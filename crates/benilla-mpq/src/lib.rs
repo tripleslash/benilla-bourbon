@@ -100,6 +100,35 @@ pub struct Archive {
     index: Arc<Index>,
 }
 
+/// One live hash-table slot, as [`Archive::entries`] reports it — an archive entry identified by
+/// [`name_key`] instead of by name, because most of the corpus has no name to be identified by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// [`name_key`] of whatever name hashes here: the slot's `(name_a, name_b)` pair packed into a
+    /// u64. The archive's own identity for the file.
+    pub key: u64,
+    /// Row in the block table — the argument [`Archive::read_block`] takes.
+    pub block_index: u32,
+    /// Uncompressed size, straight from the block entry. No I/O.
+    pub file_size: u32,
+    /// This slot is a patch tombstone, not a readable file (decision 0246). A chain walker must let
+    /// it shadow the lower-priority copy rather than skip it.
+    pub is_delete_marker: bool,
+}
+
+/// The archive's own identity for a file name: `(name_a << 32) | name_b`, the same pair
+/// [`Archive::entries`] reports and the hash-table probe matches on.
+///
+/// The two 32-bit hashes fold `/` to `\` and uppercase ASCII before hashing, so this **inherits** MPQ's
+/// name equivalence — case-insensitive, separator-agnostic — rather than reimplementing it beside the
+/// real one where the two could drift. A consumer that keys a side index on this (the pack builder)
+/// gets exactly the archive's own resolution semantics for free, including the property that two names
+/// colliding here are already indistinguishable inside the MPQ itself.
+pub fn name_key(name: &str) -> u64 {
+    (hash_string(name, hash_type::NAME_A) as u64) << 32
+        | hash_string(name, hash_type::NAME_B) as u64
+}
+
 /// Errors a read can produce. Anything outside the verified 1.12.1 envelope (encrypted file, unknown
 /// codec, …) surfaces here rather than being papered over.
 #[derive(Debug)]
@@ -240,12 +269,73 @@ impl Archive {
         &self.index.path
     }
 
+    /// Every live entry in the archive, **by hash slot rather than by name** — the complete contents,
+    /// including the files no `(listfile)` names.
+    ///
+    /// This is the enumeration [`Archive::read_file`] cannot offer. `Chain::list` unions the archives'
+    /// listfiles, which is the right answer for a human-facing tool but not a complete one: the base
+    /// content archives ship no listfile at all (`patch.MPQ`'s has 26,350 entries against a chain of
+    /// ~86k names, and most of `texture.MPQ` appears in none of them). A packer that walked listfiles
+    /// would silently drop the majority of the corpus, so it walks this instead.
+    ///
+    /// Order is hash-table order — arbitrary, but stable for a given archive, which is what makes a
+    /// pack build deterministic. Never-used and deleted probe slots are skipped, as are slots whose
+    /// `block_index` is out of range (a corrupt table, not a coding bug). Delete-markers **are**
+    /// yielded, flagged: a chain walker needs to see a tombstone to shadow the lower-priority copy
+    /// (decision 0246), which is exactly the case a filtered iterator would destroy.
+    pub fn entries(&self) -> impl Iterator<Item = Entry> + '_ {
+        let idx = &self.index;
+        idx.hash_table.iter().filter_map(move |e| {
+            if e.block_index == HASH_EMPTY || e.block_index == HASH_DELETED {
+                return None;
+            }
+            let block = idx.block_table.get(e.block_index as usize)?;
+            if block.flags & FLAG_EXISTS == 0 {
+                return None;
+            }
+            Some(Entry {
+                key: (e.name_a as u64) << 32 | e.name_b as u64,
+                block_index: e.block_index,
+                file_size: block.file_size,
+                is_delete_marker: block.flags & FLAG_DELETE_MARKER != 0,
+            })
+        })
+    }
+
     /// Read and decompress a file by its internal path. `/` or `\`; case-insensitive. `&self`: opens a
     /// fresh OS handle, so concurrent reads need no lock.
     pub fn read_file(&self, name: &str) -> Result<Vec<u8>> {
-        let idx = &self.index;
-        let block = idx.find(name).ok_or_else(|| Error::NotFound(name.into()))?;
+        let block = self
+            .index
+            .find(name)
+            .ok_or_else(|| Error::NotFound(name.into()))?;
+        self.read_entry(&block, name)
+    }
 
+    /// Read and decompress the file at `block_index` — the block-table row [`Archive::entries`]
+    /// reported for a hash slot. The **nameless** read: the base content archives carry no
+    /// `(listfile)`, so most of `texture.MPQ` is reachable by name but not enumerable, and a tool
+    /// that must see the whole archive (the pack builder) has only the hash table to walk.
+    ///
+    /// Safe without a name because the 1.12.1 envelope has no encrypted files — [`Archive::read_file`]
+    /// refuses `FLAG_ENCRYPTED` outright, and so does the shared body below — and the file key MPQ
+    /// derives for decryption is the only thing in a read that needs the name. Everything else (sector
+    /// table, codec mask, sizes) comes from the block entry and the archive itself.
+    pub fn read_block(&self, block_index: u32) -> Result<Vec<u8>> {
+        let block = self
+            .index
+            .block_table
+            .get(block_index as usize)
+            .copied()
+            .ok_or_else(|| Error::NotFound(format!("block {block_index}")))?;
+        self.read_entry(&block, &format!("block {block_index}"))
+    }
+
+    /// The shared body of [`Archive::read_file`] and [`Archive::read_block`]: everything after the
+    /// block entry is in hand. `name` is used only for error messages, so the nameless caller passes
+    /// its block index and gets errors that still say which entry failed.
+    fn read_entry(&self, block: &BlockEntry, name: &str) -> Result<Vec<u8>> {
+        let idx = &self.index;
         if block.flags & FLAG_EXISTS == 0 {
             return Err(Error::NotFound(name.into()));
         }
@@ -649,6 +739,113 @@ mod tests {
             other => panic!("expected NotFound for a tombstone, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The nameless path agrees with the named one: what `entries` reports for a slot is the key
+    /// `name_key` derives from that slot's name, and reading it by block index yields the same bytes
+    /// `read_file` yields by name. This is the whole contract the pack builder rests on.
+    #[test]
+    fn entries_key_and_read_block_agree_with_the_named_path() {
+        let name = "Interface\\a.txt";
+        let (arc, path) = open_temp_kept(
+            "entries",
+            &archive_with_one_entry(name, FLAG_EXISTS, b"hello"),
+        );
+
+        let found: Vec<Entry> = arc.entries().collect();
+        assert_eq!(found.len(), 1, "one live slot, the rest are HASH_EMPTY");
+        assert_eq!(found[0].key, name_key(name));
+        assert_eq!(found[0].file_size, 5);
+        assert!(!found[0].is_delete_marker);
+        assert_eq!(
+            arc.read_block(found[0].block_index).unwrap(),
+            arc.read_file(name).unwrap()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A tombstone is *yielded, flagged* — not filtered out. A chain walker needs to see it to shadow
+    /// the lower-priority copy; silently skipping it would fall through to the stale base version,
+    /// which is exactly the mislead decision 0246 exists to prevent.
+    #[test]
+    fn entries_yields_tombstones_flagged_rather_than_hiding_them() {
+        let name = "Interface\\FrameXML\\ClassTrainerFrame.xml";
+        let (arc, path) = open_temp_kept(
+            "entries_tomb",
+            &archive_with_one_entry(name, FLAG_EXISTS | FLAG_DELETE_MARKER, &[]),
+        );
+        let found: Vec<Entry> = arc.entries().collect();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].is_delete_marker);
+        assert_eq!(found[0].key, name_key(name));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `name_key` inherits MPQ's name equivalence rather than restating it: separator-agnostic and
+    /// case-insensitive, because the two hashes it packs already fold `/`→`\` and uppercase.
+    #[test]
+    fn name_key_inherits_mpq_name_equivalence() {
+        let canonical = name_key("Interface\\Icons\\Spell_Holy_Heal.blp");
+        assert_eq!(canonical, name_key("interface/icons/spell_holy_heal.BLP"));
+        assert_eq!(canonical, name_key("INTERFACE\\ICONS\\SPELL_HOLY_HEAL.BLP"));
+        assert_ne!(canonical, name_key("Interface\\Icons\\Spell_Holy_Heal.tga"));
+    }
+
+    /// Over a **real** archive: for every name its `(listfile)` does name, reading by block index is
+    /// byte-identical to reading by name. The synthetic tests above prove the wiring on one entry;
+    /// this proves it against the sector layouts, codecs and table sizes an actual 1.12.1 archive
+    /// presents. Skipped without an install (`$WOW_DATA`), like every other corpus-backed test here.
+    #[test]
+    fn read_block_matches_read_file_across_a_real_archive() {
+        let Some(data) = std::env::var_os("WOW_DATA").filter(|v| !v.is_empty()) else {
+            eprintln!("skipping: $WOW_DATA not set");
+            return;
+        };
+        let mpq = PathBuf::from(data).join("patch.MPQ");
+        if !mpq.is_file() {
+            eprintln!("skipping: {} not found", mpq.display());
+            return;
+        }
+        let arc = Archive::open(&mpq).expect("open patch.MPQ");
+
+        // The block index a name resolves to isn't exposed by `find`, so go the other way: build the
+        // key → block_index map from `entries`, then look each listfile name up in it. A name whose
+        // key is absent would mean `entries` missed a live slot, which is the failure this guards.
+        let by_key: std::collections::HashMap<u64, Entry> =
+            arc.entries().map(|e| (e.key, e)).collect();
+
+        let listfile = arc
+            .read_file("(listfile)")
+            .expect("patch.MPQ has a listfile");
+        let mut checked = 0usize;
+        for raw in String::from_utf8_lossy(&listfile).split([';', '\r', '\n']) {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let entry = by_key
+                .get(&name_key(name))
+                .unwrap_or_else(|| panic!("{name} is in the listfile but not in entries()"));
+            if entry.is_delete_marker {
+                continue; // read_file refuses these by design (0246); nothing to compare
+            }
+            assert_eq!(
+                arc.read_block(entry.block_index).ok(),
+                arc.read_file(name).ok(),
+                "{name} differs between the nameless and named read"
+            );
+            checked += 1;
+        }
+        // The archive's listfile is 26,350 entries; a near-empty run would mean the loop silently did
+        // nothing and the assertions above never fired.
+        assert!(checked > 20_000, "only checked {checked} names");
+
+        // And the point of the whole seam: the hash table holds far more than the listfile names.
+        assert!(
+            by_key.len() > checked,
+            "entries() ({}) should exceed the listfile ({checked})",
+            by_key.len()
+        );
     }
 
     #[test]
