@@ -197,6 +197,18 @@ impl Chain {
         self.read(name)
     }
 
+    /// The mounted archives in **ascending priority** — the order [`mount_order`] put them in, so a
+    /// caller walking them back-to-front reproduces `resolve`'s "later wins" without restating the
+    /// law.
+    ///
+    /// For the pack builder (`benilla-packer`), which cannot use [`Chain::list`]: it needs every
+    /// entry, including the ones no listfile names, and it needs the block index behind each so it
+    /// can read them by [`Archive::read_block`]. Both come from [`Archive::entries`], per archive,
+    /// which is what this exposes. Nothing on the read path uses it.
+    pub fn archives(&self) -> &[Archive] {
+        &self.archives
+    }
+
     /// List the chain's named files with sizes. Dev/extract use only — files absent from every
     /// listfile (most of `texture.MPQ`) are reachable by name but not enumerated.
     ///

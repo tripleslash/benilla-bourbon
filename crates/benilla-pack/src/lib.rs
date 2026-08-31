@@ -62,7 +62,7 @@ use benilla_bytes::ByteExt;
 #[cfg(feature = "write")]
 mod write;
 #[cfg(feature = "write")]
-pub use write::{PackPlan, PackSetBuilder};
+pub use write::{encode_pack, EncodedPack, PackPlan, PackRecord, PackSetBuilder};
 
 /// `index.bpi`'s magic. The trailing byte is the format generation: a client that fetches an index
 /// it cannot read must say so, not misparse it.

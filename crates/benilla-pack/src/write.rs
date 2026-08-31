@@ -72,111 +72,53 @@ impl PackSetBuilder {
         self.packs.len() as u32
     }
 
-    /// Encode one plan and write its `.bpk`. Returns the assigned pack id, or
-    /// [`Error::Truncated`] if the encoded object would exceed the cap — which the caller answers by
-    /// splitting the group and retrying, so the cap is a property the output *has*, not one it is
-    /// audited for afterwards.
+    /// Encode one plan, write its `.bpk`, and record its entries. The sequential convenience path.
+    ///
+    /// A build over the real corpus should use [`encode_pack`] + [`PackSetBuilder::add_encoded`]
+    /// instead: encoding 6.3 GiB at a useful zstd level is the packer's whole cost, and it
+    /// parallelises perfectly per pack, which this path cannot.
     pub fn add(&mut self, plan: &PackPlan) -> Result<u32> {
         let pack_id = self.packs.len() as u32;
+        let encoded = encode_pack(pack_id, plan, self.level, self.max_object_bytes)?;
+        self.add_encoded(encoded)
+    }
 
-        // Frame the body twice — once per-blob compressed, once stored — because which of the two
-        // wins is a measurement, not a guess, and the pack class depends on the answer.
-        let (framed_body, framed_locs) = self.frame(&plan.blobs, true)?;
-        let solid_wanted = plan.prefer == PackClass::Solid && plan.blobs.len() > 1;
+    /// Write a pack encoded elsewhere and commit it.
+    pub fn add_encoded(&mut self, e: EncodedPack) -> Result<u32> {
+        let rec = e.write_to(&self.root)?;
+        self.record(rec)
+    }
 
-        let (body, locs, codec_pack, class) = if solid_wanted {
-            let (stored_body, stored_locs) = self.frame(&plan.blobs, false)?;
-            let squeezed = zstd::encode_all(&stored_body[..], self.level)
-                .map_err(|e| Error::Decompress(format!("zstd encode: {e}")))?;
-            // Solid only earns its inflexibility if it actually beats per-frame compression.
-            if squeezed.len() < framed_body.len() {
-                self.packs.push(PackMeta {
-                    size_wire: 0, // patched below, once the wire length is known
-                    size_raw: stored_body.len() as u32,
-                    codec_pack: Codec::Zstd,
-                    class: PackClass::Solid,
-                    crc32: 0,
-                });
-                (squeezed, stored_locs, Codec::Zstd, PackClass::Solid)
-            } else {
-                self.packs.push(rangeable_meta(framed_body.len()));
-                (framed_body, framed_locs, Codec::Store, PackClass::Rangeable)
-            }
-        } else {
-            self.packs.push(rangeable_meta(framed_body.len()));
-            let class = if plan.blobs.len() == 1 {
-                PackClass::Singleton
-            } else {
-                PackClass::Rangeable
-            };
-            (framed_body, framed_locs, Codec::Store, class)
-        };
-
-        let wire_len = PACK_HEADER_LEN + body.len();
-        if wire_len > self.max_object_bytes as usize {
-            self.packs.pop();
-            return Err(Error::Truncated(format!(
-                "pack of {} blobs encodes to {wire_len} bytes, over the {} cap",
-                plan.blobs.len(),
-                self.max_object_bytes
+    /// Commit a pack that has **already been written** — metadata only.
+    ///
+    /// This is the seam that keeps a 3 GiB build inside a small working set. The obvious shape,
+    /// encoding every pack in parallel and committing the results afterwards, holds the entire
+    /// output in memory first (measured: 2 GB and climbing, heading for 3.3). Writing inside the
+    /// parallel task and carrying only [`PackRecord`] out of it costs ~36 bytes per pack plus 20
+    /// per blob — under 2 MB for the whole corpus.
+    ///
+    /// Ids must still arrive in order: a pack names its own id in its header and its path derives
+    /// from it, so accepting them out of order would silently mislabel objects. A concurrent caller
+    /// assigns ids up front from its (deterministic) plan order and sorts the records back.
+    pub fn record(&mut self, rec: PackRecord) -> Result<u32> {
+        let pack_id = self.packs.len() as u32;
+        if rec.pack_id != pack_id {
+            return Err(Error::BadIndex(format!(
+                "pack {} committed out of order (next id is {pack_id})",
+                rec.pack_id
             )));
         }
-
-        let mut wire = Vec::with_capacity(wire_len);
-        wire.extend_from_slice(&MAGIC_PACK);
-        wire.extend_from_slice(&pack_id.to_le_bytes());
-        wire.extend_from_slice(&body);
-
-        let meta = self.packs.last_mut().expect("just pushed");
-        meta.size_wire = wire.len() as u32;
-        meta.codec_pack = codec_pack;
-        meta.class = class;
-        meta.crc32 = crc32fast::hash(&wire);
-
-        let path = self.root.join(crate::pack_path(pack_id));
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io_err)?;
-        }
-        std::fs::write(&path, &wire).map_err(io_err)?;
-
-        for ((key, off, len), (_, blob)) in locs.iter().zip(&plan.blobs) {
-            self.entries.push((*key, pack_id, *off, *len));
-            self.corpus_bytes += blob.len() as u64;
+        self.packs.push(rec.meta);
+        for (key, off, len, raw_len) in rec.locs {
+            self.entries.push((key, pack_id, off, len));
+            self.corpus_bytes += raw_len as u64;
         }
         Ok(pack_id)
     }
 
-    /// Lay blobs out as frames. `compress` picks whether each frame's payload is squeezed
-    /// individually (the Rangeable shape) or stored (so the whole body can be squeezed as one).
-    #[allow(clippy::type_complexity)]
-    fn frame(
-        &self,
-        blobs: &[(u64, Vec<u8>)],
-        compress: bool,
-    ) -> Result<(Vec<u8>, Vec<(u64, u32, u32)>)> {
-        let mut body = Vec::new();
-        let mut locs = Vec::with_capacity(blobs.len());
-        for (key, raw) in blobs {
-            let off = body.len() as u32;
-            // Store when compression doesn't pay — see WORTH_COMPRESSING. The choice is per frame,
-            // so the frame records which way it went; nothing above it has to agree.
-            let (codec, payload) = if compress {
-                let squeezed = zstd::encode_all(&raw[..], self.level)
-                    .map_err(|e| Error::Decompress(format!("zstd encode: {e}")))?;
-                if (squeezed.len() as f64) < raw.len() as f64 * WORTH_COMPRESSING {
-                    (Codec::Zstd, squeezed)
-                } else {
-                    (Codec::Store, raw.clone())
-                }
-            } else {
-                (Codec::Store, raw.clone())
-            };
-            body.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-            body.push(codec as u8);
-            body.extend_from_slice(&payload);
-            locs.push((*key, off, (FRAME_HEADER_LEN + payload.len()) as u32));
-        }
-        Ok((body, locs))
+    /// Total uncompressed bytes committed so far.
+    pub fn corpus_bytes(&self) -> u64 {
+        self.corpus_bytes
     }
 
     /// Write `index.bpi` and consume the builder.
@@ -249,14 +191,154 @@ impl PackSetBuilder {
     }
 }
 
-fn rangeable_meta(body_len: usize) -> PackMeta {
-    PackMeta {
-        size_wire: 0,
-        size_raw: body_len as u32,
-        codec_pack: Codec::Store,
-        class: PackClass::Rangeable,
-        crc32: 0,
+/// One pack, encoded but not yet committed. Produced by [`encode_pack`], which is pure — no I/O, no
+/// shared state — so a build can run one of these per core and hand the results to
+/// [`PackSetBuilder::add_encoded`] in id order.
+pub struct EncodedPack {
+    pub pack_id: u32,
+    /// The `.bpk` file's exact bytes, header included.
+    pub wire: Vec<u8>,
+    pub meta: PackMeta,
+    /// `(key, frame_off, frame_len, raw_len)` per blob, in pack order.
+    pub locs: Vec<(u64, u32, u32, u32)>,
+}
+
+/// What is left of an [`EncodedPack`] once its bytes are on disk: everything the index needs and
+/// nothing that scales with the pack's size.
+pub struct PackRecord {
+    pub pack_id: u32,
+    pub meta: PackMeta,
+    pub locs: Vec<(u64, u32, u32, u32)>,
+}
+
+impl EncodedPack {
+    /// Write the `.bpk` and drop its bytes, keeping only what [`PackSetBuilder::record`] needs.
+    ///
+    /// Consuming `self` is the point: it makes it impossible to write a pack and then keep holding
+    /// the megabytes it was made of, which is exactly how the first version of the build reached a
+    /// multi-gigabyte working set.
+    pub fn write_to(self, root: &Path) -> Result<PackRecord> {
+        let path = root.join(crate::pack_path(self.pack_id));
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io_err)?;
+        }
+        std::fs::write(&path, &self.wire).map_err(io_err)?;
+        Ok(PackRecord {
+            pack_id: self.pack_id,
+            meta: self.meta,
+            locs: self.locs,
+        })
     }
+}
+
+/// Encode one locality group into a pack.
+///
+/// Errors with [`Error::Truncated`] if the result would exceed `max_object_bytes` — the caller
+/// answers by splitting the group and retrying, which is what makes the cap a property the output
+/// *has* rather than one it gets audited for after a multi-gigabyte build.
+pub fn encode_pack(
+    pack_id: u32,
+    plan: &PackPlan,
+    level: i32,
+    max_object_bytes: u32,
+) -> Result<EncodedPack> {
+    // Frame the body per-blob-compressed first; that is the Rangeable shape and the baseline a
+    // solid attempt has to beat.
+    let (framed_body, framed_locs) = frame_blobs(&plan.blobs, true, level)?;
+    let solid_wanted = plan.prefer == PackClass::Solid && plan.blobs.len() > 1;
+
+    let (body, locs, codec_pack, size_raw, class) = if solid_wanted {
+        let (stored_body, stored_locs) = frame_blobs(&plan.blobs, false, level)?;
+        let squeezed = zstd::encode_all(&stored_body[..], level)
+            .map_err(|e| Error::Decompress(format!("zstd encode: {e}")))?;
+        // Solid only earns its inflexibility if it actually beats per-frame compression. A grouping
+        // guess that was wrong therefore costs ratio, never range-extractability.
+        if squeezed.len() < framed_body.len() {
+            let raw = stored_body.len() as u32;
+            (squeezed, stored_locs, Codec::Zstd, raw, PackClass::Solid)
+        } else {
+            let raw = framed_body.len() as u32;
+            (
+                framed_body,
+                framed_locs,
+                Codec::Store,
+                raw,
+                PackClass::Rangeable,
+            )
+        }
+    } else {
+        let raw = framed_body.len() as u32;
+        let class = if plan.blobs.len() == 1 {
+            PackClass::Singleton
+        } else {
+            PackClass::Rangeable
+        };
+        (framed_body, framed_locs, Codec::Store, raw, class)
+    };
+
+    let wire_len = PACK_HEADER_LEN + body.len();
+    if wire_len > max_object_bytes as usize {
+        return Err(Error::Truncated(format!(
+            "pack of {} blobs encodes to {wire_len} bytes, over the {max_object_bytes} cap",
+            plan.blobs.len()
+        )));
+    }
+
+    let mut wire = Vec::with_capacity(wire_len);
+    wire.extend_from_slice(&MAGIC_PACK);
+    wire.extend_from_slice(&pack_id.to_le_bytes());
+    wire.extend_from_slice(&body);
+
+    Ok(EncodedPack {
+        pack_id,
+        meta: PackMeta {
+            size_wire: wire.len() as u32,
+            size_raw,
+            codec_pack,
+            class,
+            crc32: crc32fast::hash(&wire),
+        },
+        wire,
+        locs,
+    })
+}
+
+/// Lay blobs out as frames. `compress` picks whether each frame's payload is squeezed individually
+/// (the Rangeable shape) or stored (so the whole body can be squeezed as one).
+#[allow(clippy::type_complexity)]
+fn frame_blobs(
+    blobs: &[(u64, Vec<u8>)],
+    compress: bool,
+    level: i32,
+) -> Result<(Vec<u8>, Vec<(u64, u32, u32, u32)>)> {
+    let mut body = Vec::new();
+    let mut locs = Vec::with_capacity(blobs.len());
+    for (key, raw) in blobs {
+        let off = body.len() as u32;
+        // Store when compression doesn't pay — see WORTH_COMPRESSING. The choice is per frame, so
+        // the frame records which way it went; nothing above it has to agree.
+        let (codec, payload) = if compress {
+            let squeezed = zstd::encode_all(&raw[..], level)
+                .map_err(|e| Error::Decompress(format!("zstd encode: {e}")))?;
+            if (squeezed.len() as f64) < raw.len() as f64 * WORTH_COMPRESSING {
+                (Codec::Zstd, squeezed)
+            } else {
+                (Codec::Store, raw.clone())
+            }
+        } else {
+            (Codec::Store, raw.clone())
+        };
+        body.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        body.push(codec as u8);
+        body.extend_from_slice(&payload);
+        locs.push((
+            *key,
+            off,
+            (FRAME_HEADER_LEN + payload.len()) as u32,
+            raw.len() as u32,
+        ));
+    }
+    Ok((body, locs))
 }
 
 /// FNV-1a over the entry stream. Not a security hash and not trying to be — it identifies a build

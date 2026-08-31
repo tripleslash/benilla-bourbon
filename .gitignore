@@ -28,3 +28,8 @@ trace-*.json
 # The C sysroot for the wasm Lua build — fetched by scripts/web-setup.sh, ~300 MB
 /tools/wasi-sdk/
 /tools/binaryen/
+
+# The BENPACK container (`benilla-pack build`) — ~3 GiB of repackaged Blizzard data,
+# regenerated from the install, and the input to an upload to the static host.
+/web/packs/
+/web/site/

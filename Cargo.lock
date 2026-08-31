@@ -846,6 +846,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "benilla-packer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "benilla-formats",
+ "benilla-mpq",
+ "benilla-pack",
+ "clap",
+ "rayon",
+]
+
+[[package]]
 name = "benilla-protocol"
 version = "0.1.0"
 dependencies = [
