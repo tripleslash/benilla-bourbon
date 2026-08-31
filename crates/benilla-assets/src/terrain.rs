@@ -36,7 +36,7 @@ use bevy::render::render_resource::{
 
 /// Edge length every layer BLP is uploaded at for the per-tile array (uniform so they share one
 /// `texture_2d_array`). The Elwynn A/B target's layer BLPs are all natively 256² with 8 authored mips.
-pub(crate) const LAYER_TEX_SIZE: u32 = 256;
+pub(crate) const LAYER_TEX_SIZE: u32 = 256 * 2;
 
 /// Per-layer mip count for the array — the authored count at 256². Fewer-mip BLPs repeat the last
 /// authored level; sub-256² BLPs upsample (NEAREST) to fill the top.

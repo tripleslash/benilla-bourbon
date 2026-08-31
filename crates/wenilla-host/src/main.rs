@@ -1,13 +1,21 @@
-//! `wenilla-host` — the piece of the browser build that can't be static hosting: it serves the
-//! wasm bundle, answers game-data reads out of the real MPQ chain, and proxies the two TCP ports
-//! the client needs (login 3724, world 8085) over WebSocket, since a browser tab cannot open a
-//! raw socket. See `web/README.md` for
-//! the exact URL/encoding rules the client lanes code against.
+//! `wenilla-host` — the piece of the browser build that can't be static hosting: it proxies the
+//! two TCP ports the client needs (login 3724, world 8085) over WebSocket, since a browser tab
+//! cannot open a raw socket, and — for local work — also serves the wasm bundle and the game data
+//! beside it. See `web/README.md` for the exact URL rules the client lanes code against.
 //!
-//! This host is a **local development tool**. `/data` hands out the operator's game files to
-//! anyone who can reach the socket, with no login, so it binds to loopback by default and must
-//! never be exposed on the open internet. Multi-user hosting is `wenilla-realm`, which mounts the
-//! same routers behind a session cookie.
+//! Three shapes, decided by which flags are present:
+//!
+//! - **Gateway** (`--bind` and nothing else): only `/ws/{port}`. This is the hosted shape — the
+//!   static tree lives on a static host, the client is pointed at this address by `config.json`'s `ws`,
+//!   and this process sits on the realm box relaying to realmd/mangosd on **loopback**. It is the
+//!   only shape meant to face the internet, and the only one that hands out nothing: without
+//!   `--allow-remote-realms` it dials `127.0.0.1` and nowhere else, on two ports.
+//! - **Full local host** (`--www` with `--packs`/`--data`): the page, the game data and the proxy
+//!   from one process, which is how a session runs without a site.
+//! - **Anything between** — `--www` alone serves a build against a remote realm, for instance.
+//!
+//! `--www` and `/data` hand out the operator's files to anyone who can reach the socket, with no
+//! login, which is why the bind defaults to loopback and why serving them off it warns.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,21 +26,24 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(
-    about = "Serve the benilla browser build, its game data, and its net proxy (local testing only)",
-    after_help = "wenilla-host is for local testing. /data serves the game files under --data to \
-                  anyone who can reach the socket, without any login. Keep it on loopback or a \
-                  private network; never expose it on the open internet. For hosting players, \
-                  use wenilla-realm."
+    about = "The browser build's WebSocket gateway, and (locally) the page and game data beside it",
+    after_help = "With no --www/--packs/--data this is a gateway and nothing else: /ws/3724 and \
+                  /ws/8085 relayed to 127.0.0.1, which is the shape a public site runs — the \
+                  page and the container are static files elsewhere, pointed here by config.json's \
+                  `ws`. Adding --www and --packs makes it the whole local host instead; those two \
+                  routes have no login, so keep such a run on loopback or a private network."
 )]
 struct Cli {
-    /// Address to listen on. Loopback by default; anything else exposes `/data` to that
-    /// network unauthenticated (see `--help`).
+    /// Address to listen on. Loopback by default, which is right for a run that serves files
+    /// (`--www`/`--packs` have no login) and for a gateway behind a TLS proxy on the same box;
+    /// a gateway that terminates its own connections binds the public address instead.
     #[arg(long, default_value = "127.0.0.1:8090")]
     bind: String,
-    /// Directory holding the wasm-bindgen output (`index.html`, `wenilla.js`, `*.wasm`) —
-    /// `scripts/web-build.sh`'s `web/dist/`.
+    /// Directory holding the Trunk output (`index.html`, `wenilla.js`, `*.wasm`) — `web/dist/`.
+    /// Omit it to run as a gateway only, which is what a site does: the page is static files on
+    /// A static host, and the only thing this process owns is `/ws/{port}`.
     #[arg(long)]
-    www: PathBuf,
+    www: Option<PathBuf>,
     /// The vanilla `Data` directory (or a single `.MPQ`) the chain opens — the same one `benilla`
     /// itself reads on the desktop. The per-name `/data/<name>` route; the hosted client no
     /// longer uses it, but it is how a session runs without a container build.
@@ -76,6 +87,7 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
+    let serves_data = cli.data.is_some() || cli.packs.is_some();
     let game = match (&cli.data, &cli.packs) {
         (Some(data), None) => {
             let chain = Arc::new(
@@ -95,7 +107,14 @@ async fn main() -> Result<()> {
             );
             wenilla_host::packs::router(packs, !cli.no_ranges)
         }
-        _ => anyhow::bail!("pass exactly one of --data (live MPQ chain) or --packs (a built container)"),
+        // Neither: a gateway. Not an error — it is the *hosted* shape, where the container is
+        // static objects on a static host and this process exists only for the two sockets.
+        (None, None) => {
+            tracing::info!("no --data/--packs: serving no game data");
+            axum::Router::new()
+        }
+        // Unreachable: clap's `conflicts_with` refuses both before this runs.
+        (Some(_), Some(_)) => anyhow::bail!("--data and --packs are mutually exclusive"),
     };
 
     // **The localhost pin.** Without `--allow-remote-realms` the configured upstream is not merely
@@ -119,23 +138,27 @@ async fn main() -> Result<()> {
         )
     };
 
-    let app = game
-        .merge(wenilla_host::ws::router(
-            upstream.clone(),
-            wenilla_host::ALLOWED_PORTS,
-            remote,
-        ))
-        .merge(wenilla_host::static_site::router(&cli.www));
+    let app = game.merge(wenilla_host::ws::router(
+        upstream.clone(),
+        wenilla_host::ALLOWED_PORTS,
+        remote,
+    ));
+    let app = match &cli.www {
+        Some(www) => app.merge(wenilla_host::static_site::router(www)),
+        None => app,
+    };
 
     let listener = tokio::net::TcpListener::bind(&cli.bind)
         .await
         .with_context(|| format!("binding {}", cli.bind))?;
-    if !binds_loopback(&listener) {
+    // Only a run that actually serves files is worth the warning. A gateway on `0.0.0.0` is the
+    // *intended* public hosting — no files at all, loopback on two ports — and warning about it
+    // would teach the operator to ignore the line that still matters.
+    if serves_data && !binds_loopback(&listener) {
         tracing::warn!(
             bind = %cli.bind,
-            "wenilla-host is a local testing tool: /data serves your game files to anyone who \
-             can reach this address, with no login. Do not expose it on the open internet — use \
-             wenilla-realm to host players."
+            "/data serves your game files to anyone who can reach this address, with no login. \
+             Keep a run that serves data on loopback or a private network."
         );
     }
     if cli.allow_remote_realms {
@@ -146,7 +169,7 @@ async fn main() -> Result<()> {
     }
     tracing::info!(
         bind = %cli.bind,
-        www = %cli.www.display(),
+        www = cli.www.as_ref().map(|w| w.display().to_string()),
         upstream = %upstream,
         remote_realms = cli.allow_remote_realms,
         "wenilla-host listening"
@@ -166,7 +189,8 @@ fn is_local_realm(upstream: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Is the listener bound to a loopback address (the only place `/data` is safe unauthenticated)?
+/// Is the listener bound to a loopback address (the only place `--www` and `/data` are safe
+/// unauthenticated)? A gateway-only run serves neither and never consults this.
 fn binds_loopback(listener: &tokio::net::TcpListener) -> bool {
     listener
         .local_addr()

@@ -33,3 +33,6 @@ trace-*.json
 # regenerated from the install, and the input to an upload to the static host.
 /web/packs/
 /web/site/
+
+# the upload tool local state (account id cache) — machine-local, not the project.
+/.host-cache/

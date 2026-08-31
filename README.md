@@ -34,10 +34,13 @@ cargo run --release -p wenilla-host -- --www web/dist --packs web/packs
 # open http://127.0.0.1:8090/
 ```
 
-`wenilla-host` is a local testing tool: it serves the game data you point it at with no login,
-so keep it on loopback or a private network and never on the open internet. Hosting players
-is [`wenilla-realm`](crates/wenilla-realm/README.md), which gates everything behind a session.
-See [`web/README.md`](web/README.md) for the how and the porting notes. Everything else
+That command is the *local* shape: page, game data and net proxy from one process. A run that
+serves files has no login, so keep it on loopback or a private network. A site splits in two —
+the static tree (`web/site/`) goes to any object store, and the same binary runs on the realm box
+as a **gateway and nothing else** (`wenilla-host --bind …`, no `--www`/`--packs`), relaying
+`/ws/3724` and `/ws/8085` to realmd and mangosd on loopback. [`site/README.md`](site/README.md)
+is that hosting end to end — A static host on one side, docker compose with vmangos on the other;
+[`web/README.md`](web/README.md) has the how and the porting notes. Everything else
 below is upstream benilla's README, unchanged; upstream is
 [samwhosung/benilla](https://github.com/samwhosung/benilla), and the web work is meant to be
 upstreamable piece by piece.

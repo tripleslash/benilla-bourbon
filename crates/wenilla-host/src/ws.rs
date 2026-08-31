@@ -1,9 +1,9 @@
 //! `GET /ws/{port}` — the other half of the shared WebSocket scheme (Lane T ↔ Lane H): a browser
 //! tab cannot open a raw TCP socket, so `benilla-protocol::transport::web::Conn` opens this
 //! instead, and this proxy relays its binary frames to and from the real login (3724) / world
-//! (8085) TCP ports. `port` is checked against an explicit allowlist, not just "any u16" — this
-//! host runs on a Tailscale-reachable bind address, so an unchecked proxy would be an open relay
-//! onto whatever else is listening on the box.
+//! (8085) TCP ports. `port` is checked against an explicit allowlist, not just "any u16" — a
+//! gateway binds a publicly reachable address, so an unchecked proxy would be an open relay onto
+//! whatever else is listening on the box.
 //!
 //! ## Which box gets dialed, and who decides
 //!
@@ -17,8 +17,8 @@
 //! With [`RemoteRealms::Allow`] the client's `?host=` becomes the address actually dialed, which is
 //! how one gateway fronts realms it does not itself run. It is a real widening, and that is why it
 //! is a flag rather than the behaviour: an allowed gateway will connect wherever a page asks, on
-//! the two allowlisted ports. `wenilla-host --allow-remote-realms` opts in; `wenilla-realm`, which
-//! hosts strangers, never does.
+//! the two allowlisted ports. `wenilla-host --allow-remote-realms` opts in — a gateway in front of
+//! strangers leaves it off, and can then reach only the realm on its own box.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,7 +39,8 @@ use tokio::net::TcpStream;
 pub enum RemoteRealms {
     /// The client's `?host=` is a log label and nothing else; the configured upstream is dialed
     /// whatever it says. **The default**, and the only setting under which this proxy is safe in
-    /// front of people you do not know.
+    /// front of people you do not know — it is what makes a public gateway reach one box and two
+    /// ports.
     Refuse,
     /// The client's `?host=` is the address dialed, falling back to the configured upstream when it
     /// names none.
@@ -53,9 +54,9 @@ const MAX_HOST: usize = 253;
 #[derive(Clone)]
 struct WsState {
     /// Port → host the proxy dials for it — plain hostname/IP, not a URL. The key set *is* the
-    /// allowlist: a port with no entry is refused. One host for every port is the single-box
-    /// hosting (`main.rs` defaults to loopback); a host per port is the containerised one,
-    /// where realmd (3724) and mangosd (8085) are different services.
+    /// allowlist: a port with no entry is refused, which is the property worth the map. Today
+    /// every port carries the same host (`main.rs` defaults to loopback); the per-port shape is
+    /// what a realmd and a mangosd on different boxes would need.
     upstreams: Arc<HashMap<u16, Arc<str>>>,
     /// May a client's `?host=` replace the value above for its own session?
     remote: RemoteRealms,
@@ -78,7 +79,9 @@ pub fn router(
 }
 
 /// Build the `/ws/{port}` router from an explicit port → host map; the keys are the allowlist.
-pub fn router_map(
+/// Private: [`router`] is the only caller, and the only shipped hosting gives every port the
+/// same host.
+fn router_map(
     upstreams: impl IntoIterator<Item = (u16, Arc<str>)>,
     remote: RemoteRealms,
 ) -> Router {

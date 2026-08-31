@@ -1,5 +1,5 @@
-// boot.js — the pre-login loading experience, shared by the dev page (web/index.html) and the
-// realm page (crates/wenilla-realm/templates/play.html).
+// boot.js — the pre-login loading experience for web/index.html, the tree's one page (and for
+// any hosting page that boots the client the same way).
 //
 // Why this exists: the client cannot show its own boot. Everything a fresh tab waits on — the
 // 15 MB (brotli) wasm download, instantiation, and the first update's catalog pile (~100+
@@ -40,6 +40,9 @@ import { bootstrap, prefetchWorld } from './packs.js';
 // The wasm travels brotli-compressed: content-length counts .br bytes while the counted stream
 // yields decompressed ones. Dividing the two on a real build gives ~5.0; it drifts a little per
 // build and that is cosmetic — the bar is clamped at 99% until the stream actually ends.
+//
+// Only the single-file path needs the estimate. The split site reads the module's true size out
+// of `wenilla_bg.parts.json` (see fetchWasm) and this constant never enters it.
 const BR_RATIO = 5.0;
 const READY_TIMEOUT_MS = 20000;
 
@@ -98,33 +101,98 @@ export async function boot(init, opts = {}) {
 
 /// Byte-counting fetch of the wasm, re-wrapped so streaming compilation survives. Returns a
 /// Promise<Response> — wasm-bindgen's init feeds it straight to instantiateStreaming.
+///
+/// The module arrives in one of two layouts and this is the only place that knows it. On the
+/// split layout it is N parts: a static host may refuse ANY static asset over 25 MiB and the module is
+/// 77 MB with nothing left in it to strip, so `scripts/stage-packs.sh` splits it at 24 MiB and
+/// writes `wenilla_bg.parts.json` beside the pieces. Everywhere else — `trunk serve` and
+/// `wenilla-host --www`, both serving `web/dist`, where no such limit exists — it is the single
+/// file and the manifest is simply not there.
+///
+/// Concatenating the parts into ONE stream is what keeps the split cheap: a wasm module is a byte
+/// sequence, and nothing downstream can tell how many responses carried it, so the browser still
+/// compiles while it downloads exactly as it did from one file. They are all requested at once for
+/// the same reason — fetching them in turn would pay a round trip per part — and enqueued in order.
+///
+/// The manifest costs one ~200 B round trip ahead of the download, and buys back the number the
+/// single-file path can only guess at: `bytes` is the module's true uncompressed size, where a lone
+/// Content-Length counts compressed bytes and has to be scaled by BR_RATIO.
 async function fetchWasm(url, onBytes) {
-  const r = await fetch(url);
-  if (!r.ok || !r.body) return r; // let init surface the real error / non-streaming fallback
-  const contentLength = Number(r.headers.get('content-length')) || 0;
-  const compressed = !!(r.headers.get('content-encoding') || '').trim();
-  const total = contentLength ? contentLength * (compressed ? BR_RATIO : 1) : 0;
+  const manifest = await fetchPartsManifest(url);
+  const responses = manifest
+    ? await Promise.all(manifest.parts.map((name) => fetch(new URL(name, url))))
+    : [await fetch(url)];
+  // Handed back as-is so init surfaces the real status — and still gets its non-streaming
+  // fallback — rather than an error invented here.
+  const failed = responses.find((r) => !r.ok || !r.body);
+  if (failed) return failed;
+
+  let total = manifest ? manifest.bytes : 0;
+  if (!total) {
+    const contentLength = Number(responses[0].headers.get('content-length')) || 0;
+    const compressed = !!(responses[0].headers.get('content-encoding') || '').trim();
+    total = contentLength ? contentLength * (compressed ? BR_RATIO : 1) : 0;
+  }
+
   let got = 0;
-  const reader = r.body.getReader();
+  let i = 0;
+  let reader = responses[0].body.getReader();
   const counted = new ReadableStream({
     async pull(c) {
-      const { done, value } = await reader.read();
-      if (done) {
-        onBytes(got, got); // the honest total, now that we know it
-        c.close();
-        return;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (!done) {
+          got += value.byteLength;
+          onBytes(got, total);
+          c.enqueue(value);
+          return;
+        }
+        // The end of a part is not the end of the module: step to the next reader and keep
+        // pulling, so the consumer never sees the seam. The loop is why this is a `for (;;)` —
+        // one `pull` must enqueue something or close, and an empty part must not do neither.
+        if (++i >= responses.length) {
+          onBytes(got, got); // the honest total, now that we know it
+          c.close();
+          return;
+        }
+        reader = responses[i].body.getReader();
       }
-      got += value.byteLength;
-      onBytes(got, total);
-      c.enqueue(value);
     },
     cancel(reason) {
-      return reader.cancel(reason);
+      return Promise.all([
+        reader.cancel(reason),
+        // The parts still queued were never read from, so their bodies are unlocked and cancel
+        // directly. Leaving them open would hold N connections open for a boot that has failed.
+        ...responses.slice(i + 1).map((r) => r.body.cancel(reason)),
+      ]);
     },
   });
-  // Headers are copied so Content-Type: application/wasm survives — instantiateStreaming
-  // refuses anything else.
-  return new Response(counted, { status: r.status, statusText: r.statusText, headers: r.headers });
+  // Content-Type is SET, not copied from the response: instantiateStreaming refuses anything but
+  // `application/wasm`, and this Response is ours — it should not inherit that from an origin's
+  // extension mapping (nor carry the first part's Content-Length, which no longer describes the
+  // body being returned).
+  return new Response(counted, {
+    status: responses[0].status,
+    statusText: responses[0].statusText,
+    headers: { 'content-type': 'application/wasm' },
+  });
+}
+
+/// `wenilla_bg.parts.json` -> `{bytes, parts}`, or null when the module is not split.
+///
+/// A 404 IS an answer here and is not logged: unsplit is what every local run serves. Anything
+/// else — a parse error, an offline fetch — also answers null, because the single-file path is
+/// then tried and fails naming the real URL and the real cause, which is a better error than one
+/// about a manifest the reader has never heard of.
+async function fetchPartsManifest(url) {
+  try {
+    const r = await fetch(new URL('./wenilla_bg.parts.json', url));
+    if (!r.ok) return null;
+    const m = await r.json();
+    return Array.isArray(m.parts) && m.parts.length ? m : null;
+  } catch {
+    return null;
+  }
 }
 
 /// `/config.json` -> `window.__wenilla_config`, read by `benilla_app::webenv::config`.

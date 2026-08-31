@@ -412,7 +412,7 @@ export async function prefetchWorld(onProgress = () => {}) {
 // ---- the service worker ------------------------------------------------------------------
 
 /// Root-scoped so it can see `/data/*` from any page that hosts the client — `web/index.html` at
-/// `/`, and `wenilla-realm`'s play page at `/play`.
+/// `/`, and any hosting page that boots the client from a subpath.
 const SW_URL = '/sw.js';
 /// How long to wait for a first-visit worker to claim this page. It is `clients.claim()` in an
 /// `activate` handler, so this is milliseconds in practice; the bound exists so a worker that
