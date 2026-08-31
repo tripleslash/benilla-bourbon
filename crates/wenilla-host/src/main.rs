@@ -34,9 +34,19 @@ struct Cli {
     #[arg(long)]
     www: PathBuf,
     /// The vanilla `Data` directory (or a single `.MPQ`) the chain opens — the same one `benilla`
-    /// itself reads on the desktop.
+    /// itself reads on the desktop. The per-name `/data/<name>` route; the hosted client no
+    /// longer uses it, but it is how a session runs without a container build.
+    #[arg(long, conflicts_with = "packs")]
+    data: Option<PathBuf>,
+    /// A BENPACK container (`benilla-pack build --out …`), served at `/data/*` as plain files —
+    /// the local stand-in for the object store the hosted client reads. Replaces `--data`.
+    #[arg(long, conflicts_with = "data")]
+    packs: Option<PathBuf>,
+    /// Answer every request as if the host had no HTTP `Range` support — which is what a static host
+    /// measurably does. Only meaningful with `--packs`, and the only way to actually exercise the
+    /// client's whole-object fallback locally.
     #[arg(long)]
-    data: PathBuf,
+    no_ranges: bool,
     /// Host the `/ws/{port}` proxy dials for the allowed ports — the mangos boxes this host
     /// itself runs against, so it defaults to loopback.
     #[arg(long, default_value = "127.0.0.1")]
@@ -50,12 +60,29 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
-    let chain = Arc::new(
-        Chain::open(&cli.data).with_context(|| format!("opening {}", cli.data.display()))?,
-    );
-    tracing::info!(data = %cli.data.display(), "patch chain open");
+    let game = match (&cli.data, &cli.packs) {
+        (Some(data), None) => {
+            let chain = Arc::new(
+                Chain::open(data).with_context(|| format!("opening {}", data.display()))?,
+            );
+            tracing::info!(data = %data.display(), "patch chain open");
+            wenilla_host::data::router(chain)
+        }
+        (None, Some(packs)) => {
+            if !packs.join("index.bpi").is_file() {
+                anyhow::bail!("{} has no index.bpi — run `benilla-pack build` first", packs.display());
+            }
+            tracing::info!(
+                packs = %packs.display(),
+                ranges = !cli.no_ranges,
+                "serving a BENPACK container"
+            );
+            wenilla_host::packs::router(packs, !cli.no_ranges)
+        }
+        _ => anyhow::bail!("pass exactly one of --data (live MPQ chain) or --packs (a built container)"),
+    };
 
-    let app = wenilla_host::data::router(chain)
+    let app = game
         .merge(wenilla_host::ws::router(
             cli.upstream.clone(),
             wenilla_host::ALLOWED_PORTS,

@@ -4,6 +4,7 @@
 //! these modules.
 
 pub mod data;
+pub mod packs;
 pub mod static_site;
 pub mod ws;
 
