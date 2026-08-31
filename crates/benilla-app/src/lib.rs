@@ -358,6 +358,18 @@ pub fn run(build: BuildId) -> AppExit {
         }
     }
 
+    // The WebSocket gateway, on the web target only. Until now the transport always built its URL
+    // from the page's own origin, which was right while `wenilla-host` served the bundle and
+    // proxied `/ws/{port}` from one process. On a static site those separate: the page comes from
+    // an object store with no sockets, and the gateway is a box elsewhere whose address is supplied
+    // after the client is built — hence `?ws=` / `__wenilla_env.ws` / `data/config.json`, and not a
+    // constant compiled into 90 MB of wasm. Absent, the origin default stands and local dev is
+    // unchanged. (This is `set_ws_base`'s first caller; it had none before.)
+    #[cfg(target_arch = "wasm32")]
+    if let Some(base) = webenv::ws_base() {
+        benilla_protocol::transport::web::set_ws_base(base);
+    }
+
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)
     // builds. Finds the install the one way anything does (`benilla_formats::wow_data`, decision
     // 1175) — the same answer the `WorldAssets` foundation gets. On failure the source is simply

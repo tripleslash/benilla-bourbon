@@ -64,6 +64,11 @@ mod write;
 #[cfg(feature = "write")]
 pub use write::{encode_pack, EncodedPack, PackPlan, PackRecord, PackSetBuilder};
 
+/// Finding a built container on disk, for tests and tools ([`pack_index_or_skip`]). Not compiled
+/// for the browser, which is served a container rather than searching for one.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod find;
+
 /// `index.bpi`'s magic. The trailing byte is the format generation: a client that fetches an index
 /// it cannot read must say so, not misparse it.
 pub const MAGIC_INDEX: [u8; 8] = *b"BENPACK\x01";

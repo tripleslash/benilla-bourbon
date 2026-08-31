@@ -3,34 +3,36 @@
 //
 // Why this exists: the client cannot show its own boot. Everything a fresh tab waits on — the
 // 15 MB (brotli) wasm download, instantiation, and the first update's catalog pile (~100+
-// synchronous XHR chain reads in ONE rAF task, the "unresponsive tab" window) — happens before
-// the first frame the app could draw. So the page owns a DOM overlay, and it does two jobs:
+// synchronous chain reads in ONE rAF task, the "unresponsive tab" window) — happens before the
+// first frame the app could draw. So the page owns a DOM overlay, and it does three jobs:
 //
 //   1. SHOW what is happening: a byte-counted wasm download bar (the counting stream is
 //      re-wrapped in a Response so `WebAssembly.instantiateStreaming` still streams), a
-//      "game data N/M" line for the prefetch, then indeterminate "Starting…" states driven by
-//      the client's own `window.__wenilla_progress(stage)` calls (benilla-app/src/webprogress.rs)
-//      until "ready" — the first glue screen — fades the overlay out.
-//   2. SHRINK the unresponsive window: `/data/*` is served immutable (max-age=1y), and a sync
-//      XHR is served from the HTTP cache when the same URL was fetch()ed first (verified live:
-//      transferSize 0, deliveryType "cache"). So the overlay prefetches the boot read-set — a
-//      checked-in manifest (boot-manifest.json) captured from a traced boot — with a small
-//      fetch pool, in parallel with the wasm download. The catalog pile then costs parse, not
-//      ~100 serial network round trips. Every miss (drift, missing manifest) degrades to
-//      exactly today's behavior, and a warm-cache visitor flies through all of it: progress is
-//      measured, never scripted.
+//      "game data N/M MB" line for the container prefetch, then indeterminate "Starting…" states
+//      driven by the client's own `window.__wenilla_progress(stage)` calls
+//      (benilla-app/src/webprogress.rs) until "ready" — the first glue screen — fades it out.
+//   2. HAND THE CLIENT ITS DATA. `packs.js::bootstrap` fetches the container's index and listfile,
+//      measures whether this host does HTTP ranges, and warms the packs a boot actually touches.
+//      The index especially: `Chain::open` reads it synchronously, and 1.6 MB through a sync XHR's
+//      per-character body decode is exactly what that decode is worst at — fetched here it is a
+//      copy instead. Every miss degrades to a slower read, never a failure.
+//   3. CONFIGURE THE SESSION. `data/config.json` carries the WebSocket gateway and the default
+//      realmlist, so the address the hosted client dials is a hundred-byte `no-cache` asset
+//      rather than something baked into a 90 MB wasm module.
 //
 // Page contract: `const w = await boot(init); bind(w.memory);` — bind must stay immediately
 // after (the Lua WASI shims need the module's linear memory). Query switches: `?boottrace=1`
-// arms window.__wenilla_boottrace and skips the prefetch (a manifest-capture boot must show the
-// true read order); `?noprefetch=1` skips the prefetch only (the A/B lever).
+// arms window.__wenilla_boottrace and skips the pack prefetch (a manifest-capture boot must show
+// the true read order); `?noprefetch=1` skips the prefetch only (the A/B lever). Neither skips the
+// index — without it nothing is readable at all.
+
+import { bootstrap, prefetchWorld } from './packs.js';
 
 // The wasm travels brotli-compressed: content-length counts .br bytes while the counted stream
 // yields decompressed ones. Dividing the two on a real build gives ~5.0; it drifts a little per
 // build and that is cosmetic — the bar is clamped at 99% until the stream actually ends.
 const BR_RATIO = 5.0;
 const READY_TIMEOUT_MS = 20000;
-const PREFETCH_CONCURRENCY = 8;
 
 export async function boot(init, opts = {}) {
   const q = new URLSearchParams(location.search);
@@ -39,11 +41,21 @@ export async function boot(init, opts = {}) {
   const skipPrefetch = q.get('boottrace') === '1' || q.get('noprefetch') === '1';
   installProgressHook(ui, skipPrefetch);
 
-  const prefetch = skipPrefetch
-    ? Promise.resolve()
-    : prefetchManifest('./boot-manifest.json', (done, total) => ui.setData(done, total)).catch(
-        () => ui.setData(0, 0)
-      );
+  // The container's root is the page's ORIGIN plus /data, not a path relative to this document —
+  // the exact string `benilla_formats::web::data_base()` builds on the Rust side. The two must
+  // agree or the client would fetch its packs from somewhere the page never warmed.
+  const base = `${location.origin}/data`;
+
+  const config = loadConfig(base);
+  const container = bootstrap(base, (done, total) => ui.setData(done, total), {
+    prefetch: !skipPrefetch,
+  }).catch((e) => {
+    // A container that failed to bootstrap is very likely a fatal misconfiguration, but say so
+    // through the client's own error path rather than guessing here: `Chain::open` will fetch the
+    // index itself, and if that fails too its message names the URL and the cause.
+    console.warn('wenilla: container bootstrap failed —', e);
+    ui.setData(0, 0);
+  });
 
   const wasm = fetchWasm(new URL('./wenilla_bg.wasm', import.meta.url), (got, total) =>
     ui.setWasmProgress(got, total)
@@ -53,10 +65,11 @@ export async function boot(init, opts = {}) {
   // on a 100 ms-RTT link that task measured 50 s uncached — the Mac "unresponsive tab" — and
   // still 25 s when the pool merely raced it (A/B, 2026-08-31). Waiting here costs the same
   // wall-clock the reads would cost anyway, but it is spent on a moving progress bar with the
-  // page responsive, and the catalog task then runs against a warm cache (~2 s, parse-bound).
-  // The wasm download + streaming compile still overlap the pool: fetchWasm() is already
-  // in flight, only `init()` — instantiation + plugin build — moves after the data.
-  await prefetch;
+  // page responsive, and the catalog task then runs against warm packs. The wasm download +
+  // streaming compile still overlap it: fetchWasm() is already in flight, only `init()` —
+  // instantiation + plugin build — moves after the data.
+  await config;
+  await container;
   let w;
   try {
     w = await init({ module_or_path: wasm });
@@ -103,45 +116,34 @@ async function fetchWasm(url, onBytes) {
   return new Response(counted, { status: r.status, statusText: r.statusText, headers: r.headers });
 }
 
-/// Warm the HTTP cache with a manifest's read-set: fetch the manifest, then a fixed-size pool of
-/// full-body fetches. Failures are counted as done and otherwise ignored — a miss just means
-/// that file loads the old way. A missing/invalid manifest resolves immediately (line hides).
-/// Used twice: the boot set before `init()`, the world-entry set after `ready`.
-async function prefetchManifest(manifestUrl, onProgress) {
-  const r = await fetch(manifestUrl);
-  if (!r.ok) return onProgress(0, 0);
-  const manifest = await r.json();
-  const names = Array.isArray(manifest && manifest.names) ? manifest.names : [];
-  if (!names.length) return onProgress(0, 0);
-  let done = 0;
-  onProgress(0, names.length);
-  const queue = names.slice();
-  async function worker() {
-    for (;;) {
-      const name = queue.shift();
-      if (name === undefined) return;
-      try {
-        const resp = await fetch('/data/' + encodeURIComponent(name));
-        if (resp.ok) await resp.arrayBuffer(); // body fully read = body fully cached
-      } catch (_) {
-        /* offline blip, 404 drift — the sync XHR path will deal with it */
-      }
-      done += 1;
-      onProgress(done, names.length);
-    }
+/// `data/config.json` -> `window.__wenilla_config`, read by `benilla_app::webenv::config`.
+///
+/// Deliberately its OWN global rather than a merge into `window.__wenilla_env`. The env object
+/// outranks the query string in `webenv::lookup`, so folding a hosted default into it would let
+/// `config.json` beat a hand-written `?ws=…` — backwards. And `realmlist` must not travel as
+/// `host` at all: that is `$WOW_HOST`'s key, which pins the session and greys out the login
+/// screen's realmlist control. A hosted default is a default, not a pin.
+///
+/// `no-cache` so re-uploading one ~100-byte asset repoints the gateway, which is the entire reason
+/// the address is not baked into the wasm.
+async function loadConfig(base) {
+  try {
+    const r = await fetch(`${base}/config.json`, { cache: 'no-cache' });
+    window.__wenilla_config = r.ok ? await r.json() : {};
+  } catch (_) {
+    window.__wenilla_config = {};
   }
-  await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
 }
 
 /// `window.__wenilla_progress(stage)` — the client's calls land here (webprogress.rs).
 ///
-/// `ready` also starts the SECOND prefetch: the world-entry read-set. Entering the world used
+/// `ready` also starts the SECOND prefetch: the world-entry pack set. Entering the world used
 /// to be one frozen frame of ~200 synchronous sprite reads (184 `Interface\…\*.blp` on the
 /// first UI draw, plus a few quest-marker models and zone sounds) — 206 s on a cold 100 ms-RTT
-/// cache. That set is location-independent, so `world-manifest.json` (captured the same way
-/// as the boot manifest, minus the boot set) is warmed while the player is at the glue screens,
-/// with a corner line so it is visible but never in the way. Whatever is still in flight when
-/// they click Enter World just loads the old way.
+/// cache. That set is location-independent and, being almost all `Interface\`, collapses to a
+/// handful of packs; it is warmed while the player is at the glue screens, with a corner line so
+/// it is visible but never in the way. Whatever is still in flight when they click Enter World
+/// just loads the slow way.
 function installProgressHook(ui, skipPrefetch) {
   window.__wenilla_progress = (stage) => {
     if (stage === 'startup') ui.setStage('Loading interface…');
@@ -149,8 +151,8 @@ function installProgressHook(ui, skipPrefetch) {
       ui.hide();
       if (!skipPrefetch) {
         const corner = createCornerLine();
-        prefetchManifest('./world-manifest.json', (done, total) =>
-          corner.set(total > 0 && done < total ? `preparing world data — ${done}/${total}` : '')
+        prefetchWorld((done, total) =>
+          corner.set(total > 0 && done < total ? `preparing world data — ${mb(done)}/${mb(total)} MB` : '')
         )
           .catch(() => {})
           .finally(() => corner.remove());
@@ -158,6 +160,8 @@ function installProgressHook(ui, skipPrefetch) {
     }
   };
 }
+
+const mb = (n) => (n / (1024 * 1024)).toFixed(0);
 
 /// The unobtrusive bottom-left status line the world prefetch reports on.
 function createCornerLine() {
@@ -213,7 +217,6 @@ function createBootUi() {
   const dataEl = root.querySelector('.data');
   let gone = false;
   let timeout = 0;
-  const mb = (n) => (n / (1024 * 1024)).toFixed(0);
   return {
     setWasmProgress(got, total) {
       if (gone) return;
@@ -229,9 +232,10 @@ function createBootUi() {
         barEl.classList.add('pulse');
       }
     },
+    /// Bytes, not files: a pack is ~0.6 MB, so "12 of 31" would say much less than "8 of 19 MB".
     setData(done, total) {
       if (gone) return;
-      dataEl.textContent = total > 0 ? `game data — ${done}/${total}` : '';
+      dataEl.textContent = total > 0 ? `game data — ${mb(done)}/${mb(total)} MB` : '';
     },
     setStage(text) {
       if (gone) return;

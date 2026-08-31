@@ -21,12 +21,14 @@ use anyhow::{bail, Result};
 use benilla_pack::PackClass;
 
 use crate::group::label_of;
+use crate::sidecars::ReadSets;
 use crate::Blob;
 
 /// Plan every pack. Returns groups of blobs, in pack-id order.
 pub fn plan<'a>(
     blobs: &'a [Blob],
     names: &HashMap<u64, String>,
+    read_sets: &ReadSets,
     singleton_bytes: u32,
     target_pack_bytes: u64,
     max_objects: u32,
@@ -35,16 +37,24 @@ pub fn plan<'a>(
     let mut labelled: Vec<(String, &Blob)> = blobs
         .iter()
         .map(|b| {
-            (
-                label_of(
-                    names.get(&b.key).map(|s| s.as_str()),
-                    b.len,
-                    singleton_bytes,
-                    b.archive,
-                    b.block,
-                ),
-                b,
-            )
+            let natural = label_of(
+                names.get(&b.key).map(|s| s.as_str()),
+                b.len,
+                singleton_bytes,
+                b.archive,
+                b.block,
+            );
+            // A recorded read set outranks the path-shaped guess — see `ReadSets`. The natural label
+            // is kept as the suffix so ORDER WITHIN the read set is still path order, which is what
+            // keeps the boot packs individually coherent instead of hash-shuffled.
+            //
+            // `@big/` is not overridden: a singleton is about the object-size cap, not locality, and
+            // a 15 MiB blob bundled into the boot set would be exactly the over-fetch this is for.
+            let label = match read_sets.prefix(b.key) {
+                Some(prefix) if !natural.starts_with("@big/") => format!("{prefix}/{natural}"),
+                _ => natural,
+            };
+            (label, b)
         })
         .collect();
     // Sorted label order IS path order for the directory-shaped labels, which is what makes a pack
@@ -154,7 +164,7 @@ mod tests {
     #[test]
     fn bundles_close_at_the_target_so_packs_stay_uniform() {
         let bs = blobs(&[400_000; 10]);
-        let packs = plan(&bs, &no_names(), 4 << 20, 1_000_000, 18_000).unwrap();
+        let packs = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 1_000_000, 18_000).unwrap();
         // 400 KB blobs against a 1 MB target: three per pack.
         assert!(
             packs.iter().all(|p| p.len() <= 3),
@@ -169,7 +179,7 @@ mod tests {
     #[test]
     fn big_blobs_are_alone_in_their_pack() {
         let bs = blobs(&[1000, 5 << 20, 1000]);
-        let packs = plan(&bs, &no_names(), 4 << 20, 1 << 20, 18_000).unwrap();
+        let packs = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 1 << 20, 18_000).unwrap();
         let big = packs
             .iter()
             .find(|p| p.iter().any(|b| b.len == 5 << 20))
@@ -182,7 +192,7 @@ mod tests {
     fn an_overshooting_plan_grows_its_target_until_it_fits_the_budget() {
         let bs = blobs(&[10_000; 1000]);
         // A tiny target would want ~1000 packs; the budget allows 20.
-        let packs = plan(&bs, &no_names(), 4 << 20, 10_000, 20).unwrap();
+        let packs = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 10_000, 20).unwrap();
         assert!(
             packs.len() <= 20,
             "{} packs against a budget of 20",
@@ -196,7 +206,7 @@ mod tests {
     #[test]
     fn planning_is_a_partition_of_the_input() {
         let bs = blobs(&[1, 2, 3, 5 << 20, 100_000, 7, 4 << 20, 9]);
-        let packs = plan(&bs, &no_names(), 4 << 20, 50_000, 18_000).unwrap();
+        let packs = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 50_000, 18_000).unwrap();
         let mut keys: Vec<u64> = packs.iter().flat_map(|p| p.iter().map(|b| b.key)).collect();
         keys.sort_unstable();
         assert_eq!(keys, (0..bs.len() as u64).collect::<Vec<_>>());
@@ -205,8 +215,8 @@ mod tests {
     #[test]
     fn planning_is_deterministic() {
         let bs = blobs(&[1000; 50]);
-        let a = plan(&bs, &no_names(), 4 << 20, 8000, 18_000).unwrap();
-        let b = plan(&bs, &no_names(), 4 << 20, 8000, 18_000).unwrap();
+        let a = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 8000, 18_000).unwrap();
+        let b = plan(&bs, &no_names(), &ReadSets::default(), 4 << 20, 8000, 18_000).unwrap();
         let shape = |p: &Vec<Vec<&Blob>>| -> Vec<Vec<u64>> {
             p.iter()
                 .map(|g| g.iter().map(|b| b.key).collect())

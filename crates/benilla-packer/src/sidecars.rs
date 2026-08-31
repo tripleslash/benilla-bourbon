@@ -1,0 +1,280 @@
+//! The two side files that are not game data: `boot-packs.json` and `config.json`.
+//!
+//! ## `boot-packs.json` — the read-set manifests, translated
+//!
+//! `web/boot-manifest.json` (403 names) and `web/world-manifest.json` (200 names) are captured from
+//! a traced boot and stay checked in as the source of truth for *what the client actually reads*.
+//! They stay in names, not pack ids, deliberately: a name survives a re-pack, and
+//! `benilla-app/tests/boot_manifest.rs` can keep checking them for shape and staleness. But the
+//! page can no longer prefetch a name — there is no per-name route — so the packer translates
+//! them here: name -> key -> index entry -> pack id, deduplicated, with each pack's served size so
+//! the boot overlay can report megabytes instead of a file count.
+//!
+//! The collapse is large and it is the container's design showing up as a number: both sets are
+//! dominated by `DBFilesClient\*` and `Interface\*`, which group together by construction, so a few
+//! hundred names become a few dozen objects.
+//!
+//! A name that does not resolve is **counted and reported, not fatal**. Drift between a captured
+//! manifest and a re-packed install is expected and degrades to exactly one slower read; a build
+//! that failed over it would be a build that fails because someone renamed a texture.
+//!
+//! ## `config.json` — the gateway address
+//!
+//! Written **only if absent**. It carries the WebSocket gateway and default realmlist for a site,
+//! which is operator configuration and not a function of the game files — a re-pack must never
+//! clobber it. The stub exists so the hosted tree always has the file (a 404 there is harmless
+//! but noisy) and so the shape is documented where an operator will look for it.
+
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use benilla_mpq::name_key;
+use benilla_pack::Index;
+
+/// The two captured read sets as key sets, for the grouping pass.
+///
+/// **The read sets are a locality signal, and the strongest one in the tree.** Every other label in
+/// `group.rs` is a guess about what the client reads together, inferred from the archive's own
+/// directory layout; these two are a *recording* of what it actually read. Measured on the first
+/// container built without them: the 403 boot names landed in 141 packs — 91 MB fetched to reach
+/// 14.7 MB, a **6.2x over-fetch** before the first frame — because a boot read set is a thin
+/// cross-section of the whole tree (one icon here, one font there) and path-shaped groups scatter
+/// exactly that shape. Grouping them together instead takes the ratio to ~1.
+#[derive(Default)]
+pub struct ReadSets {
+    pub boot: HashSet<u64>,
+    pub world: HashSet<u64>,
+}
+
+impl ReadSets {
+    pub fn load(boot_manifest: &Path, world_manifest: &Path) -> Self {
+        Self {
+            boot: keys_of(boot_manifest),
+            world: keys_of(world_manifest),
+        }
+    }
+
+    /// The label prefix a blob's read-set membership forces, if any. Boot wins over world; the two
+    /// manifests are asserted disjoint by `benilla-app/tests/boot_manifest.rs`, so that only ever
+    /// settles a manifest that has drifted.
+    ///
+    /// `!` sorts below every other label's first character, so the read sets take the low pack ids —
+    /// which is incidental but pleasant: the objects a cold visitor needs first are `p/00/*`.
+    pub fn prefix(&self, key: u64) -> Option<&'static str> {
+        if self.boot.contains(&key) {
+            Some("!boot")
+        } else if self.world.contains(&key) {
+            Some("!world")
+        } else {
+            None
+        }
+    }
+}
+
+fn keys_of(manifest: &Path) -> HashSet<u64> {
+    std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|text| manifest_names(&text).ok())
+        .map(|names| names.iter().map(|n| name_key(n)).collect())
+        .unwrap_or_default()
+}
+
+/// One translated read-set: the packs it touches, in ascending id order, and what they weigh.
+struct PackSet {
+    /// `[pack_id, size_wire]` pairs — the shape `web/packs.js` iterates.
+    packs: Vec<(u32, u32)>,
+    /// What the prefetch actually downloads: every touched pack, whole.
+    bytes: u64,
+    /// What the read set alone weighs, as **served** bytes: each touched pack's wire size scaled by
+    /// the fraction of its body the wanted frames occupy.
+    ///
+    /// The scaling is not a nicety. A frame's `frame_len` is its length inside the pack's *decoded*
+    /// body, and in a SOLID pack the frames are stored while the body around them is one zstd
+    /// stream — so summing `frame_len` against `size_wire` compares uncompressed bytes to
+    /// compressed ones and can report an over-fetch below 1, which is nonsense. Attributing each
+    /// pack's wire bytes in proportion to the body it holds compares like with like, and a pack
+    /// every one of whose frames is wanted contributes exactly its wire size.
+    ///
+    /// `bytes / needed` is then the **over-fetch ratio**, the one number that says whether the
+    /// grouping is working for this read set. Near 1 means the set's names really do live together;
+    /// a large one means the prefetch is paying for neighbours it will not read.
+    needed: u64,
+    names: usize,
+    unresolved: usize,
+}
+
+/// Translate the checked-in read-set manifests into `boot-packs.json` beside the container.
+pub fn write_boot_packs(
+    out: &Path,
+    index: &Index,
+    boot_manifest: &Path,
+    world_manifest: &Path,
+) -> Result<()> {
+    let boot = translate(index, boot_manifest)?;
+    let world = translate(index, world_manifest)?;
+    for (label, set) in [("boot", &boot), ("world", &world)] {
+        eprintln!(
+            "{label}-packs: {} names -> {} packs, {:.1} MB fetched for {:.1} MB needed ({:.1}x){}",
+            set.names,
+            set.packs.len(),
+            mb(set.bytes),
+            mb(set.needed),
+            set.bytes as f64 / set.needed.max(1) as f64,
+            if set.unresolved > 0 {
+                format!(", {} names not in the container", set.unresolved)
+            } else {
+                String::new()
+            }
+        );
+    }
+    let path = out.join("boot-packs.json");
+    std::fs::write(
+        &path,
+        format!(
+            "{{\"version\":1,\"build_id\":\"{:016x}\",\"boot\":{},\"world\":{}}}\n",
+            index.build_id(),
+            set_json(&boot),
+            set_json(&world),
+        ),
+    )
+    .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn set_json(set: &PackSet) -> String {
+    let packs: Vec<String> = set
+        .packs
+        .iter()
+        .map(|(id, wire)| format!("[{id},{wire}]"))
+        .collect();
+    format!(
+        "{{\"packs\":[{}],\"bytes\":{},\"names\":{}}}",
+        packs.join(","),
+        set.bytes,
+        set.names
+    )
+}
+
+/// Read one manifest's `names` array and resolve it to a deduplicated pack set.
+fn translate(index: &Index, manifest: &Path) -> Result<PackSet> {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        eprintln!(
+            "warning: no {} — the page will prefetch nothing for that stage",
+            manifest.display()
+        );
+        return Ok(PackSet {
+            packs: Vec::new(),
+            needed: 0,
+            bytes: 0,
+            names: 0,
+            unresolved: 0,
+        });
+    };
+    let names = manifest_names(&text)
+        .with_context(|| format!("parsing {} — expected {{\"names\": [...]}}", manifest.display()))?;
+
+    // Frame bytes wanted per pack, so the wire size can be attributed proportionally below.
+    let mut wanted: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    let mut unresolved = 0usize;
+    for name in &names {
+        match index.locate(name_key(name)) {
+            Some(at) => *wanted.entry(at.pack_id).or_default() += at.frame_len as u64,
+            None => unresolved += 1,
+        }
+    }
+    let ids: BTreeSet<u32> = wanted.keys().copied().collect();
+    let mut packs = Vec::with_capacity(ids.len());
+    let (mut bytes, mut needed) = (0u64, 0u64);
+    for id in ids {
+        let Some(meta) = index.pack(id) else { continue };
+        bytes += meta.size_wire as u64;
+        let hit = wanted[&id].min(meta.size_raw as u64);
+        needed += meta.size_wire as u64 * hit / (meta.size_raw as u64).max(1);
+        packs.push((id, meta.size_wire));
+    }
+    Ok(PackSet {
+        packs,
+        bytes,
+        needed,
+        names: names.len(),
+        unresolved,
+    })
+}
+
+fn mb(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// The `names` array out of a manifest, without taking a JSON dependency for one array of strings.
+///
+/// The manifests are machine-written (captured from `?boottrace=1` and pasted in) and already
+/// guarded for shape by `benilla-app/tests/boot_manifest.rs` — no forward slashes, no percent
+/// encoding, no duplicates — so what is needed here is the string extraction, not a parser. The
+/// one real escape a chain name carries is `\\`, since names are backslash-separated.
+fn manifest_names(text: &str) -> Result<Vec<String>> {
+    let start = text
+        .find("\"names\"")
+        .and_then(|i| text[i..].find('[').map(|j| i + j + 1))
+        .context("no \"names\" array")?;
+    let end = text[start..]
+        .find(']')
+        .map(|j| start + j)
+        .context("unterminated \"names\" array")?;
+    let mut out = Vec::new();
+    let mut chars = text[start..end].chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut name = String::new();
+        loop {
+            match chars.next() {
+                Some('\\') => name.push(chars.next().context("manifest ends inside an escape")?),
+                Some('"') | None => break,
+                Some(c) => name.push(c),
+            }
+        }
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// The gateway/realmlist stub, written only when the operator has not already put one there.
+pub fn write_config_stub(out: &Path) -> Result<()> {
+    let path = out.join("config.json");
+    if path.exists() {
+        return Ok(());
+    }
+    // Both empty means "use the page's own origin" — today's behaviour, and the right default for
+    // `wenilla-host` on a laptop, where the WebSocket proxy really is beside the page.
+    std::fs::write(&path, "{\"ws\":\"\",\"realmlist\":\"\"}\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    eprintln!(
+        "{}: wrote a stub — set \"ws\" to the gateway (wss://host:port) before staging",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_names_reads_backslash_separated_chain_names() {
+        let text = r#"{"version":1,"names":["DBFilesClient\\Map.dbc","Interface\\Glues\\a b.blp"]}"#;
+        assert_eq!(
+            manifest_names(text).unwrap(),
+            vec![
+                "DBFilesClient\\Map.dbc".to_string(),
+                "Interface\\Glues\\a b.blp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_names_array_is_an_error_not_an_empty_set() {
+        assert!(manifest_names(r#"{"version":1}"#).is_err());
+    }
+}

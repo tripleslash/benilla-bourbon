@@ -14,6 +14,7 @@
 
 mod group;
 mod plan;
+mod sidecars;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,6 +46,12 @@ enum Cmd {
     Build(BuildArgs),
     /// Read the container back and compare it, blob for blob, with the chain it came from.
     Verify(VerifyArgs),
+    /// Regenerate `boot-packs.json` (and the `config.json` stub) against an existing container.
+    ///
+    /// Its own subcommand because the read-set manifests are recaptured far more often than the
+    /// corpus is repacked — a `?boottrace=1` capture is minutes, a build is half an hour over
+    /// 6.3 GiB — and translating names to pack ids needs only the index.
+    Sidecars(SidecarArgs),
 }
 
 #[derive(Parser)]
@@ -74,6 +81,13 @@ struct BuildArgs {
     /// Per-object byte cap. Defaults to 24 MiB — under a static host's 25 MiB, deliberately.
     #[arg(long, default_value_t = MAX_OBJECT_BYTES)]
     max_object_bytes: u32,
+    /// The boot read-set manifest to translate into `boot-packs.json` — captured from a traced
+    /// boot (`?boottrace=1`) and checked in, so it stays meaningful across re-packs.
+    #[arg(long, default_value = "web/boot-manifest.json")]
+    boot_manifest: PathBuf,
+    /// The world-entry read-set manifest, same treatment.
+    #[arg(long, default_value = "web/world-manifest.json")]
+    world_manifest: PathBuf,
     /// Plan and report, but write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -94,10 +108,27 @@ struct VerifyArgs {
     stride: usize,
 }
 
+#[derive(Parser)]
+struct SidecarArgs {
+    /// The container to read `index.bpi` from and write the side files into.
+    #[arg(long)]
+    packs: PathBuf,
+    #[arg(long, default_value = "web/boot-manifest.json")]
+    boot_manifest: PathBuf,
+    #[arg(long, default_value = "web/world-manifest.json")]
+    world_manifest: PathBuf,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Build(a) => build(a),
         Cmd::Verify(a) => verify(a),
+        Cmd::Sidecars(a) => {
+            let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)?;
+            sidecars::write_config_stub(&a.packs)
+        }
     }
 }
 
@@ -175,9 +206,12 @@ fn build(a: BuildArgs) -> Result<()> {
             / blobs.len().max(1) as f64
     );
 
+    // The captured read sets are a locality signal, not just a prefetch list — see `ReadSets`.
+    let read_sets = sidecars::ReadSets::load(&a.boot_manifest, &a.world_manifest);
     let groups = plan::plan(
         &blobs,
         &names,
+        &read_sets,
         a.singleton_bytes,
         a.target_pack_bytes,
         a.max_objects,
@@ -193,6 +227,8 @@ fn build(a: BuildArgs) -> Result<()> {
             / groups.len().max(1) as f64
             / 1024.0
     );
+    report_read_set("boot", &groups, &read_sets.boot);
+    report_read_set("world", &groups, &read_sets.world);
     if a.dry_run {
         eprintln!("--dry-run: nothing written");
         return Ok(());
@@ -275,6 +311,13 @@ fn build(a: BuildArgs) -> Result<()> {
             s
         }),
     )?;
+
+    // Read the index back rather than carrying a key->pack map through the build: it is 1.6 MB and
+    // a parse away, and going through the same `Index` the client uses means the prefetch lists are
+    // resolved by exactly the code path that will later serve them.
+    let index = Index::parse(std::fs::read(&index_path)?).map_err(|e| anyhow::anyhow!("{e}"))?;
+    sidecars::write_boot_packs(&a.out, &index, &a.boot_manifest, &a.world_manifest)?;
+    sidecars::write_config_stub(&a.out)?;
 
     wire_sizes.sort_unstable();
     let pct = |p: f64| wire_sizes[((wire_sizes.len() - 1) as f64 * p) as usize];
@@ -359,4 +402,38 @@ fn verify(a: VerifyArgs) -> Result<()> {
 
 fn gib(b: u64) -> f64 {
     b as f64 / (1024.0 * 1024.0 * 1024.0)
+}
+
+/// What a captured read set will cost the page to prefetch, in **uncompressed** bytes, straight off
+/// the plan — so a grouping change can be judged with `--dry-run` in minutes rather than after a
+/// half-hour build.
+///
+/// The number that matters is the ratio: how much of what the prefetch downloads the client will
+/// actually read. `sidecars` reports the same thing again from the finished index in served bytes;
+/// this is the one that closes the loop while the decision is still cheap to change.
+fn report_read_set(label: &str, groups: &[Vec<&Blob>], want: &std::collections::HashSet<u64>) {
+    if want.is_empty() {
+        return;
+    }
+    let (mut packs, mut fetched, mut needed) = (0usize, 0u64, 0u64);
+    for g in groups {
+        let hit: u64 = g
+            .iter()
+            .filter(|b| want.contains(&b.key))
+            .map(|b| b.len as u64)
+            .sum();
+        if hit == 0 {
+            continue;
+        }
+        packs += 1;
+        needed += hit;
+        fetched += g.iter().map(|b| b.len as u64).sum::<u64>();
+    }
+    eprintln!(
+        "  {label} read set: {} names -> {packs} packs, {:.1} / {:.1} MiB uncompressed ({:.1}x over-fetch)",
+        want.len(),
+        fetched as f64 / 1048576.0,
+        needed as f64 / 1048576.0,
+        fetched as f64 / needed.max(1) as f64,
+    );
 }

@@ -1,0 +1,52 @@
+# Trunk replaces `scripts/web-build.sh` as the browser build.
+#
+# The script did the same five things by hand — cargo build, wasm-bindgen, wasm-opt, copy the page
+# files, precompress — and each was a version pin or a flag list maintained in a comment. Trunk owns
+# the tool versions (and downloads them itself, so `scripts/web-setup.sh` no longer installs
+# wasm-bindgen-cli), reads the build's shape out of `web/index.html`, and gives the pack staging a
+# post-build hook to hang off.
+#
+# What Trunk does NOT own is `web/packs/` — 3.3 GiB of container that must not be rebuilt, copied,
+# or (Trunk clears `dist/` on every build) deleted. Hence the three-directory layout that
+# `scripts/stage-packs.sh` assembles; see its header.
+
+trunk-version = ">=0.21.14"
+
+[build]
+target = "web/index.html"
+dist = "web/dist"
+release = true
+# The page imports `./wenilla.js` by name and `_headers` matches on paths, so a content hash in the
+# filename would break both on every build. The bundle is served `no-cache` for exactly this reason
+# (`wenilla-host::static_site`), and on the site it is the one thing under `/*` rather than the
+# immutable `/data/p/*` rule.
+filehash = false
+# `web/index.html` already carries its own module script (`boot(init)` then `bind(w.memory)`, in
+# that order — the Lua WASI shims need the module's linear memory and it does not exist until
+# `init()` has run). Trunk's injected loader would run instead of it.
+inject_scripts = false
+# The inline scripts are the AudioContext resume hook and the WGSL diagnostic printer; both are
+# read by people far more often than they are shipped, and neither is on a size-critical path
+# beside a 90 MB wasm module.
+minify = "never"
+# The `wasm-bindgen = "=0.2.122"` pin is load-bearing — a crate newer than the CLI emits glue the
+# CLI cannot match — so a build that silently updated the lock would be a build that silently
+# breaks the page.
+frozen = true
+
+[tools]
+# MUST equal the Cargo.lock pin. Trunk downloads this itself; that is the whole reason
+# `scripts/web-setup.sh` stopped installing it.
+wasm_bindgen = "0.2.122"
+wasm_opt = "version_130"
+
+# Assemble `web/site/` — the directory a static host serves — from this build plus the
+# container. Never the other way round: `dist/` is cleared per build and the container is not.
+#
+# The hook does NOT read `web/dist`: post_build runs before Trunk moves its staging directory into
+# place, so `dist/` is still empty at that point (and 0.21.14 exports no `$TRUNK_STAGING_DIR` to
+# name it with). The script resolves the staging directory itself; see its header.
+[[hooks]]
+stage = "post_build"
+command = "bash"
+command_arguments = ["scripts/stage-packs.sh"]

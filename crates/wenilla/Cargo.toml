@@ -6,10 +6,11 @@ license.workspace = true
 description = "The browser entry point: a wasm-bindgen `#[start]` that boots benilla-app inside the canvas `web/index.html` gives it — benilla's third launcher shim, after `benilla` and `benilla-worldview` (decision 1160), and like them just carries the build-id stamp so a commit dirties this ~20-line crate instead of the app"
 
 [features]
-# Which browser GPU API the page renders through. `scripts/web-build.sh` picks: WebGL2 by
-# default (every browser, no secure context needed — but no storage buffers, so the glue screens
-# only), `WEB_GPU=1` for WebGPU (Chrome/Edge/Safari; Chrome on Linux behind
-# chrome://flags/#enable-unsafe-webgpu; needs https or localhost). Exactly one must be on.
+# Which browser GPU API the page renders through. `web/index.html`'s Trunk link picks, via
+# `data-cargo-features`: WebGL2 (every browser, no secure context needed — but no storage buffers,
+# so the glue screens only) or WebGPU (Chrome/Edge/Safari; Chrome on Linux behind
+# chrome://flags/#enable-unsafe-webgpu; needs https or localhost). Exactly one must be on, and the
+# hosted page is `webgpu` — the world needs storage buffers.
 webgl2 = ["benilla-app/webgl2"]
 webgpu = ["benilla-app/webgpu"]
 
@@ -23,7 +24,7 @@ crate-type = ["cdylib"]
 # feature resolution), silently linking the dev instruments into the page everyone visits.
 benilla-app = { path = "../benilla-app", default-features = false }
 # Pinned exact (workspace-wide rule, `docs/BENILLA-WASM-SPIKE.md`'s plan): a newer wasm-bindgen
-# crate plus the 0.2.122 CLI `scripts/web-build.sh` invokes emits broken glue — verified.
+# crate plus the 0.2.122 CLI Trunk downloads emits broken glue — verified.
 wasm-bindgen = "=0.2.122"
 # Routes a Rust panic to `console.error` instead of the default "unreachable executed" the browser
 # shows with no message at all — the only way a wasm crash is diagnosable from just the page.

@@ -903,6 +903,7 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     let cvars = match stored_config() {
         StoredConfig::Absent => {
             // No file, hermetic capture, or no install — the URL levers still apply.
+            apply_hosted_realmlist(&persist, &mut knobs, false);
             apply_query_overrides(&mut knobs);
             return;
         }
@@ -910,11 +911,15 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
             // A malformed file is preserved, not clobbered: nothing loads, but nothing saves
             // over it either until a change actually happens — and the warn names the file.
             warn!("{msg}");
+            apply_hosted_realmlist(&persist, &mut knobs, false);
             apply_query_overrides(&mut knobs);
             return;
         }
         StoredConfig::Table(t) => t,
     };
+    let saved_realmlist = cvars
+        .keys()
+        .any(|n| n.eq_ignore_ascii_case(crate::realmlist::CVAR_REALMLIST));
     let known: HashSet<String> = REGISTERED
         .iter()
         .map(|(n, _)| n.to_ascii_lowercase())
@@ -932,7 +937,29 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
         apply_to_knobs(name, value, &mut knobs);
     }
     persist.file = cvars;
+    apply_hosted_realmlist(&persist, &mut knobs, saved_realmlist);
     apply_query_overrides(&mut knobs);
+}
+
+/// `data/config.json`'s `realmlist` — the address a **hosted** client dials when the player has
+/// not chosen one. Skipped when `$WOW_HOST`/`?host=` owns the session, and skipped when
+/// `config.toml` already carries a `realmList`: it is the bottom of the precedence stack, below
+/// everything a person set.
+///
+/// It comes in here rather than through `webenv::var("WOW_HOST")` on purpose. That key marks the
+/// session `pinned_by_env`, which greys out the login screen's realmlist control — right for a
+/// harness leg that must dial exactly one server, wrong for a public site where the whole point
+/// is that a visitor can type their own realm. A hosted default is a default.
+fn apply_hosted_realmlist(persist: &CvarPersist, knobs: &mut Knobs, saved: bool) {
+    if saved || persist.env_overridden.contains("realmlist") {
+        return;
+    }
+    let Some(address) = crate::webenv::config("realmlist") else {
+        return;
+    };
+    if apply_to_knobs(crate::realmlist::CVAR_REALMLIST, &address, knobs) {
+        info!("config: realmList = {address} from the hosted config.json (no saved value)");
+    }
 }
 
 /// **Browser build only:** any registered CVar named in the page's query string

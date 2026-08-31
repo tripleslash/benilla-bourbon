@@ -27,10 +27,15 @@ pub use tga::tga_to_rgba;
 /// *where*, that opens it.
 mod install;
 pub use install::{candidates, wow_data};
-/// Web-target chain plumbing (HTTP in place of a filesystem) — see the module header for the Data
-/// URL scheme it implements against. Always compiled (`encode_name` is plain Rust and tested
-/// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
+/// Web-target HTTP plumbing (bytes and byte ranges, in place of a filesystem). Always compiled
+/// (`encode_name` is plain Rust and tested natively); the browser-only pieces are gated to `wasm32`
+/// inside the module itself.
 pub mod web;
+/// The web target's game-data store: the BENPACK container behind the wasm [`Chain`]. `wasm32`
+/// only — it is entirely browser plumbing (a JS-heap pack map, a `Range`-support probe), with no
+/// half that would mean anything natively.
+#[cfg(target_arch = "wasm32")]
+pub mod webpack;
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,

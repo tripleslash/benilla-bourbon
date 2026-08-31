@@ -1,6 +1,36 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>wenilla</title>
+<!-- Trunk's build description (Trunk.toml points `target` here). Paths are relative to THIS file,
+     which is why the crate is reached with `../`.
+
+     `data-bindgen-target="web"` is mandatory: Trunk defaults to `no-modules`, which breaks both
+     the import map below and `import init from './wenilla.js'`.
+
+     The wasm-opt flags reproduce what `scripts/web-build.sh` did by hand. `-O3` is a SPEED pass,
+     not a size pass — the client is CPU-bound on its one wasm thread and it measured +6% in-world
+     (2026-08-29) — and the feature list must match what rustc emitted or wasm-opt refuses the
+     module.
+
+     `--strip-debug --strip-producers` stands in for the old wasm-bindgen
+     `--remove-name-section --remove-producers-section`, which Trunk does not expose: wasm-opt's
+     `--strip-debug` drops the names section too, so the result is the same and it happens in the
+     pass that was running anyway. **Verified on the output, not assumed** — the emitted module's
+     only custom section is the 184-byte `target_features`, with no `name`, `producers` or DWARF,
+     and it is 77.2 MB against the old pipeline's ~90 MB. A second `wasm-opt -O3` over it removes
+     0.036%, which is what an already-converged module looks like; that is the check to repeat if a
+     Trunk upgrade ever makes these attributes stop being honoured, because the failure mode is
+     silent. -->
+<link data-trunk rel="rust" href="../crates/wenilla/Cargo.toml"
+      data-bindgen-target="web"
+      data-cargo-no-default-features data-cargo-features="webgpu"
+      data-target-name="wenilla" data-wasm-opt="3"
+      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers"
+      data-no-demangle />
+<link data-trunk rel="copy-file" href="wasi_stubs.js" />
+<link data-trunk rel="copy-file" href="boot.js" />
+<link data-trunk rel="copy-file" href="packs.js" />
+<link data-trunk rel="copy-file" href="_headers" />
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
   #benilla { display: block; width: 100vw; height: 100vh; }

@@ -12,29 +12,29 @@
 //! archives carry no `(listfile)`, so resolution is by name **hash**, which works without one.
 //! Which archives mount, and in what order, is [`mount_order`]'s law (decision 1300).
 //!
-//! **On `wasm32`** there is no filesystem to mount archives from at all: the browser build talks
-//! to a companion web host over HTTP instead (`crate::web`, the Data URL scheme, Lane A ↔ Lane H
-//! of the wasm plan), so `Chain` there is just the host's base URL and every method becomes a
-//! fetch. The public API — `open`/`contains`/`find_file_archive`/`read`/`read_file`/`list` — is
-//! unchanged on both targets; only the two `impl Chain` blocks below differ.
+//! **On `wasm32`** there is no filesystem to mount archives from at all, so `Chain` reads a
+//! **BENPACK container** — the same corpus repackaged into ~4,700 static objects plus one index
+//! ([`crate::webpack`]) — off whatever object store serves the page. The public API
+//! (`open`/`contains`/`find_file_archive`/`read`/`read_file`/`list`) is unchanged on both targets,
+//! which is the whole point: the ~60 synchronous call sites and the async Bevy `AssetReader` above
+//! both stayed exactly where they were while the thing underneath them was replaced. Only the two
+//! `impl Chain` blocks below differ, and the web one adds one method the native target has no use
+//! for ([`Chain::read_async`]).
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
 
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 #[cfg(not(target_arch = "wasm32"))]
 use benilla_mpq::Archive;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::VANILLA_BASE_ORDER;
-
-#[cfg(target_arch = "wasm32")]
-use anyhow::anyhow;
 
 /// One entry from a chain listing: an internal path and its uncompressed size.
 pub struct ChainEntry {
@@ -49,23 +49,23 @@ pub struct Chain {
     archives: Vec<Archive>,
 }
 
-/// The web build's `Chain`: no archives, just the web host's `/data` base URL every method fetches
-/// against (see the module header). `read` carries no cache — a sync XHR pays a round trip (or a
-/// browser-cache hit) every call, and the Bevy `AssetServer` above (`benilla-assets`) is what
-/// dedups by path, same as it would for a native disk read.
+/// The web build's `Chain`: a **BENPACK container** (`crate::webpack`) read out of a static object
+/// store, behind the native API byte for byte.
 ///
-/// **`contains` does carry one: the whole chain's name index**, fetched once from `/data/__index`
-/// on the first ask. Measured on world entry (2026-08-31): the UI's texture probes asked
-/// `contains` **2,145 times** in one entry — the same dozen chat-border and dialog icons over and
-/// over, per region per resolve — and each ask was a synchronous `HEAD`, which the browser does
-/// not serve from a `GET`-warmed cache. At 100 ms RTT that was ~125 s of a frozen tab, after every
-/// other read had been prefetched. One 4.9 MB name list, parsed once, answers all of them from
-/// memory; the `HEAD` stays only as the fallback for a host whose index route fails.
+/// There is nothing here but the store because there is nothing else to hold: the container's
+/// index answers resolution from memory, and blob bytes live on the JS heap where 3.3 GiB of corpus
+/// cannot crowd a 32-bit wasm address space. Every design note that used to live on this struct —
+/// the `/data/__index` name list, the `HEAD` fallback — is gone with the per-name HTTP scheme it
+/// belonged to.
+///
+/// Worth keeping the measurement that motivated it, because the container answers it outright: on
+/// world entry (2026-08-31) the UI's texture probes asked `contains` **2,145 times** in one entry,
+/// each a synchronous `HEAD` the browser would not serve from a `GET`-warmed cache — ~125 s of
+/// frozen tab at 100 ms RTT. `contains` is now a binary search over bytes already in memory, so
+/// that entire class of cost is not optimised but *absent*.
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
-    base: String,
-    /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
-    index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
+    store: crate::webpack::PackStore,
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
@@ -247,81 +247,56 @@ impl Chain {
 
 #[cfg(target_arch = "wasm32")]
 impl Chain {
-    /// Open the chain against the web host at `crate::web::data_base()`. `path` is accepted only
-    /// to keep the signature identical to the native target's (call sites pass `wow_data()`, which
-    /// on wasm is always `/data` — see `install::wow_data`) — it names nothing real on the web,
-    /// where every chain file lives behind one HTTP origin, not a directory.
+    /// Open the container the page is served alongside — `crate::web::data_base()`, i.e. `/data` on
+    /// this origin. `path` is accepted only to keep the signature identical to the native target's
+    /// (call sites pass `wow_data()`, which on wasm is always `/data`); it names nothing real here,
+    /// where the corpus is a few thousand HTTP objects rather than a directory of archives.
     ///
-    /// Unlike the native path, this never fails: there is no directory to fail to list or archive
-    /// to fail to open at open time. A web host that is down or missing a file only surfaces on
-    /// the first `read`/`contains` call, same as a native disk read surfaces a missing file lazily
-    /// too (it's just that native's redundant-archive check happens to run eagerly here).
+    /// **This can now fail, and that is the correction.** The old web `Chain` never failed at open
+    /// because every question was deferred to a per-name fetch. The container has no such
+    /// deferral: without `index.bpi` nothing resolves at all, so a missing or malformed index is
+    /// reported once, here, instead of as thousands of identical read failures with no cause.
     pub fn open(_path: &Path) -> Result<Self> {
         Ok(Self {
-            base: crate::web::data_base(),
-            index: std::sync::OnceLock::new(),
+            store: crate::webpack::PackStore::open(crate::web::data_base())?,
         })
     }
 
-    /// The chain file's Data URL scheme address — the client half of the Lane A ↔ Lane H contract.
-    fn url_for(&self, name: &str) -> String {
-        format!("{}/{}", self.base, crate::web::encode_name(name))
-    }
-
-    /// The index's key for a name: MPQ hashing's equivalence — case-insensitive, `/` ≡ `\`.
-    fn index_key(name: &str) -> String {
-        name.replace('/', "\\").to_ascii_lowercase()
-    }
-
-    /// The chain's name index, fetched and parsed on first use (see the struct doc). `None` when
-    /// the host has no working `/data/__index`, in which case every caller falls back to the
-    /// per-name request it made before the index existed.
-    fn index(&self) -> Option<&std::collections::HashSet<String>> {
-        self.index
-            .get_or_init(|| {
-                let bytes = crate::web::fetch_sync(&format!("{}/__index", self.base)).ok()?;
-                let names: Vec<String> = serde_json::from_slice(&bytes).ok()?;
-                Some(names.iter().map(|n| Self::index_key(n)).collect())
-            })
-            .as_ref()
-    }
-
-    /// Whether the web host has `name` — from the name index when it loaded, else a `HEAD`
-    /// request (no body).
+    /// Whether the container holds `name` (accepts `/` or `\`; case-insensitive — the equivalence is
+    /// MPQ's own, inherited through `benilla_mpq::name_key` rather than restated).
+    ///
+    /// No I/O, no allocation, no network: a binary search over the index's sorted key array.
     pub fn contains(&self, name: &str) -> bool {
-        match self.index() {
-            Some(set) => set.contains(&Self::index_key(name)),
-            None => crate::web::exists_sync(&self.url_for(name)),
-        }
+        self.store.contains(name)
     }
 
-    /// No archive *files* exist on the web target — everything is served from the one web-host
-    /// origin, so there is nothing more specific than `contains` to report.
+    /// No archive *files* exist on the web target — a blob's home is a pack id, not a path — so
+    /// there is nothing more specific than `contains` to report.
     pub fn find_file_archive(&self, _name: &str) -> Option<&Path> {
         None
     }
 
-    /// Read a file by internal path (accepts `/` or `\`) via a blocking `GET` — see
-    /// `crate::web::fetch_sync` for why this is synchronous. The error wording on a missing file
-    /// matches the native path's (`"file not in patch chain: {name}"`) so a caller that matches on
-    /// that text — there are some — behaves the same on both targets.
+    /// Read a file by internal path (accepts `/` or `\`), blocking — see
+    /// `crate::web::fetch_sync_range` for why this is synchronous and
+    /// [`crate::webpack::PackStore::read_sync`] for what it costs. The error wording on a missing
+    /// file matches the native path's (`"file not in patch chain: {name}"`) so a caller that
+    /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-                                 // A name the index says is absent is a 404 round trip saved — the same answer, and the
-                                 // sprite-candidate walk (`Foo.blp`, then `Foo.tga`) asks for absent names by design.
-        if self
-            .index()
-            .is_some_and(|set| !set.contains(&Self::index_key(name)))
-        {
-            return Err(anyhow!("file not in patch chain: {name}"));
-        }
-        crate::web::fetch_sync(&self.url_for(name)).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow!("file not in patch chain: {name}")
-            } else {
-                anyhow!("fetching {name} from web host: {e}")
-            }
-        })
+        self.store.read_sync(name)
+    }
+
+    /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`
+    /// (`benilla-assets`), which is `async fn` on every target and so has no reason to block a
+    /// browser's main thread. **Web-only**: there is no native twin, because on native the read is
+    /// a file read and there is nothing to await.
+    ///
+    /// Prefer it wherever it is reachable. It is the lane that can read Cache Storage (async-only),
+    /// and the lane that pulls multi-megabyte SINGLETON packs through a real `ArrayBuffer` instead
+    /// of the sync path's per-character body decode.
+    pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
+        crate::web::trace(name);
+        self.store.read_async(name).await
     }
 
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.
@@ -329,20 +304,22 @@ impl Chain {
         self.read(name)
     }
 
-    /// List the chain's named files via `GET /data/__index` (the Data URL scheme's third route) —
-    /// a JSON array of names. Sizes aren't part of that route (dev/extract tooling is the only
-    /// consumer and doesn't run on the web target), so every entry reports `size: 0`.
+    /// List the container's named files, from the `listfile.txt` it ships beside the index.
+    ///
+    /// Sizes are not available by name (the index is keyed by hash and a listing would need a
+    /// lookup per entry to report one), so every entry reports `size: 0` — unchanged from what the
+    /// web target reported before, and the one web caller, `load_macro_icons`, reads only names.
     pub fn list(&self) -> Result<Vec<ChainEntry>> {
-        let bytes = crate::web::fetch_sync(&format!("{}/__index", self.base))
-            .map_err(|e| anyhow!("fetching chain index: {e}"))?;
-        let names: Vec<String> =
-            serde_json::from_slice(&bytes).context("parsing chain index JSON")?;
-        Ok(names
-            .into_iter()
-            .map(|name| ChainEntry { name, size: 0 })
-            .collect())
+        self.store.listfile()
+    }
+
+    /// The store behind this chain — for the boot progress UI, which wants the container's byte
+    /// total and build id, and for diagnostics.
+    pub fn store(&self) -> &crate::webpack::PackStore {
+        &self.store
     }
 }
+
 
 // Native only: exercises `is_patch_glob_match`/`mount_order`, which don't exist on the web target.
 #[cfg(all(test, not(target_arch = "wasm32")))]

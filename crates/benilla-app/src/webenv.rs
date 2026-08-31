@@ -44,6 +44,45 @@ pub fn var(name: &str) -> Option<String> {
     lookup(&env, &search, &key)
 }
 
+/// A value from **`data/config.json`** — the hosted tree's own configuration, fetched by
+/// `web/boot.js` before `init()` and left on `window.__wenilla_config`.
+///
+/// A separate seam from [`var`], not a fourth fallback inside it, and the separation is the design:
+///
+/// - `__wenilla_env` outranks the query string in [`lookup`], so folding a hosted default into it
+///   would let `config.json` beat a hand-written `?ws=…`. Backwards. Callers consult `var` first and
+///   this second, which puts the precedence where it can be read.
+/// - A hosted default is a **default**, not a pin. `$WOW_HOST`/`?host=` mark the session
+///   `pinned_by_env` and grey out the login screen's realmlist control, which is right for a harness
+///   leg and wrong for a public site where the player must be able to type their own realm.
+///
+/// It exists at all because the WebSocket gateway's address is supplied *after* the client is built:
+/// a build-time constant would bake an address into a 90 MB wasm module, while this is a ~100-byte
+/// `no-cache` asset that a re-upload of one file repoints.
+///
+/// Native: always `None`. There is no page, and the native client has real environment variables.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn config(_key: &str) -> Option<String> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn config(key: &str) -> Option<String> {
+    thread_local! {
+        static CONFIG: std::cell::OnceCell<std::collections::HashMap<String, String>> =
+            const { std::cell::OnceCell::new() };
+    }
+    CONFIG
+        .with(|cell| {
+            cell.get_or_init(|| js_string_map("__wenilla_config"))
+                .get(key)
+                .cloned()
+        })
+        // An empty string is the stub `benilla-pack` writes; it means "not configured", not
+        // "configure this to the empty address".
+        .filter(|v| !v.trim().is_empty())
+}
+
 /// The keys the query string may only answer when the page opted in with `dev_query_creds`.
 const CREDENTIAL_KEYS: [&str; 3] = ["user", "pass", "char"];
 const DEV_QUERY_CREDS: &str = "dev_query_creds";
@@ -73,24 +112,30 @@ fn page_env() -> std::collections::HashMap<String, String> {
     thread_local! {
         static ENV: std::cell::OnceCell<std::collections::HashMap<String, String>> = const { std::cell::OnceCell::new() };
     }
-    ENV.with(|cell| {
-        cell.get_or_init(|| {
-            let mut map = std::collections::HashMap::new();
-            let Some(window) = web_sys::window() else { return map };
-            let Ok(obj) = js_sys::Reflect::get(&window, &"__wenilla_env".into()) else { return map };
-            if !obj.is_object() {
-                return map;
-            }
-            for entry in js_sys::Object::entries(&js_sys::Object::from(obj)).iter() {
-                let pair = js_sys::Array::from(&entry);
-                if let (Some(k), Some(v)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
-                    map.insert(k, v);
-                }
-            }
-            map
-        })
-        .clone()
-    })
+    ENV.with(|cell| cell.get_or_init(|| js_string_map("__wenilla_env")).clone())
+}
+
+/// One page global read as a flat string map. Shared by [`page_env`] and [`config`] because the two
+/// seams differ in *precedence and meaning*, not in how a JS object is read.
+#[cfg(target_arch = "wasm32")]
+fn js_string_map(global: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(window) = web_sys::window() else {
+        return map;
+    };
+    let Ok(obj) = js_sys::Reflect::get(&window, &global.into()) else {
+        return map;
+    };
+    if !obj.is_object() {
+        return map;
+    }
+    for entry in js_sys::Object::entries(&js_sys::Object::from(obj)).iter() {
+        let pair = js_sys::Array::from(&entry);
+        if let (Some(k), Some(v)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
+            map.insert(k, v);
+        }
+    }
+    map
 }
 
 /// `decodeURIComponent`, tolerant of failure — a query string a person hand-edited can contain a
@@ -161,17 +206,40 @@ mod tests {
         assert_eq!(lookup(&e, "?host=a%20b&junk&host2=%zz", "host").as_deref(), Some("a b"));
         assert_eq!(lookup(&e, "?host=%zz", "host"), None);
     }
+
+    /// The realmlist default follows the GATEWAY, not the page — the whole correction behind
+    /// `default_wow_host` on a static-host setup, where the page's own hostname is a static host edge with
+    /// no realmd behind it.
+    #[test]
+    fn the_ws_base_yields_the_gateway_hostname() {
+        assert_eq!(host_of_ws_base("wss://gw.example.org:8443"), Some("gw.example.org"));
+        assert_eq!(host_of_ws_base("ws://gw.example.org"), Some("gw.example.org"));
+        assert_eq!(host_of_ws_base("wss://gw.example.org/"), Some("gw.example.org"));
+        // No scheme, and an IPv6 literal whose colons are part of the address, not a port.
+        assert_eq!(host_of_ws_base("gw.example.org:443"), Some("gw.example.org"));
+        assert_eq!(host_of_ws_base("wss://[2001:db8::1]:8443"), Some("2001:db8::1"));
+        // A value that does not parse must be no worse than an absent one: the caller falls back.
+        assert_eq!(host_of_ws_base(""), None);
+        assert_eq!(host_of_ws_base("wss://"), None);
+    }
 }
 
 /// `WOW_HOST`'s fallback when unset — `net/io.rs`'s `NetConfig::from_env` calls this instead of
 /// hard-coding a default, so it stays a one-line swap there (`var("WOW_HOST").unwrap_or_else(…)`)
 /// no matter what the right default is per platform.
 ///
-/// Native: `localhost`, decision 0539's original default, unchanged. Web: the page's own
-/// hostname — `wenilla-host`'s proxy always runs beside the game server it forwards to, so
-/// whatever host served this page is already the right one to open `/ws/{port}` against; a
-/// browser tab has no `localhost`-as-loopback concept worth defaulting to instead (the page did
-/// not load from the player's own machine).
+/// Native: `localhost`, decision 0539's original default, unchanged.
+///
+/// Web: **the gateway's hostname when one is configured, and the page's own only otherwise.** This
+/// used to be unconditionally the page's hostname, on the premise that "the web host proxies to the
+/// realm beside it" — true of `wenilla-host`, which serves the bundle and the `/ws/{port}` proxy
+/// from one process, and false the moment the static tree moves to a static host and the gateway is a
+/// box somewhere else. On such a site the page's hostname is a static host edge with no realmd behind it,
+/// so defaulting to it would put every first-time visitor's login on an address that cannot answer.
+///
+/// The `ws` base is the honest source: it is the endpoint the client will actually dial, so the
+/// realm it reaches is on that host by construction. This is only the **default** — `?host=` and a
+/// saved `realmList` both still win, in that order (`Realmlist`, `cvars::load_config`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn default_wow_host() -> String {
     "localhost".into()
@@ -179,7 +247,37 @@ pub(crate) fn default_wow_host() -> String {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn default_wow_host() -> String {
+    if let Some(host) = ws_base().as_deref().and_then(host_of_ws_base) {
+        return host.to_string();
+    }
     web_sys::window()
         .and_then(|w| w.location().hostname().ok())
         .unwrap_or_else(|| "localhost".into())
+}
+
+/// The WebSocket gateway base (`wss://host[:port]`), in precedence order: `?ws=` /
+/// `window.__wenilla_env.ws`, then `data/config.json`'s `ws`. `None` = the page's own origin, which
+/// is `benilla_protocol::transport::web`'s own default and today's `wenilla-host` behaviour.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn ws_base() -> Option<String> {
+    var("WOW_WS").or_else(|| config("ws"))
+}
+
+/// `wss://gw.example.org:8443` -> `gw.example.org`. Pure string math, so it is unit-tested here
+/// rather than only exercised in a browser; a base that does not parse yields `None` and the caller
+/// falls back, because a malformed config value must not be worse than an absent one.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn host_of_ws_base(base: &str) -> Option<&str> {
+    let rest = base
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base)
+        .trim_end_matches('/');
+    let host = rest.split(['/', '?']).next()?;
+    // Strip the port, but leave a bracketed IPv6 literal alone — its colons are part of the address.
+    let host = match host.strip_prefix('[') {
+        Some(_) => host.split(']').next().map(|h| &h[1..])?,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then_some(host)
 }

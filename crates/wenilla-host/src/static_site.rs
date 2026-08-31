@@ -1,5 +1,5 @@
 //! Static hosting for the browser build's output directory (`index.html`, `wenilla.js`,
-//! `wenilla_bg.wasm`) — everything `scripts/web-build.sh` writes to `web/dist/`.
+//! `wenilla_bg.wasm`) — everything `trunk build --release` writes to `web/dist/`.
 //!
 //! Everything under `--www` gets `no-cache` rather than the immutable long cache the `/data/*`
 //! route uses — that directory holds only `index.html`/`wenilla.js`/`wenilla_bg.wasm`,
@@ -16,9 +16,15 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 pub fn router(www: &Path) -> axum::Router {
     let no_cache = HeaderValue::from_static("no-cache");
-    // Precompressed, not compressed on the fly: the wasm is ~90 MB, and brotli-ing that per
-    // request is seconds of CPU for every page load. `scripts/web-build.sh` writes the
-    // `.br`/`.gz` siblings once; a browser that accepts neither gets the plain file.
+    // Precompressed, never on the fly: the wasm is ~90 MB, and brotli-ing that per request is
+    // seconds of CPU for every page load.
+    //
+    // **Trunk does not write the `.br`/`.gz` siblings** the way `scripts/web-build.sh` did, and
+    // that is deliberate on the site path — A static host compresses on the fly at the edge, so
+    // shipping precompressed copies would just double the object count. These two lines stay
+    // because they cost nothing when the siblings are absent (a browser then gets the plain file)
+    // and still pay off for anyone serving `web/dist` to real players over a real link, who can
+    // `brotli -q 5` the bundle once by hand.
     let serve = ServeDir::new(www)
         .append_index_html_on_directories(true)
         .precompressed_br()

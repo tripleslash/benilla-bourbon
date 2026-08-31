@@ -1,0 +1,35 @@
+# Static-host headers (the `_headers` format). Four rules of the 100 allowed.
+#
+# Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
+
+/*
+  # Pre-positioning for the fetch/decode Web Worker, and free today. NOT for SharedArrayBuffer:
+  # the atomics build does not compile at all — bevy_render enables wgpu's
+  # `fragile-send-sync-non-atomic-wasm`, which makes every wgpu handle !Send + !Sync under
+  # `+atomics` while RenderDevice/RenderQueue are #[derive(Resource)] and require both. A plain
+  # Worker posting transferable ArrayBuffers needs none of that, and these headers cost nothing.
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+/data/p/*
+  # A pack's name IS its content: the id comes from a deterministic plan over the game files, so a
+  # given URL never changes meaning and `immutable` is honest rather than optimistic.
+  #
+  # It is also the rule that makes the edge *store* the object, which is the precondition for
+  # cache-layer range slicing. Measured before this existed: `Range: bytes=100-199` came back 200
+  # with the full body and `cf-cache-status: MISS` every time. Whether this flips that is the one
+  # thing to re-measure after the first upload — and nothing depends on the answer, because the
+  # client probes for it (web/packs.js) and the whole-object path is never wrong, only bigger.
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data/index.bpi
+  # Not immutable: a re-pack rewrites it in place, and a client holding a stale index would resolve
+  # names to packs that no longer exist. A week is long enough to be free on a repeat visit and
+  # short enough that a re-pack reaches everyone without a cache-busting query.
+  Cache-Control: public, max-age=604800
+
+/data/config.json
+  # The WebSocket gateway address. The entire point of it being an asset rather than a constant in
+  # the wasm is that re-uploading this one file repoints the client, so it must never be held.
+  Cache-Control: no-cache

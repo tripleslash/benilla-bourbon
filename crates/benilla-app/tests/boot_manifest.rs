@@ -1,8 +1,18 @@
-//! Sanity for `web/boot-manifest.json` — the boot-prefetch read-set `web/boot.js` warms the
-//! HTTP cache with (captured from a traced boot via `?boottrace=1`; regeneration procedure in
-//! boot.js's header). The manifest is data, hand-carried between builds, so this is the guard
-//! against the hand: shape, non-emptiness, no duplicates, and chain-style names. Staleness is
-//! NOT tested — drift degrades gracefully to an uncached read, by design.
+//! Sanity for `web/boot-manifest.json` — the boot-prefetch read-set (captured from a traced boot
+//! via `?boottrace=1`; regeneration procedure in boot.js's header). The manifest is data,
+//! hand-carried between builds, so this is the guard against the hand: shape, non-emptiness, no
+//! duplicates, and chain-style names.
+//!
+//! **These manifests now do two jobs, and the second raised the stakes.** They were a list of URLs
+//! to warm an HTTP cache with, and drift cost one uncached read. They are now translated by
+//! `benilla-pack` into `data/boot-packs.json` — the page's entire prefetch — *and* fed back into
+//! the packer's grouping, so the boot read set is laid out contiguously in the container
+//! (`benilla_packer::sidecars::ReadSets`). A name that no longer resolves is therefore a name that
+//! silently drops out of both, and enough of them turn the prefetch into a stub that says nothing
+//! is needed. Hence the last test here, which checks every name against a built `index.bpi`.
+//!
+//! Staleness in the other direction — a name the boot no longer reads — is still not tested, and
+//! still degrades gracefully: it costs a pack in the prefetch, nothing more.
 
 use std::path::Path;
 
@@ -71,5 +81,38 @@ fn the_world_manifest_is_the_ui_sprite_set_disjoint_from_boot() {
     );
     for name in &world {
         assert!(!boot.contains(name), "{name} is in both manifests — recapture both together");
+    }
+}
+
+/// **The guard against the manifests rotting into an empty pack list.** Every name in both sets
+/// must resolve in a built container's `index.bpi`, by the same `(name_a, name_b)` hash the archive
+/// itself resolves on.
+///
+/// A handful of misses is the honest tolerance, not a hole: some captured names are probes for
+/// files that genuinely are not in a stock 5875 install (the sprite walk asks for `Foo.blp` and
+/// then `Foo.tga` by design, and the icon list carries two entries with no file behind them), and
+/// failing on those would make a correct manifest untestable. What the threshold catches is the
+/// failure that matters — a re-pack, a rename, or a hand-edit that quietly detaches the read set
+/// from the container.
+///
+/// Skips with a message when there is no container, like every test that needs the real install.
+#[test]
+fn every_manifest_name_resolves_in_a_built_container() {
+    let index = benilla_pack::pack_index_or_skip!();
+    for file in ["boot-manifest.json", "world-manifest.json"] {
+        let names = checked_names(file, 50);
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|n| index.locate(benilla_mpq::name_key(n)).is_none())
+            .collect();
+        assert!(
+            missing.len() * 20 < names.len(),
+            "{file}: {} of {} names are absent from the container — the prefetch has detached \
+             from what the client reads. Re-run `benilla-pack sidecars` and recapture if needed. \
+             First few: {:?}",
+            missing.len(),
+            names.len(),
+            &missing[..missing.len().min(8)]
+        );
     }
 }

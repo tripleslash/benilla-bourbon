@@ -19,14 +19,18 @@
 This fork's `web` branch adds **wenilla**: the same client compiled to WebAssembly, so a 1.12.1
 server can be played from a browser with nothing installed — login, character select and the
 world, with the full FrameXML/Lua UI, over a WebSocket. Nothing is rewritten: raw TCP becomes a
-WebSocket through a small host (`wenilla-host`), the MPQ chain becomes single files fetched over
-HTTP, and the C Lua 5.1 VM is compiled for wasm with the wasi-sdk sysroot. WebGPU is required
-for the world; the host proxies only to the server you point it at, and never sends the MPQs.
+WebSocket through a small host (`wenilla-host`), the MPQ chain becomes a content-addressed
+container the browser streams from any static object store, and the C Lua 5.1 VM is compiled for
+wasm with the wasi-sdk sysroot. WebGPU is required for the world.
 
 ```bash
-scripts/web-setup.sh                                   # once: wasm target, wasm-bindgen, wasi-sdk (no sudo)
-scripts/web-build.sh                                   # → web/dist/
-cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data
+scripts/web-setup.sh                                   # once: wasm target, Trunk, wasi-sdk (no sudo)
+WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist/, then web/site/
+
+# once per install: 6.3 GiB of MPQ → a 3.3 GiB container of ~4,700 static objects
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    build --data /path/to/WoW/Data --out web/packs
+cargo run --release -p wenilla-host -- --www web/dist --packs web/packs
 # open http://127.0.0.1:8090/
 ```
 
