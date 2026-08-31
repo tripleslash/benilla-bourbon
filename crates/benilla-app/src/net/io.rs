@@ -122,9 +122,10 @@ pub(super) const SEND_WARN_CAP: u32 = 8;
 ///
 /// Neither the credentials nor the **address** live here any more. 0539 moved the credentials onto
 /// each [`LoginRequest`]; decision 1667 moved the host the same way and for the same reason — it
-/// is now a setting the player edits on the login screen (`crate::realmlist`), so a value latched
-/// out of the environment once at spawn could only ever be stale. `$WOW_HOST` is still honoured;
-/// it is read where every other env-overridable setting is read, by `Realmlist::default()`.
+/// is a *setting* (`crate::realmlist`: a CVar natively, `/config.json` on the page), so a value
+/// latched out of the environment once at spawn could only ever be stale. `$WOW_HOST` is still
+/// honoured; it is read where every other env-overridable setting is read, by
+/// `Realmlist::default()`.
 pub(super) struct NetConfig {
     /// `WOW_CHAR`, when explicitly set. Here it only names the create-if-empty character on a fresh
     /// account; as a *pick* it is app-side policy (`crate::char_select` auto-answers the roster with

@@ -805,9 +805,8 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
 /// additive hover sheen and a caption that whitens on hover (the ref's `HighlightFont`);
 /// plain-fill fallback. Art states + caption color are driven by [`super::glue_button_visuals`].
 ///
-/// Returns the button's entity, so a screen can reach back into what it just built — the login
-/// screen marks its realmlist button [`GlueDisabled`] when `$WOW_HOST` owns the session (1667).
-/// Ignoring the return is the norm; nothing is `#[must_use]`.
+/// Returns the button's entity, so a screen can reach back into what it just built and mark it
+/// [`GlueDisabled`]. Ignoring the return is the norm; nothing is `#[must_use]`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn glue_button<A: Component>(
     parent: &mut ChildSpawnerCommands,

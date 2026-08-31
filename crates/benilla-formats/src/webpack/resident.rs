@@ -32,6 +32,7 @@ const GLOBAL: &str = "__wenilla_packs";
 struct Bridge {
     slice: Option<Function>,
     put: Option<Function>,
+    warm_pack: Option<Function>,
     fetch_wire: Option<Function>,
     fetch_frame: Option<Function>,
     obj: JsValue,
@@ -57,6 +58,7 @@ fn with_bridge<T>(f: impl FnOnce(&Bridge) -> T) -> Option<T> {
             Some(Bridge {
                 slice: method("slice"),
                 put: method("put"),
+                warm_pack: method("warmPack"),
                 fetch_wire: method("fetchWire"),
                 fetch_frame: method("fetchFrame"),
                 obj,
@@ -109,6 +111,37 @@ pub fn put(pack_id: u32, body: &[u8]) {
         let view = Uint8Array::from(body);
         let _ = f.call2(&b.obj, &JsValue::from_f64(pack_id as f64), &view);
     });
+}
+
+/// Ask the page to have a pack **fetched, decoded and made resident** — `web/packworker.js`, the
+/// phase-6 Web Worker — and report whether it is now there.
+///
+/// This is the whole of Rust's side of the worker, and deliberately so: the expensive halves are
+/// the network wait and the zstd stream, both of which belong on a thread that is not drawing, and
+/// neither needs anything from wasm to run. What comes back is a `Map` entry on the JS heap, which
+/// [`slice`] already knows how to read.
+///
+/// `false` means "not resident — do it yourself", for every reason alike: a page with no worker, a
+/// browser with no `Worker`, an object that 404ed, a worker that died. The caller falls back to the
+/// path it took before this existed, so the worker is an accelerator and never a dependency.
+pub async fn warm(pack_id: u32, url: &str) -> bool {
+    let promise = with_bridge(|b| {
+        let f = b.warm_pack.as_ref()?;
+        f.call2(
+            &b.obj,
+            &JsValue::from_f64(pack_id as f64),
+            &JsValue::from_str(url),
+        )
+        .ok()?
+        .dyn_into::<js_sys::Promise>()
+        .ok()
+    })
+    .flatten();
+    let Some(p) = promise else { return false };
+    wasm_bindgen_futures::JsFuture::from(p)
+        .await
+        .map(|v| v.is_truthy())
+        .unwrap_or(false)
 }
 
 /// Fetch a whole `.bpk` asynchronously. Goes through the page when it can, because that is where

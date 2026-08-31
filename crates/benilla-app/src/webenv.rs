@@ -44,17 +44,22 @@ pub fn var(name: &str) -> Option<String> {
     lookup(&env, &search, &key)
 }
 
-/// A value from **`data/config.json`** — the hosted tree's own configuration, fetched by
-/// `web/boot.js` before `init()` and left on `window.__wenilla_config`.
+/// A value from **`/config.json`** — the hosted tree's own configuration, fetched by
+/// `web/boot.js` before `init()` and left on `window.__wenilla_config`. It ships at the origin
+/// root with the build (`web/config.json` → Trunk → `dist/`), not under `/data` with the 3.3 GiB
+/// container: it is the one file in the hosted tree an operator edits. Its two keys — `ws`, the
+/// WebSocket gateway the browser dials, and `realmlist`, the logon address the handshake carries —
+/// are documented in `web/README.md`.
 ///
 /// A separate seam from [`var`], not a fourth fallback inside it, and the separation is the design:
 ///
 /// - `__wenilla_env` outranks the query string in [`lookup`], so folding a hosted default into it
 ///   would let `config.json` beat a hand-written `?ws=…`. Backwards. Callers consult `var` first and
 ///   this second, which puts the precedence where it can be read.
-/// - A hosted default is a **default**, not a pin. `$WOW_HOST`/`?host=` mark the session
-///   `pinned_by_env` and grey out the login screen's realmlist control, which is right for a harness
-///   leg and wrong for a public site where the player must be able to type their own realm.
+/// - It is read *after* `var`, so the harness levers still win: `$WOW_HOST`/`?host=` mark the
+///   session `pinned_by_env` and cannot be moved off, which is right for a probe that must dial
+///   exactly one server. Below that, `realmlist` here is the page's only source (`cvars`'
+///   `apply_hosted_realmlist`) — there is no login-screen control under it any more.
 ///
 /// It exists at all because the WebSocket gateway's address is supplied *after* the client is built:
 /// a build-time constant would bake an address into a 90 MB wasm module, while this is a ~100-byte
@@ -78,8 +83,8 @@ pub(crate) fn config(key: &str) -> Option<String> {
                 .get(key)
                 .cloned()
         })
-        // An empty string is the stub `benilla-pack` writes; it means "not configured", not
-        // "configure this to the empty address".
+        // An empty string is how the checked-in `web/config.json` ships; it means "not
+        // configured", not "configure this to the empty address".
         .filter(|v| !v.trim().is_empty())
 }
 
@@ -168,7 +173,7 @@ fn decode(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::lookup;
+    use super::{host_of_ws_base, lookup};
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -238,8 +243,10 @@ mod tests {
 /// so defaulting to it would put every first-time visitor's login on an address that cannot answer.
 ///
 /// The `ws` base is the honest source: it is the endpoint the client will actually dial, so the
-/// realm it reaches is on that host by construction. This is only the **default** — `?host=` and a
-/// saved `realmList` both still win, in that order (`Realmlist`, `cvars::load_config`).
+/// realm it reaches is on that host by construction. This is only the **fallback**, for a page
+/// whose `config.json` names no `realmlist` at all — which is how the checked-in one ships, so a
+/// local `wenilla-host --www web/dist` still dials the origin that served it. `?host=` and
+/// `config.json`'s own `realmlist` both win over it (`Realmlist`, `cvars::load_config`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn default_wow_host() -> String {
     "localhost".into()
@@ -256,7 +263,7 @@ pub(crate) fn default_wow_host() -> String {
 }
 
 /// The WebSocket gateway base (`wss://host[:port]`), in precedence order: `?ws=` /
-/// `window.__wenilla_env.ws`, then `data/config.json`'s `ws`. `None` = the page's own origin, which
+/// `window.__wenilla_env.ws`, then `/config.json`'s `ws`. `None` = the page's own origin, which
 /// is `benilla_protocol::transport::web`'s own default and today's `wenilla-host` behaviour.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn ws_base() -> Option<String> {

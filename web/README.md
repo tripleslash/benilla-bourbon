@@ -74,9 +74,66 @@ web/site/   what a static host serves    hardlinks to dist/, plus data -> ../pac
 an upload to the static host      # reads the host's config
 ```
 
-Then set the gateway in `web/packs/config.json` (`{"ws": "wss://gw.example:443", "realmlist": "…"}`)
-and re-upload — it is ~100 bytes served `no-cache`, so it repoints the client without a wasm rebuild.
-That is the whole reason the address is not compiled in.
+### `web/config.json` — the site's whole configuration
+
+Two keys, both strings, both optional. The file is checked in beside the page it configures, Trunk
+copies it to the dist root, and it is served `no-cache` at `/config.json` — so re-uploading that one
+~100-byte file repoints every client with no wasm rebuild. That is the whole reason the addresses
+are not compiled in.
+
+```json
+{ "ws": "wss://gw.example.org", "realmlist": "logon.example.org" }
+```
+
+**`ws` — the transport.** The WebSocket origin the browser opens sockets against, as
+`wss://host[:port]`: scheme, host, optional port, **no path and no trailing slash**. A page cannot
+open a TCP socket, so every byte of realmd and world traffic tunnels through it: the client builds
+`{ws}/ws/{port}` and the gateway (`wenilla-host`, or the packaged `wenilla-realm`) relays to the
+mangos box it is configured for, on the two ports it allowlists — 3724 and 8085. Use `wss:` for an
+`https:` page; a secure page may not open an insecure socket. **Set this on any site where the
+page and the gateway are different machines**, which is every static-host setup: left empty the
+client dials the page's own origin, and a static host edge has no realmd behind it. Empty is right only
+when one process serves the page *and* proxies `/ws` — `wenilla-host --www web/dist`, i.e. local
+dev.
+
+Which box the gateway relays *to* is its own decision, not the page's:
+
+```bash
+wenilla-host --www web/dist --packs web/packs                       # realmd/mangosd on this box
+wenilla-host --www web/dist --packs web/packs \
+  --upstream 10.0.0.5 --allow-remote-realms                          # a realm somewhere else
+```
+
+`--upstream` is inert without `--allow-remote-realms` — the flag is off by default and pins every
+session to `127.0.0.1` whatever anyone asks for, page and command line alike, so the proxy stays on
+the machine it is running on until an operator says otherwise. Turning it on also lets each client's
+own `realmlist` choose the address for its session, which is how one gateway fronts realms it does
+not run; the ports stay allowlisted either way. `wenilla-realm` never offers it: it hosts strangers,
+and its two upstream hosts are the operator's config alone.
+
+**`realmlist` — the game address.** The logon (realmd) address the login handshake carries, as
+`host[:port]`, port defaulting to 3724. It is the reference client's `realmlist.wtf` value and the
+`realmList` CVar, and it is what the login screen's readout shows. It is *not* a second copy of
+`ws`: **`ws` says which gateway to talk to, `realmlist` says which server that conversation is
+with.** On a single box those are the same machine, which is why they can look redundant; on a
+static-host setup they are a static host edge, a gateway, and a realm.
+
+How much of it routes depends on the gateway. The **port** always does: it selects `/ws/{port}`, so
+it has to be one the gateway allowlists (3724, or bare, which means 3724). The **host** travels as
+`?host=`, and by default the gateway treats it as a label and dials its own configured upstream —
+that is what stops a page aiming the proxy anywhere it likes. Started with
+`wenilla-host --allow-remote-realms`, the gateway dials that host instead, and the realmlist becomes
+a real address rather than a name on a screen.
+
+Left empty, the client uses `ws`'s hostname (and the page's own origin if `ws` is empty too), which
+is usually right on a single-realm site — set it when the logon port is not 3724, when the address
+should read as the server's own name, or when the gateway fronts a realm somewhere else.
+
+**`realmlist` here is the only source the hosted client has.** There is no login-screen control
+under it, deliberately: an address a visitor typed would be saved into their local `config.toml`
+and outrank this one forever after, so re-uploading `config.json` would move everyone *except* the
+people who had been here before. `?host=` still pins one session, which is the lever probes and
+smoke runs set.
 
 **The data is public and unauthenticated on such a site**, unlike the login-gated `/data` route it
 replaces. Whoever serves these files is distributing Blizzard's.
@@ -96,6 +153,16 @@ replaces. Whoever serves these files is distributing Blizzard's.
   ungrouped, the 403 boot names landed in 141 packs — 91 MB fetched to reach 14.7 MB. Grouped, it is
   **22 packs and 12.3 MB**. `benilla-pack sidecars --packs web/packs` re-translates after a
   recapture without re-packing.
+- **The decode worker.** A pack that is fetched is not yet usable: SOLID packs are one zstd stream,
+  and undoing it used to happen in Rust on the frame thread, once per pack, inside the first
+  update's catalog task — so a "prefetched" pack still cost the frame its decode. `web/packworker.js`
+  moves both halves off that thread: it fetches the object, decodes it with its own small wasm module
+  (`crates/wenilla-packdecode` — `benilla-pack`'s reader alone, ~106 KB, because the browser cannot
+  decompress zstd and a JS re-implementation of the frame format would drift into silent corruption),
+  and posts the body back as a transferable `ArrayBuffer` — zero copy into the resident map. By the
+  time the client's first synchronous read runs, its pack is decoded and resident. It is an
+  accelerator and never a dependency: no worker, a wasm that will not load, a worker that dies, and
+  every read falls back to the path it took before.
 - **Hosting behind a login** — `crates/wenilla-realm` wraps this host's routers behind a session
   cookie (the wasm, `/data/*` and `/ws/*` all need it; same-origin requests carry the cookie by
   themselves), renders its own play page that fetches the player's hidden game credentials over
@@ -107,8 +174,24 @@ replaces. Whoever serves these files is distributing Blizzard's.
   settings, saved variables, the remembered account name) lives in the browser's `localStorage`,
   one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser
   and per origin, like a `benilla-config/` beside each native install; the server never sees it.
-  Clearing site data resets it. Pack bytes live in **Cache Storage** instead, namespaced by the
-  container's build id so a re-pack invalidates rather than mixes.
+  Clearing site data resets it.
+- **Game data is fetched once, ever** — `web/sw.js`, a service worker scoped to `/data/`, stores
+  every container object in **Cache Storage** the first time it is fetched and answers it from
+  there afterwards, for both read lanes. That "both" is the whole reason it exists: the ~60
+  synchronous `Chain::read` call sites go through a blocking `XMLHttpRequest`, which cannot await a
+  Promise and so could never read Cache Storage directly — a service worker sits below that
+  distinction, because a sync XHR from a controlled page dispatches a `fetch` event like any other
+  request. It also answers `Range` locally out of a stored object (fetching the whole one first if
+  it must), so a ranged session is one origin hit per *pack* rather than one per *blob*. The cache
+  is invalidated by the container's `build_id` — dropped whole, since a re-pack can reassign a pack
+  id to different bytes at the same URL — and `navigator.storage.persist()` is requested before the
+  first write so the corpus is not evictable under disk pressure. A warm repeat visit puts nothing
+  on the wire but `config.json` (the gateway address, ~30 B) and `boot-packs.json` (the ~10 KB
+  build-id pointer). With the worker in control the client pins its fetch policy to whole objects:
+  a range would save nothing once the object is permanent, and it would skip the residency that
+  makes the rest of the pack's locality group free. `?nosw=1` unregisters the worker, putting the page
+  back on the pre-worker path from the next load — how the Range/HTTP-cache fallback and
+  `--no-ranges` stay exercisable.
 - **Performance** — the client is CPU-bound on its single wasm thread (Bevy's task pools are
   single-threaded on `wasm32`): ~11 ms/frame in an outdoor scene on a laptop iGPU, scaling
   with visible objects, not pixels. The Trunk link runs `wasm-opt -O3` (+6 %). Any CVar
@@ -119,7 +202,11 @@ replaces. Whoever serves these files is distributing Blizzard's.
 - **Debugging a crash**: the panic hook prints to the console; drop `--strip-debug` from the Trunk
   link's `data-wasm-opt-params` to keep the wasm name section so the stack trace has symbols.
   `index.html` also prints the real WGSL compile diagnostics (wgpu's browser backend does not ask
-  for them). `?noprefetch=1` skips the pack warm; `?boottrace=1` also arms the read trace.
+  for them). `?noprefetch=1` skips the pack warm; `?boottrace=1` also arms the read trace;
+  `?nosw=1` unregisters the service worker so `/data` reads reach the origin again — the switch to
+  reach for when a stale or wrong-looking asset might be coming off disk; `?noworker=1` skips the
+  fetch/decode worker, putting every pack decode back on the frame thread (the A/B lever for it, and
+  the bisect for a suspected decode bug).
 - **Porting notes** — the things that differ from native and bit this port: std
   `Instant`/`SystemTime`/`env::vars_os` *panic* on wasm (use `bevy::platform::time::Instant` /
   `web-time`); the browser's WGSL compiler enforces the uniformity rule naga does not (no

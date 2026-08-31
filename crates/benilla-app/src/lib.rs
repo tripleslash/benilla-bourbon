@@ -362,7 +362,7 @@ pub fn run(build: BuildId) -> AppExit {
     // from the page's own origin, which was right while `wenilla-host` served the bundle and
     // proxied `/ws/{port}` from one process. On a static site those separate: the page comes from
     // an object store with no sockets, and the gateway is a box elsewhere whose address is supplied
-    // after the client is built — hence `?ws=` / `__wenilla_env.ws` / `data/config.json`, and not a
+    // after the client is built — hence `?ws=` / `__wenilla_env.ws` / `/config.json`, and not a
     // constant compiled into 90 MB of wasm. Absent, the origin default stands and local dev is
     // unchanged. (This is `set_ws_base`'s first caller; it had none before.)
     #[cfg(target_arch = "wasm32")]
@@ -618,7 +618,7 @@ pub fn run(build: BuildId) -> AppExit {
     // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
     // resource exists when `load_config` applies the saved value at Startup.
     .add_plugins(video::VideoPlugin)
-    // The realmlist (decision 1667) — the logon address the login screen edits. Same reason as
+    // The realmlist (decision 1667) — the logon address each attempt dials. Same reason as
     // VideoPlugin above: it is a CVar knob, so its resource has to exist before `load_config`.
     .add_plugins(realmlist::RealmlistPlugin)
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After

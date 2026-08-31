@@ -48,10 +48,26 @@ struct Cli {
     #[arg(long)]
     no_ranges: bool,
     /// Host the `/ws/{port}` proxy dials for the allowed ports — the mangos boxes this host
-    /// itself runs against, so it defaults to loopback.
-    #[arg(long, default_value = "127.0.0.1")]
+    /// itself runs against, so it defaults to loopback. **Ignored without
+    /// `--allow-remote-realms`**, which is what keeps the proxy on this machine by default.
+    #[arg(long, default_value = LOCAL_REALM)]
     upstream: String,
+    /// Let the proxy reach a realm that is not on this machine: `--upstream` starts being honoured,
+    /// and the client's own realmlist (`?host=`) becomes the address dialed for its session.
+    ///
+    /// Off by default, and the default is the safe half of the pair: without it every session goes
+    /// to loopback whatever anyone asks for, so a page cannot aim this proxy and neither can a
+    /// mistyped flag. With it, this host will connect wherever a page asks — on 3724 and 8085
+    /// only, but wherever. Turn it on for a gateway that fronts a realm somewhere else; leave it
+    /// off for the single-box case, which is what this tool is for.
+    #[arg(long)]
+    allow_remote_realms: bool,
 }
+
+/// Where the proxy dials when it may not leave this machine. Not `localhost`: that resolves
+/// through the host's own name lookup and can answer `::1` on a box where mangosd is listening on
+/// IPv4 only — an address literal cannot be misresolved.
+const LOCAL_REALM: &str = "127.0.0.1";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,10 +98,32 @@ async fn main() -> Result<()> {
         _ => anyhow::bail!("pass exactly one of --data (live MPQ chain) or --packs (a built container)"),
     };
 
+    // **The localhost pin.** Without `--allow-remote-realms` the configured upstream is not merely
+    // defaulted to loopback, it is *replaced* by it — an operator who passed `--upstream` and no
+    // flag gets loopback and a line saying so, rather than a proxy quietly reaching a box they had
+    // only half asked for. The client's own `?host=` is refused by the same switch, one layer down
+    // (`ws::RemoteRealms`), so both ways of naming a remote realm are off together or on together.
+    let (upstream, remote) = if cli.allow_remote_realms {
+        (cli.upstream.clone(), wenilla_host::ws::RemoteRealms::Allow)
+    } else {
+        if !is_local_realm(&cli.upstream) {
+            tracing::warn!(
+                upstream = %cli.upstream,
+                "--upstream names another machine but --allow-remote-realms is not set: dialing \
+                 127.0.0.1 instead. Pass --allow-remote-realms to reach it."
+            );
+        }
+        (
+            LOCAL_REALM.to_string(),
+            wenilla_host::ws::RemoteRealms::Refuse,
+        )
+    };
+
     let app = game
         .merge(wenilla_host::ws::router(
-            cli.upstream.clone(),
+            upstream.clone(),
             wenilla_host::ALLOWED_PORTS,
+            remote,
         ))
         .merge(wenilla_host::static_site::router(&cli.www));
 
@@ -100,8 +138,32 @@ async fn main() -> Result<()> {
              wenilla-realm to host players."
         );
     }
-    tracing::info!(bind = %cli.bind, www = %cli.www.display(), upstream = %cli.upstream, "wenilla-host listening");
+    if cli.allow_remote_realms {
+        tracing::warn!(
+            "--allow-remote-realms is set: this proxy will connect to whatever host a page names, \
+             on ports 3724 and 8085. Only do this on a gateway you mean to be one."
+        );
+    }
+    tracing::info!(
+        bind = %cli.bind,
+        www = %cli.www.display(),
+        upstream = %upstream,
+        remote_realms = cli.allow_remote_realms,
+        "wenilla-host listening"
+    );
     axum::serve(listener, app).await.context("serving")
+}
+
+/// Is this upstream on the machine the host is running on? Only used to decide whether the
+/// localhost pin is worth *saying* — the pin applies either way, so a name this cannot recognise
+/// (a `/etc/hosts` alias for loopback) costs one warn line and nothing else.
+fn is_local_realm(upstream: &str) -> bool {
+    let host = upstream.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Is the listener bound to a loopback address (the only place `/data` is safe unauthenticated)?

@@ -7,8 +7,10 @@
 #
 #   web/dist/    Trunk's output. CLEARED ON EVERY BUILD — which is why 3.3 GiB of container
 #                cannot live here, and why the site root is not simply `dist`.
-#   web/packs/   `benilla-pack build` output: ~4,700 .bpk objects plus index.bpi, listfile.txt,
-#                boot-packs.json and config.json. Rebuilt only when the game files change.
+#   web/packs/   `benilla-pack build` output: ~4,700 .bpk objects plus index.bpi, listfile.txt
+#                and boot-packs.json. Rebuilt only when the game files change. (`config.json` is
+#                NOT here: it configures the client, ships with the build, and lands at the site
+#                root — see web/index.html's copy-file link.)
 #   web/site/  what a static host serves: hardlinks to the build, plus `data` -> ../packs.
 #
 # Both links are cheap on purpose. Hardlinking the build is O(1) per file against a ~90 MB wasm

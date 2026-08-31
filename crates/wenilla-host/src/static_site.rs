@@ -1,12 +1,13 @@
-//! Static hosting for the browser build's output directory (`index.html`, `wenilla.js`,
-//! `wenilla_bg.wasm`) — everything `trunk build --release` writes to `web/dist/`.
+//! Static hosting for the browser build's output directory — everything `trunk build --release`
+//! writes to `web/dist/`: the page and its scripts, the wasm bundle, `sw.js`, `packworker.js` and
+//! its `wenilla-packdecode` pair, and `config.json`.
 //!
 //! Everything under `--www` gets `no-cache` rather than the immutable long cache the `/data/*`
-//! route uses — that directory holds only `index.html`/`wenilla.js`/`wenilla_bg.wasm`,
-//! and the wasm bundle changes on every rebuild but keeps the same filename (no content-hash),
-//! so a long cache would pin a stale client against a server that has already moved on — dev-
-//! cycle friction the `/data/*` files don't have (those are content the game itself never
-//! changes).
+//! route uses, and every file there wants it: the bundle changes on every rebuild but keeps the
+//! same filename (no content-hash), so a long cache would pin a stale client against a server that
+//! has already moved on; `sw.js` held would be a service worker that cannot be replaced; and
+//! `config.json` held would be a client that cannot be repointed. Dev-cycle friction the `/data/*`
+//! files don't have (those are content the game itself never changes).
 
 use std::path::Path;
 

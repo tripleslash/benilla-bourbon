@@ -1,13 +1,15 @@
-# Static-host headers (the `_headers` format). Four rules of the 100 allowed.
+# Static-host headers (the `_headers` format). Seven rules of the 100 allowed.
 #
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
 /*
-  # Pre-positioning for the fetch/decode Web Worker, and free today. NOT for SharedArrayBuffer:
-  # the atomics build does not compile at all — bevy_render enables wgpu's
-  # `fragile-send-sync-non-atomic-wasm`, which makes every wgpu handle !Send + !Sync under
-  # `+atomics` while RenderDevice/RenderQueue are #[derive(Resource)] and require both. A plain
-  # Worker posting transferable ArrayBuffers needs none of that, and these headers cost nothing.
+  # NOT for SharedArrayBuffer: the atomics build does not compile at all — bevy_render enables
+  # wgpu's `fragile-send-sync-non-atomic-wasm`, which makes every wgpu handle !Send + !Sync under
+  # `+atomics` while RenderDevice/RenderQueue are #[derive(Resource)] and require both. The
+  # fetch/decode worker that shipped instead (`web/packworker.js`) posts transferable
+  # ArrayBuffers and needs none of this — every asset it loads is same-origin, which `require-corp`
+  # allows unconditionally. Kept because it costs nothing and is the precondition if a threaded
+  # build ever becomes possible upstream.
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
 
@@ -27,9 +29,37 @@
   # Not immutable: a re-pack rewrites it in place, and a client holding a stale index would resolve
   # names to packs that no longer exist. A week is long enough to be free on a repeat visit and
   # short enough that a re-pack reaches everyone without a cache-busting query.
+  #
+  # This is the HTTP cache's rule and it is now the second line of defence, not the first: with
+  # `sw.js` installed the index is stored permanently and invalidated by build id instead, which is
+  # both stronger (it survives HTTP-cache eviction) and more precise (it turns over exactly when the
+  # container does). The header still governs a page with no worker.
   Cache-Control: public, max-age=604800
 
-/data/config.json
-  # The WebSocket gateway address. The entire point of it being an asset rather than a constant in
-  # the wasm is that re-uploading this one file repoints the client, so it must never be held.
+/data/listfile.txt
+  # Same shape as the index — rewritten by a re-pack, invalidated by build id under the worker — and
+  # left on the default `max-age=0, must-revalidate` it would be a conditional request for 4.5 MB
+  # on every load of a page that has no worker.
+  Cache-Control: public, max-age=604800
+
+/data/boot-packs.json
+  # The VERSION POINTER: it carries `build_id`, which is how the client decides whether the corpus
+  # it already holds is still the corpus this origin serves. `sw.js` keeps it network-first for that
+  # reason, and holding it would defeat the check — a client with a stale pointer never learns a
+  # re-pack happened. ~10 KB, and the only game-data request a warm repeat visit makes.
+  Cache-Control: no-cache
+
+/sw.js
+  # A worker script the browser holds is a worker that cannot be replaced, and this one owns what
+  # the client is allowed to serve off disk. Browsers already refuse to reuse a >24h-old worker
+  # script, but saying it is cheaper than relying on it.
+  Cache-Control: no-cache
+
+/config.json
+  # The gateway address and the realmlist — the site's whole configuration, and the only source
+  # the client has for either. The entire point of them being an asset rather than constants in the
+  # wasm is that re-uploading this one file repoints the client, so it must never be held.
+  #
+  # At the root, not under /data: it ships with the build (`web/config.json` -> Trunk -> dist), not
+  # with the container, so `sw.js` — scoped to /data/ — never sees it and needs no exception for it.
   Cache-Control: no-cache

@@ -4,6 +4,21 @@
 //! (8085) TCP ports. `port` is checked against an explicit allowlist, not just "any u16" — this
 //! host runs on a Tailscale-reachable bind address, so an unchecked proxy would be an open relay
 //! onto whatever else is listening on the box.
+//!
+//! ## Which box gets dialed, and who decides
+//!
+//! Two answers, and [`RemoteRealms`] is which one is in force.
+//!
+//! By default the *operator* decides and nobody else: the proxy dials the host configured for that
+//! port, and the client's `?host=` is a log label. That is what keeps a relay out of this — the
+//! realmlist a page carries cannot aim the socket, so the furthest a hostile page gets is talking
+//! to the server the operator already pointed at.
+//!
+//! With [`RemoteRealms::Allow`] the client's `?host=` becomes the address actually dialed, which is
+//! how one gateway fronts realms it does not itself run. It is a real widening, and that is why it
+//! is a flag rather than the behaviour: an allowed gateway will connect wherever a page asks, on
+//! the two allowlisted ports. `wenilla-host --allow-remote-realms` opts in; `wenilla-realm`, which
+//! hosts strangers, never does.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +33,23 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Whether a client may name the box this proxy dials — the policy half of
+/// `wenilla-host --allow-remote-realms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteRealms {
+    /// The client's `?host=` is a log label and nothing else; the configured upstream is dialed
+    /// whatever it says. **The default**, and the only setting under which this proxy is safe in
+    /// front of people you do not know.
+    Refuse,
+    /// The client's `?host=` is the address dialed, falling back to the configured upstream when it
+    /// names none.
+    Allow,
+}
+
+/// The longest host this will dial — DNS's own limit. Anything longer was never going to resolve,
+/// so it is refused here instead of handed to the resolver.
+const MAX_HOST: usize = 253;
+
 #[derive(Clone)]
 struct WsState {
     /// Port → host the proxy dials for it — plain hostname/IP, not a URL. The key set *is* the
@@ -25,29 +57,43 @@ struct WsState {
     /// hosting (`main.rs` defaults to loopback); a host per port is the containerised one,
     /// where realmd (3724) and mangosd (8085) are different services.
     upstreams: Arc<HashMap<u16, Arc<str>>>,
+    /// May a client's `?host=` replace the value above for its own session?
+    remote: RemoteRealms,
 }
 
 /// Build the `/ws/{port}` router with one upstream host for every allowed port. `allowed` is the
 /// exact port set the proxy will dial — production passes `{3724, 8085}` (the plan's shared
 /// scheme: "only 3724 and 8085 are allowed"); tests pass their own echo-server port so the
 /// allowlist check doesn't have to be bypassed to exercise it.
-pub fn router(upstream: impl Into<Arc<str>>, allowed: impl IntoIterator<Item = u16>) -> Router {
+pub fn router(
+    upstream: impl Into<Arc<str>>,
+    allowed: impl IntoIterator<Item = u16>,
+    remote: RemoteRealms,
+) -> Router {
     let upstream: Arc<str> = upstream.into();
-    router_map(allowed.into_iter().map(|p| (p, Arc::clone(&upstream))))
+    router_map(
+        allowed.into_iter().map(|p| (p, Arc::clone(&upstream))),
+        remote,
+    )
 }
 
 /// Build the `/ws/{port}` router from an explicit port → host map; the keys are the allowlist.
-pub fn router_map(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Router {
+pub fn router_map(
+    upstreams: impl IntoIterator<Item = (u16, Arc<str>)>,
+    remote: RemoteRealms,
+) -> Router {
     Router::new()
         .route("/ws/{port}", get(upgrade))
         .with_state(WsState {
             upstreams: Arc::new(upstreams.into_iter().collect()),
+            remote,
         })
 }
 
-/// `host` arrives as `?host=` — logging only (the shared scheme's own words); the proxy always
-/// dials `state.upstream`, never the client-supplied value, so a client can't redirect the socket
-/// somewhere else on the network.
+/// `host` arrives as `?host=` — the realmlist the page is dialing. Under [`RemoteRealms::Refuse`]
+/// it is logging only (the shared scheme's own words) and the configured upstream is dialed, so a
+/// client cannot redirect the socket somewhere else on the network. Under [`RemoteRealms::Allow`]
+/// it *is* the address dialed: the whole of what that setting buys, and the whole of what it costs.
 async fn upgrade(
     State(state): State<WsState>,
     Path(port): Path<u16>,
@@ -57,12 +103,51 @@ async fn upgrade(
     let Some(upstream) = state.upstreams.get(&port).cloned() else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    let host_label = params.get("host").cloned().unwrap_or_default();
+    let asked = params.get("host").cloned().unwrap_or_default();
+    let dial: Arc<str> = match state.remote {
+        RemoteRealms::Refuse => upstream,
+        RemoteRealms::Allow => dialable_host(&asked).map_or(upstream, Arc::from),
+    };
+    // Debug, not info: under the default policy this fires on every connection (the page always
+    // sends its realmlist), so an info line would be one per login for a decision that never
+    // changes. It exists at all because an address that is silently not the one dialed is exactly
+    // the kind of thing that costs an hour — `RUST_LOG=wenilla_host=debug` answers "why is it not
+    // talking to X".
+    tracing::debug!(asked = %asked, dial = %dial, port, policy = ?state.remote, "ws proxy dialing");
     ws.on_upgrade(move |socket| async move {
-        if let Err(e) = relay(socket, &upstream, port).await {
-            tracing::warn!(error = %e, host = %host_label, port, "ws proxy session ended");
+        if let Err(e) = relay(socket, &dial, port).await {
+            tracing::warn!(error = %e, asked = %asked, dial = %dial, port, "ws proxy session ended");
         }
     })
+}
+
+/// The host half of a client-supplied `host[:port]`, or `None` if there is nothing dialable in it.
+///
+/// **The port is not taken from here** — it is the path's, and the path's is checked against the
+/// allowlist. A client that could smuggle its own port past that check would undo the one part of
+/// this proxy that is a security boundary rather than a default.
+///
+/// The split mirrors `benilla_protocol::host_port`, the law the client builds this URL through: a
+/// single colon means a port, two or more is an IPv6 literal and is kept whole. Mirrored rather
+/// than imported — a byte-pump proxy that linked the game protocol crate to split a string would be
+/// the tail wagging the dog — and pinned to that behaviour by the tests below.
+fn dialable_host(asked: &str) -> Option<&str> {
+    let asked = asked.trim();
+    let host = match asked.rsplit_once(':') {
+        // A single colon whose suffix parses as a port: drop it. A suffix that does not parse is
+        // `host_port`'s own tolerance — the whole string stays the host — so nothing that connects
+        // through the client fails here.
+        Some((h, p)) if !h.contains(':') && p.parse::<u16>().is_ok() => h,
+        _ => asked,
+    };
+    if host.is_empty() || host.len() > MAX_HOST {
+        return None;
+    }
+    // Whitespace and control characters are not in any host, and are how a log line gets forged.
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(host)
 }
 
 /// Relay one session: dial the upstream TCP port, then pump bytes both directions until both
@@ -140,4 +225,36 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
 
     tokio::join!(tcp_to_ws, ws_to_tcp);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dialable_host;
+
+    /// What a client may hand this proxy as its realm, and what comes back out of it. The port half
+    /// is dropped on purpose: the socket's port is the path's, which is allowlisted.
+    #[test]
+    fn a_client_host_keeps_its_name_and_loses_its_port() {
+        assert_eq!(dialable_host("logon.example.org"), Some("logon.example.org"));
+        assert_eq!(dialable_host("  logon.example.org  "), Some("logon.example.org"));
+        assert_eq!(dialable_host("logon.example.org:3724"), Some("logon.example.org"));
+        assert_eq!(dialable_host("127.0.0.1:8085"), Some("127.0.0.1"));
+        // `host_port`'s tolerance: a suffix that is not a port was never a port.
+        assert_eq!(dialable_host("logon.example.org:nope"), Some("logon.example.org:nope"));
+        // Two or more colons is an IPv6 literal, which keeps its own colons.
+        assert_eq!(dialable_host("::1"), Some("::1"));
+        assert_eq!(dialable_host("fe80::1"), Some("fe80::1"));
+    }
+
+    /// Nothing dialable = fall back to the configured upstream, which is what `None` means to the
+    /// caller. The control-character case is the one worth having: it is a forged log line.
+    #[test]
+    fn nothing_dialable_is_refused() {
+        assert_eq!(dialable_host(""), None);
+        assert_eq!(dialable_host("   "), None);
+        assert_eq!(dialable_host(":3724"), None);
+        assert_eq!(dialable_host("logon.example.org\nGET /"), None);
+        assert_eq!(dialable_host("a b"), None);
+        assert_eq!(dialable_host(&"a".repeat(super::MAX_HOST + 1)), None);
+    }
 }

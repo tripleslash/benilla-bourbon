@@ -46,7 +46,7 @@ enum Cmd {
     Build(BuildArgs),
     /// Read the container back and compare it, blob for blob, with the chain it came from.
     Verify(VerifyArgs),
-    /// Regenerate `boot-packs.json` (and the `config.json` stub) against an existing container.
+    /// Regenerate `boot-packs.json` against an existing container.
     ///
     /// Its own subcommand because the read-set manifests are recaptured far more often than the
     /// corpus is repacked — a `?boottrace=1` capture is minutes, a build is half an hour over
@@ -126,8 +126,7 @@ fn main() -> Result<()> {
         Cmd::Sidecars(a) => {
             let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)?;
-            sidecars::write_config_stub(&a.packs)
+            sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)
         }
     }
 }
@@ -317,7 +316,6 @@ fn build(a: BuildArgs) -> Result<()> {
     // resolved by exactly the code path that will later serve them.
     let index = Index::parse(std::fs::read(&index_path)?).map_err(|e| anyhow::anyhow!("{e}"))?;
     sidecars::write_boot_packs(&a.out, &index, &a.boot_manifest, &a.world_manifest)?;
-    sidecars::write_config_stub(&a.out)?;
 
     wire_sizes.sort_unstable();
     let pct = |p: f64| wire_sizes[((wire_sizes.len() - 1) as f64 * p) as usize];

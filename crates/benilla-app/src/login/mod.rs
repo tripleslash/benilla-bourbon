@@ -77,9 +77,7 @@ impl Plugin for LoginPlugin {
                         screen::refresh_boxes,
                         screen::refresh_checkbox,
                         drive_dialog,
-                        // Both after `drive_dialog`: it is what spawns the dialog's edit box, and
-                        // what a realmlist Okay changes the address in.
-                        (screen::refresh_dialog_box, screen::refresh_realmlist),
+                        screen::refresh_realmlist,
                         crate::glue::art_swaps,
                         crate::glue::glue_button_visuals,
                         crate::glue::sync_outlines,
@@ -823,32 +821,6 @@ fn login_input(
             LoginAction::FocusAccount | LoginAction::FocusPassword => {} // focused on the press
             LoginAction::Login => do_login = true,
             LoginAction::Quit => do_quit = true,
-            // The realmlist control (1667) — the button and the address readout under it are
-            // the same action, so clicking either opens the editor.
-            LoginAction::Realmlist => {
-                // `gsLoginNewAccount` — what the reference plays for the other buttons in this
-                // corner (`AccountLogin_ManageAccount`, `AccountLogin_LaunchCommunitySite`), which
-                // is the closest authored answer for a button it does not have. It replaces a
-                // `gsClick` I invented in 1667: no such SoundEntries kit exists, so that press was
-                // silently playing nothing at all.
-                sounds.write(GlueSound("gsLoginNewAccount"));
-                if attempt.realmlist.pinned_by_env() {
-                    // A harness/dev run owns the address for the session (`cvars`' env-override
-                    // law). Say so rather than opening an editor whose Okay would be a silent
-                    // no-op — the trap that shape would set.
-                    dialog.open_error(&format!(
-                        "$WOW_HOST is set for this session, so the realmlist is fixed at {}.",
-                        attempt.realmlist.address(),
-                    ));
-                } else {
-                    dialog.open_realmlist(
-                        // The reference's own registered help text for `realmList`, byte-verified
-                        // in `WoW.exe` beside the CVar's name and default.
-                        "Address of realm list server",
-                        attempt.realmlist.address(),
-                    );
-                }
-            }
             LoginAction::ToggleSave => {
                 form.save = !form.save;
                 // Verbatim ref quirk (`AccountLoginSaveAccountName` OnClick): checked plays the
@@ -862,29 +834,19 @@ fn login_input(
                     save_account("");
                 }
             }
-            // The dialog's own buttons are [`drive_dialog`]'s, and this loop is skipped
-            // entirely while one is open.
-            LoginAction::Dialog | LoginAction::Dialog2 => {}
+            // The dialog's own button is [`drive_dialog`]'s, and this loop is skipped entirely
+            // while one is open.
+            LoginAction::Dialog => {}
         }
     }
 
     let mods = textinput::mods_now(&keys);
     let wl = textinput::wayland_display(raw_handle.iter().next());
     for ev in keyboard.read() {
-        // A dialog with an edit box owns the keyboard while it is up — the ref's `GlueDialog` is
-        // `toplevel` with `enableKeyboard="true"`, so the boxes behind it hear nothing. ENTER and
-        // ESCAPE still come back unclaimed; [`drive_dialog`] reads them as its two buttons.
+        // A dialog owns the keyboard while it is up — the ref's `GlueDialog` is `toplevel` with
+        // `enableKeyboard="true"`, so the boxes behind it hear nothing. ENTER and ESCAPE still come
+        // back unclaimed; [`drive_dialog`] reads them as its button.
         if dialog_open {
-            if dialog.kind.is_some_and(DialogKind::has_edit_box) {
-                textinput::feed_key(
-                    &mut dialog.edit,
-                    ev,
-                    mods,
-                    &mut clipboard,
-                    wl,
-                    textinput::CharFilter::Any,
-                );
-            }
             continue;
         }
         // The shared law first (editing, caret, selection, the clipboard trio); only what it
@@ -976,16 +938,10 @@ fn login_input(
 /// `caret_shown` simply never left its `true` default, so the login caret was the one glue caret
 /// that sat solid.
 ///
-/// **A dialog with an edit box takes the focus with the keys** (1667): its box blinks and the
-/// form's stops, so the screen never shows two live carets at once. Every other dialog leaves the
-/// form's caret running — a dialog eats the keys, not the clock.
-fn tick_login_caret(mut form: ResMut<LoginForm>, mut dialog: ResMut<LoginDialog>, time: Res<Time>) {
-    let dt = time.delta_secs();
-    let in_dialog = dialog.kind.is_some_and(DialogKind::has_edit_box);
-    textinput::tick_caret(form.focused(), !in_dialog, dt);
-    if in_dialog {
-        textinput::tick_caret(&mut dialog.edit, true, dt);
-    }
+/// A dialog eats the keys, not the clock: no dialog carries an edit box any more, so the form's
+/// caret keeps blinking behind whichever one is up.
+fn tick_login_caret(mut form: ResMut<LoginForm>, time: Res<Time>) {
+    textinput::tick_caret(form.focused(), true, time.delta_secs());
 }
 
 /// Editing the account box away from the saved name clears the save + unchecks (the ref's
@@ -1011,8 +967,8 @@ fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWrite
 
 // ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
 
-/// Which dialog is up: the connecting status (Cancel button, text driven by the stages), an
-/// error (Okay button), or the realmlist editor (Okay + Cancel over an edit box).
+/// Which dialog is up: the connecting status (Cancel button, text driven by the stages) or an
+/// error (Okay button).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DialogKind {
     Status,
@@ -1023,47 +979,26 @@ pub(super) enum DialogKind {
     /// distinguishes it from [`Self::Status`], and a kind is how this screen spells "different
     /// button caption".
     Queued,
-    /// The realmlist editor (decision 1667) — the reference's `GlueDialog` `hasEditBox` shape,
-    /// which is how the shipped dialog asks for a typed value (`GlueDialog.lua`: it shows
-    /// `GlueDialogEditBox` and re-heights the box to
-    /// `16 + text + 8 + editbox + 8 + button + 16`). The reference never opens this particular
-    /// dialog — it has no realmlist UI at all — but the widget is its own.
-    Realmlist,
 }
 
 impl DialogKind {
-    /// Whether this dialog carries the ref's `GlueDialogEditBox` (its `hasEditBox` flag).
-    pub(super) fn has_edit_box(self) -> bool {
-        matches!(self, DialogKind::Realmlist)
-    }
-
-    /// `(button1, button2)` captions — `GlueDialogTypes`' own two fields. A `None` second button
-    /// is the ref's centred single-button layout; `Some` is its BOTTOMRIGHT/LEFT pair.
-    pub(super) fn buttons(self, strings: &GlueStrings) -> (&str, Option<&str>) {
+    /// The button's caption — `GlueDialogTypes`' own `button1` field, in the ref's centred
+    /// single-button layout. (`button2` and `hasEditBox` are the reference's too; benilla's one
+    /// user of either was 1667's realmlist editor, and that left with the realmlist button.)
+    pub(super) fn button(self, strings: &GlueStrings) -> &str {
         match self {
-            DialogKind::Status => (strings.text("CANCEL", "Cancel"), None),
+            DialogKind::Status => strings.text("CANCEL", "Cancel"),
             // The reference's own relabel: leaving a queue is "Change Realm", not "Cancel".
-            DialogKind::Queued => (strings.text("CHANGE_REALM", "Change Realm"), None),
-            DialogKind::Error => (strings.text("OKAY", "Okay"), None),
-            DialogKind::Realmlist => (
-                strings.text("OKAY", "Okay"),
-                Some(strings.text("CANCEL", "Cancel")),
-            ),
+            DialogKind::Queued => strings.text("CHANGE_REALM", "Change Realm"),
+            DialogKind::Error => strings.text("OKAY", "Okay"),
         }
     }
 }
 
-/// What the realmlist dialog says when the box holds something that is not an address. It replaces
-/// the prompt in place and **leaves the typed text alone**, so the fix is an edit rather than a
-/// retype — the reason a bad value does not close the dialog or become an error dialog of its own.
-const REALMLIST_BAD: &str =
-    "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
-
-/// Which of the dialog's two buttons a key press answers, as `(button1, button2)` — the keyboard
-/// half of [`drive_dialog`]'s buttons; the mouse half is OR-ed in beside it. Button 1 is the
-/// affirmative one on every kind (Cancel on the status dialog, Okay on the others); button 2
-/// exists only where the kind declares it. ENTER confirms, ESCAPE dismisses; on a one-button
-/// dialog they are the same button.
+/// Whether a key press answers the dialog's button — the keyboard half of [`drive_dialog`]'s
+/// button; the mouse half is OR-ed in beside it. That button is the affirmative one on every kind
+/// (Cancel on the status dialog, Okay on an error). ENTER confirms, ESCAPE dismisses; on a
+/// one-button dialog — and every dialog is one now — they are the same button.
 ///
 /// **`on_screen` is the whole of the second bug fixed on 2026-08-29.** Pressing ENTER on an empty
 /// login form played the sound and showed nothing, while *clicking* Login showed the dialog
@@ -1078,18 +1013,16 @@ const REALMLIST_BAD: &str =
 /// ours too, and it says the same thing the dispatch does — **a dialog answers only keys pressed
 /// while it was already on screen**. Not "not this frame": on screen. It is passed the same
 /// `fresh` flag that drives the (re)spawn, so the two cannot drift apart.
-fn dialog_keys(kind: DialogKind, on_screen: bool, enter: bool, escape: bool) -> (bool, bool) {
+fn dialog_keys(kind: DialogKind, on_screen: bool, enter: bool, escape: bool) -> bool {
     if !on_screen {
-        return (false, false);
+        return false;
     }
-    let button1 = match kind {
+    match kind {
         // The status dialog's one button IS Cancel, so ESCAPE is it. The queue's button is the
         // same act under another name, so it answers to ESCAPE the same way.
         DialogKind::Status | DialogKind::Queued => escape,
         DialogKind::Error => escape || enter,
-        DialogKind::Realmlist => enter,
-    };
-    (button1, kind == DialogKind::Realmlist && escape)
+    }
 }
 
 /// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
@@ -1101,11 +1034,6 @@ pub(crate) struct LoginDialog {
     pub(super) text: String,
     pub(super) dirty: bool,
     pub(super) root: Option<Entity>,
-    /// The ref's `GlueDialogEditBox` — a real [`EditBoxState`] like the two on the screen behind
-    /// it, so the realmlist box gets the same caret, selection, Ctrl+A and clipboard law
-    /// (decision 0704). Only meaningful while a [`DialogKind::has_edit_box`] dialog is up; it is
-    /// rebuilt from the current value on every open, so a cancelled edit leaves nothing behind.
-    pub(super) edit: EditBoxState,
     /// The queue's sample ring and the realm it is for — live only while [`DialogKind::Queued`]
     /// is up, and rebuilt from empty on every fresh queue so a second login never inherits the
     /// first one's estimate.
@@ -1134,18 +1062,6 @@ impl LoginDialog {
         self.queue_realm = realm;
         self.set_text("");
     }
-    /// Open the realmlist editor over `current`, with the caret at the end of it and the whole
-    /// value selected — the reference's `hasEditBox` dialogs open ready to be typed over, and a
-    /// player changing servers is replacing the address far more often than editing it.
-    fn open_realmlist(&mut self, prompt: &str, current: &str) {
-        self.kind = Some(DialogKind::Realmlist);
-        self.edit = textinput::field(crate::realmlist::MAX_LETTERS, false);
-        self.edit.set_text(current);
-        // `HighlightText(0, -1)` — the client's own select-all (`0x77cca0`), which resets the
-        // blink on its way so the box opens on a solid caret.
-        self.edit.highlight_text(0, -1);
-        self.set_text(prompt);
-    }
     fn set_text(&mut self, text: &str) {
         if self.text != text {
             self.text = text.to_string();
@@ -1168,8 +1084,6 @@ fn drive_dialog(
     mut commands: Commands,
     mut dialog: ResMut<LoginDialog>,
     mut intent: ResMut<LoginIntent>,
-    mut realmlist: ResMut<crate::realmlist::Realmlist>,
-    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     abandon: Res<LoginAbandon>,
     art: Res<crate::glue::art::GlueArt>,
     assets: Res<AssetServer>,
@@ -1213,7 +1127,6 @@ fn drive_dialog(
             &dialog.text,
             s,
         ));
-        dialog.edit.reset_blink();
         dialog.spawned = Some(kind);
         dialog.spawned_s = s;
         dialog.dirty = false;
@@ -1226,41 +1139,24 @@ fn drive_dialog(
         dialog.dirty = false;
     }
 
-    // The buttons, from the mouse or the keys. A click needs no `fresh` guard of its own: the
+    // The button, from the mouse or the keys. A click needs no `fresh` guard of its own: the
     // button it would hit did not exist to be clicked on the frame the tree spawned.
     let hit = |want: LoginAction| buttons.iter().any(|(e, a)| *a == want && clicks.hit(e));
-    let (key1, key2) = dialog_keys(
+    let key = dialog_keys(
         kind,
         !fresh,
         keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter),
         keys.just_pressed(KeyCode::Escape),
     );
-    let button1 = hit(LoginAction::Dialog) || key1;
-    let button2 = hit(LoginAction::Dialog2) || key2;
+    let button = hit(LoginAction::Dialog) || key;
 
     // **Every glue dialog button clicks** — `GlueDialog_OnClick` ends with
-    // `PlaySound("gsTitleOptionOK")` for button 1 and button 2 alike, whatever the dialog's type.
-    // Ours played nothing at all. Emitted here, once, before the kinds diverge, so no arm can
-    // forget it (and so the realmlist editor's Okay-that-refuses still clicks: the reference plays
-    // the sound on the press, not on the outcome).
-    if button1 || button2 {
+    // `PlaySound("gsTitleOptionOK")` whatever the dialog's type. Ours played nothing at all.
+    // Emitted here, before the kinds diverge, so no arm can forget it.
+    if button {
         sounds.write(GlueSound("gsTitleOptionOK"));
     }
-    if kind == DialogKind::Realmlist && button1 {
-        // Okay: take the typed address, or say why it cannot be taken and stay open with the text
-        // as typed — the fix is then an edit, not a retype.
-        let typed = dialog.edit.text.clone();
-        if accept_realmlist(&typed, &mut realmlist, script.as_deref_mut()) {
-            dialog.close();
-            if let Some(root) = dialog.root.take() {
-                commands.entity(root).despawn();
-            }
-        } else {
-            dialog.set_text(REALMLIST_BAD);
-        }
-        return;
-    }
-    if button1 || button2 {
+    if button {
         if matches!(kind, DialogKind::Status | DialogKind::Queued) {
             // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
             // must not silently resubmit later.
@@ -1273,45 +1169,6 @@ fn drive_dialog(
             commands.entity(root).despawn();
         }
     }
-}
-
-/// Take the realmlist dialog's Okay: normalize what was typed, point the session at it, and mirror
-/// it into the `realmList` CVar so it is still there next launch. `false` = the box holds nothing
-/// usable and the caller should keep the dialog open.
-///
-/// The persistence leg is `char_select`'s `lastCharacterIndex` pattern exactly (1131/1293): an
-/// **engine-side** write rides the change queue like a Lua `SetCVar`, so `cvars::sync_cvars` folds
-/// it into the knob and marks the file dirty, and `save_config` writes `config.toml`. A write to a
-/// name the VM has not registered yet is a deliberate silent no-op there, so this reports that
-/// case rather than claiming a save that did not happen — the **session** value stands either way,
-/// which is the half that matters for the login about to be attempted.
-fn accept_realmlist(
-    typed: &str,
-    realmlist: &mut crate::realmlist::Realmlist,
-    script: Option<&mut benilla_ui::script::UiScript>,
-) -> bool {
-    let Some(address) = crate::realmlist::normalize(typed) else {
-        return false;
-    };
-    realmlist.set(&address);
-    let name = crate::realmlist::CVAR_REALMLIST;
-    match script {
-        Some(script) => {
-            script.set_cvar_engine(name, &address);
-            if script.cvar(name).is_some() {
-                info!("login: realmlist -> {address}");
-            } else {
-                warn!(
-                    "login: realmlist -> {address} for this session, but the VM has not registered \
-                     {name} yet, so it was not saved"
-                );
-            }
-        }
-        None => {
-            warn!("login: realmlist -> {address} for this session only — no UI VM to persist it")
-        }
-    }
-    true
 }
 
 // ── The saved account name (decision 0539 §4) ────────────────────────────────────────────────────
@@ -1518,50 +1375,16 @@ mod tests {
         );
     }
 
-    /// The dialog's Okay: what the box holds becomes the session's address, including the
-    /// `realmlist.wtf` line a player pastes off a server's setup page. No VM here, so the
-    /// persistence leg is the `None` arm — the session value is what this asserts, and it is the
-    /// half the next login attempt reads.
+    /// The dialog kinds' own shape: one button each, and `spawn_dialog` lays out from it. The
+    /// ref's `button2`/`hasEditBox` pair had exactly one user — 1667's realmlist editor — and it
+    /// went out with the realmlist button, so a kind that asked for either would now be a kind the
+    /// screen cannot draw.
     #[test]
-    fn the_realmlist_dialog_takes_what_was_typed() {
-        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
-        assert!(accept_realmlist(
-            r#"  SET realmlist "logon.example.org"  "#,
-            &mut realmlist,
-            None,
-        ));
-        assert_eq!(realmlist.address(), "logon.example.org");
-    }
-
-    /// …and a box holding something that is not an address changes nothing and reports it, so the
-    /// caller keeps the dialog open over the text as typed rather than closing on a silent no-op.
-    #[test]
-    fn a_bad_address_leaves_the_realmlist_alone() {
-        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
-        for typed in ["", "   ", "logon.example.org and more", "host:notaport"] {
-            assert!(
-                !accept_realmlist(typed, &mut realmlist, None),
-                "{typed:?} is not an address",
-            );
-            assert_eq!(realmlist.address(), "localhost");
-        }
-    }
-
-    /// The dialog kinds' own shape: only the realmlist editor carries the ref's `hasEditBox`, and
-    /// only it declares a second button. The caret clock and the keyboard routing both branch on
-    /// the first of those, and `spawn_dialog` lays out from the second.
-    #[test]
-    fn only_the_realmlist_dialog_has_a_box_and_two_buttons() {
+    fn every_dialog_kind_has_one_button() {
         let strings = GlueStrings::default();
-        assert!(!DialogKind::Status.has_edit_box());
-        assert!(!DialogKind::Error.has_edit_box());
-        assert!(DialogKind::Realmlist.has_edit_box());
-        assert_eq!(DialogKind::Status.buttons(&strings), ("Cancel", None));
-        assert_eq!(DialogKind::Error.buttons(&strings), ("Okay", None));
-        assert_eq!(
-            DialogKind::Realmlist.buttons(&strings),
-            ("Okay", Some("Cancel")),
-        );
+        assert_eq!(DialogKind::Status.button(&strings), "Cancel");
+        assert_eq!(DialogKind::Queued.button(&strings), "Change Realm");
+        assert_eq!(DialogKind::Error.button(&strings), "Okay");
     }
 
     /// **A dialog never answers the key press that opened it.** ENTER on an empty login form
@@ -1572,35 +1395,23 @@ mod tests {
     #[test]
     fn a_dialog_does_not_answer_the_key_that_opened_it() {
         // The frame it appears on: the key that opened it is not its answer.
-        assert_eq!(
-            dialog_keys(DialogKind::Error, false, true, false),
-            (false, false),
-        );
-        assert_eq!(
-            dialog_keys(DialogKind::Error, false, false, true),
-            (false, false),
-        );
+        assert!(!dialog_keys(DialogKind::Error, false, true, false));
+        assert!(!dialog_keys(DialogKind::Error, false, false, true));
         // Once it is up, the same press is.
-        assert_eq!(
-            dialog_keys(DialogKind::Error, true, true, false),
-            (true, false),
-        );
+        assert!(dialog_keys(DialogKind::Error, true, true, false));
     }
 
-    /// Which key answers which button, per kind: ENTER and ESCAPE are the same (single) button on
-    /// an error dialog; ESCAPE alone works the Cancel-shaped ones; the two-button editor splits
-    /// them, ENTER to Okay and ESCAPE to Cancel.
+    /// Which key answers the button, per kind: ENTER and ESCAPE are the same button on an error
+    /// dialog; ESCAPE alone works the Cancel-shaped ones, which have no affirmative to confirm.
     #[test]
     fn each_dialog_kind_maps_its_own_keys() {
         for (kind, enter, escape, want) in [
-            (DialogKind::Error, true, false, (true, false)),
-            (DialogKind::Error, false, true, (true, false)),
-            (DialogKind::Status, true, false, (false, false)),
-            (DialogKind::Status, false, true, (true, false)),
-            (DialogKind::Queued, false, true, (true, false)),
-            (DialogKind::Queued, true, false, (false, false)),
-            (DialogKind::Realmlist, true, false, (true, false)),
-            (DialogKind::Realmlist, false, true, (false, true)),
+            (DialogKind::Error, true, false, true),
+            (DialogKind::Error, false, true, true),
+            (DialogKind::Status, true, false, false),
+            (DialogKind::Status, false, true, true),
+            (DialogKind::Queued, false, true, true),
+            (DialogKind::Queued, true, false, false),
         ] {
             assert_eq!(
                 dialog_keys(kind, true, enter, escape),
@@ -1608,22 +1419,6 @@ mod tests {
                 "{kind:?} enter={enter} escape={escape}",
             );
         }
-    }
-
-    /// Opening the editor seats the current address in the box, selected whole — so typing a new
-    /// server replaces the old one instead of appending to it.
-    #[test]
-    fn opening_the_editor_preselects_the_current_address() {
-        let mut dialog = LoginDialog::default();
-        dialog.open_realmlist("Address of realm list server", "logon.example.org");
-        assert_eq!(dialog.kind, Some(DialogKind::Realmlist));
-        assert_eq!(dialog.edit.text, "logon.example.org");
-        assert_eq!(
-            dialog.edit.selected_text().as_deref(),
-            Some("logon.example.org")
-        );
-        assert_eq!(dialog.edit.max_letters, crate::realmlist::MAX_LETTERS);
-        assert!(!dialog.edit.password, "an address is not a secret");
     }
 
     /// Did this update ask the app to quit?

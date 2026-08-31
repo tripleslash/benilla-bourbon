@@ -16,6 +16,9 @@
 //!   has already fetched them by the time the app starts, so the normal path is a copy, not I/O.
 //! - [`resident`] — the pack map, which lives on the **JS heap** (`web/packs.js`), not in wasm
 //!   linear memory. 3.3 GiB of corpus must never touch a 32-bit heap, and the JS GC can evict.
+//!   It is also where the fetch/decode Web Worker is reached ([`resident::warm`]): a pack it warms
+//!   arrives decoded, so the read that wanted it is a memcpy rather than a download and a zstd
+//!   stream on the thread that draws.
 //! - [`probe`] — whether this host honours HTTP `Range`, which is a *measurement*, not a constant.
 //!
 //! ## Why both fetch shapes exist
@@ -137,13 +140,24 @@ impl PackStore {
     /// This is also the lane that should pull SINGLETONs: a multi-megabyte object through
     /// [`crate::web::fetch_sync_range`]'s per-character decode is exactly what that decode is bad
     /// at, and here there is a real `ArrayBuffer` instead. It is also the only lane that can read
-    /// Cache Storage, which is async-only — see [`resident::fetch_wire`].
+    /// Cache Storage, which is async-only — see [`resident::fetch_wire`] — and the only one that
+    /// can wait on the decode worker ([`resident::warm`]), for the same structural reason.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         let Some((at, meta)) = self.locate(name) else {
             return Err(anyhow!("file not in patch chain: {name}"));
         };
         if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
             return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
+        }
+        // The **Web Worker** first (`web/packworker.js`): it fetches the object and undoes the
+        // pack's zstd stream on its own thread, and hands the decoded body straight to the resident
+        // map. That is strictly better than either branch below — both of which would do the same
+        // work here, on the thread that draws — so it is asked first and the rest is what happens
+        // when there is no worker to ask.
+        if resident::warm(at.pack_id, &self.pack_url(at.pack_id)).await {
+            if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+                return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
+            }
         }
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
             let (start, end) = at.wire_range();

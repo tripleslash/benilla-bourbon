@@ -1,4 +1,4 @@
-//! The two side files that are not game data: `boot-packs.json` and `config.json`.
+//! The one side file that is not game data: `boot-packs.json`.
 //!
 //! ## `boot-packs.json` — the read-set manifests, translated
 //!
@@ -18,12 +18,14 @@
 //! manifest and a re-packed install is expected and degrades to exactly one slower read; a build
 //! that failed over it would be a build that fails because someone renamed a texture.
 //!
-//! ## `config.json` — the gateway address
+//! ## Where `config.json` went
 //!
-//! Written **only if absent**. It carries the WebSocket gateway and default realmlist for a site,
-//! which is operator configuration and not a function of the game files — a re-pack must never
-//! clobber it. The stub exists so the hosted tree always has the file (a 404 there is harmless
-//! but noisy) and so the shape is documented where an operator will look for it.
+//! It used to be written here as a stub, and that was the wrong home for it. The gateway address
+//! and the realmlist are **operator configuration, not a function of the game files**: writing them
+//! into `web/packs/` put them in a 3.3 GiB gitignored directory that is regenerated from a WoW
+//! install, where they could not be checked in, reviewed, or found. They now live at
+//! `web/config.json`, ship with the *build* (Trunk copies it to the dist root), and are served at
+//! `/config.json`. The packer has nothing to say about them.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
@@ -238,23 +240,6 @@ fn manifest_names(text: &str) -> Result<Vec<String>> {
         out.push(name);
     }
     Ok(out)
-}
-
-/// The gateway/realmlist stub, written only when the operator has not already put one there.
-pub fn write_config_stub(out: &Path) -> Result<()> {
-    let path = out.join("config.json");
-    if path.exists() {
-        return Ok(());
-    }
-    // Both empty means "use the page's own origin" — today's behaviour, and the right default for
-    // `wenilla-host` on a laptop, where the WebSocket proxy really is beside the page.
-    std::fs::write(&path, "{\"ws\":\"\",\"realmlist\":\"\"}\n")
-        .with_context(|| format!("writing {}", path.display()))?;
-    eprintln!(
-        "{}: wrote a stub — set \"ws\" to the gateway (wss://host:port) before staging",
-        path.display()
-    );
-    Ok(())
 }
 
 #[cfg(test)]

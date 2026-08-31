@@ -11,20 +11,29 @@
 //      "game data N/M MB" line for the container prefetch, then indeterminate "Starting…" states
 //      driven by the client's own `window.__wenilla_progress(stage)` calls
 //      (benilla-app/src/webprogress.rs) until "ready" — the first glue screen — fades it out.
-//   2. HAND THE CLIENT ITS DATA. `packs.js::bootstrap` fetches the container's index and listfile,
-//      measures whether this host does HTTP ranges, and warms the packs a boot actually touches.
-//      The index especially: `Chain::open` reads it synchronously, and 1.6 MB through a sync XHR's
-//      per-character body decode is exactly what that decode is worst at — fetched here it is a
-//      copy instead. Every miss degrades to a slower read, never a failure.
-//   3. CONFIGURE THE SESSION. `data/config.json` carries the WebSocket gateway and the default
-//      realmlist, so the address the hosted client dials is a hundred-byte `no-cache` asset
-//      rather than something baked into a 90 MB wasm module.
+//   2. HAND THE CLIENT ITS DATA. `packs.js::bootstrap` installs the service worker that makes the
+//      container permanent (`web/sw.js`), fetches the index and listfile, and warms the packs a
+//      boot actually touches — through `web/packworker.js`, so they arrive *decoded* and the
+//      catalog frame that follows does no zstd at all. The index especially: `Chain::open` reads
+//      it synchronously, and 1.6 MB through a sync XHR's per-character body decode is exactly what
+//      that decode is worst at — fetched here it is a copy instead. Every miss degrades to a
+//      slower read, never a failure. On a repeat visit none of it reaches the origin: the service
+//      worker answers it all off disk, so the bar moves at cache speed and the only bytes on the
+//      wire are `/config.json` and the ~10 KB `boot-packs.json` pointer.
+//   3. CONFIGURE THE SESSION. `/config.json` carries the WebSocket gateway and **the realmlist**,
+//      so the addresses a hosted client dials are a hundred-byte `no-cache` asset rather than
+//      something baked into a 90 MB wasm module. It ships with the build (Trunk copies it into
+//      `dist/`), not with the 3.3 GiB container, because it is the one file in the tree an
+//      operator edits.
 //
 // Page contract: `const w = await boot(init); bind(w.memory);` — bind must stay immediately
 // after (the Lua WASI shims need the module's linear memory). Query switches: `?boottrace=1`
 // arms window.__wenilla_boottrace and skips the pack prefetch (a manifest-capture boot must show
-// the true read order); `?noprefetch=1` skips the prefetch only (the A/B lever). Neither skips the
-// index — without it nothing is readable at all.
+// the true read order); `?noprefetch=1` skips the prefetch only (the A/B lever); `?nosw=1`
+// unregisters the service worker, putting the page back on the pre-worker fetch path from the next
+// load, which is how the Range/HTTP-cache fallback (and `wenilla-host --no-ranges`) stays
+// exercisable; `?noworker=1` skips the fetch/decode worker, putting every pack decode back on the
+// frame thread. None of them skips the index — without it nothing is readable at all.
 
 import { bootstrap, prefetchWorld } from './packs.js';
 
@@ -46,9 +55,11 @@ export async function boot(init, opts = {}) {
   // agree or the client would fetch its packs from somewhere the page never warmed.
   const base = `${location.origin}/data`;
 
-  const config = loadConfig(base);
+  const config = loadConfig(location.origin);
   const container = bootstrap(base, (done, total) => ui.setData(done, total), {
     prefetch: !skipPrefetch,
+    sw: q.get('nosw') !== '1',
+    worker: q.get('noworker') !== '1',
   }).catch((e) => {
     // A container that failed to bootstrap is very likely a fatal misconfiguration, but say so
     // through the client's own error path rather than guessing here: `Chain::open` will fetch the
@@ -116,19 +127,34 @@ async function fetchWasm(url, onBytes) {
   return new Response(counted, { status: r.status, statusText: r.statusText, headers: r.headers });
 }
 
-/// `data/config.json` -> `window.__wenilla_config`, read by `benilla_app::webenv::config`.
+/// `/config.json` -> `window.__wenilla_config`, read by `benilla_app::webenv::config`.
+///
+/// Two keys, `ws` and `realmlist`, and what each one is for is in `web/README.md` under
+/// "the site's whole configuration" — the file itself is data an operator edits, so it carries
+/// no commentary of its own (JSON has nowhere to put any).
+///
+/// **This is the only place the client learns its realmlist.** There is no login-screen editor any
+/// more and no page-origin guess behind it: the address a hosted client dials is whatever this
+/// file says, which is what makes it changeable by re-uploading one ~100-byte asset instead of a
+/// 90 MB wasm module. `$WOW_HOST` / `?host=` still pins a session ahead of it — that is the
+/// harness lever every probe and smoke run sets, and it never reaches a player's tree.
+///
+/// It sits at the ORIGIN ROOT rather than under `/data`, because it belongs to the build and not
+/// to the container: `web/config.json` is checked in, Trunk copies it into `dist/`, and
+/// `stage-packs.sh` hardlinks it into what a static host serves. The container is 3.3 GiB regenerated
+/// from a game install, and a setting kept there would be a setting that lives in a directory
+/// nobody edits and `.gitignore` cannot track.
 ///
 /// Deliberately its OWN global rather than a merge into `window.__wenilla_env`. The env object
 /// outranks the query string in `webenv::lookup`, so folding a hosted default into it would let
 /// `config.json` beat a hand-written `?ws=…` — backwards. And `realmlist` must not travel as
-/// `host` at all: that is `$WOW_HOST`'s key, which pins the session and greys out the login
-/// screen's realmlist control. A hosted default is a default, not a pin.
+/// `host` either: that key marks the session env-pinned, which is a statement about a harness run
+/// and not about a site.
 ///
-/// `no-cache` so re-uploading one ~100-byte asset repoints the gateway, which is the entire reason
-/// the address is not baked into the wasm.
-async function loadConfig(base) {
+/// `no-cache`, and it is one of exactly two things a warm repeat visit still puts on the wire.
+async function loadConfig(origin) {
   try {
-    const r = await fetch(`${base}/config.json`, { cache: 'no-cache' });
+    const r = await fetch(`${origin}/config.json`, { cache: 'no-cache' });
     window.__wenilla_config = r.ok ? await r.json() : {};
   } catch (_) {
     window.__wenilla_config = {};

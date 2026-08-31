@@ -6,6 +6,13 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+use wenilla_host::ws::RemoteRealms;
+
+/// A host that exists in no routing table anywhere: TEST-NET-1 (RFC 5737), reserved for
+/// documentation and guaranteed not to be reachable. Used as the address a test must NOT dial — a
+/// connection attempt to it cannot succeed by accident, so a test that passes proves the dial went
+/// somewhere else.
+const UNREACHABLE: &str = "192.0.2.1";
 
 async fn spawn_echo_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
@@ -38,7 +45,7 @@ async fn relays_binary_frames_both_ways_and_closes_with_the_upstream() {
     let echo_port = spawn_echo_server().await;
     // The allowlist is by port, so the test builds its own router with the echo port allowed —
     // production's fixed {3724, 8085} set lives in main.rs, not in ws::router itself.
-    let app = wenilla_host::ws::router("127.0.0.1", [echo_port]);
+    let app = wenilla_host::ws::router("127.0.0.1", [echo_port], RemoteRealms::Refuse);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -84,4 +91,71 @@ async fn relays_binary_frames_both_ways_and_closes_with_the_upstream() {
         end.is_none() || matches!(end, Some(Ok(Message::Close(_)))),
         "expected the proxy to close, got {end:?}"
     );
+}
+
+/// Serve `app` on loopback and return its address.
+async fn spawn_proxy(app: axum::Router) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// One round trip through the proxy, or the error that stopped it. `Ok` means the byte reached
+/// something that echoed it — i.e. the echo server, i.e. the dial went to loopback.
+async fn round_trip(addr: std::net::SocketAddr, port: u16, host: &str) -> Result<(), String> {
+    let url = format!("ws://{addr}/ws/{port}?host={host}");
+    let (ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut tx, mut rx) = ws.split();
+    tx.send(Message::Binary(vec![7u8; 4].into()))
+        .await
+        .map_err(|e| e.to_string())?;
+    match rx.next().await {
+        Some(Ok(Message::Binary(b))) if b.as_ref() == [7u8; 4] => Ok(()),
+        other => Err(format!("no echo back: {other:?}")),
+    }
+}
+
+/// **The default, and the whole point of it.** With `RemoteRealms::Refuse` the client's `?host=`
+/// changes nothing: a page naming an unreachable box still lands on the configured upstream. The
+/// echo answering is the proof — TEST-NET-1 could not have.
+#[tokio::test]
+async fn a_refused_proxy_ignores_the_host_the_client_names() {
+    let echo_port = spawn_echo_server().await;
+    let addr = spawn_proxy(wenilla_host::ws::router(
+        "127.0.0.1",
+        [echo_port],
+        RemoteRealms::Refuse,
+    ))
+    .await;
+
+    round_trip(addr, echo_port, UNREACHABLE)
+        .await
+        .expect("the client-named host must be ignored, not dialed");
+    // ...and a host-shaped attempt at something else is equally inert.
+    round_trip(addr, echo_port, "evil.example.org")
+        .await
+        .expect("still the configured upstream");
+}
+
+/// With `RemoteRealms::Allow` the client's `?host=` *is* the address. Read the setup: the
+/// configured upstream is the unreachable one, so an echo coming back can only mean the dial
+/// followed the client's host instead.
+#[tokio::test]
+async fn an_allowed_proxy_dials_the_host_the_client_names() {
+    let echo_port = spawn_echo_server().await;
+    let addr = spawn_proxy(wenilla_host::ws::router(
+        UNREACHABLE,
+        [echo_port],
+        RemoteRealms::Allow,
+    ))
+    .await;
+
+    // The port comes off the PATH, not off the host — so a realmlist carrying one is accepted and
+    // its port is dropped rather than smuggled past the allowlist.
+    round_trip(addr, echo_port, "127.0.0.1:3724")
+        .await
+        .expect("the client-named host must be dialed");
 }

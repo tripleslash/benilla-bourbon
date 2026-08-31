@@ -8858,6 +8858,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wenilla-packdecode"
+version = "0.1.0"
+dependencies = [
+ "benilla-pack",
+ "console_error_panic_hook",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "wenilla-realm"
 version = "0.1.0"
 dependencies = [

@@ -900,10 +900,13 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     if crate::webenv::var("WOW_HOST").is_some() {
         persist.env_overridden.insert("realmlist".into());
     }
+    // The hosted page's realmlist, applied BEFORE the file is read rather than after it: it
+    // marks `realmlist` overridden for the session, and the loop below skips every overridden key.
+    // That ordering is the whole of "`/config.json` is the only source" — see the function.
+    apply_hosted_realmlist(&mut persist, &mut knobs);
     let cvars = match stored_config() {
         StoredConfig::Absent => {
             // No file, hermetic capture, or no install — the URL levers still apply.
-            apply_hosted_realmlist(&persist, &mut knobs, false);
             apply_query_overrides(&mut knobs);
             return;
         }
@@ -911,15 +914,11 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
             // A malformed file is preserved, not clobbered: nothing loads, but nothing saves
             // over it either until a change actually happens — and the warn names the file.
             warn!("{msg}");
-            apply_hosted_realmlist(&persist, &mut knobs, false);
             apply_query_overrides(&mut knobs);
             return;
         }
         StoredConfig::Table(t) => t,
     };
-    let saved_realmlist = cvars
-        .keys()
-        .any(|n| n.eq_ignore_ascii_case(crate::realmlist::CVAR_REALMLIST));
     let known: HashSet<String> = REGISTERED
         .iter()
         .map(|(n, _)| n.to_ascii_lowercase())
@@ -937,28 +936,40 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
         apply_to_knobs(name, value, &mut knobs);
     }
     persist.file = cvars;
-    apply_hosted_realmlist(&persist, &mut knobs, saved_realmlist);
     apply_query_overrides(&mut knobs);
 }
 
-/// `data/config.json`'s `realmlist` — the address a **hosted** client dials when the player has
-/// not chosen one. Skipped when `$WOW_HOST`/`?host=` owns the session, and skipped when
-/// `config.toml` already carries a `realmList`: it is the bottom of the precedence stack, below
-/// everything a person set.
+/// `/config.json`'s `realmlist` — on a hosted page, **the only source the address comes from**.
 ///
-/// It comes in here rather than through `webenv::var("WOW_HOST")` on purpose. That key marks the
-/// session `pinned_by_env`, which greys out the login screen's realmlist control — right for a
-/// harness leg that must dial exactly one server, wrong for a public site where the whole point
-/// is that a visitor can type their own realm. A hosted default is a default.
-fn apply_hosted_realmlist(persist: &CvarPersist, knobs: &mut Knobs, saved: bool) {
-    if saved || persist.env_overridden.contains("realmlist") {
-        return;
+/// It used to be the bottom of the precedence stack: a default, applied only when `config.toml`
+/// carried no `realmList` of its own, because the login screen had a control a visitor could type
+/// their own realm into. That control is gone (see `login/screen.rs`), and with it the reason for
+/// the deference — a saved value can now only be one an *older* build wrote, and letting it win
+/// would mean an operator re-uploading `config.json` silently fails to move exactly the returning
+/// visitors, which is the whole population that matters.
+///
+/// So it registers as **session-overridden**, the same standing `$WOW_HOST` and every `$WOW_*`
+/// A/B lever have: the file's value is not applied over it, and nothing writes it back. Two things
+/// still outrank it, both deliberately — `$WOW_HOST`/`?host=` (the harness pin every probe and
+/// smoke run sets, which `Realmlist` refuses to be moved off) and a Lua `SetCVar("realmList")`,
+/// which is a live session act and not a stored one.
+///
+/// Native is untouched: [`crate::webenv::config`] is `None` off the page, so `config.toml` remains
+/// the realmlist's home there — the seam the reference itself edits through `realmlist.wtf`.
+fn apply_hosted_realmlist(persist: &mut CvarPersist, knobs: &mut Knobs) {
+    if knobs.realmlist.pinned_by_env() {
+        return; // `$WOW_HOST` owns the session; `realmlist` is already marked overridden.
     }
     let Some(address) = crate::webenv::config("realmlist") else {
         return;
     };
+    // Marked before the value is checked, and deliberately: a `config.json` that names an
+    // unusable address has still spoken for this key, and falling back to a saved `config.toml`
+    // one would be the two-source confusion this exists to end. `apply_to_knobs` warns and the
+    // fallback is the page's own origin, which is a legible failure.
+    persist.env_overridden.insert("realmlist".into());
     if apply_to_knobs(crate::realmlist::CVAR_REALMLIST, &address, knobs) {
-        info!("config: realmList = {address} from the hosted config.json (no saved value)");
+        info!("config: realmList = {address} from the hosted config.json");
     }
 }
 
