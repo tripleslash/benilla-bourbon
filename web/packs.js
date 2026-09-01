@@ -342,6 +342,11 @@ export async function bootstrap(base, onProgress = () => {}, opts = {}) {
   // prompt, and a boot that blocks until someone notices a doorhanger is a worse bug than the one
   // this is preventing. Nothing depends on the answer either way: the flag is origin-wide and
   // applies to what is already stored, so a late grant protects the packs written before it.
+  //
+  // Origin-wide also means this is not only about the corpus. The client keeps its state folder —
+  // CVars, key bindings, macros, layouts, the remembered account name — in `localStorage`, one
+  // entry per file (benilla-app/src/local_state.rs), and eviction takes an origin's quota storage
+  // as a unit: the same ask is what keeps a returning player off default keybinds.
   requestPersistence();
   packs.sw = await registerWorker(opts.sw !== false);
 

@@ -220,11 +220,26 @@ whole of its security: two ports, one loopback address.
   `window.__wenilla_env = {user, pass, host}` before `init()`, the seam in the table at the top.
 - **Sound** starts on the first click or key in the page — browsers suspend every AudioContext
   until a user gesture; `index.html` resumes it then.
+- **Full screen** — the page's "full screen" button (`web/platform.js`) is not just
+  `requestFullscreen`: in full screen it also takes a Keyboard Lock on `Escape`, `Tab` and
+  `KeyW`, so Esc opens the game menu instead of leaving full screen, Tab cycles targets instead
+  of walking browser focus, and Ctrl+W doesn't close the tab mid-pull. Chrome then exits on a
+  *press-and-hold* of Esc (it says so once, in its own toast). The lock follows F11 and every
+  other way in or out too — it is driven by `fullscreenchange`, not by the button. Chromium
+  only; elsewhere the button is plain full screen.
 - **Persistence** — the state folder (`config.toml`, macros, key bindings, layouts, chat
   settings, saved variables, the remembered account name) lives in the browser's `localStorage`,
   one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser
   and per origin, like a `benilla-config/` beside each native install; the server never sees it.
-  Clearing site data resets it.
+  Clearing site data resets it. `packs.js::bootstrap` asks for `navigator.storage.persist()` on
+  every boot, which is what keeps it from being cleared for anyone *else's* reason: without a
+  grant the origin's quota storage is "best-effort", and a browser under storage pressure evicts
+  it as a unit and silently — the difference between "the player cleared site data" and "the
+  player came back to default keybinds". The grant is heuristic (Chrome answers it silently on an
+  engaged origin, Firefox prompts, and either may refuse) and there is no fallback if it is
+  refused, which is why the ask is early and never awaited. It is origin-wide, so that one call
+  covers both halves of what a returning player would otherwise have to earn back: this state
+  folder, and the Cache Storage the service worker below keeps the archives in.
 - **Game data is fetched once, ever** — `web/sw.js`, a service worker scoped to `/data/`, stores
   every container object in **Cache Storage** the first time it is fetched and answers it from
   there afterwards, for both read lanes. That "both" is the whole reason it exists: the ~60

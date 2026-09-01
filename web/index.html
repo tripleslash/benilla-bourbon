@@ -44,6 +44,7 @@
 <link data-trunk rel="copy-file" href="boot.js" />
 <link data-trunk rel="copy-file" href="packs.js" />
 <link data-trunk rel="copy-file" href="packworker.js" />
+<link data-trunk rel="copy-file" href="platform.js" />
 <!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
      directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
 <link data-trunk rel="copy-file" href="sw.js" />
@@ -56,6 +57,10 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
   #benilla { display: block; width: 100vw; height: 100vh; }
+  /* Top-right, over the canvas: the canvas is the whole viewport, so there is no bar to sit in. */
+  #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
+        background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
+        font: 12px system-ui, sans-serif; text-decoration: underline; }
 </style>
 <script>
   // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
@@ -109,6 +114,7 @@
     };
   }
 </script>
+<button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
@@ -127,6 +133,17 @@
   // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
   // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
   // linear memory exists to write into, and `init()` is what creates it.
+  // Full-screen key capture: in full screen the page also takes a Keyboard Lock, so Esc, Tab and
+  // Ctrl+W reach the game instead of the browser. Dynamic, unawaited and never load-bearing —
+  // see web/platform.js. Durable storage is not asked for here; `packs.js::bootstrap` does it on
+  // the boot path, ahead of the service worker's first write.
+  import('./platform.js')
+    .then(({ installFullscreenToggle }) => {
+      installFullscreenToggle(document.getElementById('fs'), {
+        focusTarget: document.getElementById('benilla'),
+      });
+    })
+    .catch((e) => console.warn('platform.js:', e));
   const w = await boot(init);
   bind(w.memory);
 </script>
