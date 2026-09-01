@@ -215,6 +215,8 @@ pub(crate) fn boot_windowed_size() -> UVec2 {
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct VideoConfig {
     pub(crate) vsync: bool,
+    /// Whether characters use the isolated real shadow-map path.
+    pub(crate) world_shadows: bool,
     pub(crate) display: DisplayMode,
     /// The windowed size, `gxResolution`. Kept while fullscreen so leaving it can restore it.
     pub(crate) windowed: UVec2,
@@ -224,6 +226,7 @@ impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             vsync: !novsync_env(),
+            world_shadows: false,
             display: if windowed_env() {
                 DisplayMode::Windowed
             } else {
@@ -534,6 +537,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(VideoConfig {
             vsync: true,
+            world_shadows: false,
             display: DisplayMode::Fullscreen,
             windowed: UVec2::new(1024, 768),
         })

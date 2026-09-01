@@ -47,7 +47,8 @@
     pbr_functions::alpha_discard,
     pbr_bindings,
     forward_io::VertexOutput,
-    mesh_view_bindings::view,
+    mesh_view_bindings::{lights, view},
+    shadows,
     mesh_functions,
 }
 
@@ -110,6 +111,13 @@ struct ModelParams {
     anim_slots: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> m: ModelParams;
+
+// **How dark a fully covered character shadow gets** — the same number `terrain.wgsl` carries and
+// `benilla-world`'s `static_gx.wgsl` carries; move all three together. Here (and in `static_gx`)
+// it scales the SUN term only — the subtract-and-restore below keeps the authored ambient — so at
+// one value a model reads slightly lighter than the ground under it, which is the intended
+// reading. 0.70, raised from the 0.45 this first shipped at (a near-black silhouette).
+const SHADOW_SUN_FLOOR: f32 = 0.70;
 
 // The shared global light (lighting::global_light): ONE storage buffer every material reads, updated
 // once/frame in place — replaces the per-material light/fog uniforms the old apply_wow_lighting re-pushed
@@ -972,6 +980,63 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // through `point_diffuse` below like any exterior entity.
     let is_rig = m.sun_scale.x >= 1.5;
     let lit = select(select(lit_exterior, lit_interior, is_interior), lit_m2_interior, is_rig);
+    var player_shadow = 1.0;
+    if (lights.n_directional_lights > 0u) {
+        let view_z = (view.view_from_world * in.world_position).z;
+        for (var light_id = 0u; light_id < lights.n_directional_lights; light_id = light_id + 1u) {
+            if ((lights.directional_lights[light_id].flags & 1u) != 0u) {
+#ifdef WOW_RIG_SKIN
+                // A skinned UNIT samples the map ONCE at its rig origin (between the feet),
+                // nudged 2.5 units TOWARD the sun, and the whole unit dims uniformly — the
+                // reference's own per-unit response. Per-fragment sampling is wrong here: the
+                // caster proxy holds a CPU-skinned copy of this very body, so a body fragment
+                // reads its own limbs/weapon as occluders (self-shadow speckle no bias fixes on
+                // animated silhouettes). Points along the sun ray share a shadow-map texel, so
+                // the nudge only excludes occluders within ~2.5 units of the feet ALONG the ray
+                // (a fence hugging the unit) — a building or canopy still lands. Gated on the
+                // directional-enable flag so an interior-lit unit never takes an exterior dim.
+                if (wow_light.light_sun.w > 0.5) {
+                    let sun_ray = normalize(wow_light.light_sun.xyz);
+                    let anchor = wow_light.rig_origin[(fade_tag >> 19u) & 0x7ffu].xyz
+                        - 2.5 * sun_ray;
+                    player_shadow = shadows::fetch_directional_shadow(
+                        light_id,
+                        vec4<f32>(anchor, 1.0),
+                        vec3<f32>(0.0, 1.0, 0.0),
+                        view_z,
+                    );
+                }
+#else
+                player_shadow = shadows::fetch_directional_shadow(
+                    light_id,
+                    in.world_position,
+                    wow_normalize(in.world_normal),
+                    view_z,
+                );
+#endif
+                break;
+            }
+        }
+    }
+    // The realtime map blocks only the directional sun. Preserve the authored ambient/probe
+    // contribution instead of multiplying the whole lighting result; the latter makes interiors,
+    // point-lit props, and shadow-side characters globally too dark.
+    //
+    // `is_rig` (the glue create-booth lane) is excluded DELIBERATELY: a booth scene's light is
+    // entirely its authored rig — there is no world sun to block. World units are `ShadeSel::Lit`
+    // and receive through the WOW_RIG_SKIN ground sample above. The `player_shadow < 0.999`
+    // arm keeps `worldShadows 0` (and a fully sunlit fragment) byte-identical: `ambient +
+    // (lit − ambient) × 1.0` is not guaranteed to round back to `lit`.
+    let shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, player_shadow);
+    let lit_with_shadow = select(
+        lit,
+        clamp(
+            wow_light.light_ambient.rgb + (lit - wow_light.light_ambient.rgb) * shadow_term,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        ),
+        !is_interior && !is_rig && player_shadow < 0.999,
+    );
     // Gamma-space albedo — the lane (0161): the buffer holds bytes, lighting math runs on the
     // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
     // `m.tint` is the animated M2Color RGB (identity 1 for static batches) — the same per-batch
@@ -1028,7 +1093,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // MOCV multiplies the lit terms (GL_COLOR_MATERIAL) but NOT the emission terms — SIDN and
         // the highlight add alongside, exactly the FFP's material-emission placement.
         let primary = clamp(
-            vc * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            vc * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
@@ -1058,7 +1123,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // writes a colour. (Left off the `is_wmo` branch on purpose: a WMO surface is not a CM2
         // instance and has no tint slot of its own.)
         let primary = clamp(
-            inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            inst_tint * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
@@ -1068,7 +1133,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // (`sidn_e` is zero for every M2 batch; a WMO batch without MOCV lands here too and keeps it —
     // harmlessly, since a WMO instance's tint slot is the identity slot 0.)
     let primary = clamp(
-        inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+        inst_tint * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

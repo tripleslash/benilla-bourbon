@@ -1,6 +1,6 @@
 //! **The engine's WGSL, compiled into the binary** (decision 1175).
 //!
-//! The seven shaders under `src/shaders/` are the *engine's* — 1171's line, unchanged: the game's
+//! The eight shaders under `src/shaders/` are the *engine's* — 1171's line, unchanged: the game's
 //! five live in `benilla-app`, and `embedded_asset!` is per-crate by construction, so the seam
 //! costs nothing to keep.
 //!
@@ -21,7 +21,7 @@
 
 use bevy::prelude::*;
 
-/// Compile the engine's seven WGSL files in and register them under
+/// Compile the engine's eight WGSL files in and register them under
 /// `embedded://benilla_world/shaders/…`.
 ///
 /// Added as the first member of [`crate::world_plugins::WorldPlugins`] rather than exposed as a
@@ -37,6 +37,7 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/ffx_glow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wow_effect.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/static_gx.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/ssilvb.wgsl");
 }
 
 #[cfg(test)]
@@ -79,7 +80,8 @@ mod tests {
         }
         // 6 since decision 1264 retired `skybox.wgsl` (a WMO skybox draws on the shared
         // model lane, whose forced-far-depth branch lives in `benilla_assets`'
-        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass).
-        assert_eq!(found, 7, "the engine's shader set changed size");
+        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass); 8 since
+        // `ssilvb.wgsl` (screen-space indirect lighting).
+        assert_eq!(found, 8, "the engine's shader set changed size");
     }
 }

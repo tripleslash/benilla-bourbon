@@ -1176,9 +1176,27 @@ pub enum ModelKind {
 /// Tags every spawned model submesh with the metadata the panel toggles on: its subsystem and its
 /// blend mode (the "layer" — opaque trunk vs alpha-cut canopy).
 #[derive(Component, Clone, Copy)]
+#[require(ShadowOccluder)]
 pub struct ModelPart {
     pub kind: ModelKind,
     pub blend: ModelBlend,
+}
+
+/// The camera-INDEPENDENT half of [`visibility::apply_model_visibility`]'s verdict: does this
+/// submesh exist as world content this frame (toggles, far clip, distance fade, material alpha)?
+///
+/// `Visibility` cannot answer that for a shadow caster: it also folds the exterior window gate,
+/// the portal PVS and the exterior-scene cull — all functions of where the camera LOOKS — and a
+/// wall behind the camera still blocks the sun. Gating the caster proxy on `InheritedVisibility`
+/// made every entity-lane shadow swing with view direction. Defaults to occluding so a part casts
+/// correctly from its spawn frame; the walk corrects a toggled-off part one frame later.
+#[derive(Component, Clone, Copy)]
+pub struct ShadowOccluder(pub bool);
+
+impl Default for ShadowOccluder {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 /// Ordering handle so the one system allowed to *override* the model-`Visibility` authority — the

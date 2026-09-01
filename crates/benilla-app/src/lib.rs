@@ -83,6 +83,7 @@ mod pending_item_ops;
 mod perf;
 mod pipe_warm;
 mod player;
+mod player_shadow;
 mod poi_marker;
 mod portrait;
 #[cfg(feature = "dev")]
@@ -532,7 +533,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(CreatureAnimPlugin)
     // The unit blob shadow: the dark ground oval under every unit, sized from the playing
     // animation's box (the byte-verified law — wow-re unit-blob-shadow RE), on the same
-    // surface-decal projector as the selection ring.
+    // surface-decal projector as the selection ring. `worldShadows 0` — the shipped default,
+    // the faithful 1.12 frame — draws it exactly as the reference does; while `worldShadows 1`
+    // the realtime shadow-map path owns unit shadows and this lane hides (the gate inside
+    // `update_shadows`), so a unit never wears the oval underneath its cast shadow.
     .add_plugins(BlobShadowPlugin)
     // Footprint decals (B212, decision 1006): the prints a walking unit leaves on snow/sand,
     // spawn-once projections on the same decal projector, fading off the effect stream.
@@ -618,7 +622,8 @@ pub fn run(build: BuildId) -> AppExit {
     // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
     // resource exists when `load_config` applies the saved value at Startup.
     .add_plugins(video::VideoPlugin)
-    // The realmlist (decision 1667) — the logon address each attempt dials. Same reason as
+    .add_plugins(player_shadow::WorldShadowPlugin)
+    // The realmlist (decision 1667) — the logon address the login screen edits. Same reason as
     // VideoPlugin above: it is a CVar knob, so its resource has to exist before `load_config`.
     .add_plugins(realmlist::RealmlistPlugin)
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After

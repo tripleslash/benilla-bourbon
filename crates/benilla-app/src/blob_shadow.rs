@@ -169,6 +169,7 @@ fn sync_shadows(
 /// reaches zero, or no receiving surface is in the box (the reference's no-ground gate).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_shadows(
+    video: Res<crate::video::VideoConfig>,
     time: Res<Time>,
     catalog: Option<Res<AnimData>>,
     rig: Option<Res<CameraControl>>,
@@ -206,6 +207,19 @@ fn update_shadows(
     // report, answerable from a log instead of a debugger.
     mut census_at: Local<f32>,
 ) {
+    // `worldShadows 1`: the realtime shadow-map path owns unit shadows — every record hides so a
+    // unit never wears the oval underneath its cast shadow. The records themselves stay (spawned
+    // by `sync_shadows` as usual) and `hide` drops each cache key, so flipping the cvar back
+    // rebuilds every projection on the next frame. With the cvar off — the shipped default —
+    // this gate is a single false branch and the lane below is the untouched reference path.
+    if video.world_shadows {
+        for (_, mut key, mut verts) in &mut shadows {
+            if key.shown || !verts.0.is_empty() {
+                hide(&mut key, &mut verts);
+            }
+        }
+        return;
+    }
     let now = time.elapsed_secs();
     let census = now >= *census_at;
     if census {

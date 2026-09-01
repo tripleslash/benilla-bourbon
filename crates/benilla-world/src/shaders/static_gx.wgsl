@@ -27,9 +27,19 @@
 // `Matte`). Output alpha is pinned 1.0 — every draw here is opaque-intent by admission
 // (wow_model.wgsl's bit-3 armor, as a constant).
 
-#import bevy_render::view::View
+#import bevy_pbr::{
+    mesh_view_bindings::{lights, view},
+    shadows,
+}
 
-@group(0) @binding(0) var<uniform> view: View;
+// Group 0 is Bevy's standard mesh-view bind group (view matrices, directional-light records and
+// the shadow textures the retained pass reads).
+
+// **How dark a fully covered character shadow gets** — the same number `benilla-assets`'
+// `terrain.wgsl` and `wow_model.wgsl` carry; move all three together. Scales the SUN term only:
+// the subtract-and-restore below keeps the authored ambient, and with it the retained pass's
+// fixture/probe lighting. 0.70, raised from the 0.45 this first shipped at.
+const SHADOW_SUN_FLOOR: f32 = 0.70;
 
 // The shared global light's per-frame PREFIX (lighting::global_light; the full layout lives in
 // wow_model.wgsl — keep field order in sync with BOTH).
@@ -59,7 +69,7 @@ struct WowLight {
     // rig/tint/mat-anim regions beyond it stay unmirrored (statics never read them).
     prop_probes: array<vec4<f32>, 57344>,
 }
-@group(0) @binding(1) var<storage, read> wow_light: WowLight;
+@group(2) @binding(0) var<storage, read> wow_light: WowLight;
 
 // Per-cell state (static_gx/render.rs `cell_layout`).
 struct GxCell {
@@ -287,6 +297,39 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
+    // The retained path uses the same Bevy directional shadow map as terrain and entity models.
+    // `static_gx` used to have no mesh-view shadow bindings, which made every Stormwind WMO act
+    // as if shadows were disabled even though the caster map was populated.
+    var world_shadow = 1.0;
+    if (lights.n_directional_lights > 0u && (in.word & WORD_INTERIOR) == 0u) {
+        let view_z = (view.view_from_world * in.world_position).z;
+        for (var light_id = 0u; light_id < lights.n_directional_lights; light_id = light_id + 1u) {
+            if ((lights.directional_lights[light_id].flags & 1u) != 0u) {
+                world_shadow = shadows::fetch_directional_shadow(
+                    light_id,
+                    in.world_position,
+                    n_lit,
+                    view_z,
+                );
+                break;
+            }
+        }
+    }
+    let shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
+    // Keep ambient energy when the realtime map blocks the sun. The retained pass also carries
+    // authored fixture/probe lighting, which must not be darkened by a directional shadow. The
+    // `world_shadow < 0.999` arm keeps `worldShadows 0` (no shadow-mapped light) and a fully
+    // sunlit fragment byte-identical: `ambient + (lit − ambient) × 1.0` is not guaranteed to
+    // round back to `lit`.
+    let lit_nl_shadowed = select(
+        lit_nl,
+        clamp(
+            wow_light.light_ambient.rgb + (lit_nl - wow_light.light_ambient.rgb) * shadow_term,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        ),
+        world_shadow < 0.999,
+    );
     // The order-2 SH basis products over the fragment normal — shared by the exterior
     // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
@@ -313,12 +356,14 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // WINDOW (MOMT 0x20) — interior drawer only: GL_LIGHT0 swapped to the brighter
         // Direct/Ambient midpoint pair, ambient +16/255 saturating (0x6d37e0).
         let window_mid = 0.5 * (wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb);
-        let lit_window = clamp(
-            window_mid + vec3<f32>(16.0 / 255.0) + window_mid * ndotl,
+        // The window's directional half rides the sun, so it takes the shadow term (×1.0 exact
+        // when the caster is off — no identity guard needed on a pure multiply).
+        let lit_window_shadowed = clamp(
+            window_mid + vec3<f32>(16.0 / 255.0) + window_mid * ndotl * shadow_term,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
-        let lit_int_base = select(lit_nl, lit_window, (in.word & WORD_WINDOW) != 0u);
+        let lit_int_base = select(lit_nl_shadowed, lit_window_shadowed, (in.word & WORD_WINDOW) != 0u);
         // The interior BATCH-CLASS lanes (trace-forensics-abbey-interior-d3d §2): INT = unlit
         // (the bake IS the room's light), TRANS = the per-vertex MOCV-alpha lit↔bake lerp,
         // EXT = plain lit_nl. Exterior groups take lit_nl at sun-scale 1 (prog 198/VS 151 —
@@ -329,7 +374,11 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         } else if (!class_int) {
             lit_wmo_interior = lit_int_base;
         }
-        let lit_wmo = select(lit_nl, lit_wmo_interior, interior);
+        // EXTERIOR surfaces are the ones the realtime map can shadow (the fetch above is
+        // gated on !interior, so `lit_nl_shadowed` collapses to `lit_nl` for interior
+        // fragments anyway). Taking plain `lit_nl` here left every Stormwind street and
+        // wall unshadowed while the caster map was fully populated.
+        let lit_wmo = select(lit_nl_shadowed, lit_wmo_interior, interior);
         // SIDN night glow (MOMT 0x10): the authored emissive × the live night fraction, an
         // EMISSION term — inside the clamped sum, never MOCV-multiplied; dead on the unlit
         // INT lane, TRANS-weighted by the lit-pass alpha (wmo-interior-night-light §4).
@@ -427,9 +476,26 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
                     * (dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
                         + wow_light.sh_c16.z * x2y2),
         );
-        let lit_doodad = clamp(sun_lobe, vec3<f32>(0.0), vec3<f32>(1.0));
+        // The SH lobe's own ambient rows (the .w column) are the doodad lane's ambient share:
+        // subtract-and-restore around the shadow term so only the directional part of the lobe
+        // dims. Guarded like `lit_nl_shadowed` so the no-shadow state stays byte-identical.
+        let sun_ambient = vec3<f32>(
+            wow_light.sh_c10_r.w,
+            wow_light.sh_c10_g.w,
+            wow_light.sh_c10_b.w,
+        );
+        let lit_doodad_plain = clamp(sun_lobe, vec3<f32>(0.0), vec3<f32>(1.0));
+        let lit_doodad = select(
+            lit_doodad_plain,
+            clamp(
+                sun_ambient + (sun_lobe - sun_ambient) * shadow_term,
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            ),
+            world_shadow < 0.999,
+        );
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
-        let lit = select(lit_nl, lit_doodad, wow_light.light_sun.w > 0.5);
+        let lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
         // FFP combine: the light sum saturates FIRST, the texture (× the baked constant
         // tint, when authored) modulates the clamped result. Statics: inst_tint identity,
         // no highlight, no SIDN.

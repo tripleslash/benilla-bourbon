@@ -168,6 +168,7 @@ mod shaders;
 pub mod sky;
 pub mod sky_order;
 pub mod skybox;
+pub mod ssilvb;
 pub mod static_gx;
 pub mod static_merge;
 pub mod sun;

@@ -264,7 +264,10 @@ fn plugin(app: &mut App) {
         Startup,
         spawn_view_camera.after(benilla_assets::AssetSet::Open),
     )
-    .add_systems(Update, fly.in_set(crate::schedule::WorldStage::Input));
+    .add_systems(
+        Update,
+        (fly, toggle_indirect).in_set(crate::schedule::WorldStage::Input),
+    );
 
     // `WOW_WORLDVIEW_SHOT=<png>` (at `WOW_WORLDVIEW_SHOT_AT` seconds, default 20) writes one frame
     // and exits. The client's own live shot (`capture::LiveShotPlugin`) can't serve here: its
@@ -275,6 +278,40 @@ fn plugin(app: &mut App) {
     if std::env::var("WOW_WORLDVIEW_SHOT").is_ok() {
         app.add_systems(Update, shoot_and_exit);
     }
+}
+
+/// **`G` flips screen-space indirect lighting between full strength and off** — the viewer's A/B
+/// lever, and the reason it is a hotkey rather than another `$WOW_*` variable: the two states have
+/// to be seen in the SAME frame, over the same trunk or the same doorway, or the eye simply agrees
+/// with whichever it saw last. Relaunching for each half cannot do that.
+///
+/// It flips between the SHIPPED strengths and off, not between a maximum and off. Since both halves
+/// carry a gain that puts the intended look at the sliders' midpoint, the shipped 0.5 already is
+/// the gather's own term applied whole; 1.0 is a deliberate over-drive, and A/B-ing against an
+/// over-drive tells you what the exaggeration looks like rather than what the game looks like.
+///
+/// Toggling is safe mid-run. The first enable re-allocates the depth buffer to be sampleable, and
+/// the render node stands that one frame down rather than bind a texture that is not armed yet;
+/// the flag is never cleared again, so every later toggle is free.
+fn toggle_indirect(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut lighting: ResMut<crate::ssilvb::IndirectLighting>,
+) {
+    if !keys.just_pressed(KeyCode::KeyG) {
+        return; // never touch the resource on a quiet frame — that would re-extract it every tick
+    }
+    let shipped = crate::ssilvb::IndirectLighting {
+        ao: crate::ssilvb::AO_DEFAULT,
+        gi: crate::ssilvb::GI_DEFAULT,
+    };
+    let off = crate::ssilvb::IndirectLighting { ao: 0.0, gi: 0.0 };
+    *lighting = if lighting.enabled() { off } else { shipped };
+    info!(
+        "worldview: indirect lighting {} (ao {:.2}, gi {:.2})",
+        if lighting.enabled() { "ON" } else { "OFF" },
+        lighting.ao,
+        lighting.gi,
+    );
 }
 
 /// The one-shot frame writer behind `WOW_WORLDVIEW_SHOT` — fires once, then gives the screenshot
@@ -342,7 +379,8 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
     ));
 }
 
-/// WASD + Space/C fly, right-drag look, Ctrl boost, scroll to change speed. The editor's
+/// WASD + Space/C fly, right-drag look, Ctrl boost, scroll to change speed (`G` toggles indirect
+/// lighting, see [`toggle_indirect`]). The editor's
 /// navigation, not the game's.
 fn fly(
     time: Res<Time>,

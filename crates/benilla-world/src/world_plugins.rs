@@ -209,6 +209,10 @@ impl PluginGroup for WorldPlugins {
             // rebuilt from the byte RE + two reference-trace reconstructions (decision 0264).
             .add(crate::water_fx::WaterFxPlugin)
             .add(crate::ffx_glow::FfxGlowPlugin)
+            // Screen-space indirect lighting (AO + one bounce of colour bleed) — the frame's other
+            // full-screen pass, and the one before FFXGlow in the graph. Its two strengths are
+            // player sliders and both halves are exact no-ops at zero.
+            .add(crate::ssilvb::SsilvbPlugin)
             .add(crate::ribbons::RibbonPlugin)
             // Stuck-modifier reconciliation: macOS system shortcuts (⇧⌘5) swallow modifier
             // releases without a focus loss, wedging every bare-key binding (decision 0606).

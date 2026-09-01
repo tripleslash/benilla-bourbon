@@ -633,6 +633,26 @@
             .. "There is no exclusive fullscreen mode. WoW itself removed one in 8.0.1, and "
             .. "modern Classic offers these same two."
 
+        BENILLA_TOOLTIP_WORLD_SHADOWS =
+            "Renders real dynamic silhouettes for players, NPCs, creatures, and mounts. Terrain, "
+            .. "buildings, and trees keep their authored shading, matching Wrath's character-only "
+            .. "shadow tier. This uses additional GPU time and memory."
+
+        -- The two halves of the indirect-lighting pass. One gather produces both, so they are two
+        -- rows rather than one only because a player wants to move them apart: contact darkening
+        -- is close to a fidelity choice, colour bleed is squarely a taste one. Neither has a 1.12
+        -- counterpart -- the reference renders straight to the backbuffer, with no depth buffer it
+        -- could gather over -- so both carry a BENILLA_ description, like Render Scale below.
+        BENILLA_TOOLTIP_AMBIENT_OCCLUSION =
+            "Darkens the creases the sun cannot reach: the base of a tree, the inside of a "
+            .. "doorway, the underside of a roof.\n\n"
+            .. "0% turns it off entirely. Higher values cost additional GPU time."
+
+        BENILLA_TOOLTIP_INDIRECT_LIGHT =
+            "Bounces colour between nearby surfaces, so grass tints the trunk standing in it and "
+            .. "a painted wall tints the floor.\n\n"
+            .. "0% turns off colour bleeding and leaves Ambient Occlusion running on its own."
+
         OPTIONS_PAGE_ROWS = {
             Controls = {
                 "RowStickyTarget", "RowBlockTrades", "RowAutoLoot", "RowInvertMouse",
@@ -644,7 +664,11 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
-                "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
+                "RowDisplayMode", "RowVerticalSync", "RowWorldShadows",
+                -- The indirect-lighting pair sits between the shadow toggle and Render Scale:
+                -- everything above it is what the world IS, Render Scale is how big it gets
+                -- drawn, and Render Scale keeps the last seat its own note below claims.
+                "RowAmbientOcclusion", "RowIndirectLight", "RowRenderScale",
             },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
@@ -2429,10 +2453,64 @@
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
+                                        <Frame name="$parentRowWorldShadows" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "worldShadows", "Real Character Shadows",
+                                                    "BENILLA_TOOLTIP_WORLD_SHADOWS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAmbientOcclusion" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Ambient Occlusion -- the AO half of the
+                                                -- screen-space indirect-lighting pass
+                                                -- (benilla_world::ssilvb). benilla's own row, no
+                                                -- 1.12 counterpart, in the Render Scale mould.
+                                                --
+                                                -- 0-100%, narrower than the CVar's own clamp
+                                                -- (SSILVB_RANGE, 0-2). The headroom above is for
+                                                -- a hand-typed CVar and for looking at an
+                                                -- exaggerated term while tuning; this is what a
+                                                -- player should be offered.
+                                                --
+                                                -- NOT deferred, unlike Render Scale: nothing is
+                                                -- reallocated by a move -- the render node reads
+                                                -- the strength each frame -- so the handle
+                                                -- previews live, which is the whole value of a
+                                                -- look slider. Staging this one to Apply would
+                                                -- make a player set it blind.
+                                                OptionsRow_OnLoad(self, "ssaoStrength", "Ambient Occlusion",
+                                                    "BENILLA_TOOLTIP_AMBIENT_OCCLUSION")
+                                                OptionsSliderRow_Setup(self, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowIndirectLight" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Indirect Lighting -- the colour-bleed half of
+                                                -- the same gather, and the same row shape as its
+                                                -- neighbour above for the same reasons. At 0% the
+                                                -- bounce term is exactly zero and Ambient
+                                                -- Occlusion is left running on its own.
+                                                OptionsRow_OnLoad(self, "ssgiStrength", "Indirect Lighting",
+                                                    "BENILLA_TOOLTIP_INDIRECT_LIGHT")
+                                                OptionsSliderRow_Setup(self, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Render Scale (decision 1639) -- benilla's own

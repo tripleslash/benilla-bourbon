@@ -1022,6 +1022,91 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **The indirect-lighting pair** — the AO half and the colour-bleed half of one screen-space
+/// gather (`benilla_world::ssilvb`), as two independent rows because a player wants to move them
+/// apart. Both read the CVar table on select and read out as a percent; both are LIVE rather than
+/// deferred, because nothing is reallocated by a move and a look slider a player cannot see under
+/// the handle is a slider they set blind.
+///
+/// The part worth pinning is **exact zero**: that is the value the render node checks to skip the
+/// pass whole and the value the shader's own no-op arm tests, so a row that could only get near it
+/// would make "off" a lie.
+#[test]
+fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
+    const AO: &str = "OptionsFrameContainerBodyGraphicsRowAmbientOcclusion";
+    const GI: &str = "OptionsFrameContainerBodyGraphicsRowIndirectLight";
+    let mut s = audio_harness();
+    s.set_cvar_host("ssaoStrength", "0.5");
+    s.set_cvar_host("ssgiStrength", "0.25");
+    let s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+
+    for (row, want, text) in [(AO, 0.5, "50%"), (GI, 0.25, "25%")] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return math.abs({row}ControlSlider:GetValue() - {want}) < 0.0001"
+            ))
+            .unwrap(),
+            "{row}: the slider did not take its CVar"
+        );
+        assert_eq!(
+            s.eval::<String>(&format!("return {row}ControlValue:GetText()"))
+                .unwrap(),
+            text
+        );
+        // The row offers 0–100%; the CVar's own clamp is wider (SSILVB_RANGE) so a hand-typed
+        // value still has headroom. Same split Render Scale documents.
+        assert!(
+            s.eval::<bool>(&format!(
+                "local lo, hi = {row}ControlSlider:GetMinMaxValues() return lo == 0 and hi == 1"
+            ))
+            .unwrap(),
+            "{row}: not the 0-100% grid"
+        );
+    }
+    assert_eq!(
+        s.eval::<String>(&format!("return {AO}Label:GetText()"))
+            .unwrap(),
+        "Ambient Occlusion"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {GI}Label:GetText()"))
+            .unwrap(),
+        "Indirect Lighting"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    // Zero is reachable, is what the readout says, and — the row being live — reaches the CVar on
+    // the move rather than at Apply.
+    s.run(&format!("{GI}ControlSlider:SetValue(0)")).unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("ssgiStrength".to_string(), "0".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {GI}ControlValue:GetText()"))
+            .unwrap(),
+        "0%"
+    );
+    assert!(
+        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+            .unwrap(),
+        "a live row stages nothing, so no Apply button"
+    );
+    // The two halves are independent: turning colour bleed off left occlusion where it was.
+    assert_eq!(
+        s.eval::<String>(&format!("return {AO}ControlValue:GetText()"))
+            .unwrap(),
+        "50%"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The **Display Mode** row (1650) — modern Classic's own control, which 1627 had already given us
 /// the two states for. Blizzard's `Blizzard_SettingsDefinitions_Shared/Graphics.lua` (identical on
 /// live, classic and classic_era) builds a boolean proxy as a dropdown with exactly two entries,
@@ -2104,7 +2189,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode). Neither has a 1.12
+        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode, the World Shadows
+        // toggle, and the two indirect-lighting sliders). None has a 1.12
         // counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale has no era row at
         // all, and Display Mode's era row was a CHECKBOX whose string says "Check to…" — and both
         // are rows a player needs a description for. Each carries one under a `BENILLA_` prefix so
@@ -2115,6 +2201,12 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
             ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
+            ("BENILLA_TOOLTIP_WORLD_SHADOWS", "GraphicsRowWorldShadows"),
+            (
+                "BENILLA_TOOLTIP_AMBIENT_OCCLUSION",
+                "GraphicsRowAmbientOcclusion",
+            ),
+            ("BENILLA_TOOLTIP_INDIRECT_LIGHT", "GraphicsRowIndirectLight"),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2151,11 +2243,12 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 54 of the 56 are 1.12's own; the other two are Render Scale (1639) and Display Mode
-    // (1650), whose descriptions are benilla's and whose carve-out is above.
+    // 54 of the 59 are 1.12's own; the other five are Render Scale (1639), Display Mode
+    // (1650), World Shadows and the two indirect-lighting sliders (Ambient Occlusion, Indirect
+    // Lighting), whose descriptions are benilla's and whose carve-out is above.
     // The 28th CVar row is Block Trades (1764), on the Controls page — its key
     // OPTION_TOOLTIP_BLOCK_TRADES is the reference's, so it is counted here like the rest.
-    assert_eq!(checked, 56, "every tipped row carries a live key");
+    assert_eq!(checked, 59, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2260,10 +2353,11 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    // …plus the Graphics page's Render Scale (1639) and Display Mode (1650), the two rows whose
-    // descriptions are benilla's own rather than 1.12 GlobalStrings — see the guard above.
+    // …plus the Graphics page's Render Scale (1639), Display Mode (1650), World Shadows and the
+    // two indirect-lighting sliders, the rows whose descriptions are benilla's own rather than
+    // 1.12 GlobalStrings — see the guard above.
     // …and Block Trades (1764), the Controls page's 28th CVar row.
-    assert_eq!(raised, 56, "every row but Auto Loot raises a description");
+    assert_eq!(raised, 59, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

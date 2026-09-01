@@ -253,6 +253,12 @@ impl MaterialExtension for WowModelExt {
         // at 10/11. Bevy's own SKINNED branch never fires for these meshes — that's the point.
         if layout.0.contains(crate::ATTRIBUTE_WOW_JOINT_INDEX) {
             descriptor.vertex.shader_defs.push("WOW_RIG_SKIN".into());
+            // The FRAGMENT stage keys on the same def: a skinned unit takes the whole-unit
+            // ground-point shadow sample (one fetch at its rig origin) instead of the
+            // per-fragment fetch, which would read the unit's own caster copy as an occluder.
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_RIG_SKIN".into());
+            }
             let mut attrs = Vec::with_capacity(7);
             for (attr, loc) in [
                 (Mesh::ATTRIBUTE_POSITION, 0),

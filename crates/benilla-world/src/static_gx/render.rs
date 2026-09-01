@@ -16,9 +16,15 @@
 //! bind groups, never a texture.
 
 use bevy::camera::primitives::Aabb;
+use bevy::core_pipeline::oit::OrderIndependentTransparencySettingsOffset;
 use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
 use bevy::mesh::VertexBufferLayout;
+use bevy::pbr::{
+    MeshPipeline, MeshPipelineViewLayoutKey, MeshViewBindGroup, ViewEnvironmentMapUniformOffset,
+    ViewFogUniformOffset, ViewLightProbesUniformOffset, ViewLightsUniformOffset,
+    ViewScreenSpaceReflectionsUniformOffset,
+};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
@@ -30,14 +36,12 @@ use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, texture_2d_array, uniform_buffer, uniform_buffer_sized,
+    sampler, storage_buffer_read_only_sized, texture_2d_array, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{
-    ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
-};
+use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniformOffset};
 use bevy::render::{Render, RenderSystems};
 use bevy::shader::ShaderDefVal;
 use std::ops::Range;
@@ -193,6 +197,7 @@ struct GxGpuCache {
 struct GxPipelines {
     view_layout: BindGroupLayoutDescriptor,
     cell_layout: BindGroupLayoutDescriptor,
+    light_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     sampler_clamp: Sampler,
     /// Keyed `(cutout, two_sided)`; specialized for the world view's (samples, format) pair —
@@ -201,15 +206,25 @@ struct GxPipelines {
     specialized_for: Option<(u32, TextureFormat)>,
 }
 
-fn init_pipelines(mut commands: Commands, render_device: Res<RenderDevice>) {
-    let view_layout = BindGroupLayoutDescriptor::new(
-        "static_gx_view_layout",
+fn init_pipelines(
+    mut commands: Commands,
+    mesh_pipeline: Res<MeshPipeline>,
+    render_device: Res<RenderDevice>,
+) {
+    // Use Bevy's real mesh-view layout for the retained pass. Besides the view and light records,
+    // this carries the directional shadow textures and comparison samplers produced for the
+    // world camera. The old two-binding layout could render the city, but it had no legal way for
+    // `static_gx.wgsl` to receive the shadow map.
+    let view_layout = mesh_pipeline
+        .get_view_layout(MeshPipelineViewLayoutKey::empty())
+        .main_layout
+        .clone();
+    // The pass's own extra (group 2): the shared light storage.
+    let light_layout = BindGroupLayoutDescriptor::new(
+        "static_gx_light_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
-            (
-                uniform_buffer::<ViewUniform>(true),
-                storage_buffer_read_only_sized(false, None),
-            ),
+            (storage_buffer_read_only_sized(false, None),),
         ),
     );
     let cell_layout = BindGroupLayoutDescriptor::new(
@@ -253,6 +268,7 @@ fn init_pipelines(mut commands: Commands, render_device: Res<RenderDevice>) {
     commands.insert_resource(GxPipelines {
         view_layout,
         cell_layout,
+        light_layout,
         sampler: make("static_gx_repeat", AddressMode::Repeat),
         sampler_clamp: make("static_gx_clamp", AddressMode::ClampToEdge),
         pipelines: HashMap::default(),
@@ -324,6 +340,7 @@ fn prepare_static_gx(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     asset_server: Res<AssetServer>,
+    mesh_pipeline: Res<MeshPipeline>,
     images: Res<RenderAssets<GpuImage>>,
     views: Query<GxViewKey>,
 ) {
@@ -339,12 +356,20 @@ fn prepare_static_gx(
     };
     let key = (msaa.samples(), format);
     if pipes.specialized_for != Some(key) {
+        pipes.view_layout = mesh_pipeline
+            .get_view_layout(MeshPipelineViewLayoutKey::from(*msaa))
+            .main_layout
+            .clone();
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
         pipes.pipelines.clear();
         for cutout in [false, true] {
             for two_sided in [false, true] {
                 let mut defs = vec![];
+                // The world camera uses Bevy's default Gaussian shadow filtering. The retained
+                // pipeline is custom, so it must opt into the same shader branch explicitly;
+                // otherwise `shadows::fetch_directional_shadow` falls back to a constant 1.0.
+                defs.push(ShaderDefVal::from("SHADOW_FILTER_METHOD_GAUSSIAN"));
                 if cutout {
                     defs.push(ShaderDefVal::from("GX_CUTOUT"));
                 }
@@ -352,7 +377,11 @@ fn prepare_static_gx(
                     label: Some(
                         format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),
                     ),
-                    layout: vec![pipes.view_layout.clone(), pipes.cell_layout.clone()],
+                    layout: vec![
+                        pipes.view_layout.clone(),
+                        pipes.cell_layout.clone(),
+                        pipes.light_layout.clone(),
+                    ],
                     vertex: VertexState {
                         shader: shader.clone(),
                         shader_defs: defs.clone(),
@@ -647,33 +676,33 @@ fn kill_bit(killed: &[u64], i: usize) -> u32 {
     )
 }
 
-/// The per-frame view bind group (group 0): bevy's view uniform + the shared light buffer —
-/// the SAME `wow_shared_light` storage every material binds (1429: identical lighting by
-/// construction).
+/// The retained pass's extra bind group (group 2): the shared light buffer — the SAME
+/// `wow_shared_light` storage every material binds (1429: identical lighting by construction) —
+/// Group 0 is Bevy's standard mesh-view bind group, which supplies the view matrices,
+/// directional-light records, and shadow textures.
 #[derive(Resource)]
-struct GxViewBind(BindGroup);
+struct GxLightBind(BindGroup);
 
 fn prepare_view_bind(
     mut commands: Commands,
     pipes: Res<GxPipelines>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
-    view_uniforms: Res<ViewUniforms>,
     light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
-    let (Some(view_binding), Some(light)) = (view_uniforms.uniforms.binding(), light) else {
+    let Some(light) = light else {
         return;
     };
-    let layout = pipeline_cache.get_bind_group_layout(&pipes.view_layout);
-    commands.insert_resource(GxViewBind(render_device.create_bind_group(
-        "static_gx_view",
+    let layout = pipeline_cache.get_bind_group_layout(&pipes.light_layout);
+    commands.insert_resource(GxLightBind(render_device.create_bind_group(
+        "static_gx_light",
         &layout,
-        &BindGroupEntries::sequential((view_binding, light.0.as_entire_binding())),
+        &BindGroupEntries::sequential((light.0.as_entire_binding(),)),
     )));
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct StaticGxLabel;
+pub(crate) struct StaticGxLabel;
 
 #[derive(Default)]
 struct StaticGxNode;
@@ -683,6 +712,13 @@ impl ViewNode for StaticGxNode {
         &'static ViewTarget,
         &'static ViewDepthTexture,
         &'static ViewUniformOffset,
+        &'static ViewLightsUniformOffset,
+        &'static ViewFogUniformOffset,
+        &'static ViewLightProbesUniformOffset,
+        &'static ViewScreenSpaceReflectionsUniformOffset,
+        &'static ViewEnvironmentMapUniformOffset,
+        Option<&'static OrderIndependentTransparencySettingsOffset>,
+        &'static MeshViewBindGroup,
         // The world camera only — a booth bake must never receive world cells (see the marker).
         &'static StaticGxView,
     );
@@ -691,7 +727,19 @@ impl ViewNode for StaticGxNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (target, depth, view_offset, _marker): QueryItem<'w, '_, Self::ViewQuery>,
+        (
+            target,
+            depth,
+            view_offset,
+            view_lights,
+            view_fog,
+            view_light_probes,
+            view_ssr,
+            view_environment_map,
+            maybe_oit,
+            view_bind,
+            _marker,
+        ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let _t = super::gx_perf_guard(4);
@@ -702,7 +750,7 @@ impl ViewNode for StaticGxNode {
         let cache = world.resource::<GxGpuCache>();
         let pipes = world.resource::<GxPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(view_bind) = world.get_resource::<GxViewBind>() else {
+        let Some(light_bind) = world.get_resource::<GxLightBind>() else {
             return Ok(());
         };
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
@@ -760,7 +808,18 @@ impl ViewNode for StaticGxNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        pass.set_bind_group(0, &view_bind.0, &[view_offset.offset]);
+        let mut view_offsets = vec![
+            view_offset.offset,
+            view_lights.offset,
+            view_fog.offset,
+            **view_light_probes,
+            **view_ssr,
+            **view_environment_map,
+        ];
+        if let Some(oit) = maybe_oit {
+            view_offsets.push(oit.offset);
+        }
+        pass.set_bind_group(0, &view_bind.main, &view_offsets);
         for (gpu, draw, sel) in &resolved {
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
                 continue;
@@ -789,6 +848,7 @@ impl ViewNode for StaticGxNode {
                 }
                 pass.set_render_pipeline(ready[&(run.cutout, run.two_sided)]);
                 pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                pass.set_bind_group(2, &light_bind.0, &[]);
                 pass.draw_indexed(
                     (islice.range.start + run.index_range.start)
                         ..(islice.range.start + run.index_range.end),

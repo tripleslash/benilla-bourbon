@@ -133,6 +133,12 @@ mod pick;
 mod pool;
 mod render;
 
+/// The retained pass's render-graph label, re-exported for ONE reader: `crate::ssilvb`, whose
+/// gather must not run until this node has written the WMO and doodad cells into the depth buffer
+/// it reads. An ordering edge is the only thing outside this module that has any business naming
+/// the node, so the module itself stays private and only the label comes out.
+pub(crate) use render::StaticGxLabel;
+
 /// The doodad spatial cell — ¼ ADT tile, the same 133⅓-yd locality key the merge lanes use
 /// (`terrain_stream::merge::CELL`; 1413 round 2 proved the locality load-bearing).
 const CELL: f32 = 533.333_3 / 4.0;
@@ -294,8 +300,11 @@ struct GxItem {
     owner: (i32, i32),
     texture: Option<AssetId<bevy::image::Image>>,
     /// Kept as a live handle so the render world's `GpuImage` can never be dropped from under
-    /// the baked cell (the id alone holds nothing).
-    _texture_handle: Option<Handle<bevy::image::Image>>,
+    /// the baked cell (the id alone holds nothing). Never READ (the bake keys everything off
+    /// [`Self::texture`]'s id) — its whole job is the strong reference held by its own
+    /// existence, so `dead_code` is a false positive here.
+    #[allow(dead_code)]
+    texture_handle: Option<Handle<bevy::image::Image>>,
     cutout: bool,
     two_sided: bool,
     unlit: bool,
@@ -770,7 +779,7 @@ impl StaticGx {
             local_aabb: b.aabb,
             owner: b.owner,
             texture: b.texture.as_ref().map(Handle::id),
-            _texture_handle: b.texture,
+            texture_handle: b.texture,
             cutout: b.blend == ModelBlend::AlphaTest && !crate::model_render::alphatest_disabled(),
             two_sided: b.two_sided,
             unlit: b.unlit,

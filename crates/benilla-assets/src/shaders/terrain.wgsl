@@ -29,13 +29,27 @@
     mesh_functions,
     forward_io::Vertex,
     view_transformations::position_world_to_clip,
-    mesh_view_bindings::view,
+    mesh_view_bindings::{lights, view},
+    shadows,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var layer_array: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var alpha_array: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var splat_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var shadow_array: texture_2d_array<f32>;
+
+// **How dark a fully covered character shadow gets.** One number, carried by value in all three
+// receivers — `wow_model.wgsl` beside this file, and `benilla-world`'s `static_gx.wgsl`. Move the
+// three together; they are separate files in two crates only because WGSL has no shared header.
+//
+// Terrain's copy reads DEEPEST of the three at the same value, because here the factor multiplies
+// the whole `tex · primary · (0.3·mcsh + 0.7)` modulate rather than the sun term alone (the
+// neutral greyscale attenuation the combine below explains). That is where it should read hardest:
+// the ground is what a character's shadow is actually cast onto.
+//
+// **0.70, raised from the 0.45 this first shipped at.** At 0.45 a character standing on Elwynn's
+// morning grass wore a hole in the ground rather than a silhouette.
+const SHADOW_SUN_FLOOR: f32 = 0.70;
 
 // Per-tile Vec4 uniforms packed into ONE buffer (binding 106) — the field order here MUST match the
 // Rust `TerrainExtension` struct. Light + fog live in the shared global-light storage buffer (below);
@@ -89,6 +103,9 @@ struct TerrainVsOut {
     // hard knee, the director's "hard square". Sun N·L moving per-pixel → per-vertex is the
     // faithful direction (Step 3's own note: indistinguishable on the smooth term).
     @location(6) primary: vec3<f32>,
+    // The receiver normal is carried so the real cascaded shadow lookup can apply a slope-aware
+    // bias. This is forward-pass data only; the terrain shadow caster is a stock Bevy proxy.
+    @location(7) world_normal: vec3<f32>,
 }
 
 // Terrain's point-light **candidacy half-width** (yd): the reference's guaranteed covered box is
@@ -196,6 +213,7 @@ fn vertex(in: Vertex) -> TerrainVsOut {
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position, 1.0));
     out.clip_position = position_world_to_clip(out.world_position.xyz);
     let world_normal = mesh_functions::mesh_normal_local_to_world(in.normal, in.instance_index);
+    out.world_normal = world_normal;
     out.uv = in.uv;
     out.uv_b = in.uv_b;
     out.color = in.color;
@@ -216,8 +234,9 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // byte-verified `1/(0.7d + 0.03d²)`, raw over-gamut colours in.
     let ndotl = max(dot(n, l), 0.0);
     let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));
+    let sun_lighting = wow_light.light_diffuse.rgb * ndotl;
     out.primary = clamp(
-        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl + points,
+        wow_light.light_ambient.rgb + sun_lighting + points,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
@@ -281,6 +300,28 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // colour, byte-faithful to GL T&L (see the `primary` struct note; the MCNR normal and the
     // DayNight sun share a space per the Phase-0 validation). The MCSH ×(0.3·s + 0.7) factor below
     // still scales the whole modulate, as the traced combine does.
+    // Fetch the character coverage here, but apply it as a NEUTRAL scalar after the terrain's
+    // authored lighting below. Subtracting the warm sun RGB left only Elwynn's green ambient and
+    // produced a green silhouette on yellow morning ground. The era-style projected shadow is a
+    // greyscale attenuation: it darkens the existing hue instead of changing it.
+    // Keep the raw fetch for the specular gate below. The realtime map now contains CHARACTERS
+    // only; MCSH contains the static world's baked blockers. They are independent occluders, so
+    // the character map must never replace (and thereby brighten) the authored terrain bake.
+    var world_shadow = 1.0;
+    if (lights.n_directional_lights > 0u) {
+        let view_z = (view.view_from_world * in.world_position).z;
+        for (var light_id = 0u; light_id < lights.n_directional_lights; light_id = light_id + 1u) {
+            if ((lights.directional_lights[light_id].flags & 1u) != 0u) {
+                world_shadow = shadows::fetch_directional_shadow(
+                    light_id,
+                    in.world_position,
+                    normalize(in.world_normal),
+                    view_z,
+                );
+                break;
+            }
+        }
+    }
     let primary = in.primary;
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass
@@ -297,14 +338,20 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let mcsh = textureSampleLevel(shadow_array, splat_samp, auv, i32(round(si)), 0.0).r;
         shadow_lit = 1.0 - mcsh;
     }
+    // MCSH always remains the authored base. Realtime character coverage applies a neutral
+    // attenuation and closes the sheen gate. This makes the result monotonic and hue-preserving:
+    // a character can only darken the terrain already underneath it.
+    let shadow_lit_eff = shadow_lit;
+    let spec_gate = min(shadow_lit, world_shadow);
+    let character_shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
 
     // The faithful `terrainp_s` combine (Q15):
     //   diffuse  = tex · primary · (0.3·shadow + 0.7)   → a flat −30% in shadow, NO colour tint
     //   specular = per-vertex sheen · gloss_mask · shadow → gated to ZERO in shadow (no sheen in shade)
     // (`tex·primary` is the MODULATE-1× diffuse; the sheen is added after, separate-specular.) Then
     // LDR-clamp; gamma/byte throughout; raw gamma out (GAMMA LANE, 0161).
-    let diffuse_term = color * primary * (0.3 * shadow_lit + 0.7);
-    let spec_term = in.specular * specmask * shadow_lit;
+    let diffuse_term = color * primary * (0.3 * shadow_lit_eff + 0.7) * character_shadow_term;
+    let spec_term = in.specular * specmask * spec_gate;
     var tuned = clamp(diffuse_term + spec_term, vec3<f32>(0.0), vec3<f32>(1.0));
 
     // STEP 5: gamma-space linear fog (q6). Applied AFTER tone/curve (so the diagnostic knobs see

@@ -59,6 +59,7 @@ pub(super) fn apply_model_visibility(
         &ModelPart,
         &GlobalTransform,
         &mut Visibility,
+        &mut super::ShadowOccluder,
         Option<&DoodadFade>,
         Option<&mut MeshTag>,
         Option<&mut MeshMaterial3d<WowModelMaterial>>,
@@ -105,6 +106,7 @@ pub(super) fn apply_model_visibility(
             part,
             xf,
             mut vis,
+            mut occluder,
             fade,
             tag,
             mat,
@@ -226,6 +228,15 @@ pub(super) fn apply_model_visibility(
             };
             if *vis != desired {
                 *vis = desired;
+            }
+
+            // The shadow-caster verdict: the CONTENT terms only. `portal_visible`, `exterior_ok`
+            // and `owner_hidden` are all functions of where the camera looks, and geometry the
+            // camera cannot see still blocks the sun — folding them in made entity-lane shadows
+            // swing with view direction. Change-gated like every write in this walk.
+            let occludes = toggled_on && in_range && fade_alpha > 0.0 && mat_factor > 0.0;
+            if occluder.0 != occludes {
+                occluder.0 = occludes;
             }
 
             // Push the fade alpha to the shader (per-instance `MeshTag` alpha field — `wow_model.wgsl`

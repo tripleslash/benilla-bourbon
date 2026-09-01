@@ -45,6 +45,7 @@ use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
+use benilla_world::ssilvb::{IndirectLighting, SSILVB_RANGE};
 use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
 
 /// The host-backed CVars: `(registered name, default)`. Grows one row per knob a settings page
@@ -314,6 +315,9 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
     // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
     ("gxVSync", "1"),
+    // Benilla's opt-in Wrath-style character shadow-map path. Static world assets keep their
+    // authored shading; players, NPCs, creatures and mounts cast realtime silhouettes.
+    ("worldShadows", "0"),
     // **Display mode** (decisions 1627, 1650) — 1.12's own `gxWindow`, worn since 1650 as modern
     // Classic's two-entry *Display Mode* dropdown rather than 1.12's *Windowed Mode* checkbox: the
     // two states 1627 settled on ARE that client's two (its own `Graphics.lua` builds the list from
@@ -435,6 +439,24 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // its pre-1639 numbers bit-for-bit, so no visual golden in the tree moves. `$WOW_RENDER_SCALE`
     // overrides it session-only, below.
     ("renderScale", "1"),
+    // **Screen-space indirect lighting** — benilla's own pair, no 1.12 counterpart in the same
+    // sense `renderScale` has none: the reference renders straight to the backbuffer with no depth
+    // it could gather over, and its ambient IS the authored `LightParams` row. One pass computes
+    // both halves off one swept horizon (`benilla_world::ssilvb`), so they are two CVars rather
+    // than one only because a player wants to move them apart: contact darkening is a fidelity
+    // choice, colour bleed is a taste one.
+    //
+    // `ssaoStrength` — how much of the gathered occlusion to apply. `0` is off, and off is exact:
+    // the fragment returns its source untouched rather than through a lossy decode/encode pair.
+    //
+    // **Registered non-zero**, unlike `worldShadows` and `renderScale`, whose defaults are the
+    // values at which no frame moves. Those two are opt-in experiments; this is meant to be what
+    // the game looks like. The engine owns the number ([`AO_DEFAULT`]) and this string is welded to
+    // it below, so the two cannot drift. `$WOW_SSAO` overrides session-only.
+    ("ssaoStrength", "0.5"),
+    // `ssgiStrength` — how much of the single bounce to add back, tinted by what bounced it. `0` is
+    // off and is exact, on the same terms. `$WOW_SSGI` overrides session-only.
+    ("ssgiStrength", "0.5"),
     (crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -577,6 +599,7 @@ pub(crate) struct KnobParams<'w> {
     follow: ResMut<'w, FollowConfig>,
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
+    indirect: ResMut<'w, IndirectLighting>,
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
@@ -612,6 +635,7 @@ impl KnobParams<'_> {
             follow: &mut self.follow,
             video: &mut self.video,
             render_scale: &mut self.render_scale,
+            indirect: &mut self.indirect,
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
@@ -643,6 +667,8 @@ struct Knobs<'a> {
     follow: &'a mut FollowConfig,
     video: &'a mut VideoConfig,
     render_scale: &'a mut RenderScale,
+    /// The two screen-space indirect-lighting strengths (`ssaoStrength` / `ssgiStrength`).
+    indirect: &'a mut IndirectLighting,
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
@@ -757,6 +783,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
         // watches the value and pushes it to the window; nothing else reads it.
         "gxvsync" => knobs.video.vsync = v != 0.0,
+        "worldshadows" => knobs.video.world_shadows = v != 0.0,
         // Display mode (1627) — a flag like every other checkbox here, and the reference's own
         // polarity: `1` is WINDOWED (the row is "Windowed Mode"). `video::apply_window_mode`
         // watches the value and pushes it to the window; nothing else reads it.
@@ -768,6 +795,15 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // in the same pass, which is what keeps the pick rays where they were.
         "renderscale" => {
             knobs.render_scale.0 = v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
+        }
+        // Screen-space indirect lighting. Clamped at the knob's edge like every other numeric
+        // row; the render node reads the resource each frame, so a drag tick previews live and
+        // nothing is reallocated by the move (which is why neither row is `deferred`).
+        "ssaostrength" => {
+            knobs.indirect.ao = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
+        }
+        "ssgistrength" => {
+            knobs.indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
         }
         // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
@@ -893,6 +929,17 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     // that pinned 4× into the file would come back at 4× the next time the client opened.
     if crate::webenv::var("WOW_RENDER_SCALE").is_some() {
         persist.env_overridden.insert("renderscale".into());
+    }
+    // `$WOW_SSAO` / `$WOW_SSGI` are the indirect-lighting A/B levers, session-only under the same
+    // law as every override above — and doubly so, because they are how `benilla-worldview` (which
+    // has no CVar host) drives this pass at all: a value that stuck in the file would silently
+    // denominate every later look at the same scene. `IndirectLighting::default()` has already
+    // taken them; this keeps them off disk.
+    if std::env::var_os("WOW_SSAO").is_some() {
+        persist.env_overridden.insert("ssaostrength".into());
+    }
+    if std::env::var_os("WOW_SSGI").is_some() {
+        persist.env_overridden.insert("ssgistrength".into());
     }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
@@ -1084,6 +1131,7 @@ fn sync_cvars(
             follow,
             video,
             render_scale,
+            indirect,
             pane_rate,
             guild_notify,
             block_trades,
@@ -1124,7 +1172,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 42] = [
+        let session: [(&str, String); 45] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1165,6 +1213,7 @@ fn sync_cvars(
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
             ("gxVSync", flag(video.vsync)),
+            ("worldShadows", flag(video.world_shadows)),
             // The reference's polarity: the CVar is `gxWindow`, so `1` is the WINDOWED state.
             (
                 "gxWindow",
@@ -1177,6 +1226,8 @@ fn sync_cvars(
             ),
             ("boothHalfRate", flag(pane_rate.half)),
             ("renderScale", render_scale.0.to_string()),
+            ("ssaoStrength", indirect.ao.to_string()),
+            ("ssgiStrength", indirect.gi.to_string()),
             ("gxMultisample", msaa.samples.to_string()),
             ("trilinear", flag(tex_filter.trilinear)),
             ("anisotropic", tex_filter.aniso.to_string()),
@@ -1342,6 +1393,10 @@ fn save_config(
 mod tests {
     use super::*;
     use crate::ui_script::DEFAULT_UI_SCALE;
+    // The engine's shipped indirect-lighting numbers. Named only here: the registered strings are
+    // welded to them, and the fixtures below seed the resource with them rather than with
+    // `IndirectLighting::default()`, which reads $WOW_SSAO / $WOW_SSGI.
+    use benilla_world::ssilvb::{AO_DEFAULT, GI_DEFAULT};
 
     /// Every registered default IS the code constant it mirrors — parse-compared so "1" vs
     /// "1.0" cannot fail it, welded so neither side can drift alone.
@@ -1453,12 +1508,22 @@ mod tests {
         // VSync welds to the video knob, which in turn welds to the window literal's boot
         // mode (`video::tests`) — so the registered "1" cannot drift from what we ship.
         assert_eq!(d["gxVSync"] != 0.0, VideoConfig::default().vsync);
+        assert_eq!(
+            d["worldShadows"] != 0.0,
+            VideoConfig::default().world_shadows
+        );
         // The pane half-rate (1444) welds to the portrait knob's shipped default.
         assert_eq!(d["boothHalfRate"] != 0.0, PaneRate::default().half);
         // Render scale (1639) welds to OFF. Not a taste default: the whole tree of visual
         // goldens is denominated in a 1:1 backdrop, so a registered value other than 1 would
         // silently re-render every one of them through a resample.
         assert_eq!(d["renderScale"], 1.0);
+        // The indirect-lighting pair welds to the ENGINE's shipped numbers, not to a literal
+        // repeated here: `benilla_world::ssilvb` owns what the pass ships at, and these registered
+        // strings are the same fact spelled for the CVar host. (Not `IndirectLighting::default()`,
+        // which reads $WOW_SSAO / $WOW_SSGI — a shell that exports one must not move this test.)
+        assert_eq!(d["ssaoStrength"], AO_DEFAULT as f64);
+        assert_eq!(d["ssgiStrength"], GI_DEFAULT as f64);
     }
 
     #[test]
@@ -1495,6 +1560,12 @@ mod tests {
         };
         // Literal for the same reason: RenderScale::default() reads $WOW_RENDER_SCALE.
         let mut render_scale = RenderScale(1.0);
+        // Literal for the same reason once again: IndirectLighting::default() reads
+        // $WOW_SSAO / $WOW_SSGI. These are what ships.
+        let mut indirect = IndirectLighting {
+            ao: AO_DEFAULT,
+            gi: GI_DEFAULT,
+        };
         // Literal for the same reason again (1642): TexFilterSetting::default() reads
         // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
         let mut tex_filter = benilla_assets::TexFilterSetting {
@@ -1523,6 +1594,7 @@ mod tests {
             follow: &mut follow,
             video: &mut video,
             render_scale: &mut render_scale,
+            indirect: &mut indirect,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
             block_trades: &mut block_trades,
@@ -1599,6 +1671,18 @@ mod tests {
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.end());
         assert!(apply_to_knobs("renderscale", "0", &mut knobs));
         assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.start());
+        // The indirect-lighting pair: independent knobs, each clamped at both ends, and each
+        // reaching exactly ZERO — the off state the render node checks for and the shader's own
+        // no-op arm. A clamp that floored at some epsilon would make "0" not mean off.
+        assert!(apply_to_knobs("ssaoStrength", "0.25", &mut knobs));
+        assert_eq!(knobs.indirect.ao, 0.25);
+        assert_eq!(knobs.indirect.gi, GI_DEFAULT, "the two halves are independent");
+        assert!(apply_to_knobs("ssgistrength", "0", &mut knobs));
+        assert_eq!(knobs.indirect.gi, *SSILVB_RANGE.start());
+        assert!(apply_to_knobs("ssaostrength", "9", &mut knobs));
+        assert_eq!(knobs.indirect.ao, *SSILVB_RANGE.end());
+        assert!(apply_to_knobs("ssaostrength", "-1", &mut knobs));
+        assert_eq!(knobs.indirect.ao, *SSILVB_RANGE.start());
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -1840,6 +1924,11 @@ mod tests {
             .init_resource::<VideoConfig>()
             // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
             .insert_resource(RenderScale(1.0))
+            // Literal for the same reason: IndirectLighting::default() reads $WOW_SSAO/$WOW_SSGI.
+            .insert_resource(IndirectLighting {
+                ao: AO_DEFAULT,
+                gi: GI_DEFAULT,
+            })
             // Literal for the same reason again (1667): Realmlist::default() reads $WOW_HOST.
             .insert_resource(crate::realmlist::Realmlist::unpinned(
                 crate::realmlist::DEFAULT_REALMLIST,
