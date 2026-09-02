@@ -23,10 +23,13 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
+use super::art;
 use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
+use super::screen::LiquidScreenTargets;
+use super::WaterDetail;
 use crate::lighting::WATER_SHININESS;
 use benilla_assets::coords::wow_to_bevy;
-use benilla_assets::materials::{LiquidExt, LiquidMaterial};
+use benilla_assets::materials::{LiquidCataExt, LiquidCataMaterial, LiquidExt, LiquidMaterial};
 use benilla_assets::LockRecover;
 use benilla_assets::{liquid_frame_array, RenderConfig, WorldAssets};
 use benilla_formats::{read_texture_mip_chain, BlpMipChain, LiquidKind, LiquidMesh};
@@ -149,8 +152,14 @@ fn scrolls(nibble: u8) -> bool {
     matches!(nibble, 6 | 7)
 }
 
+/// The two materials a liquid key can wear — one per renderer, built side by side at startup so
+/// that flipping `waterDetail` is a component swap and never an asset build. Both share the kind's
+/// one decoded frame array; the pair costs a few hundred bytes, not a second 30 × 256² decode.
 struct LiquidEntry {
+    /// The 1.12.1 renderer (`liquid.wgsl`).
     material: Handle<LiquidMaterial>,
+    /// The Cataclysm renderer (`liquid_cata.wgsl`).
+    cata: Handle<LiquidCataMaterial>,
 }
 
 impl LiquidAssets {
@@ -167,6 +176,45 @@ impl LiquidAssets {
             .get(&LiquidKey { kind, path, scroll })
             .map(|e| e.material.clone())
     }
+
+    /// The same surface's **Cataclysm** material. Misses exactly where [`Self::material`] misses,
+    /// the two being built in the same pass off the same frame array.
+    fn cata_material(
+        &self,
+        kind: LiquidKind,
+        path: LiquidPath,
+        scroll: bool,
+    ) -> Option<Handle<LiquidCataMaterial>> {
+        self.materials
+            .get(&LiquidKey { kind, path, scroll })
+            .map(|e| e.cata.clone())
+    }
+}
+
+/// Which shared material a spawned surface should be wearing.
+///
+/// Carried on the entity because the *renderer* can change under it at runtime and the spawn site
+/// is long gone by then: [`apply_water_detail`] re-materials every liquid surface in the world when
+/// `waterDetail` moves, and this is how it knows which of the ~30 shared materials each one wants.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct LiquidLane {
+    kind: LiquidKind,
+    path: LiquidPath,
+    scroll: bool,
+}
+
+/// Record which shared material a freshly-spawned surface wants.
+///
+/// The material itself is attached by [`apply_water_detail`], not here, and that is the whole point:
+/// *which component type* it is differs between the two renderers
+/// (`MeshMaterial3d<LiquidMaterial>` vs `MeshMaterial3d<LiquidCataMaterial>`, the price of the two
+/// paths not sharing a bind group), and the streamer's two spawn sites are already at Bevy's
+/// 16-param ceiling with no room to take the setting. One system owning the decision also means
+/// there is no second place that can disagree with it — a tile streaming in on the same frame the
+/// player flips the toggle cannot land on the losing side of a race, because it is the same sweep
+/// that dresses both.
+fn record_lane(entity: &mut EntityCommands, lane: LiquidLane) {
+    entity.insert(lane);
 }
 
 /// Marks a spawned water surface (one per liquid MCNK chunk), so it can be queried/culled as a group.
@@ -249,18 +297,22 @@ pub(crate) fn spawn_liquids<'a>(
         // ADT queue is a different kernel that hard-zeroes the v-translate ([`scrolls`]). Deriving
         // the flag from `lq.sound_nibble` here — the obvious-looking thing — would slide every
         // Searing Gorge and Burning Steppes lava pool in the game.
-        let Some(material) = liquid.material(lq.kind, LiquidPath::Adt, false) else {
-            continue; // this kind's frames failed to load (warned at setup)
+        let lane = LiquidLane {
+            kind: lq.kind,
+            path: LiquidPath::Adt,
+            scroll: false,
         };
+        if liquid.material(lq.kind, LiquidPath::Adt, false).is_none() {
+            continue; // this kind's frames failed to load (warned at setup)
+        }
         // The world-space liquid grid (MCLQ positions are already absolute WoW, so the IDENTITY
         // transform is a no-op round-trip).
         let info = wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk);
         let foam = !lq.kind.is_fullbright(); // white surf is a water thing
         entities.push(
-            commands
-                .spawn((
+            {
+                let mut ec = commands.spawn((
                     Mesh3d(meshes.add(liquid_bevy_mesh(lq, None))),
-                    MeshMaterial3d(material),
                     Transform::IDENTITY,
                     LiquidSurface,
                     // **Open-world liquid is exterior scene** — the reference's ADT liquid
@@ -283,8 +335,10 @@ pub(crate) fn spawn_liquids<'a>(
                     LiquidSoundSource {
                         nibble: lq.sound_nibble,
                     },
-                ))
-                .id(),
+                ));
+                record_lane(&mut ec, lane);
+                ec.id()
+            },
         );
         // Foam is water-only; the cells it clips against ride `info`, not the marker.
         if foam {
@@ -391,9 +445,14 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                     .copied()
             })
             .flatten();
-        let Some(material) = liquid.material(lq.kind, path, scroll) else {
-            continue; // this kind's frames failed to load (warned at setup)
+        let lane = LiquidLane {
+            kind: lq.kind,
+            path,
+            scroll,
         };
+        if liquid.material(lq.kind, path, scroll).is_none() {
+            continue; // this kind's frames failed to load (warned at setup)
+        }
         if scroll {
             // Rare (only nibble 6/7 pools reach it) and the only outside view of a decision that is
             // otherwise invisible until you stand over the pool and watch it for ten seconds.
@@ -402,10 +461,9 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 lq.kind, lq.sound_nibble
             );
         }
-        let surface = commands
-            .spawn((
+        let surface = {
+            let mut ec = commands.spawn((
                 Mesh3d(meshes.add(liquid_bevy_mesh(lq, body_color))),
-                MeshMaterial3d(material),
                 transform,
                 LiquidSurface,
                 // The per-frame interior-fog lane rides `MeshTag` bit 30, written by the one
@@ -418,8 +476,10 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 LiquidSoundSource {
                     nibble: lq.sound_nibble,
                 },
-            ))
-            .id();
+            ));
+            record_lane(&mut ec, lane);
+            ec.id()
+        };
         // The swim/submersion grid rides EVERY kind, magma and slime included — that is what
         // makes Blackrock's lava and Undercity's slime swimmable instead of something you fall
         // through (decision 0634, bugs B24/B25). It used to be gated on `!is_fullbright()` because
@@ -465,10 +525,23 @@ pub(super) fn setup_liquid(
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
+    mut cata_materials: ResMut<Assets<LiquidCataMaterial>>,
 ) {
     let (Some(_config), Some(mut world_assets)) = (config, world_assets) else {
         return; // no client data → no terrain, so no water either
     };
+    // The cata renderer's two non-light inputs, both created here so that a material can never be
+    // built before its bindings exist:
+    //
+    // * the synthesised wave normal map (`art`), which is a compile-time blob and cannot fail;
+    // * the three screen-space targets (`screen`), allocated at a provisional size because the
+    //   window may not have reported one yet at `Startup`. `screen::resize_targets` corrects that on
+    //   the first `Update` with a real size, republishing the handles and re-pointing the materials
+    //   — the same path a genuine resize takes, so the first frame is not a special case anybody
+    //   has to maintain.
+    let bump = images.add(art::bump_image());
+    let targets = LiquidScreenTargets::allocate(&mut images, UVec2::new(1280, 720));
+
     // No light seed and no per-frame push: light, fog and both water swatches come off the shared
     // global-light buffer (`lighting::global_light`), which `build_light_data` has already packed by
     // the time anything draws — the same path terrain and the models take.
@@ -573,9 +646,55 @@ pub(super) fn setup_liquid(
                     light_buf: world_assets.shared_light.clone(),
                 },
             });
+            // The same surface on the Cataclysm renderer. Everything that is a *property of the
+            // surface* — kind lanes, renderer id, animation, blend, cull, the sort rung — is
+            // identical by construction: the toggle changes how water is SHADED, not where it sits
+            // in the frame or what it is. Only the shading inputs are new.
+            let cata = cata_materials.add(ExtendedMaterial {
+                base: StandardMaterial {
+                    unlit: true,
+                    alpha_mode,
+                    cull_mode: None,
+                    double_sided: true,
+                    depth_bias: if kind.is_fullbright() {
+                        0.0
+                    } else {
+                        crate::sky_order::WATER_BIAS
+                    },
+                    ..default()
+                },
+                extension: LiquidCataExt {
+                    frames: frames.clone(),
+                    bump: bump.clone(),
+                    scene_color: targets.color.clone(),
+                    scene_blur: targets.blur.clone(),
+                    scene_depth: targets.depth.clone(),
+                    kind: Vec4::new(
+                        if kind.is_fullbright() { 1.0 } else { 0.0 },
+                        if kind == LiquidKind::Ocean { 1.0 } else { 0.0 },
+                        if path.interior_fog() { 1.0 } else { 0.0 },
+                        WATER_SHININESS,
+                    ),
+                    // `y` starts above-water; `sync_below_water` flips it with the eye.
+                    path: Vec4::new(path.shader_id(), 0.0, 0.0, 0.0),
+                    anim: Vec4::new(
+                        0.0,
+                        frame_count as f32,
+                        if scroll { 1.0 } else { 0.0 },
+                        if crate::dev_state::deterministic_run() {
+                            0.0
+                        } else {
+                            1.0
+                        },
+                    ),
+                    bump_params: cata_bump_params(kind),
+                    shade_params: cata_shade_params(kind),
+                    light_buf: world_assets.shared_light.clone(),
+                },
+            });
             assets
                 .materials
-                .insert(LiquidKey { kind, path, scroll }, LiquidEntry { material });
+                .insert(LiquidKey { kind, path, scroll }, LiquidEntry { material, cata });
         }
     }
     // Frame SETS, not materials — a set backs every renderer/scroll variant of its kind.
@@ -587,6 +706,41 @@ pub(super) fn setup_liquid(
             .count()
     );
     commands.insert_resource(assets);
+    commands.insert_resource(targets);
+}
+
+/// The bump lane for a kind: the two tiling scales, the scroll rate, and the bump strength.
+///
+/// The reference reads these off `LiquidType.dbc`'s `Float[18]` block —
+/// `CMaterialSettings::GetFloat(mat, 3)` and `(mat, 4)` for the scales (each multiplied by
+/// `Liquid::WorldCoordScale`), `(mat, 7) × 0.35` for the strength. 1.12.1's `LiquidType.dbc` has no
+/// such columns, so the table is here instead, seeded from the constants the shipped programs
+/// carry and tuned per kind. Values are in repeats per yard: water wants a long swell, rapids a
+/// short chop.
+fn cata_bump_params(kind: LiquidKind) -> Vec4 {
+    match kind {
+        // Open ocean: the largest features and the slowest drift.
+        LiquidKind::Ocean => Vec4::new(0.018, 0.055, 0.05, 0.9),
+        // A river running: tighter than a lake and noticeably quicker.
+        LiquidKind::Rapids => Vec4::new(0.075, 0.21, 0.30, 1.25),
+        // Lakes and rivers at rest.
+        _ => Vec4::new(0.035, 0.11, 0.09, 1.0),
+    }
+}
+
+/// The shading lane: view perturb (`c23.y`), specular power (`c4.w`), specular scale (`c27.w`) and
+/// sun-glare scale (`c27.z`).
+///
+/// The specular power stays on [`WATER_SHININESS`] — water's own exponent, verified for the 1.12
+/// path and unchanged by the renderer swap, because it describes the *surface*, not the program.
+fn cata_shade_params(kind: LiquidKind) -> Vec4 {
+    let glare = match kind {
+        // Ocean carries the strongest sun track; it is the one surface with an unbroken horizon.
+        LiquidKind::Ocean => 0.35,
+        LiquidKind::Rapids => 0.22,
+        _ => 0.25,
+    };
+    Vec4::new(0.55, WATER_SHININESS, 0.6, glare)
 }
 
 /// Decode frames `1..=count` for a kind — each with its BLP **authored mip chain** — into one
@@ -706,6 +860,7 @@ mod tests {
                 },
                 LiquidEntry {
                     material: Handle::default(),
+                    cata: Handle::default(),
                 },
             )]),
         }
@@ -924,5 +1079,93 @@ mod real_data {
             sw.iter().all(|(_, interior)| !interior),
             "Stormwind's canals and fountains are open to the sky — none takes the interior fog: {sw:?}",
         );
+    }
+}
+
+/// **Re-material every liquid surface when `waterDetail` moves.**
+///
+/// The two renderers are different material *types*, so the swap is a component swap: drop
+/// `MeshMaterial3d<LiquidMaterial>`, add `MeshMaterial3d<LiquidCataMaterial>`, or the reverse. Both
+/// handles already exist ([`LiquidEntry`] builds them side by side at startup), so nothing is
+/// loaded, decoded or compiled here — the cost is one archetype move per surface, paid once per
+/// flip of a settings row.
+///
+/// **Watches the VALUE, not `is_changed()`.** The CVar host constructs its whole `Knobs` bundle on
+/// any cvar write, which deref-muts every knob resource — so `Res::is_changed()` fires when the
+/// player adjusts the volume slider. `terrain_stream`'s `rescatter_clutter` documents the same trap
+/// and takes the same `Local` shape; here the consequence of getting it wrong would be re-materialing
+/// every lake in the world on an unrelated setting.
+pub(super) fn apply_water_detail(
+    mut commands: Commands,
+    detail: Res<WaterDetail>,
+    assets: Option<Res<LiquidAssets>>,
+    all: Query<(Entity, &LiquidLane)>,
+    fresh: Query<(Entity, &LiquidLane), Added<LiquidLane>>,
+    mut last: Local<Option<WaterDetail>>,
+) {
+    let Some(assets) = assets else {
+        return; // no client data - nothing spawned to material
+    };
+    let previous = last.replace(*detail);
+    let changed = previous.is_some_and(|p| p != *detail);
+
+    let dress = |commands: &mut Commands, entity: Entity, lane: &LiquidLane| {
+        let mut e = commands.entity(entity);
+        if detail.is_cata() {
+            if let Some(m) = assets.cata_material(lane.kind, lane.path, lane.scroll) {
+                e.remove::<MeshMaterial3d<LiquidMaterial>>();
+                e.insert(MeshMaterial3d(m));
+            }
+        } else if let Some(m) = assets.material(lane.kind, lane.path, lane.scroll) {
+            e.remove::<MeshMaterial3d<LiquidCataMaterial>>();
+            e.insert(MeshMaterial3d(m));
+        }
+    };
+
+    if changed {
+        // The setting moved: re-dress the whole world. `fresh` is a subset of `all`, so the second
+        // sweep is skipped rather than run twice.
+        let mut swapped = 0usize;
+        for (entity, lane) in &all {
+            dress(&mut commands, entity, lane);
+            swapped += 1;
+        }
+        info!(
+            "liquid: waterDetail {} to {} ({swapped} surface(s) re-materialed)",
+            previous.map_or(u8::MAX, |p| p.0),
+            detail.0
+        );
+        return;
+    }
+    // The steady state: dress whatever streamed in this tick. Usually empty, and an empty `Added`
+    // query is a bitmask test rather than a walk.
+    for (entity, lane) in &fresh {
+        dress(&mut commands, entity, lane);
+    }
+}
+
+/// Flip the cata materials' below-water lane with the camera eye.
+///
+/// The reference chooses `ProcWaterAbove` or `ProcWaterBelow` **per draw**
+/// (`CMaterialWater::RenderAbove` / `RenderBelow`), against that surface's own plane. benilla's
+/// submersion verdict is a single global resource — one eye is in one liquid — and every other
+/// consumer of it (the atmosphere swap, the sky suppression, the clear colour, the drift cloud)
+/// already treats it that way. Flipping one uniform on the shared materials keeps this renderer in
+/// step with the rest of the frame rather than inventing a second, per-surface answer that would
+/// disagree with the sky above it.
+///
+/// Value-watched for the same reason as [`apply_water_detail`].
+pub(super) fn sync_below_water(
+    submerged: Res<super::Underwater>,
+    mut materials: ResMut<Assets<LiquidCataMaterial>>,
+    mut last: Local<Option<bool>>,
+) {
+    let below = submerged.0.is_water();
+    if last.replace(below) == Some(below) {
+        return;
+    }
+    let flag = if below { 1.0 } else { 0.0 };
+    for (_, material) in materials.iter_mut() {
+        material.extension.path.y = flag;
     }
 }

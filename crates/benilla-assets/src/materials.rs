@@ -37,7 +37,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-/// Compile the four WGSL files into the binary and register them under
+/// Compile the five WGSL files into the binary and register them under
 /// `embedded://benilla_assets/shaders/…`. Call **after** Bevy's `AssetPlugin` (it fills the
 /// registry that plugin creates); [`crate::register_asset_loaders`] already does.
 pub fn register_shaders(app: &mut App) {
@@ -45,6 +45,7 @@ pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/wow_model.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid_cata.wgsl");
 }
 
 /// The WDL far-band shader's source, for the law tests that live beside the renderer rather than
@@ -543,6 +544,112 @@ pub struct LiquidExt {
     /// creation, never mutated.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+}
+
+/// **The Cataclysm liquid renderer** (`waterDetail 2`) — the second of benilla's two liquid paths.
+///
+/// A separate material type rather than a shader-def branch on [`LiquidExt`], and deliberately so:
+///
+/// * The two do not share a bind group. This one carries a bump map and three pictures of the frame
+///   ([`benilla_world`'s `liquid::screen`]); the 1.12.1 one carries an animated sheet and nothing
+///   else, and paying its cost on every machine that never turns cata water on would be a tax on
+///   the default-off path for no reason.
+/// * `MaterialExtension::vertex_shader` is an associated function with no key, so a *single*
+///   extension type cannot answer with two different WGSL files. The alternative is one file
+///   forked end to end by `#ifdef`, which would dilute `liquid.wgsl`'s header — 86 lines of
+///   byte-level reverse engineering about a *different* renderer, five previously-wrong readings
+///   and why each was reverted. That record earns its own file.
+///
+/// Swapping is therefore a component swap (`MeshMaterial3d<LiquidMaterial>` ↔
+/// `MeshMaterial3d<LiquidCataMaterial>`), which `benilla_world`'s `liquid::surface` owns.
+pub type LiquidCataMaterial = ExtendedMaterial<StandardMaterial, LiquidCataExt>;
+
+/// Inputs for `liquid_cata.wgsl` — the ported `ProcWater` + `ProcWaterAbove`/`ProcWaterBelow`
+/// (perm 4) program family.
+///
+/// The reference binds ten texture stages for this program; six of them belong to permutations this
+/// client does not port (the dynamic displacement maps, the third material texture, the noise
+/// volume, and the real reflection buffer). What is left is the four below plus the depth ramp,
+/// which is evaluated from the shared light rather than sampled — see `liquid_cata.wgsl`.
+#[derive(Asset, AsBindGroup, Clone, TypePath)]
+pub struct LiquidCataExt {
+    /// The kind's animated frames, exactly as [`LiquidExt::frames`] carries them.
+    ///
+    /// **Water does not read this** — the cata water program has no animated-sheet stage at all,
+    /// its surface detail coming from the bump map and its body from the depth ramp. It stays bound
+    /// because magma and slime still take their sheet as the body colour, and one material type
+    /// covering all five kinds is worth more than a binding the water lane ignores.
+    #[texture(100, dimension = "2d_array", visibility(fragment))]
+    #[sampler(101, visibility(fragment))]
+    pub frames: Handle<Image>,
+
+    /// Stage 5: the tiling wave normal map, sampled four times per fragment at two scales and two
+    /// scroll phases. Synthesised at build time — `benilla_world`'s `liquid::art` is the whole
+    /// account of why, and of why it is a full RGB normal rather than a two-channel derivative.
+    #[texture(103, visibility(fragment))]
+    #[sampler(104, visibility(fragment))]
+    pub bump: Handle<Image>,
+
+    /// Stage 0: the opaque frame, for refraction.
+    #[texture(105, visibility(fragment))]
+    #[sampler(106, visibility(fragment))]
+    pub scene_color: Handle<Image>,
+    /// Stage 3: a blurred quarter-size copy of the same, for the screen-space reflection. Shares
+    /// sampler 106 — both are linear-clamp reads of the same picture at different scales, and
+    /// Metal's per-stage sampler ceiling is close enough here to be worth not spending twice.
+    #[texture(107, visibility(fragment))]
+    pub scene_blur: Handle<Image>,
+    /// Stage 6: linear view depth in yards, `R32Float`.
+    ///
+    /// `filterable = false` and **no sampler**: `R32Float` cannot take a filtering sampler without
+    /// a device feature, and the shader reads it with `textureLoad`. That is not a concession —
+    /// a depth used for an in-front-of/behind comparison wants a point fetch, and interpolating
+    /// across a silhouette would invent a surface that is in neither place.
+    #[texture(108, sample_type = "float", filterable = false, visibility(fragment))]
+    pub scene_depth: Handle<Image>,
+
+    // -------------------------------------------------------------------------------------------
+    // Packed uniform buffer at binding 102 — the WGSL `LiquidParams` struct lists these fields in
+    // the SAME order (each `Vec4` is 16 bytes, no padding). Reordering is a breaking change.
+    // -------------------------------------------------------------------------------------------
+    /// As [`LiquidExt::kind`]: `x` fullbright, `y` ocean swatch, `z` interior fog, `w` sheen
+    /// shininess.
+    #[uniform(102)]
+    pub kind: Vec4,
+    /// As [`LiquidExt::path`]: `x` = which of the reference's three liquid renderers owns this
+    /// surface. `y` = **the below-water flag** — 1 when the camera eye is under this surface, which
+    /// is what selects `ProcWaterBelow` over `ProcWaterAbove`. The reference makes the same choice
+    /// per draw (`CMaterialWater::RenderAbove` / `RenderBelow`), not per fragment.
+    #[uniform(102)]
+    pub path: Vec4,
+    /// As [`LiquidExt::anim`]: `x` reserved, `y` frame count, `z` scroll flag, `w` clock enable.
+    #[uniform(102)]
+    pub anim: Vec4,
+    /// The bump lane, from the reference's `LiquidType.dbc` `Float[18]` block:
+    /// `x`/`y` = the two tiling scales (`GetFloat(mat, 3)` / `GetFloat(mat, 4)`, each times
+    /// `Liquid::WorldCoordScale`), `z` = the scroll rate, `w` = **bump strength** (`c23.w`,
+    /// `GetFloat(mat, 7) × 0.35`).
+    #[uniform(102)]
+    pub bump_params: Vec4,
+    /// The shading lane: `x` = the view-perturb amount (`c23.y`), `y` = specular power (`c4.w`),
+    /// `z` = specular scale (`c27.w`), `w` = sun-glare scale (`c27.z`).
+    #[uniform(102)]
+    pub shade_params: Vec4,
+
+    /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
+    /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its
+    /// lighting, and both fog blocks; it needs no light input the 1.12.1 path did not already have.
+    #[storage(90, read_only, buffer, visibility(vertex, fragment))]
+    pub light_buf: Buffer,
+}
+
+impl MaterialExtension for LiquidCataExt {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+    }
 }
 
 impl MaterialExtension for LiquidExt {

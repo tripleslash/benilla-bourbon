@@ -1,0 +1,8 @@
+# Binary blobs compiled into the client with `include_bytes!`.
+#
+# Without this, a checkout with `core.autocrlf=true` (the Windows default, and what this tree is
+# checked out with) rewrites any 0x0A byte that follows a 0x0D into 0x0D 0x0A on the way out — which
+# for a texture is silent corruption, and for `liquid::art`'s committed bump map is a test that
+# fails on Windows and passes everywhere else. Marking them binary is what makes the bytes in the
+# repository the bytes the compiler sees.
+*.rgba binary

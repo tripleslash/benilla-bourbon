@@ -179,7 +179,7 @@ fn arm_depth_binding(
 // ---------------------------------------------------------------- render world
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct SsilvbLabel;
+pub(crate) struct SsilvbLabel;
 
 /// The two layouts and the four pipelines.
 ///

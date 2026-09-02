@@ -78,11 +78,13 @@
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
-use benilla_assets::materials::LiquidMaterial;
+use benilla_assets::materials::{LiquidCataMaterial, LiquidMaterial};
 use benilla_assets::AssetSet;
 
+mod art;
 mod drift;
 mod query;
+mod screen;
 #[cfg(test)]
 mod real_data;
 mod spatial;
@@ -106,6 +108,56 @@ pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
 };
 
+/// **Which liquid renderer the client is running** — the `waterDetail` CVar, in the reference's own
+/// value space.
+///
+/// `0` is the 1.12.1 path (`liquid.wgsl`, a port of `Water.bls` and the fixed-function combine
+/// around it) and `2` is the Cataclysm path (`liquid_cata.wgsl`, `ProcWater` + `ProcWaterAbove`).
+/// Those are the reference's numbers, not ours: `Liquid::CMaterialWater::InitResources` switches on
+/// exactly this cvar, and its `1` is the *medium* tier (`MediumWater`), which benilla does not
+/// implement. Leaving the gap rather than renumbering means a medium tier can land later without
+/// re-teaching the options page, the config files players already have, or this type.
+///
+/// Cata is the default. `$WOW_WATER_DETAIL` overrides for a session.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WaterDetail(pub u8);
+
+/// The 1.12.1 renderer.
+pub const WATER_DETAIL_LEGACY: u8 = 0;
+/// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
+pub const WATER_DETAIL_CATA: u8 = 2;
+
+impl WaterDetail {
+    /// Is this the Cataclysm renderer? Written as "not legacy" rather than "== 2" so that a medium
+    /// tier landing at `1` joins the cata lane by default instead of silently falling back.
+    pub fn is_cata(self) -> bool {
+        self.0 != WATER_DETAIL_LEGACY
+    }
+
+    /// Clamp an arbitrary cvar value onto a tier this build actually has. Anything that is not a
+    /// known tier reads as cata, which is the default and the better-looking answer; a player who
+    /// hand-edits `waterDetail 7` into their config gets water, not a black lake.
+    pub fn from_cvar(v: f32) -> Self {
+        if v <= 0.0 {
+            WaterDetail(WATER_DETAIL_LEGACY)
+        } else {
+            WaterDetail(WATER_DETAIL_CATA)
+        }
+    }
+}
+
+impl Default for WaterDetail {
+    fn default() -> Self {
+        match std::env::var("WOW_WATER_DETAIL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            Some(v) => Self::from_cvar(v),
+            None => WaterDetail(WATER_DETAIL_CATA),
+        }
+    }
+}
+
 /// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
 /// verdict orders itself `.after(..)`. The submerged view is a whole-screen swap (atmosphere, clear
 /// colour, and the sky-pass suppression all flip on it), so a consumer reading a frame-old verdict
@@ -123,6 +175,8 @@ pub(crate) struct LiquidPlugin;
 impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
+            .add_plugins(MaterialPlugin::<LiquidCataMaterial>::default())
+            .init_resource::<WaterDetail>()
             .init_resource::<Underwater>()
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
@@ -131,6 +185,21 @@ impl Plugin for LiquidPlugin {
             // entry in between self-filters at the consumer (`Query::get` misses).
             .add_systems(PreUpdate, maintain_water_index)
             .add_systems(Startup, surface::setup_liquid.after(AssetSet::Open))
+            // The renderer swap and the above/below flip. Both are value-watched (see their
+            // headers) so the steady state is one compare, and both run in `Update` because their
+            // effect is a material the NEXT frame draws with — there is no ordering to get right
+            // beyond being before the extract.
+            .add_systems(
+                Update,
+                (
+                    surface::sync_below_water.after(SubmersionVerdict),
+                    screen::resize_targets,
+                ),
+            )
+            // `PostUpdate`, so the tiles the streamer spawned this tick have already had their
+            // commands applied and show up in its `Added` query — a surface is never drawn
+            // material-less, and never dressed twice.
+            .add_systems(PostUpdate, surface::apply_water_detail)
             .add_systems(
                 Update,
                 (
@@ -164,5 +233,15 @@ impl Plugin for LiquidPlugin {
         // The underwater drift cloud — the one thing in this subsystem that RENDERS because the
         // eye is submerged, rather than answering where the liquid is (see the layout note above).
         drift::register(app);
+        // The three pictures of the frame the cata renderer reads, and the graph node that fills
+        // them. Registered unconditionally: the node stands itself down when the targets are absent
+        // or MSAA is on, and the materials that read them exist either way.
+        screen::register(app);
+    }
+
+    /// The liquid screen pass's edge to `Ssilvb`, which can only be declared once every plugin has
+    /// built — see [`screen::register_late`].
+    fn finish(&self, app: &mut App) {
+        screen::register_late(app);
     }
 }

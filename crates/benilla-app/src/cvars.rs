@@ -58,6 +58,7 @@ use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
+use benilla_world::liquid::WaterDetail;
 use benilla_world::ssilvb::{IndirectLighting, SSILVB_RANGE};
 use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
 
@@ -784,6 +785,25 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
          split across two rows only so a player can move them apart",
     ),
+    // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
+    //
+    // The name and the value space are the REFERENCE's, taken from a later client rather than
+    // invented here: `Liquid::CMaterialWater::InitResources` (WoW 4.1.0) switches on exactly this
+    // CVar, binding `Water` at 0, `MediumWater` at 1 and `ProcWaterAbove`/`ProcWaterBelow` at 2.
+    // benilla implements 0 (its 1.12.1 renderer, `liquid.wgsl`) and 2 (`liquid_cata.wgsl`), and
+    // deliberately leaves the 1 slot EMPTY rather than renumbering to a dense 0/1 — a medium tier
+    // is a real thing that could land later, and it should land on its own number instead of
+    // shifting a value players already have in `config.toml`.
+    //
+    // **Registered at 2**, so cata water is what the client looks like out of the box. That is a
+    // benilla choice, not a reference default (1.12.1 has no such CVar at all: its water is the
+    // only water it has), which is why this is an `ours` row. `$WOW_WATER_DETAIL` overrides
+    // session-only.
+    ours(
+        "waterDetail",
+        "2",
+        "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below) and keeps 1.12.1's renderer on tier 0",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -927,6 +947,7 @@ pub(crate) struct KnobParams<'w> {
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
     indirect: ResMut<'w, IndirectLighting>,
+    water_detail: ResMut<'w, WaterDetail>,
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
@@ -963,6 +984,7 @@ impl KnobParams<'_> {
             video: &mut self.video,
             render_scale: &mut self.render_scale,
             indirect: &mut self.indirect,
+            water_detail: &mut self.water_detail,
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
@@ -996,6 +1018,8 @@ struct Knobs<'a> {
     render_scale: &'a mut RenderScale,
     /// The two screen-space indirect-lighting strengths (`ssaoStrength` / `ssgiStrength`).
     indirect: &'a mut IndirectLighting,
+    /// Which liquid renderer is running (`waterDetail`).
+    water_detail: &'a mut WaterDetail,
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
@@ -1134,6 +1158,11 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "ssgistrength" => {
             knobs.indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
         }
+        // The liquid renderer. Not clamped into a range like the numeric rows above — the value
+        // space is a set of TIERS with a hole at 1, so `WaterDetail::from_cvar` maps rather than
+        // clamps, and anything unrecognised reads as cata (the default, and the one that cannot
+        // look broken).
+        "waterdetail" => *knobs.water_detail = WaterDetail::from_cvar(v),
         // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
         // and nothing reads this resource after the world camera's spawn.
@@ -1269,6 +1298,13 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     }
     if std::env::var_os("WOW_SSGI").is_some() {
         persist.env_overridden.insert("ssgistrength".into());
+    }
+    // `$WOW_WATER_DETAIL` is the liquid-renderer A/B lever, session-only on the same law: every
+    // side-by-side of the two water paths sets it, and a value that stuck in the file would leave
+    // the player's client on whichever side the last comparison happened to want.
+    // `WaterDetail::default()` has already taken it; this keeps it off disk.
+    if std::env::var_os("WOW_WATER_DETAIL").is_some() {
+        persist.env_overridden.insert("waterdetail".into());
     }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
@@ -1461,6 +1497,7 @@ fn sync_cvars(
             video,
             render_scale,
             indirect,
+            water_detail,
             pane_rate,
             guild_notify,
             block_trades,
@@ -1501,7 +1538,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 47] = [
+        let session: [(&str, String); 48] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1560,6 +1597,7 @@ fn sync_cvars(
             ),
             ("boothHalfRate", flag(pane_rate.half)),
             ("renderScale", render_scale.0.to_string()),
+            ("waterDetail", water_detail.0.to_string()),
             ("ssaoStrength", indirect.ao.to_string()),
             ("ssgiStrength", indirect.gi.to_string()),
             ("gxMultisample", msaa.samples.to_string()),
@@ -1977,6 +2015,12 @@ mod tests {
         // repeated here: `benilla_world::ssilvb` owns what the pass ships at, and these registered
         // strings are the same fact spelled for the CVar host. (Not `IndirectLighting::default()`,
         // which reads $WOW_SSAO / $WOW_SSGI — a shell that exports one must not move this test.)
+        // The registered default IS the engine's tier constant, so the string and the code cannot
+        // drift apart — the same weld every other row in this test carries.
+        assert_eq!(
+            d["waterDetail"],
+            f32::from(benilla_world::liquid::WATER_DETAIL_CATA)
+        );
         assert_eq!(d["ssaoStrength"], AO_DEFAULT);
         assert_eq!(d["ssgiStrength"], GI_DEFAULT);
     }
@@ -2021,6 +2065,8 @@ mod tests {
             ao: AO_DEFAULT,
             gi: GI_DEFAULT,
         };
+        // Literal for the same reason yet again: WaterDetail::default() reads $WOW_WATER_DETAIL.
+        let mut water_detail = WaterDetail(benilla_world::liquid::WATER_DETAIL_CATA);
         // Literal for the same reason again (1642): TexFilterSetting::default() reads
         // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
         let mut tex_filter = benilla_assets::TexFilterSetting {
@@ -2050,6 +2096,7 @@ mod tests {
             video: &mut video,
             render_scale: &mut render_scale,
             indirect: &mut indirect,
+            water_detail: &mut water_detail,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
             block_trades: &mut block_trades,
@@ -2141,6 +2188,21 @@ mod tests {
         assert_eq!(knobs.indirect.ao, *SSILVB_RANGE.end());
         assert!(apply_to_knobs("ssaostrength", "-1", &mut knobs));
         assert_eq!(knobs.indirect.ao, *SSILVB_RANGE.start());
+        // `waterDetail` MAPS rather than clamps: the value space is a set of tiers, and everything
+        // that is not the 1.12.1 renderer resolves to cata. `1` — the reference's medium tier,
+        // which benilla does not implement — is the interesting case: it must land on a renderer
+        // that exists, not on a hole.
+        assert!(apply_to_knobs("waterDetail", "0", &mut knobs));
+        assert!(!knobs.water_detail.is_cata());
+        assert!(apply_to_knobs("waterdetail", "2", &mut knobs));
+        assert!(knobs.water_detail.is_cata());
+        assert!(apply_to_knobs("waterDetail", "1", &mut knobs));
+        assert!(
+            knobs.water_detail.is_cata(),
+            "the unimplemented medium tier must resolve to a renderer that exists"
+        );
+        assert!(apply_to_knobs("waterDetail", "-3", &mut knobs));
+        assert!(!knobs.water_detail.is_cata());
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -2387,6 +2449,8 @@ mod tests {
                 ao: AO_DEFAULT,
                 gi: GI_DEFAULT,
             })
+            // Literal for the same reason again: WaterDetail::default() reads $WOW_WATER_DETAIL.
+            .insert_resource(WaterDetail(benilla_world::liquid::WATER_DETAIL_CATA))
             // Literal for the same reason again (1667): Realmlist::default() reads $WOW_HOST.
             .insert_resource(crate::realmlist::Realmlist::unpinned(
                 crate::realmlist::DEFAULT_REALMLIST,

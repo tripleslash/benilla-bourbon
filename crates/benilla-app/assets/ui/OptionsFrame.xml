@@ -697,6 +697,16 @@
             .. "a painted wall tints the floor.\n\n"
             .. "0% turns off colour bleeding and leaves Ambient Occlusion running on its own."
 
+        -- Water Detail: which liquid renderer draws the world's water. Not a 1.12 row -- 1.12 has
+        -- one water and no CVar for it -- so a BENILLA_ description, like the two above. The CVar
+        -- name and its values ARE the reference's, from a later client's liquid system; the row
+        -- offers the two tiers benilla implements.
+        BENILLA_TOOLTIP_WATER_DETAIL =
+            "Which water the world is drawn with.\n\n"
+            .. "Modern adds surface waves, a reflection of the sky and shoreline, and lets you "
+            .. "see through the surface to the bottom. Classic is the original flat, tinted water.\n\n"
+            .. "Modern water costs additional GPU time."
+
         OPTIONS_PAGE_ROWS = {
             Controls = {
                 "RowStickyTarget", "RowBlockTrades", "RowAutoLoot", "RowInvertMouse",
@@ -713,7 +723,8 @@
                 -- The indirect-lighting pair sits between the shadow toggle and Render Scale:
                 -- everything above it is what the world IS, Render Scale is how big it gets
                 -- drawn, and Render Scale keeps the last seat its own note below claims.
-                "RowAmbientOcclusion", "RowIndirectLight", "RowRenderScale",
+                "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
+                "RowRenderScale",
             },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
@@ -2595,10 +2606,40 @@
                                                 OptionsSliderRow_Setup(self, 0, 1.0, 0.05)
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
+                                        <Frame name="$parentRowWaterDetail" inherits="OptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Water Detail -- which of benilla's two liquid
+                                                -- renderers draws the world. A DROPDOWN rather than a
+                                                -- checkbox, and the difference is load-bearing:
+                                                -- OptionsCheckbox_OnClick writes "1"/"0", and this row
+                                                -- writes "0"/"2" because those are the REFERENCE's own
+                                                -- tier numbers (4.1.0's Liquid::CMaterialWater::
+                                                -- InitResources switches on waterDetail: Water at 0,
+                                                -- MediumWater at 1, ProcWaterAbove/Below at 2).
+                                                -- benilla implements 0 and 2 and leaves 1 empty, so a
+                                                -- medium tier can land later without renumbering what
+                                                -- players already have in config.toml.
+                                                --
+                                                -- Modern (the Cataclysm-era renderer) is the default: it
+                                                -- is the newer look and the better one. Classic stays a
+                                                -- click away for a player who wants the original, or whose
+                                                -- machine would rather not pay for the screen-space passes.
+                                                OptionsRow_OnLoad(self, "waterDetail", "Water Detail",
+                                                    "BENILLA_TOOLTIP_WATER_DETAIL")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Modern", value = "2" },
+                                                    { text = "Classic", value = "0" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Render Scale (decision 1639) -- benilla's own

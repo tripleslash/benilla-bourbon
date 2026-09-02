@@ -13,7 +13,7 @@ use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
 
-use benilla_assets::materials::{LiquidMaterial, WowModelMaterial};
+use benilla_assets::materials::{LiquidCataMaterial, LiquidMaterial, WowModelMaterial};
 use benilla_world::clouds::CloudMaterial;
 use benilla_world::model_render::{
     far_twin_of, model_material, zfill_material, MaterialCache, ShadeSel,
@@ -52,6 +52,13 @@ pub(super) struct WarmLanes<'w> {
     clouds: ResMut<'w, Assets<CloudMaterial>>,
     sky: ResMut<'w, Assets<SkyMaterial>>,
     liquid: ResMut<'w, Assets<LiquidMaterial>>,
+    /// The Cataclysm liquid materials (`waterDetail 2`). A SECOND lane rather than more
+    /// handles on the one above, because the two renderers are different material types with
+    /// different bind groups and therefore different pipelines. Both are warmed whichever way
+    /// the setting currently points: a player who flips it mid-session must not pay a
+    /// compile stall for the privilege, and flipping it is exactly the moment they are
+    /// looking at water.
+    liquid_cata: ResMut<'w, Assets<LiquidCataMaterial>>,
     /// The plain-`StandardMaterial` lanes (0938): representatives for the on-demand nameplate
     /// and raid-mark materials go through this store the way their builders do.
     standard: ResMut<'w, Assets<StandardMaterial>>,
@@ -460,7 +467,8 @@ pub(super) fn spawn_menagerie(
     let (plain_mesh, plain_aabb, _) = layouts[0].clone();
     let (colours_mesh, colours_aabb, _) = layouts[2].clone();
     let posuv = meshes.add(warm_pos_uv_mesh());
-    let liquid_mesh = meshes.add(warm_liquid_mesh());
+    let liquid_mesh = meshes.add(warm_liquid_mesh(false));
+    let liquid_mesh_colored = meshes.add(warm_liquid_mesh(true));
     // Celestial discs + glares (`sun::setup` quads: position+normal+UV).
     for mat in lane_handles(&mut lanes.celestial) {
         spawn_lane_rig(
@@ -510,9 +518,22 @@ pub(super) fn spawn_menagerie(
             &mut count,
         );
     }
-    // Liquid: every kind × fog-block material `setup_liquid` built, on the liquid grid layout.
-    for mat in lane_handles(&mut lanes.liquid) {
-        spawn_lane_rig(commands, cam, None, &liquid_mesh, None, mat, &mut count);
+    // Liquid: every kind × fog-block material `setup_liquid` built, on BOTH renderers (a player can
+    // move `waterDetail` at any time and each is its own pipeline) and on BOTH vertex layouts.
+    //
+    // The second layout is not new here, only newly warmed: `liquid::surface::liquid_bevy_mesh`
+    // adds `ATTRIBUTE_COLOR` for a WMO *interior* pool, whose body colour is its own MOMT
+    // `diffColor` baked into the mesh, and that layout has never been in the menagerie — so the
+    // first dungeon pool a player swam up to compiled its pipeline live, outside the loading cover
+    // `watch_pipelines` polices. One unwarmed variant was a bug worth leaving alone; two (one per
+    // renderer) is one too many, so it is closed rather than doubled.
+    for mesh in [&liquid_mesh, &liquid_mesh_colored] {
+        for mat in lane_handles(&mut lanes.liquid) {
+            spawn_lane_rig(commands, cam, None, mesh, None, mat, &mut count);
+        }
+        for mat in lane_handles(&mut lanes.liquid_cata) {
+            spawn_lane_rig(commands, cam, None, mesh, None, mat, &mut count);
+        }
     }
     // The plain-`StandardMaterial` lanes (0938 — the director's evening log). The fallback cube
     // (`entities::CubeAssets`, drawn while any entity's model streams) uses the production mesh
@@ -700,9 +721,14 @@ fn warm_pos_uv_mesh() -> Mesh {
     m
 }
 
-/// A tiny quad in the liquid grid's layout — POSITION + NORMAL + UV_0 + UV_1
-/// (`liquid::surface` inserts exactly these four attributes).
-fn warm_liquid_mesh() -> Mesh {
+/// A tiny quad in the liquid grid's layout — POSITION + NORMAL + UV_0 + UV_1, plus COLOR when
+/// `colored`.
+///
+/// Both layouts ship: `liquid::surface::liquid_bevy_mesh` inserts the first four always and adds
+/// `ATTRIBUTE_COLOR` for a WMO interior pool, which carries its `MOMT.diffColor` body colour on the
+/// vertex. Two layouts is two pipelines per material, and a mesh attribute set is a pipeline key —
+/// which is why warming only the four-attribute one left every dungeon pool compiling live.
+fn warm_liquid_mesh(colored: bool) -> Mesh {
     let mut m = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -720,6 +746,9 @@ fn warm_liquid_mesh() -> Mesh {
     m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4]);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs.clone());
     m.insert_attribute(Mesh::ATTRIBUTE_UV_1, uvs);
+    if colored {
+        m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0, 1.0, 1.0, 1.0]; 4]);
+    }
     m.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
     m
 }

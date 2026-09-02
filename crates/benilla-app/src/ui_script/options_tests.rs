@@ -1223,6 +1223,79 @@ fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Water Detail** — the row that picks which of benilla's two liquid renderers draws the world.
+///
+/// The assertions worth having here are the ones a checkbox would have made impossible. This row
+/// writes `"0"` and `"2"`, not `"1"`/`"0"`, because those are the *reference's* tier numbers
+/// (4.1.0's `Liquid::CMaterialWater::InitResources` binds `Water` at 0, `MediumWater` at 1 and
+/// `ProcWaterAbove`/`ProcWaterBelow` at 2), and benilla deliberately leaves the middle tier empty
+/// so it can land later without renumbering a value players already have on disk. A checkbox
+/// cannot express that — `OptionsCheckbox_OnClick` hard-writes `"1"`/`"0"` — so the shape of the
+/// control IS part of what is being verified.
+///
+/// Modern is listed first because it is the default, and `Defaults` must return to it: this is
+/// the one graphics row whose default is the *newer* behaviour rather than the reference's.
+#[test]
+fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
+    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowWaterDetail";
+    let mut s = audio_harness();
+    // Seed the 1.12.1 tier BEFORE the XML loads, so the capsule has something to read that is not
+    // the registered default — a row that showed "Cataclysm" here would pass on a stuck widget.
+    s.set_cvar_host("waterDetail", "0");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Water Detail"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Classic"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    // Two entries, and only two: the medium tier is a hole in the value space, not a row.
+    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
+    assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
+    assert_eq!(
+        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
+        2.0
+    );
+
+    // Picking Modern writes "2" — the reference's tier number, not a boolean.
+    s.run("DropDownList1Button1:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("waterDetail".to_string(), "2".to_string())],
+        "the row writes the reference's tier number on click, not on Apply"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Modern"
+    );
+    assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
+
+    // Defaults comes back to Modern, this row's default being the newer behaviour.
+    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
+    s.run("DropDownList1Button2:Click()").unwrap();
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Modern"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// **Vertical Sync** (1394) — the Graphics page's third row, and the first option in this window
 /// that reaches the *window* rather than a gameplay or UI knob. It is 1.12's own Video Options
 /// checkbox 5 (`gxVSync`), which lived on the perf HUD as a dev checkbox until it turned out to be
@@ -2271,6 +2344,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "GraphicsRowAmbientOcclusion",
             ),
             ("BENILLA_TOOLTIP_INDIRECT_LIGHT", "GraphicsRowIndirectLight"),
+            ("BENILLA_TOOLTIP_WATER_DETAIL", "GraphicsRowWaterDetail"),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
@@ -2321,7 +2395,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // Enable Sound in Background (1847), the Audio page's fifth checkbox and the one row on that
     // page the reference never made settable; the 31st, 32nd and 33rd are the Graphics page's
     // World Shadows and its two indirect-lighting sliders, benilla's own on the same terms.
-    assert_eq!(checked, 61, "every tipped row carries a live key");
+    assert_eq!(checked, 62, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
