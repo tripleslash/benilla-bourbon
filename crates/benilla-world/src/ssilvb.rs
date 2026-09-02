@@ -38,10 +38,12 @@ use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    texture_2d, texture_depth_2d, uniform_buffer, uniform_buffer_sized,
+    texture_2d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
+    uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::shader::ShaderDefVal;
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
@@ -181,15 +183,25 @@ fn arm_depth_binding(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct SsilvbLabel;
 
-/// The two layouts and the four pipelines.
+/// The two layouts and the four pipelines, **per MSAA sample count**.
 ///
-/// **Why two layouts.** Every pass but the last reads (view, depth, one source texture, params);
-/// the composite reads only the gathered term and the params, and needs neither the view nor the
-/// depth. One WGSL module cannot declare two different bindings at the same index, so the shader
-/// numbers its four slots once and each layout claims the subset its entry point uses — which is
-/// exactly what `with_indices` is for.
+/// **Why two layouts.** Every pass but the last reads (view, depth, source, params); the composite
+/// reads only the gathered term and the params, and needs neither the view nor the depth. One WGSL
+/// module cannot declare two different bindings at the same index, so the shader numbers its four
+/// slots once and each layout claims the subset its entry point uses.
+///
+/// **Why keyed on sample count.** Two things change with it, and neither is expressible as a
+/// runtime flag: the *binding type* of the view's depth (which has no resolve, unlike its colour),
+/// and the composite's own `multisample` state — that pass writes into the view target, which is
+/// multisampled when the rest of the frame is. `MsaaSetting` is latched at camera spawn, so in
+/// practice one variant is built per session.
 #[derive(Resource)]
 struct SsilvbPipelines {
+    shader: Handle<Shader>,
+    variants: bevy::platform::collections::HashMap<u32, SsilvbVariant>,
+}
+
+struct SsilvbVariant {
     layout_pass: BindGroupLayoutDescriptor,
     layout_composite: BindGroupLayoutDescriptor,
     gather: CachedRenderPipelineId,
@@ -198,23 +210,60 @@ struct SsilvbPipelines {
     composite: CachedRenderPipelineId,
 }
 
-fn init_pipelines(
-    mut commands: Commands,
+fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(SsilvbPipelines {
+        shader: asset_server.load("embedded://benilla_world/shaders/ssilvb.wgsl"),
+        variants: Default::default(),
+    });
+}
+
+/// Build the variant this frame's views need, once each. See [`SsilvbPipelines`] for why the sample
+/// count cannot be a runtime flag, and `liquid::screen::specialize_pipelines` for the twin of this.
+fn specialize_pipelines(
+    mut pipelines: ResMut<SsilvbPipelines>,
     fullscreen_shader: Res<FullscreenShader>,
-    asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    lighting: Res<IndirectLighting>,
+    views: Query<&Msaa, With<SsilvbView>>,
 ) {
-    let shader: Handle<Shader> = asset_server.load("embedded://benilla_world/shaders/ssilvb.wgsl");
+    if !lighting.enabled() {
+        return;
+    }
+    for msaa in &views {
+        let samples = msaa.samples();
+        if pipelines.variants.contains_key(&samples) {
+            continue;
+        }
+        let variant =
+            build_variant(&pipelines.shader, &fullscreen_shader, &pipeline_cache, samples);
+        pipelines.variants.insert(samples, variant);
+    }
+}
+
+fn build_variant(
+    shader: &Handle<Shader>,
+    fullscreen_shader: &FullscreenShader,
+    pipeline_cache: &PipelineCache,
+    samples: u32,
+) -> SsilvbVariant {
+    let ms = samples > 1;
     let params = || uniform_buffer_sized(false, Some(std::num::NonZero::new(16).unwrap()));
-    let colour = || texture_2d(TextureSampleType::Float { filterable: true });
+    let term = || texture_2d(TextureSampleType::Float { filterable: true });
     let layout_pass = BindGroupLayoutDescriptor::new(
         "ssilvb_pass_layout",
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
             (
                 (0, uniform_buffer::<ViewUniform>(true)),
-                (1, texture_depth_2d()),
-                (2, colour()),
+                (
+                    1,
+                    if ms {
+                        texture_depth_2d_multisampled()
+                    } else {
+                        texture_depth_2d()
+                    },
+                ),
+                (2, term()),
                 (3, params()),
             ),
         ),
@@ -223,13 +272,19 @@ fn init_pipelines(
         "ssilvb_composite_layout",
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
-            ((2, colour()), (3, params())),
+            ((2, term()), (3, params())),
         ),
     );
+    let defs: Vec<ShaderDefVal> = if ms {
+        vec!["SSILVB_MSAA".into()]
+    } else {
+        vec![]
+    };
     let pipeline = |label: &'static str,
                     layout: &BindGroupLayoutDescriptor,
                     entry: &'static str,
-                    blend: Option<BlendState>|
+                    blend: Option<BlendState>,
+                    target_samples: u32|
      -> RenderPipelineDescriptor {
         RenderPipelineDescriptor {
             label: Some(label.into()),
@@ -237,7 +292,7 @@ fn init_pipelines(
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),
-                shader_defs: vec![],
+                shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format: ViewTarget::TEXTURE_FORMAT_HDR,
@@ -245,6 +300,13 @@ fn init_pipelines(
                     write_mask: ColorWrites::ALL,
                 })],
             }),
+            // The gather and the two blurs write this pass's OWN single-sampled ping-pong, so they
+            // stay at one sample whatever the frame is doing. Only the composite writes the view
+            // target, and it has to match it.
+            multisample: MultisampleState {
+                count: target_samples,
+                ..default()
+            },
             ..default()
         }
     };
@@ -254,6 +316,10 @@ fn init_pipelines(
     // pass left on it. Flipping the view target's ping-pong here would instead hand that pass a
     // texture it had not used yet, and Bevy clears an attachment on first use — the whole opaque
     // frame, gone. Alpha is passed through untouched (`Zero·Src + One·Dst`).
+    //
+    // Under MSAA the multiply lands on every sample of the pixel, which is right: the occlusion is
+    // a property of the pixel's neighbourhood, not of which triangle happened to cover which
+    // sample, and darkening the samples unequally would show up as a fringe on every silhouette.
     let multiply = Some(BlendState {
         color: BlendComponent {
             src_factor: BlendFactor::Dst,
@@ -266,34 +332,38 @@ fn init_pipelines(
             operation: BlendOperation::Add,
         },
     });
-    commands.insert_resource(SsilvbPipelines {
+    SsilvbVariant {
         gather: pipeline_cache.queue_render_pipeline(pipeline(
             "ssilvb_gather",
             &layout_pass,
             "fs_gather",
             None,
+            1,
         )),
         blur_h: pipeline_cache.queue_render_pipeline(pipeline(
             "ssilvb_blur_h",
             &layout_pass,
             "fs_blur_h",
             None,
+            1,
         )),
         blur_v: pipeline_cache.queue_render_pipeline(pipeline(
             "ssilvb_blur_v",
             &layout_pass,
             "fs_blur_v",
             None,
+            1,
         )),
         composite: pipeline_cache.queue_render_pipeline(pipeline(
             "ssilvb_composite",
             &layout_composite,
             "fs_composite",
             multiply,
+            samples,
         )),
         layout_pass,
         layout_composite,
-    });
+    }
 }
 
 /// The gather target and its blur ping-pong, plus the 16-byte params uniform.
@@ -319,10 +389,7 @@ fn prepare_textures(
     if !lighting.enabled() {
         return;
     }
-    for (entity, camera, msaa, existing) in &views {
-        if *msaa != Msaa::Off {
-            continue; // see `SsilvbNode::run` for why multisampling stands the pass down
-        }
+    for (entity, camera, _msaa, existing) in &views {
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
@@ -366,20 +433,6 @@ fn prepare_textures(
     }
 }
 
-/// Say once, out loud, that multisampling stood this pass down.
-///
-/// A player who sets `gxMultisample 4` and then reports "the ambient occlusion stopped working" is
-/// otherwise asking a question no log can answer.
-fn warn_msaa_once() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        info!(
-            "ssilvb: multisampling is on (gxMultisample) — indirect lighting is off for this \
-             session; a multisampled depth buffer cannot be read by the gather"
-        );
-    });
-}
-
 #[derive(Default)]
 struct SsilvbNode;
 
@@ -405,15 +458,11 @@ impl ViewNode for SsilvbNode {
         if !lighting.enabled() {
             return Ok(());
         }
-        // **Multisampling stands the whole pass down.** A multisampled depth texture is a different
-        // binding type with no single depth per pixel to reconstruct a position from, and a
-        // mid-graph `post_process_write` against an MSAA resolve chain is a hazard on top. Bevy's
-        // own SSAO makes the same trade; `MsaaSetting::default()` is one sample, so this is the
-        // shipped path standing down, not the common one.
-        if *msaa != Msaa::Off {
-            warn_msaa_once();
-            return Ok(());
-        }
+        // **Multisampling no longer stands this pass down.** A multisampled depth and colour are
+        // different binding types, not missing information: `build_variant` compiles a second set
+        // of pipelines that read them per-sample, and the composite matches the view target's own
+        // sample count so the multiply lands on every sample. Nothing is resolved to make it work,
+        // and the single-sampled build is unchanged — it never sees the MSAA spelling at all.
         // The depth texture has to have been ARMED for sampling before it can be bound, and the
         // arming is a main-world write that reallocates it — so on the first frame after an enable
         // (and on the frame a re-created camera has not been marked yet) the buffer in hand is
@@ -429,12 +478,15 @@ impl ViewNode for SsilvbNode {
             return Ok(());
         }
         let pipelines = world.resource::<SsilvbPipelines>();
+        let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
+            return Ok(()); // `specialize_pipelines` builds it this frame; gathered next
+        };
         let pipeline_cache = world.resource::<PipelineCache>();
         let (Some(gather), Some(blur_h), Some(blur_v), Some(composite)) = (
-            pipeline_cache.get_render_pipeline(pipelines.gather),
-            pipeline_cache.get_render_pipeline(pipelines.blur_h),
-            pipeline_cache.get_render_pipeline(pipelines.blur_v),
-            pipeline_cache.get_render_pipeline(pipelines.composite),
+            pipeline_cache.get_render_pipeline(variant.gather),
+            pipeline_cache.get_render_pipeline(variant.blur_h),
+            pipeline_cache.get_render_pipeline(variant.blur_v),
+            pipeline_cache.get_render_pipeline(variant.composite),
         ) else {
             return Ok(()); // pipelines still compiling — draw the frame un-occluded
         };
@@ -453,8 +505,8 @@ impl ViewNode for SsilvbNode {
         );
 
         let render_device = render_context.render_device().clone();
-        let layout_pass = pipeline_cache.get_bind_group_layout(&pipelines.layout_pass);
-        let layout_composite = pipeline_cache.get_bind_group_layout(&pipelines.layout_composite);
+        let layout_pass = pipeline_cache.get_bind_group_layout(&variant.layout_pass);
+        let layout_composite = pipeline_cache.get_bind_group_layout(&variant.layout_composite);
 
         // Every bind group here is built per frame. The gather binds the view target's live main
         // texture, which flips whenever anything ahead of this node post-processes, and the rest
@@ -480,7 +532,8 @@ impl ViewNode for SsilvbNode {
                 "ssilvb_gather",
                 gather,
                 // The opaque world as it stands: terrain, both model lanes, and the retained
-                // cells. Read as a plain texture — no pass has it bound as an attachment here.
+                // cells. Read as a plain texture — Bevy resolved it at the end of the opaque pass,
+                // and no pass has it bound as an attachment here.
                 pass_bind("ssilvb_gather_bind", view_target.main_texture_view()),
                 &textures.a.default_view,
             ),
@@ -566,7 +619,7 @@ impl Plugin for SsilvbPlugin {
             .add_systems(RenderStartup, init_pipelines)
             .add_systems(
                 Render,
-                prepare_textures.in_set(RenderSystems::PrepareResources),
+                (prepare_textures, specialize_pipelines).in_set(RenderSystems::PrepareResources),
             )
             .add_render_graph_node::<ViewNodeRunner<SsilvbNode>>(Core3d, SsilvbLabel)
             .add_render_graph_edges(

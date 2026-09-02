@@ -20,6 +20,15 @@
 //! author, one less render pass and no second camera — and it is what a Cataclysm player with
 //! reflections off actually saw.
 //!
+//! ## Multisampling
+//!
+//! These passes run under MSAA and cost nothing extra to do it. They were already copying the frame
+//! into single-sampled targets, and a copy that reads N samples and writes one value *is* a
+//! resolve — so the resolve is the copy, in the pass that was happening anyway, with no second
+//! target and no `resolve_target` chain. The single-sampled build is untouched: it keeps the plain
+//! binding and the plain filtered fetch, with no per-sample loop to skip. `liquid_screen.wgsl`
+//! carries which half resolves by averaging (colour) and which by taking sample 0 (depth), and why.
+//!
 //! ## Where this runs, and why there
 //!
 //! Between `Ssilvb` and `MainTransparentPass`, the slot `ssilvb` already established. By then the
@@ -51,15 +60,16 @@ use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    sampler, texture_2d, texture_depth_2d, uniform_buffer,
+    sampler, texture_2d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::RenderContext;
+use bevy::shader::ShaderDefVal;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
-use bevy::render::{RenderApp, RenderStartup};
+use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::view::WorldCamera;
 
@@ -232,37 +242,90 @@ pub(crate) fn resize_targets(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct LiquidScreenLabel;
 
+/// The three pipelines, per MSAA sample count.
+///
+/// Multisampling changes the *binding type* of the view's colour and depth, not just a flag, so the
+/// layout and all three pipelines are per-count. `MsaaSetting` is latched at camera spawn and never
+/// moves mid-session, so in practice exactly one variant is ever built — but keying it means a
+/// second view at a different count (a booth pane, a future split target) cannot quietly bind a
+/// multisampled texture into a single-sampled slot, which is a validation error that kills the
+/// render thread rather than degrading.
 #[derive(Resource)]
 struct LiquidScreenPipelines {
+    shader: Handle<Shader>,
+    variants: bevy::platform::collections::HashMap<u32, ScreenVariant>,
+}
+
+struct ScreenVariant {
     layout: BindGroupLayoutDescriptor,
     copy: CachedRenderPipelineId,
     blur: CachedRenderPipelineId,
     linear_depth: CachedRenderPipelineId,
 }
 
-fn init_pipelines(
-    mut commands: Commands,
+fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(LiquidScreenPipelines {
+        shader: asset_server.load("embedded://benilla_world/shaders/liquid_screen.wgsl"),
+        variants: Default::default(),
+    });
+}
+
+/// Build the variant this frame's views actually need, once each.
+///
+/// A `Render`-schedule system rather than `RenderStartup`, because the sample count is not known
+/// until a view exists — the same reason `static_gx` specialises its four pipelines against a
+/// `(samples, format)` key instead of queueing them at startup.
+fn specialize_pipelines(
+    mut pipelines: ResMut<LiquidScreenPipelines>,
     fullscreen_shader: Res<FullscreenShader>,
-    asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    views: Query<&Msaa, With<LiquidScreenView>>,
 ) {
-    let shader: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/liquid_screen.wgsl");
-    // One layout for all three passes. Two of them leave a binding unread, which is legal — the
-    // pipeline layout only has to be a superset of what the entry point touches, and `ssilvb`
-    // shares one layout across four entry points on the same reasoning.
+    for msaa in &views {
+        let samples = msaa.samples();
+        if pipelines.variants.contains_key(&samples) {
+            continue;
+        }
+        let variant = build_variant(&pipelines.shader, &fullscreen_shader, &pipeline_cache, samples);
+        pipelines.variants.insert(samples, variant);
+    }
+}
+
+fn build_variant(
+    shader: &Handle<Shader>,
+    fullscreen_shader: &FullscreenShader,
+    pipeline_cache: &PipelineCache,
+    samples: u32,
+) -> ScreenVariant {
+    let ms = samples > 1;
+    // Only binding 1 varies: the view's DEPTH is multisampled under MSAA and has no resolve.
+    // Binding 2 is the view's colour, which Bevy already resolved at the end of the opaque pass, and
+    // binding 4 is the copy this file makes — both single-sampled on every path.
     let layout = BindGroupLayoutDescriptor::new(
         "liquid_screen_layout",
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
             (
                 (0, uniform_buffer::<ViewUniform>(true)),
-                (1, texture_depth_2d()),
+                (
+                    1,
+                    if ms {
+                        texture_depth_2d_multisampled()
+                    } else {
+                        texture_depth_2d()
+                    },
+                ),
                 (2, texture_2d(TextureSampleType::Float { filterable: true })),
                 (3, sampler(SamplerBindingType::Filtering)),
+                (4, texture_2d(TextureSampleType::Float { filterable: true })),
             ),
         ),
     );
+    let defs: Vec<ShaderDefVal> = if ms {
+        vec!["LIQUID_SCREEN_MSAA".into()]
+    } else {
+        vec![]
+    };
     let pipeline = |label: &'static str, entry: &'static str, format: TextureFormat| {
         RenderPipelineDescriptor {
             label: Some(label.into()),
@@ -270,7 +333,7 @@ fn init_pipelines(
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),
-                shader_defs: vec![],
+                shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format,
@@ -278,10 +341,12 @@ fn init_pipelines(
                     write_mask: ColorWrites::ALL,
                 })],
             }),
+            // The TARGETS are single-sampled in every build — that is the whole point: these
+            // passes write resolved images, so the resolve is this copy and there is no second one.
             ..default()
         }
     };
-    commands.insert_resource(LiquidScreenPipelines {
+    ScreenVariant {
         copy: pipeline_cache.queue_render_pipeline(pipeline(
             "liquid_screen_copy",
             "fs_copy",
@@ -298,7 +363,7 @@ fn init_pipelines(
             TextureFormat::R32Float,
         )),
         layout,
-    });
+    }
 }
 
 #[derive(Default)]
@@ -320,13 +385,6 @@ impl ViewNode for LiquidScreenNode {
         (view_target, depth, view_offset, msaa, _marker): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        // Multisampling stands the whole thing down, and the water materials stand down with it
-        // (`surface::cata_available`). A multisampled colour or depth texture is a different
-        // binding type with no single value per pixel, and resolving both mid-graph to feed a
-        // refraction is a cost nobody asked for. `ssilvb` makes the same trade.
-        if *msaa != Msaa::Off {
-            return Ok(());
-        }
         let Some(targets) = world.get_resource::<LiquidScreenTargets>() else {
             return Ok(());
         };
@@ -341,12 +399,17 @@ impl ViewNode for LiquidScreenNode {
         {
             return Ok(());
         }
+        // The variant for THIS view's sample count. Multisampling does not stand these passes
+        // down; it changes one binding type and nothing else (see `liquid_screen.wgsl`).
         let pipelines = world.resource::<LiquidScreenPipelines>();
+        let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
+            return Ok(()); // `specialize_pipelines` builds it this frame; drawn next
+        };
         let cache = world.resource::<PipelineCache>();
         let (Some(copy), Some(blur), Some(linear_depth)) = (
-            cache.get_render_pipeline(pipelines.copy),
-            cache.get_render_pipeline(pipelines.blur),
-            cache.get_render_pipeline(pipelines.linear_depth),
+            cache.get_render_pipeline(variant.copy),
+            cache.get_render_pipeline(variant.blur),
+            cache.get_render_pipeline(variant.linear_depth),
         ) else {
             return Ok(()); // still compiling — the water falls back to its flat lane this frame
         };
@@ -363,41 +426,51 @@ impl ViewNode for LiquidScreenNode {
         };
 
         let device = render_context.render_device().clone();
-        let layout = cache.get_bind_group_layout(&pipelines.layout);
-        let bind = |src: &TextureView, samp: &Sampler| {
+        let layout = cache.get_bind_group_layout(&variant.layout);
+        // Bindings 0-3 are the same for every pass: the view uniform, the view's depth (1) and its
+        // resolved colour (2), and a sampler. Binding 4 is the blur's source — and it has to VARY,
+        // because a texture cannot be a bound resource and a colour target in the same pass. The
+        // copy writes `color`, so its group must not also read `color`; the blur reads `color` and
+        // writes `blurred`, so its group must not read `blurred`. Two groups, swapped.
+        let bind = |label: &'static str, blur_src: &TextureView| {
             device.create_bind_group(
-                "liquid_screen_bind",
+                label,
                 &layout,
                 &BindGroupEntries::with_indices((
                     (0, view_binding.clone()),
                     (1, depth.view()),
-                    (2, src),
-                    (3, samp),
+                    (2, view_target.main_texture_view()),
+                    (3, &color.sampler),
+                    (4, blur_src),
                 )),
             )
         };
+        // Whatever is bound at 4 for these two is unread by their entry points — `blurred` is
+        // simply the texture neither of them writes.
+        let bind_write_color = bind("liquid_screen_bind_write", &blurred.texture_view);
+        let bind_blur = bind("liquid_screen_bind_blur", &color.texture_view);
 
         // colour ← the live main texture; blur ← that copy; depth ← the view's depth buffer.
         // The blur reads `color` rather than the main texture again purely so the two colour reads
         // agree bit for bit — a reflection sampling a different frame from the refraction beside it
         // is the kind of mismatch that only shows up in motion.
-        let passes: [(&str, &RenderPipeline, BindGroup, &TextureView); 3] = [
+        let passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
             (
                 "liquid_screen_copy",
                 copy,
-                bind(view_target.main_texture_view(), &color.sampler),
+                &bind_write_color,
                 &color.texture_view,
             ),
             (
                 "liquid_screen_blur",
                 blur,
-                bind(&color.texture_view, &color.sampler),
+                &bind_blur,
                 &blurred.texture_view,
             ),
             (
                 "liquid_screen_depth",
                 linear_depth,
-                bind(&color.texture_view, &color.sampler),
+                &bind_write_color,
                 &depth_out.texture_view,
             ),
         ];
@@ -417,7 +490,7 @@ impl ViewNode for LiquidScreenNode {
                     occlusion_query_set: None,
                 });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &group, &[view_offset.offset]);
+            pass.set_bind_group(0, group, &[view_offset.offset]);
             pass.draw(0..3, 0..1);
         }
         Ok(())
@@ -435,6 +508,10 @@ pub(crate) fn register(app: &mut App) {
     };
     render_app
         .add_systems(RenderStartup, init_pipelines)
+        .add_systems(
+            Render,
+            specialize_pipelines.in_set(RenderSystems::PrepareResources),
+        )
         .add_render_graph_node::<ViewNodeRunner<LiquidScreenNode>>(Core3d, LiquidScreenLabel)
         // After everything opaque — including the retained static pass and the indirect-lighting
         // multiply — and before the transparent pass water itself draws in.

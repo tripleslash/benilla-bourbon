@@ -234,8 +234,10 @@ impl Plugin for LiquidPlugin {
         // eye is submerged, rather than answering where the liquid is (see the layout note above).
         drift::register(app);
         // The three pictures of the frame the cata renderer reads, and the graph node that fills
-        // them. Registered unconditionally: the node stands itself down when the targets are absent
-        // or MSAA is on, and the materials that read them exist either way.
+        // them. Registered unconditionally: the node stands itself down when the targets are
+        // absent, and the materials that read them exist either way. Multisampling is NOT a
+        // stand-down — the node compiles a per-sample-count variant and resolves in the copy it was
+        // already making.
         screen::register(app);
     }
 

@@ -42,9 +42,26 @@
 #import bevy_render::view::{View, position_ndc_to_view, uv_to_ndc}
 
 @group(0) @binding(0) var<uniform> view: View;
+
+// **Multisampling touches the depth binding and nothing else.** Bevy resolves the colour attachment
+// at the end of the opaque pass, so `ViewTarget::main_texture_view()` is single-sampled on every
+// path; the depth buffer has no such resolve, and there is no meaningful way to average one. So
+// `SSILVB_MSAA` swaps the depth binding's type and leaves the rest of this file alone — and the
+// single-sampled build pays nothing for the option existing.
+//
+// `textureLoad`'s third argument reads the same in both builds: the only mip on a plain depth
+// texture, and the deliberately-chosen sample on a multisampled one. Sample 0 rather than an
+// average, because a depth is a set of alternatives rather than a quantity to mix — averaging it
+// across a silhouette invents a surface that is in neither place, which this pass would then
+// occlude against.
+#ifdef SSILVB_MSAA
+@group(0) @binding(1) var depth_tex: texture_depth_multisampled_2d;
+#else
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
-// The pass input: the scene colour for the gather, the ping-pong half for each blur, and the scene
-// colour again for the composite.
+#endif
+
+// The pass input: the scene colour for the gather, and this pass's own ping-pong half for each blur
+// and for the composite. Single-sampled throughout.
 @group(0) @binding(2) var src_tex: texture_2d<f32>;
 // x = AO strength, y = indirect strength (both zero and the node never runs at all), z = the world
 // sample radius in yards, w = the assumed occluder thickness in yards.
