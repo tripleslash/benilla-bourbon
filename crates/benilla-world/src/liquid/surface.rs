@@ -25,6 +25,7 @@ use bevy::prelude::*;
 
 use super::art;
 use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
+use super::ripple;
 use super::screen::LiquidScreenTargets;
 use super::WaterDetail;
 use crate::lighting::WATER_SHININESS;
@@ -526,6 +527,7 @@ pub(super) fn setup_liquid(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
     mut cata_materials: ResMut<Assets<LiquidCataMaterial>>,
+    render_device: Res<bevy::render::renderer::RenderDevice>,
 ) {
     let (Some(_config), Some(mut world_assets)) = (config, world_assets) else {
         return; // no client data → no terrain, so no water either
@@ -541,7 +543,12 @@ pub(super) fn setup_liquid(
     //   has to maintain.
     let bump = images.add(art::bump_image());
     let foam = images.add(art::foam_image());
+    let noise_vol = images.add(art::noise_volume_image());
     let targets = LiquidScreenTargets::allocate(&mut images, UVec2::new(1280, 720));
+    let ripples = ripple::setup(&mut images);
+    // The ripple field's placement buffer, on the same terms as the shared light: created here so
+    // the material can clone it, written in place by the render world every frame.
+    let ripple_buf = ripple::new_ripple_buffer(&render_device);
 
     // No light seed and no per-frame push: light, fog and both water swatches come off the shared
     // global-light buffer (`lighting::global_light`), which `build_light_data` has already packed by
@@ -668,9 +675,11 @@ pub(super) fn setup_liquid(
                     frames: frames.clone(),
                     bump: bump.clone(),
                     foam: foam.clone(),
+                    noise_vol: noise_vol.clone(),
                     scene_color: targets.color.clone(),
                     scene_blur: targets.blur.clone(),
                     scene_depth: targets.depth.clone(),
+                    ripple_map: ripples.map.clone(),
                     kind: Vec4::new(
                         if kind.is_fullbright() { 1.0 } else { 0.0 },
                         if kind == LiquidKind::Ocean { 1.0 } else { 0.0 },
@@ -692,7 +701,11 @@ pub(super) fn setup_liquid(
                     bump_params: cata_bump_params(kind),
                     shade_params: cata_shade_params(kind),
                     foam_params: cata_foam_params(kind),
+                    magma_scales: cata_magma_scales(kind),
+                    magma_params: cata_magma_params(kind),
+                    magma_color: cata_magma_color(kind),
                     light_buf: world_assets.shared_light.clone(),
+                    ripple_buf: ripple_buf.0.clone(),
                 },
             });
             assets
@@ -710,6 +723,8 @@ pub(super) fn setup_liquid(
     );
     commands.insert_resource(assets);
     commands.insert_resource(targets);
+    commands.insert_resource(ripples);
+    commands.insert_resource(ripple_buf);
 }
 
 /// The bump lane for a kind: the two tiling scales, the scroll rate, and the bump strength.
@@ -728,6 +743,42 @@ fn cata_bump_params(kind: LiquidKind) -> Vec4 {
         LiquidKind::Rapids => Vec4::new(0.075, 0.21, 0.30, 1.25),
         // Lakes and rivers at rest.
         _ => Vec4::new(0.035, 0.11, 0.09, 1.0),
+    }
+}
+
+/// `ProcMagma`'s tiling lane: the two noise-volume scales and the first two layer scales, all in
+/// repeats per yard.
+///
+/// The two volume scales are deliberately close but not equal — the whole point of the pair is that
+/// they disagree, and two taps at the same scale would blend between two views of the same
+/// structure. The layer scales spread wider, so the composite has a large crust, a mid crack
+/// pattern and a fine shimmer rather than three copies of one thing.
+fn cata_magma_scales(kind: LiquidKind) -> Vec4 {
+    match kind {
+        // Slime is a thicker, slower body: everything larger and lazier than lava.
+        LiquidKind::Slime => Vec4::new(0.020, 0.029, 0.050, 0.11),
+        _ => Vec4::new(0.028, 0.041, 0.075, 0.16),
+    }
+}
+
+/// `ProcMagma`'s motion lane: third layer scale, wobble frequency, clock rate, tap drift.
+fn cata_magma_params(kind: LiquidKind) -> Vec4 {
+    match kind {
+        LiquidKind::Slime => Vec4::new(0.24, 0.09, 0.020, 0.004),
+        // Lava crawls, and the clock rate is what that is: a full trip round the volume's third
+        // axis every ~28 s. Fast enough to see moving, slow enough not to boil.
+        _ => Vec4::new(0.33, 0.13, 0.035, 0.007),
+    }
+}
+
+/// `ProcMagma`'s base colour — what the surface is where every mask reads zero.
+///
+/// The cold crust, not a tint: it shows through only where all three layers are masked out, so it
+/// wants to be darker than anything in the sheet rather than an average of it.
+fn cata_magma_color(kind: LiquidKind) -> Vec4 {
+    match kind {
+        LiquidKind::Slime => Vec4::new(0.04, 0.09, 0.03, 1.0),
+        _ => Vec4::new(0.10, 0.028, 0.012, 1.0),
     }
 }
 

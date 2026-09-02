@@ -84,6 +84,7 @@ use benilla_assets::AssetSet;
 mod art;
 mod drift;
 mod query;
+mod ripple;
 mod screen;
 #[cfg(test)]
 mod real_data;
@@ -239,6 +240,8 @@ impl Plugin for LiquidPlugin {
         // stand-down — the node compiles a per-sample-count variant and resolves in the copy it was
         // already making.
         screen::register(app);
+        // The dynamic ripple displacement map: the wave a wading body pushes into the water.
+        ripple::register(app);
     }
 
     /// The liquid screen pass's edge to `Ssilvb`, which can only be declared once every plugin has

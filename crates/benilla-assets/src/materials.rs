@@ -608,6 +608,24 @@ pub struct LiquidCataExt {
     #[sampler(110, visibility(fragment))]
     pub foam: Handle<Image>,
 
+    /// `ProcMagma`'s stage 0: the animated noise VOLUME whose three channels are three independent
+    /// masks for three composited lava layers.
+    ///
+    /// The reference loads it from `XTextures\FX\noise.blob` as a 128 x 128 x 16 volume; this one
+    /// is synthesised at half the face (`benilla_world`'s `liquid::art`). The third axis is a
+    /// clock, not a third space dimension — the shader walks it — which is why the sampler repeats
+    /// on `w` too.
+    #[texture(111, dimension = "3d", visibility(fragment))]
+    #[sampler(112, visibility(fragment))]
+    pub noise_vol: Handle<Image>,
+
+    /// `ProcWaterAbove`'s stage 4: the dynamic ripple displacement map — `.x` the current wave
+    /// height, `.y` the previous one, packed so the water can interpolate between two fixed steps.
+    /// `benilla_world`'s `liquid::ripple` owns the simulation.
+    #[texture(113, visibility(fragment))]
+    #[sampler(114, visibility(fragment))]
+    pub ripple_map: Handle<Image>,
+
     /// Stage 6: linear view depth in yards, `R32Float`.
     ///
     /// `filterable = false` and **no sampler**: `R32Float` cannot take a filtering sampler without
@@ -650,12 +668,35 @@ pub struct LiquidCataExt {
     /// tap, so the foam churns with the swell instead of sliding over it.
     #[uniform(102)]
     pub foam_params: Vec4,
+    /// `ProcMagma`'s tiling lane: `x`/`y` = the two noise-volume sample scales, `z`/`w` = the first
+    /// two lava layer scales. All in repeats per yard.
+    #[uniform(102)]
+    pub magma_scales: Vec4,
+    /// `ProcMagma`'s motion lane: `x` = the third layer's scale, `y` = the wobble frequency,
+    /// `z` = how fast the clock walks the volume's third axis, `w` = how fast the two volume taps
+    /// drift apart.
+    #[uniform(102)]
+    pub magma_params: Vec4,
+    /// `ProcMagma`'s base colour — the reference's `c17.rgb`, what the surface is where every mask
+    /// reads zero. The cold crust under the layers, not a tint over them.
+    #[uniform(102)]
+    pub magma_color: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its
     /// lighting, and both fog blocks; it needs no light input the 1.12.1 path did not already have.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+
+    /// **The ripple field's placement**, on its own shared buffer for the same reason the light is
+    /// on one: it changes every frame, and a per-frame `#[uniform]` rewrite would re-prepare every
+    /// liquid bind group every frame. Written in place by `liquid::ripple`'s render-world upload.
+    ///
+    /// A second buffer rather than more rows on the light one because the light buffer's tail is a
+    /// variable-length point-light table — there is no free row to take, only spare lanes scattered
+    /// through rows that mean something else.
+    #[storage(91, read_only, buffer, visibility(fragment))]
+    pub ripple_buf: Buffer,
 }
 
 impl MaterialExtension for LiquidCataExt {

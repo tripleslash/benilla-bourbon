@@ -70,6 +70,8 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var scene_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var scene_blur: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var scene_depth: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var noise_vol: texture_3d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var noise_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var foam_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var foam_samp: sampler;
 
@@ -89,6 +91,12 @@ struct LiquidParams {
     // x = foam tiling (repeats/yard); y = foam depth scale (yards); z = foam strength (c28.y);
     // w = how far the wave normal drags the second foam tap.
     foam_params: vec4<f32>,
+    // ProcMagma: x/y = the two noise-volume sample scales, z/w = layer 1 and 2 scales.
+    magma_scales: vec4<f32>,
+    // ProcMagma: x = layer 3 scale, y = wobble frequency, z = clock rate, w = tap drift rate.
+    magma_params: vec4<f32>,
+    // ProcMagma: the base colour under every layer (the reference's c17.rgb).
+    magma_color: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -111,12 +119,39 @@ struct WowLight {
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
+@group(#{MATERIAL_BIND_GROUP}) @binding(113) var ripple_map: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(114) var ripple_samp: sampler;
+
+/// The dynamic ripple field's placement — see `benilla_world`'s `liquid::ripple`, which owns the
+/// simulation and writes this every frame. Only the first two rows are read here; the rest is the
+/// wave step's own state and is declared so the two shaders agree on the layout.
+struct Ripple {
+    // xy = the map's min corner in world XZ; z = 1/extent; w = interpolation between the two
+    // packed heights.
+    placement: vec4<f32>,
+    // x = one texel in UV; y = the slope scale; z = enabled; w = damping.
+    params: vec4<f32>,
+    prev: vec4<f32>,
+    stamp_count: vec4<f32>,
+    stamps: array<vec4<f32>, 16>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(91) var<storage, read> ripple: Ripple;
+
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
-    // The four bump UV sets, packed as two `vec4`s exactly as the reference packs TEXCOORD0/1.
-    // `.xy` and `.zw` of each are the same scale at two scroll phases; the two locations are two
-    // different scales, and the fragment stage blends between them by view distance.
+    // **These three carry two different things, and the reference does the same.** On water they
+    // are the four bump UV sets and the two foam sets — `bump_uv_*` packed as two `vec4`s exactly
+    // as `ProcWater` packs TEXCOORD0/1, `.xy` and `.zw` of each being one scale at two scroll
+    // phases, the two locations being two scales the fragment stage blends by view distance.
+    //
+    // On MAGMA the same interpolator slots carry `ProcMagma`'s: the two noise-volume taps, the
+    // first two lava layers, the third layer and the wobble. That is not a trick to save space —
+    // `ProcMagma` and `ProcWater` are two vertex programs writing the same TEXCOORD0/1/2 registers,
+    // and a `MaterialExtension` gets one vertex entry point for both, so the vertex stage branches
+    // on `kind.x` and fills whichever set its kind will read. Each branch is a uniform branch and
+    // costs nothing; adding three magma-only varyings would instead cost interpolator bandwidth on
+    // every water fragment in the world, which is the common case by a wide margin.
     @location(1) bump_uv_a: vec4<f32>,
     @location(2) bump_uv_b: vec4<f32>,
     // Camera-relative world offset (the reference's TEXCOORD4). Its LENGTH is the view distance the
@@ -220,6 +255,43 @@ fn vertex(in: Vertex) -> VsOut {
         world_uv * s1 * 0.87 + vec2<f32>(phase * 0.52, -phase * 0.29),
     );
 
+    if (w.kind.x > 0.5) {
+        // ---- ProcMagma's vertex half -------------------------------------------------------
+        //
+        // Two noise-volume taps that drift apart with the clock (so the two never agree and the
+        // blend between them keeps moving), three layer UV sets at three scales, and the wobble.
+        let drift = anim_time() * w.magma_params.w;
+        out.bump_uv_a = vec4<f32>(
+            world_uv * w.magma_scales.x + vec2<f32>(drift, drift * 0.4),
+            world_uv * w.magma_scales.y - vec2<f32>(drift * 0.7, drift * 0.9),
+        );
+        out.bump_uv_b = vec4<f32>(
+            world_uv * w.magma_scales.z,
+            world_uv * w.magma_scales.w + vec2<f32>(drift * 0.15, -drift * 0.11),
+        );
+        // **The wobble**, and it is worth spelling out because the bytecode hides it behind six
+        // `sincos` and a pile of range wrapping. `ProcMagma`'s vertex program builds
+        // `0.5 + 0.15 · 0.5 · Σ` over three harmonics of a transformed UV in both axes — the
+        // `frac(x/2π + 0.5)·2π − π` around each is only bringing the angle into `sincos`'s domain,
+        // so the whole of it is `sin(k·u) + sin(k·v)` for k = 1, 2, 3. It is what decides, per
+        // vertex, which of the two volume taps a patch of crust follows, and three harmonics is
+        // what keeps that from reading as a grid.
+        let mw = world_uv * w.magma_params.y + drift * 0.05;
+        let harmonics =
+            (sin(mw.x) + sin(mw.y))
+            + (sin(2.0 * mw.x) + sin(2.0 * mw.y))
+            + (sin(3.0 * mw.x) + sin(3.0 * mw.y));
+        out.foam_uv = vec4<f32>(
+            world_uv * w.magma_params.x,
+            0.5 + 0.075 * harmonics,
+            0.0,
+        );
+        // COLOR0 is unread on this lane — magma is fullbright, which is the reference's own state
+        // (`GL_LIGHTING` off at both magma passes) and not a simplification.
+        out.lit_color = vec3<f32>(1.0);
+        return out;
+    }
+
     // The foam UV pair. The reference builds these from the bump coordinate scaled by 228 plus a
     // `sincos` wobble driven off the clock and the vertex position — a high frequency with a slow
     // drift, which is what keeps surf from reading as a sliding decal. Same shape here, anchored to
@@ -259,7 +331,7 @@ fn vertex(in: Vertex) -> VsOut {
 /// reason cata water does not shimmer into noise at range: at the camera the coarse pair dominates
 /// (`t = 0.2`), and past ~800 yards the fine pair has taken over entirely — which sounds backwards
 /// until you notice the fine pair is what carries the *large* features once it is scaled by 2.
-fn bump_gradient(in: VsOut) -> vec3<f32> {
+fn bump_gradient(in: VsOut) -> vec2<f32> {
     let a = textureSample(bump_tex, bump_samp, in.bump_uv_a.xy).xyz;
     let b = textureSample(bump_tex, bump_samp, in.bump_uv_a.zw).xyz;
     let c = textureSample(bump_tex, bump_samp, in.bump_uv_b.xy).xyz;
@@ -269,10 +341,43 @@ fn bump_gradient(in: VsOut) -> vec3<f32> {
     let dist = length(in.view_vec);
     let t = clamp(dist * 0.001 + 0.2, 0.0, 1.0);
     let g = (fine * 2.0 - coarse) * t + coarse;
-    // `bump.z = 1` before the normalise, exactly as the program sets it: the stored `z` carries the
-    // per-tap slope, but the SUM of four taps is a gradient, and a gradient's surface normal takes
-    // a unit up-axis.
-    return normalize(vec3<f32>(g.xy * w.bump_params.w, 1.0));
+    // The raw SLOPE, not a normal. The reference normalises here (`bump.z = 1`, then `nrm`), but the
+    // ripple field has its own slope to add and the two have to be summed before either is turned
+    // into a direction — normalising twice would let whichever is larger swallow the other.
+    return g.xy * w.bump_params.w;
+}
+
+/// The dynamic ripple field's contribution to the surface slope.
+///
+/// Three taps rather than four: the centre and one step in each axis is a forward difference, which
+/// is what `ProcWaterAbove` takes (it reads centre, +x and +y and subtracts). The lookup is nudged
+/// by the bump gradient first — the reference's own `−bump · 0.02` — so a wake shears with the swell
+/// crossing it instead of lying flat under it.
+///
+/// Zero outside the map, and zero when the field is off. The map covers a square that follows the
+/// camera, so "outside" is most of the world's water at any moment; the early-out is the common
+/// case, not the exception.
+fn ripple_slope(world_xz: vec2<f32>, bump: vec2<f32>) -> vec2<f32> {
+    if (ripple.params.z < 0.5) {
+        return vec2<f32>(0.0);
+    }
+    let uv = (world_xz - ripple.placement.xy) * ripple.placement.z - bump * 0.02;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec2<f32>(0.0);
+    }
+    let e = ripple.params.x;
+    let c = ripple_height(uv);
+    return vec2<f32>(ripple_height(uv + vec2<f32>(e, 0.0)) - c,
+                     ripple_height(uv + vec2<f32>(0.0, e)) - c) * ripple.params.y;
+}
+
+/// One height sample, interpolated between the two fixed steps the map packs.
+///
+/// `mix(previous, current, t)` — the reference's `lrp` against its `c31.x`, and the reason a 60 Hz
+/// simulation does not stutter on a 144 Hz display.
+fn ripple_height(uv: vec2<f32>) -> f32 {
+    let h = textureSampleLevel(ripple_map, ripple_samp, uv, 0.0);
+    return mix(h.y, h.x, ripple.placement.w);
 }
 
 /// Screen UV for this fragment, from the rasteriser's own pixel position.
@@ -300,6 +405,57 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
     return textureLoad(scene_depth, px, 0).x;
 }
 
+/// **`ProcMagma`** — the Cataclysm magma/slime program, ported whole.
+///
+/// The reference routes these kinds away from the water material entirely: `LiquidType.dbc`'s
+/// material id sends them to `CMaterialMagma` and `CMaterialMercury`, separate classes with
+/// separate shaders. What `ProcMagma` does is composite three layers over a base colour, each
+/// layer masked by one channel of an animated noise volume:
+///
+/// ```text
+/// mask = mix(volume(uvA, t), volume(uvB, t), wobble)   // three independent channels
+/// rgb  = mix(base,  layer1, mask.x)
+/// rgb  = mix(rgb,   layer2, mask.y · layer2.a)
+/// rgb  = mix(rgb,   layer3, mask.z · layer3.a)
+/// ```
+///
+/// The volume is `benilla_world`'s synthesised stand-in for `proceduralNoiseVolTex`; its third axis
+/// is a clock, so the masks crawl. The three LAYERS are where this departs from the reference and
+/// says so: it binds three authored Cataclysm textures through `LiquidType.dbc` columns 1.12.1 does
+/// not have, so the port samples the kind's own animated sheet at three different scales instead.
+/// The structure is the reference's and the art is the one this client actually ships — which is
+/// what turns a flat scrolling sheet into a crust with hot cracks moving under it.
+///
+/// **Slime takes this too.** `CMaterialMercury` is genuinely a different program (`ProcMercury` is
+/// bump and Fresnel over a reflection, closer to water than to lava) and is NOT ported here; slime
+/// rides the magma composite because it is the same shape of problem — a body whose sheet is its
+/// colour — and because the alternative is leaving it flat. Named rather than hidden.
+fn magma_sheet(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return textureSampleBias(frames, frames_samp, uv, layer, view.mip_bias);
+}
+
+fn magma(in: VsOut) -> vec4<f32> {
+    let layer = frame_layer();
+    // The clock walks the volume's third axis. `fract` is belt and braces — the sampler repeats on
+    // `w` — but it keeps the coordinate small enough that f32 does not start losing the low bits of
+    // it after an hour of uptime.
+    let slice = fract(anim_time() * w.magma_params.z);
+    let na = textureSample(noise_vol, noise_samp, vec3<f32>(in.bump_uv_a.xy, slice)).rgb;
+    let nb = textureSample(noise_vol, noise_samp, vec3<f32>(in.bump_uv_a.zw, slice)).rgb;
+    let mask = mix(na, nb, in.foam_uv.z);
+
+    let l1 = magma_sheet(in.bump_uv_b.xy, layer);
+    let l2 = magma_sheet(in.bump_uv_b.zw, layer);
+    let l3 = magma_sheet(in.foam_uv.xy, layer);
+
+    var rgb = mix(w.magma_color.rgb, l1.rgb, mask.x);
+    rgb = mix(rgb, l2.rgb, clamp(mask.y * l2.a, 0.0, 1.0));
+    rgb = mix(rgb, l3.rgb, clamp(mask.z * l3.a, 0.0, 1.0));
+    // Fogged and opaque, exactly as before: the reference fogs every liquid batch, magma included,
+    // and `ocol0.w` is a hard 1 in the program.
+    return vec4<f32>(apply_fog(rgb, in.world_position.xyz), 1.0);
+}
+
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // HARD FAR-CLIP WALL — the same one terrain, the models and `liquid.wgsl` take.
@@ -318,12 +474,16 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // (`sheet · vcolor`, fogged) and therefore already at parity with the cata *low* tier.
     // Porting `ProcMagma`/`ProcMercury` is a separate piece of work with its own art question.
     if (w.kind.x > 0.5) {
-        let sheet = textureSampleBias(
-            frames, frames_samp, apply_scroll(in.uv), frame_layer(), view.mip_bias);
-        return vec4<f32>(apply_fog(sheet.rgb, in.world_position.xyz), 1.0);
+        return magma(in);
     }
 
-    let grad = bump_gradient(in);
+    // The swell, plus whatever a body wading nearby has pushed into the water. The two are summed
+    // as SLOPES and normalised once — see `bump_gradient`.
+    let swell = bump_gradient(in);
+    let grad = normalize(vec3<f32>(
+        swell + ripple_slope(in.world_position.xz, swell),
+        1.0,
+    ));
     // The shading normal: the vertex normal's horizontal components pushed by the bump gradient,
     // `c23.y` deep. Y-up here where the reference is Z-up — see the header.
     let n = normalize(vec3<f32>(

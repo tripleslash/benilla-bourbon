@@ -66,8 +66,8 @@ pub(super) fn auto_spawn_probe(
     existing: Query<Entity, With<WadeProbe>>,
     camera: Query<&Transform, With<WorldCamera>>,
     water: Query<&WaterChunkInfo>,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut done: Local<bool>,
 ) {
     if *done || std::env::var_os("WOW_WADE_PROBE").is_none() || !existing.is_empty() {
@@ -76,14 +76,19 @@ pub(super) fn auto_spawn_probe(
     let Ok(cam) = camera.single() else {
         return;
     };
-    // A coarse outward scan. 4-yard steps out to 120: fine enough to land inside a river, coarse
-    // enough that the whole sweep is a few hundred point queries on one frame, once.
+    // A coarse outward scan, centred on the point the camera is LOOKING at rather than on the
+    // camera itself. The difference matters for a rig whose whole job is to be watched: scanning
+    // from the camera finds whichever water is nearest in any direction, which on a riverbank is
+    // as likely to be behind you as in front, and a probe you cannot see validates nothing.
+    let forward = cam.forward().as_vec3();
+    let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::Z);
+    let seed = cam.translation + flat * 10.0;
     let mut found = None;
-    'scan: for ring in 1..30u32 {
+    'scan: for ring in 0..30u32 {
         let r = ring as f32 * 4.0;
-        for step in 0..(ring * 8) {
-            let a = step as f32 / (ring * 8) as f32 * std::f32::consts::TAU;
-            let p = cam.translation + Vec3::new(a.cos() * r, 0.0, a.sin() * r);
+        for step in 0..(ring * 8).max(1) {
+            let a = step as f32 / (ring * 8).max(1) as f32 * std::f32::consts::TAU;
+            let p = seed + Vec3::new(a.cos() * r, 0.0, a.sin() * r);
             let wow = bevy_to_wow(p);
             if let Some(z) = water_surface_at(water.iter(), wow, LiquidClaim::Outdoors) {
                 found = Some(wow_to_bevy([wow[0], wow[1], z]));
@@ -95,7 +100,7 @@ pub(super) fn auto_spawn_probe(
         return; // no water streamed in yet — try again next frame
     };
     *done = true;
-    spawn_probe(&mut commands, anchor, Vec3::X, meshes, materials);
+    spawn_probe(&mut commands, anchor, Vec3::X, &mut meshes, &mut materials);
     info!("wade probe: auto-spawned at {anchor:?} ($WOW_WADE_PROBE)");
 }
 
@@ -126,7 +131,7 @@ pub(super) fn toggle_wade_probe(
     // The walk axis is across the view, so the probe crosses the shoreline in front of you rather
     // than marching away from you down it.
     let axis = Vec3::new(-flat.z, 0.0, flat.x);
-    spawn_probe(&mut commands, anchor, axis, meshes, materials);
+    spawn_probe(&mut commands, anchor, axis, &mut meshes, &mut materials);
     info!("wade probe: on - walking {WALK_RADIUS} yd either side of the camera's forward point");
 }
 
@@ -134,8 +139,8 @@ fn spawn_probe(
     commands: &mut Commands,
     anchor: Vec3,
     axis: Vec3,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
 ) {
     commands.spawn((
         WadeProbe {
@@ -153,14 +158,26 @@ fn spawn_probe(
             bound: None,
         },
         Transform::from_translation(anchor),
-        // A visible body, so what the foam is reacting to can be seen reacting. Unlit and crude on
-        // purpose: this is a marker, and dressing it up would invite reading it as a character.
+        // The parent carries no mesh of its own, so nothing would give it the visibility component
+        // its child's inherits from — Bevy warns B0004 and the child's visibility stops
+        // propagating. Stated here rather than left to a required-component chain that does not
+        // reach a mesh-less entity.
+        Visibility::default(),
+    ))
+    // The body is a CHILD, lifted half its height. The parent's translation is the emitter's
+    // contract — feet, because `water_fx` and `liquid::ripple` both measure depth as
+    // `surface - position` — while a capsule's own origin is its middle, so a mesh on the parent
+    // would stand buried to the neck and be invisible under its own ripples.
+    .with_child((
+        // Unlit and crude on purpose: this is a marker, and dressing it up would invite reading it
+        // as a character.
         Mesh3d(meshes.add(Capsule3d::new(0.4, PROBE_HEIGHT - 0.8))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.9, 0.2, 0.2),
             unlit: true,
             ..default()
         })),
+        Transform::from_xyz(0.0, PROBE_HEIGHT * 0.5, 0.0),
     ));
 }
 
