@@ -292,16 +292,25 @@ fn vertex(in: Vertex) -> VsOut {
         return out;
     }
 
-    // The foam UV pair. The reference builds these from the bump coordinate scaled by 228 plus a
-    // `sincos` wobble driven off the clock and the vertex position — a high frequency with a slow
-    // drift, which is what keeps surf from reading as a sliding decal. Same shape here, anchored to
-    // world XZ for the same reason the bump sets are.
+    // The foam UV pair — `ProcWater`'s `result.texcoord[2]`, read off the shipped `arbvp1` program:
+    //
+    //     texcoord[2].xy = base · 228 + sincos · 0.1
+    //     texcoord[2].zw = base · 228 + sincos · 0.05 + 0.5
+    //
+    // **One scale, not two.** Both taps sample the sheet at the same frequency; what separates them
+    // is a half-texture offset and a wobble at HALF the amplitude, so the pair beats against itself
+    // at the wobble's own slow rate. This used to give the second tap 0.73× the first's scale, which
+    // is a different thing entirely: two frequencies 27 % apart sum into a coarse moiré whose period
+    // is far longer than either, and that beat — not the sheet — was the size of benilla's surf.
+    // (The 228 is against the reference's own `attrib[6]/32` liquid coordinate, whose world scale is
+    // authored data this client has no copy of; `foam_params.x` is that number's stand-in, anchored
+    // to world XZ like the bump sets.)
     let fs = w.foam_params.x;
     let wob = vec2<f32>(
         sin(phase * 4.0 + world_uv.x * 0.05),
         cos(phase * 2.0 + world_uv.y * 0.05),
     ) * 0.1;
-    out.foam_uv = vec4<f32>(world_uv * fs + wob, world_uv * fs * 0.73 - wob * 0.7);
+    out.foam_uv = vec4<f32>(world_uv * fs + wob, world_uv * fs + wob * 0.5 + 0.5);
 
     // COLOR0: `ambient + diffuse · saturate(N·L)`, times the mesh's vertex colour. The reference
     // computes it per vertex over the WORLD normal for exactly this reason — the surface is flat,
@@ -569,16 +578,20 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // and both easy to miss in the bytecode because they are single `mul`s a long way from the
     // rest of the term:
     //
-    //   * the **view-distance blend** — the very same `saturate(0.001·d + 0.2)` the bump taps use.
-    //     At the camera that is 0.2, so the surf you are standing over is at a fifth strength and
-    //     only reaches full out near the horizon. Without it the shoreline nearest the player is
-    //     the brightest thing in the frame, which is exactly backwards.
+    //   * the **view-distance fade**, `1.1 − saturate(d / 150)` — its own term, NOT the bump taps'
+    //     `saturate(0.001·d + 0.2)`. Surf is loudest where you are standing in it and gone by 150
+    //     yards. This carried the bump's blend for a while, which is the same law read backwards:
+    //     a fifth strength underfoot climbing to full at the horizon, i.e. a faint smear at the
+    //     shore you are standing on and a bright rim on every lake in the distance.
     //   * **N.up** — foam lies flat. A wave face turned toward you carries less of it.
-    let detail_blend = clamp(length(in.view_vec) * 0.001 + 0.2, 0.0, 1.0);
-    // Two taps, ADDED, the second dragged by the wave normal so the two layers beat against each
-    // other instead of sliding as one sheet. The sheet is sparse and near-black by construction
-    // (`liquid::art`) precisely so this addition is foam rather than a lift.
-    let foam_a = textureSample(foam_tex, foam_samp, in.foam_uv.xy).rgb;
+    let detail_blend = 1.1 - clamp(length(in.view_vec) * (1.0 / 150.0), 0.0, 1.0);
+    // Two taps, ADDED, and **both dragged by the wave normal** — which is where the dynamic ripple
+    // reaches the surf, the normal being the one term the displacement field feeds. The reference's
+    // two drags are deliberately unequal: `−N.xy` at full strength on the first and `+N.yx · 0.2` on
+    // the second, opposed and swizzled, so a wave pulls the two layers apart instead of sliding them
+    // together. Only the second was dragged here, so half the foam sat still while the water moved
+    // under it — a raindrop or a wading leg perturbed the water and left the surf where it was.
+    let foam_a = textureSample(foam_tex, foam_samp, in.foam_uv.xy - n.xz).rgb;
     let foam_b = textureSample(
         foam_tex,
         foam_samp,

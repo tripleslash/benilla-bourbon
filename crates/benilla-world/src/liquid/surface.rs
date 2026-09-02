@@ -784,26 +784,36 @@ fn cata_magma_color(kind: LiquidKind) -> Vec4 {
 
 /// The shoreline-foam lane: tiling, depth scale, strength, and the second tap's normal drag.
 ///
-/// The **depth scale** is the one number with a physical meaning, and it is where the look lives: it
-/// is how deep the water gets before the surf stops, in yards. Sub-yard on a river, because a
-/// shoreline band is a band and not a shallows — the first cut used two yards and painted every
-/// sandbar in Elwynn. The ocean gets a little more, a beach shelving more slowly than a bank.
+/// The **tiling** is the sheet's frequency in repeats per yard. The reference's own number is
+/// `228 ×` a liquid coordinate whose world scale is authored data this client cannot read, so this
+/// is a stand-in — but its ORDER is not free: at the 0.6 it carried, one foam cell spanned nearly
+/// two yards and the surf read as a few big soft lumps rather than as broken water. Against the
+/// reference client's shoreline it wants to be a few times finer than that.
 ///
-/// The **strength** reads higher than it looks: the shader multiplies it by the view-distance blend
-/// (0.2 at the camera) and by the surface normal's up component before adding, so a third here is
-/// nearer a fifteenth underfoot. That is deliberate and it is the reference's — see `liquid_cata.wgsl`.
+/// The **depth scale** is the one number with a physical meaning: how deep the water gets before the
+/// surf stops, in yards. Sub-yard on a river, because a shoreline band is a band and not a shallows
+/// — the first cut used two yards and painted every sandbar in Elwynn. The ocean gets a little more,
+/// a beach shelving more slowly than a bank.
+///
+/// The **strength** is smaller than it looks like it should be, and that is the distance fade being
+/// the reference's own way round (`1.1 − d/150`, `liquid_cata.wgsl`): the surf you are standing in
+/// gets the full term rather than the fifth the bump blend used to give it, so the authored number
+/// has to come down by about the same factor to land on the same shoreline.
+///
+/// The **drag** is the reference's `0.2` outright — the second tap's `+N.yx · 0.2`; the first tap's
+/// drag is a full-strength `−N.xy` and takes no parameter.
 ///
 /// Magma and slime never reach this — the fullbright branch returns before the foam term — but they
 /// are given a zero strength anyway rather than a plausible number, so that a future port of
 /// `ProcMagma` starts from "off" instead of inheriting water's surf.
 fn cata_foam_params(kind: LiquidKind) -> Vec4 {
     match kind {
-        LiquidKind::Ocean => Vec4::new(0.45, 1.0, 0.30, 0.05),
+        LiquidKind::Ocean => Vec4::new(0.40, 0.58, 0.082, 0.2),
         // Rapids: tighter and brighter, and reaching less far out — white water is the point, and
         // a river is narrow enough that a wide band would simply fill it.
-        LiquidKind::Rapids => Vec4::new(0.85, 0.5, 0.45, 0.09),
+        LiquidKind::Rapids => Vec4::new(0.75, 0.30, 0.128, 0.2),
         LiquidKind::Magma | LiquidKind::Slime => Vec4::ZERO,
-        _ => Vec4::new(0.6, 0.7, 0.35, 0.06),
+        _ => Vec4::new(0.52, 0.40, 0.098, 0.2),
     }
 }
 

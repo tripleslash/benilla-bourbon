@@ -64,15 +64,30 @@ use benilla_assets::coords::bevy_to_wow;
 /// so large and so short-lived that each one looked like a separate event.
 pub const RIPPLE_SIZE: u32 = 1024;
 
-/// How much world the map covers, in yards.
+/// How much world the map covers, in yards — **the reference's own 102.4**, and it is a read
+/// number rather than a fitted one.
 ///
-/// The reference derives this from the view size times a per-map factor, which is data this
-/// client cannot read — but its other two numbers pin it: a 1024-texel map and a **0.3-yard**
-/// perturbation radius ([`STAMP_RADIUS`], read off the rain emitter) only make sense together if a
-/// texel is around a twentieth of a yard, and 50 yards over 1024 texels is 0.049. That also puts the
-/// map's half-width at the 25 yards the reference's own rain scatters within, which is the shape of
-/// a thing sized to hold its own content.
-pub const RIPPLE_EXTENT: f32 = 50.0;
+/// `CWorldScene`'s render entry (`0xD488F0`) calls `Liquid::SetDisplMapInfo(s_playerPos, {128,
+/// 128})` — the two `1124073472` immediates, which are `128.0f` — and `SetDisplMapInfo`
+/// (`0x52C2A0`) multiplies that by the
+/// per-map factor `dword_FF7A38[i]` before centring it on the player and flooring the corner to a
+/// texel. That factor is data, not code, so it is read from the binary the decomp came from
+/// (the 4.1.0 build 13850 Mac client, Mach-O i386, `__TEXT,__const` at VA `0xFF7A38`): **{0.8, 4.0}**. The single-map
+/// configuration this file ports is map 0, so `128 × 0.8 = 102.4`.
+///
+/// Three numbers agree on it and are the reason to trust it over the 50 this constant used to
+/// carry:
+/// - a texel is **exactly 0.1 yd** (102.4 / 1024), which is a designed number, not a fitted one;
+/// - `PerturbDisplMap` sizes a stamp `floor(radius / extent · size)` texels, so the 0.3-yd raindrop
+///   is **exactly 3 texels** — at 50 it was 6, and at map 1's 512 it floors to 0 and vanishes;
+/// - the rain emitter scatters ±50 yd ([`RAIN_SPREAD`]), which fits inside the ±51.2 half-width
+///   with room to spare. At 50 the map's half-width was 25, so **three of every four raindrops fell
+///   outside the field and did nothing** — which, with the halved wave speed and the missing
+///   [`PERTURB_SCALE`], is why rain made no visible ripples at all.
+///
+/// The 50 it replaces came from reading the rain scatter as ±25 (it is ±50: `((rand%1000)/500 − 1)
+/// · 50`, `CWorldMap.c`) and fitting the extent to that.
+pub const RIPPLE_EXTENT: f32 = 102.4;
 
 /// Milliseconds between simulation steps — the reference's `dword_13F141C = 50`, i.e. **20 Hz**.
 ///
@@ -92,11 +107,15 @@ const MAX_CATCHUP: u32 = 2;
 /// The reference's own damping (`PropagateDisplMap`'s `c0.z`).
 const DAMPING: f32 = 0.97;
 
-/// The most disturbances integrated in one step — must match `liquid_ripple.wgsl`'s `MAX_STAMPS`.
+/// The most disturbances integrated in one step — **must match `liquid_ripple.wgsl`'s
+/// `MAX_STAMPS`**, and this file is where the number lives.
 ///
-/// Sized for RAIN, which is the reference's own source and by far the heaviest: it scatters twenty
-/// drops per tick. Bodies contribute one each and never come close.
-const MAX_STAMPS: usize = 32;
+/// Sized for RAIN, which is the reference's own source and by far the heaviest: [`RAIN_DROPS`] a
+/// step, plus room for the bodies, which contribute one each and never come close. The shader's
+/// copy sat at 16 while this said 32 — the two are a single ABI and nothing checks them, so the
+/// mismatch was silent: WGSL clamps an out-of-range constant index, so every rain drop past the
+/// sixteenth was quietly stamped on top of the sixteenth instead of where it fell.
+const MAX_STAMPS: usize = 48;
 
 /// A perturbation's radius in yards — **the reference's 0.3**, read as the float literal
 /// `1050253722` (`0x3E99999A`) in its rain emitter's `Liquid::AddPerturbation` call.
@@ -109,9 +128,17 @@ const STAMP_RADIUS: f32 = 0.3;
 /// water.
 const RAIN_AMPLITUDE: (f32, f32) = (-0.4, -0.2);
 
-/// Rain drops scattered per step, and how far from the camera — the reference's twenty per tick,
-/// spread over `(rand/500 − 1) · 50` in each axis.
-const RAIN_DROPS: usize = 20;
+/// Rain drops per simulation step, and how far from the camera they scatter.
+///
+/// The reference emits **20 per 33 ms** — its weather tick's own cadence (`CWorldMap`, `elapsed /
+/// 0x21` ticks, capped at four, `20 × ticks` drops), which is the render loop's rate and NOT the
+/// displacement map's 50 ms step. Its emission is decoupled from the simulation because a
+/// perturbation added between steps is still stamped that frame and only propagates at the next
+/// one. This port collects on step frames only (see [`collect_stamps`]), so the rate is carried
+/// into the step instead: `20 × 50/33.3` = **30 a step** is the same 600 drops a second.
+///
+/// The spread is `((rand%1000)/500 − 1) · 50` in each axis — ±50 yards, inside the map's ±51.2.
+const RAIN_DROPS: usize = 30;
 const RAIN_SPREAD: f32 = 50.0;
 
 /// The intensity below which rain makes no ripples — the reference's `> 0.2` gate.
@@ -121,12 +148,25 @@ const RAIN_MIN_DENSITY: f32 = 0.2;
 ///
 /// **The reference has no such source.** Its dynamic displacement map is driven by rain and by
 /// mesh-shaped disturbances only; a walking character's ripple is the separate `CWater0Ripple`
-/// decal system, which benilla already carries in `water_fx`. These two numbers are therefore a
+/// decal system, which benilla carries in `water_fx`. These two numbers are therefore a
 /// deliberate addition, scaled off the raindrop the reference does specify: half again its radius,
 /// and an amplitude in the same band, because a leg entering water is a bigger version of the same
 /// event and should not be a different order of magnitude.
+///
+/// Adding it made the wading body a thing benilla draws **twice**, and the decal is the half that
+/// gives way: `water_fx`'s emitter stands down on the cata path (its `emit_water_foam` carries the
+/// reasoning) and keeps the whole of the legacy one, so each renderer has exactly one wake.
 const WADE_RADIUS: f32 = 0.45;
 const WADE_AMPLITUDE: f32 = -0.30;
+
+/// **The amplitude scale every perturbation is multiplied by**, and the clamp that follows it —
+/// `PerturbDisplMap`'s `clamp(amp · dword_FF7A30[i], −1, 1)`.
+///
+/// Read from the same binary as [`RIPPLE_EXTENT`]'s factor, four bytes below it (VA `0xFF7A30`):
+/// **{1.25, 0.25}**, map 0's being the 1.25. It is per-map rather than per-perturbation, which is
+/// what makes it a property of the field and not of the raindrop: map 1 covers five times the world
+/// at a fifth of the amplitude.
+const PERTURB_SCALE: f32 = 1.25;
 
 /// The gradient scale the water shader applies to the field.
 ///
@@ -320,6 +360,16 @@ pub(super) fn pack_ripple_data(mut field: ResMut<RippleField>, mut data: ResMut<
     }
 }
 
+/// One disturbance, in the packed form the shader reads: `xy` world XZ, `z` radius in yards, `w`
+/// amplitude — with [`PERTURB_SCALE`] and the reference's clamp already applied.
+///
+/// The scale belongs on the way IN rather than in the shader because it is a property of the map,
+/// not of the event: every perturbation of a given map takes the same factor, and folding it in here
+/// means the stamp array carries final amplitudes and the kernel stays the kernel.
+fn perturbation(x: f32, z: f32, radius: f32, amplitude: f32) -> Vec4 {
+    Vec4::new(x, z, radius, (amplitude * PERTURB_SCALE).clamp(-1.0, 1.0))
+}
+
 /// Collect this step's disturbances: the rain the reference itself simulates, and the wading bodies
 /// this port adds.
 ///
@@ -383,9 +433,7 @@ pub(super) fn collect_stamps(
         // runner's legs — and rises a little with speed.
         let submerge = 1.0 - (depth / (height * 2.0)).clamp(0.0, 1.0);
         let amp = WADE_AMPLITUDE * (speed / 4.0).clamp(0.3, 1.6) * submerge;
-        field
-            .stamps
-            .push(Vec4::new(pos.x, pos.z, WADE_RADIUS, amp));
+        field.stamps.push(perturbation(pos.x, pos.z, WADE_RADIUS, amp));
         if field.stamps.len() >= MAX_STAMPS {
             return;
         }
@@ -413,7 +461,7 @@ pub(super) fn collect_stamps(
         };
         let (x, z) = (next(), next());
         let a = next();
-        field.stamps.push(Vec4::new(
+        field.stamps.push(perturbation(
             cam.translation.x + (x * 2.0 - 1.0) * RAIN_SPREAD,
             cam.translation.z + (z * 2.0 - 1.0) * RAIN_SPREAD,
             STAMP_RADIUS,

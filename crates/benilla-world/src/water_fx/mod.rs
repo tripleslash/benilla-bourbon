@@ -2,6 +2,11 @@
 //! rebuilt as the reference's actual **record model** (decision 0264; supersedes the ribbon of 0240
 //! and the stamps of 0234).
 //!
+//! **This is the legacy renderer's answer, and only its.** The Cataclysm path draws a wading body's
+//! ripple as a real wave in the dynamic displacement map (`liquid::ripple`), so on `waterDetail 2`
+//! the emitter stands down and the decal is not drawn at all — see [`emit_water_foam`] for why the
+//! wave wins that tie rather than the two being summed.
+//!
 //! Ground truth, twice over: the byte-exact RE (wow-5875-re `system/terrain/scratch/`
 //! `water-ripple-decal.md` + the `waterdecal-*.c` decomps, §5-verified) **and** two live GL traces
 //! of the reference reconstructed frame-by-frame (Northshire wade 2026-07-08 + standing-ring
@@ -68,7 +73,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
-use crate::liquid::{FoamPatch, WaterChunkInfo, WaterIndex};
+use crate::liquid::{FoamPatch, WaterChunkInfo, WaterDetail, WaterIndex};
 use crate::particles::buffer::{
     begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
 };
@@ -413,9 +418,25 @@ fn drive_unit(
 
 /// Per frame: run the driver for the avatar (its real movement flags — the reference's own
 /// selection bits) and for every streamed unit (the velocity/yaw proxy), emitting pool records.
+///
+/// **Legacy renderer only.** A body wading is ONE event, and benilla now has two things that draw
+/// it: this decal, and the wave the Cataclysm path stamps into the dynamic displacement map
+/// (`liquid::ripple`). The reference never has to choose — its displacement field is driven by rain
+/// and mesh disturbances only, and the wading stamp is this port's own addition — so the choice is
+/// ours to make, and drawing both means a stencil-shaped white patch sitting on top of a wave that
+/// is already there, each about half of a wake and neither reading as one. The wave is the better
+/// half on the path that has it (it refracts, it spreads, it survives the body leaving), so the
+/// decal is the answer for `waterDetail 0` and only for it.
+///
+/// Gated INSIDE the system rather than by a `run_if`, because the setting moves at runtime and the
+/// motion history has to be dropped when it does: `last_pos` is differenced against the last frame,
+/// so a map kept across a spell of cata would put one frame's worth of `dt` against minutes of
+/// travel the moment the player switched back — a single fat wake at the far end of a jump the unit
+/// never made.
 #[allow(clippy::too_many_arguments)] // the emitter's real input set; the index ride-along tipped it
 fn emit_water_foam(
     time: Res<Time>,
+    detail: Res<WaterDetail>,
     materials: Option<Res<FoamAssets>>,
     mut foam: ResMut<WaterFoam>,
     viewer: Res<crate::view::Viewer>,
@@ -425,6 +446,13 @@ fn emit_water_foam(
     index: Res<WaterIndex>,
 ) {
     if materials.is_none() {
+        return;
+    }
+    if detail.is_cata() {
+        // Emitter state only — the pool is left alone deliberately. `push_water_foam` keeps
+        // running, so records already in flight when the setting moved finish their second of life
+        // and retire on the ordinary lifetime path instead of vanishing mid-fade.
+        foam.units.clear();
         return;
     }
     let now = time.elapsed_secs();
@@ -652,17 +680,16 @@ impl Plugin for WaterFxPlugin {
 mod tests {
     use super::*;
 
-    /// The emitter reaches its water through [`WaterIndex`], end to end: a wading unit standing
-    /// in an indexed pool emits a record on its first frame (the step-in one-shot), and a unit
-    /// on dry land emits nothing. This is the regression fence for the index rewire — an empty
-    /// or stale index is a world with NO foam, which no helper-level test would catch.
-    #[test]
-    fn the_emitter_finds_its_water_through_the_index() {
+    /// One wading unit standing in an indexed pool, one dry control far outside it, on the
+    /// renderer `detail` names. The wader is 1.5 yd under the surface — past the 0.4·h step-in
+    /// line — so the one-shot ring fires on its first classified frame.
+    fn wading_world(detail: u8) -> App {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<WaterIndex>()
             .init_resource::<WaterFoam>()
             .init_resource::<crate::view::Viewer>()
+            .insert_resource(WaterDetail(detail))
             .insert_resource(FoamAssets {
                 ring: Handle::default(),
                 wake: Handle::default(),
@@ -694,8 +721,6 @@ mod tests {
             height: 2.0,
             bound: None,
         };
-        // Feet 1.5 yd under the surface — past the 0.4·h step-in line, so the one-shot ring
-        // fires on the first classified frame.
         app.world_mut().spawn((
             Transform::from_translation(wow_to_bevy([2.0, 2.0, 3.5])),
             unit(),
@@ -705,19 +730,48 @@ mod tests {
             Transform::from_translation(wow_to_bevy([500.0, 500.0, 3.5])),
             unit(),
         ));
+        app
+    }
 
-        app.update();
-        let foam = app.world().resource::<WaterFoam>();
-        let live: Vec<usize> = foam
+    /// The live records in the pool, by slot.
+    fn live_slots(app: &App) -> Vec<usize> {
+        app.world()
+            .resource::<WaterFoam>()
             .pool
             .iter()
             .enumerate()
             .filter_map(|(i, r)| r.as_ref().map(|_| i))
-            .collect();
+            .collect()
+    }
+
+    /// The emitter reaches its water through [`WaterIndex`], end to end: a wading unit standing
+    /// in an indexed pool emits a record on its first frame (the step-in one-shot), and a unit
+    /// on dry land emits nothing. This is the regression fence for the index rewire — an empty
+    /// or stale index is a world with NO foam, which no helper-level test would catch.
+    #[test]
+    fn the_emitter_finds_its_water_through_the_index() {
+        let mut app = wading_world(crate::liquid::WATER_DETAIL_LEGACY);
+        app.update();
+        let live = live_slots(&app);
         assert_eq!(live.len(), 1, "one record: the wader's, not the dry unit's");
         assert!(
             live[0] >= SELF_SLOTS,
             "a streamed unit allocates from the other partition"
+        );
+    }
+
+    /// **The Cataclysm path draws no decal.** Same world, same wader, same frame — the setting is
+    /// the only difference, and it is the whole difference: on `waterDetail 2` the wake is the wave
+    /// `liquid::ripple` stamps into the displacement map, and a decal over it would be the same
+    /// event painted twice. The default is cata, so this is also the fence that says a `WaterDetail`
+    /// the emitter forgot to read means every cata player sees the old stencil.
+    #[test]
+    fn the_cata_renderer_emits_no_foam_decal() {
+        let mut app = wading_world(crate::liquid::WATER_DETAIL_CATA);
+        app.update();
+        assert!(
+            live_slots(&app).is_empty(),
+            "the cata renderer's wake is the displacement wave; the decal must not double it"
         );
     }
 

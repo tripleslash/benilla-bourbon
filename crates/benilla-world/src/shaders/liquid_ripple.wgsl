@@ -37,9 +37,11 @@
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
-/// The most disturbances the field integrates in one frame. Beyond this the nearest are kept — see
-/// `ripple.rs`, which does the choosing.
-const MAX_STAMPS: u32 = 16u;
+/// The most disturbances the field integrates in one step. **This is one ABI with `ripple.rs`'s
+/// `MAX_STAMPS`, which sizes the buffer** — nothing checks the two, and WGSL clamps an out-of-range
+/// constant index rather than faulting, so a shader smaller than the buffer does not fail, it
+/// silently restamps its last slot for every disturbance past the end. Keep them equal.
+const MAX_STAMPS: u32 = 48u;
 
 struct Ripple {
     /// `xy` = the map's min corner in Bevy world XZ; `z` = 1 / extent in yards; `w` = the
