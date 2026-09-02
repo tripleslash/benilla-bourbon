@@ -540,6 +540,7 @@ pub(super) fn setup_liquid(
     //   — the same path a genuine resize takes, so the first frame is not a special case anybody
     //   has to maintain.
     let bump = images.add(art::bump_image());
+    let foam = images.add(art::foam_image());
     let targets = LiquidScreenTargets::allocate(&mut images, UVec2::new(1280, 720));
 
     // No light seed and no per-frame push: light, fog and both water swatches come off the shared
@@ -666,6 +667,7 @@ pub(super) fn setup_liquid(
                 extension: LiquidCataExt {
                     frames: frames.clone(),
                     bump: bump.clone(),
+                    foam: foam.clone(),
                     scene_color: targets.color.clone(),
                     scene_blur: targets.blur.clone(),
                     scene_depth: targets.depth.clone(),
@@ -689,6 +691,7 @@ pub(super) fn setup_liquid(
                     ),
                     bump_params: cata_bump_params(kind),
                     shade_params: cata_shade_params(kind),
+                    foam_params: cata_foam_params(kind),
                     light_buf: world_assets.shared_light.clone(),
                 },
             });
@@ -725,6 +728,31 @@ fn cata_bump_params(kind: LiquidKind) -> Vec4 {
         LiquidKind::Rapids => Vec4::new(0.075, 0.21, 0.30, 1.25),
         // Lakes and rivers at rest.
         _ => Vec4::new(0.035, 0.11, 0.09, 1.0),
+    }
+}
+
+/// The shoreline-foam lane: tiling, depth scale, strength, and the second tap's normal drag.
+///
+/// The **depth scale** is the one number with a physical meaning, and it is where the look lives: it
+/// is how deep the water gets before the surf stops, in yards. Sub-yard on a river, because a
+/// shoreline band is a band and not a shallows — the first cut used two yards and painted every
+/// sandbar in Elwynn. The ocean gets a little more, a beach shelving more slowly than a bank.
+///
+/// The **strength** reads higher than it looks: the shader multiplies it by the view-distance blend
+/// (0.2 at the camera) and by the surface normal's up component before adding, so a third here is
+/// nearer a fifteenth underfoot. That is deliberate and it is the reference's — see `liquid_cata.wgsl`.
+///
+/// Magma and slime never reach this — the fullbright branch returns before the foam term — but they
+/// are given a zero strength anyway rather than a plausible number, so that a future port of
+/// `ProcMagma` starts from "off" instead of inheriting water's surf.
+fn cata_foam_params(kind: LiquidKind) -> Vec4 {
+    match kind {
+        LiquidKind::Ocean => Vec4::new(0.45, 1.0, 0.30, 0.05),
+        // Rapids: tighter and brighter, and reaching less far out — white water is the point, and
+        // a river is narrow enough that a wide band would simply fill it.
+        LiquidKind::Rapids => Vec4::new(0.85, 0.5, 0.45, 0.09),
+        LiquidKind::Magma | LiquidKind::Slime => Vec4::ZERO,
+        _ => Vec4::new(0.6, 0.7, 0.35, 0.06),
     }
 }
 

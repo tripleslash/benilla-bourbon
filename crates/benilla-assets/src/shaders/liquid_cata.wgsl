@@ -70,6 +70,8 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var scene_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var scene_blur: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var scene_depth: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(109) var foam_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var foam_samp: sampler;
 
 struct LiquidParams {
     // x = fullbright (magma/slime); y = ocean swatch; z = interior fog; w = sun-sheen shininess.
@@ -84,6 +86,9 @@ struct LiquidParams {
     // x = view-perturb (c23.y); y = specular power (c4.w); z = specular scale (c27.w);
     // w = sun-glare scale (c27.z).
     shade_params: vec4<f32>,
+    // x = foam tiling (repeats/yard); y = foam depth scale (yards); z = foam strength (c28.y);
+    // w = how far the wave normal drags the second foam tap.
+    foam_params: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -122,6 +127,9 @@ struct VsOut {
     // `ambient + diffuse·N·L`, times the mesh's vertex colour (the reference's COLOR0).
     @location(5) lit_color: vec3<f32>,
     @location(6) uv: vec2<f32>,
+    // The two shoreline-foam UV sets (the reference's TEXCOORD2), a high-frequency pair with a
+    // slow sinusoidal wobble so the surf churns rather than slides.
+    @location(7) foam_uv: vec4<f32>,
 }
 
 // ─────────────────────────────────────────────────────────────────────── shared with liquid.wgsl
@@ -211,6 +219,17 @@ fn vertex(in: Vertex) -> VsOut {
         world_uv * s1 + vec2<f32>(-phase * 0.21, -phase * 0.44),
         world_uv * s1 * 0.87 + vec2<f32>(phase * 0.52, -phase * 0.29),
     );
+
+    // The foam UV pair. The reference builds these from the bump coordinate scaled by 228 plus a
+    // `sincos` wobble driven off the clock and the vertex position — a high frequency with a slow
+    // drift, which is what keeps surf from reading as a sliding decal. Same shape here, anchored to
+    // world XZ for the same reason the bump sets are.
+    let fs = w.foam_params.x;
+    let wob = vec2<f32>(
+        sin(phase * 4.0 + world_uv.x * 0.05),
+        cos(phase * 2.0 + world_uv.y * 0.05),
+    ) * 0.1;
+    out.foam_uv = vec4<f32>(world_uv * fs + wob, world_uv * fs * 0.73 - wob * 0.7);
 
     // COLOR0: `ambient + diffuse · saturate(N·L)`, times the mesh's vertex colour. The reference
     // computes it per vertex over the WORLD normal for exactly this reason — the surface is flat,
@@ -358,6 +377,55 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // alpha 1.0 and still read as transparent.
     refracted = mix(refracted, body, ramp.a * (1.0 - 0.1 * fres2));
 
+    // ---- Shoreline foam ------------------------------------------------------------------------
+    //
+    // `ProcWaterAbove`'s samp7 permutations, and the whole of it is one idea: **the water column**.
+    // `scene_z − frag_view_z` is how far the bottom sits behind the surface at this pixel, and
+    // where that collapses, the surface is meeting something. Surf is what a water surface does
+    // where it meets something.
+    //
+    // That is also why this one term covers both of the things foam is asked for. A shoreline is
+    // where the column goes to zero because the bed rises into the surface; a character standing in
+    // the water is where it goes to zero because a body does. The mask cannot tell them apart and
+    // does not need to — it foams around rocks, piers, tree trunks and players for free, which is
+    // exactly the behaviour the reference gets from the same subtraction.
+    //
+    // The column is scaled by `1 − V.up` before the ramp, which is the reference's own slant
+    // correction: at a grazing view you are looking through more water for the same depth, so the
+    // surf band reads wider from the shore than from directly above it.
+    let column = max(scene_z - frag_view_z, 0.0);
+    let slant = 1.0 - v.y;
+    // The band WIDENS at grazing angles. The reference divides by `(fres² · c9.w + c9.z) · 2.5`,
+    // i.e. an authored depth scale with a Fresnel-driven term added to it; the shape is what
+    // matters and the coefficient is folded to one constant here, the two registers behind it
+    // being `LiquidType.dbc` columns that 1.12.1 has no equivalent of.
+    let foam_depth = max(w.foam_params.y, 0.01) * (1.0 + fres2 * 1.5);
+    let t = clamp(column * slant / foam_depth, 0.0, 1.0);
+    // `1 − smoothstep`: full at the waterline, gone by the depth scale. Hermite rather than a
+    // linear ramp because a linear one puts a visible straight edge along the contour where it
+    // reaches zero, and a shoreline is exactly where that edge would be looked at.
+    let shore = 1.0 - (t * t * (3.0 - 2.0 * t));
+    // **The two attenuators that make this subtle rather than a white sheet**, both the reference's
+    // and both easy to miss in the bytecode because they are single `mul`s a long way from the
+    // rest of the term:
+    //
+    //   * the **view-distance blend** — the very same `saturate(0.001·d + 0.2)` the bump taps use.
+    //     At the camera that is 0.2, so the surf you are standing over is at a fifth strength and
+    //     only reaches full out near the horizon. Without it the shoreline nearest the player is
+    //     the brightest thing in the frame, which is exactly backwards.
+    //   * **N.up** — foam lies flat. A wave face turned toward you carries less of it.
+    let detail_blend = clamp(length(in.view_vec) * 0.001 + 0.2, 0.0, 1.0);
+    // Two taps, ADDED, the second dragged by the wave normal so the two layers beat against each
+    // other instead of sliding as one sheet. The sheet is sparse and near-black by construction
+    // (`liquid::art`) precisely so this addition is foam rather than a lift.
+    let foam_a = textureSample(foam_tex, foam_samp, in.foam_uv.xy).rgb;
+    let foam_b = textureSample(
+        foam_tex,
+        foam_samp,
+        in.foam_uv.zw + n.zx * w.foam_params.w,
+    ).rgb;
+    let foam = (foam_a + foam_b) * (shore * w.foam_params.z * detail_blend * n.y);
+
     let below = w.path.y > 0.5;
     var rgb: vec3<f32>;
     if (below) {
@@ -411,6 +479,9 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
     rgb += glare * wow_light.light_spec.rgb * body;
     rgb += w.shade_params.z * spec_color * fres2;
+    // Foam last, and additively: it sits ON the water rather than being tinted by it, and it is
+    // the one term that should survive a dark shoreline at dusk.
+    rgb += foam;
 
     rgb = apply_fog(rgb, in.world_position.xyz);
     // **Alpha 1.0, and that is the program's own answer** (`mov ocol0.w, 1`). Cata water is opaque

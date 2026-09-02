@@ -599,6 +599,15 @@ pub struct LiquidCataExt {
     /// Metal's per-stage sampler ceiling is close enough here to be worth not spending twice.
     #[texture(107, visibility(fragment))]
     pub scene_blur: Handle<Image>,
+    /// Stage 7: the shoreline foam sheet, sampled twice at two scroll phases and ADDED.
+    ///
+    /// `ProcWaterAbove`'s `samp7` — `GetTexture(mat, 3, 0)`, the third of the reference's per-liquid
+    /// material textures. Synthesised, like the bump map, and for the same reason: the column that
+    /// names it does not exist in 1.12.1's `LiquidType.dbc`. See `benilla_world`'s `liquid::art`.
+    #[texture(109, visibility(fragment))]
+    #[sampler(110, visibility(fragment))]
+    pub foam: Handle<Image>,
+
     /// Stage 6: linear view depth in yards, `R32Float`.
     ///
     /// `filterable = false` and **no sampler**: `R32Float` cannot take a filtering sampler without
@@ -635,6 +644,12 @@ pub struct LiquidCataExt {
     /// `z` = specular scale (`c27.w`), `w` = sun-glare scale (`c27.z`).
     #[uniform(102)]
     pub shade_params: Vec4,
+    /// The shoreline foam lane: `x` = the sheet's tiling scale in repeats per yard, `y` = the
+    /// **depth scale** in yards — how deep the water has to get before the surf fades out —
+    /// `z` = strength (the reference's `c28.y`), `w` = how far the wave normal drags the second
+    /// tap, so the foam churns with the swell instead of sliding over it.
+    #[uniform(102)]
+    pub foam_params: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its

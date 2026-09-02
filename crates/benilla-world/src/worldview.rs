@@ -29,6 +29,8 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use benilla_assets::coords::wow_to_bevy;
 
+mod wade_probe;
+
 use crate::boot;
 use crate::build_id::BuildId;
 use crate::terrain_stream::SPAWN_XY;
@@ -266,7 +268,15 @@ fn plugin(app: &mut App) {
     )
     .add_systems(
         Update,
-        (fly, toggle_indirect).in_set(crate::schedule::WorldStage::Input),
+        (fly, toggle_indirect, wade_probe::toggle_wade_probe)
+            .in_set(crate::schedule::WorldStage::Input),
+    )
+    // The wade probe MOVES in the ordinary update, not the input stage: `water_fx`'s emitter reads
+    // its `Transform` and differentiates it for the wake heading, so it has to be walking by the
+    // time the emitter looks.
+    .add_systems(
+        Update,
+        (wade_probe::auto_spawn_probe, wade_probe::drive_probe),
     );
 
     // `WOW_WORLDVIEW_SHOT=<png>` (at `WOW_WORLDVIEW_SHOT_AT` seconds, default 20) writes one frame
