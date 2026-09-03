@@ -1,4 +1,1 @@
-{
-  "ws": "",
-  "realmlist": ""
-}
+{ "ws": "wss://realm.example.com", "realmlist": "realm.example.com" }
