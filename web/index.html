@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>wenilla</title>
+<title>World of Warcraft</title>
 <!-- Trunk's build description (Trunk.toml points `target` here). Paths are relative to THIS file,
      which is why the crate is reached with `../`.
 
@@ -111,6 +111,66 @@
         }
       });
       return m;
+    };
+  }
+</script>
+<script>
+  // **The sampler census.** The fault is `CreatePipelineLayout` rejecting 17 fragment samplers
+  // against WebGPU's per-stage limit of 16 — a limit native never applies, because Vulkan/D3D12
+  // report it in the hundreds of thousands and Bevy asks the adapter for whatever it has.
+  //
+  // The rejection names no group and no material, so tag every bind group layout with what it holds
+  // as it is created, then add them up when a pipeline layout binds them together. Group 3 is the
+  // material; groups 0-2 are Bevy's view, view-binding-arrays and mesh, and they are the fixed cost
+  // every material pays.
+  if (navigator.gpu && window.GPUDevice) {
+    const info = new WeakMap();
+    const origBGL = GPUDevice.prototype.createBindGroupLayout;
+    GPUDevice.prototype.createBindGroupLayout = function (d) {
+      const bgl = origBGL.call(this, d);
+      const n = { sampler: 0, texture: 0, buffer: 0, storageTexture: 0 };
+      for (const e of (d && d.entries) || []) {
+        const c = e.count || 1;
+        if (e.sampler) n.sampler += c;
+        else if (e.texture || e.externalTexture) n.texture += c;
+        else if (e.storageTexture) n.storageTexture += c;
+        else if (e.buffer) n.buffer += c;
+      }
+      info.set(bgl, { label: (d && d.label) || '(unlabeled)', n, entries: ((d && d.entries) || []).length });
+      return bgl;
+    };
+
+    const seen = new Set();
+    const origPL = GPUDevice.prototype.createPipelineLayout;
+    GPUDevice.prototype.createPipelineLayout = function (d) {
+      const groups = ((d && d.bindGroupLayouts) || []).map((b) => info.get(b));
+      const tot = groups.reduce((a, g) => a + ((g && g.n.sampler) || 0), 0);
+      const key = groups.map((g) => (g ? `${g.label}:${g.n.sampler}` : '?')).join('|');
+      // Only speak for layouts at or over the limit — the passing ones are noise.
+      if (tot >= 16 && !seen.has(key)) {
+        seen.add(key);
+        let s = `\n>>> PIPELINE LAYOUT: ${tot} fragment samplers (limit 16) <<<\n`;
+        groups.forEach((g, i) => {
+          s += g
+            ? `  group ${i}: samplers=${String(g.n.sampler).padStart(2)}  textures=${String(g.n.texture).padStart(2)}  buffers=${String(g.n.buffer).padStart(2)}  "${g.label}"\n`
+            : `  group ${i}: (not seen at creation)\n`;
+        });
+        console.error(s);
+      }
+      return origPL.call(this, d);
+    };
+
+    const origReq = GPUAdapter.prototype.requestDevice;
+    GPUAdapter.prototype.requestDevice = async function (desc) {
+      const dev = await origReq.call(this, desc);
+      const shown = new Set();
+      dev.addEventListener('uncapturederror', (e) => {
+        const m = e.error.message;
+        if (shown.has(m.slice(0, 120))) return;
+        shown.add(m.slice(0, 120));
+        console.error(`WebGPU ${e.error.constructor.name}\n    ${m}`);
+      });
+      return dev;
     };
   }
 </script>

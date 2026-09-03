@@ -1,7 +1,14 @@
 //! The login screen (decision 0539) — the faithful `AccountLogin` glue, functional core only:
 //! the `UI_MainMenu` scene with its authored fog/fires, the account/password boxes, Remember
-//! Account Name, Login/Quit, the version block, and the connecting/error dialogs. The Credits/
-//! Cinematics/TOS side of the reference screen is deliberately cut (the director's call).
+//! Account Name, Login, the version block, and the connecting/error dialogs. The Credits/
+//! Cinematics/TOS side of the reference screen is deliberately cut (the director's call), and so
+//! is the ref's Quit button — benilla ships in a browser tab, where closing the client is the
+//! browser's gesture ([`screen`]'s header; the ESC menu's Exit Game rung went the same way).
+//! **ESC went with it.** The ref's `AccountLogin` binds ESCAPE to the same Quit it draws, so the
+//! key had nowhere left to point once the button was gone; rather than leave a keystroke that
+//! silently kills a tab nothing asked it to kill, ESC on this screen now does one thing and
+//! only when there is something to do — it **leaves fullscreen** ([`leave_fullscreen`]), the
+//! browser's own meaning for the key. Windowed, it does nothing at all.
 //!
 //! This module owns the **credential policy** — the 0193 §3 mirror for the IO thread's pre-logon
 //! park: the env fast path (any of `WOW_USER`/`WOW_PASS`/`WOW_CHAR` explicitly set auto-submits
@@ -43,6 +50,7 @@ use crate::net::{
 };
 use crate::portrait::{GluePreview, GlueScene};
 use crate::sound::GlueSound;
+use crate::video::{DisplayMode, VideoConfig};
 
 pub(crate) use screen::LoginAction;
 pub(crate) use smoke::smoke_character;
@@ -50,8 +58,6 @@ pub(crate) use smoke::smoke_character;
 /// The flat resubmit pacing after a transport failure with pending credentials (decision 0065's
 /// reconnect cadence, moved app-side by 0539 — the IO thread never sleeps).
 const RETRY_DELAY_SECS: f32 = 3.0;
-/// The quit grace: `gsTitleQuit` gets this long to be audible before `AppExit` drops the mixer.
-const QUIT_GRACE_SECS: f32 = 0.4;
 /// The ref's `letters="16"` on both edit boxes.
 const MAX_LETTERS: usize = 16;
 
@@ -69,7 +75,7 @@ impl Plugin for LoginPlugin {
                 (
                     // Policy + transitions run in EVERY state: the reconnect resubmit fires while
                     // `InWorld`, and the roster edge lands wherever it lands.
-                    (drive_policy, to_select_on_roster, drive_quit).chain(),
+                    (drive_policy, to_select_on_roster).chain(),
                     (
                         screen::materialize_screen,
                         login_input,
@@ -734,10 +740,6 @@ impl LoginForm {
     }
 }
 
-/// The armed quit (`gsTitleQuit` needs [`QUIT_GRACE_SECS`] to be audible before `AppExit`).
-#[derive(Resource, Default)]
-struct QuitArm(Option<f32>);
-
 /// Entering the login screen: the ref's `AccountLogin_OnShow` — prefill the saved account name,
 /// clear the password, focus account when empty / password otherwise, checkbox = saved-name
 /// exists — and stand the `UI_MainMenu` scene up.
@@ -762,8 +764,9 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
 }
 
 /// The screen's input: typing into the focused box (the ref's 16-letter cap), Tab cycling, Enter
-/// submits, Esc quits (dialog-first — an open dialog's Esc is its Cancel/Okay), clicks focus the
-/// boxes / press the buttons / toggle the checkbox.
+/// submits, Esc leaves fullscreen and otherwise does nothing (dialog-first — an open dialog's Esc
+/// is still its Cancel/Okay, and that rung is unchanged), clicks focus the boxes / press the
+/// buttons / toggle the checkbox.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn login_input(
     presses: Query<(Entity, &LoginAction, Ref<Interaction>)>,
@@ -778,15 +781,12 @@ fn login_input(
     mut dialog: ResMut<LoginDialog>,
     strings: Option<Res<GlueStrings>>,
     mut sounds: MessageWriter<GlueSound>,
-    mut quit: Local<bool>,
-    mut commands: Commands,
-    time: Res<Time>,
+    mut video: ResMut<VideoConfig>,
 ) {
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
     let mut do_login = false;
-    let mut do_quit = false;
 
     // While a dialog is up it owns the input; the box/button surface underneath is inert.
     let dialog_open = dialog.kind.is_some();
@@ -820,7 +820,6 @@ fn login_input(
         match action {
             LoginAction::FocusAccount | LoginAction::FocusPassword => {} // focused on the press
             LoginAction::Login => do_login = true,
-            LoginAction::Quit => do_quit = true,
             LoginAction::ToggleSave => {
                 form.save = !form.save;
                 // Verbatim ref quirk (`AccountLoginSaveAccountName` OnClick): checked plays the
@@ -880,8 +879,11 @@ fn login_input(
     {
         do_login = true;
     }
+    // **ESC is not a quit here** (the module header). The reference's own binding was the Quit
+    // button, which this screen no longer draws, so the key is left with the one thing a player
+    // pressing it on a full-screen client actually means — and nothing at all otherwise.
     if !dialog_open && keys.just_pressed(KeyCode::Escape) {
-        do_quit = true;
+        leave_fullscreen(&mut video);
     }
 
     if do_login && !attempt.intent.in_flight {
@@ -920,11 +922,6 @@ fn login_input(
             }
         }
     }
-    if do_quit && !*quit {
-        *quit = true;
-        sounds.write(GlueSound("gsTitleQuit"));
-        commands.insert_resource(QuitArm(Some(time.elapsed_secs() + QUIT_GRACE_SECS)));
-    }
 }
 
 /// The caret's clock. Exactly one box owns the keyboard, so the focused one is the one that blinks
@@ -956,13 +953,27 @@ fn on_account_edited(form: &mut LoginForm) {
     }
 }
 
-/// Fire the armed quit once its grace elapsed (so `gsTitleQuit` is heard).
-fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWriter<AppExit>) {
-    if let Some(arm) = arm {
-        if arm.0.is_some_and(|t| time.elapsed_secs() >= t) {
-            exit.write(AppExit::Success);
-        }
+/// ESC's whole job on this screen: **drop out of fullscreen, if we are in it.**
+///
+/// The write is to [`VideoConfig`] and nowhere else, because that resource is the seam the window
+/// actually hangs off — `video::apply_window_mode` watches it, flips the window and hands
+/// `gxResolution` back on the way out, and `cvars::compose_file` composes the saved `gxWindow`
+/// from this same field, so the choice persists without this function knowing how a config file
+/// is spelled. The live CVar *table* is not written here: it is seeded from these knobs whenever a
+/// VM is built (`cvars::sync_cvars`'s registration seed), which is every VM the player will meet
+/// after this screen.
+///
+/// **Windowed in, nothing happens** — the early return is the "ESC does nothing" half of the
+/// contract, and it is the only guard: `just_pressed` is already an edge, so a held key does not
+/// re-enter this, and the one thing worth not doing on a no-op press is writing the resource.
+///
+/// Returns whether it did anything, which is what the test below asks it.
+fn leave_fullscreen(video: &mut VideoConfig) -> bool {
+    if video.display == DisplayMode::Windowed {
+        return false;
     }
+    video.display = DisplayMode::Windowed;
+    true
 }
 
 // ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
@@ -1213,6 +1224,22 @@ fn save_account(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **ESC on this screen is not a quit and is not a toggle.** It leaves fullscreen once and
+    /// then does nothing — pressing it again must not put the player *back* into fullscreen,
+    /// which a naive "flip the mode" reading of "Esc exits fullscreen" would do, and which is
+    /// how a key that is supposed to be an escape hatch becomes a trap.
+    #[test]
+    fn escape_leaves_fullscreen_once_and_is_inert_afterwards() {
+        let mut video = VideoConfig {
+            display: DisplayMode::Fullscreen,
+            ..VideoConfig::default()
+        };
+        assert!(leave_fullscreen(&mut video), "the first press did something");
+        assert_eq!(video.display, DisplayMode::Windowed);
+        assert!(!leave_fullscreen(&mut video), "the second press did not");
+        assert_eq!(video.display, DisplayMode::Windowed, "and never toggles back");
+    }
 
     /// Stand `drive_policy` up on its own with the env fast path already spent, so the policy
     /// under test is the disconnect arm and nothing else — and so an ambient `WOW_USER` in

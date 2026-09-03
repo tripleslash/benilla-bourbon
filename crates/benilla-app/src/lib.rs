@@ -406,7 +406,7 @@ pub fn run(build: BuildId) -> AppExit {
     // because `embedded_asset!` is per-crate by construction. Only the directory is gone.
 
     app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
-        title: "benilla".into(),
+        title: "World of Warcraft".into(),
         // **Born in the player's display mode, not flipped into it** (decision 1627). `gxWindow`
         // is read straight off `config.toml` here rather than waiting for `Startup`'s
         // `load_config`, because a launch that opens windowed and goes fullscreen one frame later

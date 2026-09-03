@@ -1,9 +1,9 @@
 //! The shipped `assets/ui/GameMenuFrame.xml` — the frame ESC opens (decision 0674).
 //!
-//! What these guard, in order: the ladder geometry (the ERA menu shape minus its AddOns rung —
-//! 200×267, seven rungs in three 20-gapped sections, the era layout engine's own numbers
-//! precomputed in the XML's header note); the greyed pending entries; the live buttons' wire
-//! intents and sounds;
+//! What these guard, in order: the ladder geometry (the ERA menu shape minus its AddOns and Exit
+//! Game rungs — 200×246, six rungs in three 20-gapped sections, the era layout engine's own
+//! numbers precomputed in the XML's header note); the greyed pending entries; the live buttons'
+//! wire intents and sounds;
 //! the ESC ladder's two new rungs (open when nothing is left to eat, close before everything
 //! else); the micro button's `clicked` toggle; the native-center rule that makes the menu take
 //! the screen (windows close on the way in, and nothing opens while it is up); and the camp/quit
@@ -82,25 +82,25 @@ fn bag_harness_with(before: &[&str], after: &[&str]) -> UiScript {
     harness_with(&files)
 }
 
-/// The seven buttons, top to bottom — the ERA ladder, its own shape (the director's call on the
-/// 0951 review; GameMenuFrame.xml's header SCOPE note quotes the era source), minus two seats:
+/// The six buttons, top to bottom — the ERA ladder, its own shape (the director's call on the
+/// 0951 review; GameMenuFrame.xml's header SCOPE note quotes the era source), minus three seats:
 /// 0997's carved Key Bindings seat left with its standalone window (decision 1008 folded key
-/// bindings into the Options window, where the era menu always pointed), and the AddOns rung
+/// bindings into the Options window, where the era menu always pointed), the AddOns rung
 /// left with the in-game panel when the director made the char-select AddOns screen the only
-/// addon UI (it had been live since 1197).
-const LADDER: [&str; 7] = [
+/// addon UI (it had been live since 1197), and Exit Game left because a browser tab has no
+/// process for it to end — the login screen's Quit button went out on the same call.
+const LADDER: [&str; 6] = [
     "GameMenuButtonOptions",
     "GameMenuButtonEditMode",
     "GameMenuButtonSupport",
     "GameMenuButtonMacros",
     "GameMenuButtonLogout",
-    "GameMenuButtonQuit",
     "GameMenuButtonContinue",
 ];
 
 /// The ladder geometry — the era layout engine's own numbers (MainMenuFrameTemplates: padding
-/// 32/28/28/28, spacing 0, AddSection gap 20) over our seven rungs: 200×267, each button
-/// 144×21 at x=28, tops at 32/73/94/115/156/177/218 — three sections split by the 20-unit
+/// 32/28/28/28, spacing 0, AddSection gap 20) over our six rungs: 200×246, each button
+/// 144×21 at x=28, tops at 32/73/94/115/156/197 — three sections split by the 20-unit
 /// gaps after Options, after Macros, and before Return to Game. First thing to break if the
 /// era shape is ever "tidied".
 #[test]
@@ -113,11 +113,11 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    assert_eq!((w, h), (200.0, 267.0), "the era frame size");
+    assert_eq!((w, h), (200.0, 246.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
-    const TOPS: [f64; 7] = [32.0, 73.0, 94.0, 115.0, 156.0, 177.0, 218.0];
+    const TOPS: [f64; 6] = [32.0, 73.0, 94.0, 115.0, 156.0, 197.0];
     for (name, down) in LADDER.iter().zip(TOPS) {
         let (bw, bh, btop, bleft) = s
             .eval::<(f64, f64, f64, f64)>(&format!(
@@ -165,7 +165,6 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
         "GameMenuButtonOptions",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
-        "GameMenuButtonQuit",
         "GameMenuButtonContinue",
     ] {
         assert!(
@@ -333,9 +332,11 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The three live buttons: each plays its own reference kit and does its one thing. Logout and Exit
-/// Game both queue on the session seam — the difference between them is entirely app-side (whether
-/// the completed logout ends the process), which is why they look identical from here.
+/// The two live buttons: each plays its own reference kit and does its one thing — plus `Quit()`
+/// itself, which lost its rung (a browser tab has no process to end) but not its callers: `/quit`
+/// and the Mac application menu still reach the session seam through it, and the QUIT countdown
+/// dialog below is what they raise. Logout and Quit queue the same shape — the difference between
+/// them is entirely app-side (whether the completed logout ends the process).
 #[test]
 fn the_live_buttons_queue_their_intents_and_play_their_kits() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -361,14 +362,10 @@ fn the_live_buttons_queue_their_intents_and_play_their_kits() {
         .contains(&SoundRequest::KitName("igMainMenuLogout".into())));
     assert!(!s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap());
 
-    // Exit Game — the same shape, its own kit.
-    s.run("ToggleGameMenu()").unwrap();
-    let _ = s.take_sounds();
-    s.run("GameMenuButtonQuit:Click()").unwrap();
+    // Quit — no button any more, but the API behind the retired rung is what `/quit` calls, and
+    // it queues the same shape Logout does.
+    s.run("Quit()").unwrap();
     assert_eq!(s.take_session_requests(), vec![SessionRequest::Quit]);
-    assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuQuit".into())));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -487,13 +484,14 @@ fn player_quiting_offers_exit_now_and_logout_cancel_closes_it() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The reference's own OnShow guard on both live buttons: a menu re-opened over a running countdown
-/// shows them dead, because re-arming a logout that is already counting is meaningless.
+/// The reference's own OnShow guard on Logout: a menu re-opened over a running countdown shows it
+/// dead, because re-arming a logout that is already counting is meaningless. Both countdowns arm
+/// it — CAMP here, and QUIT still reachable through `/quit` even with the Exit Game rung gone.
 ///
 /// Opened with the micro button's form on purpose — the ESC key can't get you here at all, which is
 /// the next test.
 #[test]
-fn logout_and_exit_read_disabled_while_a_countdown_runs() {
+fn logout_reads_disabled_while_a_countdown_runs() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
@@ -503,11 +501,19 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
             .unwrap(),
         "Logout is dead while the camp timer runs"
     );
-    assert!(!s
-        .eval::<bool>("return GameMenuButtonQuit:IsEnabled() ~= 0")
-        .unwrap());
 
-    // With the countdown gone, a re-opened menu has them back.
+    // The QUIT countdown arms the same guard — `/quit` is still a way to raise one.
+    s.run("HideUIPanel(GameMenuFrame)").unwrap();
+    s.fire_event("LOGOUT_CANCEL", vec![]);
+    s.fire_event("PLAYER_QUITING", vec![]);
+    s.run("ToggleGameMenu(1)").unwrap();
+    assert!(
+        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
+            .unwrap(),
+        "…and dead under the quit timer too"
+    );
+
+    // With the countdown gone, a re-opened menu has it back.
     s.run("HideUIPanel(GameMenuFrame)").unwrap();
     s.fire_event("LOGOUT_CANCEL", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();

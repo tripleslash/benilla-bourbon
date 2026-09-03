@@ -65,15 +65,31 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var frames: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var frames_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var bump_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var bump_samp: sampler;
+// **One sampler for all three synthesised sheets** — the bump map, the foam and the magma noise
+// volume. `liquid::art` builds them with byte-identical descriptors (Repeat on u/v/w, Linear mag,
+// min and mipmap), a sampler is pipeline STATE rather than a property of a texture, and WebGPU
+// samplers carry no dimensionality — so the 3D volume takes the same one the 2D sheets do.
+//
+// This is not tidying, it is the fix for a black screen. WebGPU caps FRAGMENT samplers at **16 per
+// stage** and counts them across every bind group in the pipeline layout, Bevy's view groups
+// included; three separate ones here put this material at **17**, and `CreatePipelineLayout`
+// refused it. On the browser backend that refusal is silent (wgpu forwards and never reads the
+// result), and an invalid pipeline poisons the command buffer that binds it, so `submit` dropped
+// the WHOLE frame — every other pass with it — and the canvas presented as black wherever liquid
+// drew. Both liquid pipelines fell to it, `AlphaMode::Opaque` magma and `AlphaMode::Blend` water
+// alike, because they share this layout. Native never sees any of it: Vulkan and D3D12 report the
+// limit in the hundreds of thousands, and Bevy asks the adapter for whatever it has.
+//
+// So: a FOURTH sampler on this material costs the frame, not the sheet. The remaining three are
+// 101 (`frames`, its own filter policy), 106 (`scene_*`, clamped) and 114 (`ripple_map`); 106 and
+// 114 are themselves identical and can merge the same way if this ever needs another.
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var art_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var scene_color: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var scene_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var scene_blur: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var scene_depth: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var noise_vol: texture_3d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112) var noise_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var foam_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var foam_samp: sampler;
 
 struct LiquidParams {
     // x = fullbright (magma/slime); y = ocean swatch; z = interior fog; w = sun-sheen shininess.
@@ -125,6 +141,12 @@ struct WowLight {
 /// The dynamic ripple field's placement — see `benilla_world`'s `liquid::ripple`, which owns the
 /// simulation and writes this every frame. Only the first two rows are read here; the rest is the
 /// wave step's own state and is declared so the two shaders agree on the layout.
+///
+/// **`stamps` is one ABI with `ripple.rs`'s `MAX_STAMPS` and `liquid_ripple.wgsl`'s — THREE copies
+/// of one number, and nothing checks them.** This one sat at 16 while the other two moved to 48,
+/// which is survivable only because this program never indexes `stamps`: it reads `placement` and
+/// `params` and stops. It is still wrong, and it is wrong in the direction that hides — a declared
+/// struct SMALLER than the buffer binds and runs, so the mismatch produces no error anywhere.
 struct Ripple {
     // xy = the map's min corner in world XZ; z = 1/extent; w = interpolation between the two
     // packed heights.
@@ -133,7 +155,7 @@ struct Ripple {
     params: vec4<f32>,
     prev: vec4<f32>,
     stamp_count: vec4<f32>,
-    stamps: array<vec4<f32>, 16>,
+    stamps: array<vec4<f32>, 48>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(91) var<storage, read> ripple: Ripple;
 
@@ -341,10 +363,10 @@ fn vertex(in: Vertex) -> VsOut {
 /// (`t = 0.2`), and past ~800 yards the fine pair has taken over entirely — which sounds backwards
 /// until you notice the fine pair is what carries the *large* features once it is scaled by 2.
 fn bump_gradient(in: VsOut) -> vec2<f32> {
-    let a = textureSample(bump_tex, bump_samp, in.bump_uv_a.xy).xyz;
-    let b = textureSample(bump_tex, bump_samp, in.bump_uv_a.zw).xyz;
-    let c = textureSample(bump_tex, bump_samp, in.bump_uv_b.xy).xyz;
-    let d = textureSample(bump_tex, bump_samp, in.bump_uv_b.zw).xyz;
+    let a = textureSample(bump_tex, art_samp, in.bump_uv_a.xy).xyz;
+    let b = textureSample(bump_tex, art_samp, in.bump_uv_a.zw).xyz;
+    let c = textureSample(bump_tex, art_samp, in.bump_uv_b.xy).xyz;
+    let d = textureSample(bump_tex, art_samp, in.bump_uv_b.zw).xyz;
     let fine = (a + b) - 1.0;
     let coarse = ((c + d) - 1.0) * 1.4;
     let dist = length(in.view_vec);
@@ -449,8 +471,8 @@ fn magma(in: VsOut) -> vec4<f32> {
     // `w` — but it keeps the coordinate small enough that f32 does not start losing the low bits of
     // it after an hour of uptime.
     let slice = fract(anim_time() * w.magma_params.z);
-    let na = textureSample(noise_vol, noise_samp, vec3<f32>(in.bump_uv_a.xy, slice)).rgb;
-    let nb = textureSample(noise_vol, noise_samp, vec3<f32>(in.bump_uv_a.zw, slice)).rgb;
+    let na = textureSample(noise_vol, art_samp, vec3<f32>(in.bump_uv_a.xy, slice)).rgb;
+    let nb = textureSample(noise_vol, art_samp, vec3<f32>(in.bump_uv_a.zw, slice)).rgb;
     let mask = mix(na, nb, in.foam_uv.z);
 
     let l1 = magma_sheet(in.bump_uv_b.xy, layer);
@@ -591,10 +613,10 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // the second, opposed and swizzled, so a wave pulls the two layers apart instead of sliding them
     // together. Only the second was dragged here, so half the foam sat still while the water moved
     // under it — a raindrop or a wading leg perturbed the water and left the surf where it was.
-    let foam_a = textureSample(foam_tex, foam_samp, in.foam_uv.xy - n.xz).rgb;
+    let foam_a = textureSample(foam_tex, art_samp, in.foam_uv.xy - n.xz).rgb;
     let foam_b = textureSample(
         foam_tex,
-        foam_samp,
+        art_samp,
         in.foam_uv.zw + n.zx * w.foam_params.w,
     ).rgb;
     let foam = (foam_a + foam_b) * (shore * w.foam_params.z * detail_blend * n.y);

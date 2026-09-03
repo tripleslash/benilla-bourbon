@@ -604,8 +604,11 @@ pub struct LiquidCataExt {
     /// `ProcWaterAbove`'s `samp7` — `GetTexture(mat, 3, 0)`, the third of the reference's per-liquid
     /// material textures. Synthesised, like the bump map, and for the same reason: the column that
     /// names it does not exist in 1.12.1's `LiquidType.dbc`. See `benilla_world`'s `liquid::art`.
+    ///
+    /// **No sampler of its own** — it takes 104 (`art_samp`), which `liquid_cata.wgsl` explains at
+    /// the declaration: this sheet, the bump map and the noise volume are built with identical
+    /// descriptors, and WebGPU's 16-sampler-per-fragment-stage cap counts every one in the layout.
     #[texture(109, visibility(fragment))]
-    #[sampler(110, visibility(fragment))]
     pub foam: Handle<Image>,
 
     /// `ProcMagma`'s stage 0: the animated noise VOLUME whose three channels are three independent
@@ -615,8 +618,10 @@ pub struct LiquidCataExt {
     /// is synthesised at half the face (`benilla_world`'s `liquid::art`). The third axis is a
     /// clock, not a third space dimension — the shader walks it — which is why the sampler repeats
     /// on `w` too.
+    /// on `w` too — and 104, the shared `art_samp` it now takes instead of one of its own, repeats
+    /// on all three axes for exactly that reason. A sampler carries no dimensionality, so the same
+    /// binding serves this 3D volume and the two 2D sheets alike.
     #[texture(111, dimension = "3d", visibility(fragment))]
-    #[sampler(112, visibility(fragment))]
     pub noise_vol: Handle<Image>,
 
     /// `ProcWaterAbove`'s stage 4: the dynamic ripple displacement map — `.x` the current wave

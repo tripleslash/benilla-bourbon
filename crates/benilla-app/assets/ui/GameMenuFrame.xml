@@ -19,8 +19,8 @@
           DIALOG, the UI-DialogBox backdrop with the 11/12/12/11 insets and 32px tile/edge, the
           256x64 UI-DialogBox-Header at TOP +12 with MAIN_MENU centered 14px down it, and the
           eight-button ladder — first button CENTER on the frame's TOP at (0,-37), each next one
-          TOP-to-BOTTOM at (0,-1), and Return to Game hung (0,-16) below Exit Game (the one gap in
-          the stack, which is what makes the last entry read as separate).
+          TOP-to-BOTTOM at (0,-1), and Return to Game hung (0,-16) below the last entry (the one
+          gap in the stack, which is what makes it read as separate).
         · **The button** — ref `GameMenuButtonTemplate` (UIPanelTemplates.xml l.403-410): a 144x21
           `UIPanelButtonTemplate` (the UI-Panel-Button Up/Down/Disabled/Highlight four-state art,
           TexCoords 0..0.625 / 0..0.6875) whose label trio is overridden to
@@ -28,13 +28,14 @@
           not the gold a normal panel button wears, and grey when disabled.
         · **The labels** — GlobalStrings.lua (patch-2.MPQ), verbatim: VIDEOOPTIONS_MENU "Video
           Options", SOUNDOPTIONS_MENU "Sound Options", UIOPTIONS_MENU "Interface Options",
-          MACROS "Macros", LOGOUT "Logout", EXIT_GAME "Exit Game",
+          MACROS "Macros", LOGOUT "Logout",
           RETURN_TO_GAME "Return to Game", MAIN_MENU "Main Menu". Declared as the real globals
           (they are addon-visible API, decision 0068) and read back into each button's label in its
           OnLoad — the ref's `text="LOGOUT"` attribute IS a global lookup, which this engine's
           literal `text=` is not.
         · **The sounds** — the ref's own OnClick lines: igMainMenuOption (the five option buttons),
-          igMainMenuLogout, igMainMenuQuit, igMainMenuContinue. All four kits verified present in
+          igMainMenuLogout, igMainMenuContinue (igMainMenuQuit went with the Exit Game rung, and
+          is still the ESC-close kit — UiPanels.xml). All kits verified present in
           SoundEntries.dbc (patch-2.MPQ) alongside the igMainMenuOpen/Close pair already in use.
         · **The two logout dialogs** — ref `StaticPopup.lua` l.564-600 (CAMP + QUIT) is the
           SPECIFICATION for them: the two dialog keys, the field names, the 20 s timeout and the
@@ -65,9 +66,9 @@
             Rewards / What's New / Ratings are structurally off in Era — store disabled, no
             account store, IsStandard() false, koKR only.)
           · The layout math those constants produce, precomputed here (this engine has no layout
-            frames) — for OUR seven rungs, the era's eight minus AddOns (next bullet): width
-            28+144+28 = 200; button tops 32/73/94/115/156/177/218; height 218+21+28 = 267.
-            Anchored as a TOPLEFT chain so the gaps read in the XML.
+            frames) — for OUR six rungs, the era's eight minus AddOns and Exit Game (next two
+            bullets): width 28+144+28 = 200; button tops 32/73/94/115/156/197; height
+            197+21+28 = 246. Anchored as a TOPLEFT chain so the gaps read in the XML.
           · No Key Bindings rung — the era menu's own shape: 1.15 ceded the entry to the
             Settings panel, and since decision 1008 ours lives there too (the Options window's
             Keybindings category, KeyBindingsPage.xml). 0997 had carved the 1.13/1.14 seat back
@@ -76,6 +77,13 @@
             (`char_select::addons`, the reference's own glue-side home for this list) is the only
             addon UI. The in-game panel 1197 put behind this rung (AddonList.xml) is retired,
             and the rung left with it — 1.12's own ESC menu has no AddOns row either.
+          · No Exit Game rung — the director's call: benilla ships in a browser tab, where there
+            is no process for the entry to end (closing the tab is the browser's gesture, and the
+            login screen's Quit button went the same way for the same reason). Logout keeps the
+            only leaving the client can actually perform. The machinery behind the entry is
+            untouched — `Quit()`, the QUIT countdown dialog (UiPanels.xml) and `PLAYER_QUITING`
+            are still there for `/quit` and for the Mac application menu (`mac_quit`) — this
+            removes only the rung, and its section gap merges into Logout's.
           · The header — Classic/Dialog/DialogTemplates.xml l.11-43 (ClassicDialogHeaderTemplate):
             the same 256x64 UI-DialogBox-Header art, text = MAINMENU_BUTTON, swapped to
             GameFontNormalMed1 (13px) by MainMenuFrameMixin:OnLoad. Both header idioms (1.12's
@@ -107,7 +115,6 @@
         GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"
         MACROS = MACROS or "Macros"
         LOGOUT = LOGOUT or "Logout"
-        EXIT_GAME = EXIT_GAME or "Exit Game"
         RETURN_TO_GAME = RETURN_TO_GAME or "Return to Game"
         CANCEL = CANCEL or "Cancel"
 
@@ -147,8 +154,8 @@
          decision 1318). Restored alone; the ref's `movable`/`parent` stay off deliberately. -->
     <Frame name="GameMenuFrame" parent="UIParent" frameStrata="DIALOG" toplevel="true" enableMouse="true" hidden="true">
         <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
-             28-bottom padding around our seven 21-unit rungs with three 20-unit section gaps. -->
-        <Size><AbsDimension x="200" y="267"/></Size>
+             28-bottom padding around our six 21-unit rungs with three 20-unit section gaps. -->
+        <Size><AbsDimension x="200" y="246"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
@@ -172,8 +179,8 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The era ladder minus its AddOns rung (header SCOPE notes): Options · gap ·
-                 Edit Mode, Support, Macros · gap · Logout, Exit Game · gap · Return to Game.
+            <!-- The era ladder minus its AddOns and Exit Game rungs (header SCOPE notes):
+                 Options · gap · Edit Mode, Support, Macros · gap · Logout · gap · Return to Game.
                  A TOPLEFT chain at the era layout engine's numbers — x 28, first top -32, 0
                  between group members, -20 at each section break. Live entries wire the era
                  OnClick intent; pending ones grey out through GameMenuButton_Pending until
@@ -226,10 +233,11 @@
                 </Scripts>
             </Button>
 
-            <!-- The three that are live. The ref's OnShow on both Logout and Quit disables the
-                 button while either logout dialog is already up (you cannot re-arm a running
-                 countdown); it runs on the menu's own show, which is when a re-opened menu has to
-                 re-read that state. -->
+            <!-- The two that are live. The ref's OnShow on Logout disables the button while
+                 either logout dialog is already up (you cannot re-arm a running countdown); it
+                 runs on the menu's own show, which is when a re-opened menu has to re-read that
+                 state. The QUIT half of that guard outlived its rung: `/quit` can still put that
+                 dialog up, and Logout must read dead under it exactly as it does under CAMP. -->
             <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
@@ -250,29 +258,9 @@
                     </OnClick>
                 </Scripts>
             </Button>
-            <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                </Anchors>
-                <Scripts>
-                    <OnLoad>self:SetText(EXIT_GAME)</OnLoad>
-                    <OnShow>
-                        if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
-                            self:Enable()
-                        else
-                            self:Disable()
-                        end
-                    </OnShow>
-                    <OnClick>
-                        PlaySound("igMainMenuQuit")
-                        Quit()
-                        HideUIPanel(GameMenuFrame)
-                    </OnClick>
-                </Scripts>
-            </Button>
             <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonQuit" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnLoad>self:SetText(RETURN_TO_GAME)</OnLoad>

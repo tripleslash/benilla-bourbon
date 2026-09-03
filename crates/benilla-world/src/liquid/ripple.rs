@@ -159,6 +159,14 @@ const RAIN_MIN_DENSITY: f32 = 0.2;
 const WADE_RADIUS: f32 = 0.45;
 const WADE_AMPLITUDE: f32 = -0.30;
 
+/// Below this planar speed (yd/s) a body stamps nothing — standing in water pushes none of it, and
+/// the wave already made carries on by itself.
+///
+/// Named rather than repeated because [`collect_stamps`] applies it in TWO places: the avatar,
+/// whose position comes off [`crate::view::Viewer`], and the streamed units, whose comes off their
+/// `Transform`. Two branches with one threshold between them is exactly the shape that drifts.
+const WADE_MIN_SPEED: f32 = 0.15;
+
 /// **The amplitude scale every perturbation is multiplied by**, and the clamp that follows it —
 /// `PerturbDisplMap`'s `clamp(amp · dword_FF7A30[i], −1, 1)`.
 ///
@@ -389,6 +397,8 @@ pub(super) fn collect_stamps(
     mut last: Local<bevy::platform::collections::HashMap<Entity, Vec3>>,
     mut seed: Local<u32>,
     weather: Option<Res<crate::weather::WeatherState>>,
+    viewer: Res<crate::view::Viewer>,
+    self_unit: Query<&WorldUnit, With<ViewerUnit>>,
     camera: Query<&Transform, With<WorldCamera>>,
     units: Query<(Entity, &Transform, &WorldUnit), Without<ViewerUnit>>,
     water: Query<&WaterChunkInfo>,
@@ -398,6 +408,29 @@ pub(super) fn collect_stamps(
     // last step, or a body would appear to teleport between steps.
     let mut seen = bevy::platform::collections::HashMap::new();
     let mut moving: Vec<(Vec3, f32, f32)> = Vec::new();
+
+    // **The avatar, and it needs its own branch** — `Without<ViewerUnit>` below is not a way of
+    // saying "everyone", it is half of a pair. The viewer's body is not read off a `Transform` like
+    // a streamed unit's: the eye's own position is authoritative and lives on [`crate::view::Viewer`]
+    // (`emit_water_foam` splits the same two cases for the same reason, and its avatar half is the
+    // one this was missing). Taking only the `Without` half meant the one body the player actually
+    // controls was the one body that never stamped — and because the decal emitter now stands down
+    // on the cata path, its wake had no second source to fall back to. It went unseen because the
+    // wade probe it was verified with is a streamed unit, not the viewer.
+    if let Some(body) = viewer.at {
+        seen.insert(Entity::PLACEHOLDER, body);
+        if let Some(prev) = last.get(&Entity::PLACEHOLDER) {
+            let speed = (body - *prev).length() / dt;
+            if speed >= WADE_MIN_SPEED {
+                // `Viewer::height` is the collision cylinder in yards, unscaled — the same input
+                // the decal ring takes — so the unit's scale is applied here exactly as the
+                // streamed branch applies its own.
+                let scale = self_unit.single().map(|u| u.scale).unwrap_or(1.0);
+                moving.push((body, speed, viewer.height * scale.max(0.1)));
+            }
+        }
+    }
+
     for (entity, transform, unit) in &units {
         if !unit.wades {
             continue;
@@ -408,7 +441,7 @@ pub(super) fn collect_stamps(
             continue; // first sight — no velocity yet
         };
         let speed = (pos - *prev).length() / dt;
-        if speed < 0.15 {
+        if speed < WADE_MIN_SPEED {
             continue; // standing still pushes nothing; the wave already made carries on by itself
         }
         moving.push((pos, speed, unit.height * unit.scale.max(0.1)));

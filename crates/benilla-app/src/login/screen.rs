@@ -7,12 +7,15 @@
 //! box (160×37 at BOTTOM (8,345)) and password box (160×37 at BOTTOM (8,270)) with their
 //! `GlueFontNormal` labels seated just above each (the ref's BOTTOM→TOP (0,−23) anchor on a
 //! 64-tall centered rect ≈ text center 9 px above the box top), Login (`GlueButtonTemplate`
-//! 170×45 at TOP (8,−519)), Quit (`GlueButtonSmallTemplate` 150×38 at BOTTOMRIGHT (−5,29)), the
+//! 170×45 at TOP (8,−519)), the
 //! Remember Account Name checkbox (20×20 at its resolved absolute (17, top 653) with the 10 px
 //! shadowed gold label at LEFT+24), the Blizzard logo (100×100 at BOTTOM (0,8)) under the
 //! `BLIZZ_DISCLAIMER` line (BOTTOM (0,10)), and the version block (BOTTOMLEFT (0,10),
 //! `VERSION_TEMPLATE` filled with the 5875 build facts). The Credits/Cinematics/TOS side of the
-//! reference layout is deliberately absent (decision 0539 §1). The dialog is the ref's shared
+//! reference layout is deliberately absent (decision 0539 §1), and so is the ref's **Quit**
+//! button (`AccountLoginExitButton`): benilla ships in a browser tab, where closing the client is
+//! the browser's gesture, not a control the page owns — the same call the ESC menu's Exit Game
+//! rung went out on (GameMenuFrame.xml's SCOPE note). The dialog is the ref's shared
 //! `GlueDialog` box (512-wide `UI-DialogBox`, text wrapping at 440, one 200×40 button).
 
 use bevy::prelude::*;
@@ -45,7 +48,6 @@ pub(crate) enum LoginAction {
     FocusAccount,
     FocusPassword,
     Login,
-    Quit,
     ToggleSave,
     /// The dialog's one button — Cancel on the status dialog, Okay on an error
     /// ([`super::drive_dialog`]'s; the ref's `GlueDialogButton1`).
@@ -391,27 +393,6 @@ fn spawn_screen(
                 });
             });
 
-        // Quit (`GlueButtonSmallTemplate` 150×38 at BOTTOMRIGHT (−5,29)).
-        ui.spawn((Node {
-            position_type: PositionType::Absolute,
-            right: px(5.0),
-            bottom: px(29.0),
-            ..default()
-        },))
-            .with_children(|c| {
-                glue_button(
-                    c,
-                    art,
-                    &font,
-                    LoginAction::Quit,
-                    strings.text("QUIT", "Quit"),
-                    150.0,
-                    38.0,
-                    GlueBtnKind::Small,
-                    s,
-                );
-            });
-
         // **The realmlist readout** — the address this client will dial, in the reference's own
         // `AccountLoginRealmName` slot.
         //
@@ -428,7 +409,10 @@ fn spawn_screen(
         // `GlueFontDisableSmall` at TOPRIGHT ← `AccountLoginExitButton`'s BOTTOMRIGHT, (−8, −10),
         // filled in `AccountLogin_OnShow` from `GetServerName()`. Resolved: Quit is BOTTOMRIGHT
         // (−5, 29) at 150×38, so its bottom edge is 768 − 29 = 739 from the top and the readout's
-        // top is 10 below that (749); its right edge is 8 further in (5 + 8 = 13).
+        // top is 10 below that (749); its right edge is 8 further in (5 + 8 = 13). The Quit
+        // button itself is gone now (the header's note) and the readout keeps that resolved seat:
+        // the anchor was always the reference's arithmetic, never a live dependency on the
+        // button, and the line reads where the player's eye already learned to find it.
         outlined_text(
             ui,
             Node {
