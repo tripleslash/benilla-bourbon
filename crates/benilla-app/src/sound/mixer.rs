@@ -33,9 +33,38 @@ use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
 use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
 
+// kira's own cpal backend — every target but macOS (see [`PlatformBackend`]). Named as
+// `CpalBackend` rather than kira's `DefaultBackend` on purpose: `DefaultBackend` *silently*
+// becomes the mock backend when the `cpal` feature is off, so a dropped feature would ship a
+// client that plays nothing rather than one that fails to build.
+#[cfg(not(target_os = "macos"))]
+use cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(not(target_os = "macos"))]
+use kira::backend::cpal::{CpalBackend, CpalBackendSettings};
+
 use super::limiter;
 use super::meter::{self, LevelReading, MixLevel};
-use super::output::{self, Event, OutputBackend, OutputSettings, Window};
+#[cfg(target_os = "macos")]
+use super::output::{self, Event, OutputBackend, OutputSettings};
+use super::output::Window;
+
+/// The device the mix plays through, per platform.
+///
+/// benilla's owned output layer (`super::output`, decision 1857) is CoreAudio: `output::stub`
+/// opens nothing on any other target, and that decision's own note says porting means writing
+/// its surface over the platform's audio API. Until someone does, Linux, Windows and the wasm32
+/// browser build play through kira's cpal backend rather than running silent — on wasm32 that is
+/// Web Audio, whose context the autoplay policy suspends until a gesture resumes it (the page's
+/// own hook, `web/index.html`).
+///
+/// The consequence for the mix-health report: the owned backend's deadline meters
+/// ([`OutputWindow`]) exist only on macOS. Everywhere else [`MixHealth`] carries what cpal gives
+/// us and the window stays empty — `sound::report_output` already returns on a window that saw
+/// no cycles.
+#[cfg(target_os = "macos")]
+type PlatformBackend = OutputBackend;
+#[cfg(not(target_os = "macos"))]
+type PlatformBackend = CpalBackend;
 
 /// The output backend's per-window meters, re-exported for the report in `sound::poll_mix_health`.
 pub(super) type OutputWindow = Window;
@@ -171,7 +200,7 @@ pub(crate) fn amp_to_db(amp: f32) -> Decibels {
 /// wow-re `benilla-pins.md` B6); underwater is the reverb preset + the ambience swap, both
 /// upstream of this seam.
 pub(crate) struct Mixer {
-    manager: AudioManager<OutputBackend>,
+    manager: AudioManager<PlatformBackend>,
     listener: ListenerHandle,
     /// Rolling mix-health counters — the crackle instrument ([`Mixer::poll_health`]).
     health: MixHealth,
@@ -207,11 +236,16 @@ impl Mixer {
         // The device's rate is needed before the manager exists: the mix tap's WAV header and
         // the limiter's delay line are sized at build time, and a kira main track is
         // build-time-only.
-        let sample_rate = output::probe_sample_rate();
-        let backend_settings = OutputSettings {
-            mix_ahead_ms: mix_ahead_ms(),
-            device_buffer_frames: io_buffer_frames(),
-        };
+        #[cfg(target_os = "macos")]
+        let (backend_settings, sample_rate) = (
+            OutputSettings {
+                mix_ahead_ms: mix_ahead_ms(),
+                device_buffer_frames: io_buffer_frames(),
+            },
+            output::probe_sample_rate(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (backend_settings, sample_rate) = cpal_backend_settings();
         let level = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(true));
         let MainChain {
@@ -220,7 +254,7 @@ impl Mixer {
             output,
             audio_pos,
         } = main_track(&level, &limiter_on, sample_rate, probe_dir);
-        let settings = AudioManagerSettings::<OutputBackend> {
+        let settings = AudioManagerSettings::<PlatformBackend> {
             backend_settings,
             main_track_builder,
             capacities: kira::Capacities {
@@ -229,8 +263,11 @@ impl Mixer {
             },
             ..Default::default()
         };
-        let mut manager = AudioManager::<OutputBackend>::new(settings)
+        let mut manager = AudioManager::<PlatformBackend>::new(settings)
             .map_err(|e| anyhow::anyhow!("audio device init: {e:#}"))?;
+        // The owned backend negotiates its own rate on open, so it is read back here rather than
+        // probed; the cpal path already has the negotiated rate from `cpal_backend_settings`.
+        #[cfg(target_os = "macos")]
         let sample_rate = Some(manager.backend_mut().sample_rate());
         // The zone-reverb send: wet-only (the dry path stays on the source tracks), silent until
         // a zone preset raises it. Effects are build-time-only; parameters retune at runtime.
@@ -571,6 +608,7 @@ struct MainChain {
 /// the way the reference reads it once at sound-system init — before the `App` exists, so
 /// straight from the stored config (`boot_cvar`), the registered default when unset. Clamped
 /// to what a ring can sensibly hold; a value outside it is a typo, not a request.
+#[cfg(target_os = "macos")]
 fn mix_ahead_ms() -> u32 {
     crate::cvars::boot_cvar("SoundBufferSize")
         .and_then(|v| v.trim().parse::<f64>().ok())
@@ -584,12 +622,69 @@ fn mix_ahead_ms() -> u32 {
 /// busier IO thread (512, the shipping-engine norm) or a longer cycle budget (1115's 2048)
 /// rides a Space switch better is a question this machine's next crackle answers, and both
 /// arms have to be one env var apart to answer it. Unset is the default in `sound::output`.
+#[cfg(target_os = "macos")]
 fn io_buffer_frames() -> u32 {
     std::env::var("WOW_IO_BUFFER")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(output::DEVICE_BUFFER_FRAMES)
+}
+
+/// The device IO buffer the cpal path asks for, frames. ~43 ms at 48 kHz — latency that size is
+/// inaudible for WoW (nothing here is rhythm-critical; the shortest UI click is an order of
+/// magnitude longer), and the size is set by the *driver's* deadline, not our mix's: a confirmed
+/// crackle (decision 1115) was the OS missing the device IO-cycle deadline under system pressure
+/// while our own mix ran clean, and the buffer size is the cycle length — fewer, longer cycles
+/// mean more slack per cycle. This is the opposite dial from the owned backend's 512-frame cycle
+/// (`output::DEVICE_BUFFER_FRAMES`), which can afford to be small because its IOProc only copies.
+#[cfg(not(target_os = "macos"))]
+const TARGET_BUFFER_FRAMES: u32 = 2048;
+
+/// Build the cpal backend settings: kira's default device, our explicit buffer size. Also reports
+/// the negotiated sample rate (the mix tap's WAV header must match the renderer); `None` when the
+/// device/config could not be probed — those paths run on kira defaults.
+///
+/// `device` stays `None` on purpose — that keeps kira's own default-device selection *and* its
+/// disconnect/restart handling (`custom_device = false`). We override only the config. Every
+/// failure path falls back to kira's defaults, so a machine we can't probe still opens the device
+/// exactly as before; [`Mixer::new`]'s caller already tolerates no-device.
+///
+/// On wasm32 cpal is Web Audio, which reports no buffer-size range, so this lands on the fallback
+/// arm and the browser picks the quantum — the probe still costs one call and keeps the rate.
+#[cfg(not(target_os = "macos"))]
+fn cpal_backend_settings() -> (CpalBackendSettings, Option<u32>) {
+    let fallback = CpalBackendSettings::default();
+    let Some(device) = cpal::default_host().default_output_device() else {
+        return (fallback, None);
+    };
+    let Ok(supported) = device.default_output_config() else {
+        return (fallback, None);
+    };
+    // Clamp into what the device will actually accept; `Unknown` means cpal can't tell us the
+    // range, and asking for a size outside it fails the stream build — so leave those alone.
+    let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size() else {
+        info!("audio: device reports no buffer-size range — leaving it to the driver");
+        let rate = supported.config().sample_rate;
+        return (fallback, Some(rate));
+    };
+    let frames = TARGET_BUFFER_FRAMES.clamp(*min, *max);
+    let mut config = supported.config();
+    config.buffer_size = cpal::BufferSize::Fixed(frames);
+    info!(
+        "audio: {} Hz, {} ch, buffer {frames} frames (~{:.1} ms)",
+        config.sample_rate,
+        config.channels,
+        f64::from(frames) / f64::from(config.sample_rate) * 1000.0,
+    );
+    let rate = config.sample_rate;
+    (
+        CpalBackendSettings {
+            config: Some(config),
+            ..fallback
+        },
+        Some(rate),
+    )
 }
 
 /// The mix-health counters — what a crackle actually *is*, in numbers (decision 1026; the
@@ -618,6 +713,7 @@ pub(crate) struct MixHealth {
 impl Mixer {
     /// Service the output backend — device notices, stream rebuilds, the meters — and fold the
     /// window into the health counters. Cheap and non-blocking; call every frame.
+    #[cfg(target_os = "macos")]
     pub(crate) fn poll_health(&mut self) -> MixHealth {
         let backend = self.manager.backend_mut();
         let (window, events) = backend.service();
@@ -648,6 +744,33 @@ impl Mixer {
         }
         self.health.overruns += window.underruns;
         self.window.merge(window);
+        self.health
+    }
+
+    /// The cpal path's twin: kira's backend has no device layer of ours to service, so this is
+    /// just its two health queues drained. Bounded queues — *not* draining them is what loses
+    /// information — so this still runs every frame.
+    ///
+    /// kira's wasm32 `CpalBackend` has neither `pop_cpu_usage` nor `pop_error`: Web Audio is
+    /// underneath it and exposes no such diagnostics. Rather than fabricate a load kira never
+    /// gives it, the meter reports nothing on web (`health` starts and stays at its `Default`).
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn poll_health(&mut self) -> MixHealth {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let backend = self.manager.backend_mut();
+            while let Some(load) = backend.pop_cpu_usage() {
+                self.health.load = load;
+                self.health.peak_load = self.health.peak_load.max(load);
+                if load >= 1.0 {
+                    self.health.overruns += 1;
+                }
+            }
+            while let Some(err) = backend.pop_error() {
+                self.health.stream_errors += 1;
+                warn!("audio: stream error — {err}");
+            }
+        }
         self.health
     }
 

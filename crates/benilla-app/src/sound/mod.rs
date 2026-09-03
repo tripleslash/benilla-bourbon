@@ -38,6 +38,12 @@ mod money;
 mod mount;
 // Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
 // it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
+//
+// This is the CoreAudio device layer, and off macOS `mixer::PlatformBackend` runs kira's cpal
+// backend instead — so everything below `Window` goes unused there. It still *compiles* on every
+// target (`output::stub`) so that `Window` and the `report_output` that reads its dozen fields
+// need no `#[cfg]` of their own; the allow is what that costs.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod output;
 mod probe;
 mod reverb;
