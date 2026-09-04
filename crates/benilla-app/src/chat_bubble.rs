@@ -351,9 +351,12 @@ fn load_bubble_art(
     let Some(mut assets) = assets else {
         return; // no game data (bare test app) — drive_bubbles tolerates the missing resource
     };
-    let bg = assets.sprite_texture(BG_TEXTURE, &mut images);
-    let edge = assets.sprite_texture_tiled(EDGE_TEXTURE, &mut images);
-    let tail = assets.sprite_texture(TAIL_TEXTURE, &mut images);
+    // The blocking lane: this runs once at `Startup` and the handles (and `edge_texels`, baked from
+    // one of them) live for the session, so a deferred read would leave bubbles blank forever with
+    // nothing to ask again. See `WorldAssets::sprite_texture_blocking`.
+    let bg = assets.sprite_texture_blocking(BG_TEXTURE, &mut images);
+    let edge = assets.sprite_texture_tiled_blocking(EDGE_TEXTURE, &mut images);
+    let tail = assets.sprite_texture_blocking(TAIL_TEXTURE, &mut images);
     let (Some(bg), Some(edge), Some(tail)) = (bg, edge, tail) else {
         warn!("chat_bubble: bubble art missing from the patch chain — bubbles will not draw");
         return;

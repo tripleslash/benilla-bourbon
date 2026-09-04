@@ -192,7 +192,7 @@ impl GlueArt {
             path: &str,
             images: &mut Assets<Image>,
         ) -> Option<(Handle<Image>, Vec2)> {
-            let h = assets.sprite_texture(path, images)?;
+            let h = assets.sprite_texture_blocking(path, images)?;
             let size = images.get(&h)?.size_f32();
             Some((h, size))
         }
@@ -204,8 +204,8 @@ impl GlueArt {
         ) -> Option<ArrowArt> {
             let base = format!("Interface\\Glues\\Common\\Glue-{side}Arrow-Button-");
             Some(ArrowArt {
-                up: assets.sprite_texture(&format!("{base}Up"), images)?,
-                down: assets.sprite_texture(&format!("{base}Down"), images),
+                up: assets.sprite_texture_blocking(&format!("{base}Up"), images)?,
+                down: assets.sprite_texture_blocking(&format!("{base}Down"), images),
                 hi: add_overlay(
                     assets,
                     &format!("{base}Highlight"),
@@ -221,7 +221,7 @@ impl GlueArt {
         self.classes = sized(assets, &format!("{CC}Classes"), images);
         self.gender = sized(assets, &format!("{CC}Gender"), images);
         self.factions = sized(assets, &format!("{CC}Factions"), images);
-        self.banners = assets.sprite_texture(&format!("{CC}Banners"), images);
+        self.banners = assets.sprite_texture_blocking(&format!("{CC}Banners"), images);
         // (`CheckButtonHilight` stays unloaded — the template's `CheckedTexture` is commented out
         // in the shipped 1.12 GlueXML; the selected visual is the *locked* highlight alone.)
         self.hilight = add_overlay(
@@ -231,7 +231,8 @@ impl GlueArt {
             images,
             add_mats,
         );
-        self.logo = assets.sprite_texture("Interface\\Glues\\Common\\Glues-WoW-Logo", images);
+        self.logo =
+            assets.sprite_texture_blocking("Interface\\Glues\\Common\\Glues-WoW-Logo", images);
         self.arrow_left = arrow(assets, "Left", images, add_mats);
         self.arrow_right = arrow(assets, "Right", images, add_mats);
         self.button_up = sized(assets, &format!("{GB}Up"), images);
@@ -244,19 +245,19 @@ impl GlueArt {
             images,
             add_mats,
         );
-        self.tower_bg = assets.sprite_texture(&format!("{CC}Background"), images);
+        self.tower_bg = assets.sprite_texture_blocking(&format!("{CC}Background"), images);
         self.tower_border = sized(assets, &format!("{CC}OuterBorder"), images);
-        self.icon_shadow = assets.sprite_texture(&format!("{CC}IconShadow"), images);
+        self.icon_shadow = assets.sprite_texture_blocking(&format!("{CC}IconShadow"), images);
         self.label_frame = sized(
             assets,
             "Interface\\Glues\\CharacterCreate\\CharacterCreate-LabelFrame",
             images,
         );
-        self.rotate_up = assets.sprite_texture(
+        self.rotate_up = assets.sprite_texture_blocking(
             "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Up",
             images,
         );
-        self.rotate_down = assets.sprite_texture(
+        self.rotate_down = assets.sprite_texture_blocking(
             "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Down",
             images,
         );
@@ -278,7 +279,7 @@ impl GlueArt {
             images,
         );
         self.tooltip_bg =
-            assets.sprite_texture("Interface\\Tooltips\\UI-Tooltip-Background", images);
+            assets.sprite_texture_blocking("Interface\\Tooltips\\UI-Tooltip-Background", images);
         fn scroll_btn(
             assets: &mut WorldAssets,
             dir: &str,
@@ -286,12 +287,12 @@ impl GlueArt {
             add_mats: &mut Assets<AddUiMaterial>,
         ) -> Option<ScrollBtnArt> {
             let base = format!("Interface\\Buttons\\UI-ScrollBar-Scroll{dir}Button-");
-            let h = assets.sprite_texture(&format!("{base}Up"), images)?;
+            let h = assets.sprite_texture_blocking(&format!("{base}Up"), images)?;
             let size = images.get(&h)?.size_f32();
             Some(ScrollBtnArt {
                 up: h,
-                down: assets.sprite_texture(&format!("{base}Down"), images)?,
-                dis: assets.sprite_texture(&format!("{base}Disabled"), images)?,
+                down: assets.sprite_texture_blocking(&format!("{base}Down"), images)?,
+                dis: assets.sprite_texture_blocking(&format!("{base}Disabled"), images)?,
                 hi: add_overlay(
                     assets,
                     &format!("{base}Highlight"),
@@ -328,10 +329,10 @@ impl GlueArt {
             "Interface\\DialogFrame\\UI-DialogBox-Border",
             images,
         );
-        self.dialog_bg =
-            assets.sprite_texture("Interface\\DialogFrame\\UI-DialogBox-Background", images);
+        self.dialog_bg = assets
+            .sprite_texture_blocking("Interface\\DialogFrame\\UI-DialogBox-Background", images);
         self.dialog_alert =
-            assets.sprite_texture("Interface\\DialogFrame\\DialogAlertIcon", images);
+            assets.sprite_texture_blocking("Interface\\DialogFrame\\DialogAlertIcon", images);
         self.chat_input_left = sized(
             assets,
             "Interface\\ChatFrame\\UI-ChatInputBorder-Left",
@@ -343,13 +344,15 @@ impl GlueArt {
             images,
         );
         // The login screen's set (decision 0539).
-        self.blizzard_logo =
-            assets.sprite_texture("Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo", images);
+        self.blizzard_logo = assets
+            .sprite_texture_blocking("Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo", images);
         self.checkbox = (|| {
             Some(CheckboxArt {
-                up: assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Up", images)?,
-                down: assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Down", images)?,
-                checked: assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Check", images)?,
+                up: assets.sprite_texture_blocking("Interface\\Buttons\\UI-CheckBox-Up", images)?,
+                down: assets
+                    .sprite_texture_blocking("Interface\\Buttons\\UI-CheckBox-Down", images)?,
+                checked: assets
+                    .sprite_texture_blocking("Interface\\Buttons\\UI-CheckBox-Check", images)?,
                 hi: add_overlay(
                     assets,
                     "Interface\\Buttons\\UI-CheckBox-Highlight",
@@ -370,9 +373,9 @@ impl GlueArt {
                 tl: tl.0,
                 top: top.0,
                 tr: tr.0,
-                bl: assets.sprite_texture(&format!("{HF}BotLeft"), images)?,
-                bottom: assets.sprite_texture(&format!("{HF}Bottom"), images)?,
-                br: assets.sprite_texture(&format!("{HF}BotRight"), images)?,
+                bl: assets.sprite_texture_blocking(&format!("{HF}BotLeft"), images)?,
+                bottom: assets.sprite_texture_blocking(&format!("{HF}Bottom"), images)?,
+                br: assets.sprite_texture_blocking(&format!("{HF}BotRight"), images)?,
             })
         })();
         self.dialog_header = sized(
@@ -383,15 +386,15 @@ impl GlueArt {
         self.close_btn = (|| {
             const MB: &str = "Interface\\Buttons\\UI-Panel-MinimizeButton-";
             Some(CloseBtnArt {
-                up: assets.sprite_texture(&format!("{MB}Up"), images)?,
-                down: assets.sprite_texture(&format!("{MB}Down"), images)?,
+                up: assets.sprite_texture_blocking(&format!("{MB}Up"), images)?,
+                down: assets.sprite_texture_blocking(&format!("{MB}Down"), images)?,
                 hi: add_overlay(assets, &format!("{MB}Highlight"), FULL_TC, images, add_mats),
             })
         })();
-        self.dropdown_arrow_up =
-            assets.sprite_texture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up", images);
-        self.dropdown_arrow_down =
-            assets.sprite_texture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down", images);
+        self.dropdown_arrow_up = assets
+            .sprite_texture_blocking("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up", images);
+        self.dropdown_arrow_down = assets
+            .sprite_texture_blocking("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down", images);
         self.quest_hilight = add_overlay(
             assets,
             "Interface\\QuestFrame\\UI-QuestTitleHighlight",
@@ -399,8 +402,8 @@ impl GlueArt {
             images,
             add_mats,
         );
-        self.check_disabled =
-            assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Check-Disabled", images);
+        self.check_disabled = assets
+            .sprite_texture_blocking("Interface\\Buttons\\UI-CheckBox-Check-Disabled", images);
         self.tooltip_border = super::backdrop::backdrop_edges(
             assets,
             "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -481,7 +484,7 @@ fn add_overlay(
     images: &mut Assets<Image>,
     add_mats: &mut Assets<AddUiMaterial>,
 ) -> Option<Handle<AddUiMaterial>> {
-    let texture = assets.sprite_texture(path, images)?;
+    let texture = assets.sprite_texture_blocking(path, images)?;
     Some(add_mats.add(AddUiMaterial {
         texture,
         rect: Vec4::new(tc[0], tc[2], tc[1], tc[3]),

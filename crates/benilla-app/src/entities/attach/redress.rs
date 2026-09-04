@@ -127,6 +127,9 @@ pub(in crate::entities) fn redress_player_looks(
         }
         // Stamp first, unconditionally: a player whose display resolved to no model at all (the
         // cube fallback) has nothing to re-dress, and must not re-enter this arm every frame.
+        // Kept, so the one case that DOES want to come back — a composite whose textures are still
+        // in flight, below — can put it back.
+        let was_applied = applied.0;
         applied.0 = *live;
         let Some(dm) = net
             .display_id
@@ -147,7 +150,10 @@ pub(in crate::entities) fn redress_player_looks(
             Some(cg.0.visible_geosets(l.race, l.sex, l.hair_style, l.facial_hair, &eg))
         });
         // The re-composite. Cached per (appearance, worn set) in `SkinComposites`, so a swap back
-        // to a set already worn this session costs a lookup.
+        // to a set already worn this session costs a lookup. Bracketed like the first build's
+        // (`attach_entity_visuals`): a composite whose textures have not arrived does not blend, and
+        // this player keeps the body it is wearing until they do.
+        let skin_deferrals_before = super::char_skin::skin_deferrals();
         let char_mats: CharSkinMaterials = match look.as_ref() {
             Some(l) => build_char_skin_materials(
                 l,
@@ -165,6 +171,13 @@ pub(in crate::entities) fn redress_player_looks(
             ),
             None => (None, None, None, (None, None)),
         };
+        // Still coming: undo the stamp so this arm re-enters next frame, and leave the player in the
+        // gear they are already wearing rather than re-pointing every part at a half-dressed atlas.
+        // The warm the probe started lands within a few frames.
+        if super::char_skin::skin_deferrals() != skin_deferrals_before {
+            applied.0 = was_applied;
+            continue;
+        }
         // No look (a druid form, a GM morph — a Player-kind entity on a beast display) means no
         // geoset filter, exactly as at build: every batch the model authors draws.
         let shows = |geoset: u16| visible.as_ref().is_none_or(|v| v.contains(&geoset));

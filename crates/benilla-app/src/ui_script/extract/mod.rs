@@ -184,7 +184,16 @@ fn report_gate_miss(
     generation_eq: bool,
     text_ui_eq: bool,
     portraits_eq: bool,
+    art_deferred: bool,
 ) {
+    if art_deferred {
+        // First, because it is the one miss whose cause is not in the comparison at all: the last
+        // conversion drew a placeholder for art that had not arrived, so this frame converts again
+        // to pick it up. Expected on the web target and only there; a run that reports it every
+        // frame is a sprite that never resolves, not a gate that is working.
+        eprintln!("[ui-gate] miss: art deferred by the last conversion has not arrived yet");
+        return;
+    }
     if !dims_eq {
         eprintln!("[ui-gate] miss: window size / seam scale / DPI changed");
         return;
@@ -249,6 +258,16 @@ pub(super) struct GateInputs {
     /// conversion, kept current by the splice — this is what lets a one-entry change (the resting
     /// blink) re-convert one entry instead of the whole interface.
     spans: Vec<u32>,
+    /// **Did the last conversion draw art that had not arrived yet?** (web target only — on native
+    /// a sprite either resolves or is missing, and this is permanently `false`.)
+    ///
+    /// The gate below skips a frame on the argument that equal inputs prove last frame's quads are
+    /// this frame's too. A deferred sprite breaks that argument from outside the inputs: the quads
+    /// are a transparent placeholder, the real art lands a few frames later, and nothing in
+    /// `extracted`/`dims`/`generation` moves to say so — which is a window that stays blank until
+    /// you close and reopen it. So a conversion that deferred anything refuses the next skip, and
+    /// keeps refusing until one completes with everything it asked for in hand.
+    art_deferred: bool,
     /// The stitch's ping-pong buffer: last frame's quad allocation, emptied. A stitch drains the
     /// live list into a fresh one and parks the drained allocation here, so a steady stream of
     /// changes (a hovered tooltip re-filling every frame) reuses two buffers forever instead of
@@ -827,6 +846,7 @@ pub(super) fn drive_script(
     // frame's values too.
     let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
     let settled = capture.is_none()
+        && !prev.art_deferred
         && prev.dims == Some(dims)
         && prev.generation == generation
         && text_ui == prev.text_ui
@@ -865,6 +885,11 @@ pub(super) fn drive_script(
         }
         return;
     }
+    // Brackets the conversion below — either path — so `prev.art_deferred` records whether THIS
+    // frame's drawing is complete rather than whether anything anywhere is still loading. Taken
+    // past the skip because a skipped frame converts nothing and has nothing to record.
+    let deferrals_before = benilla_assets::sprite_deferrals();
+
     // `WOW_UI_GATE=1` — why the gate MISSED. A skip is worth the whole conversion, so the
     // question "what moved?" is where a per-frame cost always ends, and a `Vec` inequality does
     // not answer it. Off by default, like the `[ui-cost]` meter beside it.
@@ -877,6 +902,7 @@ pub(super) fn drive_script(
             prev.generation == generation,
             text_ui == prev.text_ui,
             booths.images.0 == prev.portraits,
+            prev.art_deferred,
         );
     }
     // ── The per-entry splice: 1361's shape one layer up ──────────────────────────────────────
@@ -924,6 +950,15 @@ pub(super) fn drive_script(
         }
         if booths.images.0 != prev.portraits {
             no_splice!("portrait sources moved");
+        }
+        // The splice re-converts only the entries that DIFFER, and art that has not arrived is not a
+        // difference — the entry is identical, its quad is a placeholder. So one animating entry (a
+        // cooldown sweep, the resting blink) would splice itself, clear the flag, and let the gate
+        // settle with every other entry's placeholder still on screen. That is the reopened-window
+        // bug again, one layer down. While anything is outstanding the full conversion is the only
+        // pass that re-resolves everything, so take it.
+        if prev.art_deferred {
+            no_splice!("art deferred by the last conversion has not arrived yet");
         }
         // spans describe last conversion's `quads.quads` — if any future writer replaces the
         // base lane out from under this pass, degrade to the full conversion instead of
@@ -1120,6 +1155,7 @@ pub(super) fn drive_script(
                 align.dropped.len()
             );
         }
+        prev.art_deferred = benilla_assets::sprite_deferrals() != deferrals_before;
         return;
     }
     prev.dims = Some(dims);
@@ -1249,6 +1285,9 @@ pub(super) fn drive_script(
             );
         }
     }
+    // Past the whole conversion, which is the point: anything it drew as a placeholder makes the
+    // next frame convert again rather than keep these quads.
+    prev.art_deferred = benilla_assets::sprite_deferrals() != deferrals_before;
 }
 
 /// One extracted entry converted to its screen quads, pushed onto `out` — with the side channels

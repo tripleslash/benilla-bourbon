@@ -234,9 +234,9 @@ pub async fn fetch_wire(pack_id: u32, url: &str) -> Result<Vec<u8>, String> {
                 .map_err(js_msg)?;
             // `dyn_into`, not `Uint8Array::new`: the page already resolved a Uint8Array, and the
             // constructor would copy it a second time on the way past.
-            let bytes: Uint8Array = value
-                .dyn_into()
-                .map_err(|_| "fetchWire resolved to something other than a Uint8Array".to_string())?;
+            let bytes: Uint8Array = value.dyn_into().map_err(|_| {
+                "fetchWire resolved to something other than a Uint8Array".to_string()
+            })?;
             Ok(bytes.to_vec())
         }
         None => plain_fetch(url).await,

@@ -314,22 +314,32 @@ fn setup_minimap(
     match translate {
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
-            let mask = assets.mask_texture("Textures\\MinimapMask", &mut images);
-            let arrow = assets.sprite_texture("Interface\\Minimap\\MinimapArrow", &mut images);
-            let poi = assets.sprite_texture("Interface\\Minimap\\POIIcons", &mut images);
+            // Every read in this table is BLOCKING: it builds one resource, once, and each handle
+            // in it lives for the session with nothing to ask again. See
+            // `WorldAssets::sprite_texture_blocking`.
+            let mask = assets.mask_texture_blocking("Textures\\MinimapMask", &mut images);
+            let arrow =
+                assets.sprite_texture_blocking("Interface\\Minimap\\MinimapArrow", &mut images);
+            let poi = assets.sprite_texture_blocking("Interface\\Minimap\\POIIcons", &mut images);
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
-                rim_arrows.set(kind, assets.sprite_texture(kind.texture(), &mut images));
+                rim_arrows.set(
+                    kind,
+                    assets.sprite_texture_blocking(kind.texture(), &mut images),
+                );
             }
             let object_icons =
-                assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
+                assets.sprite_texture_blocking("Interface\\Minimap\\ObjectIcons", &mut images);
             // `ping6` is deliberately absent: the model carries it on two quads whose weight
             // track is a single key of 0, so the client culls those batches before it reads their
             // blend mode. Loading it would be loading art that never draws.
             let ping = ping::PingArt {
-                ping5: assets.sprite_texture("Interface\\Minimap\\Ping\\ping5", &mut images),
-                ping2: assets.sprite_texture("Interface\\Minimap\\Ping\\ping2", &mut images),
-                ping4: assets.sprite_texture("Interface\\Minimap\\Ping\\ping4", &mut images),
+                ping5: assets
+                    .sprite_texture_blocking("Interface\\Minimap\\Ping\\ping5", &mut images),
+                ping2: assets
+                    .sprite_texture_blocking("Interface\\Minimap\\Ping\\ping2", &mut images),
+                ping4: assets
+                    .sprite_texture_blocking("Interface\\Minimap\\Ping\\ping4", &mut images),
             };
             // Per layer, not just "none of them": the three do different jobs, and a silently
             // absent `ping4` would cost the ring — the one thing the eye actually reads — while
@@ -1015,7 +1025,9 @@ fn feed_minimap_mask(
     let path = want
         .as_deref()
         .unwrap_or(benilla_ui::widget::MINIMAP_DEFAULT_MASK);
-    match world_assets.mask_texture(path, &mut images) {
+    // Blocking: `*last` was committed above, so a deferred read would leave this mask unfetched
+    // with nothing to ask again. See `WorldAssets::sprite_texture_blocking`.
+    match world_assets.mask_texture_blocking(path, &mut images) {
         Some(handle) => assets.mask = Some(handle),
         None => {
             warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")

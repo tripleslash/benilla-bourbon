@@ -123,6 +123,23 @@ pub(super) fn resolve_char_look(
     None
 }
 
+/// How many body composites have been put off because their textures had not arrived — the signal
+/// `attach_entity_visuals` reads to know it must come back to a unit.
+///
+/// A counter rather than a return value because the answer has to cross
+/// [`build_char_skin_materials`], whose four-part return is already the whole of a character's
+/// materials and has no room for a status. The caller brackets the call: unequal before and after
+/// means "this unit was not finished", and it simply does not stamp `VisualAttached`.
+///
+/// Permanently zero on native, where `Chain::ready` never says no.
+static SKIN_DEFERRALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read [`SKIN_DEFERRALS`]. Snapshot around [`build_char_skin_materials`]; a change means the unit
+/// must be attached again next frame.
+pub(crate) fn skin_deferrals() -> u64 {
+    SKIN_DEFERRALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The `mpq://` URL for a pre-baked NPC body atlas (a CreatureDisplayInfoExtra bake name) under
 /// `Textures\BakedNpcTextures\`. Lowercased forward-slash, like the other `mpq://` loads.
 fn baked_npc_url(bake_name: &str) -> String {
@@ -339,21 +356,34 @@ pub(super) fn build_char_skin_materials(
                         }
                     }
                     let chain = &mut world.chain.lock_recover();
-                    let composed = sections
-                        .0
-                        .composite_body(
-                            chain,
-                            key.race,
-                            key.sex,
-                            key.skin,
-                            key.face,
-                            key.facial_hair,
-                            key.hair_style,
-                            key.hair_color,
-                            worn,
-                            key.emblem,
-                        )
-                        .ok()??;
+                    // What this appearance needs, worked out before a byte is read
+                    // (`CharSections::composite_plan`). The split exists for the browser: the atlas
+                    // below is blended once and cached per appearance for the session, so a layer
+                    // that has not arrived yet cannot be skipped and picked up later — it would be a
+                    // tabard missing for as long as the player wears it. `ready` warms every path
+                    // and says whether they are all in memory; until they are, this whole unit's
+                    // attach is deferred (see the caller) rather than the frame blocked on a fetch.
+                    // On native `ready` is always true and none of this runs.
+                    let plan = sections.0.composite_plan(
+                        key.race,
+                        key.sex,
+                        key.skin,
+                        key.face,
+                        key.facial_hair,
+                        key.hair_style,
+                        key.hair_color,
+                        worn,
+                        key.emblem,
+                    )?;
+                    // `fold`, not `all`: every path must be ASKED, because asking is what starts the
+                    // warm. A short-circuit would warm the first missing one and leave the rest for
+                    // the next frame to discover, one round trip at a time.
+                    let ready = plan.paths().fold(true, |acc, p| chain.ready(p) && acc);
+                    if !ready {
+                        SKIN_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return None;
+                    }
+                    let composed = sections.0.composite_from_plan(chain, &plan).ok()?;
                     // Through the upload gate like every other texture: a composite is
                     // layered texel-by-texel on the CPU so it is already RGBA8, and
                     // `for_upload` is a no-op on it — but going through it is what makes

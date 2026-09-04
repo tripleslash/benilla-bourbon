@@ -37,6 +37,27 @@ use benilla_formats::{blp_to_rgba, tga_to_rgba, Chain, ModelBlend, TryRead};
 mod images;
 pub use images::*;
 
+/// How many times a sprite resolution has answered [`SpriteLoad::Pending`] — **the signal that a
+/// cached UI conversion is stale**, and the reason `Pending` is safe to hand out at all.
+///
+/// A caller that draws once and remembers the result (the FrameXML extract gate is exactly that:
+/// equal inputs make it keep last frame's quads untouched) would otherwise hold the placeholder for
+/// as long as its inputs stay equal — which for an open window is forever, and looks like a panel
+/// that stays blank until you close and reopen it. There is no per-asset callback to hang the fix
+/// on, so this is the crude thing that works: a monotonic count, snapshotted around a conversion,
+/// telling that conversion whether anything it resolved has yet to arrive.
+///
+/// Counts every sprite lane alike — the five caches, [`sprite_dimensions`], [`WorldAssets::decode_rgba`]
+/// — because it is bumped inside [`decode_sprite`], which all of them go through. A consumer that
+/// over-triggers on another lane's deferral pays one extra conversion, which is the right way round.
+static SPRITE_DEFERRALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read [`SPRITE_DEFERRALS`]. Snapshot it before a conversion and compare after: unequal means
+/// something that conversion drew is still coming, and the result must not be cached as final.
+pub fn sprite_deferrals() -> u64 {
+    SPRITE_DEFERRALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// [`WorldAssets::pending_sprite`]'s slot in the `generated` cache. A reserved name, not a path: no
 /// BLP is ever asked for under it.
 const PENDING_SPRITE_KEY: &str = "@pending";
@@ -195,7 +216,7 @@ pub fn sprite_dimensions(
     loose_root: Option<&Path>,
     path: &str,
 ) -> SpriteDims {
-    match decode_sprite(chain, loose_root, path) {
+    match decode_sprite(chain, loose_root, path, ReadMode::Defer) {
         SpriteLoad::Ready((w, h, _)) => SpriteDims::Ready(w, h),
         SpriteLoad::Pending => SpriteDims::Pending,
         SpriteLoad::Missing => SpriteDims::Missing,
@@ -240,7 +261,12 @@ pub enum SpriteDims {
 /// `AddOns\` path (Blizzard's own `Blizzard_*` stubs aside, addon art only exists on disk), so the
 /// order between the stores is unobservable; chain-first keeps every non-addon path on exactly the
 /// code it always ran.
-fn decode_sprite(chain: &Mutex<Chain>, loose_root: Option<&Path>, path: &str) -> SpriteLoad {
+fn decode_sprite(
+    chain: &Mutex<Chain>,
+    loose_root: Option<&Path>,
+    path: &str,
+    mode: ReadMode,
+) -> SpriteLoad {
     let candidates = sprite_candidates(path);
     let chain = chain.lock_recover();
     // Set by any candidate the store has but has not got here yet. It does not short-circuit the
@@ -248,7 +274,7 @@ fn decode_sprite(chain: &Mutex<Chain>, loose_root: Option<&Path>, path: &str) ->
     // if none is, because "not yet" and "not there" must not produce the same cached answer.
     let mut waiting = false;
     for candidate in &candidates {
-        match chain.try_read(candidate) {
+        match mode.read(&chain, candidate) {
             TryRead::Ready(bytes) => {
                 if let Ok(decoded) = decode_sprite_bytes(&bytes) {
                     return SpriteLoad::Ready(decoded);
@@ -267,6 +293,7 @@ fn decode_sprite(chain: &Mutex<Chain>, loose_root: Option<&Path>, path: &str) ->
         }
     }
     if waiting {
+        SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return SpriteLoad::Pending;
     }
     warn!(
@@ -279,6 +306,38 @@ fn decode_sprite(chain: &Mutex<Chain>, loose_root: Option<&Path>, path: &str) ->
         candidates.join(", ")
     );
     SpriteLoad::Missing
+}
+
+/// Which read lane a sprite resolution takes — the answer to "**can this caller come back?**".
+///
+/// [`ReadMode::Defer`] is right for anything asked per frame: the FrameXML extract re-resolves every
+/// texture on every conversion, so a `Pending` costs a frame or two of transparent placeholder and
+/// nothing else.
+///
+/// [`ReadMode::Block`] is for the **one-shot warmers** — the glue screens' art, the chat-bubble and
+/// V-plate boot sets, the loading-screen backdrop — which resolve a fixed set once and then keep the
+/// handles (and, in two cases, bake pixel sizes off them) for the rest of the session. A placeholder
+/// reaching one of those is permanent: the art never appears, and the size baked from a 1x1 image is
+/// wrong forever. They pay a blocking read instead, which costs what it has always cost and lands on
+/// a boot or loading frame where there is no smooth animation to protect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    /// May answer [`SpriteLoad::Pending`]. The caller must ask again and cache nothing.
+    Defer,
+    /// Never answers `Pending`; blocks until the bytes are in hand (on native both are the same read).
+    Block,
+}
+
+impl ReadMode {
+    fn read(self, chain: &Chain, name: &str) -> TryRead {
+        match self {
+            ReadMode::Defer => chain.try_read(name),
+            ReadMode::Block => match chain.read(name) {
+                Ok(bytes) => TryRead::Ready(bytes),
+                Err(_) => TryRead::Missing,
+            },
+        }
+    }
 }
 
 /// What [`decode_sprite`] found. The third arm exists for the browser, where a texture whose pack
@@ -531,7 +590,12 @@ impl WorldAssets {
         if let Some(cached) = self.sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Defer,
+        ) {
             SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image(w, h, rgba))),
             // In flight: hand back the transparent placeholder and cache NOTHING, so the next
             // frame asks again and gets the real art the moment it lands.
@@ -547,7 +611,12 @@ impl WorldAssets {
     /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+        match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Defer,
+        ) {
             SpriteLoad::Ready(decoded) => Some(decoded),
             // Uncached and one-shot, so `Pending` folds into `None` here: the caller asks at load
             // and asks again if it needs to, and there is no cache entry to poison either way.
@@ -569,7 +638,12 @@ impl WorldAssets {
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Defer,
+        ) {
             SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image_tiled(w, h, rgba))),
             // In flight: hand back the transparent placeholder and cache NOTHING, so the next
             // frame asks again and gets the real art the moment it lands.
@@ -595,6 +669,99 @@ impl WorldAssets {
     /// frame a load is outstanding.
     fn pending_sprite(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
         self.generated_sprite(PENDING_SPRITE_KEY, images, || (1, 1, vec![0, 0, 0, 0]))
+    }
+
+    /// [`Self::sprite_texture`] for a **one-shot warmer** — a caller that resolves its art once and
+    /// keeps the handle. See [`ReadMode::Block`] for why those cannot take a placeholder: nothing
+    /// asks them again, so "not here yet" would mean "never".
+    ///
+    /// The customers are the glue screens' art table, the chat-bubble and V-plate boot sets, and the
+    /// loading-screen backdrop. All four resolve on a boot or loading frame, where a blocking read is
+    /// what has always happened and there is no animation to protect.
+    pub fn sprite_texture_blocking(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = sprite_key(path);
+        if let Some(cached) = self.sprites.get(&key) {
+            return cached.clone();
+        }
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Block,
+        ) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image(w, h, rgba))),
+            // `Block` never defers; the arm exists because the enum has three of them.
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        };
+        self.sprites.insert(key, loaded.clone());
+        loaded
+    }
+
+    /// [`Self::sprite_texture_tiled`]'s blocking twin — see [`Self::sprite_texture_blocking`]. One
+    /// caller: the chat bubble's tiled edge strip, whose texel size is baked at load.
+    pub fn sprite_texture_tiled_blocking(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = sprite_key(path);
+        if let Some(cached) = self.tiled_sprites.get(&key) {
+            return cached.clone();
+        }
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Block,
+        ) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image_tiled(w, h, rgba))),
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        };
+        self.tiled_sprites.insert(key, loaded.clone());
+        loaded
+    }
+
+    /// [`Self::mask_texture`]'s blocking twin — see [`Self::sprite_texture_blocking`]. Its callers
+    /// are the minimap's boot art table and `SetMaskTexture`, which commits the requested path
+    /// before it resolves and so has nothing to ask again.
+    pub fn mask_texture_blocking(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let key = sprite_key(path);
+        if let Some(cached) = self.masks.get(&key) {
+            return cached.clone();
+        }
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Block,
+        ) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(mask_image(w, h, rgba))),
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        };
+        self.masks.insert(key, loaded.clone());
+        loaded
+    }
+
+    /// [`Self::decode_rgba`]'s blocking twin — see [`Self::sprite_texture_blocking`]. One caller:
+    /// the V-plate border, whose pixels are kept and resampled per plate size for the session.
+    pub fn decode_rgba_blocking(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+        match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Block,
+        ) {
+            SpriteLoad::Ready(decoded) => Some(decoded),
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        }
     }
 
     /// A sprite whose pixels this client **computes**, cached under `key` and built at most once.
@@ -636,7 +803,12 @@ impl WorldAssets {
         if let Some(cached) = self.portraits.get(&key) {
             return cached.clone();
         }
-        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Defer,
+        ) {
             SpriteLoad::Ready((w, h, rgba)) => Some(images.add(portrait_image(w, h, rgba))),
             // In flight: hand back the transparent placeholder and cache NOTHING, so the next
             // frame asks again and gets the real art the moment it lands.
@@ -659,7 +831,12 @@ impl WorldAssets {
         if let Some(cached) = self.masks.get(&key) {
             return cached.clone();
         }
-        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+        let loaded = match decode_sprite(
+            &self.chain,
+            self.loose_root.as_deref(),
+            path,
+            ReadMode::Defer,
+        ) {
             SpriteLoad::Ready((w, h, rgba)) => Some(images.add(mask_image(w, h, rgba))),
             // In flight: hand back the transparent placeholder and cache NOTHING, so the next
             // frame asks again and gets the real art the moment it lands.

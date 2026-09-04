@@ -681,6 +681,10 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
     let visible = ctx.characters.map(|c| {
         c.0.visible_geosets(race, sex, char_look.hair_style, char_look.facial_hair, &eg)
     });
+    // Bracketed like the world path's: a body composite whose textures have not arrived does not
+    // blend, and the booth waits — the same "retry next frame" this function already does for a
+    // held-item model that is still loading.
+    let skin_deferrals_before = super::char_skin::skin_deferrals();
     let char_mats = super::char_skin::build_char_skin_materials(
         &char_look,
         bodyslots,
@@ -695,6 +699,9 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         ctx.asset_server,
         ctx.mats,
     );
+    if super::char_skin::skin_deferrals() != skin_deferrals_before {
+        return None; // the body composite's textures are still coming — retry next frame
+    }
 
     // Whether this look shows the part's geoset (billboard or body alike).
     let shows = |p: &EntityPart| {

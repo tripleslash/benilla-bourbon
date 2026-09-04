@@ -66,7 +66,9 @@ pub(super) fn backdrop_edges(
     path: &str,
     images: &mut Assets<Image>,
 ) -> Option<BackdropEdges> {
-    let (w, h, rgba) = assets.decode_rgba(path)?;
+    // Blocking, like the rest of the glue art table this is part of: split once, kept for the
+    // session. See `WorldAssets::sprite_texture_blocking`.
+    let (w, h, rgba) = assets.decode_rgba_blocking(path)?;
     let e = h as usize;
     if e == 0 || w as usize != 8 * e {
         warn!("glue art: {path} is {w}x{h}, not an 8-cell edge strip");

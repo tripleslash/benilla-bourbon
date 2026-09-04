@@ -235,11 +235,25 @@ whole of its security: two ports, one loopback address.
   - The one place that must still block — a synchronous `XMLHttpRequest` at boot — now unpacks its
     binary-string body in JS (`packs.js::unpackBinary`) instead of transcoding it through UTF-8 into
     wasm and decoding it back.
-  - *Known remaining exposure*: the **character skin composite** (`char_skin.rs`) still reads its
-    half-dozen BLPs synchronously, because it runs on an appearance edge and deferring it needs a
-    retry latch on the entity rather than a `None` that would leave a player untextured for good. It
-    is bounded — the reads are locality groups, so it is about one fetch per race/gear family for the
-    session, not one per stranger.
+  - *A deferred read must reach someone who will ask again*, and that is where the lane's one real
+    hazard lives: several consumers **keep what they were handed**. Two rules cover them.
+    - Anything asked per frame defers. The FrameXML extract skips its whole conversion when its
+      inputs are unchanged, which for an open window is forever — so a conversion that drew a
+      placeholder refuses the next skip and keeps refusing until one completes with everything in
+      hand (`benilla_assets::sprite_deferrals`, the extract gate's `art_deferred`). Without that,
+      opening the world map showed black panels that only filled in if you closed and reopened it.
+    - **One-shot warmers block instead** (`WorldAssets::sprite_texture_blocking` and its twins): the
+      glue art table, the chat-bubble and V-plate boot sets, the minimap art, the loading-screen
+      backdrop and the cursor composite each resolve a fixed set once and keep the handles — two of
+      them bake pixel sizes off those handles — so a placeholder reaching one is permanent. They run
+      on boot or loading frames, where a blocking read is what has always happened.
+  - The **character skin composite** takes a third shape, because it is neither: it blends a base
+    skin with up to fifteen overlays into one atlas cached per appearance for the session, so a
+    layer arriving late is not a late layer, it is a tabard missing for as long as it is worn. So the
+    derivation is split from the reading (`CharSections::composite_plan`), the caller warms every
+    path and asks whether they are all in memory (`Chain::ready`), and until they are the unit is
+    simply not stamped `VisualAttached` — the attach query picks it up again next frame. The redress
+    and character-select booth paths bracket the same call the same way.
 - **Hosting behind a login.** There is no such thing here any more: the hosted tree is public
   static assets, and the gateway relays to loopback for whoever asks. Accounts are the realm's own
   (mangos `account create`), which is the only gate on the site. A page that wanted to hand the

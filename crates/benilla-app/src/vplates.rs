@@ -444,15 +444,18 @@ fn load_plate_art(
     let Some(mut assets) = assets else {
         return; // no game data (bare test app) — drive_vplates tolerates the missing resource
     };
-    let fill = assets.sprite_texture(BAR_TEXTURE, &mut images);
-    let skull = assets.sprite_texture(SKULL_TEXTURE, &mut images);
-    let raid_icons = assets.sprite_texture(RAID_TEXTURE, &mut images);
+    // Blocking, like every other one-shot warmer: this resolves once and the handles (plus the
+    // border's raw pixels below) are kept for the session, so there is nobody to ask again if the
+    // art is not here yet. See `WorldAssets::sprite_texture_blocking`.
+    let fill = assets.sprite_texture_blocking(BAR_TEXTURE, &mut images);
+    let skull = assets.sprite_texture_blocking(SKULL_TEXTURE, &mut images);
+    let raid_icons = assets.sprite_texture_blocking(RAID_TEXTURE, &mut images);
     let (Some(fill), Some(skull), Some(raid_icons)) = (fill, skull, raid_icons) else {
         warn!("vplates: plate art missing from the patch chain — plates will not draw");
         return;
     };
     // Decode the border BLP's raw pixels once; drive_vplates resamples them per plate size.
-    let Some((src_w, src_h, src)) = assets.decode_rgba(BORDER_TEXTURE) else {
+    let Some((src_w, src_h, src)) = assets.decode_rgba_blocking(BORDER_TEXTURE) else {
         warn!("vplates: border art missing from the patch chain — plates will not draw");
         return;
     };

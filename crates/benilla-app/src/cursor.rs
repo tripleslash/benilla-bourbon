@@ -97,7 +97,9 @@ fn decode_payload_cursor_rgba(
     assets: &mut benilla_assets::WorldAssets,
     path: &str,
 ) -> Option<Vec<u8>> {
-    let (w, h, rgba) = assets.decode_rgba(path)?;
+    // Blocking: the composite becomes a hardware cursor for the whole drag, and nothing asks
+    // again mid-drag. See `WorldAssets::sprite_texture_blocking`.
+    let (w, h, rgba) = assets.decode_rgba_blocking(path)?;
     let mut out = box_downsample_32(w, h, &rgba);
     for a in out.iter_mut().skip(3).step_by(4) {
         *a = 0xFF;

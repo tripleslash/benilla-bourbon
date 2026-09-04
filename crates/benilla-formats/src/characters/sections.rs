@@ -147,6 +147,33 @@ pub struct CharSections {
     sections: HashMap<(u8, u8, u8, u8, u8), [String; 3]>,
 }
 
+/// The read plan of one body composite — [`CharSections::composite_plan`]'s answer, and the input to
+/// [`CharSections::composite_from_plan`].
+///
+/// Deliberately opaque past [`CompositePlan::paths`]: the only thing a caller outside this module
+/// wants from it is "what does this need in memory?", and exposing the tile rects would invite a
+/// second place to reason about them.
+pub struct CompositePlan {
+    /// The base skin — the canvas. Required.
+    base: String,
+    /// In blit order: each layer's candidate paths (first that decodes wins) and the tile it covers.
+    layers: Vec<(Vec<String>, Tile)>,
+}
+
+impl CompositePlan {
+    /// Every blob the composite may read, base first. A caller warming these
+    /// ([`crate::Chain::ready`]) asks for more than the build will use — a layer stops at its first
+    /// candidate that decodes — which is the right way round: the candidates of one layer are the
+    /// same locality group anyway, and the alternative is reading to find out.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.base.as_str()).chain(
+            self.layers
+                .iter()
+                .flat_map(|(c, _)| c.iter().map(String::as_str)),
+        )
+    }
+}
+
 impl CharSections {
     /// The base body-skin BLP for an appearance — CharSections `sectionType 0`, the single full 256²
     /// body-layout texture keyed by skinColor. `None` if the row is absent.
@@ -260,11 +287,50 @@ impl CharSections {
         equipment: [Option<&ItemDisplay>; 8],
         emblem: Option<GuildEmblem>,
     ) -> Result<Option<BlpMipChain>> {
-        let Some(base_path) = self.skin_texture(race, sex, skin) else {
+        let Some(plan) = self.composite_plan(
+            race,
+            sex,
+            skin,
+            face,
+            facial_hair,
+            hair_style,
+            hair_color,
+            equipment,
+            emblem,
+        ) else {
             return Ok(None);
         };
-        let mut atlas = read_texture_mip_chain(chain, base_path)
-            .with_context(|| format!("reading base skin '{base_path}'"))?;
+        self.composite_from_plan(chain, &plan).map(Some)
+    }
+
+    /// **What a [`Self::composite_body`] with these arguments would read**, and where each layer
+    /// lands — the whole derivation, with no reading in it.
+    ///
+    /// It is split out because the browser needs to ask *before* it starts. The composite blends a
+    /// base skin with up to fifteen overlays into one atlas that is then cached per appearance for
+    /// the session, so a read that is not ready yet cannot simply be skipped and retried: the atlas
+    /// would be cached without that layer, and a tabard would be missing for as long as the player
+    /// wore it. With the plan in hand a caller can warm every path ([`crate::Chain::ready`]) and do
+    /// nothing until they are all in memory — without a second transcription of which section fans
+    /// out to which tile, which is the part that must never drift.
+    ///
+    /// `None` when the race/sex/skin triple names no base skin, which is [`Self::composite_body`]'s
+    /// `Ok(None)`: there is nothing to composite onto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_plan(
+        &self,
+        race: u8,
+        sex: u8,
+        skin: u8,
+        face: u8,
+        facial_hair: u8,
+        hair_style: u8,
+        hair_color: u8,
+        equipment: [Option<&ItemDisplay>; 8],
+        emblem: Option<GuildEmblem>,
+    ) -> Option<CompositePlan> {
+        let base = self.skin_texture(race, sex, skin)?.to_string();
+        let mut layers: Vec<(Vec<String>, Tile)> = Vec::new();
         // The head overlays: (sectionType, variation, color, texColumn, destTile) — the verified fan-out
         // (RF-0067 §"section → cell core" + RF-0074 head map). Within a tile, order matters (later
         // overwrites/blends over earlier): base skin (already the canvas) → face → facial hair → hair.
@@ -281,29 +347,23 @@ impl CharSections {
             (SECTION_HAIR, hair_style, hair_color, 2, TILE_G8),
         ];
         for (ty, var, color, col, tile) in overlays {
-            let Some(path) = self.tex(race, sex, ty, var, color, col) else {
-                continue;
-            };
-            if let Ok(overlay) = read_texture_mip_chain(chain, path) {
-                blit_over(&mut atlas, &overlay, tile);
+            if let Some(path) = self.tex(race, sex, ty, var, color, col) {
+                layers.push((vec![path.to_string()], tile));
             }
         }
         // The equipment plan, built once: the blits below consume it, and the underwear reads it as its
         // gate. One plan, so "what dresses this tile?" has a single answer (decision 0074's `equip_blits`).
-        let plan = equip_blits(&equipment, emblem);
+        let equip = equip_blits(&equipment, emblem);
         // The underwear ([`UNDERWEAR_TILES`]) — the tile's fallback, not an under-layer: a contribution
         // in any of the group's TESTED columns and the client draws no underwear there at all, leaving
         // the base skin it already blitted. Drawn before the equipment because the untested columns (the
         // belt, the tabard) still stack on top of it.
         for (col, layer, tested) in UNDERWEAR_TILES {
-            if plan.iter().any(|s| s.layer == layer && s.column < tested) {
+            if equip.iter().any(|s| s.layer == layer && s.column < tested) {
                 continue;
             }
-            let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) else {
-                continue;
-            };
-            if let Ok(overlay) = read_texture_mip_chain(chain, path) {
-                blit_over(&mut atlas, &overlay, EQUIP_TILES[layer]);
+            if let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) {
+                layers.push((vec![path.to_string()], EQUIP_TILES[layer]));
             }
         }
         // The equipment layers (decision 0074) and the guild tabard's three (decision 1704), in the
@@ -311,16 +371,31 @@ impl CharSections {
         // [`EquipBlit::candidates`] that decodes. A name that resolves to nothing is skipped —
         // best-effort, like the skin overlays; on the model it reads as a garment that stops early,
         // which is what the instrument's `MISSING` line is for.
-        for step in &plan {
-            if let Some(overlay) = step
-                .candidates(sex)
+        for step in &equip {
+            layers.push((step.candidates(sex), EQUIP_TILES[step.layer]));
+        }
+        Some(CompositePlan { base, layers })
+    }
+
+    /// Read and blend what [`Self::composite_plan`] worked out. The base skin is required — without
+    /// the canvas there is no atlas — and every layer is best-effort, exactly as before the plan was
+    /// split out of it.
+    pub fn composite_from_plan(
+        &self,
+        chain: &mut Chain,
+        plan: &CompositePlan,
+    ) -> Result<BlpMipChain> {
+        let mut atlas = read_texture_mip_chain(chain, &plan.base)
+            .with_context(|| format!("reading base skin '{}'", plan.base))?;
+        for (candidates, tile) in &plan.layers {
+            if let Some(overlay) = candidates
                 .iter()
                 .find_map(|path| read_texture_mip_chain(chain, path).ok())
             {
-                blit_over(&mut atlas, &overlay, EQUIP_TILES[step.layer]);
+                blit_over(&mut atlas, &overlay, *tile);
             }
         }
-        Ok(Some(atlas))
+        Ok(atlas)
     }
 
     /// Load CharSections.dbc from the patch chain.

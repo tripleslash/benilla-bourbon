@@ -332,7 +332,9 @@ fn setup_loading_screen(
     }
 
     // The two layers 1.12 actually draws (sRGB clamp sprites — UI art, not tiling world art).
-    let mut tex = |path: &str| assets.sprite_texture(path, &mut images);
+    // Blocking: the `ImageNode`s spawned below own these handles for the session and this system
+    // runs once. See `WorldAssets::sprite_texture_blocking`.
+    let mut tex = |path: &str| assets.sprite_texture_blocking(path, &mut images);
     let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
         error!("loading bar textures missing — plain black cover, no art");
         return;
@@ -692,9 +694,14 @@ fn drive_loading_screen(
             let path = path.to_string();
             let handle = match screen.art_cache.get(&path) {
                 Some(h) => Some(h.clone()),
-                None => assets.sprite_texture(&path, &mut images).inspect(|h| {
-                    screen.art_cache.insert(path.clone(), h.clone());
-                }),
+                // Blocking: the handle goes straight into `art_cache` and is never re-resolved, so
+                // a deferred read would leave this continent's backdrop black for the session. The
+                // frame it stalls is a loading frame, which is the one place that is free.
+                None => assets
+                    .sprite_texture_blocking(&path, &mut images)
+                    .inspect(|h| {
+                        screen.art_cache.insert(path.clone(), h.clone());
+                    }),
             };
             if let (Some(handle), Ok((mut img, _))) = (handle, backdrop.single_mut()) {
                 if img.image != handle {

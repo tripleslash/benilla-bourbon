@@ -680,6 +680,10 @@ pub(super) fn attach_entity_visuals(
             // per-appearance over the shared model, so built here (not in the shared model cache);
             // `model_material` then dedups by texture so bodies of one look share them. `(None, None)` ⇒
             // those parts keep their built (untextured) material (no look, or tables/chain absent).
+            // Brackets the skin build: a body composite whose textures have not arrived yet counts
+            // itself here rather than blending an atlas that is missing a layer and caching it for
+            // the session (`char_skin::skin_deferrals`). Zero on native.
+            let skin_deferrals_before = char_skin::skin_deferrals();
             let char_mats = match look.as_ref() {
                 Some(l) => build_char_skin_materials(
                     l,
@@ -697,6 +701,15 @@ pub(super) fn attach_entity_visuals(
                 ),
                 None => (None, None, None, (None, None)),
             };
+            // The composite deferred, so this unit is not finished. Leave it WITHOUT
+            // `VisualAttached` — the query above is `Without<VisualAttached>`, so the next frame
+            // picks it up again — and skip the spawning below rather than build a body around a
+            // half-dressed atlas. The reads it asked for are warming meanwhile, so this converges in
+            // the handful of frames a fetch takes. Nothing has been spawned at this point; the one
+            // component written above (`BoneAttach`) is an overwrite on the retry, not a duplicate.
+            if char_skin::skin_deferrals() != skin_deferrals_before {
+                continue;
+            }
             // Whether any spawned child armed a `PendingAppearFade` this pass — mirrored onto the unit
             // root below as `UnitAppearFade` so a held item / helm / shoulder that resolves and spawns
             // *later* (`entities::equipment::attach_held_items`, async — a template round trip, a model

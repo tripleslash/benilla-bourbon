@@ -178,6 +178,30 @@ impl PackStore {
         }
     }
 
+    /// Would [`Self::try_read_sync`] answer without deferring? Starts the warm if not.
+    ///
+    /// [`Self::prefetch`] without the blind spot and [`Self::try_read_sync`] without the bytes — for
+    /// a caller that must decide **before** it starts, because what it is about to do reads several
+    /// blobs and is only correct if it can finish. The character-skin composite is that caller: it
+    /// blends a base skin with up to fifteen overlays into one atlas that is then cached for the
+    /// session, so an overlay arriving late is not "a late overlay", it is a tabard that is missing
+    /// for as long as the player wears it.
+    ///
+    /// **A blob the container does not hold counts as ready**, because "not there" is a final answer
+    /// and every caller of this treats a missing overlay as one — waiting for it would be waiting
+    /// forever. So is a blob whose pack cannot be warmed: that read will block, which is the old
+    /// behaviour and not something a probe can improve.
+    pub fn is_ready(&self, name: &str) -> bool {
+        let Some((at, _)) = self.locate(name) else {
+            return true;
+        };
+        if resident::is_resident(at.pack_id) || !resident::can_warm(at.pack_id) {
+            return true;
+        }
+        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
+        false
+    }
+
     /// Say that `name` will be wanted soon, and return immediately.
     ///
     /// The point of a locality group is that fetching one blob's pack warms the few hundred reads
@@ -221,9 +245,10 @@ impl PackStore {
         }
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
             let (start, end) = at.wire_range();
-            let (ranged, body) = resident::fetch_frame(at.pack_id, &self.pack_url(at.pack_id), start, end)
-                .await
-                .map_err(|e| anyhow!("{name}: fetching pack {}: {e}", at.pack_id))?;
+            let (ranged, body) =
+                resident::fetch_frame(at.pack_id, &self.pack_url(at.pack_id), start, end)
+                    .await
+                    .map_err(|e| anyhow!("{name}: fetching pack {}: {e}", at.pack_id))?;
             if ranged && body.len() as u64 == end - start + 1 {
                 return frame_bytes(&body).map_err(|e| anyhow!("{name}: {e}"));
             }

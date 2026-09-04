@@ -242,6 +242,13 @@ impl Chain {
         }
     }
 
+    /// Would [`Self::try_read`] answer without deferring? **Always true on native**, where every
+    /// read resolves on the spot — see the web twin for what it is for.
+    #[inline]
+    pub fn ready(&self, _name: &str) -> bool {
+        true
+    }
+
     /// Say that `name` will be wanted soon. **Nothing to do on native** — a file on disk is not
     /// warmed by being mentioned — so this is an empty call the optimiser deletes, and the shared
     /// call sites can say what they mean without a `cfg`.
@@ -338,6 +345,16 @@ impl Chain {
         self.store.try_read_sync(name)
     }
 
+    /// Would [`Self::try_read`] answer without deferring? Starts the warm if not — see
+    /// [`crate::webpack::PackStore::is_ready`], including why a name the container does not hold is
+    /// reported ready.
+    ///
+    /// For a caller whose work reads several blobs and is only correct once it can read all of them:
+    /// it asks first, does nothing while the answer is no, and the packs warm in the meantime.
+    pub fn ready(&self, name: &str) -> bool {
+        self.store.is_ready(name)
+    }
+
     /// Warm the pack `name` lives in, and return immediately — see
     /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
     pub fn prefetch(&self, name: &str) {
@@ -377,7 +394,6 @@ impl Chain {
         &self.store
     }
 }
-
 
 // Native only: exercises `is_patch_glob_match`/`mount_order`, which don't exist on the web target.
 #[cfg(all(test, not(target_arch = "wasm32")))]
