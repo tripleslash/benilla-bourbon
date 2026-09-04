@@ -26,7 +26,13 @@
 //! can produce are wired — the self-descriptor edges here, the packets and drains at their own
 //! seams through [`TutorialEvent`] — and the record names the rest with their conditions.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The platform clock, not std's: `std::time::Instant::now()` PANICS on wasm32 ("time not
+// implemented on this platform"), and the tutorial cascade reads it on ordinary gameplay events —
+// a loot, a first cast, opening the chat box. On native this is a re-export of std's, so nothing
+// about the native build changes.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

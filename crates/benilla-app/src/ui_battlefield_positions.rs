@@ -22,7 +22,11 @@
 //! (`0x4ac0f0`, the `[0xb6ec00]` stamp) and goes out only with an active slot — outside a
 //! battleground the list is cleared instead, so a stale roster never draws on the next map.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The platform clock, not std's — `std::time::Instant::now()` panics on wasm32. See
+// `crate::tutorial` for the same note; the request throttle below reads it per frame.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
