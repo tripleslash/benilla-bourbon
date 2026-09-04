@@ -405,6 +405,10 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for file in BAG_UI {
         load_xml(&s, file);
     }
@@ -415,6 +419,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -491,6 +496,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -594,6 +600,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -615,6 +622,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         2,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -675,8 +683,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert!(s
         .eval::<bool>(
-            "return GameTooltipMoneyCoin1:IsShown() \
-             and GameTooltipMoneyCoin1Num:GetText() == '52'",
+            "return GameTooltipMoneyFrame:IsShown() \
+             and GameTooltipMoneyFrameCopperButton:GetText() == '52'",
         )
         .unwrap());
     assert_eq!(
@@ -689,7 +697,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     unhover(&mut s);
     assert_eq!(s.ui_cursor(), None, "ResetCursor on leave");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
 
     // The unsellable item: the ITEM_UNSELLABLE line, no coins.
@@ -704,7 +712,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
         .unwrap();
     assert!(has_line, "SellPrice 0 shows the ITEM_UNSELLABLE line");
     assert!(s
-        .eval::<bool>("return not GameTooltipMoneyCoin1:IsShown()")
+        .eval::<bool>("return not GameTooltipMoneyFrame:IsShown()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -798,6 +806,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -881,6 +890,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -1013,6 +1023,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -1454,6 +1465,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     // SetInventoryItem arm. Bar slot 1 is inventory slot 20 (Bag0Slot).
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
+        duration_ms: None,
         already_bound: false,
         bar_placeable: true,
         durability: None,
@@ -1635,13 +1647,15 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
         bar_right - perf_right
     );
 
-    // And it reverts: destroying the last key takes the keyring back off the bar (our divergence
-    // from the ref's one-way saved-variable latch — see MainMenuBar_UpdateKeyRing).
+    // And it does NOT revert: the reference's latch is one-way — `MainMenuBar_UpdateKeyRing`
+    // only ever Shows, and SHOW_KEYRING is a saved variable (stock MainMenuBar.lua:174-183,
+    // MainMenuBar.xml:323-336). Our file used to take the button away with the last key; that
+    // divergence went with the file (1938).
     s.set_has_key(false);
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
     assert!(
-        !s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
-        "losing the last key takes the button away again"
+        s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
+        "losing the last key leaves the button on the bar — the reference's one-way latch"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

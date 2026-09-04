@@ -38,9 +38,9 @@ pub mod web;
 #[cfg(target_arch = "wasm32")]
 pub mod webpack;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,
-    CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges, EmblemLayer,
-    EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges,
+    EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;
 mod cinematics;
@@ -84,7 +84,8 @@ mod garble;
 pub use garble::{garble, garble_chat, Garble, FLUENT_SKILL};
 mod languages;
 pub use languages::{
-    load_default_languages, load_language_words, DefaultLanguages, LanguagePool, LanguageWords,
+    load_default_languages, load_language_words, load_languages, DefaultLanguages, LanguagePool,
+    LanguageWords, Languages,
 };
 mod creature_families;
 pub use creature_families::{
@@ -106,7 +107,9 @@ pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
 mod stationery;
-pub use stationery::{load_stationery_catalog, StationeryCatalog, STATIONERY_DEFAULT};
+pub use stationery::{
+    load_stationery_catalog, StationeryCatalog, StationeryRow, STATIONERY_DEFAULT,
+};
 mod lock;
 pub use lock::{
     load_lock_catalog, LockCatalog, LockSlot, GO_STATE_ACTIVE, GO_STATE_ACTIVE_ALTERNATIVE,
@@ -147,11 +150,13 @@ pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod maps;
-pub use maps::{load_map_catalog, MapCatalog};
+pub use maps::{load_map_catalog, MapBattlegroundColumns, MapCatalog};
 mod anim_data;
 pub use anim_data::{load_anim_data_catalog, AnimDataCatalog, AnimEntry};
 mod quest_headers;
 pub use quest_headers::{load_quest_header_names, QuestHeaderNames};
+mod quest_info;
+pub use quest_info::{load_quest_tag_names, QuestTagNames};
 mod area_trigger;
 pub use area_trigger::{load_area_trigger_catalog, AreaTriggerCatalog, AreaTriggerRow};
 mod area_sound;
@@ -172,6 +177,8 @@ mod environmental_damage;
 pub use environmental_damage::{load_environmental_damage, EnvironmentalDamageTable};
 mod footsteps;
 pub use footsteps::{load_footprint_textures, load_footstep_catalog, FootstepCatalog};
+mod death_thud;
+pub use death_thud::{load_death_thud_catalog, DeathThudCatalog};
 mod sound_entries;
 pub use sound_entries::{load_sound_kit_catalog, sound_kit_flags, SoundKit, SoundKitCatalog};
 mod sound_provider;
@@ -196,10 +203,11 @@ mod wmo_area;
 pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;
 pub use spells::{
-    load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_dispel_types,
-    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, FormRefusal, OpenLock,
-    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
+    cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
+    load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
+    load_spell_ranges, substitute, CcExemption, FormRefusal, OpenLock, ShapeshiftForm,
+    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
+    SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
     SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,
@@ -211,7 +219,9 @@ pub use skill_lines::{
     load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
 };
 mod spell_focus;
+mod spell_mechanic;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
+pub use spell_mechanic::{load_spell_mechanic_catalog, SpellMechanicCatalog};
 mod talents;
 pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
 mod spell_visual;
@@ -822,7 +832,8 @@ mod tests {
     fn registered_dbc_schemas_dump_the_shipped_tables() {
         let data = crate::wow_data_or_skip!();
         let mut chain = open_chain(&data).expect("open chain");
-        let out = std::env::temp_dir().join("benilla-schema-registry-test.csv");
+        let out =
+            std::env::temp_dir().join(format!("benilla-schema-reg-{}.csv", std::process::id()));
         for table in [
             "CreatureDisplayInfo",
             "CreatureDisplayInfoExtra",

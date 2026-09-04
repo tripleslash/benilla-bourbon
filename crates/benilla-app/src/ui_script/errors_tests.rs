@@ -39,7 +39,7 @@ fn info_and_error_messages_stack_hold_and_expire() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml");
 
     // Empty at load. The frame itself is shown — a MessageFrame with nothing to say simply draws
@@ -109,12 +109,17 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\UIErrorsFrame.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // BenillaMoney_* — QuestLogDetail's reward money row
@@ -122,7 +127,12 @@ fn an_error_toast_draws_over_an_open_panel_window() {
                                                             // pane's UIPanelScrollFrameTemplate). A MISSING template is a loader *warning*, so an
                                                             // under-loaded list passes and then dies on the first FauxScrollFrame_Update.
     load_xml(&s, "ScrollTemplates.xml");
-    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
     // A left-slot panel open, and the toast raised after it — the order that must not decide.
     s.eval::<()>("ShowUIPanel(QuestLogFrame)").unwrap();

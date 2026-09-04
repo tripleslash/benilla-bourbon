@@ -1205,6 +1205,9 @@ pub(super) fn drive_script(
             CursorPayload::PetAction(p) => p.texture,
             CursorPayload::StablePet(p) => Some(p.texture),
             CursorPayload::Merchant(m) => m.texture,
+            CursorPayload::Money(m) => {
+                Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
+            }
         });
         if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
             if let Some(handle) = assets
@@ -1370,8 +1373,51 @@ fn convert_entry(
         //
         // A pane with no name, or one no window claims, draws nothing (`SetModel` panes included:
         // this engine holds their scene and renders no M2 into it). Nothing is stubbed white.
-        QuadContent::ModelPane { name } => {
+        QuadContent::ModelPane {
+            name,
+            model,
+            facing,
+            model_scale: _,
+        } => {
             use crate::portrait::PortraitSource;
+            // The world-map arrow (decision 1980): the stock `WorldMapFrame.lua` /
+            // `Blizzard_BattlefieldMinimap.lua` create an anonymous `Model` child, `SetModel` it to
+            // the minimap arrow, and steer it with `SetFacing`/`SetPosition` every update. benilla
+            // draws that one file as the minimap's own arrow sprite — the same art the minimap
+            // ring draws (`crate::minimap::blips`), turned the same way (`-facing`: the M2's yaw
+            // is CCW-positive, the screen's is CW), filling the pane the engine sized to the
+            // reference's 33.6 px footprint times the arrow's `SetModelScale`. No 3D pane needs
+            // to exist for a two-triangle arrow.
+            if model.as_deref() == Some(benilla_ui::script::ARROW_MODEL) {
+                use crate::minimap::blips::{
+                    PLAYER_ARROW_OFFSET_PX, PLAYER_ARROW_QUAD_PX, PLAYER_ARROW_TEXTURE,
+                };
+                let Some(handle) = assets
+                    .as_mut()
+                    .and_then(|a| a.sprite_texture(PLAYER_ARROW_TEXTURE, images))
+                else {
+                    return;
+                };
+                // The M2's single quad sits off its origin by an authored offset that turns with
+                // the facing — the minimap's arrow applies the same one at its 33.6 px basis, and
+                // the pane the engine sized (`worldmap_arrow.rs`: the footprint times the
+                // `SetModelScale`) scales it here. `model_scale` is already in the rect.
+                let rotation = -facing;
+                let (sin, cos) = rotation.sin_cos();
+                let off = PLAYER_ARROW_OFFSET_PX * (rect.width() / PLAYER_ARROW_QUAD_PX);
+                let off = Vec2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
+                let rect = Rect::from_center_size(rect.center() + off, rect.size());
+                out.push(UiQuad {
+                    rect,
+                    z_key: eq.z,
+                    texture: Some(handle),
+                    color: [1.0, 1.0, 1.0, eq.alpha],
+                    rotation,
+                    clip,
+                    ..default()
+                });
+                return;
+            }
             let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
                 return;
             };
@@ -1554,7 +1600,7 @@ fn convert_entry(
             // A slice that runs PAST the texture is the reference's tiling idiom, not a crop:
             // `SetTexCoord(0, n, 0, 1)` on an n-slots-wide strip repeats the art n times — the
             // stance shelf's middle carries one slot per extra form exactly that way
-            // (`StanceBar.xml`, `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
+            // (stock `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
             // across the extra width instead. Clamp/repeat bake into the `Image`, so this picks
             // the tiled GPU image + cache entry, as the `Backdrop` arm's `tile` does below.
             let tiled = uv
@@ -1564,7 +1610,13 @@ fn convert_entry(
                 .any(|c| !(-0.001..=1.001).contains(c));
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
-                    let resolved = if circular {
+                    // The tabard designer's emblem cells (1977): the reference installs a
+                    // generated 128×64 / 128×32 image — white RGB carrying the emblem BLP's own
+                    // alpha — into the Texture the setter was handed; the region carries that as
+                    // a token path and the resolver builds exactly that image.
+                    let resolved = if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
+                        a.emblem_mask_texture(blp, images)
+                    } else if circular {
                         a.portrait_texture(p, images)
                     } else if tiled {
                         a.sprite_texture_tiled(p, images)

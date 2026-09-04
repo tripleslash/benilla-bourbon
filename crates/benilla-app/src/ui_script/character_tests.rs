@@ -68,6 +68,7 @@ fn combat_stats() -> UnitCombatStats {
 fn inventory_with_head_item() -> InventorySlots {
     let mut slots: InventorySlots = Default::default();
     slots[1] = Some(InvSlotView {
+        duration_ms: None,
         already_bound: false,
         bar_placeable: true,
         durability: None,
@@ -94,6 +95,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     slots.insert(
         1,
         benilla_ui::script::ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -158,6 +160,10 @@ fn shipped_character_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for f in super::test_ui::CHARACTER_UI {
         super::test_ui::load_ui_strict(&s, f);
     }
@@ -1198,15 +1204,20 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     // The reference's `PanelTemplates_SelectTab` ends with `if GameTooltip:IsOwned(tab)` —
     // an arm our deleted copy omitted ("our tabs set no tooltip"), so selecting a tab now needs
     // the tooltip to exist (1860).
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "UIParent.xml");
 
     // A conforming row: tabs named `<frame>Tab1..N` (what `PanelTemplates_UpdateTabs` getglobals)

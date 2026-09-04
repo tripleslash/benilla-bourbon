@@ -77,7 +77,9 @@ fn shipped_xml() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert!(out.len() >= 40, "only {} xml files swept", out.len());
+    // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751), so
+    // the floor sits well under the count rather than one step above it (1956).
+    assert!(out.len() >= 10, "only {} xml files swept", out.len());
     out
 }
 
@@ -155,11 +157,6 @@ const BOTTOM_EXEMPT: &[(&str, &str)] = &[
         "MainMenuBar",
         "the base itself — the bar everything else measures its clearance FROM, so it has no \
          clearance of its own to compute",
-    ),
-    (
-        "WorldFrame",
-        "a full-screen named handle, not a HUD frame (UIParent.xml) — setAllPoints, renders \
-         nothing",
     ),
     ("UIParent", "the full-screen root itself"),
     (

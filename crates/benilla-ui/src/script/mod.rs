@@ -43,15 +43,23 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod battlefield_positions;
+mod battlefield_queue;
+mod battlefield_score;
 mod bind_confirm;
 mod binder;
 mod binding_abi;
+mod dialog_verbs;
+mod tutorial;
+mod worldmap_arrow;
 // The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
 mod camera_view;
 mod channel;
 mod char_stats;
+mod chat_misc;
 mod chat_send;
+mod chat_types;
 mod chat_window;
 mod clip;
 mod colorselect;
@@ -80,6 +88,7 @@ mod gossip;
 mod guild;
 mod handler_prof;
 mod screenshot;
+mod tabard;
 pub use handler_prof::HandlerRow;
 mod inspect;
 mod item_stats;
@@ -158,22 +167,29 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
+pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
+pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
+pub use channel::{ChannelCommand, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
+pub use chat_misc::EmoteRequest;
 pub use chat_send::ChatSend;
-pub use chat_window::ChatWindowLook;
+pub use chat_types::ChatTypeColor;
+pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
-    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
-    RandomPropertyView, UiCursorMode,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
+    PetitionSlotView, RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::money::coin_icon;
 pub use cursor::{
-    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorPayload, CursorPetAction,
-    CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
+    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
@@ -190,6 +206,11 @@ pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
+pub use tabard::{
+    emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
+    TABARD_CREATION_COST,
+};
+pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
 
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
@@ -198,7 +219,7 @@ pub use layout_cache::{FrameLayout, LayoutPoint};
 pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
+pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
@@ -207,7 +228,9 @@ pub use model::{TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
-pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
+pub use quest::{
+    QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
+};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
 pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
@@ -553,6 +576,8 @@ impl UiScript {
         addon::install(&lua)?;
         addon_message::install(&lua)?;
         chat_send::install(&lua)?;
+        chat_types::install(&lua)?;
+        chat_misc::install(&lua)?;
         channel::install(&lua)?;
         chat_window::install(&lua)?;
         client::install(&lua)?;
@@ -596,6 +621,12 @@ impl UiScript {
         spellbook::install(&lua)?;
         macros::install(&lua)?;
         talent::install(&lua)?;
+        dialog_verbs::install(&lua)?;
+        battlefield_score::install(&lua)?;
+        battlefield_queue::install(&lua)?;
+        battlefield_positions::install(&lua)?;
+        tutorial::install(&lua)?;
+        worldmap_arrow::install(&lua)?;
         shapeshift::install(&lua)?;
         pet::install(&lua)?;
         gossip::install(&lua)?;
@@ -610,6 +641,7 @@ impl UiScript {
         trade::install(&lua)?;
         inspect::install(&lua)?;
         dressup::install(&lua)?;
+        tabard::install(&lua)?;
         tradeskill::install(&lua)?;
         craft::install(&lua)?;
         reputation::install(&lua)?;
@@ -838,7 +870,7 @@ impl UiScript {
     ///
     /// One field, not one per widget: there is exactly one ping (decision 1596), and the old
     /// per-widget push walked the whole ~3k-frame arena every frame a ping was live.
-    pub fn set_minimap_ping(&mut self, ping: Option<(f32, f32)>) {
+    pub fn set_minimap_ping(&mut self, ping: (f32, f32)) {
         self.model_mut().minimap_ping = ping;
     }
 
@@ -1023,6 +1055,32 @@ impl UiScript {
     /// holds the `OnLoad` `Function` directly (to fire it bottom-up) rather than through the registry:
     /// this keeps the convention in one home instead of duplicating it. Errors are returned so the
     /// caller routes them (the loader records them in its own report).
+    /// Whether the frame with this global name is effectively visible — shown, with every ancestor
+    /// shown (`IsVisible()`'s answer, read host-side). `false` for a name no live frame carries.
+    /// The read side of a window for a host that keeps state per window: the dressing-room feed
+    /// empties its booth when `DressUpFrame` hides, and the stock file has no hook of ours in its
+    /// OnHide to say so (1969). A linear scan, like [`Self::model_pane`], for the same reason.
+    pub fn frame_visible(&self, name: &str) -> bool {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+    }
+
+    /// The effective alpha of the frame with this global name while it is effectively visible,
+    /// `None` when it is hidden or no live frame carries the name. The read side of a frame whose
+    /// pixels a host draws for the engine: the stock `MiniMapPing` is a `<Model>` this engine
+    /// renders nothing for, so the app's ping sprite follows the frame's own show/hide and alpha
+    /// — the lifetime the reference's `Minimap.lua` owns — instead of keeping a clock of its own
+    /// (1974). A linear scan, like [`Self::frame_visible`].
+    pub fn frame_effective_alpha(&self, name: &str) -> Option<f32> {
+        self.model_ref()
+            .arena
+            .iter_frames()
+            .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+            .map(|(_, f)| f.effective_alpha)
+    }
+
     /// Resolve every frame's rect: sync each frame's effective scale from the arena into its layout
     /// input, run the [`crate::layout`] graph (screen root as the external base), and cache the
     /// resolved rects. `GetWidth`/`GetHeight`/`extract` read this cache.
@@ -1380,6 +1438,8 @@ impl UiScript {
         if let Some(h) = model.arena.lookup(name) {
             return model.arena.frame(h).map(|f| match f.kind {
                 crate::widget::FrameKind::Frame => "Frame",
+                // A `Frame` to Lua (1984): the registered name never becomes a class identity.
+                crate::widget::FrameKind::WorldFrame => "Frame",
                 crate::widget::FrameKind::Button => "Button",
                 crate::widget::FrameKind::CheckButton => "CheckButton",
                 // `GetObjectType 0x495b60` is two instructions and returns `"LootButton"`
@@ -1391,6 +1451,8 @@ impl UiScript {
                 crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
                 crate::widget::FrameKind::Model => "Model",
                 crate::widget::FrameKind::PlayerModel => "PlayerModel",
+                crate::widget::FrameKind::DressUpModel => "DressUpModel",
+                crate::widget::FrameKind::TabardModel => "TabardModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",

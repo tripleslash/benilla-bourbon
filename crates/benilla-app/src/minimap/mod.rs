@@ -27,7 +27,7 @@
 //! stem; [`blips`] — the phase-3 blip layer (AreaPOI landmark arrows, quest-giver dots, the
 //! hover tooltip).
 
-mod blips;
+pub(crate) mod blips;
 /// The party blip's position law, shared with the world map (report B320): one function decides
 /// where a member is, so the two surfaces can never disagree about it.
 pub(crate) use blips::party_member_pos;
@@ -318,8 +318,7 @@ fn setup_minimap(
             // in it lives for the session with nothing to ask again. See
             // `WorldAssets::sprite_texture_blocking`.
             let mask = assets.mask_texture_blocking("Textures\\MinimapMask", &mut images);
-            let arrow =
-                assets.sprite_texture_blocking("Interface\\Minimap\\MinimapArrow", &mut images);
+            let arrow = assets.sprite_texture_blocking(blips::PLAYER_ARROW_TEXTURE, &mut images);
             let poi = assets.sprite_texture_blocking("Interface\\Minimap\\POIIcons", &mut images);
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
@@ -481,7 +480,14 @@ fn emit_minimap(
     // always spent in the frame it was made. Held across frames it would seat against geometry
     // the player never clicked on; and a click made on a frame the map does not draw is simply
     // not a ping (decision 1596).
-    let click = script.and_then(|mut s| s.take_minimap_ping_request());
+    // The stock `MiniMapPing` frame's alpha is read beside it: the ping's lifetime is that
+    // frame's (`ping.rs`), so the sprite wants the frame as it stands after this tick.
+    let (click, ping_shown) = script.map_or((None, None), |mut s| {
+        (
+            s.take_minimap_ping_request(),
+            s.frame_effective_alpha(ping::PING_FRAME),
+        )
+    });
     let (Some(slot), Some(assets), Some(map), Some(catalog)) =
         (widget.0.as_ref(), assets, map, catalog)
     else {
@@ -761,10 +767,12 @@ fn emit_minimap(
     // draw under the player arrow; the quest dots draw LAST — above it (the client's own draw
     // order). Hover lands in [`blips::MinimapBlipHover`] for the tooltip drive.
     // Our own descriptor's tracking state (PRIVATE fields — only ever on the self entity).
-    let tracking = self_store
-        .iter()
-        .next()
-        .map(|s| blips::SelfTracking {
+    let me = self_store.iter().next();
+    // Our own guid — the classifier compares a candidate's charm/summon owner against it, so our
+    // own pet and minions never take a dot (§W15 Q2d).
+    let self_guid = me.map(|(_, g)| g.0);
+    let tracking = me
+        .map(|(s, _)| blips::SelfTracking {
             creatures: s.0.player_track_creatures(),
             resources: s.0.player_track_resources(),
             stealthed: s.0.player_track_stealthed(),
@@ -882,6 +890,7 @@ fn emit_minimap(
                 tracking,
                 &tracked,
                 quest.statuses(),
+                self_guid,
                 &names,
                 &go_templates,
                 locks.as_deref().map(|l| &l.0),
@@ -895,8 +904,8 @@ fn emit_minimap(
             blips::emit_quest_dots(
                 ctx,
                 quest.statuses(),
-                &guids,
-                &unit_pos,
+                &tracked,
+                self_guid,
                 icons,
                 player_indoors,
                 // A dot NPC's own containment — the same faces-only down-ray the entity light
@@ -946,7 +955,7 @@ fn emit_minimap(
     // This is also where a `Minimap:PingLocation` click is drained: the geometry it must resolve
     // against is the geometry standing right here, this frame (decision 1596).
     if let Some(ctx) = &blip_ctx {
-        ping::emit_ping(ctx, &mut ping, click, map.0, &assets.ping, &mut quads);
+        ping::emit_ping(ctx, &mut ping, click, ping_shown, &assets.ping, &mut quads);
     }
 }
 

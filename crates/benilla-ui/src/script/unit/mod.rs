@@ -41,6 +41,10 @@ pub enum SelectionRequest {
     /// `AssistUnit(unit)` — select the token's own `UNIT_FIELD_TARGET`; a basis with no target is
     /// a silent no-op (the reference's shared assist tail bails before any send).
     Assist(String),
+    /// `AssistByName(name)` (`0x489c40`) — the `/assist Bob` handler's verb: select what the
+    /// *named player* is targeting. A name, not a unit token, so it is the app's name→unit
+    /// resolution (`AssistRequest`) rather than `Assist`'s token walk.
+    AssistByName(String),
     /// `TargetLastEnemy()` — select the last *attackable* unit that was committed.
     LastEnemy,
 }
@@ -191,6 +195,12 @@ pub struct UnitState {
     /// player-options newbie tip. `UnitIsPlayer`'s note used to call this reach a gap we did not
     /// carry; the unit-frame migration is what closed it.
     pub player_controlled: bool,
+    /// `UNIT_FIELD_FLAGS`, raw — what `UNIT_FLAGS` fires on (the app's `fire_transitions`); the
+    /// three readings above are bits of it.
+    pub flags: u32,
+    /// The unit's owner — `UNIT_FIELD_SUMMONEDBY`, else its charmer, else its creator; `0` for
+    /// nobody's. What `UnitPlayerOrPetInParty`/`InRaid` read for the "or pet" half (1958).
+    pub owner: u64,
     /// The unit's guild membership (`GetGuildInfo(unit)`, decision 1257). `None` = guildless, or
     /// a creature, or a player whose `PLAYER_GUILDID` has not streamed yet. Filled from the
     /// PUBLIC descriptor fields 191/192 joined against the app's guild-identity cache — see

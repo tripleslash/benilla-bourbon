@@ -18,7 +18,8 @@ mod anim_events;
 mod cinematic;
 mod combat;
 mod creature;
-mod doodad_pool;
+mod death_thud;
+mod emitter_pool;
 mod emote;
 pub(crate) mod footsteps;
 mod gameobject;
@@ -39,11 +40,12 @@ mod mount;
 // Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
 // it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
 //
-// This is the CoreAudio device layer, and off macOS `mixer::PlatformBackend` runs kira's cpal
-// backend instead — so everything below `Window` goes unused there. It still *compiles* on every
-// target (`output::stub`) so that `Window` and the `report_output` that reads its dozen fields
-// need no `#[cfg]` of their own; the allow is what that costs.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The device layer is the mix's own on every target that has threads (1920), and on wasm32 it is
+// not the device at all — `mixer::PlatformBackend` runs kira's own cpal backend there, because
+// this layer's shape is a render thread the page cannot give it. It still *compiles* on wasm32 so
+// that `Window` and the `report_output` that reads its dozen fields need no `#[cfg]` of their
+// own; the allow is what that costs.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) mod output;
 mod probe;
 mod reverb;
@@ -55,6 +57,10 @@ mod water;
 mod weather;
 mod zone;
 pub(crate) use emote::EmoteSounds;
+/// First-play kit decodes so far (`kit::DECODES`) — the probe's tail annotation.
+pub(crate) fn kit_decodes() -> u32 {
+    kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use message::MessageSounds;
@@ -551,12 +557,13 @@ impl Plugin for SoundPlugin {
         cinematic::plugin(app);
         gameobject::plugin(app);
         anim_events::plugin(app);
-        doodad_pool::plugin(app);
+        emitter_pool::plugin(app);
         spell::plugin(app);
         missile::plugin(app);
         creature::plugin(app);
         combat::plugin(app);
         footsteps::plugin(app);
+        death_thud::plugin(app);
         mount::plugin(app);
         water::plugin(app);
         weather::plugin(app);

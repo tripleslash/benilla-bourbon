@@ -160,8 +160,9 @@ const STABLE_SLOT: &str = "stable";
 ///
 /// The names, and where each is declared: `CharacterModelFrame` (stock `PaperDollFrame.xml`),
 /// `PetModelFrame` (stock `PetPaperDollFrame.xml`), `PetStableModel` (stock `PetStable.xml`, the
-/// reference's own file since 1751), `DressUpModel` (stock `DressUpFrame.xml`'s name, still our
-/// file), and `InspectModelFrame` (stock `InspectPaperDollFrame.xml`, out of the LoadOnDemand
+/// reference's own file since 1751), `DressUpModel` (stock `DressUpFrame.xml`, 1969),
+/// `AuctionDressUpModel` (the auction addon's `Blizzard_AuctionDressUp.xml`, 1971), and
+/// `InspectModelFrame` (stock `InspectPaperDollFrame.xml`, out of the LoadOnDemand
 /// `Blizzard_InspectUI` — the reference's own since 1832).
 ///
 /// **Every name here is now the reference's.** This note used to carry a `BenillaInspectModelFrame`
@@ -169,12 +170,20 @@ const STABLE_SLOT: &str = "stable";
 /// take the name from. It is not packed — the `.pub` is only what the loose
 /// `Interface\AddOns\Blizzard_InspectUI\` folder holds, while the real `.xml` and `.lua` sit
 /// inside `patch.MPQ`, which the chain mounts. 1832 migrated the window and the prefix went with it.
-const MODEL_PANE_BOOTHS: [(&str, &str); 5] = [
+const MODEL_PANE_BOOTHS: [(&str, &str); 7] = [
     ("CharacterModelFrame", PAPERDOLL_SLOT),
+    // The tabard designer's pane (1977): a PlayerModel of the player — the paper doll's own
+    // bake, whose body wears the design under preview while the window is up.
+    ("TabardModel", PAPERDOLL_SLOT),
     ("PetModelFrame", PETDOLL_SLOT),
     ("InspectModelFrame", INSPECT_SLOT),
     ("PetStableModel", STABLE_SLOT),
     ("DressUpModel", dressup::DRESSUP_SLOT),
+    // The auction house's embedded dressing room (`Blizzard_AuctionDressUp.xml`, 1971) — a second
+    // `<DressUpModel>` sharing the one booth: the app keeps ONE dressing-room look (its
+    // `TryOn`/`Dress` intents are not per-widget), so the two panes show the same substitutions.
+    // A deliberate approximation, named: the reference's two widgets each clone their own model.
+    ("AuctionDressUpModel", dressup::DRESSUP_SLOT),
 ];
 
 /// The booth a named model pane samples, or `None` for a pane no window has claimed.
@@ -1297,6 +1306,12 @@ fn booth_view_shape() -> impl Bundle {
         bevy::render::view::Hdr,
         Tonemapping::None,
         Msaa::Off,
+        // No bevy light ever reaches a booth (its lighting is the material variant,
+        // `portrait::light`), so the per-view cluster assignment is dead work here exactly as
+        // it is on the world camera (`player::setup`): with the default config every booth view
+        // rebuilt its empty cluster grid each frame — 0.2 ms of the raid's main thread for
+        // nothing drawn by it.
+        bevy::light::cluster::ClusterConfig::None,
     )
 }
 

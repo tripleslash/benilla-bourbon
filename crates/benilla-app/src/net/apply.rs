@@ -106,11 +106,17 @@ pub(super) fn apply_net_updates(
     mut reputations: ResMut<Reputations>,
     mut transforms: Query<&mut Transform>,
     mut stores: Query<&mut ObjectStore>,
-    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the two
+    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the three
     // per-unit motion states the drain writes. [`RemoteMotion`] is a relayed player's dead-reckon;
-    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780). Different
-    // components, one concern — what the wire says about how a body we don't control is moving.
-    mut motion: (Query<&mut RemoteMotion>, Query<&mut UnitMoveModes>),
+    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780);
+    // [`crate::transport::TransportRider`] is the deck a unit is standing on and its pose there
+    // (decision 1936). Different components, one concern — what the wire says about how a body we
+    // don't control is moving.
+    mut motion: (
+        Query<&mut RemoteMotion>,
+        Query<&mut UnitMoveModes>,
+        Query<&mut crate::transport::TransportRider>,
+    ),
     // One tuple param (the 16-SystemParam ceiling): the session-lifecycle one-shot writers — the
     // player's teleport/worldport snaps + the glue-screen edges (decision 0193).
     session_msgs: (
@@ -240,7 +246,25 @@ pub(super) fn apply_net_updates(
                 // `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
                 // `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose
                 // Accept is the only thing that unlearns anything. The binder's twin above.
-                ResMut<crate::ui_talent_wipe::TalentWipeState>,
+                (
+                    ResMut<crate::ui_talent_wipe::TalentWipeState>,
+                    // The dialog engine's verbs (decision 1963): the pet trainer's latch, the
+                    // instance-boot clock, the area spirit healer, the battleground queue and
+                    // the meeting-stone queue — each a feed for a stock dialog. Nested beside
+                    // the talent wipe because this tuple sits at Bevy's sixteen-entry limit.
+                    (
+                        ResMut<crate::ui_dialog_verbs::PetUnlearnState>,
+                        ResMut<crate::ui_dialog_verbs::InstanceBoot>,
+                        ResMut<crate::ui_dialog_verbs::AreaSpiritHealer>,
+                        ResMut<crate::ui_dialog_verbs::BattlefieldQueue>,
+                        ResMut<crate::ui_dialog_verbs::MeetingStone>,
+                        ResMut<crate::ui_battlefield_score::BattlefieldScoreboard>,
+                        ResMut<crate::ui_battlefield::Battlefield>,
+                        ResMut<crate::tutorial::Tutorials>,
+                        ResMut<crate::ui_battlefield_positions::BattlefieldPositions>,
+                        ResMut<crate::ui_tabard::TabardOpen>,
+                    ),
+                ),
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
                 // stamped with — the wire carries no map field, so "where you were standing when
                 // the guard told you" is the client's to remember (`crate::poi_marker`).
@@ -454,7 +478,21 @@ pub(super) fn apply_net_updates(
                 mut played_time_answer,
                 mut guild,
                 mut binder,
-                mut talent_wipe,
+                (
+                    mut talent_wipe,
+                    (
+                        mut pet_unlearn,
+                        mut instance_boot,
+                        mut area_spirit,
+                        mut battlefield_queue,
+                        mut meeting_stone,
+                        mut battlefield_scoreboard,
+                        mut battlefield,
+                        mut tutorials,
+                        mut battlefield_positions,
+                        mut tabard,
+                    ),
+                ),
                 mut poi_marker,
                 current_map,
                 mut inspect_honor,
@@ -541,10 +579,12 @@ pub(super) fn apply_net_updates(
                 self_guid: guid,
                 name,
                 billing_time_rested,
+                tutorial_flags,
             } => session::connected(
                 guid,
                 name,
                 billing_time_rested,
+                tutorial_flags,
                 &mut self_guid,
                 &mut status,
                 &mut names,
@@ -651,6 +691,16 @@ pub(super) fn apply_net_updates(
                 &index,
                 &mut transforms,
             ),
+            // **An observed mover skipped time** (decision 1935). No pose moved — only that
+            // unit's clock ran on — so this touches its relay chain and nothing else, which is
+            // the whole of what the reference's handler does (`0x603b40` → `0x61ab90`:
+            // `[CMovement+0xac] += lag`). A guid we do not hold is dropped, faithfully: the
+            // reference resolves under `TYPEMASK_UNIT` and returns on a miss.
+            SessionEvent::MoveTimeSkipped { guid, lag_ms } => {
+                if let Some(mut m) = index.0.get(&guid).and_then(|&e| motion.0.get_mut(e).ok()) {
+                    m.relay.skip_time(lag_ms);
+                }
+            }
             SessionEvent::UnitMove {
                 guid,
                 position,
@@ -717,6 +767,7 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::MonsterMove {
                 guid,
+                transport,
                 start,
                 spline_id,
                 path,
@@ -727,6 +778,7 @@ pub(super) fn apply_net_updates(
                 run_mode,
             } => objects::monster_move(
                 guid,
+                transport,
                 start,
                 spline_id,
                 path,
@@ -739,6 +791,7 @@ pub(super) fn apply_net_updates(
                 &mut commands,
                 &index,
                 &mut transforms,
+                &mut motion.2,
             ),
             SessionEvent::Teleport {
                 guid,
@@ -896,6 +949,46 @@ pub(super) fn apply_net_updates(
                 } else {
                     debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
                     talent_wipe.ask(trainer, cost);
+                }
+            }
+            // The pet trainer's question (decision 1963) — the talent-wipe twin above; a zero
+            // guid is the reference's own `ERR_TALENT_WIPE_ERROR` leg, carried over as observed.
+            SessionEvent::PetUnlearnConfirm { trainer, cost } => {
+                if trainer == 0 {
+                    debug!("net: pet unlearn refused (zero trainer) — no dialog");
+                    ui_error_keys
+                        .0
+                        .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+                } else {
+                    debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
+                    pet_unlearn.ask(trainer, cost);
+                }
+            }
+            SessionEvent::RaidGroupOnly { delay_ms, reason } => {
+                instance_boot.apply(delay_ms, reason, bevy::platform::time::Instant::now());
+            }
+            SessionEvent::AreaSpiritHealerTime { healer, ms } => {
+                area_spirit.on_time(healer, ms, bevy::platform::time::Instant::now());
+            }
+            SessionEvent::BattlefieldStatus(status) => battlefield_queue.apply(status),
+            SessionEvent::PvpLogData(data) => battlefield_scoreboard.apply(data),
+            SessionEvent::BattlefieldList(list) => battlefield.apply_list(list),
+            SessionEvent::GroupJoinedBattleground { result } => battlefield.apply_verdict(result),
+            SessionEvent::BattlegroundPlayer { guid, joined } => {
+                battlefield.apply_player(guid, joined);
+            }
+            SessionEvent::MeetingStoneSetQueue { area, status } => {
+                meeting_stone.apply(area, status);
+            }
+            SessionEvent::MeetingStoneNotice(notice) => meeting_stone.apply_notice(notice),
+            SessionEvent::TutorialFlags(bytes) => tutorials.apply_flags(&bytes),
+            SessionEvent::BattlefieldPositions(packet) => battlefield_positions.apply(packet),
+            SessionEvent::TabardVendorActivate(vendor) => tabard.open(vendor),
+            // A saved emblem evicts our guild's cached record (`0x5e715f`): the next query
+            // anywhere re-fetches it — no event, no packet.
+            SessionEvent::SaveGuildEmblemResult(result) => {
+                if tabard.apply_result(result) {
+                    guild.evict_own_identity();
                 }
             }
             SessionEvent::PlayerBound { binder: npc, area } => {
@@ -1141,12 +1234,13 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::RaidTargetSet { icon, guid } => group.apply_raid_target(icon, guid),
             SessionEvent::RaidTargetList { entries } => group.apply_raid_target_list(&entries),
-            // The ready check came back with the Raid tab (decision 1549): the open form bumps
-            // the ticket the feed turns into a `READY_CHECK` edge. The ANSWER form is still
-            // ignored — the reference has no per-member answer surface in 1.12 (the raid pane
-            // shows no ready column; only later clients do), so there is nothing to show and
-            // storing it would be state with no reader.
-            SessionEvent::ReadyCheckRequest => group.apply_ready_check(),
+            // The ready check (decision 1549, completed by 1989): the open form takes the
+            // leader arm or the popup arm by our guid; the ANSWER form — forwarded to the leader
+            // alone — is logged for the engine's flags, which the timeout tick sums up after 30 s
+            // (1.12 has no per-member answer surface, only the AFK summary line).
+            SessionEvent::ReadyCheckRequest => {
+                group::ready_check_request(&mut group, &mut chat_log, &self_guid)
+            }
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
             // A group member pinged (decision 1596). The wire carries raw world floats and the
             // relay is stateless in the reference too — we seat them as the pin and the minimap
@@ -1154,9 +1248,11 @@ pub(super) fn apply_net_updates(
             // between people who are grouped, and a ping from another map would be dropped by the
             // renderer's own map test anyway.
             SessionEvent::MinimapPing { guid, x, y } => {
-                ping.seat((x, y), current_map.as_ref().map_or(0, |m| m.0), guid);
+                ping.seat((x, y), guid);
             }
-            SessionEvent::ReadyCheckAnswer { .. } => {}
+            SessionEvent::ReadyCheckAnswer { guid, ready } => {
+                group.apply_ready_check_answer(guid, ready != 0)
+            }
             // ── The duel family (decision 0633): the session mirror + the two DisplayError
             // lines the handlers emit inline; the Era events fire off the mirror's edges in
             // `ui_duel::feed_duel`, and the countdown ticks in its own system ──
@@ -1331,7 +1427,9 @@ pub(super) fn apply_net_updates(
             SessionEvent::LootReleaseResponse { guid } => {
                 loot_release_response(guid, &mut loot, &mut loot_latch)
             }
-            SessionEvent::ItemPushResult(p) => item_push_result(p, &self_guid, &mut loot),
+            SessionEvent::ItemPushResult(p) => {
+                item_push_result(p, &self_guid, &mut loot, &mut tutorials)
+            }
             // ── The group-loot roll family (decision 0591) — the GroupLootFrame feed ───────────
             SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut loot_rolls),
             SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),
@@ -1668,6 +1766,12 @@ pub(super) fn apply_net_updates(
                 item_guid,
                 spell_id,
             } => item_cooldown(item_guid, spell_id, &items, &mut ui_actions.10),
+            // The item-lifetime countdown's ONLY feed (decision 1933): park the deadline on the
+            // item store, exactly as the enchant timer below does — vmangos's own writer says the
+            // `ITEM_FIELD_DURATION` field the client also holds is not what it displays from.
+            SessionEvent::ItemTime { item_guid, seconds } => {
+                items.set_item_duration(item_guid, seconds)
+            }
             // The temporary-enchant countdown's ONLY feed (decision 0920): park the deadline on the
             // item store, which every tooltip surface reads back through `enchant_remaining_ms`.
             SessionEvent::ItemEnchantTime {

@@ -42,10 +42,16 @@ pub(crate) struct CastErrors(pub Vec<CastFail>);
 /// word that fills the message's `%s` (the arm table at `0x6e1d8e` — a `SpellFocusObject.dbc` id
 /// for 0x5e, an `AreaTable.dbc` id for 0x5d).
 ///
-/// `arg` is `None` for every **client-local** refusal, and that is faithful rather than a gap: the
-/// local refusals the reference raises itself go through `DisplayError` with no argText, and the
-/// two client-generated argument messages it *does* build (the lock toasts, MIN_SKILL) are
+/// `arg` is `None` for **almost** every client-local refusal, and that is faithful rather than a
+/// gap: the local refusals the reference raises itself go through `DisplayError` with no argText,
+/// and the two client-generated argument messages it *does* build (the lock toasts, MIN_SKILL) are
 /// [`UiError`]'s tenants, not this queue's.
+///
+/// The **one** exception is the crowd-control ladder's `0x8d` (decision 1948). That refusal is
+/// local — `0x6094f0` bails before any packet — yet it carries an argument all the same, because
+/// its own exemption scan produced one: the blocking aura's `SpellMechanic.dbc` id. It is the
+/// only place a locally-generated word reaches this queue, which is why `push_local` still cannot
+/// set one and [`CastErrors::push_local_arg`] exists beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CastFail {
     pub spell_id: u32,
@@ -68,6 +74,16 @@ impl CastErrors {
     /// Queue a [`CastFail::local`] refusal.
     pub(crate) fn push_local(&mut self, spell_id: u32, reason: u8) {
         self.0.push(CastFail::local(spell_id, reason));
+    }
+
+    /// Queue a client-local refusal that carries its own argument word — see [`CastFail::arg`]
+    /// for why there is exactly one such tenant.
+    pub(crate) fn push_local_arg(&mut self, spell_id: u32, reason: u8, arg: u32) {
+        self.0.push(CastFail {
+            spell_id,
+            reason,
+            arg: Some(arg),
+        });
     }
 }
 
@@ -176,6 +192,12 @@ pub(crate) struct Shown {
 }
 
 impl Shown {
+    /// The resolved text — what the surface will show.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
     /// A **catalog** message, named by its GlobalStrings key — the reference's `DisplayError(id)`,
     /// which is nearly every line benilla shows. One lookup answers both "where does it go" and
     /// "what does it sound like".
@@ -213,6 +235,17 @@ impl Shown {
 /// four of them had grown their own copy (decision 1821).
 pub(crate) fn keyed_line(script: &UiScript, key: &'static str) -> Option<Shown> {
     let text = script.lua().globals().get::<String>(key).ok()?;
+    (!text.is_empty()).then(|| Shown::keyed(key, text))
+}
+
+/// [`keyed_line`] for a `%s`-shaped string: each argument fills the next `%s`, in order — the
+/// reference's `format`-with-pushed-arguments face of the same catalog rows (the battleground
+/// join verdict's map name, the joined-or-left player's name, 1974).
+pub(crate) fn keyed_line_s(script: &UiScript, key: &'static str, args: &[&str]) -> Option<Shown> {
+    let mut text = script.lua().globals().get::<String>(key).ok()?;
+    for arg in args {
+        text = text.replacen("%s", arg, 1);
+    }
     (!text.is_empty()).then(|| Shown::keyed(key, text))
 }
 

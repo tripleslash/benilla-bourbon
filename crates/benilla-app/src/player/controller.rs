@@ -71,6 +71,9 @@ pub(super) fn control(
         // A knockback the server aimed at our mover (decision 1702) — `wire_in` latches it, the
         // take-off site below flies it, and the movement stream acks it with the post-launch pose.
         MessageReader<crate::net::KnockBackMessage>,
+        // The tutorial system's world-input sites (1976): Movement acknowledged + the 10 s
+        // Targeting popup on a movement input, Cameras acknowledged on a mouse-look.
+        crate::tutorial::InputHooks,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -95,6 +98,10 @@ pub(super) fn control(
         // The spyglass scope ([`scoped_view`]): while held, the rig is pinned to first person and
         // the wheel cannot leave it.
         Res<scoped_view::ScopedView>,
+        // Is the loading cover up? The cover takes the whole input plane at the source
+        // (`loading_screen::input`), so nothing new arrives here — but a mouse gesture already in
+        // flight is retained state, and only its owner can unwind it. See the cancel below.
+        Res<crate::loading_screen::LoadingScreen>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
@@ -153,6 +160,7 @@ pub(super) fn control(
     let view_subject = &speed_capsule.8;
     let self_guid = speed_capsule.9 .0;
     let scoped = &speed_capsule.10;
+    let covered = speed_capsule.11.covering();
     // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
     // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
     // Totem), our own facing is not what "behind" means, so the return is forced off rather than
@@ -261,6 +269,20 @@ pub(super) fn control(
             drunk::wobble(time.elapsed().as_millis() as u32, f)
         }
     };
+    // **A cover cancels a gesture; it never completes one.** The cover emptied the button planes
+    // in `PreUpdate`, so the look session below ends on its own this frame — and ending it also
+    // *settles* the click test the press armed, against `PressGesture::is_click`'s free window. A
+    // right-press 0.1 s before a portal would therefore have dispatched a `WorldRightClick` under
+    // the loading screen, acting on the pick latched in the world we just left. Dropping both
+    // tests first leaves the session to end with nothing to fire. This is the one place the cover
+    // has to be named by hand: taking the input away cannot rewind a state machine that is already
+    // mid-gesture, and this system owns the only such state the world side has (the UI's own armed
+    // press/drag is unwound by `UiScript::pointer_left_window`, which the blanked cursor already
+    // triggers).
+    if covered {
+        *left_click = None;
+        *right_click = None;
+    }
     run_look_session(
         &buttons,
         mouse_motion,
@@ -483,6 +505,13 @@ pub(super) fn control(
             turn_right,
             ..
         } = axes;
+        // The world-input tutorial sites (1976): a movement input, a mouse-look.
+        if fwd_axis != 0 || side_axis != 0 {
+            net.13.moved();
+        }
+        if mouselook {
+            net.13.mouselooked();
+        }
         // **The mover's own** six speeds, read once here for the whole frame — the turn below and
         // the run/backpedal selection further down. All six live on the driven unit's `CMovement`
         // and nothing in the reference's applied-input path ever reads *our* speeds when the mover
@@ -1063,6 +1092,15 @@ pub(super) fn control(
                 orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
             }
         });
+        // The skipped-time clock (decision 1935): a held frame is a frame of movement simulation
+        // we advanced through without integrating, and the mover we name is the one we are
+        // actually driving — a possessed unit while we hold its reins. Read out before the call
+        // takes `player` mutably.
+        let skip = movement_net::SkipClock {
+            dt,
+            held: player.settling,
+            mover: player.foreign_mover.or(self_guid),
+        };
         movement_net::stream_self_movement(
             &net.0 .0,
             &mut player,
@@ -1090,6 +1128,7 @@ pub(super) fn control(
             // byte is 0 → `0x615c80 je 0x616539`: no apply, and no ack).
             knockback.filter(|_| knocked),
             wire_transport,
+            skip,
         );
     } else {
         // Free fly (pre-connect or detached): aim from the look angles, move the camera directly

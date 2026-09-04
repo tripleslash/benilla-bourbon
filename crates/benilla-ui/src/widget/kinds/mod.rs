@@ -20,6 +20,18 @@ pub use messageframe::*;
 pub enum FrameKind {
     /// Plain `CSimpleFrame` — the base container.
     Frame,
+    /// The reference's `CGWorldFrame` (decisions 1983/1984; wow-re `worldframe-widget.md`): the
+    /// singleton the 3D world renders behind. Registered as its own frame type (`"WorldFrame"`
+    /// @`0x843450`, factory `0x4959d0`) whose registry record is **destroyed on the first
+    /// instantiation** — a second `<WorldFrame>` or `CreateFrame("WorldFrame")` is an unknown type;
+    /// **a `Frame` to Lua** (`GetObjectType()` answers `"Frame"`, `IsObjectType("WorldFrame")` is
+    /// nil — its vtable inherits the base's type slots, the TaxiRouteFrame precedent); born with
+    /// key, mouse and wheel enabled (`0xE`) in **stratum 0, `WORLD`, below `BACKGROUND`**, which
+    /// no XML or Lua can name. benilla draws the world through Bevy, so the kind is a full-screen
+    /// frame whose hits are the WORLD's: the app's pointer arbiter treats a hovered WorldFrame as
+    /// not-over-UI while its own scripts still fire, as the reference's do before the click's
+    /// binding runs.
+    WorldFrame,
     Button,
     /// `CLootButton` (`Ui\\LootFrame.h:21`, factory `0x495a30`, size `0x4e0`) — a
     /// **registered `CreateFrame` type**, one of the eight the client registers through
@@ -81,6 +93,23 @@ pub enum FrameKind {
     /// no getter reads them, and they drive a shuffle animation on a renderer we have not built.
     /// `script::modelframe`'s `SetRotation` carries the addresses.
     PlayerModel,
+    /// `DressUpModel` — `CGDressUpModelFrame` (`Ui\DressUpModelFrame.cpp`, factory `0x495c00`,
+    /// ctor `0x5041d0` chaining `CGCharacterModelBase`'s `0x505680`): the dressing room's pane.
+    /// It EXTENDS [`FrameKind::PlayerModel`] — the same members, two behavioural vtable overrides
+    /// (idx36 `0x504350`: clone the unit's CharacterComponents and seed the two hand lanes; idx38
+    /// `0x504470`) — and adds exactly three verbs of its own, table `0x84f190`: `Undress 0x504c00`,
+    /// `Dress 0x504cd0`, `TryOn 0x504d90`. Everything else it answers is `PlayerModel`'s and then
+    /// `Model`'s, by the same chaining. Its state is [`KindState::Model`] like both of them; what a
+    /// try-on DOES lives app-side as an ordered intent queue (`script::dressup`), because the
+    /// substitution set is a look composed against the player's live equipment, which the VM
+    /// never holds (decisions 1060, 1969; wow-re `ui/scratch/dressup-model-equipment.md` §0).
+    DressUpModel,
+    /// `TabardModel` (`0x503bd0`) — the guild tabard designer's pane: `CGCharacterModelBase`'s
+    /// other subclass (the dress-up model's sibling), with ten verbs of its own in table
+    /// `0x84ee40` — the emblem/colour cycling, the two emblem-texture setters, the save gate and
+    /// the save. Its state is [`KindState::Model`] like its siblings; the design it carries lives
+    /// app-side (`script::tabard`, decision 1977).
+    TabardModel,
     /// `CSimpleMessageFrame` — the non-scrolling message frame (`UIErrorsFrame`'s class, and the
     /// one `CreateFrame("MessageFrame")` makes). Its behaviour (the display lines, the per-line
     /// fade, `insertMode`) is modeled in [`KindState::Message`]. Sibling of

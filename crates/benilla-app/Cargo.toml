@@ -106,13 +106,13 @@ cosmic-text = "0.16"
 # public-in-crate types). Pinned to the exact version `cosmic-text` 0.16 depends on so there's one
 # `fontdb` in the graph.
 fontdb = "0.23"
-# kira renders the mix; the device it plays through depends on the target — see
-# `mixer::PlatformBackend`, and the two target tables at the bottom of this file that carry the
-# `cpal` feature. On macOS the device is OURS (`sound::output`, decision 1857) and kira's own cpal
-# backend stays out of the graph: there it could neither report a lost default device nor rebuild
-# on one, and it discarded the IO-cycle timestamp the deadline meters need. Everywhere else
-# `sound::output` opens nothing, so kira's cpal backend is the only device there is — and on
-# wasm32 it is the browser's Web Audio, i.e. the whole of the web build's sound.
+# kira renders the mix; the device it plays through is OURS (`sound::output`, decisions 1857 and
+# 1920) on every target that has threads — CoreAudio on macOS, cpal elsewhere. The wasm32 browser
+# build is the one exception: the owned layer runs a render thread the page does not have, so
+# there kira's OWN cpal backend is the device, which on wasm32 is Web Audio. That is the whole of
+# the web build's sound. See `mixer::PlatformBackend`, and the wasm32 target table at the bottom
+# of this file — it is what turns the `cpal` feature on, and only there.
+kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
 # The realtime-audio allocation tripwire (decision 1857): `assert_no_alloc(|| …)` around the output
 # IO callback and the render pass aborts a DEBUG build on any allocation inside them, so a
 # realtime-safety regression fails a test or a smoke instead of reaching an ear. Release builds
@@ -142,20 +142,19 @@ rand = "0.8"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = "3"
 
-# Every target but macOS plays through kira's cpal backend (`mixer::PlatformBackend`): our own
-# device layer is CoreAudio-only, so without this the client runs silent on Linux, on Windows and
-# in the browser. `cpal` is named directly as well because the mixer hands the backend an explicit
-# device buffer, which means naming cpal's own `StreamConfig` — so it must stay the exact version
-# kira resolves, or there are two cpals in the graph and the types don't line up.
+# Everywhere but macOS: the same device layer over cpal (decision 1920, `sound::output::cpal`).
+# 1857 owns the mix-ahead ring, the render thread and the meters on every platform; only the last
+# hop — find the default device, open a stream on it, hand back one buffer per cycle — is platform
+# code, and off macOS that hop is ALSA/PipeWire, WASAPI or the host's own API. cpal is the layer
+# that already speaks all of them; on macOS it is still not in the graph, because there its defects
+# (a no-op error callback on the default device, a pinned `DefaultOutput` unit, the discarded
+# IO-cycle timestamp) are exactly what 1857 went direct to escape.
+#
+# wasm32 is in this table too, and deliberately: `mixer` names cpal's own `SupportedBufferSize` and
+# `StreamConfig` when it probes the browser's device for kira's backend, so cpal must stay the
+# exact version kira resolves or there are two cpals in the graph and the types don't line up.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cpal = "0.17"
-kira = { version = "0.12", default-features = false, features = [
-    "cpal",
-    "mp3",
-    "wav",
-    "pcm",
-    "adpcm",
-] }
 
 [dev-dependencies]
 # tests/boot_manifest.rs parses web/boot-manifest.json (the boot-prefetch read-set). Dev-only:
@@ -191,8 +190,6 @@ smithay-clipboard = "0.7"
 # hide revert to the arrow); we bypass it with NSCursor + NSWindow::disableCursorRects. See
 # docs/knowledge/camera-control.md.
 [target.'cfg(target_os = "macos")'.dependencies]
-# kira without its cpal backend — the device here is ours (see the kira note above).
-kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
 # The audio device layer (decision 1857, `sound::output::coreaudio`): the HAL output unit through
 # coreaudio-rs's `AudioUnit`, and the AudioObject property/listener API through the objc2 CoreAudio
 # bindings — the two crates cpal itself stood on, now used directly. The versions are the ones the
@@ -225,3 +222,9 @@ wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Location", "Storage"] }
+# The browser's device, and the ONLY place the `cpal` feature is asked for: on wasm32 the owned
+# output layer cannot run (no render thread), so kira's own backend is what opens Web Audio.
+# Cargo unions features across target tables, so this adds `cpal` to the common kira above on
+# wasm32 alone. Named `CpalBackend` rather than `DefaultBackend` in `mixer` on purpose — the
+# default backend degrades *silently* to a mock when the feature is off.
+kira = { version = "0.12", default-features = false, features = ["cpal"] }

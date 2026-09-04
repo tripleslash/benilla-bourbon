@@ -187,6 +187,8 @@ impl Plugin for UiUnitPlugin {
             (
                 feed_units,
                 feed_unit_reach,
+                feed_player_control,
+                feed_farsight_focus,
                 melee_unit_combat,
                 fire_unit_combat,
                 fire_combat_text,
@@ -199,10 +201,11 @@ impl Plugin for UiUnitPlugin {
         .add_systems(Update, drain_worn_display_toggles.after(UiInput))
         .add_systems(Update, drain_action_bar_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
+        .add_systems(Update, feed_known_languages.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
         // `load_default_languages` only builds a Bevy resource and stays a one-shot.
         .add_systems(Update, load_exhaustion_rows)
-        .add_systems(PostStartup, load_default_languages);
+        .add_systems(PostStartup, (load_default_languages, load_languages));
     }
 }
 
@@ -213,6 +216,108 @@ impl Plugin for UiUnitPlugin {
 pub(crate) struct DefaultLanguagesRes(pub(crate) benilla_formats::DefaultLanguages);
 
 /// Load `Languages.dbc` × `ChrRaces.dbc` once at startup ([`load_exhaustion_rows`]'s shape).
+/// `Languages.dbc` in row order — the walk behind `GetNumLaguages`/`GetLanguageByIndex`.
+#[derive(Resource)]
+pub(crate) struct LanguagesRes(pub(crate) benilla_formats::Languages);
+
+fn load_languages(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        use benilla_assets::LockRecover;
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_languages(&mut chain)
+    };
+    match loaded {
+        Ok(langs) => {
+            info!("ui_unit: {} Languages.dbc rows", langs.len());
+            commands.insert_resource(LanguagesRes(langs));
+        }
+        Err(e) => warn!("ui_unit: Languages.dbc unavailable — {e:#}"),
+    }
+}
+
+/// The languages this character **knows**, folded the reference's way and fed to the VM for
+/// `GetNumLaguages`/`GetLanguageByIndex` (wow-re `chat-language-scramble.md` §8, C6):
+///
+/// 1. `0x4b25b0` runs on spell add and stores `[languageId] = spellId` for a spell whose
+///    `Effect_1 == 39` — so the table holds only languages *this character's known spells*
+///    declare ([`benilla_formats::SpellCatalog::declared_language`], spell → language, never the
+///    other way round: five shipped language spells declare Common, and that anomaly is the
+///    reference's).
+/// 2. `GetNumLaguages` walks `Languages.dbc` rows and keeps those `0x5ec720` answers non-zero
+///    for: the language's spell resolves to a `SkillLine` (`0x6de040`, race/class, spell) that is
+///    present in the player's `PLAYER_SKILL_INFO` block. Presence, not value: a found line
+///    returns 1 whatever its value.
+///
+/// One knowingly-unreproduced detail: a later learn overwrites an earlier spell on the same
+/// language id in the reference's table. The known-spell set here is unordered, so when two
+/// known spells declare one language, either's skill line passes — unobservable on shipped data
+/// (every language skill a character holds is 300, and the only shared id is Common's).
+pub(crate) fn known_languages(
+    known: impl IntoIterator<Item = u32>,
+    spells: &benilla_formats::SpellCatalog,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    has_skill_line: impl Fn(u32) -> bool,
+    languages: &benilla_formats::Languages,
+) -> Vec<String> {
+    let mut declared: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    for spell in known {
+        if let Some(lang) = spells.declared_language(spell) {
+            declared.entry(lang).or_default().push(spell);
+        }
+    }
+    languages
+        .names(0)
+        .filter(|(id, _)| {
+            declared.get(id).is_some_and(|spells| {
+                spells.iter().any(|&spell| {
+                    skill_lines
+                        .and_then(|sl| sl.spell_to_line(spell))
+                        .is_some_and(&has_skill_line)
+                })
+            })
+        })
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+fn feed_known_languages(
+    script: Option<NonSendMut<UiScript>>,
+    actions: Option<Res<crate::ui_action::PlayerActions>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    languages: Option<Res<LanguagesRes>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut pushed: Local<crate::ui_script::VmMemo<Option<Vec<String>>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let (Some(actions), Some(spells), Some(languages)) = (actions, spells, languages) else {
+        return;
+    };
+    let pushed = pushed.get(&script);
+    let store = self_q.iter().next();
+    let has_skill_line = |line: u32| {
+        store.is_some_and(|s| {
+            (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
+                .filter_map(|i| s.0.player_skill(i))
+                .any(|slot| u32::from(slot.skill_id) == line)
+        })
+    };
+    let names = known_languages(
+        actions.spells.iter().copied(),
+        &spells.catalog,
+        skill_lines.as_deref().map(|s| &s.catalog),
+        has_skill_line,
+        &languages.0,
+    );
+    if pushed.as_ref() != Some(&names) {
+        script.set_known_languages(names.clone());
+        *pushed = Some(names);
+    }
+}
+
 fn load_default_languages(
     mut commands: Commands,
     assets: Option<Res<benilla_assets::WorldAssets>>,
@@ -627,6 +732,57 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
     (dz * dz + dx * dx) + dy * dy
 }
 
+/// `PLAYER_CONTROL_LOST` / `PLAYER_CONTROL_GAINED` — `SMSG_CLIENT_CONTROL_UPDATE` naming the
+/// local player reaches `0x4958e0`, which writes the player-control flag and, **on a change**,
+/// fires LOST when the byte is zero and GAINED when it is not; the boot init is "in control"
+/// (wow-re `farsight-and-client-control.md` §5, `incoming-trade-request-law.md`). The flag is
+/// [`crate::player::Player::control_lost`], which `player::wire_in` writes from that packet; this
+/// fires the edge, and a fresh VM's memo is the boot value.
+fn feed_player_control(
+    script: Option<NonSendMut<UiScript>>,
+    player: Option<Res<crate::player::Player>>,
+    mut lost: Local<crate::ui_script::VmMemo<bool>>,
+) {
+    let (Some(mut script), Some(player)) = (script, player) else {
+        return;
+    };
+    let lost = lost.get(&script);
+    if *lost != player.control_lost {
+        *lost = player.control_lost;
+        // `HasFullControl`'s flag rides the same edge (1958).
+        script.set_player_control(!player.control_lost);
+        let event = if player.control_lost {
+            "PLAYER_CONTROL_LOST"
+        } else {
+            "PLAYER_CONTROL_GAINED"
+        };
+        script.fire_event(event, vec![]);
+    }
+}
+
+/// `PLAYER_FARSIGHT_FOCUS_CHANGED` — the `PLAYER_FARSIGHT` field-change callback (`0x5de0d0`)
+/// fires it on both of its legs, whether or not the new guid resolves to a streamed object
+/// (wow-re `farsight-and-client-control.md` §2). The edge is the FIELD's, so this diffs the
+/// descriptor value the camera's `publish_view_subject` reads, never the resolved pose.
+fn feed_farsight_focus(
+    script: Option<NonSendMut<UiScript>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut focus: Local<crate::ui_script::VmMemo<Option<u64>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let Some(store) = self_q.iter().next() else {
+        return;
+    };
+    let anchor = store.0.player_farsight();
+    let focus = focus.get(&script);
+    if *focus != anchor {
+        *focus = anchor;
+        script.fire_event("PLAYER_FARSIGHT_FOCUS_CHANGED", vec![]);
+    }
+}
+
 /// Feed the **unit reach map** — for every token that resolves to a live unit object, its squared
 /// distance from us, plus whether that unit passes inspect's own two non-distance refusals.
 ///
@@ -796,6 +952,13 @@ pub(crate) fn snapshot(
         // leg of the selection ring). Wider than `is_player` above: a pet or a charmed creature
         // sets it without being a player.
         player_controlled: store.0.unit_flags() & 0x8 != 0,
+        flags: store.0.unit_flags(),
+        owner: store
+            .0
+            .unit_summoned_by()
+            .or_else(|| store.0.unit_charmed_by())
+            .or_else(|| store.0.unit_created_by())
+            .unwrap_or(0),
         // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
         // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
         // that idiom found the local-player readers reading this identical bit, so there is no
@@ -1071,6 +1234,15 @@ pub(crate) fn fire_transitions(
     }
     if changed(|u| u64::from(u.power_type)) {
         script.fire_event("UNIT_DISPLAYPOWER", vec![tok()]);
+    }
+    // `UNIT_FLAGS` (id 40) — the per-field watch bridge (wow-re `unit-field-event-bridge.md`,
+    // VERIFIED): `0x51bbb0` registers one watch per named unit field, the notifier `0x465570`
+    // fires `0x51bd50` → `0x515e50` on any change of the dword's bytes, once per token mapping to
+    // the unit, `arg1` the token. The create leg runs no notify pass, so a unit's FIRST snapshot
+    // is not a transition here — unlike the fields above, whose first-appearance fire is this
+    // feed's own posture (1953, corrected in 1957). The stock pet bar filters it for `"pet"`.
+    if prev.is_some() && changed(|u| u64::from(u.flags)) {
+        script.fire_event("UNIT_FLAGS", vec![tok()]);
     }
     // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
     // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
@@ -1553,15 +1725,50 @@ fn feed_units(
     // Trigger PROVISIONAL (0578's pattern): fired off the descriptor diff, which lands in the
     // same update batch as the ding's XP fields, so consumers read a coherent picture. The
     // real client plausibly fires it from its `SMSG_LEVELUP_INFO` handler instead, with the
-    // packet's gain tuple as arg2+ — unpinned, and no 1.12 FrameXML consumer reads past arg1
-    // (`ReputationWatchBar_Update` takes arg1; the tick's handler takes none), so the extra
-    // args wait for a consumer.
+    // packet's gain tuple as arg2+.
+    //
+    // **THE ARGS ARE NOT OPTIONAL, AND THE CLAIM THAT USED TO STAND HERE WAS WRONG.** It said no
+    // 1.12 FrameXML consumer reads past arg1, citing `ReputationWatchBar_Update` (arg1) and the
+    // tick's handler (none). It missed the main one: `ChatFrame.lua:1283-1320` reads **arg1
+    // through arg9** — the level, the health and mana gains, the talent points, and the five stat
+    // gains, each printed as its own system line. The reference's own fire site says the same,
+    // `%d%d%d%d%d%d%d%d%d` (SignalEvent2). Two consumers were surveyed, the conclusion was drawn
+    // from two, and the third is the one that matters.
+    //
+    // We fire arg1 alone, so the stock ChatFrame's `if ( arg3 > 0 )` would compare nil with a
+    // number and raise — this blocks the ChatFrame window. The gains are on a packet we already
+    // parse (`SMSG_LEVELUP_INFO`, twelve u32) and already spend: `ui_chat/feed.rs` composes those
+    // very lines in Rust because the event could not carry them. Decision 1884 scopes plumbing
+    // the tuple here and retiring the Rust duplicate; this trigger is a descriptor diff and the
+    // gains arrive on the packet, so it is a join, not a one-liner.
     if let Some((store, _)) = self_q.iter().next() {
         if let Some(level) = store.0.unit_level() {
             let prev = memo.last_level.replace(level);
             if prev.is_some_and(|p| level != p) {
                 gate.audit("feed_units", "the level edge");
-                script.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(i64::from(level))]);
+                // All nine, per the reference's own fire site (`%d%d%d%d%d%d%d%d%d`): level,
+                // health gain, mana gain, talent points, then the five stat gains in
+                // `SPELL_STAT0..4` order. Absent gains are ZEROS, not a shorter payload — a
+                // demotion really did gain nothing, and every consumer guards with `if ( argN > 0 )`
+                // so zero reads as "no line" while nil raises.
+                let (info, talent_points) = chat.take_level_up_gains(level).unzip();
+                let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> u32| {
+                    ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
+                };
+                script.fire_event(
+                    "PLAYER_LEVEL_UP",
+                    vec![
+                        ScriptValue::Int(i64::from(level)),
+                        gain(|l| l.health),
+                        gain(|l| l.powers[0]),
+                        ScriptValue::Int(i64::from(talent_points.unwrap_or(0))),
+                        gain(|l| l.stats[0]),
+                        gain(|l| l.stats[1]),
+                        gain(|l| l.stats[2]),
+                        gain(|l| l.stats[3]),
+                        gain(|l| l.stats[4]),
+                    ],
+                );
             }
         }
     }
@@ -1790,6 +1997,126 @@ mod tests {
     /// Bit `0x8` has **no** arm, in the reference or here — proven there by enumerating all 122
     /// instructions and 12 branches of the watcher. The negative half is asserted too, because
     /// "fire on both, it's cheaper" is the obvious wrong simplification.
+    /// `UNIT_FLAGS` rides the raw field: any change of `UNIT_FIELD_FLAGS` fires it with the
+    /// token, an unchanged field does not, and a unit's first snapshot is NOT a transition — the
+    /// reference's watch bridge has no watch to fire on the create leg (1953, corrected 1957).
+    #[test]
+    fn a_flags_change_fires_unit_flags_with_the_token() {
+        let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_FLAGS")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "pet", prev.as_ref(), &cur);
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let base = UnitState {
+            exists: true,
+            has_object: true,
+            flags: 0x8,
+            ..Default::default()
+        };
+        assert_eq!(
+            fired(
+                Some(base.clone()),
+                UnitState {
+                    flags: 0x8 | 0x0400_0000,
+                    ..base.clone()
+                }
+            ),
+            vec!["UNIT_FLAGS:pet".to_string()]
+        );
+        assert_eq!(
+            fired(Some(base.clone()), base.clone()),
+            Vec::<String>::new()
+        );
+        assert_eq!(fired(None, base.clone()), Vec::<String>::new());
+    }
+
+    /// The two edges on the player's own state (1953): the control flag's, which fires LOST on
+    /// the way down and GAINED on the way up and nothing while it holds (the boot value is "in
+    /// control"), and the far-sight field's, which fires on every change including the clear.
+    #[test]
+    fn the_control_and_far_sight_edges_fire_once_each_way() {
+        use bevy::prelude::*;
+        const FIELD_PLAYER_FARSIGHT: u16 = 712;
+        let mut app = App::new();
+        app.init_resource::<crate::player::Player>()
+            .add_systems(Update, (feed_player_control, feed_farsight_focus));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_CONTROL_LOST")
+                f:RegisterEvent("PLAYER_CONTROL_GAINED")
+                f:RegisterEvent("PLAYER_FARSIGHT_FOCUS_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(0x77),
+                ObjectStore(benilla_protocol::ObjectFields::default()),
+            ))
+            .id();
+        let seen = |app: &mut App| -> Vec<String> {
+            app.update();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        assert_eq!(
+            seen(&mut app),
+            Vec::<String>::new(),
+            "in control, no far sight: quiet"
+        );
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = true;
+        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
+        assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = false;
+        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
+
+        let set_farsight = |app: &mut App, guid: u64| {
+            app.world_mut().entity_mut(me).insert(ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&[
+                    (FIELD_PLAYER_FARSIGHT, guid as u32),
+                    (FIELD_PLAYER_FARSIGHT + 1, (guid >> 32) as u32),
+                ]),
+            ));
+        };
+        set_farsight(&mut app, 0xf130_0000_0000_0042);
+        assert_eq!(
+            seen(&mut app),
+            vec!["PLAYER_FARSIGHT_FOCUS_CHANGED".to_string()],
+            "set — whether or not the guid resolves"
+        );
+        assert_eq!(seen(&mut app), Vec::<String>::new());
+        set_farsight(&mut app, 0);
+        assert_eq!(
+            seen(&mut app),
+            vec!["PLAYER_FARSIGHT_FOCUS_CHANGED".to_string()],
+            "cleared — the other leg"
+        );
+    }
+
     #[test]
     fn the_tapped_bit_fires_unit_faction_and_the_by_player_bit_fires_nothing() {
         let fired = |prev: UnitState, cur: UnitState| -> Vec<String> {

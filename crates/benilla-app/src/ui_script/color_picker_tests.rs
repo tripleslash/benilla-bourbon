@@ -17,15 +17,20 @@ use super::test_ui::load_ui as load_xml;
 fn picker() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\ColorPickerFrame.xml",
     ] {
         load_xml(&s, file);

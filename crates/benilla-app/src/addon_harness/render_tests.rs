@@ -157,6 +157,34 @@ fn the_render_column_can_fail() {
     );
 }
 
+/// Put a corpus addon folder under the fixture root. A symlink where the platform gives one for
+/// free, a copy where it does not: Windows needs a privilege for `symlink_dir` that an ordinary
+/// developer shell does not have, and these folders are a few kilobytes of Lua and XML.
+fn link_corpus_addon(from: &std::path::Path, to: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(from, to).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(to)?;
+            for e in std::fs::read_dir(from)? {
+                let e = e?;
+                let dst = to.join(e.file_name());
+                if e.file_type()?.is_dir() {
+                    copy_dir(&e.path(), &dst)?;
+                } else {
+                    std::fs::copy(e.path(), dst)?;
+                }
+            }
+            Ok(())
+        }
+        copy_dir(from, to).unwrap();
+    }
+}
+
+
 /// Where the corpus might be — the `ui_chat::ace_gate_tests` resolver, so a machine without the
 /// third-party corpus skips rather than reddens.
 fn corpus() -> Option<PathBuf> {
@@ -196,7 +224,7 @@ fn the_directors_two_verified_addons_come_out_on_opposite_sides() {
     // `addon_harness` example's job, not a unit test's.
     let fx = Fixtures::new("oracle");
     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
-        std::os::unix::fs::symlink(corpus.join(name), fx.root().join(name)).unwrap();
+        link_corpus_addon(&corpus.join(name), &fx.root().join(name));
     }
     let reports = survey(fx.root());
     let row = |name: &str| {

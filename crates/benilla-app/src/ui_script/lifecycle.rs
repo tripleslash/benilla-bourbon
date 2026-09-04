@@ -131,10 +131,14 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
 }
 
 /// Does this run want the player UI at all? Captures stay pristine — their baselines regression-test
-/// the WORLD render — unless `WOW_CAPTURE_UI=1` opts the UI in.
+/// the WORLD render — unless the UI is opted in, which happens two ways: `WOW_CAPTURE_UI=1` on any
+/// scenario, or the scenario **declaring a `ui:` fixture**, which is the harness saying the window
+/// is the subject — [`crate::run_mode::capture_ui_opted_in`] is the one predicate, and its doc says why all
+/// three consumers of it must agree. A run with no `CaptureMode` is an ordinary client and always
+/// wants its UI.
 fn ui_wanted(world: &World) -> bool {
     !world.contains_resource::<crate::run_mode::CaptureMode>()
-        || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
+        || crate::run_mode::capture_ui_opted_in()
 }
 
 /// The world-entry UI load, armed at `OnEnter(InWorld)` and run by [`run_pending_entry_load`]
@@ -179,6 +183,9 @@ pub(crate) struct PendingEntryUiLoad {
     version_check: bool,
     /// The builtin manifest's file list, resolved once at the first step.
     files: Vec<String>,
+    /// Frames the current step has spent waiting for its chain entry's pack to arrive
+    /// (web only — see [`ENTRY_CHAIN_WAIT_FRAMES`]). Reset on every step that runs.
+    waited: u32,
 }
 
 impl PendingEntryUiLoad {
@@ -219,10 +226,51 @@ enum EntryStage {
 /// cover's — cheap to render — and every one of them is a frame the browser can answer.
 const ENTRY_LOAD_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
-/// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
-/// see [`PendingEntryUiLoad`].
-pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
-    commands.insert_resource(PendingEntryUiLoad::default());
+/// How many frames one **chain-sourced** manifest entry may wait for its pack before the load
+/// stops waiting and reads it blocking anyway.
+///
+/// Since the stock migration (1751) most of the manifest is `Interface\FrameXML\…` read off the
+/// player's own install, and on the page that read is a synchronous fetch when the pack holding
+/// it is not resident — which is the whole freeze the slicing exists to prevent, moved one layer
+/// down. Asking [`benilla_formats::Chain::ready`] both answers "is it here?" and starts the warm,
+/// so a step that yields on `false` converges without a scheduler of its own, with the loading
+/// cover up and its bar still moving.
+///
+/// The cap is the backstop, not the mechanism: a pack that never arrives must not hang the login
+/// forever, so past it the step runs and pays whatever the read costs. ~10 s at 60 fps, which is
+/// far outside any warm this has been measured taking. Free on native, where `ready` is always
+/// true on the first ask.
+const ENTRY_CHAIN_WAIT_FRAMES: u32 = 600;
+
+/// **The boot VM, parked for the deferral window** (decision 1978). Between the world-entry edge
+/// and the deferred entry load there is no VM in the world at all: the boot VM waits here, out of
+/// every feed's reach, and the load takes it back. Every feed takes the VM as an `Option` and
+/// already returns on `None` — the glue phase's shape — so a feed keyed on a per-VM memo cannot
+/// push into a VM that has no interface yet and then hold the real push back (the chat plate
+/// that stayed white, and 1348's whole class). `ingame_ui_pending` stays for the feeds that
+/// name it; with the VM parked it is belt and braces.
+///
+/// **The window is the whole sliced load, not just the wait before it.** The load spends itself
+/// over frames now ([`PendingEntryUiLoad`]), and a VM with half a frame tree in it is no more
+/// ready for a feed than one with none — so a slice that yields parks the VM again rather than
+/// handing it back, and only [`EntryStage::Finish`] returns it to the world.
+pub(crate) struct ParkedBootVm(UiScript);
+
+/// `OnEnter(InWorld)`: arm the deferred entry load and park the boot VM. The load itself runs a
+/// few frames later — see [`PendingEntryUiLoad`] and [`ParkedBootVm`].
+pub(crate) fn arm_entry_ui_load(world: &mut World) {
+    world.insert_resource(PendingEntryUiLoad::default());
+    if let Some(vm) = world.remove_non_send_resource::<UiScript>() {
+        world.insert_non_send_resource(ParkedBootVm(vm));
+    }
+}
+
+/// The parked boot VM back into the world, if one is parked — the session end and the
+/// left-before-the-load arm both want the VM where the tail expects it.
+fn unpark_boot_vm(world: &mut World) {
+    if let Some(ParkedBootVm(vm)) = world.remove_non_send_resource::<ParkedBootVm>() {
+        world.insert_non_send_resource(vm);
+    }
 }
 
 /// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
@@ -268,6 +316,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     if !in_world {
         // Left the world before the load ran — nothing to build a UI for.
         world.remove_resource::<PendingEntryUiLoad>();
+        unpark_boot_vm(world);
         return;
     }
     let covering = world
@@ -289,9 +338,15 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // between frames exactly as it did around the old single burst.
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
+        unpark_boot_vm(world);
         return;
     }
-    let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
+    // The parked VM first (`ParkedBootVm` — the ordinary path since 1978), then the world's own
+    // as the fallback for a load that was armed without a park.
+    let parked = world
+        .remove_non_send_resource::<ParkedBootVm>()
+        .map(|ParkedBootVm(vm)| vm);
+    let Some(mut script) = parked.or_else(|| world.remove_non_send_resource::<UiScript>()) else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         world.remove_resource::<PendingEntryUiLoad>();
         return;
@@ -316,17 +371,38 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 pending.done = 0;
                 pending.files = files;
                 pending.stage = EntryStage::Builtin { next: 1 };
+                pending.waited = 0;
+                // Start the whole manifest's chain entries warming at once, before the first one
+                // is read. They are the majority of the list since the stock migration, they sit
+                // in one `Interface\FrameXML\` locality group, and the walk below reads them in
+                // order — so one sweep here is the difference between a warm that overlaps the
+                // load and forty warms discovered one blocking read at a time. Free on native.
+                warm_chain_entries(world);
             }
             EntryStage::Builtin { next } => {
                 let pending = world.resource::<PendingEntryUiLoad>();
                 if next < pending.files.len() {
-                    let file = &pending.files[next..next + 1];
+                    let entry = pending.files[next].clone();
+                    // A chain entry whose pack has not arrived is *waited for*, not read: the
+                    // read would be synchronous and would blow this frame's budget on the one
+                    // thing the slicing cannot slice. `ready` starts the warm, the cover keeps
+                    // presenting, and the step runs on the frame the bytes land — or, past
+                    // [`ENTRY_CHAIN_WAIT_FRAMES`], anyway.
+                    if super::reference_ui::is_chain_entry(&entry)
+                        && pending.waited < ENTRY_CHAIN_WAIT_FRAMES
+                        && !super::reference_ui::ready(&entry)
+                    {
+                        world.resource_mut::<PendingEntryUiLoad>().waited += 1;
+                        break; // resume next frame, same step
+                    }
+                    let file = std::slice::from_ref(&entry);
                     // Errors are logged by the loader itself and retained for `/errors`; the
                     // one-shot path discards them too.
                     let _ = super::manifest::load_manifest(&script, file);
                     let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                     pending.done += 1;
                     pending.stage = EntryStage::Builtin { next: next + 1 };
+                    pending.waited = 0;
                 } else {
                     world.resource_mut::<PendingEntryUiLoad>().stage = EntryStage::Positions;
                     continue; // free transition
@@ -371,7 +447,22 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
             break; // resume next frame
         }
     }
-    world.insert_non_send_resource(script);
+    // Back into the park, not into the world: the tree is still part-built, and 1978's whole
+    // point is that no feed sees a VM in that state. `Finish` above is the one exit that
+    // publishes it.
+    world.insert_non_send_resource(ParkedBootVm(script));
+}
+
+/// Start every chain-sourced manifest entry's pack warming, and return at once.
+///
+/// One sweep at the top of the load rather than a warm discovered per blocking read — see
+/// [`ENTRY_CHAIN_WAIT_FRAMES`]. `ready` is the ask that starts a warm, and its answer is
+/// discarded here on purpose: this is the warm, not the gate.
+fn warm_chain_entries(world: &mut World) {
+    let files = world.resource::<PendingEntryUiLoad>().files.clone();
+    for entry in files.iter().filter(|f| super::reference_ui::is_chain_entry(f)) {
+        let _ = super::reference_ui::ready(entry);
+    }
 }
 
 /// The entry load's opening: the identity the addons see, the realm and player the file scopes
@@ -451,6 +542,9 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
 /// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    // The VM the entry edge parked (1978); the live slot is the fallback for a caller that did
+    // not go through the arm.
+    unpark_boot_vm(world);
     if !ui_wanted(world) {
         return;
     }
@@ -655,6 +749,9 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// Exclusive rather than a `NonSendMut` system because it both drops and installs a `NonSend`, and
 /// because the shutdown writes must be ordered against each other — see [`shutdown_ui_state`].
 pub(crate) fn end_ui_session(world: &mut World) {
+    // A VM still parked (the load never ran) goes back into the world first, so the tail below
+    // runs against the same slot it always did (1978).
+    unpark_boot_vm(world);
     // An armed-but-unrun entry load ([`PendingEntryUiLoad`]) means this session never built an
     // in-game UI: there are no globals to save and no addon state to write, and running the
     // shutdown tail against the boot VM would overwrite the real files with that emptiness.
@@ -906,4 +1003,33 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The entry edge parks the boot VM (1978): between the arm and the load there is no VM in
+    /// the world for any feed to push into, and the session end puts a never-loaded one back.
+    #[test]
+    fn the_entry_edge_parks_the_boot_vm_and_the_session_end_returns_it() {
+        let mut world = World::new();
+        let boot = UiScript::new().unwrap();
+        let session = boot.session();
+        world.insert_non_send_resource(boot);
+        arm_entry_ui_load(&mut world);
+        assert!(
+            world.get_non_send_resource::<UiScript>().is_none(),
+            "no VM in the deferral window"
+        );
+        assert!(world.get_resource::<PendingEntryUiLoad>().is_some());
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_some());
+        // Left the world before the load ran: the VM comes back, untouched.
+        unpark_boot_vm(&mut world);
+        let vm = world
+            .get_non_send_resource::<UiScript>()
+            .expect("the parked VM is back");
+        assert_eq!(vm.session(), session, "the same VM, no session moved");
+        assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+    }
 }

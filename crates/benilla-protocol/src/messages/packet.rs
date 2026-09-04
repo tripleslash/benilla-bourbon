@@ -135,8 +135,19 @@ pub enum ServerPacket {
     TriggerCinematic {
         cinematic_id: u32,
     },
+    /// `MSG_MOVE_TIME_SKIPPED` — an observed mover's own client skipped `lag_ms` of movement
+    /// simulation, so every watcher's copy of its wire clock must move with it (layout in
+    /// [`super::movement::read_move_time_skipped`]). Decision 1935.
+    MoveTimeSkipped {
+        guid: u64,
+        lag_ms: u32,
+    },
     MonsterMove {
         guid: u64,
+        /// `SMSG_MONSTER_MOVE_TRANSPORT` only: the transport whose frame `start` and every `path`
+        /// point are expressed in (deck-local offsets, not world coordinates). `None` = the plain
+        /// `SMSG_MONSTER_MOVE`, whose coordinates are absolute. Decision 1936.
+        transport: Option<u64>,
         start: Vector3d,
         /// The server's per-move spline counter — echoed back in `CMSG_MOVE_SPLINE_DONE` when the
         /// spline drives our own player (Charge/knockback/taxi); ignored for a creature's walk.
@@ -283,6 +294,54 @@ pub enum ServerPacket {
         trainer: u64,
         cost: u32,
     },
+    /// `SMSG_PET_UNLEARN_CONFIRM` — the pet trainer's question (decision 1963): the talent-wipe
+    /// twin for a pet, the same latch-and-confirm shape; nothing is unlearned until
+    /// `CMSG_PET_UNLEARN` goes back with the guid.
+    PetUnlearnConfirm {
+        trainer: u64,
+        cost: u32,
+    },
+    /// `SMSG_RAID_GROUP_ONLY` — the instance-boot clock (decision 1963): a positive delay arms
+    /// the boot, zero clears it and names the reason on screen.
+    RaidGroupOnly {
+        delay_ms: u32,
+        reason: u32,
+    },
+    /// `SMSG_AREA_SPIRIT_HEALER_TIME` — a battleground spirit healer's next wave (decision 1963).
+    AreaSpiritHealerTime {
+        healer: u64,
+        ms: u32,
+    },
+    /// `SMSG_BATTLEFIELD_STATUS` — one of the three queue slots (decision 1963).
+    BattlefieldStatus(crate::messages::BattlefieldStatus),
+    /// `MSG_PVP_LOG_DATA` inbound — the battleground scoreboard (decision 1972).
+    PvpLogData(crate::messages::PvpLogData),
+    /// `SMSG_BATTLEFIELD_LIST` — the battleground instance list (decision 1974).
+    BattlefieldList(crate::messages::BattlefieldList),
+    /// `MSG_BATTLEGROUND_PLAYER_POSITIONS` inbound — the teammates and the flag carrier (1980).
+    BattlefieldPositions(crate::messages::BattlefieldPositions),
+    /// `MSG_TABARDVENDOR_ACTIVATE` inbound — the vendor guid that opens the tabard designer (1977).
+    TabardVendorActivate(u64),
+    /// `MSG_SAVE_GUILD_EMBLEM` inbound — the save's result row (1977).
+    SaveGuildEmblemResult(u32),
+    /// `SMSG_GROUP_JOINED_BATTLEGROUND` — a group join's verdict (decision 1974).
+    GroupJoinedBattleground {
+        result: u32,
+    },
+    /// `SMSG_BATTLEGROUND_PLAYER_JOINED` / `_LEFT` — one guid each (decision 1974).
+    BattlegroundPlayer {
+        guid: u64,
+        joined: bool,
+    },
+    /// `SMSG 0x295` — the meeting-stone queue state (decision 1963).
+    MeetingStoneSetQueue {
+        area: u32,
+        status: u8,
+    },
+    /// `SMSG 0x297/0x298/0x299/0x2BB` — the meeting stone's display-only replies (decision 1974).
+    MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// `SMSG_TUTORIAL_FLAGS` — the account's tutorial bank (decision 1976).
+    TutorialFlags(crate::messages::TutorialFlags),
     /// `SMSG_SUMMON_REQUEST` — someone is *asking* to pull us to them (decision 1747): a
     /// warlock's ritual, a meeting stone, a GM. The twin of [`Self::BinderConfirm`] in shape —
     /// nothing moves until `CMSG_SUMMON_RESPONSE` goes back — and its opposite in teardown:
@@ -644,6 +703,12 @@ pub enum ServerPacket {
     ItemCooldown {
         item_guid: u64,
         spell_id: u32,
+    },
+    /// `SMSG_ITEM_TIME_UPDATE` — how long one duration-limited item instance has left, in
+    /// **seconds** (layout in [`super::items::read_item_time`]). Decision 1933.
+    ItemTime {
+        item_guid: u64,
+        seconds: u32,
     },
     /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — how long one item's TEMPORARY enchant has left (layout in
     /// [`super::items::read_item_enchant_time`]). The tooltip's countdown has no other source
@@ -1496,7 +1561,14 @@ impl ServerPacket {
             ServerPacket::CompressedMoves { .. } => "SMSG_COMPRESSED_MOVES".into(),
             ServerPacket::DestroyObject { .. } => "SMSG_DESTROY_OBJECT".into(),
             ServerPacket::TriggerCinematic { .. } => "SMSG_TRIGGER_CINEMATIC".into(),
-            ServerPacket::MonsterMove { .. } => "SMSG_MONSTER_MOVE".into(),
+            ServerPacket::MoveTimeSkipped { .. } => "MSG_MOVE_TIME_SKIPPED".into(),
+            ServerPacket::MonsterMove { transport, .. } => {
+                if transport.is_some() {
+                    "SMSG_MONSTER_MOVE_TRANSPORT".into()
+                } else {
+                    "SMSG_MONSTER_MOVE".into()
+                }
+            }
             ServerPacket::PlayerMove { opcode, .. } => format!("MSG_MOVE relay ({opcode:#06x})"),
             ServerPacket::Teleport { .. } => "MSG_MOVE_TELEPORT_ACK".into(),
             ServerPacket::NewWorld { .. } => "SMSG_NEW_WORLD".into(),
@@ -1516,6 +1588,36 @@ impl ServerPacket {
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
             ServerPacket::SummonRequest { .. } => "SMSG_SUMMON_REQUEST".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
+            ServerPacket::PetUnlearnConfirm { .. } => "SMSG_PET_UNLEARN_CONFIRM".into(),
+            ServerPacket::RaidGroupOnly { .. } => "SMSG_RAID_GROUP_ONLY".into(),
+            ServerPacket::AreaSpiritHealerTime { .. } => "SMSG_AREA_SPIRIT_HEALER_TIME".into(),
+            ServerPacket::BattlefieldStatus(_) => "SMSG_BATTLEFIELD_STATUS".into(),
+            ServerPacket::PvpLogData(_) => "MSG_PVP_LOG_DATA".into(),
+            ServerPacket::BattlefieldList(_) => "SMSG_BATTLEFIELD_LIST".into(),
+            ServerPacket::BattlefieldPositions(_) => "MSG_BATTLEGROUND_PLAYER_POSITIONS".into(),
+            ServerPacket::TabardVendorActivate(_) => "MSG_TABARDVENDOR_ACTIVATE".into(),
+            ServerPacket::SaveGuildEmblemResult(_) => "MSG_SAVE_GUILD_EMBLEM".into(),
+            ServerPacket::GroupJoinedBattleground { .. } => "SMSG_GROUP_JOINED_BATTLEGROUND".into(),
+            ServerPacket::BattlegroundPlayer { joined: true, .. } => {
+                "SMSG_BATTLEGROUND_PLAYER_JOINED".into()
+            }
+            ServerPacket::BattlegroundPlayer { joined: false, .. } => {
+                "SMSG_BATTLEGROUND_PLAYER_LEFT".into()
+            }
+            ServerPacket::MeetingStoneSetQueue { .. } => "SMSG_MEETINGSTONE_SETQUEUE".into(),
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::Success) => {
+                "SMSG_MEETINGSTONE_SUCCESS".into()
+            }
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::InProgress) => {
+                "SMSG_MEETINGSTONE_IN_PROGRESS".into()
+            }
+            ServerPacket::MeetingStoneNotice(
+                crate::messages::MeetingStoneNotice::MemberAdded { .. },
+            ) => "SMSG_MEETINGSTONE_MEMBER_ADDED".into(),
+            ServerPacket::MeetingStoneNotice(crate::messages::MeetingStoneNotice::JoinFailed {
+                ..
+            }) => "SMSG_MEETINGSTONE_JOIN_FAILED".into(),
+            ServerPacket::TutorialFlags(_) => "SMSG_TUTORIAL_FLAGS".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
@@ -1572,6 +1674,7 @@ impl ServerPacket {
             ServerPacket::CancelAutoRepeat => "SMSG_CANCEL_AUTO_REPEAT".into(),
             ServerPacket::SpellCooldownList { .. } => "SMSG_SPELL_COOLDOWN".into(),
             ServerPacket::ItemCooldown { .. } => "SMSG_ITEM_COOLDOWN".into(),
+            ServerPacket::ItemTime { .. } => "SMSG_ITEM_TIME_UPDATE".into(),
             ServerPacket::ItemEnchantTime { .. } => "SMSG_ITEM_ENCHANT_TIME_UPDATE".into(),
             ServerPacket::CooldownEvent { .. } => "SMSG_COOLDOWN_EVENT".into(),
             ServerPacket::ClearCooldown { .. } => "SMSG_CLEAR_COOLDOWN".into(),

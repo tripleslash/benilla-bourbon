@@ -15,8 +15,12 @@ use super::test_ui::load_ui as load_xml;
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    // The stock file writes `CastingBarText:SetText(FAILED)` rather than a literal, so the window
+    // needs GlobalStrings — which the manifest has above it, and which our own retired
+    // `CastingBar.xml` did not need because it hardcoded "Failed".
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     s
 }
 
@@ -381,11 +385,23 @@ fn bottom(s: &UiScript, name: &str) -> f64 {
 fn managed_positions_track_the_bottom_bar_stack() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "UIParent.xml");
-    load_xml(&s, "CastingBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\CastingBarFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml"); // the dropdown kit's MenuBackdrop reads TOOLTIP_DEFAULT_COLOR
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
 
     // The loader's post-load bootstrap, replayed with no bars in existence: the bare bases.
     s.run("UIParent_ManageFramePositions()").unwrap();
@@ -408,6 +424,14 @@ fn managed_positions_track_the_bottom_bar_stack() {
     assert_eq!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
 
     // The stance bar shows (the warrior at login): the pet term, plus chat's both-flags extra.
+    // The pass's shapeshift-appearance arm (the reference's own, UIParent.lua:1705-1732 — in ours
+    // since 1938) touches the bar's three shelf textures by name, unguarded as the reference has
+    // it; a stand-in frame needs stand-in textures.
+    s.run(
+        "local t = { Show = function() end, Hide = function() end } \
+         ShapeshiftBarLeft, ShapeshiftBarMiddle, ShapeshiftBarRight = t, t, t",
+    )
+    .unwrap();
     s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();

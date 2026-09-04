@@ -24,6 +24,7 @@ fn one_item_backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -70,6 +71,9 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     // `PartyFrame.xml` is needed at LOAD (MAX_PARTY_MEMBERS) and skipping it fails loudly, but
     // `ItemButtonTemplate` is only a warning and skipping it fails silently.
     for file in super::test_ui::LOOT_UI {
+        if BAG_UI.contains(file) {
+            continue; // a file loads once — the bag chain above carried it
+        }
         load_xml(&s, file);
     }
     load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
@@ -147,7 +151,15 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     }
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
@@ -178,12 +190,17 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
 fn escape_closes_the_options_window_before_opening_the_menu() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
     load_xml(&s, "KeyBindingsPage.xml");
@@ -236,7 +253,15 @@ fn escape_closes_an_open_stack_split_frame() {
         load_xml(&s, file);
     }
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
-    load_xml(&s, "ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
+    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
+    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
@@ -244,6 +269,7 @@ fn escape_closes_an_open_stack_split_frame() {
     slots.insert(
         1,
         ContainerSlot {
+            duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
@@ -478,11 +504,16 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
 fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "GameMenuFrame.xml");
 
     // The addon's three lines, verbatim in shape.

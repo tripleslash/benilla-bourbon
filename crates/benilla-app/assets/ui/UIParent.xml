@@ -33,38 +33,73 @@
         <Scripts>
             <OnLoad>
                 this:RegisterEvent("VARIABLES_LOADED")
+                this:RegisterEvent("TRAINER_SHOW")
+                this:RegisterEvent("TRAINER_CLOSED")
+                this:RegisterEvent("AUCTION_HOUSE_SHOW")
+                this:RegisterEvent("AUCTION_HOUSE_CLOSED")
+                this:RegisterEvent("TRADE_SKILL_SHOW")
+                this:RegisterEvent("TRADE_SKILL_CLOSE")
+                this:RegisterEvent("CRAFT_SHOW")
+                this:RegisterEvent("CRAFT_CLOSE")
+                this:RegisterEvent("GUILD_INVITE_REQUEST")
+                this:RegisterEvent("GUILD_INVITE_CANCEL")
                 this:RegisterEvent("MIRROR_TIMER_START")
                 this:RegisterEvent("PLAYER_ENTERING_WORLD")
                 this:RegisterEvent("READY_CHECK")
                 this:RegisterEvent("START_LOOT_ROLL")
                 this:RegisterEvent("CONFIRM_LOOT_ROLL")
+                -- The dialog-raising events below (ref UIParent.lua l.76-127), registered here
+                -- since the dialog engine became the reference's file (1960); what the engine does
+                -- not produce yet is left unregistered and named in that record, never armed blind.
+                this:RegisterEvent("PLAYER_DEAD")
+                this:RegisterEvent("PLAYER_ALIVE")
+                this:RegisterEvent("PLAYER_UNGHOST")
+                this:RegisterEvent("RESURRECT_REQUEST")
+                this:RegisterEvent("PARTY_INVITE_REQUEST")
+                this:RegisterEvent("PARTY_INVITE_CANCEL")
+                this:RegisterEvent("PLAYER_CAMPING")
+                this:RegisterEvent("PLAYER_QUITING")
+                this:RegisterEvent("LOGOUT_CANCEL")
+                this:RegisterEvent("LOOT_BIND_CONFIRM")
+                this:RegisterEvent("EQUIP_BIND_CONFIRM")
+                this:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
+                this:RegisterEvent("USE_BIND_CONFIRM")
+                this:RegisterEvent("DELETE_ITEM_CONFIRM")
+                this:RegisterEvent("QUEST_ACCEPT_CONFIRM")
+                this:RegisterEvent("CURSOR_UPDATE")
+                this:RegisterEvent("DUEL_REQUESTED")
+                this:RegisterEvent("DUEL_OUTOFBOUNDS")
+                this:RegisterEvent("DUEL_INBOUNDS")
+                this:RegisterEvent("DUEL_FINISHED")
+                this:RegisterEvent("CONFIRM_XP_LOSS")
+                this:RegisterEvent("CORPSE_IN_RANGE")
+                this:RegisterEvent("CORPSE_IN_INSTANCE")
+                this:RegisterEvent("CORPSE_OUT_OF_RANGE")
+                this:RegisterEvent("BIND_ENCHANT")
+                this:RegisterEvent("REPLACE_ENCHANT")
+                this:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+                this:RegisterEvent("CONFIRM_TALENT_WIPE")
+                this:RegisterEvent("CONFIRM_BINDER")
+                this:RegisterEvent("CONFIRM_SUMMON")
+                -- The dialog engine's verbs (1963): the feeds behind these exist now.
+                this:RegisterEvent("INSTANCE_BOOT_START")
+                this:RegisterEvent("INSTANCE_BOOT_STOP")
+                this:RegisterEvent("CONFIRM_PET_UNLEARN")
+                this:RegisterEvent("AREA_SPIRIT_HEALER_IN_RANGE")
+                this:RegisterEvent("AREA_SPIRIT_HEALER_OUT_OF_RANGE")
             </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
+            <!-- The reference's own UIParent OnUpdate line (its UIParent.xml l.19): the floating
+                 chat frames' hover reveal, the tab fades and the dock-drag driver run from here,
+                 once a frame, since the chat window became the reference's (1948). The fade and
+                 flash kits keep their own tick sources in UiPanels.xml. The guard is for a VM that
+                  loaded this file without the chat files — a test's, never the manifest's. -->
+            <OnUpdate>if FCF_OnUpdate then FCF_OnUpdate(arg1) end if ButtonPulse_OnUpdate then ButtonPulse_OnUpdate(arg1) end if UnitPopup_OnUpdate then UnitPopup_OnUpdate(arg1) end</OnUpdate>
         </Scripts>
     </Frame>
 
-    <!--
-        WorldFrame — the reference's full-screen, bottom-of-the-strata frame that the 3D world
-        renders into. **Ours renders nothing**: benilla draws the world through Bevy's render
-        graph, not through a FrameScript frame, so this is a NAMED HANDLE and nothing more. That
-        is a disclosed divergence, not a pretence — and it is what makes the two things addons
-        actually do with it work: `WorldFrame:GetWidth()`/`GetHeight()` (the screen rect, which
-        this frame really has) and `frame:SetParent(WorldFrame)` / `SetPoint(..., WorldFrame,
-        ...)` (parking a tooltip or an overlay under everything). Measured demand: 29 of the 218
-        vanilla-corpus addons die on their first load with `attempt to index global 'WorldFrame'`
-        without it (the corpus harness, `benilla_app::addon_harness`).
-
-        **No `enableMouse`, deliberately** — the same reason UIParent above ships without it, and
-        here it is load-bearing rather than incidental. benilla's `PointerOverUi` is "is the
-        topmost mouse-enabled frame under the cursor a UI frame", and it gates camera look, world
-        clicks and hover targeting (`player/camera.rs`, `target/hover.rs`); a full-screen
-        mouse-enabled plate would answer yes for every world pixel and kill all three. The
-        reference gets away with it because *its* WorldFrame IS the world, so a click landing
-        there is a world click by construction. Reproducing that here means teaching the arbiter
-        that a WorldFrame hit is not a UI hit — engine work with its own tests, not a rename — so
-        until then the addon-facing `OnMouseDown`/`OnMouseUp` hooks on this frame never fire.
-    -->
-    <Frame name="WorldFrame" setAllPoints="true" frameStrata="BACKGROUND"/>
+    <!-- WorldFrame is the reference's own file now (`Interface\FrameXML\WorldFrame.xml`, decision
+         1983), loaded right above this one as its toc orders them; its kind is the engine's. -->
 
     <!--
         The UIParent bottom-stack position manager - UIPARENT_MANAGED_FRAME_POSITIONS and
@@ -74,8 +109,8 @@
         XML anchor: every layout pass re-anchors it to a base offset plus per-bar deltas -
         either bottom multibar, the pet/stance bar, the reputation watch bar - fired from those
         bars' OnShow/OnHide (ref BonusActionBarFrame.xml:350-355 et al.) and applied once at
-        startup. The loader's post-load call (ui_script/mod.rs) is our startup seam; the stance
-        bar's OnShow/OnHide (StanceBar.xml) is the one live re-fire today.
+        startup. The loader's post-load call (ui_script/mod.rs) is our startup seam; the pet
+        bar's OnShow/OnHide and the options rows' setters (1938) are the live re-fires today.
 
         Departures, each named:
         - Lua 5.1 dialect (the 1.12 client ran 5.0): pairs() iteration, table.insert for
@@ -118,8 +153,10 @@
           Nothing consumes them yet; they are set for the day the bag anchors do.
     -->
     <Script><![CDATA[
-        -- Declared by the ref's ContainerFrame.lua / PetActionBarFrame.lua / WorldStateFrame.lua
-        -- (files we don't ship); the manage pass below overwrites them every run.
+        -- Declared by the ref's ContainerFrame.lua / PetActionBarFrame.lua / WorldStateFrame.lua;
+        -- PetActionBarFrame.lua is on the chain (1953) and re-declares its two below, the other
+        -- two files are not shipped. Pre-declared here so a manage pass that runs before the pet
+        -- file loads reads a number; the pass overwrites them every run.
         CONTAINER_OFFSET_X = 0
         CONTAINER_OFFSET_Y = 70
         BATTLEFIELD_TAB_OFFSET_Y = 210
@@ -207,7 +244,7 @@
         -- `CMSG_SET_ACTIONBAR_TOGGLES` and waits for the field to come back (wow-re
         -- `system/ui/scratch/action-bar-toggles.md` §5: the setter's every store is into its own
         -- stack frame, and nothing in the binary fires on a change to that byte). So the live UI
-        -- state is the four Lua globals `MultiBars.xml` owns, and `GetActionBarToggles()` is read
+        -- state is the four Lua globals stock `MultiActionBars.lua` reads, and `GetActionBarToggles()` is read
         -- exactly ONCE, here, to seed them. Reading it again later would fight the optimistic
         -- value the options rows just set and lose a round trip's worth of clicks.
         --
@@ -215,17 +252,91 @@
         -- statements on the same event). `MultiActionBar_Update` is existence-guarded because the
         -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
         -- level and always installed. Decision 1500.
-        -- ref UIParent.lua:223, whose slot this is — immediately above `UIParent_OnEvent`, the
-        -- same neighbour it has there. It moved here from our own InspectFrame.xml when 1832
-        -- retired that file: the name belongs to UIParent in the reference, and the window it
-        -- opens is now the stock LoadOnDemand `Blizzard_InspectUI` off the player's chain.
+        -- ── ITEM_QUALITY_COLORS (ref UIParent.lua l.65-72) ───────────────────────────────
+        -- Its reference home is THIS file. It lived in our own `Fonts.xml` until 1888 put
+        -- that file on the chain — the reference's `Fonts.xml` does not declare it, so the
+        -- table had to come back here or vanish. Every reader is below UIParent.xml in the
+        -- manifest (GameTooltip 169, UnitPopup 203, AuctionFrame 928; UnitPopup's is a
+        -- FILE-SCOPE read inside a table literal, which is the one that makes the order
+        -- load-bearing rather than incidental).
+        -- The item-quality palette — **built from the engine verb, exactly as the reference
+        -- builds it** (ref UIParent.lua l.65-72, verbatim shape; decision 1199):
         --
-        -- The reference's body is `InspectFrame_LoadUI()` and then a guarded `InspectFrame_Show`.
-        -- We have no load-on-demand — benilla.toc loads that addon with everything else — so the
-        -- LoadUI call has nothing to do and is left out rather than stubbed (1203). The guard is
-        -- kept exactly as the reference writes it, and it is not decoration: it is what makes this
-        -- safe in the ~25 per-window harnesses that load UIParent.xml without the inspect window.
+        --     ITEM_QUALITY_COLORS = { }
+        --     for i = -1, 6 do … = GetItemQualityColor(i) end
+        --
+        -- It used to be seven hand-typed rows here. They were CLOSE and not exact — 0.62 where
+        -- the client's byte is 0x9d/255 = 0.6157, 0.64/0.21/0.93 where Epic is
+        -- 0xa3/0x35/0xee — and they carried no `.hex`, which the reference's table has and
+        -- which addons splice straight into a chat link. `GetItemQualityColor` is now a real
+        -- engine binding over wow-5875-re RF-0055's byte-verified table, so the rounding and
+        -- the second source both go.
+        --
+        -- The loop starts at -1 like the reference's, and the -1 row is not a curiosity: it is the
+        -- colour a loot row wears while its item template is uncached, which is the value
+        -- `GetLootSlotInfo` answers there. `GetItemQualityColor`'s clamp is UNSIGNED, so -1 lands
+        -- on Common/white with 7-and-up (decision 1805, correcting 1199's "reads before the
+        -- array").
+        ITEM_QUALITY_COLORS = { }
+        for i = -1, 6 do
+            ITEM_QUALITY_COLORS[i] = { }
+            ITEM_QUALITY_COLORS[i].r,
+            ITEM_QUALITY_COLORS[i].g,
+            ITEM_QUALITY_COLORS[i].b,
+            ITEM_QUALITY_COLORS[i].hex = GetItemQualityColor(i)
+        end
+
+        -- ── UIParentLoadAddOn (ref UIParent.lua l.638-647, and now our slot for it) ──────
+        -- It lived in our own BasicControls.xml until 1881 migrated that file to the chain;
+        -- the reference never put it there, so the move is back to where it belongs.
+        -- The on-demand loader every "open the auction house / tradeskill / talent panel" path
+        -- goes through, and the one 5 corpus addons name — FuBar_MCPFu, Fubar_RareTrackerFu, MCP,
+        -- MikScrollingBattleText, SpecialTalent: five separate addons, not one library replicated
+        -- (1207/1240).
+        --
+        -- Every piece was already here and only the join was missing: `LoadAddOn` answers the
+        -- reference's own `(1, nil)` / `(nil, reason)` pair, `message` and `TEXT` are directly
+        -- above, and the `ADDON_*` reason words come from the real `GlobalStrings.lua` we RUN off
+        -- the patch chain rather than copy (1234).
+        --
+        -- **`FailedAddOnLoad` is the reference's own latch, and it is not decoration.** Without it
+        -- an addon that retries the load from a handler raises a modal on every attempt; with it
+        -- the failure shows once per addon name per session. It is exactly the detail this would
+        -- have lacked had it been reconstructed from the name instead of read.
+        --
+        -- Every reason our `LoadAddOn` can answer resolves to a string: MISSING, DISABLED,
+        -- NOT_DEMAND_LOADED, DEP_MISSING and DEP_DISABLED all have an `ADDON_..reason` word
+        -- (GlobalStrings l.16-31), the same reason set wow-re's `ui.md` l.2396 carves off
+        -- `0x51e780`. So the `getglobal` below cannot hand `format` a nil.
+        FailedAddOnLoad = {};
+
+        function UIParentLoadAddOn(name)
+            local loaded, reason = LoadAddOn(name)
+            if not loaded then
+                if not FailedAddOnLoad[name] then
+                    message(format(TEXT(ADDON_LOAD_FAILED), name, TEXT(getglobal("ADDON_" .. reason))))
+                    FailedAddOnLoad[name] = true
+                end
+            end
+            return loaded
+        end
+
+        -- ref UIParent.lua l.170-172 and l.223-228, verbatim — the inspect window's loader and its
+        -- opener, immediately above `UIParent_OnEvent` as there. They moved here from our own
+        -- InspectFrame.xml when 1832 retired that file: the names belong to UIParent in the
+        -- reference. The window is the stock `Blizzard_InspectUI`, a LoadOnDemand registry row
+        -- off the player's chain (`ui_script::addons`, 1957) that `InspectFrame_LoadUI` loads on
+        -- the first call — the reference's own timing since 1967; from 1832 until then benilla.toc
+        -- listed the addon with everything else and the call was left out rather than stubbed
+        -- (1203). The guard is the reference's own, and it is not decoration: a harness that loads
+        -- UIParent.xml with no addon seated gets the reference's "failed to load" message from
+        -- `UIParentLoadAddOn` above and then, through this guard, nothing else.
+        function InspectFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_InspectUI");
+        end
+
         function InspectUnit(unit)
+            InspectFrame_LoadUI();
             if ( InspectFrame_Show ) then
                 InspectFrame_Show(unit);
             end
@@ -237,30 +348,133 @@
         -- addon, so deleting our window file would have taken the name with it.
         --
         -- The LEVEL GATE is the reference's, and it is real behaviour rather than a guard: below
-        -- level 10 the key and the micro button do nothing at all. `TalentFrame_LoadUI` is left
-        -- out (we load the addon eagerly, 1203 — build it or leave it out, never stub it); the
-        -- `TalentFrame_Toggle` guard is kept verbatim, and it is what lets the ~25 harnesses that
-        -- load UIParent.xml without the talent window do so safely.
+        -- level 10 the key and the micro button do nothing at all — the addon is not even loaded.
+        -- `TalentFrame_LoadUI` (ref l.185-187) loads the LoadOnDemand row the first time (1967;
+        -- until then benilla.toc listed the addon and the call was left out, 1203). The
+        -- `TalentFrame_Toggle` guard is verbatim too.
+        function TalentFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TalentUI");
+        end
+
         function ToggleTalentFrame()
             if ( UnitLevel("player") < 10 ) then
                 return;
             end
+            TalentFrame_LoadUI();
             if ( TalentFrame_Toggle ) then
                 TalentFrame_Toggle();
             end
+        end
+
+        -- ref UIParent.lua l.194-196, verbatim — the fifth squatter, and the smallest. Stock
+        -- `HelpFrame.xml` calls it when a GM survey is waiting (its l.1487), and its whole body is
+        -- `UIParentLoadAddOn("Blizzard_GMSurveyUI")` — a verb 1881 already moved here and an addon
+        -- that really is on the player's chain (patch-2.MPQ). So this is the reference's own
+        -- function, not a stand-in: 1889 needed it because the stock help window is on the chain
+        -- now and ours is gone.
+        function GMSurveyFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_GMSurveyUI")
+        end
+
+        -- ref UIParent.lua l.162-164, verbatim — the trainer window's loader, reached from the
+        -- TRAINER_SHOW arm below. The addon is a LoadOnDemand registry row read off the chain
+        -- (`ui_script::addons`, 1957), so this is the reference's own mechanism, not a stand-in.
+        function ClassTrainerFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TrainerUI")
+        end
+
+        -- ref UIParent.lua l.154-156, verbatim — the auction house's loader, reached from the
+        -- AUCTION_HOUSE_SHOW arm below; `Blizzard_AuctionUI` is a registry row off the chain (1971).
+        function AuctionFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_AuctionUI");
+        end
+
+        -- ref UIParent.lua l.158-160 and l.216-221, verbatim — the battlefield minimap's loader
+        -- and its toggle (the TOGGLEBATTLEFIELDMINIMAP binding); the stock WorldStateFrame.lua
+        -- calls the loader when a battleground's world states arrive (1972). The addon is a
+        -- registry row off the chain like the others; its pane is a `<Minimap>`-kind widget this
+        -- engine draws nothing into yet.
+        function BattlefieldMinimap_LoadUI()
+            UIParentLoadAddOn("Blizzard_BattlefieldMinimap");
+        end
+
+        function ToggleBattlefieldMinimap()
+            BattlefieldMinimap_LoadUI();
+            if ( BattlefieldMinimap_Toggle ) then
+                BattlefieldMinimap_Toggle();
+            end
+        end
+
+        -- ref UIParent.lua l.166-168 and l.190-192, verbatim — the crafting windows' loaders,
+        -- reached from the TRADE_SKILL_SHOW / CRAFT_SHOW arms below; `Blizzard_TradeSkillUI` and
+        -- `Blizzard_CraftUI` are registry rows off the chain (1973).
+        function CraftFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_CraftUI");
+        end
+
+        function TradeSkillFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_TradeSkillUI");
+        end
+
+        -- ref UIParent.lua's own `BuildColoredListString`, verbatim — the "Requires: X, Y" line
+        -- both crafting addons build their tool/reagent lists with (a missing tool in red). It
+        -- lived as a guarded global in our TradeSkillFrame.xml until 1973 retired that file.
+        function BuildColoredListString(...)
+            if ( arg.n == 0 ) then
+                return nil;
+            end
+
+            -- Takes input where odd items are the text and even items determine whether the arg should be colored or not
+            local string;
+            if ( arg[2] ) then
+                string = arg[1];
+            else
+                string = RED_FONT_COLOR_CODE.. arg[1]..FONT_COLOR_CODE_CLOSE;
+            end
+            for i=3, arg.n, 2 do
+                if ( arg[i+1] ) then
+                    -- If meets the condition
+                    string = string..", "..arg[i];
+                else
+                    -- If doesn't meet the condition
+                    string = string..", "..RED_FONT_COLOR_CODE..arg[i]..FONT_COLOR_CODE_CLOSE;
+                end
+            end
+
+            return string;
         end
 
         -- ref UIParent.lua's own `ShowMacroFrame`, moved here from our MacroFrame.xml when 1848
         -- retired that file — the third such squatter after `InspectUnit` (1832) and
         -- `ToggleTalentFrame` (1833), and by now the expected shape.
         --
-        -- `MacroFrame_LoadUI` is left out: the addon loads eagerly from benilla.toc, so there is
-        -- nothing for it to do, and 1203 says leave it out rather than stub it. The
+        -- `MacroFrame_LoadUI` (ref l.176-178) loads the LoadOnDemand row the first time (1967;
+        -- until then benilla.toc listed the addon and the call was left out, 1203). The
         -- `MacroFrame_Show` guard is the reference's own.
+        function MacroFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_MacroUI");
+        end
+
         function ShowMacroFrame()
+            MacroFrame_LoadUI();
             if ( MacroFrame_Show ) then
                 MacroFrame_Show();
             end
+        end
+
+        -- ref UIParent.lua's own `RaidFrame_LoadUI` (l.182-184), verbatim — the fourth squatter,
+        -- after `InspectUnit` (1832), `ToggleTalentFrame` (1833) and `ShowMacroFrame` (1848).
+        --
+        -- **Unlike `MacroFrame_LoadUI`, this one cannot be left out.** That one was omitted because
+        -- nothing on the chain calls it; the reference's own `RaidFrame.lua` calls THIS on
+        -- `RAID_ROSTER_UPDATE` and again at `PLAYER_LOGIN` with a raid up (l.34, l.39), so its
+        -- absence is a raise every time the roster moves. It is a FrameXML function, not an engine
+        -- verb, and this file is our stand-in for `UIParent.lua` — the same relationship the three
+        -- above have. `UIParentLoadAddOn` is just above; the addon is a LoadOnDemand registry
+        -- row (1957) that this loads on the first roster update — the reference's timing since
+        -- 1967 (1874 had listed it in benilla.toc, so this was a no-op on a loaded addon).
+        function RaidFrame_LoadUI()
+            UIParentLoadAddOn("Blizzard_RaidUI");
         end
 
         function UIParent_OnEvent(event)
@@ -276,6 +490,77 @@
                 if ( LocalizeFrames ) then
                     LocalizeFrames()
                 end
+                return
+            end
+            -- The trainer arms (ref UIParent.lua l.590-602), verbatim: `Blizzard_TrainerUI` is a
+            -- LoadOnDemand addon off the player's chain, loaded here on the first trainer the
+            -- way the reference loads it — which is when its ADDON_LOADED arm pushes the saved
+            -- filters, after the list packet that resets them (1957). The guards are the
+            -- reference's own, and are what keeps the per-window harnesses that load this file
+            -- without the trainer safe.
+            if ( event == "TRAINER_SHOW" ) then
+                ClassTrainerFrame_LoadUI()
+                if ( ClassTrainerFrame_Show ) then
+                    ClassTrainerFrame_Show()
+                end
+                return
+            end
+            if ( event == "TRAINER_CLOSED" ) then
+                if ( ClassTrainerFrame_Hide ) then
+                    ClassTrainerFrame_Hide()
+                end
+                return
+            end
+            -- The auction arms (ref UIParent.lua l.575-587), verbatim — the addon loads on the first
+            -- auctioneer and its own `AuctionFrame_Show` reads the hello the app applied (1971).
+            if ( event == "AUCTION_HOUSE_SHOW" ) then
+                AuctionFrame_LoadUI();
+                if ( AuctionFrame_Show ) then
+                    AuctionFrame_Show();
+                end
+                return;
+            end
+            if ( event == "AUCTION_HOUSE_CLOSED" ) then
+                if ( AuctionFrame_Hide ) then
+                    AuctionFrame_Hide();
+                end
+                return;
+            end
+            -- The trade skill and craft arms (ref UIParent.lua l.605-632), verbatim (1973).
+            if ( event == "TRADE_SKILL_SHOW" ) then
+                TradeSkillFrame_LoadUI();
+                if ( TradeSkillFrame_Show ) then
+                    TradeSkillFrame_Show();
+                end
+                return;
+            end
+            if ( event == "TRADE_SKILL_CLOSE" ) then
+                if ( TradeSkillFrame_Hide ) then
+                    TradeSkillFrame_Hide();
+                end
+                return;
+            end
+            if ( event == "CRAFT_SHOW" ) then
+                CraftFrame_LoadUI();
+                if ( CraftFrame_Show ) then
+                    CraftFrame_Show();
+                end
+                return;
+            end
+            if ( event == "CRAFT_CLOSE" ) then
+                if ( CraftFrame_Hide ) then
+                    CraftFrame_Hide();
+                end
+                return;
+            end
+            -- The guild invitation (ref UIParent.lua l.296-303, verbatim): the dialog rode a driver
+            -- frame in our FriendsFrame.xml until that file became the reference's (1959).
+            if ( event == "GUILD_INVITE_REQUEST" ) then
+                StaticPopup_Show("GUILD_INVITE", arg1, arg2)
+                return
+            end
+            if ( event == "GUILD_INVITE_CANCEL" ) then
+                StaticPopup_Hide("GUILD_INVITE")
                 return
             end
             -- The mirror bars' START driver (ref UIParent.lua l.97 + l.374-377). It lived on a
@@ -324,6 +609,214 @@
                 if ( dialog ) then
                     dialog.data = arg1
                     dialog.data2 = arg2
+                end
+                return
+            end
+            -- ── The dialog-raising arms, ref UIParent.lua l.237-268 and l.284-360, l.378-453,
+            -- l.533-552, verbatim (1960). Until the dialog engine became the reference's own file
+            -- these rode nine hidden driver frames — one per dialog file, plus two in UiPanels.xml
+            -- — each explaining that it existed because benilla had no UIParent OnEvent to put the
+            -- arm in. It does, and the reference's placement is the one that survives the dialogs
+            -- being someone else's. Two guards are ours, each marked. ─────────────────────────────
+            if ( event == "PLAYER_DEAD" ) then
+                if ( not StaticPopup_Visible("DEATH") ) then
+                    CloseAllWindows(1)
+                    if ( GetReleaseTimeRemaining() > 0 or GetReleaseTimeRemaining() == -1 ) then
+                        StaticPopup_Show("DEATH")
+                    end
+                end
+                return
+            end
+            if ( event == "PLAYER_ALIVE" ) then
+                StaticPopup_Hide("DEATH")
+                StaticPopup_Hide("RESURRECT_NO_SICKNESS")
+                return
+            end
+            if ( event == "PLAYER_UNGHOST" ) then
+                StaticPopup_Hide("RESURRECT")
+                StaticPopup_Hide("RESURRECT_NO_SICKNESS")
+                StaticPopup_Hide("RESURRECT_NO_TIMER")
+                StaticPopup_Hide("SKINNED")
+                StaticPopup_Hide("SKINNED_REPOP")
+                return
+            end
+            if ( event == "RESURRECT_REQUEST" ) then
+                if ( ResurrectHasSickness() ) then
+                    StaticPopup_Show("RESURRECT", arg1)
+                elseif ( ResurrectHasTimer() ) then
+                    StaticPopup_Show("RESURRECT_NO_SICKNESS", arg1)
+                else
+                    StaticPopup_Show("RESURRECT_NO_TIMER", arg1)
+                end
+                return
+            end
+            if ( event == "PARTY_INVITE_REQUEST" ) then
+                StaticPopup_Show("PARTY_INVITE", arg1)
+                return
+            end
+            if ( event == "PARTY_INVITE_CANCEL" ) then
+                StaticPopup_Hide("PARTY_INVITE")
+                return
+            end
+            if ( event == "PLAYER_CAMPING" ) then
+                StaticPopup_Show("CAMP")
+                return
+            end
+            if ( event == "PLAYER_QUITING" ) then
+                StaticPopup_Show("QUIT")
+                return
+            end
+            if ( event == "LOGOUT_CANCEL" ) then
+                StaticPopup_Hide("CAMP")
+                StaticPopup_Hide("QUIT")
+                return
+            end
+            if ( event == "LOOT_BIND_CONFIRM" ) then
+                local dialog = StaticPopup_Show("LOOT_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "EQUIP_BIND_CONFIRM" ) then
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                local dialog = StaticPopup_Show("EQUIP_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "AUTOEQUIP_BIND_CONFIRM" ) then
+                StaticPopup_Hide("EQUIP_BIND")
+                local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if ( dialog ) then
+                    dialog.data = arg1
+                end
+                return
+            end
+            if ( event == "USE_BIND_CONFIRM" ) then
+                StaticPopup_Show("USE_BIND")
+                return
+            end
+            if ( event == "DELETE_ITEM_CONFIRM" ) then
+                -- Check quality
+                if ( arg2 >= 3 ) then
+                    StaticPopup_Show("DELETE_GOOD_ITEM", arg1)
+                else
+                    StaticPopup_Show("DELETE_ITEM", arg1)
+                end
+                return
+            end
+            if ( event == "QUEST_ACCEPT_CONFIRM" ) then
+                StaticPopup_Show("QUEST_ACCEPT", arg1, arg2)
+                return
+            end
+            if ( event == "CURSOR_UPDATE" ) then
+                StaticPopup_Hide("EQUIP_BIND")
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                return
+            end
+            if ( event == "DUEL_REQUESTED" ) then
+                StaticPopup_Show("DUEL_REQUESTED", arg1)
+                return
+            end
+            if ( event == "DUEL_OUTOFBOUNDS" ) then
+                StaticPopup_Show("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "DUEL_INBOUNDS" ) then
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "DUEL_FINISHED" ) then
+                StaticPopup_Hide("DUEL_REQUESTED")
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+                return
+            end
+            if ( event == "CONFIRM_XP_LOSS" ) then
+                local resSicknessTime = GetResSicknessDuration()
+                if ( resSicknessTime ) then
+                    local dialog = StaticPopup_Show("XP_LOSS", resSicknessTime)
+                    if ( dialog ) then
+                        dialog.data = resSicknessTime
+                    end
+                else
+                    local dialog = StaticPopup_Show("XP_LOSS_NO_SICKNESS")
+                    if ( dialog ) then
+                        dialog.data = 1
+                    end
+                end
+                -- Ours: the reference's `HideUIPanel(GossipFrame)` unguarded — the per-window
+                -- harnesses load this file without the gossip window.
+                if ( GossipFrame ) then
+                    HideUIPanel(GossipFrame)
+                end
+                return
+            end
+            if ( event == "CORPSE_IN_RANGE" ) then
+                StaticPopup_Show("RECOVER_CORPSE")
+                return
+            end
+            if ( event == "CORPSE_IN_INSTANCE" ) then
+                StaticPopup_Show("RECOVER_CORPSE_INSTANCE")
+                return
+            end
+            if ( event == "CORPSE_OUT_OF_RANGE" ) then
+                StaticPopup_Hide("RECOVER_CORPSE")
+                StaticPopup_Hide("RECOVER_CORPSE_INSTANCE")
+                StaticPopup_Hide("XP_LOSS")
+                return
+            end
+            if ( event == "BIND_ENCHANT" ) then
+                StaticPopup_Show("BIND_ENCHANT")
+                return
+            end
+            if ( event == "REPLACE_ENCHANT" ) then
+                StaticPopup_Show("REPLACE_ENCHANT", arg1, arg2)
+                return
+            end
+            if ( event == "CURRENT_SPELL_CAST_CHANGED" ) then
+                StaticPopup_Hide("BIND_ENCHANT")
+                StaticPopup_Hide("REPLACE_ENCHANT")
+                StaticPopup_Hide("TRADE_REPLACE_ENCHANT")
+                return
+            end
+            if ( event == "CONFIRM_TALENT_WIPE" ) then
+                local dialog = StaticPopup_Show("CONFIRM_TALENT_WIPE")
+                if ( dialog ) then
+                    MoneyFrame_Update(dialog:GetName().."MoneyFrame", arg1)
+                end
+                return
+            end
+            if ( event == "CONFIRM_BINDER" ) then
+                StaticPopup_Show("CONFIRM_BINDER", arg1)
+                return
+            end
+            if ( event == "CONFIRM_SUMMON" ) then
+                StaticPopup_Show("CONFIRM_SUMMON")
+                return
+            end
+            -- ref UIParent.lua l.429-436 and l.525-546, verbatim (1963).
+            if ( event == "AREA_SPIRIT_HEALER_IN_RANGE" ) then
+                StaticPopup_Show("AREA_SPIRIT_HEAL")
+                return
+            end
+            if ( event == "AREA_SPIRIT_HEALER_OUT_OF_RANGE" ) then
+                StaticPopup_Hide("AREA_SPIRIT_HEAL")
+                return
+            end
+            if ( event == "INSTANCE_BOOT_START" ) then
+                StaticPopup_Show("INSTANCE_BOOT")
+                return
+            end
+            if ( event == "INSTANCE_BOOT_STOP" ) then
+                StaticPopup_Hide("INSTANCE_BOOT")
+                return
+            end
+            if ( event == "CONFIRM_PET_UNLEARN" ) then
+                local dialog = StaticPopup_Show("CONFIRM_PET_UNLEARN")
+                if ( dialog ) then
+                    MoneyFrame_Update(dialog:GetName().."MoneyFrame", arg1)
                 end
                 return
             end
@@ -717,6 +1210,12 @@
             -- while the stance bar is up starts 20px past the last stance button. That case is
             -- rare but real — a possessed or charmed unit gives a pet bar to a class that also
             -- has forms.
+            -- Update shapeshift bar appearance — ref UIParent.lua l.1705-1732, the reference's own
+            -- arm of this pass: with the bottom-left bar up the stance bar loses its shelf (end
+            -- caps + middle strip) and its rings shrink to 50; otherwise the shelf shows (the
+            -- middle only past two forms) and the rings are 64. Stock BonusActionBarFrame.lua
+            -- carries a `ShapeshiftBar_UpdatePosition` with the same body that nothing calls; the
+            -- pass IS the caller. (Our StanceBar.xml did this through a listener until 1938.)
             local bottomLeftUp = MultiBarBottomLeft and MultiBarBottomLeft:IsShown()
             if ( SlidingActionBarTexture0 and SlidingActionBarTexture1 ) then
                 if ( bottomLeftUp ) then
@@ -725,6 +1224,28 @@
                 else
                     SlidingActionBarTexture0:Show()
                     SlidingActionBarTexture1:Show()
+                end
+            end
+            if ( ShapeshiftBarFrame ) then
+                local numForms = GetNumShapeshiftForms and GetNumShapeshiftForms() or 0
+                if ( bottomLeftUp ) then
+                    ShapeshiftBarLeft:Hide()
+                    ShapeshiftBarRight:Hide()
+                    ShapeshiftBarMiddle:Hide()
+                    for i=1, numForms do
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetWidth(50)
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetHeight(50)
+                    end
+                else
+                    if ( numForms > 2 ) then
+                        ShapeshiftBarMiddle:Show()
+                    end
+                    ShapeshiftBarLeft:Show()
+                    ShapeshiftBarRight:Show()
+                    for i=1, numForms do
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetWidth(64)
+                        getglobal("ShapeshiftButton"..i.."NormalTexture"):SetHeight(64)
+                    end
                 end
             end
             if ( PetActionBarFrame ) then
@@ -959,8 +1480,8 @@
         --
         -- **benilla's own drag code does NOT use them**, and that is deliberate rather than an
         -- oversight: our UI space is 1:1 logical px and `GetCursorPosition` already reports in
-        -- the same space `SetPoint` offsets are read in (the same identity `MouseIsOver`'s
-        -- comment below records for `GetEffectiveScale`). Multiplying here would place a dragged
+        -- the same space `SetPoint` offsets are read in at the UI root's scale of 1 (a frame
+        -- under a `SetScale` reads its own units — `MouseIsOver` below divides for that). Multiplying here would place a dragged
         -- frame at 1.5x the cursor on a 1600-wide window. Kept for the addons, unused by us.
         function GetScreenHeightScale()
             return GetScreenHeight() / 768
@@ -991,13 +1512,18 @@
         -- hand back for it, and the reference's own comment on that guard ("a symptom not the real
         -- issue") is about where the unresolved frame came from, not about the guard.
         --
-        -- ONE DIVERGENCE, and it is a no-op: the reference divides the cursor by
-        -- `frame:GetEffectiveScale()` because 1.12 hands Lua screen pixels. benilla's UI space is
-        -- 1:1 logical px and `GetEffectiveScale` is the constant 1 (`script/pointer.rs`,
-        -- `object.rs` l.271), so the division is written out rather than left in to divide by one
-        -- forever. If a real UI scale ever lands, this is one of the sites that needs it back.
+        -- The cursor is divided by `frame:GetEffectiveScale()` exactly as the reference does
+        -- (UIParent.lua l.1389-1390): `GetLeft`/`GetRight`/`GetTop`/`GetBottom` answer in the
+        -- frame's OWN units (screen ÷ effective scale, `object/layout_methods.rs`), and a frame
+        -- CAN be scaled — the stock world map is (`SetupFullscreenScale`, 1981), and with the
+        -- division written out its player blip answered "not over" under the very cursor that
+        -- had just entered it, so the hover tooltip came up empty (decision 1985). An earlier
+        -- note here called the scale "the constant 1"; that was true of the UI root and of
+        -- nothing a `SetScale` has touched.
         function MouseIsOver(frame, topOffset, bottomOffset, leftOffset, rightOffset)
             local x, y = GetCursorPosition()
+            x = x / frame:GetEffectiveScale()
+            y = y / frame:GetEffectiveScale()
             local left, right = frame:GetLeft(), frame:GetRight()
             local top, bottom = frame:GetTop(), frame:GetBottom()
             if not left then

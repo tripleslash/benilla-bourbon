@@ -36,16 +36,31 @@ fn harness() -> UiScript {
 /// before it for the kit's TOOLTIP_DEFAULT_COLOR — the app's own order.
 fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
+    // A file loads ONCE, as in the client: the definer harnesses below load some of these ahead
+    // of this list to capture file-scope values, and a second load of the stock money kit's
+    // frames trips its own global-named update (`MoneyFrame_Update` writes the amount onto
+    // `getglobal(name)` — the first instance — while the second instance reads its own).
+    let loaded = |s: &UiScript, file: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return (BENILLA_TEST_LOADED or {{}})[{file:?}] == true"
+        ))
+        .unwrap_or(false)
+    };
     for file in [
-        "Fonts.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
         // exist by the time they are read, exactly as it does in the manifest (decision 1734).
         "UIParent.xml",
-        "MoneyFrame.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
         "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
@@ -60,6 +75,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
         // here is what made this kit break the moment a file it loads migrated (1751).
         // The dialect announces DROPPED subtrees as warnings, not errors — for the new file,
         // a warning is a silently-missing piece of chrome, so it fails there.
+        if loaded(&s, file) {
+            continue;
+        }
         if file == "OptionsFrame.xml" {
             super::test_ui::load_ui_strict(&s, file);
         } else {
@@ -676,15 +694,17 @@ fn audio_harness() -> UiScript {
     s
 }
 
-/// The Combat page's harness (decision 1134): the **real** `CombatText.xml` loaded ahead of the
-/// window, in the manifest's own order (it is file 59, OptionsFrame.xml file 281), so the rows
-/// capture the same file-scope defaults and the same `applyFunc` they capture in the client —
-/// nothing about the family is restated here. `UIParent.xml` comes first because CombatText's
-/// strings anchor to it.
+/// The Combat page's harness (decision 1134, 1964): the family's defaults are the window's own
+/// file-scope block (the reference's UIOptionsFrame.lua l.135-152), and the addon they drive is
+/// `Blizzard_CombatText` off the chain, loaded on demand by the master row's apply.
 fn combat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["UIParent.xml", "CombatText.xml"]);
+    load_definers(&s, &["UIParent.xml"]);
+    // The family's definers are the options window's own since 1964 (the reference's
+    // UIOptionsFrame.lua block); the addon itself is LoadOnDemand off the chain, seated so the
+    // master row's apply can load it the way the client does.
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_CombatText");
     harness_on(s)
 }
 
@@ -694,9 +714,12 @@ fn combat_harness() -> UiScript {
 /// exactly the ordering the real manifest guarantees.
 fn load_definers(s: &UiScript, files: &[&str]) {
     for file in files {
-        // Both stores: a definer can be the reference's own file now (BuffFrame.xml since 1751
-        // window 18), and `test_ui::load_ui` is the reader that speaks either.
         super::test_ui::load_ui(s, file);
+        // Remembered so `harness_on` loads each file once (see there).
+        s.run(&format!(
+            "BENILLA_TEST_LOADED = BENILLA_TEST_LOADED or {{}} BENILLA_TEST_LOADED[{file:?}] = true"
+        ))
+        .unwrap();
     }
 }
 
@@ -716,11 +739,16 @@ fn interface_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
-            "MoneyFrame.xml",
+            "Interface\\FrameXML\\Fonts.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "UIParent.xml",
             // The target-of-target pair's definer (1576) and the three files ahead of it, all in
             // their manifest seats. The chain is a real load-ORDER requirement rather than
@@ -729,9 +757,10 @@ fn interface_harness() -> UiScript {
             // own backdrop reads `GameTooltip`'s TOOLTIP_DEFAULT_COLOR. `harness_on` loads two of
             // these again after these — re-running a UI file is what `/reload` does, and the
             // loader takes it.
-            "GameTooltip.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "UnitPopup.xml",
+            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+            "Interface\\FrameXML\\UnitPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\BuffFrame.xml",
@@ -749,11 +778,26 @@ fn interface_harness() -> UiScript {
             // loaded it too.
             "Interface\\FrameXML\\ColorPickerFrame.xml",
             "Cooldown.xml",
-            "ActionBar.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
+            // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+            // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+            // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+            // two template files its check boxes inherit through (1875).
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            r"Interface\FrameXML\OptionsFrameTemplates.xml",
+            r"Interface\FrameXML\ReputationFrame.xml",
             "ScrollTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
-            "QuestFrame.xml",
-            "QuestLogFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\ItemButtonTemplate.xml",
+            "Interface\\FrameXML\\QuestFrame.xml",
+            r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+            "Interface\\FrameXML\\QuestLogFrame.xml",
         ],
     );
     harness_on(s)
@@ -771,16 +815,26 @@ fn chat_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
-            "MoneyFrame.xml",
+            "Interface\\FrameXML\\Fonts.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
             "UiPanels.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "UIParent.xml",
-            "GameTooltip.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
-            "ChatFrame.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\ChatFrame.xml",
+            "Interface\\FrameXML\\UIPanelTemplates.lua",
+            "Interface\\FrameXML\\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\FloatingChatFrame.xml",
         ],
     );
     harness_on(s)
@@ -797,11 +851,39 @@ fn actionbars_harness() -> UiScript {
     load_definers(
         &s,
         &[
-            "Fonts.xml",
+            "Interface\\FrameXML\\Fonts.xml",
             "UIParent.xml",
             "Cooldown.xml",
-            "ActionBar.xml",
-            "MultiBars.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
+            // The reference declares the reputation WATCH BAR in `ReputationFrame.xml`, and
+            // `ExhaustionTick_Update` reads `ReputationWatchBar:IsShown()` twice — the reference's own
+            // coupling of MainMenuBar to that pane. So an action-bar harness loads it, and with it the
+            // two template files its check boxes inherit through (1875).
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            r"Interface\FrameXML\OptionsFrameTemplates.xml",
+            r"Interface\FrameXML\ReputationFrame.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
+            "UiPanels.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "ScrollTemplates.xml",
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            "Interface\\FrameXML\\StaticPopup.xml",
+            "KeyBindingsPage.xml",
+            "OptionsFrame.xml",
+            "Interface\\FrameXML\\MultiActionBars.xml",
         ],
     );
     harness_on(s)
@@ -2185,6 +2267,10 @@ fn hover_label(s: &mut UiScript, frame: &str) {
 #[test]
 fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
     let mut s = harness_on(audio_harness());
+    // The stock tooltip declares no size: it sizes from its lines through the font engine, as
+    // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
+    // font is that engine here.
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Checking this will prevent the deselection.\"")
         .unwrap();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
@@ -2844,7 +2930,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
-    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
     assert!(
         s.cursor_payload().is_none(),
@@ -2854,7 +2940,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     // Defaults walks it back to ActionBar.xml's own assignment, and the bar drags again.
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(s.eval::<String>("return LOCK_ACTIONBAR").unwrap(), "0");
-    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
+    s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
     assert!(s.cursor_payload().is_some(), "unlocked again");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -2995,9 +3081,9 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     assert!(
         s.eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
-                 == TargetofTarget_Update \
+                 == \"TargetofTarget_Update\" \
              and OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
-                 == TargetofTarget_Update"
+                 == \"TargetofTarget_Update\""
         )
         .unwrap(),
         "both rows re-decide the frame when they are written"
@@ -3258,6 +3344,9 @@ fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
     // What the saved chunk does, verbatim: assign over the file-scope default, then the event.
     s.run("SHOW_COMBAT_TEXT = \"1\"").unwrap();
     s.fire_event("VARIABLES_LOADED", vec![]);
+    // The walk loaded the addon (1964); a frame passes before any message can arrive, and the
+    // stock message placement reads the strings' screen positions, which that frame lays out.
+    s.resolve();
 
     s.fire_event(
         "COMBAT_TEXT_UPDATE",

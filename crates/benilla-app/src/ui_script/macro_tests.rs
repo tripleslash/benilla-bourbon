@@ -89,12 +89,15 @@ fn harness_with(player: &str) -> UiScript {
     // reader cannot name it (decision 1848).
     for file in [
         r"Interface\FrameXML\GlobalStrings.lua",
-        "Fonts.xml",
-        "BasicControls.xml", // `TEXT`
-        "MoneyFrame.xml",
+        "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
         // The chain's `PanelTemplates_SelectTab` reaches for `GameTooltip` unguarded.
-        "GameTooltip.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
         "UIParent.xml", // `ShowMacroFrame` lives here now
         // **ScrollTemplates BEFORE UIPanelTemplates, the manifest's own order.** Ours still
         // carries dead `FauxScrollFrame_*` copies the chain overrides by loading after (1846's
@@ -105,11 +108,15 @@ fn harness_with(player: &str) -> UiScript {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // `ClassTrainerListScrollFrameTemplate` — the icon chooser's scroll frame inherits it.
         r"Interface\FrameXML\ClassTrainerFrameTemplates.xml",
-        "MicroMenu.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
-        r"Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml", // stock `MacroFrame_OnShow`/`_OnHide` drive the micro button
     ] {
         super::test_ui::load_ui(&s, file);
     }
+    // The window is a LoadOnDemand addon, reached the way the app reaches it: seated off the
+    // chain as a registry row (1957) and loaded by the reference's own `MacroFrame_LoadUI`
+    // (UIParent.xml; 1967).
+    super::test_ui::seat_chain_addon(&mut s, "Blizzard_MacroUI");
+    s.run("MacroFrame_LoadUI()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // The icon chooser's list is the app's push; three entries is enough to index into.
     s.set_macro_icons(vec![
@@ -671,4 +678,38 @@ fn the_tab_highlight_is_exactly_its_tab() {
         }
         no_errors(&s, "tab highlight");
     }
+}
+
+/// Clicking "Change Name/Icon" opens the icon picker.
+///
+/// **This harness cannot catch the defect that made it raise in-game**, and that is worth saying
+/// out loud: a harness lists its own dependencies, so it had
+/// `ClassTrainerFrameTemplates.xml` while the shipped manifest did not. The window worked here and
+/// was broken in the client. What catches THAT is
+/// `every_template_the_manifest_inherits_is_declared_by_the_manifest`, plus the end-to-end drive in
+/// `shipped_xml_tests`. Decision 1862.
+///
+/// The raise it reproduced:
+///
+/// ```text
+/// Blizzard_MacroUI.lua:233: attempt to perform arithmetic on local 'macroPopupOffset' (a nil value)
+///   MacroPopupFrame_Update  <-  MacroPopupFrame_OnShow  <-  MacroEditButton_OnClick
+/// ```
+#[test]
+fn the_icon_picker_opens_without_raising() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    select_first(&s);
+    let _ = s.errors();
+    s.run("MacroEditButton:Click()").unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "opening the icon picker must not raise: {:?}",
+        s.errors()
+    );
+    assert!(
+        s.eval::<bool>("return MacroPopupFrame:IsShown() and true or false")
+            .unwrap(),
+        "the picker is up"
+    );
 }

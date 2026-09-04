@@ -162,7 +162,7 @@ pub(super) fn refresh_hud_snapshot(
 /// right, the action bar the bottom, the chat dock the bottom left).
 ///
 /// **Asked of the frame, not recomputed from its numbers.** Its row pitch and anchor live in
-/// `assets/ui/WorldStateFrame.xml`; mirroring them here would be two copies to keep in step, so
+/// the stock `WorldStateFrame.xml` (1972); mirroring them here would be two copies to keep in step, so
 /// this reads the resolved edge the layout actually produced (`GetBottom`, y-up). One tiny chunk
 /// at 4 Hz, only while the HUD is drawing — the same shape as [`crate::hover_log`]'s tooltip
 /// probe.
@@ -181,12 +181,25 @@ pub(super) fn refresh_hud_snapshot(
 /// (~47 µs on a 200-frame tree — `layout_methods::settle`'s own measurement), four times a second.
 /// Every other frame it is a chunk load and a table lookup.
 pub(crate) fn top_centre_claimed(script: &UiScript, win_h: f32) -> f32 {
+    // The stock `WorldStateAlwaysUpFrame` is a permanently shown container (1972); what the
+    // readout actually occupies is its ROWS — `AlwaysUpFrame<n>`, built on demand and hidden when
+    // the scope admits nothing — so the claim is the lowest shown row's bottom, or nothing.
     const CHUNK: &str = r#"
         local f = WorldStateAlwaysUpFrame
         if not (f and f:IsVisible()) then return -1 end
-        local bottom, screen = f:GetBottom(), GetScreenHeight()
-        if not bottom or not screen or screen <= 0 then return -1 end
-        return (screen - bottom) / screen
+        local lowest, i = nil, 1
+        while true do
+            local r = getglobal("AlwaysUpFrame" .. i)
+            if not r then break end
+            if r:IsShown() then
+                local b = r:GetBottom()
+                if b and (not lowest or b < lowest) then lowest = b end
+            end
+            i = i + 1
+        end
+        local screen = GetScreenHeight()
+        if not lowest or not screen or screen <= 0 then return -1 end
+        return (screen - lowest) / screen
     "#;
     let frac: f32 = script.eval::<f64>(CHUNK).unwrap_or(-1.0) as f32;
     if !(0.0..=1.0).contains(&frac) {
@@ -218,11 +231,19 @@ pub(super) fn pill_quads(
         !matches!(&*cache, Some(c) if c.snap_at == hud.snap_at && c.win_w == win_w && c.top == top);
     if stale {
         let cpu = hud.snap.cpu.mean();
+        let main = hud.snap.main.mean();
         let fps = hud.snap.fps();
-        // One string, the dim run via markup: "59 fps  8.5 ms" — fps dim, cost in full text.
-        let text = match cpu {
-            Some(cpu) => format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {cpu:.1} ms"),
-            None => format!("{Q_DIM_MARKUP}-- ms"),
+        // One string, the dim runs via markup: "59 fps  7.0 ms  17.3 cpu" — fps dim, the MAIN
+        // thread's ms in full text (the part of the frame the player feels), and the process-wide
+        // sum dim at the end (every thread, the number a CPU % agrees with — decision 1954: a
+        // raid read 17 on it at a solid 60 with the main thread at 7, and the sum was taken for
+        // a frame time by everyone who looked at it).
+        let text = match (main, cpu) {
+            (Some(main), Some(cpu)) => {
+                format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {main:.1} ms  {Q_DIM_MARKUP}{cpu:.1} cpu|r")
+            }
+            (None, Some(cpu)) => format!("{Q_DIM_MARKUP}{fps:.0} fps|r  {cpu:.1} cpu"),
+            _ => format!("{Q_DIM_MARKUP}-- ms"),
         };
         let center = Vec2::new(win_w * 0.5, 0.0); // measured first, then shifted under PILL_TOP
         let mut e = atlas.lock();
@@ -349,10 +370,12 @@ mod tests {
             claimed > 8.0,
             "two rows reach past the pill's own seat, so the pill must move: {claimed}"
         );
-        // The frame's own geometry, read back the way the probe reads it: the container's top offset
-        // plus one row per pushed row. Asserted against the XML rather than restated as constants.
+        // The frame's own geometry, read back the way the probe reads it: the second (lowest)
+        // row's resolved bottom. Asserted against the stock XML rather than restated as constants.
         let expected: f32 = s
-            .eval::<f64>("return (20 + WORLD_STATE_ROW_HEIGHT * 2 + 15) / GetScreenHeight()")
+            .eval::<f64>(
+                "return (GetScreenHeight() - AlwaysUpFrame2:GetBottom()) / GetScreenHeight()",
+            )
             .expect("the frame's own numbers") as f32
             * SCREEN_H;
         assert!(

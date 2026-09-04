@@ -282,6 +282,12 @@ pub(crate) fn name_cache_path(realm: &str) -> Option<PathBuf> {
 /// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev
 /// affordance (`/shot`, compiled out by `--no-default-features` since 1179), but it persists on a
 /// real machine, so it resolves here like everything else rather than through a private path.
+/// `Logs/` — `WoWChatLog.txt` and `WoWCombatLog.txt`, the reference's two names beside its
+/// `WTF`, kept here beside ours ([`crate::ui_chat`]'s logging).
+pub(crate) fn logs_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("Logs"))
+}
+
 pub(crate) fn shots_path() -> Option<PathBuf> {
     home().map(|h| h.join("shots.txt"))
 }
@@ -320,6 +326,8 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 /// this instrument was built for — the director's, and the long probe rounds — keep it. The
 /// alternative, an ungated second accessor, would put "which paths are exempt from hermetic?" back
 /// into someone's head, which is what the single rule exists to prevent.
+// Same one reader as `sound::output::device_open`: the macOS-only stall watchdog.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Diagnostics"))
 }

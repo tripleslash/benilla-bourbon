@@ -1,4 +1,4 @@
-//! The pet action bar (`PetActionBar.xml`) driven end to end through the REAL shipped XML
+//! The pet action bar (the reference's `PetActionBarFrame.xml`, 1953) driven end to end through the REAL shipped XML
 //! (decision 0982) — the `multibar_stance_tests` pattern: a self-contained loader, then the
 //! whole chain from a pushed slot list to the quads it actually paints.
 
@@ -9,16 +9,45 @@ use super::test_ui::load_ui as load_xml;
 /// The pet bar's own load prerequisites, in manifest order: UiPanels (`SetDesaturation`, the
 /// disabled-bar grey), UIParent (the managed bottom stack its OnShow/OnHide re-fires), Cooldown
 /// (`CooldownFrame_SetTimer`), ActionBar (the `MainMenuBar` anchor target) — then the bar.
-fn load_pet_bar(s: &UiScript) {
+/// The reference's pet bar needs what the manifest loads before it: the action-bar chain
+/// (`ActionButton_UpdateState`, `MainMenuBar` as its parent, `CooldownFrame_SetTimer`), the
+/// options window's uvars for `MultiActionBars.lua`, `SetDesaturation` and `GetBindingText` from
+/// our UIParent.lua slices, `TEXT` — and the chat window, whose edit box `ShowPetActionBar`
+/// raises over the sliding bar (PetActionBarFrame.lua l.175). One chain, in the manifest's order,
+/// for every test here (1953).
+pub(super) fn load_pet_bar(s: &UiScript) {
     for file in [
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "UIParent.xml",
         "Cooldown.xml",
-        "ActionBar.xml",
-        "PetActionBar.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\ReputationFrame.xml",
+        "UiPanels.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "Interface\\FrameXML\\MultiActionBars.xml",
+        "Interface\\FrameXML\\PetActionBarFrame.xml",
+        "PetActionBarAdapters.xml",
+        "Interface\\FrameXML\\UIMenu.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         load_xml(s, file);
     }
@@ -27,7 +56,7 @@ fn load_pet_bar(s: &UiScript) {
 /// GlobalStrings is loaded from the MPQ at runtime, not by the loader — a token slot's `name` is
 /// a KEY into it, so the tests declare the two keys they read. (That the real keys exist in the
 /// shipped file is a separate fact, asserted in `ui_pet`'s own tests by name.)
-fn declare_token_strings(s: &UiScript) {
+pub(super) fn declare_token_strings(s: &UiScript) {
     s.run(
         "PET_ACTION_ATTACK = 'Attack' \
          PET_MODE_DEFENSIVE = 'Defensive'",
@@ -42,7 +71,7 @@ const CLAW_WORD: u32 = 0xC100_0BC2;
 
 /// A hunter's bar as the server actually sends it: Attack (a lit command token), an empty spell
 /// slot, Claw (a spell with autocast running), and Defensive (a lit reaction token).
-fn hunter_slots() -> Vec<PetActionView> {
+pub(super) fn hunter_slots() -> Vec<PetActionView> {
     let mut slots = vec![PetActionView::default(); 10];
     slots[0] = PetActionView {
         name: Some("PET_ACTION_ATTACK".into()),
@@ -191,10 +220,13 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         (72.0, 56.0, 102.0, 86.0)
     );
 
-    // The pet goes: the bar hides again, shine marker and all.
+    // The pet goes: the bar slides out over the reference's PETACTIONBAR_SLIDETIME (0.09 s,
+    // `PetActionBarFrame_OnUpdate`) and hides at the end of the slide, shine marker and all.
     s.set_pet_actions(false, true, true, Vec::new());
     s.fire_event("PET_BAR_UPDATE", vec![]);
-    s.tick(0.05);
+    for _ in 0..3 {
+        s.tick(0.05);
+    }
     s.resolve();
     let gone = s.extract();
     assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
@@ -350,23 +382,11 @@ fn a_disabled_bar_greys_rather_than_hides() {
 fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-    ] {
-        load_xml(&s, file);
-    }
-    load_xml(&s, "MultiBars.xml");
+    load_pet_bar(&s);
     if with_multibar {
         s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update()")
             .unwrap();
     }
-    load_xml(&s, "PetActionBar.xml");
     declare_token_strings(&s);
 
     s.set_pet_actions(true, true, true, hunter_slots());
@@ -629,26 +649,6 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 // law, the no-seam continuity pin) live with the drawing now: `crate::autocast_shine`'s own
 // test module — the script layer no longer moves a single spark (decision 1383).
 
-/// The pet bar plus the three files its TOOLTIP needs, in the TOC's own order: Fonts.xml (the
-/// colour codes that wrap the binding), GameTooltip.xml (the plate), and UIParent.xml — already a
-/// prerequisite for the managed stack — for `GetBindingText`, which renders the key.
-fn load_pet_bar_with_tooltip(s: &UiScript) {
-    for file in [
-        "Fonts.xml",
-        "MoneyFrame.xml",
-        "UiPanels.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "PetActionBar.xml",
-    ] {
-        load_xml(s, file);
-    }
-}
-
 /// A hunter bar hovered through the REAL gesture, with the real binding registry and the real CVar
 /// table behind it — `mouse_move` runs the shipped `<OnEnter>` with `this` bound, which is the only
 /// way this fork gets exercised the way nazriel exercised it.
@@ -667,7 +667,7 @@ fn hovered_pet_bar() -> UiScript {
     // `GetCVar("UberTooltips")` answers "1" (its byte-read registrar value) rather than nil.
     s.register_bindings(&crate::bindings::registry_commands());
     s.register_cvars(crate::cvars::registered_pairs());
-    load_pet_bar_with_tooltip(&s);
+    load_pet_bar(&s);
     declare_token_strings(&s);
     s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
@@ -692,7 +692,7 @@ fn tooltip_line1(s: &UiScript) -> String {
 ///
 /// The exact string is pinned, colour codes and all, because the ref's concatenation puts the
 /// colour BEFORE the space (`Attack|cffffd200 (CTRL-1)|r`, not `Attack |cffffd200(CTRL-1)|r` —
-/// which is what MicroMenu.xml's different-shaped version of the same idea produces).
+/// which is what the stock `MicroButtonTooltipText` — the same idea, the other shape — produces).
 #[test]
 fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
     let mut s = hovered_pet_bar();

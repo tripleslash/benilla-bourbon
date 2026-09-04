@@ -12,14 +12,28 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
-const FILES: [&str; 7] = [
-    "Fonts.xml",
-    "MoneyFrame.xml",
+const FILES: &[&str] = &[
+    "Interface\\FrameXML\\Fonts.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
+    // the `MoneyInputFrame_*` verbs. Seated straight after MoneyFrame.xml, benilla.toc's order.
+    r"Interface\FrameXML\MoneyInputFrame.lua",
+    r"Interface\FrameXML\MoneyInputFrame.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    "GameTooltip.xml",
-    "MailFrame.xml",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    "Interface\\FrameXML\\GameTooltip.xml",
+    r"Interface\FrameXML\ItemButtonTemplate.xml", // the send tab's attachment slot inherits it
+    // The stock tabs inherit `FriendsFrameTabTemplate`, and `inherits=` resolves at load — so the
+    // social window and the kit it needs come first, as the reference's toc has them (1970).
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
+    "Interface\\FrameXML\\FriendsFrame.xml",
+    "Interface\\FrameXML\\MailFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -54,7 +68,12 @@ fn load_ui(script: &UiScript) {
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
             panic!("parsing {file}: {e}");
         });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
+        // The document's OWN path, not the path-less `load` (1923). The base is what every
+        // relative `<Script file=>` / `<Include file=>` inside resolves against (1186); with
+        // an empty base they stay bare and miss the provider entirely, so a self-sourcing
+        // stock file loads as an empty shell and every handler in it goes missing — silently,
+        // because nothing in these lists used to be self-sourcing.
+        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &provider);
         assert!(
             report.errors.is_empty(),
             "{file} loaded with errors: {:#?}",
@@ -401,7 +420,8 @@ fn closing_a_taken_husk_deletes_it() {
     );
 }
 
-/// The expiry text pluralizes like the reference (GetText("DAYS_ABBR"): "Day"/"Days").
+/// The expiry text pluralizes like the reference (`GetText("DAYS_ABBR", nil, n)`: "Day"/"Days") —
+/// and carries the reference's own trailing space before the colour close (MailFrame.lua l.144).
 #[test]
 fn expiry_text_pluralizes_days() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -417,12 +437,12 @@ fn expiry_text_pluralizes_days() {
     assert_eq!(
         s.eval::<String>("return MailItem1ExpireTime:GetText()")
             .unwrap(),
-        "|cff20ff2029 Days|r"
+        "|cff20ff2029 Days |r"
     );
     assert_eq!(
         s.eval::<String>("return MailItem2ExpireTime:GetText()")
             .unwrap(),
-        "|cff20ff201 Day|r"
+        "|cff20ff201 Day |r"
     );
     assert!(s.take_errors().is_empty());
 }
@@ -502,14 +522,15 @@ fn money_button_hover_shows_the_amount_tooltip() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     s.run("MailItem1Button:Click()").unwrap();
 
-    s.run("BenillaOpenMailMoneyButton_OnEnter(OpenMailMoneyButton)")
+    // The hover is the button's own inline handler (stock MailFrame.xml), reading `this`.
+    s.run("this = OpenMailMoneyButton OpenMailMoneyButton:GetScript(\"OnEnter\")()")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip:IsShown()").unwrap(),
         "the money tooltip shows on hover"
     );
     assert!(
-        s.eval::<bool>("return GameTooltipMoneyCoin1:IsShown()")
+        s.eval::<bool>("return GameTooltipMoneyFrame:IsShown()")
             .unwrap(),
         "the coin row rendered (SetTooltipMoney path)"
     );

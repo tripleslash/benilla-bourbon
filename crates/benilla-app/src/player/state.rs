@@ -853,6 +853,12 @@ pub(crate) struct Player {
     pub(crate) owes_worldport_ack: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,
+    /// **Milliseconds of movement simulation this client advanced through without integrating** —
+    /// the quantity `CMSG_MOVE_TIME_SKIPPED` reports (decision 1935). Accumulated while
+    /// [`Self::settling`] holds the mover (the world under us has not streamed in, so no step
+    /// runs), drained and sent by [`super::movement_net::stream_self_movement`] on the release
+    /// edge. Fractional because it accumulates a frame `dt` at a time; the wire takes whole ms.
+    pub(super) skipped_ms: f32,
     /// `Time::elapsed_secs` when the current airborne phase (jump or step-off) began, else `None` on the
     /// ground. Drives the wire `fall_time` (ms airborne) and detects the take-off / landing transitions
     /// that emit `MSG_MOVE_JUMP` / `MSG_MOVE_FALL_LAND` (decision 0053).
@@ -1034,6 +1040,11 @@ pub(crate) struct Player {
     pub(super) server_riding: bool,
     /// The `splineId` of the ride in progress (echoed in `CMSG_MOVE_SPLINE_DONE` when it ends).
     pub(super) ride_spline_id: u32,
+    /// Was the ride in progress a **ground** path? — the `FLYING` bit of the [`crate::net::Spline`]
+    /// that drove it, kept because the frame the ride *ends* has already lost the spline
+    /// (`sample_splines` drops a finished path) and the endpoint still has to be grounded by the
+    /// same law as every frame before it (decision 1927). A taxi's endpoint keeps its own altitude.
+    pub(super) ride_grounded: bool,
     /// Standing on a transport (boat/zepp): the mover lives in that platform's frame (decision
     /// 0438 phase 2). Attached when the ground support is a [`crate::transport::Transport`]
     /// collider; kept through jumps above the deck (deck-frame ballistics — a jump on a moving

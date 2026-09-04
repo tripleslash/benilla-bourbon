@@ -82,7 +82,12 @@ pub(super) fn feed_social(
     fed.seeded = true;
     if social.friends_dirty || first {
         social.friends_dirty = false;
-        script.fire_event("FRIENDLIST_UPDATE", Vec::new());
+        let event = if std::mem::take(&mut social.friends_show_pending) {
+            "FRIENDLIST_SHOW"
+        } else {
+            "FRIENDLIST_UPDATE"
+        };
+        script.fire_event(event, Vec::new());
     }
     if social.ignores_dirty || first {
         social.ignores_dirty = false;
@@ -303,6 +308,7 @@ pub(super) fn drain_social(
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     areas: Option<Res<AreaTableRes>>,
+    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -314,10 +320,22 @@ pub(super) fn drain_social(
     for request in requests {
         match request {
             SocialRequest::RefreshFriends => {
+                social.friends_show_pending = true;
                 let _ = commands.0.send(ClientCommand::FriendListRequest);
             }
             SocialRequest::AddFriend(name) => {
+                // `0x5ae67c`: Friends acknowledged right before the send (1976).
+                if let Some(t) = tutorials.as_mut() {
+                    t.write(crate::tutorial::TutorialEvent::Acknowledge {
+                        id: crate::tutorial::id::FRIENDS,
+                    });
+                }
                 let _ = commands.0.send(ClientCommand::AddFriend { name });
+            }
+            SocialRequest::SetLookingForGroup { slots, comment } => {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::SetLookingForGroup { slots, comment });
             }
             SocialRequest::RemoveFriendIndex(index) => {
                 if let Some(guid) = row_guid(&social.display_order, index) {

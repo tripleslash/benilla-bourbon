@@ -13,14 +13,26 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The trade window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because TradeFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (the two gold displays), so a load error in either fails here.
-const FILES: [&str; 7] = [
-    "Fonts.xml",
-    "MoneyFrame.xml",
+const FILES: &[&str] = &[
+    "Interface\\FrameXML\\Fonts.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    // The money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and the
+    // `MoneyInputFrame_*` verbs the window's OnLoad calls. Seated straight after MoneyFrame.xml,
+    // which is benilla.toc's own order.
+    r"Interface\FrameXML\MoneyInputFrame.lua",
+    r"Interface\FrameXML\MoneyInputFrame.xml",
     "UiPanels.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    "GameTooltip.xml",
-    "TradeFrame.xml",
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    "Interface\\FrameXML\\GameTooltip.xml",
+    // The stock slot updates go through ItemButtonTemplate.lua's SetItemButton* helpers (1966).
+    r"Interface\FrameXML\ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\TradeFrame.xml",
 ];
 
 fn load_ui(script: &UiScript) {
@@ -55,7 +67,12 @@ fn load_ui(script: &UiScript) {
         let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
             panic!("parsing {file}: {e}");
         });
-        let report = benilla_ui::loader::load(script, &doc, &provider);
+        // The document's OWN path, not the path-less `load` (1923). The base is what every
+        // relative `<Script file=>` / `<Include file=>` inside resolves against (1186); with
+        // an empty base they stay bare and miss the provider entirely, so a self-sourcing
+        // stock file loads as an empty shell and every handler in it goes missing — silently,
+        // because nothing in these lists used to be self-sourcing.
+        let report = benilla_ui::loader::load_in(script, &doc, &file.replace('\\', "/"), &provider);
         assert!(
             report.errors.is_empty(),
             "{file} loaded with errors: {:#?}",
@@ -109,8 +126,8 @@ fn trade_frame_loads_and_key_regions_exist() {
         "TradeRecipientItem7",
         "TradeFrameTradeButton",
         "TradeFrameCancelButton",
-        "TradePlayerInputMoneyGold", // our gold is now the editable input (P2)
-        "TradeRecipientMoneyFrameCoin1",
+        "TradePlayerInputMoneyFrameGold", // our gold is now the editable input (P2)
+        "TradeRecipientMoneyFrameCopperButton",
         "TradeHighlightPlayer",
         "TradeHighlightRecipientEnchant",
     ] {
@@ -130,6 +147,16 @@ fn trade_show_opens_and_both_columns_populate() {
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade(Some(state()));
+    // The stock header reads `UnitName("NPC")` — the partner rides the shared "npc" booth the
+    // app's session feed points at them (1966).
+    s.set_unit(
+        "npc",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Thrall".into()),
+            ..Default::default()
+        }),
+    );
 
     s.fire_event("TRADE_SHOW", vec![]);
     assert!(
@@ -160,18 +187,18 @@ fn trade_show_opens_and_both_columns_populate() {
         "Silk Cloth"
     );
     assert!(
-        s.eval::<bool>("return TradePlayerItem1ItemButtonIcon:IsShown()")
+        s.eval::<bool>("return TradePlayerItem1ItemButtonIconTexture:IsShown()")
             .unwrap(),
         "a filled slot shows its icon"
     );
-    // An empty slot clears its name + hides its icon.
-    assert_eq!(
-        s.eval::<String>("return TradePlayerItem2Name:GetText()")
-            .unwrap(),
-        ""
-    );
+    // An empty slot clears its name (the stock's `SetText(nil)`) + hides its icon.
+    assert!(s
+        .eval::<Option<String>>("return TradePlayerItem2Name:GetText()")
+        .unwrap()
+        .unwrap_or_default()
+        .is_empty());
     assert!(!s
-        .eval::<bool>("return TradePlayerItem2ItemButtonIcon:IsShown()")
+        .eval::<bool>("return TradePlayerItem2ItemButtonIconTexture:IsShown()")
         .unwrap());
 
     // The partner's name paints from GetTradePartnerName().
@@ -181,10 +208,16 @@ fn trade_show_opens_and_both_columns_populate() {
         "Thrall"
     );
 
-    // The partner's read-only gold rendered a coin (5s → 1 coin); our own gold is the editable input,
-    // exercised in `player_money_input_reflects_then_offers`.
+    // The partner's read-only money rendered exactly one coin for 5s: TARGET_TRADE is a COLLAPSING
+    // type (MoneyTypeInfo.collapse), so gold and copper hide and silver alone stands — the
+    // reference's own rule, and the one this fixture was written to show. Our own gold is the
+    // editable input, exercised in `player_money_input_reflects_then_offers`.
     assert!(s
-        .eval::<bool>("return TradeRecipientMoneyFrameCoin1:IsShown()")
+        .eval::<bool>(
+            "return TradeRecipientMoneyFrameSilverButton:IsShown() \
+             and not TradeRecipientMoneyFrameGoldButton:IsShown() \
+             and not TradeRecipientMoneyFrameCopperButton:IsShown()"
+        )
         .unwrap());
 
     assert!(s.take_errors().is_empty(), "clean repaint");
@@ -204,7 +237,8 @@ fn enchant_slot_shows_the_not_traded_note() {
     assert_eq!(
         s.eval::<String>("return TradePlayerItem7Name:GetText()")
             .unwrap(),
-        "|cffffffffWill Not Be Traded|r"
+        // The stock wording, TRADEFRAME_NOT_MODIFIED_TEXT (ours had read "Will Not Be Traded").
+        "|cffffffffItem not yet modified|r"
     );
     assert!(s.take_errors().is_empty());
 }
@@ -293,6 +327,7 @@ fn trade_button_click_queues_accept() {
 fn player_money_input_reflects_then_offers() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.set_money(1_000_000); // SetTradeMoney is purse-gated (1965)
     load_ui(&s);
     s.set_trade(Some(state())); // state().player.gold == 12345 (1g 23s 45c)
     s.fire_event("TRADE_SHOW", vec![]);
@@ -301,7 +336,7 @@ fn player_money_input_reflects_then_offers() {
     for box_ in ["Gold", "Silver", "Copper"] {
         assert!(
             s.eval::<bool>(&format!(
-                "return getglobal('TradePlayerInputMoney{box_}') ~= nil"
+                "return getglobal('TradePlayerInputMoneyFrame{box_}') ~= nil"
             ))
             .unwrap(),
             "money box {box_} exists"
@@ -314,9 +349,9 @@ fn player_money_input_reflects_then_offers() {
     s.fire_event("PLAYER_TRADE_MONEY", vec![]);
     assert_eq!(
         s.eval::<(String, String, String)>(
-            "return TradePlayerInputMoneyGold:GetText(), \
-             TradePlayerInputMoneySilver:GetText(), \
-             TradePlayerInputMoneyCopper:GetText()"
+            "return TradePlayerInputMoneyFrameGold:GetText(), \
+             TradePlayerInputMoneyFrameSilver:GetText(), \
+             TradePlayerInputMoneyFrameCopper:GetText()"
         )
         .unwrap(),
         ("1".into(), "23".into(), "45".into()),
@@ -331,7 +366,8 @@ fn player_money_input_reflects_then_offers() {
     // A genuine keystroke offers the running total (bypass the affordability clamp — a bare harness
     // has no purse).
     s.run("GetMoney = function() return 100000000 end").unwrap();
-    s.run("TradePlayerInputMoneyGold:SetText('2')").unwrap();
+    s.run("TradePlayerInputMoneyFrameGold:SetText('2')")
+        .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
         s.take_trade_money(),

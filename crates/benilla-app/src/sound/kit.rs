@@ -500,7 +500,7 @@ pub(super) struct PlayExtras {
     /// [`SAME_KIT_MAX`]. Those are the **one-shot lane's** gate (`0x458f40` lifting `SoundEntries`
     /// bit 0x20 into the FMOD flags word, consumed by `0x7a66a0`), and a caller that already
     /// guarantees one channel per kit by construction must not be held to it a second time. The
-    /// ambient emitter pool ([`super::doodad_pool`]) is that caller: it dedupes **structurally**,
+    /// ambient emitter pool ([`super::emitter_pool`]) is that caller: it dedupes **structurally**,
     /// one entry per SoundEntries id (wow-re `doodad-sound-emitters.md` §15), and its opens go
     /// through `0x7a5680` → `0x7a54d0`, which never reaches that gate at all.
     ///
@@ -1074,6 +1074,7 @@ impl SoundKits {
         };
         let data = mixer::sfx_from_bytes(bytes)?;
         self.cache.insert(key, data.clone());
+        DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Some(data))
     }
 
@@ -1093,6 +1094,11 @@ impl SoundKits {
         }
     }
 }
+
+/// First-play decodes so far — a chain read plus a decode on the main thread, once per
+/// distinct kit file per session. `FPS_PROBE` reads it per frame to annotate a tail frame
+/// (a raid's buff wave meets dozens of distinct spell sounds in its first minute).
+pub(crate) static DECODES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Startup: load the kit catalog off the chain (absent → no resource; every play site tolerates
 /// that, the same optional-catalog rule as `Creatures`).
@@ -1180,6 +1186,12 @@ pub(super) fn apply_kit_debug(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
+    // Read before borrowing mutably: a `&mut` through `ResMut` marks `DebugState` changed, and
+    // this ran every frame — so every still-frame gate that reads `debug.is_changed()`
+    // (decision 1979) saw a changed debug state on every frame of every run.
+    if !debug.sound.play_kit {
+        return;
+    }
     let s = &mut debug.sound;
     if !std::mem::take(&mut s.play_kit) {
         return;

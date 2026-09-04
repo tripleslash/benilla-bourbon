@@ -10,12 +10,17 @@ use super::test_ui::load_ui as load_xml;
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, "DeathFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "UIParent.xml");
     s
 }
 
@@ -38,7 +43,7 @@ fn death_popup_counts_down_and_release_queues_repop() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "5 minutes until release",
+        "5 Minutes until release",
         "the countdown renders through the engine's DEATH per-tick text"
     );
     // ESC must NOT close it (no hideOnEscape on DEATH — the ref's law).
@@ -249,7 +254,7 @@ fn resurrect_request_picks_variant_and_answers() {
 fn xp_loss_two_step_confirm_then_range_hide() {
     let mut s = setup();
     s.set_death(DeathUiState {
-        sickness_duration: Some("8 minutes".into()),
+        sickness_duration: Some("8 Minutes".into()),
         spirit_healer_in_range: true,
         ..Default::default()
     });
@@ -262,7 +267,7 @@ fn xp_loss_two_step_confirm_then_range_hide() {
         .eval::<String>("return StaticPopup1Text:GetText()")
         .unwrap();
     assert!(
-        text.contains("afflicted by 8 minutes of Resurrection Sickness"),
+        text.contains("afflicted by 8 Minutes of Resurrection Sickness"),
         "the sickness duration formats into CONFIRM_XP_LOSS: {text}"
     );
     // First Accept: the AGAIN text swaps in, the dialog stays, nothing queues. XP_LOSS's verbatim
@@ -318,7 +323,7 @@ fn xp_loss_two_step_confirm_then_range_hide() {
 fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
     let mut s = setup();
     s.set_death(DeathUiState {
-        sickness_duration: Some("8 minutes".into()),
+        sickness_duration: Some("8 Minutes".into()),
         spirit_healer_in_range: true,
         ..Default::default()
     });
@@ -414,7 +419,7 @@ fn corpse_range_events_drive_recover_corpse() {
     assert_eq!(
         s.eval::<String>("return StaticPopup1Text:GetText()")
             .unwrap(),
-        "2 seconds until resurrection"
+        "2 Seconds until resurrection"
     );
     s.tick(1.6);
     assert_eq!(
@@ -460,7 +465,7 @@ fn corpse_map_position_binding() {
         .eval::<(f64, f64)>("return GetCorpseMapPosition()")
         .unwrap();
     assert_eq!((x, y), (0.0, 0.0), "no corpse ⇒ the (0,0) hide sentinel");
-    s.set_world_map_feed(None, None, 0.0, Some((0.25, 0.75)), Vec::new());
+    s.set_world_map_feed(None, None, 0.0, Some((0.25, 0.75)), Vec::new(), Vec::new());
     let (x, y) = s
         .eval::<(f64, f64)>("return GetCorpseMapPosition()")
         .unwrap();

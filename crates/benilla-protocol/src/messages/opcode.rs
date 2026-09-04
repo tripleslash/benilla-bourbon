@@ -60,6 +60,13 @@ pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
 pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
+/// `SMSG_MONSTER_MOVE_TRANSPORT` (VERIFIED vmangos `Opcodes_1_12_1.h`: 686) — the transport twin of
+/// [`SMSG_MONSTER_MOVE`]: the identical body with the **transport's packed guid inserted after the
+/// mover's**, and every coordinate in it a deck-local offset instead of a world position. Sent for a
+/// unit pathing *on* a transport — a pet following its owner aboard a boat, anything a player pulls
+/// onto a deck (`Movement::MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:146-154`). Body in
+/// [`super::monster_move::read_monster_move`]; decision 1936.
+pub const SMSG_MONSTER_MOVE_TRANSPORT: u16 = 0x02AE; // 686
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
 /// A faction became visible in the reputation pane (VERIFIED vmangos `Opcodes_1_12_1.h`: 291,
 /// sender `ReputationMgr::SendVisible`) — body one `u32` reputation-list slot. The server sets the
@@ -88,8 +95,18 @@ pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
 /// [`super::ServerPacket::CompressedMoves`].
 pub const SMSG_COMPRESSED_MOVES: u16 = 0x02FB;
 pub const SMSG_LOGIN_VERIFY_WORLD: u16 = 0x0236;
-// The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
-// 631/632/722).
+/// The account's tutorial bank (wow-re `tutorial-flags.md` §7, decision 1976): every remaining
+/// byte of the body is the bank, both of the client's banks copied from it — vmangos sends 32
+/// bytes (256 bits) after the login. Until it lands no tutorial can fire.
+pub const SMSG_TUTORIAL_FLAGS: u16 = 0x00FD; // 253
+/// `FlagTutorial(n)` and the six auto-acknowledge sites (§5/§6, 1976): one `u32`, the 0-based id.
+pub const CMSG_TUTORIAL_FLAG: u16 = 0x00FE; // 254
+/// `ClearTutorials()` (§6, 1976): EMPTY — every bit set locally and on the server.
+pub const CMSG_TUTORIAL_CLEAR: u16 = 0x00FF; // 255
+/// `ResetTutorials()` (§6, 1976): EMPTY — every bit cleared locally and on the server.
+pub const CMSG_TUTORIAL_RESET: u16 = 0x0100; // 256
+                                             // The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
+                                             // 631/632/722).
 pub const SMSG_PLAY_MUSIC: u16 = 0x0277;
 pub const SMSG_PLAY_OBJECT_SOUND: u16 = 0x0278;
 pub const SMSG_PLAY_SOUND: u16 = 0x02D2;
@@ -198,6 +215,30 @@ pub const SMSG_PET_CAST_FAILED: u16 = 0x0138; // 312
 /// and a trailing float the server `read_skip`s (VERIFIED vmangos `Opcodes_1_12_1.h`: 713;
 /// `MoveSplineDone::ReadFromWorldPacket`).
 pub const CMSG_MOVE_SPLINE_DONE: u16 = 0x02C9; // 713
+/// The client's report that its movement clock **skipped** — a stall, a long frame, a window that
+/// went to the background — carrying the mover and how many milliseconds went missing (VERIFIED
+/// vmangos `Opcodes_1_12_1.h`: 718). Body in [`super::client::move_time_skipped`].
+///
+/// vmangos adds the reported `lag` to the mover's `stime`/`ctime` so its own movement clock stays
+/// aligned with ours — **and hangs a 1.12-specific transport fix off it**: a player whose last
+/// movement packet was the *first* one carrying `MOVEFLAG_ONTRANSPORT` is flagged `JustBoarded`,
+/// and the next `CMSG_MOVE_TIME_SKIPPED` makes the server re-send that transport's out-of-range
+/// update followed by a fresh create (`HandleMoveTimeSkippedOpcode`,
+/// `Handlers/MovementHandler.cpp:989-1019`, comment *"fix an 1.12 client problem with
+/// transports"*). A client that never sends this never gets that refresh. Decision 1935.
+pub const CMSG_MOVE_TIME_SKIPPED: u16 = 0x02CE; // 718
+/// The **broadcast twin** of [`CMSG_MOVE_TIME_SKIPPED`] (VERIFIED vmangos `Opcodes_1_12_1.h`: 793):
+/// the server relays one mover's skip to everyone watching it, so their copies of that unit's
+/// movement clock move with it (`MovementHandler.cpp:1011-1017`, packed guid + the same `u32`).
+///
+/// **Not ignorable.** The reference registers a handler for it (`0x6035e0` → `0x603b40`) that reads
+/// a packed guid, resolves under `TYPEMASK_UNIT`, and adds the lag to `[CMovement+0xac]` — the
+/// observed unit's last-seen **wire** movement timestamp, the monotonic maximum the relay chain
+/// hangs off (`0x601560` → `0x61ab90`). That cell is benilla-app's relay-chain `last_wire_ms`
+/// (`net::motion::relay::RelayChain`, decision 0615, which models `+0xa8`/`+0xac` by name). Drop the packet and the chain's copy stays `lag` ms short of the sender's
+/// forever: the mover's next real packet then reads as a step `lag` too large and is scheduled
+/// that much late — a hitch on that unit, not a lost packet. Decision 1935.
+pub const MSG_MOVE_TIME_SKIPPED: u16 = 0x0319; // 793
 pub const SMSG_ATTACKSTART: u16 = 0x0143; // 323
 pub const SMSG_ATTACKSTOP: u16 = 0x0144; // 324
 pub const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A; // 330
@@ -210,6 +251,10 @@ pub const SMSG_AI_REACTION: u16 = 0x013C; // 316
 pub const SMSG_SPELL_START: u16 = 0x0131; // 305
 pub const SMSG_SPELL_GO: u16 = 0x0132; // 306
 pub const SMSG_PLAY_SPELL_VISUAL: u16 = 0x01F3; // 499
+/// The guild tabard designer's two-way pair (decision 1977; bodies in [`super::tabard`]): the
+/// vendor activation that opens the frame, and the save whose reply is a six-row result.
+pub const MSG_SAVE_GUILD_EMBLEM: u16 = 0x01F1; // 497
+pub const MSG_TABARDVENDOR_ACTIVATE: u16 = 0x01F2; // 498
 pub const SMSG_CANCEL_AUTO_REPEAT: u16 = 0x029C; // 668
 pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 
@@ -227,6 +272,21 @@ pub const SMSG_ITEM_COOLDOWN: u16 = 0x00B0; // 176
 pub const SMSG_COOLDOWN_EVENT: u16 = 0x0135; // 309
 pub const SMSG_CLEAR_COOLDOWN: u16 = 0x01DE; // 478
 pub const SMSG_COOLDOWN_CHEAT: u16 = 0x01E1; // 481
+
+/// `SMSG_ITEM_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 490) — the
+/// remaining lifetime, in **seconds**, of one duration-limited item instance (a conjured stone, a
+/// holiday gift, a timed quest item). Shares its handler with
+/// [`SMSG_ITEM_ENCHANT_TIME_UPDATE`]: both read an 8-byte item guid first and then fork on the
+/// opcode (`0x5e4f69 sub eax,0x1ea ; je …` / `0x5e4f74 dec eax` — wow-re
+/// `ui/scratch/weapon-enchant-info.md` §7).
+///
+/// The item's own `ITEM_FIELD_DURATION` (wire field 15) carries the same number and is sent to the
+/// owner, but vmangos's writer says in as many words that it is not what the client displays —
+/// *"Though the client has the information in the item's data field, we have to send
+/// SMSG_ITEM_TIME_UPDATE to display the remaining time"* (`Item::SendTimeUpdate`,
+/// `Objects/Item.cpp:1094`). Same shape as the enchant countdown (decision 0920): a client-local
+/// deadline whose only feed is the packet. Body in [`super::items::read_item_time`]; decision 1933.
+pub const SMSG_ITEM_TIME_UPDATE: u16 = 0x01EA; // 490
 
 /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 491) — the **only** source
 /// of a temporary enchant's remaining time. The item's `ITEM_FIELD_ENCHANTMENT` duration field is
@@ -302,6 +362,10 @@ pub const CMSG_CHAR_CREATE: u16 = 0x0036;
 pub const CMSG_CHAR_ENUM: u16 = 0x0037;
 pub const CMSG_PLAYER_LOGIN: u16 = 0x003D;
 pub const CMSG_LOGOUT_REQUEST: u16 = 0x004B;
+/// The forced logout (`ForceLogout 0x48ab50`, decision 1963): the same session dispatcher as
+/// `Logout`/`Quit` with `force = 1`, which turns the opcode from `0x4B` into `0x4A` and bypasses
+/// the pending-logout latch. Empty body (wow-re `staticpopup-dialog-bindings.md` §4).
+pub const CMSG_PLAYER_LOGOUT: u16 = 0x004A; // 74
 /// 78 — call off a pending logout (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body; answered by
 /// [`SMSG_LOGOUT_CANCEL_ACK`]. The CAMP/QUIT dialog's Cancel (decision 0674).
 pub const CMSG_LOGOUT_CANCEL: u16 = 0x004E;
@@ -365,6 +429,17 @@ pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
 /// guid** (`HandleOpenItemOpcode` → `SendLoot(item, LOOT_CORPSE)`), so the loot window opens over
 /// a thing in your bag rather than a corpse in the world.
 pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
+/// Wrap an item in a piece of gift wrapping (VERIFIED vmangos `Opcodes_1_12_1.h`: 467). Body in
+/// [`super::items::wrap_item`]: `giftBag`, `giftSlot`, `itemBag`, `itemSlot` — the **paper first**,
+/// then the thing being wrapped.
+///
+/// The other half of the gift arc: [`CMSG_OPEN_ITEM`] above *unwraps* one, and this is how a gift
+/// gets made. Right-clicking a `ITEM_FLAG_WRAPPER` template whose instance is **not** already
+/// wrapped sends nothing at all — it arms a purely local wrap cursor (`0x5edea0`: the item lock
+/// `0x4953e0` @`0x5edeb5` + `CursorSetMode(2)`, disarmed by `0x5eded0` from inside `ClearCursor`;
+/// wow-re `ui/scratch/right-click-open.md`, use-dispatcher arm 2, VERIFIED) — and *this* opcode
+/// goes out when the armed cursor is then clicked on a target. Decision 1934.
+pub const CMSG_WRAP_ITEM: u16 = 0x01D3; // 467
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 177. Body in [`super::gameobj_use`] — a full guid, the
 /// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
 /// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.
@@ -535,6 +610,9 @@ pub const CMSG_INSPECT: u16 = 0x0114; // 276
 /// Same three silent refusals as [`CMSG_INSPECT`] (`MiscHandler.cpp:962-972`), but *unlike* it
 /// this handler does not set our selection. Decision 1512.
 pub const MSG_INSPECT_HONOR_STATS: u16 = 0x02D6; // 726
+/// The NPC-click ladder's BATTLEMASTER arm (`0x5e01a0`): a `u64` NPC guid, no gate; the server
+/// answers with `SMSG_BATTLEFIELD_LIST` (decision 1977 retires 1861's greeting stand-in).
+pub const CMSG_BATTLEMASTER_HELLO: u16 = 0x02D7; // 727
 pub const CMSG_SET_SELECTION: u16 = 0x013D; // 317
 pub const CMSG_ATTACKSWING: u16 = 0x0141; // 321
 pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
@@ -923,6 +1001,98 @@ pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 /// `0x48dc40` → `0x5df980`): both directions run through one range-gated function, whose outbound
 /// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
+/// `SMSG_RAID_GROUP_ONLY` (wow-re `staticpopup-dialog-bindings.md` §5.2): `u32 delayMs`,
+/// `u32 reason`. Every arrival fires an instance-boot event — START for a positive delay, STOP
+/// for zero — and a zero delay with reason 1/2 also shows `ERR_RAID_GROUP_ONLY`/`_FULL`
+/// (decision 1963).
+pub const SMSG_RAID_GROUP_ONLY: u16 = 0x0286; // 646
+/// The battleground queue's slot update (§7): `u32 slot`, `u32 mapId`, `u8 bracket`, `u32`,
+/// `u32 status`, then `u32` when status is 2 and two `u32` when it is 3; fires
+/// `UPDATE_BATTLEFIELD_STATUS` (decision 1963).
+pub const SMSG_BATTLEFIELD_STATUS: u16 = 0x02D4; // 724
+/// `AcceptBattlefieldPort(index, accept)`'s packet (§7): `u32 mapId` (the slot's Map.dbc row),
+/// `u8 accept` (decision 1963).
+pub const CMSG_BATTLEFIELD_PORT: u16 = 0x02D5; // 725
+/// The battleground scoreboard, both ways (wow-re `battlefield-verb-family.md` §4.3/§5.1, 1972):
+/// the client's `RequestBattlefieldScoreData` sends it EMPTY (throttled to 5000 ms client-side);
+/// the server's answer is `u8 ended`, `u8 winner` only when ended, `u32 count`, then per row
+/// `u64 guid, u32 rank, u32 killingBlows, u32 honorableKills, u32 deaths, u32 honorGained,
+/// u32 statCount, statCount × u32` (the client stores at most eight). Fires
+/// `UPDATE_BATTLEFIELD_SCORE` once every row's name resolves.
+pub const MSG_PVP_LOG_DATA: u16 = 0x02E0; // 736
+/// `LeaveBattlefield()`'s packet (§5.3, 1972): `u32 mapId` of the battleground the client is in,
+/// sent only once the scoreboard's "ended" byte has arrived.
+pub const CMSG_LEAVE_BATTLEFIELD: u16 = 0x02E1; // 737
+/// The battleground teammate positions, both ways (wow-re `worldmap-arrow-and-positions.md` §3.1,
+/// 1980): `RequestBattlefieldPositions()` sends it EMPTY (5000 ms throttle, only with an active
+/// slot); the server's answer is `u32 count`, `count × (u64 guid, f32 x, f32 y)`, then
+/// `u8 hasCarrier` and, when set, one `(u64 guid, f32 x, f32 y)` flag carrier. No event fires on
+/// arrival — the UI polls.
+pub const MSG_BATTLEGROUND_PLAYER_POSITIONS: u16 = 0x02E9; // 745
+/// `ShowBattlefieldList(index)`'s packet (wow-re `battlefield-verb-family.md` §5, 1974): `u32 mapId`
+/// of a QUEUED slot — the battlemaster-less way to reopen the instance list.
+pub const CMSG_BATTLEFIELD_LIST: u16 = 0x023C; // 572
+/// The battleground instance list (§4.1, 1974): `u64 battlemaster` (zero when the list was not
+/// opened at an NPC), `u32 mapId`, `u8 bracket`, `u32 count`, `count × u32 instanceId`. Fires
+/// `BATTLEFIELDS_SHOW`; the cached battlemaster guid decides which join opcode a later
+/// `JoinBattlefield` sends.
+pub const SMSG_BATTLEFIELD_LIST: u16 = 0x023D; // 573
+/// `JoinBattlefield`'s packet when the list arrived WITHOUT a battlemaster (§5.2, 1974): `u32 mapId`,
+/// `u32 instanceId` (0 = first available), `u8 asGroup`.
+pub const CMSG_BATTLEFIELD_JOIN: u16 = 0x023E; // 574
+/// `JoinBattlefield`'s packet when the list arrived from a battlemaster (§5.2, 1974): `u64 guid`,
+/// `u32 mapId`, `u32 instanceId` (0 = first available), `u8 asGroup`.
+pub const CMSG_BATTLEMASTER_JOIN: u16 = 0x02EE; // 750
+/// The world-enter status request (§5/§8, 1974): EMPTY; the server answers with one
+/// `SMSG_BATTLEFIELD_STATUS` per live queue slot.
+pub const CMSG_BATTLEFIELD_STATUS: u16 = 0x02D3; // 723
+/// A group join's verdict (§4.4, 1974): `u32 result` — `0xFFFFFFFE` deserters (message 439), a
+/// Map.dbc id joined (440, with the map's name), anything else the generic failure (441).
+pub const SMSG_GROUP_JOINED_BATTLEGROUND: u16 = 0x02E8; // 744
+/// A player joined the battleground (§4.5, 1974): `u64 guid`, printed as message 444 once the name
+/// cache answers.
+pub const SMSG_BATTLEGROUND_PLAYER_JOINED: u16 = 0x02EC; // 748
+/// A player left the battleground (§4.5, 1974): `u64 guid`, message 445.
+pub const SMSG_BATTLEGROUND_PLAYER_LEFT: u16 = 0x02ED; // 749
+/// The area spirit healer query the client sends when it adopts a new healer (§6): `u64 guid`;
+/// answered by [`SMSG_AREA_SPIRIT_HEALER_TIME`] (decision 1963).
+pub const CMSG_AREA_SPIRIT_HEALER_QUERY: u16 = 0x02E2; // 738
+/// `AcceptAreaSpiritHeal()`'s packet (§6): `u64 guid`, the CACHED current-area healer, never an
+/// argument (decision 1963).
+pub const CMSG_AREA_SPIRIT_HEALER_QUEUE: u16 = 0x02E3; // 739
+/// The healer's next-resurrection clock (§6): `u64 guid`, `u32 ms`; a match against the cached
+/// healer with a positive time arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`
+/// (decision 1963).
+pub const SMSG_AREA_SPIRIT_HEALER_TIME: u16 = 0x02E4; // 740
+/// `CancelMeetingStoneRequest()`'s packet (§8): EMPTY. Gated client-side on party leadership
+/// only; clears nothing — the server's `0x295` reply does (decision 1963). The emulators' name
+/// for this number does not line up with the client's block; the number is what is verified.
+pub const CMSG_MEETINGSTONE_LEAVE: u16 = 0x0293; // 659
+/// The meeting-stone queue state (§8): `u32 areaId`, `u8 status`; stored unconditionally, a
+/// status message per value, then `MEETINGSTONE_CHANGED` (decision 1963).
+pub const SMSG_MEETINGSTONE_SETQUEUE: u16 = 0x0295; // 661
+/// The enter-world "what is my meeting-stone status" query (wow-re `meeting-stone-status.md`
+/// §6, 1974): EMPTY, sent once per world session right after the status text resets to the
+/// localized `UNKNOWN`; the server answers with `0x295`. The emulators' names for this block do
+/// not line up with the client's; the numbers are what is verified.
+pub const CMSG_MEETINGSTONE_STATUS_QUERY: u16 = 0x0296; // 662
+/// Display-only (§9): empty; `ERR_MEETING_STONE_SUCCESS` (1974).
+pub const SMSG_MEETINGSTONE_SUCCESS: u16 = 0x0297; // 663
+/// Display-only (§9): empty; `ERR_MEETING_STONE_IN_PROGRESS` (1974).
+pub const SMSG_MEETINGSTONE_IN_PROGRESS: u16 = 0x0298; // 664
+/// Display-only (§9): `u64 guid`; `ERR_MEETING_STONE_MEMBER_ADDED_S` with the name once the name
+/// cache answers, nothing on a miss that never resolves (1974).
+pub const SMSG_MEETINGSTONE_MEMBER_ADDED: u16 = 0x0299; // 665
+/// Display-only (§9): `u8 code` — `1` must-be-leader, `2` group full, `3` no raid group, anything
+/// else nothing (1974).
+pub const SMSG_MEETINGSTONE_JOIN_FAILED: u16 = 0x02BB; // 699
+/// `ConfirmPetUnlearn()`'s packet (§9): `u64 trainerGuid`, the latch — never an argument
+/// (decision 1963).
+pub const CMSG_PET_UNLEARN: u16 = 0x02F0; // 752
+/// The pet trainer's question (§9): `u64 trainerGuid`, `u32 costCopper` — latched, then
+/// `CONFIRM_PET_UNLEARN(cost)`; a zero guid shows `ERR_TALENT_WIPE_ERROR` instead (the reference
+/// re-uses the talent-wipe string there) (decision 1963).
+pub const SMSG_PET_UNLEARN_CONFIRM: u16 = 0x02F1; // 753
 
 /// The player-summon pair — the question and the accept (VERIFIED vmangos `Opcodes_1_12_1.h`:
 /// 683/684 + `Opcodes.cpp`'s `HandleSummonResponseOpcode` registration; decision 1747). A
@@ -1093,6 +1263,10 @@ pub const CMSG_FRIEND_LIST: u16 = 0x0066; // 102
 pub const SMSG_FRIEND_LIST: u16 = 0x0067; // 103
 pub const SMSG_FRIEND_STATUS: u16 = 0x0068; // 104
 pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
+/// The client's LFG slots and comment (wow-re `lfg-set-get-law.md`: written into a `CDataStore`
+/// at exactly one site image-wide, `0x4e8948`; no registered handler answers it). The name is
+/// the emulators' — the value and its site are the bytes'.
+pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108

@@ -117,16 +117,21 @@ mod sound;
 mod target;
 mod textinput;
 mod transport;
+mod tutorial;
 mod ui_action;
 mod ui_auction;
 mod ui_aura;
 mod ui_bank;
+mod ui_battlefield;
+mod ui_battlefield_positions;
+mod ui_battlefield_score;
 mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;
 mod ui_char;
 mod ui_chat;
 mod ui_craft;
+mod ui_dialog_verbs;
 mod ui_dressup;
 mod ui_duel;
 mod ui_follow;
@@ -168,6 +173,7 @@ mod ui_social;
 mod ui_spellbook;
 mod ui_stable;
 mod ui_summon;
+mod ui_tabard;
 mod ui_talent;
 mod ui_talent_wipe;
 mod ui_taxi;
@@ -211,15 +217,20 @@ use sound::SoundPlugin;
 use target::TargetPlugin;
 use textinput::TextInputPlugin;
 use transport::TransportPlugin;
+use tutorial::TutorialPlugin;
 use ui_action::UiActionPlugin;
 use ui_auction::UiAuctionPlugin;
 use ui_aura::UiAuraPlugin;
 use ui_bank::UiBankPlugin;
+use ui_battlefield::BattlefieldPlugin;
+use ui_battlefield_positions::BattlefieldPositionsPlugin;
+use ui_battlefield_score::BattlefieldScorePlugin;
 use ui_binder::UiBinderPlugin;
 use ui_cast::UiCastPlugin;
 use ui_char::UiCharPlugin;
 use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
+use ui_dialog_verbs::UiDialogVerbsPlugin;
 use ui_duel::UiDuelPlugin;
 use ui_follow::UiFollowPlugin;
 use ui_gm_ticket::UiGmTicketPlugin;
@@ -253,6 +264,7 @@ use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_stable::UiStablePlugin;
 use ui_summon::UiSummonPlugin;
+use ui_tabard::TabardUiPlugin;
 use ui_talent::UiTalentPlugin;
 use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -423,7 +435,11 @@ pub fn run(build: BuildId) -> AppExit {
         // border texture's native 128×32 — directly diffable against the decoded BLP. Sized
         // per-capture off WOW_CAPTURE.
         resolution: video::at_requested_dpi(
-            if capturing && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1") {
+            // Same opt-in as the UI load itself (`ui_script::lifecycle::ui_wanted`): a scenario
+            // that declares a `ui:` fixture sizes its window for the window it photographs, with
+            // or without the env var. The two must agree — a UI loaded into a world-sized window
+            // is a capture of the right content at the wrong size.
+            if capturing && crate::run_mode::capture_ui_opted_in() {
                 // `$WOW_WIN` overrides here too — the resolution-A/B instrument for UI scenarios (a
                 // scale-dependent text bug looks fine at the scenario's default size and truncates at
                 // fullscreen heights).
@@ -655,6 +671,13 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // The dialog engine's own verbs (decision 1963): the pet trainer's question, the instance
+    // boot clock, the area spirit healer, the battleground queue, the meeting stone.
+    .add_plugins(UiDialogVerbsPlugin)
+    .add_plugins(BattlefieldScorePlugin)
+    .add_plugins(BattlefieldPlugin)
+    .add_plugins(BattlefieldPositionsPlugin)
+    .add_plugins(TutorialPlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.
@@ -730,7 +753,7 @@ pub fn run(build: BuildId) -> AppExit {
     // in shape — a guid-carrying question over an already-closed gossip menu.
     .add_plugins(UiTalentWipePlugin)
     // The stance/shapeshift bar feed (wow-re shapeshift-bar-api.md): builds the form list from
-    // PlayerActions.spells per the byte-verified admission/order, drives StanceBar.xml through
+    // PlayerActions.spells per the byte-verified admission/order, drives the stock shapeshift bar through
     // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
     // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
     .add_plugins(UiShapeshiftPlugin)
@@ -798,6 +821,7 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(UiSavedPlugin)
     .add_plugins(NamePersistPlugin)
     .add_plugins(UiStablePlugin)
+    .add_plugins(TabardUiPlugin)
     .add_plugins(UiTrainerPlugin)
     // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the
     // NPC-session range guard, and the TaxiFrame.xml window feed/drain (catalogs, node
@@ -810,11 +834,11 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(UiLootPlugin)
     .add_plugins(UiLootRollPlugin)
     // The questgiver window (decision 0088): fills from the net drain's QuestGiver and drives
-    // QuestFrame.xml's four sub-panels over the Era quest API.
+    // the stock questgiver window's four sub-panels over the Era quest API (1944).
     .add_plugins(UiQuestPlugin)
     // The quest-log window (decision 0088's deferred second slice): fills from the self player's
     // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
-    // QuestLogFrame.xml over the Era quest-log API.
+    // the stock quest log over the Era quest-log API (1944).
     .add_plugins(UiQuestLogPlugin)
     // The party quest-share (decision 1733): the verdict lines on a quest we pushed, and the
     // escort-quest confirm. Neither is bound to a window, so it is its own plugin rather than a
