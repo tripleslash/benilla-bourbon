@@ -24,11 +24,10 @@ use bevy::prelude::*;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::effect::volume_control::{VolumeControlBuilder, VolumeControlHandle};
 use kira::listener::ListenerHandle;
-// kira drops its whole streaming module on wasm32 (no decode threads there — `sound.rs`'s own
-// `#[cfg(not(target_arch = "wasm32"))]` on `pub mod streaming`), so the type only exists to
-// import on native. The wasm32 stand-ins live just below the `pub(crate) use` block they replace.
-#[cfg(not(target_arch = "wasm32"))]
-use kira::sound::streaming::StreamingSoundData;
+// The decode error the streaming types are parameterised on. It lives in `kira::sound`, not in
+// `kira::sound::streaming` — which kira drops entirely on wasm32 (no decode threads there:
+// `sound.rs`'s own `#[cfg(not(target_arch = "wasm32"))]` on `pub mod streaming`) — so this one
+// import is unconditional and the wasm32 stand-ins below can wear the same name.
 use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
 use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
@@ -79,8 +78,11 @@ pub(crate) use benilla_formats::SoundProvider;
 // for removal — which lands once the track's sounds finish, see `play_3d`'s
 // `persist_until_sounds_finish`, so a fade-then-drop still gets to fade).
 pub(crate) use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+// Crate-visible on native too: the music slot and the cinematic channel both split their opens
+// into a read head and a play tail (the browser decodes in between), and the tail names the type
+// it is handed.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use kira::sound::streaming::StreamingSoundHandle;
+pub(crate) use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 pub(crate) use kira::track::SpatialTrackHandle;
 
 /// wasm32's stand-in for [`StreamingSoundData`]/[`StreamingSoundHandle`]: kira has no decode
@@ -838,6 +840,15 @@ pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<Fro
     StaticSoundData::from_cursor(std::io::Cursor::new(bytes))
         .map(|data| StreamingSoundData(data, std::marker::PhantomData))
         .context("opening stream")
+}
+
+/// wasm32: PCM the **browser** decoded ([`super::web_decode`]), wearing the streaming type the
+/// music slot's callers name. No decode happens here — that is the entire point; this is the
+/// wrapper [`stream_from_bytes`] puts on after its own synchronous decode, made reachable on its
+/// own so the decode can happen somewhere other than the frame.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn stream_from_decoded(data: StaticSoundData) -> StreamingSoundData<FromFileError> {
+    StreamingSoundData(data, std::marker::PhantomData)
 }
 
 /// Compressed-audio source whose reads promote the calling thread — the stream-decode QoS fix

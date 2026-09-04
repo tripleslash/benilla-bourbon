@@ -198,6 +198,24 @@ pub(super) struct ZoneAudio {
     /// it was asked to arrive with. `ambience_kit` is already committed when this is set, so the
     /// retry re-enters the bed player directly rather than going back through the swap's edge check.
     ambience_pending: Option<(u32, String, f32, u64)>,
+    /// **The browser's decode in flight for the music slot** — the second half of the same wait
+    /// [`Self::music_pending`] is the first half of.
+    ///
+    /// Deferring the *read* took the fetch off the frame and left the decode on it, and on this
+    /// target the decode is the bigger number: kira has no streaming module on wasm32, so
+    /// `stream_from_bytes` decodes a whole multi-megabyte track up front, measured at ~91 ms for
+    /// a 1.1 MB tavern MP3 against ~60 ms for its fetch. The bytes now go to the browser instead
+    /// ([`super::web_decode`]) and the slot opens on the frame the PCM comes back.
+    ///
+    /// Carries the same pick the read latch does, for the same reason: nothing is re-decided
+    /// while a wait is in progress.
+    #[cfg(target_arch = "wasm32")]
+    music_decode: Option<(u32, String, f32, super::web_decode::Pending)>,
+    /// [`Self::music_decode`] for the ambience bed, carrying the fade it was asked to arrive
+    /// under as well. The bed absorbs the extra frames by construction — its incoming leg is a
+    /// per-frame envelope that simply starts later.
+    #[cfg(target_arch = "wasm32")]
+    ambience_decode: Option<(u32, String, f32, u64, super::web_decode::Pending)>,
     /// Intro throttle: intro row id → last-played time (secs), against `MinDelayMinutes`.
     intro_last: std::collections::HashMap<u32, f64>,
     /// The last area id acted on (change detection).
@@ -226,6 +244,10 @@ impl Default for ZoneAudio {
             ambience_fade_in: None,
             music_pending: None,
             ambience_pending: None,
+            #[cfg(target_arch = "wasm32")]
+            music_decode: None,
+            #[cfg(target_arch = "wasm32")]
+            ambience_decode: None,
             intro_last: std::collections::HashMap::new(),
             area: None,
             interior: None,
@@ -640,16 +662,25 @@ fn open_music_stream(
     if config.music_suppressed {
         return false;
     }
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    // Checked, not borrowed: the mixer is taken by the tail ([`play_music_data`]), which on this
+    // target runs frames later. No point reading a track for a device that is not there.
+    if out.mixer.is_none() {
         return false;
-    };
+    }
     let bytes = match assets.chain.lock_recover().try_read(&path) {
         TryRead::Ready(bytes) => bytes,
         // Not in memory yet (web only): the read has started the warm. Remember the pick — file and
         // all — so the retry opens this track rather than re-rolling the kit, and leave the frame.
+        //
+        // **`true`, not `false`** — the slot IS taken, by a track that has not started yet. The
+        // caller reads this as "did this track get the slot?", and answering `false` would let the
+        // zone track start on the same edge and overwrite the latch the fanfare just made, so the
+        // fanfare could never play on this target. The **disclosed divergence** is the other side
+        // of that coin: `MinDelayMinutes` is stamped when the load starts rather than when the
+        // track sounds, so a load that fails consumes the cooldown.
         TryRead::Pending => {
             zone.music_pending = Some((kit_id, path, kit_vol));
-            return false;
+            return true;
         }
         TryRead::Missing => {
             warn!("zone music: {path} — not readable from the patch chain");
@@ -658,12 +689,50 @@ fn open_music_stream(
         }
     };
     zone.music_pending = None;
-    let data = match mixer::stream_from_bytes(bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("zone music: {path} — {e:#}");
-            return false;
-        }
+    // The browser decodes it (`super::web_decode`) and [`retry_deferred`] opens the slot on the
+    // frame the PCM lands. This is the decode half of the same wait the read half above just
+    // finished: a whole track decoded here would cost more frame than the fetch did.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.music_decode = Some((
+            kit_id,
+            path,
+            kit_vol,
+            super::web_decode::begin(bytes, false),
+        ));
+        // `true` for the same reason the `Pending` arm above answers `true`: the slot is spoken
+        // for, by a track a few frames away.
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let data = match mixer::stream_from_bytes(bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("zone music: {path} — {e:#}");
+                return false;
+            }
+        };
+        play_music_data(zone, out, config, kit_id, &path, kit_vol, data)
+    }
+}
+
+/// The tail of [`open_music_stream`]: a **decoded** track into the slot.
+///
+/// Split out because on the web target the decode happens between the two halves, off the frame —
+/// so the tail has to be reachable from [`retry_deferred`] as well. The slot's guards were checked
+/// by the head and are not re-checked here: this is one open, not two.
+fn play_music_data(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    config: &SoundConfig,
+    kit_id: u32,
+    path: &str,
+    kit_vol: f32,
+    data: mixer::StreamingSoundData<kira::sound::FromFileError>,
+) -> bool {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return false;
     };
     let start_amp = config.category_amp(SoundCategory::Music) * kit_vol;
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(start_amp))) {
@@ -711,6 +780,12 @@ fn swap_ambience(
     zone.ambience_kit = kit_id;
     zone.ambience_fade_in = None;
     zone.ambience_pending = None;
+    // A decode still running for the bed we just swapped away from is abandoned here rather than
+    // left to be refused when it lands: the same drop the read latch above gets, one wait later.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.ambience_decode = None;
+    }
     if kit_id == 0 {
         return;
     }
@@ -758,9 +833,13 @@ fn play_ambience_bed(
     fade_ms: u64,
     now: f64,
 ) {
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    // Checked, not borrowed — the mixer is the tail's ([`play_ambience_data`]), and so are the
+    // config and the clock: on the page they are read frames later, when the bed actually opens.
+    if out.mixer.is_none() {
         return;
-    };
+    }
+    #[cfg(target_arch = "wasm32")]
+    let (_, _) = (config, now);
     let bytes = match assets.chain.lock_recover().try_read(&path) {
         TryRead::Ready(bytes) => bytes,
         // Not in memory yet (web only) — latch the pick and the fade it asked for, and let the
@@ -777,14 +856,51 @@ fn play_ambience_bed(
         }
     };
     zone.ambience_pending = None;
-    // A static loop, NOT a stream: streaming loop beds die at EOF (mixer::loop_from_bytes docs).
-    let data = match mixer::loop_from_bytes(bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("ambience: {path} — {e:#}");
-            return;
-        }
+    // The decode goes to the browser and the bed opens on the frame the PCM lands — `true` is the
+    // whole-file loop `loop_from_bytes` applies on the synchronous path. The crossfade absorbs the
+    // extra frames: its incoming leg is a per-frame envelope that simply starts later.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.ambience_decode = Some((
+            kit_id,
+            path,
+            kit_vol,
+            fade_ms,
+            super::web_decode::begin(bytes, true),
+        ));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // A static loop, NOT a stream: streaming loop beds die at EOF (mixer::loop_from_bytes docs).
+        let data = match mixer::loop_from_bytes(bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("ambience: {path} — {e:#}");
+                return;
+            }
+        };
+        play_ambience_data(zone, out, config, kit_id, &path, kit_vol, fade_ms, now, data);
+    }
+}
+
+/// The tail of [`play_ambience_bed`]: a **decoded** bed into the slot. Split for the same reason
+/// [`play_music_data`] is — on the web target the decode happens between the halves, off the frame.
+#[allow(clippy::too_many_arguments)]
+fn play_ambience_data(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    config: &SoundConfig,
+    kit_id: u32,
+    path: &str,
+    kit_vol: f32,
+    fade_ms: u64,
+    now: f64,
+    data: mixer::StaticSoundData,
+) {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return;
     };
+    let _ = kit_id;
     // Start silent and let the per-frame envelope ramp it up (the fade-in leg of the crossfade).
     let start_amp = if fade_ms > 0 {
         0.0
@@ -836,6 +952,46 @@ fn retry_deferred(
         // and a swap to silence cleared it. Either way `take` above is the drop.
         if kit == zone.ambience_kit {
             play_ambience_bed(zone, out, assets, config, kit, path, kit_vol, fade_ms, now);
+        }
+    }
+    // The decode half of the same wait (`super::web_decode`). Polled here rather than woken by a
+    // callback for the reason the read half is: this system already runs every frame, and a poll
+    // of an `Option` is cheaper than the machinery a callback would need to reach a `NonSend`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some((kit, path, kit_vol, mut pending)) = zone.music_decode.take() {
+            match pending.take() {
+                None => zone.music_decode = Some((kit, path, kit_vol, pending)),
+                Some(Ok(data)) => {
+                    // Re-checked here and not assumed: a cinematic that started during the decode
+                    // must still silence the track, which is the same rule the read half follows.
+                    if !config.music_suppressed {
+                        play_music_data(
+                            zone,
+                            out,
+                            config,
+                            kit,
+                            &path,
+                            kit_vol,
+                            mixer::stream_from_decoded(data),
+                        );
+                    }
+                }
+                Some(Err(e)) => warn!("zone music: {path} — {e}"),
+            }
+        }
+        if let Some((kit, path, kit_vol, fade_ms, mut pending)) = zone.ambience_decode.take() {
+            match pending.take() {
+                None => zone.ambience_decode = Some((kit, path, kit_vol, fade_ms, pending)),
+                Some(Ok(data)) => {
+                    if kit == zone.ambience_kit {
+                        play_ambience_data(
+                            zone, out, config, kit, &path, kit_vol, fade_ms, now, data,
+                        );
+                    }
+                }
+                Some(Err(e)) => warn!("ambience: {path} — {e}"),
+            }
         }
     }
 }

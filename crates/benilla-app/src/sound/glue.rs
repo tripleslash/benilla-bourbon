@@ -52,7 +52,27 @@ struct GlueMusic {
     /// so a live `MusicVolume` change cannot stomp the ramp back up to full mid-fade — the hazard
     /// [`super::zone`]'s ambience crossfade documents from the other side.
     fading: bool,
+    /// **wasm32: the theme's load in flight.** The login screen is where this client's first
+    /// audio happens, and it was the last whole-file blocking read left in the sound engine: a
+    /// synchronous fetch of a multi-megabyte MP3 followed by a whole-file wasm decode, both on
+    /// the frame, taken from a per-frame system on the screen the player is looking at. It now
+    /// takes the same two-step wait the zone soundscape takes — `Chain::try_read` for the bytes,
+    /// [`super::web_decode`] for the PCM — and the stream starts on the frame it lands.
+    #[cfg(target_arch = "wasm32")]
+    decode: Option<super::web_decode::Pending>,
+    /// wasm32: a load that failed does not retry every frame — [`start_glue_music`] is per-frame,
+    /// so an unguarded failure would fire a fresh request on each one. It retries after
+    /// [`GLUE_MUSIC_RETRY`].
+    #[cfg(target_arch = "wasm32")]
+    retry_at: Option<bevy::platform::time::Instant>,
 }
+
+/// wasm32: how long a failed theme load waits before the next attempt. The failure this guards is
+/// a *permanent* one — a file the container does not hold, a decode nothing accepts — where the
+/// per-frame start would otherwise mean one request per frame for as long as the player sits on
+/// the login screen.
+#[cfg(target_arch = "wasm32")]
+const GLUE_MUSIC_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Default for GlueMusic {
     fn default() -> Self {
@@ -60,6 +80,59 @@ impl Default for GlueMusic {
             handle: None,
             watch: mixer::StreamWatch::new("glue music"),
             fading: false,
+            #[cfg(target_arch = "wasm32")]
+            decode: None,
+            #[cfg(target_arch = "wasm32")]
+            retry_at: None,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl GlueMusic {
+    /// The theme's data once the browser has it. Starts the read (and then the decode) on the
+    /// first call, answers `None` while either is in flight, and hands the stream back exactly
+    /// once — the frame that happens is the frame the theme starts.
+    fn poll_or_begin(
+        &mut self,
+        assets: &WorldAssets,
+    ) -> Option<mixer::StreamingSoundData<kira::sound::FromFileError>> {
+        use benilla_formats::TryRead;
+        use bevy::platform::time::Instant;
+
+        if let Some(pending) = self.decode.as_mut() {
+            return match pending.take() {
+                None => None,
+                Some(Ok(data)) => {
+                    self.decode = None;
+                    Some(mixer::stream_from_decoded(data))
+                }
+                Some(Err(e)) => {
+                    debug!("glue music: {GLUE_MUSIC} — {e}");
+                    self.decode = None;
+                    self.retry_at = Some(Instant::now() + GLUE_MUSIC_RETRY);
+                    None
+                }
+            };
+        }
+        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        match assets.chain.lock_recover().try_read(GLUE_MUSIC) {
+            TryRead::Ready(bytes) => {
+                self.decode = Some(super::web_decode::begin(bytes, false));
+                None
+            }
+            // The pack is warming — that ask started it. Come back next frame; no backoff, because
+            // this is progress, not failure.
+            TryRead::Pending => None,
+            TryRead::Missing => {
+                // Not in the container at all: the same silence native gives, without a request a
+                // frame for the rest of the session.
+                debug!("glue music: {GLUE_MUSIC} — not readable from the patch chain");
+                self.retry_at = Some(Instant::now() + GLUE_MUSIC_RETRY);
+                None
+            }
         }
     }
 }
@@ -113,16 +186,26 @@ fn start_glue_music(
     let (Some(assets), Some(mixer_ref)) = (assets, out.mixer.as_mut()) else {
         return;
     };
-    let bytes = {
-        let chain = assets.chain.lock_recover();
-        chain.read(GLUE_MUSIC)
-    };
-    let data = match bytes.and_then(mixer::stream_from_bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            debug!("glue music: {GLUE_MUSIC} — {e:#}");
-            return;
+    // Native opens the stream inline; the page hands the fetch to the pack chain and the decode to
+    // the browser ([`GlueMusic::poll_or_begin`]) and arrives here a few frames later with the same
+    // data.
+    #[cfg(not(target_arch = "wasm32"))]
+    let data = {
+        let bytes = {
+            let chain = assets.chain.lock_recover();
+            chain.read(GLUE_MUSIC)
+        };
+        match bytes.and_then(mixer::stream_from_bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                debug!("glue music: {GLUE_MUSIC} — {e:#}");
+                return;
+            }
         }
+    };
+    #[cfg(target_arch = "wasm32")]
+    let Some(data) = music.poll_or_begin(&assets) else {
+        return;
     };
     let amp = config.category_amp(SoundCategory::Music) * GLUE_MUSIC_VOLUME;
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(amp))) {

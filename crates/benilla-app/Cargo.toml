@@ -221,7 +221,18 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Location", "Storage"] }
+# `OfflineAudioContext` + `AudioBuffer` (and the `BaseAudioContext` that carries
+# `decodeAudioData`) are the browser's decoder — `sound::web_decode`, the lane that keeps a whole
+# MP3 decode off the frame. The context is never started, so it is outside the autoplay policy and
+# cannot perturb the device the mixer owns.
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Storage",
+    "AudioBuffer",
+    "BaseAudioContext",
+    "OfflineAudioContext",
+] }
 # The browser's device, and the ONLY place the `cpal` feature is asked for: on wasm32 the owned
 # output layer cannot run (no render thread), so kira's own backend is what opens Web Audio.
 # Cargo unions features across target tables, so this adds `cpal` to the common kira above on

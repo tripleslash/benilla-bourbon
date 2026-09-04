@@ -29,6 +29,11 @@ use benilla_world::dev_state::DebugState;
 
 use super::math;
 use super::mixer::{self, StaticSoundData};
+
+/// wasm32: the decode cache's misses do not merely go silent — the play that asked is recorded
+/// against the file and replayed when it lands. Our carry; see its header.
+#[cfg(target_arch = "wasm32")]
+mod deferred;
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// Which config slider scales a channel — the WoW volume categories (master is global, on the
@@ -71,6 +76,10 @@ pub(crate) struct SoundKits {
     /// Decoded SFX by (lowercased) path — kit variations are short files, decoded once and
     /// cheaply cloned per play (the frames are shared). The client's SoundFileDataCache analogue.
     cache: HashMap<String, StaticSoundData>,
+    /// wasm32: the files on their way into [`Self::cache`], by the same key, with the plays
+    /// waiting on each ([`deferred`]). Native fills the cache inline and never has one.
+    #[cfg(target_arch = "wasm32")]
+    pending: HashMap<String, deferred::PendingSfx>,
     pick: HashMap<u32, PickState>,
     rng: Rng,
 }
@@ -703,6 +712,19 @@ pub(super) fn play_kit_ext(
     // has to learn a new one.
     let Some(data) = kits.sfx(assets, &path)? else {
         kits.prefetch_kit(assets, id);
+        // wasm32 only: the file is on its way ([`deferred`]). The shot — with the variation
+        // already drawn — replays when it lands, if it lands soon enough.
+        #[cfg(target_arch = "wasm32")]
+        kits.defer(
+            &path.to_ascii_lowercase(),
+            deferred::Deferred::Kit {
+                kit: id,
+                variant: pick,
+                pos,
+                category,
+                extras,
+            },
+        );
         return Ok(false);
     };
 
@@ -940,6 +962,15 @@ pub(crate) fn play_file(
     // Not here yet (web target): the read started the warm, so the addon's next `PlaySoundFile`
     // finds it. Silence beats a frozen frame — same trade as `play_kit_ext`.
     let Some(data) = kits.sfx(assets, path)? else {
+        // wasm32 only: in flight — replayed when it lands ([`deferred`]).
+        #[cfg(target_arch = "wasm32")]
+        kits.defer(
+            &path.to_ascii_lowercase(),
+            deferred::Deferred::File {
+                path: path.to_string(),
+                category,
+            },
+        );
         return Ok(());
     };
     let amp = config.category_amp(category);
@@ -993,6 +1024,8 @@ impl SoundKits {
         Self {
             catalog,
             cache: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            pending: HashMap::new(),
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
         }
@@ -1066,16 +1099,32 @@ impl SoundKits {
         }
         let bytes = match assets.chain.lock_recover().try_read(path) {
             TryRead::Ready(bytes) => bytes,
-            TryRead::Pending => return Ok(None),
+            TryRead::Pending => {
+                // The pack is warming. Note the wait so the play that asked can record itself
+                // against it ([`deferred`]) and be replayed rather than lost.
+                #[cfg(target_arch = "wasm32")]
+                self.begin_sfx(&key, path, None);
+                return Ok(None);
+            }
             // Deliberately vaguer than the old `read_file` error it replaces: `TryRead` collapses
             // "no such file" and "the read failed" into one arm, so claiming either specifically
             // would be a guess. Sound misses are warned, never acted on.
             TryRead::Missing => bail!("reading {path}: not readable from the patch chain"),
         };
-        let data = mixer::sfx_from_bytes(bytes)?;
-        self.cache.insert(key, data.clone());
-        DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Some(data))
+        // The bytes are here; the **decode** is the half still on the frame. On the page it goes
+        // to the browser ([`super::web_decode`]) and the shot replays when the PCM lands.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.begin_sfx(&key, path, Some(bytes));
+            return Ok(None);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let data = mixer::sfx_from_bytes(bytes)?;
+            self.cache.insert(key, data.clone());
+            DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(data))
+        }
     }
 
     /// Warm every file a kit could roll, without waiting for any of them.
@@ -1084,7 +1133,7 @@ impl SoundKits {
     /// warming only the one that just missed leaves the next roll to miss as well. A kit's files sit
     /// in the same `snd/` locality group, so this is usually one pack for the whole set. Free on
     /// native, where `prefetch` is an empty call.
-    fn prefetch_kit(&self, assets: &WorldAssets, id: u32) {
+    pub(super) fn prefetch_kit(&self, assets: &WorldAssets, id: u32) {
         let Some(kit) = self.catalog.get(id) else {
             return;
         };
@@ -1274,6 +1323,10 @@ fn evict_kit_cache(
     changes.clear();
     if let Some(mut k) = kits {
         k.cache.clear();
+        // The loads in flight go with it: they are for the map being left, and a shot recorded
+        // against one is for an event on that map. wasm32 only — native has none.
+        #[cfg(target_arch = "wasm32")]
+        k.pending.clear();
     }
 }
 
@@ -1292,6 +1345,19 @@ pub(super) fn plugin(app: &mut App) {
             OnExit(crate::char_select::ClientState::InWorld),
             stop_all_channels,
         );
+    // The web target's two: land the loads (before the pump, so a replayed shot is pumped on the
+    // frame it starts) and warm a creature's voice packs when it appears. Native has neither —
+    // nothing ever defers there.
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(
+        Update,
+        (
+            deferred::land_sfx_loads
+                .before(pump_channels)
+                .in_set(benilla_world::schedule::WorldStage::Present),
+            deferred::prewarm_creature_voices,
+        ),
+    );
 }
 
 #[cfg(test)]

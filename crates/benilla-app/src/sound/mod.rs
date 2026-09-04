@@ -55,6 +55,10 @@ mod ui;
 mod vocal;
 mod water;
 mod weather;
+// The browser's decode lane — `decodeAudioData` instead of a whole-file wasm decode on the frame.
+// Every audio path on this target reads through it; native decodes inline as it always has.
+#[cfg(target_arch = "wasm32")]
+mod web_decode;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 /// First-play kit decodes so far (`kit::DECODES`) — the probe's tail annotation.

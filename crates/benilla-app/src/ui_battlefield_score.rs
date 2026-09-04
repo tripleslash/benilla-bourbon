@@ -16,7 +16,11 @@
 //!   the queue flags — BEFORE the queue feed fires `UPDATE_BATTLEFIELD_STATUS` (§4.2's order).
 //! - **The request is throttled to 5000 ms** (§5.1) and the leave carries the active map (§5.3).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The platform clock, not std's: `std::time::Instant::now()` panics on wasm32, and these
+// deadlines are compared against `ui_battlefield`'s, which are on the same clock.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
