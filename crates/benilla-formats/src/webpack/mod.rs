@@ -48,6 +48,11 @@ pub mod resident;
 
 pub use probe::Policy;
 
+// The warm priority a name is asked for at lives in `crate::web` — it is plain string math with no
+// browser dependency, and this module compiles only on `wasm32`, so keeping it here would put its
+// law where no native test can reach it (the same reasoning that keeps `encode_name` there).
+pub use crate::web::{warm_priority, PRIORITY_GEOMETRY, PRIORITY_NORMAL};
+
 /// The container, open and ready to read: the parsed index plus the base URL its objects hang off.
 ///
 /// Deliberately holds **no bytes of game data**. Blob bytes live either in the JS-side resident map
@@ -164,7 +169,7 @@ impl PackStore {
                 Err(_) => TryRead::Missing,
             },
             None if resident::can_warm(at.pack_id) => {
-                resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
+                resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
                 TryRead::Pending
             }
             // Nothing here can warm this pack — no decode worker on this page, or this one has
@@ -198,7 +203,7 @@ impl PackStore {
         if resident::is_resident(at.pack_id) || !resident::can_warm(at.pack_id) {
             return true;
         }
-        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
+        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
         false
     }
 
@@ -215,7 +220,7 @@ impl PackStore {
         if resident::is_resident(at.pack_id) {
             return;
         }
-        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
+        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
     }
 
     /// Read a blob without blocking — the Bevy `AssetReader` lane (`benilla-assets`), which is
@@ -238,7 +243,7 @@ impl PackStore {
         // map. That is strictly better than either branch below — both of which would do the same
         // work here, on the thread that draws — so it is asked first and the rest is what happens
         // when there is no worker to ask.
-        if resident::warm(at.pack_id, &self.pack_url(at.pack_id)).await {
+        if resident::warm(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name)).await {
             if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
                 return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
             }

@@ -298,6 +298,19 @@ whole of its security: two ports, one loopback address.
   makes the rest of the pack's locality group free. `?nosw=1` unregisters the worker, putting the page
   back on the pre-worker path from the next load — how the Range/HTTP-cache fallback and
   `--no-ranges` stay exercisable.
+- **Collision is fetched first, and stood in for until it lands.** Deferred loading makes "not here
+  yet" an ordinary state of the world, and a body walking into a tile whose collider is still on the
+  wire falls through it. Three things stop that. Pack warms are **ordered**: `.adt`, `.wmo`, `.m2`,
+  `.wdt` and `.wdl` — everything carrying collision geometry or model bounds — jump the queue in
+  `web/packs.js`, and take their frame-budget slots ahead of art (`benilla_assets::frame_budget`'s
+  two lanes). An **arrival** waits for real collision under its own tile
+  (`WorldLoadProgress::focus_collidable`), and the settle hold's stall backstop no longer counts a
+  stream that is still fetching as a stalled one (`loads_in_flight`). And where geometry is genuinely
+  missing, the streamer puts up a **stand-in**: the map's WDL heightmap as a coarse floor under an
+  unloaded tile, and a WMO placement's authored MODF bounding box as a box where its building will
+  be (`terrain_stream::provisional`). Both are known before the geometry is fetched, both are on the
+  body's collision layer only, and both are retired the frame the real collider attaches. Set
+  `WOW_NO_PROVISIONAL=1` to turn the stand-ins off and see the raw behaviour.
 - **Performance** — the client is CPU-bound on its single wasm thread (Bevy's task pools are
   single-threaded on `wasm32`): ~11 ms/frame in an outdoor scene on a laptop iGPU, scaling
   with visible objects, not pixels. The Trunk link runs `wasm-opt -O3` (+6 %). Any CVar

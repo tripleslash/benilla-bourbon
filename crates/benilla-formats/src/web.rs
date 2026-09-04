@@ -10,7 +10,92 @@
 //!
 //! [`encode_name`] is plain string math with no browser dependency, so it is exercised natively
 //! (`tests/web_names.rs`); [`data_base`], [`fetch_sync`] and [`fetch_sync_range`] need `web-sys`
-//! and only compile their bodies on `wasm32`.
+//! and only compile their bodies on `wasm32`. [`warm_priority`] lives here for the first reason
+//! rather than the second: it decides the ORDER packs are fetched in, which is
+//! [`crate::webpack`]'s business — but that module compiles on `wasm32` only, and a rule this
+//! load-bearing should not be somewhere no native test can reach it.
+
+/// **Which reads the page should fetch first** — the warm priority a name is asked for at
+/// (`web/packs.js`'s `warmPack`/`prefetch`; a lower number starts sooner).
+///
+/// The container is a network, and a network has an order. At a zone boundary the client asks for
+/// one `.adt`, a handful of `.wmo` roots and groups, a few dozen `.m2`s — and, in the same frame,
+/// several hundred `.blp`s for all of them. Every one of those is a pack warm, the browser will run
+/// six at a time, and *nothing about the reads themselves says which six matter*. Before this
+/// existed the answer was arrival order, which is very nearly the worst possible one: the four
+/// objects that decide whether there is a floor under the player queue behind the art of the
+/// building they hold up, land seconds late, and the body walks onto ground that has no collider.
+///
+/// So the geometry lane goes first. What is in it is exactly the set of files that carry
+/// **collision geometry or model bounds**:
+///
+/// - `.adt` — the terrain tile: its MCNK heightfield IS the ground collider.
+/// - `.wdt` / `.wdl` — the tile-existence index the streamer gates on, and the coarse whole-map
+///   heightmap the provisional ground floor is built from (`benilla_world`'s
+///   `terrain_stream::provisional`).
+/// - `.wmo` — building roots *and* their group files, which hold the MOPY/MOVI faces both per-WMO
+///   collider bakes come from.
+/// - `.m2` / `.mdx` — the model header (its bounding box) and the collision hull that follows it.
+///
+/// Everything else — textures, sounds, DBCs, UI art — is [`PRIORITY_NORMAL`]. Nothing is *starved*
+/// by this: the queue is work-conserving, so with no geometry outstanding the art has the whole
+/// six-wide pool exactly as before. The extension law lives here, in the one place that already
+/// knows what a name means; `packs.js` only orders what it is told.
+pub fn warm_priority(name: &str) -> u8 {
+    // The extension, or nothing: the last dot, refused when a path separator follows it (a
+    // directory with a dot in its name, holding a file that has no extension of its own).
+    let ext = match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.contains(['\\', '/']) => ext,
+        _ => return PRIORITY_NORMAL,
+    };
+    const GEOMETRY: [&str; 6] = ["adt", "wmo", "m2", "mdx", "wdt", "wdl"];
+    if GEOMETRY.iter().any(|g| ext.eq_ignore_ascii_case(g)) {
+        PRIORITY_GEOMETRY
+    } else {
+        PRIORITY_NORMAL
+    }
+}
+
+/// Collision geometry and model bounds — the reads a body's floor depends on. See
+/// [`warm_priority`].
+pub const PRIORITY_GEOMETRY: u8 = 0;
+/// Everything else. See [`warm_priority`].
+pub const PRIORITY_NORMAL: u8 = 1;
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    /// The families that carry collision geometry or model bounds are the geometry lane, and
+    /// nothing else is. The one worth pinning is the WMO **group** file — it is where the collider
+    /// faces actually live, and it is the easy one to miss, since it is `..._014.wmo` rather than
+    /// an extension of its own.
+    #[test]
+    fn geometry_names_outrank_everything_else() {
+        for name in [
+            r"World\Maps\Azeroth\Azeroth_32_48.adt",
+            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind.WMO",
+            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind_014.wmo",
+            r"World\Maps\Azeroth\Azeroth.wdt",
+            r"World\Maps\Azeroth\Azeroth.wdl",
+            r"Creature\Wolf\Wolf.m2",
+        ] {
+            assert_eq!(warm_priority(name), PRIORITY_GEOMETRY, "{name}");
+        }
+        for name in [
+            r"Tileset\Elwynn\ElwynnGrass01.blp",
+            r"Sound\Ambience\Forest.wav",
+            r"DBFilesClient\Spell.dbc",
+            r"Interface\FrameXML\UIParent.lua",
+            // No extension at all, and a dotted directory holding one — neither is a geometry name,
+            // and the second is the one a naive "text after the last dot" would get wrong.
+            "listfile",
+            r"Interface\v1.2\readme",
+        ] {
+            assert_eq!(warm_priority(name), PRIORITY_NORMAL, "{name}");
+        }
+    }
+}
 
 /// Percent-encode `name` exactly like JavaScript's `encodeURIComponent`: the unreserved set is
 /// `A-Za-z0-9-_.!~*'()`; every other byte, including `\` (chain names are internally

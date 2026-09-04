@@ -147,17 +147,18 @@ pub fn put(pack_id: u32, body: &[u8]) {
 /// `false` means "not resident — do it yourself", for every reason alike: a page with no worker, a
 /// browser with no `Worker`, an object that 404ed, a worker that died. The caller falls back to the
 /// path it took before this existed, so the worker is an accelerator and never a dependency.
-pub async fn warm(pack_id: u32, url: &str) -> bool {
+pub async fn warm(pack_id: u32, url: &str, priority: u8) -> bool {
     let promise = with_bridge(|b| {
         let f = b.warm_pack.as_ref()?;
-        f.call2(
-            &b.obj,
+        let args = Array::of3(
             &JsValue::from_f64(pack_id as f64),
             &JsValue::from_str(url),
-        )
-        .ok()?
-        .dyn_into::<js_sys::Promise>()
-        .ok()
+            &JsValue::from_f64(f64::from(priority)),
+        );
+        f.apply(&b.obj, &args)
+            .ok()?
+            .dyn_into::<js_sys::Promise>()
+            .ok()
     })
     .flatten();
     let Some(p) = promise else { return false };
@@ -199,14 +200,19 @@ pub fn can_warm(pack_id: u32) -> bool {
 /// Idempotent and cheap to spam. `packs.js`'s `prefetch` returns immediately for a pack that is
 /// resident or already in flight, so a UI system asking for the same not-yet-arrived icon on every
 /// frame costs two `Map` lookups per frame and no second fetch.
-pub fn prefetch(pack_id: u32, url: &str) {
+///
+/// `priority` is the wait order, not the work: see [`super::warm_priority`]. Re-asking a queued
+/// pack at a better priority promotes it in place, which is why spamming this from a lane that has
+/// become urgent is the right thing rather than a wasted call.
+pub fn prefetch(pack_id: u32, url: &str, priority: u8) {
     with_bridge(|b| {
         let Some(f) = b.prefetch.as_ref() else { return };
-        let _ = f.call2(
-            &b.obj,
+        let args = Array::of3(
             &JsValue::from_f64(pack_id as f64),
             &JsValue::from_str(url),
+            &JsValue::from_f64(f64::from(priority)),
         );
+        let _ = f.apply(&b.obj, &args);
     });
 }
 

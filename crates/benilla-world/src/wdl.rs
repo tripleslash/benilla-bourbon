@@ -80,6 +80,29 @@ impl WdlStreamer {
         let wow = bevy_to_wow(bevy_pos);
         self.wdl.height_at(wow[0], wow[1])
     }
+
+    /// One tile's coarse surface as **Bevy-space** `(vertices, triangles)`, ready for a parry
+    /// build — `None` where this map authors no such tile.
+    ///
+    /// The horizon mesh, borrowed for a second job: it is the only description of a tile's ground
+    /// that exists *before* the tile's own `.adt` has been fetched, because the whole map's copy of
+    /// it arrived in one 770 KB file at startup. `terrain_stream::provisional` stands a body on it
+    /// while the real heightfield is still on the wire. 545 verts and 3072 indices per tile — about
+    /// a five-hundredth of the real collider — so building one is not a cost worth pacing.
+    pub(crate) fn coarse_collision(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+        let mesh = self.wdl.tile_mesh(tile_x, tile_y)?;
+        let verts: Vec<Vec3> = mesh.positions.iter().map(|p| wow_to_bevy(*p)).collect();
+        let tris: Vec<[u32; 3]> = mesh
+            .indices
+            .chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect();
+        (!tris.is_empty()).then_some((verts, tris))
+    }
 }
 
 /// Marks a spawned WDL tile (so a future system could query/cull them as a group if needed).

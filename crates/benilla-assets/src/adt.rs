@@ -166,8 +166,13 @@ impl AssetLoader for AdtLoader {
         // Metered, like every CPU-bound stretch in a loader: on the web target this runs on the
         // thread that draws (`crate::frame_budget`). Scoped rather than held to the end of `load`,
         // because the chunk loop below awaits layer reads and a slot must never span I/O.
+        //
+        // The **geometry** lane: this decode is where the tile's MCNK heightfield comes from, and
+        // that heightfield IS the terrain collider (`terrain_stream::collider`). It must not queue
+        // behind the several hundred layer/doodad textures the same zone boundary asks for — that
+        // race is the one that leaves a body standing on ground with no collider under it.
         let tile = {
-            let _slot = crate::frame_budget::slot().await;
+            let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
             adt_to_tile_mesh(&bytes).map_err(to_io)?
         };
 
@@ -253,7 +258,8 @@ impl AssetLoader for AdtLoader {
         let layer_count = layers.len() as u32 + 1;
         // The tile's second heavy stretch: repacking every layer into one array (and resizing the
         // ones authored small). Nothing is awaited from here to the end of `load`, so one slot
-        // covers the rest.
+        // covers the rest. The **art** lane (the default): the collider was already derivable from
+        // the chunks above, and nothing about a splat array holds a body up.
         let _slot = crate::frame_budget::slot().await;
         let packed = pack_layers([107, 133, 82, 0], layers);
         // Which lane this tile took, and what it cost. Per-tile rather than aggregated because the

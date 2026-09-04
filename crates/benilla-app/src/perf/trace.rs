@@ -34,9 +34,10 @@ pub(super) struct StreamTrace {
 }
 
 const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,furnish_ms,mfurnish_ms,\
-                                   spawn_ms,collider_ms,tiles_dropped,pl_dropped,pl_ents_dropped,\
+                                   spawn_ms,collider_ms,prov_ms,tiles_dropped,pl_dropped,\
+                                   pl_ents_dropped,\
                                    tiles_req,tiles_spawned,cells_spawned,mmeshes_built,pl_spawned,\
-                                   attached,adt_freed,meshes_freed,images_freed,adt_added,\
+                                   attached,prov_live,adt_freed,meshes_freed,images_freed,adt_added,\
                                    meshes_added,images_added,pipes_new,pipes_pending\n";
 
 #[allow(clippy::too_many_arguments)]
@@ -109,7 +110,7 @@ pub(super) fn trace_stream(
         let _ = std::fs::write(&trace.path, STREAM_TRACE_HEADER);
     }
     let line = format!(
-        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img},{added_adt},{added_mesh},{added_img},{pipes_new},{pipes_pending}\n",
+        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img},{added_adt},{added_mesh},{added_img},{pipes_new},{pipes_pending}\n",
         trace.frame,
         time.elapsed_secs(),
         entities.iter().len(),
@@ -118,6 +119,7 @@ pub(super) fn trace_stream(
         a.mfurnish_ms,
         a.spawn_ms,
         a.collider_ms,
+        a.provisional_ms,
         a.tiles_dropped,
         a.placements_dropped,
         a.placement_entities_dropped,
@@ -127,6 +129,7 @@ pub(super) fn trace_stream(
         a.model_meshes_built,
         a.placements_spawned,
         a.colliders_attached,
+        a.provisional_live,
     );
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()

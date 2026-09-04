@@ -200,7 +200,16 @@ pub(super) fn release_post_snap_hold(
     let now = time.elapsed_secs();
     if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
-    } else if player.world_stale || progressed {
+    } else if player.world_stale || progressed || p.loads_in_flight > 0 {
+        // **A stream that is fetching is a stream that is arriving.** The two terms before this one
+        // read progress off the residency counters, which move when something *lands* — and on the
+        // web target the container is a network, so a single large object can be on the wire for
+        // longer than the whole budget with nothing landing behind it. The backstop then fires
+        // against a stream that is working perfectly: gravity back on in a city whose colliders are
+        // still coming, which is the exact failure the budget was made a *stall* budget (1303) to
+        // prevent, arrived at from the other side. `loads_in_flight` is the AssetServer's own answer
+        // to "is anything still coming", so this cannot hold a dead stream: nothing in flight, and
+        // the deadline runs again.
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
@@ -236,11 +245,16 @@ mod tests {
     /// baseline across frames, which `run_system_once` would reset) and a hand-driven clock.
     /// The published progress names the avatar's own tile — each test then describes residency
     /// facts that are at least *about* the right place (the mismatch test overrides it).
+    ///
+    /// `focus_collidable` starts true because these tests are not about it: they describe worlds
+    /// whose ground is there and ask when the hold ends. The two tests that ARE about it turn it
+    /// off, which is the only way it should ever appear in this file.
     fn app() -> App {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
             .insert_resource(WorldLoadProgress {
                 focus_tile: Some(own_tile()),
+                focus_collidable: true,
                 ..WorldLoadProgress::default()
             })
             .insert_resource(Player {
@@ -423,6 +437,66 @@ mod tests {
         assert!(
             !settling(&mut app),
             "the stall budget never started counting"
+        );
+    }
+
+    /// **The body is not released onto ground that has no collider.** The scene term says the tile
+    /// is spawned and furnished and the queue is quiet, and every one of those can be true one
+    /// frame before the tile's own collider attaches — the terms are published a stage apart. What
+    /// the mover needs is the single fact, so `presentable` carries it and the release waits for it.
+    #[test]
+    fn a_presentable_scene_with_no_collision_under_it_does_not_release() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        step(&mut app, 1.0, |p| {
+            p.total = 2000;
+            p.ready = 2000;
+            p.colliders_pending = 0;
+            p.scene_ready = true;
+            p.focus_collidable = false;
+        });
+        assert!(
+            settling(&mut app),
+            "released onto a tile whose collider had not attached"
+        );
+        // …and the moment it does attach, the same frame releases.
+        step(&mut app, 0.1, |p| p.focus_collidable = true);
+        assert!(
+            !settling(&mut app),
+            "collision landed and the hold stayed on"
+        );
+    }
+
+    /// **A stream that is still fetching is not a stalled stream.** The stall backstop reads
+    /// progress off counters that move when something *lands*; against a container served over a
+    /// network a single large object can be in flight for longer than the whole budget with nothing
+    /// landing behind it, and the backstop would then fire on a stream that is working perfectly —
+    /// gravity back on in a city whose colliders are still coming.
+    #[test]
+    fn assets_still_in_flight_hold_the_deadline() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        for _ in 0..(3.0 * SETTLE_TIMEOUT) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = 500;
+                p.colliders_pending = 300;
+                p.scene_ready = false;
+                p.loads_in_flight = 4; // frozen counters, four objects on the wire
+            });
+        }
+        assert!(
+            settling(&mut app),
+            "the hold gave up while the world was still being fetched"
+        );
+        // Nothing left in flight and nothing landing: now it is a dead stream, and the backstop is
+        // exactly what should fire.
+        for _ in 0..=(SETTLE_TIMEOUT + 2.0) as usize {
+            step(&mut app, 1.0, |p| p.loads_in_flight = 0);
+        }
+        assert!(
+            !settling(&mut app),
+            "a stream with nothing in flight and nothing landing must still time out"
         );
     }
 

@@ -311,7 +311,10 @@ impl AssetLoader for M2ModelLoader {
         // From here to the end of `load` is CPU with nothing awaited in it, and on the web target
         // that is CPU on the thread that draws — so it runs under one metered slot
         // (`crate::frame_budget`). Taken after the read so the frame is never billed for the fetch.
-        let _slot = crate::frame_budget::slot().await;
+        //
+        // The **geometry** lane: this parse yields the model's bounding box and its collision hull,
+        // which are what a placement is stood on before (and after) its art arrives.
+        let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
 
         // `dir` only feeds creature skin-variation resolution, which is inert here (we pass no skins —

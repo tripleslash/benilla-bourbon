@@ -867,6 +867,7 @@ mod tests {
             portal_instance,
             refs: 1,
             owner: (0, 0),
+            bounds: None,
         }
     }
 

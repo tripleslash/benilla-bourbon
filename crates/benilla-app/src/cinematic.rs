@@ -988,6 +988,10 @@ mod settling_under_black {
             total: 1,
             focus_resident: home,
             scene_ready: home,
+            // The third residency term the reveal reads through `presentable`: there is real
+            // collision under the focus tile. It rides `home` with the other two — this fixture's
+            // whole vocabulary is "the world is, or is not, here".
+            focus_collidable: home,
             ..Default::default()
         }
     }

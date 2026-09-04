@@ -508,8 +508,12 @@ impl AssetLoader for WmoModelLoader {
         // there is one thread and this is the one that draws (`crate::frame_budget`). Scoped, not
         // held to the end of `load`, because the group loop below awaits and a slot must never
         // span I/O.
+        //
+        // All three of this loader's slots take the **geometry** lane: a building's groups are
+        // where both per-WMO collider bakes come from, so every stretch here is on the path to a
+        // floor and none of it may queue behind the art hanging on that floor.
         let root = {
-            let _slot = crate::frame_budget::slot().await;
+            let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
             parse_wmo_root(&bytes).map_err(to_io)?
         };
 
@@ -581,7 +585,8 @@ impl AssetLoader for WmoModelLoader {
             // One slot per group, which is what makes a cathedral load without a hitch: the
             // groups are read and gathered one at a time already, so the budget can put the
             // expensive ones on separate frames instead of the whole building on one.
-            let _group_slot = crate::frame_budget::slot().await;
+            let _group_slot =
+                crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
             // Fill this group's flags + portal-ref span from its MOGP header (what the client's
             // visibility pass reads). Bounds were seeded from MOGI above.
             if let (Some(h), Some(nav)) =
@@ -690,8 +695,9 @@ impl AssetLoader for WmoModelLoader {
             }
         }
         // Nothing is awaited from here to the end of `load`, so the tail — doodad-base resolution,
-        // the portal build, the collider merges — runs under one last slot.
-        let _tail_slot = crate::frame_budget::slot().await;
+        // the portal build, the collider merges — runs under one last slot. The collider merges are
+        // the reason it, too, is the geometry lane.
+        let _tail_slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
         // light lists are all fixed in the root/groups, so nothing here is ever re-derived. Both
         // MODR inversions come off the same refs: the first-owner one names the MOLR set the

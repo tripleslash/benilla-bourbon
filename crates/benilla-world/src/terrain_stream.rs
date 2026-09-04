@@ -43,6 +43,7 @@ use benilla_assets::{m2_url, wmo_url};
 mod collider;
 mod furnish;
 pub mod merge;
+mod provisional;
 mod queries;
 mod spawn;
 mod weld;
@@ -63,6 +64,9 @@ pub use spawn::prop_light::{fold_interior_probe, interior_light_up, PropLobeLigh
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
 pub use collider::{build_collider_task, placement_collider_data, PendingCollider};
+// The stand-in collision lane (`provisional`): its marker is public so an instrument can tell a
+// stand-in floor from real ground; everything else about it is the streamer's own business.
+pub use provisional::ProvisionalCollider;
 pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnedModel};
 // The position queries + area authority (their home is `queries`; paths stay `terrain_stream::X`).
 use queries::update_current_area;
@@ -210,6 +214,14 @@ struct Placement {
     /// M2 doodad this is its hull weld's owner tile (decision 1369; the lifetime argument is in
     /// `weld`'s module doc). WMO placements never read it: their prop hulls weld per placement.
     owner: (i32, i32),
+    /// The building's authored **world-space bounding box** in WoW coords (MODF), `None` for an M2
+    /// doodad and for a MODF entry whose box is degenerate.
+    ///
+    /// Carried because it is known one fetch EARLIER than anything else about this placement: the
+    /// box is authored in the tile, so it exists while the `.wmo` is still on the wire. That is the
+    /// whole basis of the stand-in hull (`provisional`) — a body can be stopped by a building's
+    /// mass before the building's geometry has arrived.
+    bounds: Option<[[f32; 3]; 2]>,
 }
 
 /// How much of the world the streamer wants around the view focus is actually there. Written each
@@ -239,6 +251,32 @@ pub struct WorldLoadProgress {
     pub scene_ready: bool,
     /// Outstanding collider attaches (decision 0610's queue) — published by `finish_colliders`.
     pub colliders_pending: usize,
+    /// **Is there real collision geometry under the focus tile?** Published by the stand-in lane
+    /// (`provisional`), which is the only system that both knows the focus tile and can see whether
+    /// its collider has actually attached.
+    ///
+    /// The scene term plus a quiet collider queue *imply* this on every ordinary frame, and saying
+    /// it out loud anyway is the point: the implication runs through four other terms, and the
+    /// thing a body must never be released onto is exactly this one fact. It is deliberately about
+    /// the REAL collider — a stand-in floor does not make it true — so an arrival still waits for
+    /// the ground it is going to stand on rather than for the coarse shape of it.
+    ///
+    /// Vacuously true where the map authors no tile under the focus (open ocean, a map edge, a
+    /// WMO-only map), for the same reason `focus_resident` is: waiting there would hang forever on
+    /// terrain that cannot exist.
+    pub focus_collidable: bool,
+    /// Streamed assets the AssetServer says are **still arriving** — desired tiles and unspawned
+    /// placements whose fetch/decode has not finished. Published by the stand-in lane beside
+    /// [`Self::focus_collidable`].
+    ///
+    /// It exists for the settle hold's stall backstop (`SETTLE_TIMEOUT`), which pushes its deadline
+    /// while the destination is "visibly still arriving" and reads that off the residency counters.
+    /// Those counters move when something *lands*; on the web target a single large object can be
+    /// on the wire for longer than the whole budget without any of them moving, and the backstop
+    /// then fires against a stream that is working perfectly — gravity back on in a city whose
+    /// colliders are still coming. A non-zero count here is the direct statement the counters can
+    /// only imply: this stream is slow, not dead.
+    pub loads_in_flight: usize,
     /// Unflushed static-merge accumulators (1418, `WOW_STATIC_MERGE`) — published by
     /// `flush_static_merge`. Merged world geometry that has not yet baked is a hole the reveal
     /// must not show; same conservative semantics as the weld backlog inside
@@ -294,6 +332,7 @@ impl WorldLoadProgress {
     /// both consumers (the screen clear here, the settle release in the streamer) key on.
     pub fn presentable(&self) -> bool {
         self.scene_ready
+            && self.focus_collidable
             && self.colliders_pending == 0
             && self.merge_pending == 0
             && self.gx_pending == 0
@@ -438,6 +477,21 @@ enum ModelHandle {
     Wmo(Handle<WmoModel>),
 }
 
+impl ModelHandle {
+    /// Is this model's asset still being fetched or decoded?
+    ///
+    /// Read by the stand-in lane to publish `WorldLoadProgress::loads_in_flight` — the difference
+    /// between a stream that is *stalled* and one that is merely *slow*, which on the web target is
+    /// the difference between a dead origin and a large object still coming down a wire.
+    fn is_loading(&self, server: &AssetServer) -> bool {
+        let state = match self {
+            ModelHandle::M2(h) => server.load_state(h),
+            ModelHandle::Wmo(h) => server.load_state(h),
+        };
+        state.is_loading()
+    }
+}
+
 /// The terrain streamer plugin (added by `main` as the world's terrain owner).
 /// **Per-frame streamer activity** — what this streamer did this frame, bumped by the
 /// `WorldStage::Stream` chain as it works (a handful of integer adds + five self-timers,
@@ -470,6 +524,10 @@ pub struct StreamActivity {
     pub placements_spawned: u32,
     /// Off-thread colliders attached.
     pub colliders_attached: u32,
+    /// Stand-in colliders up right now (`provisional`) — WDL ground floors plus MODF hull boxes.
+    /// A level, not a per-frame count: it is zero in a settled world, and a trace row where it is
+    /// not names a frame where something was holding a body up that was not the real world.
+    pub provisional_live: u32,
     /// Self-time of `stream_terrain` / `furnish_tile_cells` / `furnish_model_forms` /
     /// `spawn_loaded_placements` / `finish_colliders` (ms).
     pub stream_ms: f32,
@@ -477,6 +535,8 @@ pub struct StreamActivity {
     pub mfurnish_ms: f32,
     pub spawn_ms: f32,
     pub collider_ms: f32,
+    /// Self-time of `provisional::maintain_provisional_collision` (ms).
+    pub provisional_ms: f32,
 }
 
 impl StreamActivity {
@@ -511,6 +571,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<HullWelds>()
             .init_resource::<StaticMerge>()
             .init_resource::<crate::model_forms::ModelForms>()
+            .init_resource::<provisional::ProvisionalCollision>()
             .init_resource::<CurrentArea>()
             // **The streaming chain lives in `WorldStage::Stream`** — the load-bearing half of the
             // frame ordering contract (schedule.rs): the teleport snap (Input) → the streamer
@@ -531,6 +592,12 @@ impl Plugin for TerrainPlugin {
                     flush_hull_welds,
                     flush_static_merge,
                     sync_interior_volumes,
+                    // The stand-in collision lane, at the TAIL: the chain's head is
+                    // `finish_colliders`, so a collider that attached this frame is visible here
+                    // and its stand-in is retired in the same frame rather than one late. It also
+                    // publishes `focus_collidable` / `loads_in_flight`, which the settle release
+                    // (a stage later) reads for this frame.
+                    provisional::maintain_provisional_collision,
                 )
                     .chain()
                     .in_set(WorldStage::Stream)
@@ -718,6 +785,13 @@ fn stream_terrain(
                     unique_id: GLOBAL_WMO_UID,
                     doodad_set: g.doodad_set,
                     name_set: g.name_set,
+                    // No stand-in box for the building that IS the map. Its MODF box is authored in
+                    // the WDT's own raw frame, not the ADT's corner-origin one, so it would need a
+                    // second remap to be trustworthy — and it would buy nothing: there is no
+                    // neighbouring ground to fall between, and the only way onto a WMO-only map is
+                    // an arrival, which the settle hold already refuses to release until the
+                    // building has spawned (`focus_resident` folds it, decision 0688).
+                    bounds: None,
                 },
             );
             state.global_wmo = true;
@@ -1165,6 +1239,10 @@ fn register_doodad(
             portal_instance: None,
             refs: 1,
             owner: tile,
+            // MDDF authors no bounding box — an M2 doodad's extents live in the model header, which
+            // is the thing that has not arrived. A tree with no stand-in hull is the right answer
+            // anyway: doodads are what you walk *past*, not what holds you up.
+            bounds: None,
         },
     );
     placements.pending_spawns += 1;
@@ -1194,6 +1272,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             portal_instance: None,
             refs: 1,
             owner: (0, 0), // unread for WMOs — their prop hulls weld per placement (1369)
+            bounds: w.bounds,
         },
     );
     placements.pending_spawns += 1;
@@ -1269,6 +1348,7 @@ fn release_world(
     mut forms: ResMut<crate::model_forms::ModelForms>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
     mut activity: ResMut<StreamActivity>,
+    mut prov: ResMut<provisional::ProvisionalCollision>,
     // Bundled for the same reason as `stream_terrain`'s pair: the stream-batch
     // accumulators the world drop must clear (and clippy's argument-count line).
     batchers: (
@@ -1289,6 +1369,11 @@ fn release_world(
     // cache in one deterministic sweep instead — nothing world-scoped may survive a logout, and
     // an entry whose asset another holder keeps resident would otherwise pin its meshes forever.
     forms.clear();
+    // The stand-ins go with the world they stood in for. They cannot wait for their own lane to
+    // notice: that lane is inside the `world_is_live` chain, so out of world it does not run at
+    // all — which is exactly what makes an abandoned collider immortal (the same reasoning this
+    // whole system exists for one paragraph up).
+    prov.release(&mut commands);
     drop_streamed_world(
         &mut commands,
         &mut state,
@@ -1600,6 +1685,7 @@ mod straddler_tests {
             portal_instance: None,
             refs: 1,
             owner,
+            bounds: None,
         }
     }
 

@@ -302,6 +302,14 @@ pub struct WmoInstance {
     pub doodad_set: u16,
     /// MODF name-set index — the placement's `WMOAreaTable.NameSetID` naming/audio variant.
     pub name_set: u16,
+    /// The placement's authored **world-space bounding box** in WoW coords — `[min, max]`, mapped
+    /// through the same MODF→world transform as [`Self::position`]. `None` where the entry authors
+    /// a degenerate box (nothing to bound).
+    ///
+    /// Known from the *tile*, so it exists before the `.wmo` has been fetched — which is what makes
+    /// it useful: a building's mass can be stood on while its real hull is still on the wire
+    /// (`benilla_world::terrain_stream::provisional`).
+    pub bounds: Option<[[f32; 3]; 2]>,
 }
 
 /// One ADT tile's terrain: its per-MCNK chunk meshes + placed doodads + buildings.
@@ -578,6 +586,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
                 unique_id: w.unique_id,
                 doodad_set: w.doodad_set,
                 name_set: w.name_set,
+                bounds: modf_bounds_to_world(&w.bounds),
             })
         })
         .collect();
@@ -587,6 +596,27 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
         doodads,
         wmos,
     })
+}
+
+/// A MODF bounding box (raw placement frame, `[min, max]`) as a **WoW world-space** AABB.
+///
+/// The corner remap is [`parse_tile_mesh`]'s own — `(x, y, z) -> (MAP_CENTER - z, MAP_CENTER - y', y)`
+/// with the axes it uses for a position — and it flips two axes, so a mapped "min" corner is not
+/// the mapped box's min. Both corners go through the transform and the extremes are taken
+/// afterwards, which is the only form of this that stays correct if the remap ever changes.
+///
+/// `None` for a degenerate box: several MODF entries in the shipped corpus author `0,0,0 .. 0,0,0`,
+/// and a zero-volume hull is worse than no hull — it is an invisible point the mover can hit.
+fn modf_bounds_to_world(bounds: &[[f32; 3]; 2]) -> Option<[[f32; 3]; 2]> {
+    // The same corner origin `parse_tile_mesh` uses for a placement position.
+    const MAP_CENTER: f32 = 32.0 * TILE_SIZE;
+    let corner = |p: &[f32; 3]| [MAP_CENTER - p[2], MAP_CENTER - p[0], p[1]];
+    let (a, b) = (corner(&bounds[0]), corner(&bounds[1]));
+    let min = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
+    let max = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
+    let solid =
+        (0..3).all(|i| max[i] - min[i] > 0.01) && min.iter().chain(&max).all(|v| v.is_finite());
+    solid.then_some([min, max])
 }
 
 /// Read a map's WDT from the chain and parse it (vanilla/Classic layout).

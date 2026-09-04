@@ -69,6 +69,26 @@ const RESIDENT_BUDGET_BYTES = 256 * 1024 * 1024;
 /// Fetch pool width for the prefetch. Matches boot.js's old per-name pool; the objects are ~50x
 /// larger now, so this is bandwidth-bound rather than round-trip-bound and the number matters less.
 const PREFETCH_CONCURRENCY = 6;
+/// How many warms may be in flight at once — and, therefore, the reason `_warmQueue` exists at all.
+///
+/// Before this there was no queue: every `warmPack` posted to the worker (or started a fetch) the
+/// instant it was asked for, and the ORDER packs arrived in was whatever order the browser's own
+/// six-connections-per-host limit happened to drain. That is fine when every pack is equally
+/// wanted. It is not fine at a zone boundary, where a few hundred texture warms are asked for in
+/// the same frame as the one `.adt` and the three `.wmo` groups that decide whether there is a
+/// floor under the player — those four then queue behind the art, arrive seconds late, and the
+/// body walks onto ground that has no collider yet.
+///
+/// Six matches what the browser would have allowed anyway, so throughput is unchanged; what
+/// changes is that WE choose which six, by `priority` (see `warmPack`).
+const WARM_CONCURRENCY = 6;
+/// Warm priority: **collision-bearing reads** — terrain tiles, WMO roots and groups, M2 headers
+/// (their bounds and collision hulls) — go ahead of everything else. The classifier is Rust's
+/// (`benilla_formats::webpack::warm_priority`), which is where the extension law already lives;
+/// this file only orders what it is told.
+const PRIORITY_GEOMETRY = 0;
+/// Everything else: textures, sounds, DBCs, UI art. The default when a caller names no priority.
+const PRIORITY_NORMAL = 1;
 /// Stop writing Cache Storage at this fraction of the origin's quota. Going over does not fail
 /// loudly — the browser evicts something, possibly the packs we just wrote — so leaving headroom is
 /// how the cache stays useful rather than thrashing.
@@ -109,6 +129,9 @@ const packs = {
   listfile: null,
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
+  /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
+  /// seam is readable from a console and so the two constants have exactly one definition.
+  PRIORITY: { geometry: PRIORITY_GEOMETRY, normal: PRIORITY_NORMAL },
 
   // ---- the resident map ------------------------------------------------------------------
 
@@ -176,9 +199,18 @@ const packs = {
   /// The live `packworker.js`, or null. Public because `prefetch` branches on it and because it is
   /// the first thing to look at from a console when a boot is slower than it should be.
   worker: null,
-  /// packId -> `{resolve}` for every warm in flight, and the dedup with it: two reads landing in
-  /// the same unheld pack share one job rather than fetching it twice.
+  /// packId -> the job record for every warm that has been ASKED FOR — queued or in flight — and
+  /// the dedup with it: two reads landing in the same unheld pack share one job rather than
+  /// fetching it twice. A record carries `{promise, resolve, url, priority, started}`.
   _pending: new Map(),
+  /// Asked-for warms that have not started yet, in arrival order; `_pumpWarms` picks the best
+  /// priority out of it. An array rather than a heap because it is drained six at a time and is
+  /// empty in steady state — a linear scan of a list that is usually zero-length costs nothing,
+  /// and a heap here would be a data structure to maintain for no measurable win.
+  _warmQueue: [],
+  /// How many warms are actually in flight (started, not yet settled). Bounded by
+  /// `WARM_CONCURRENCY`.
+  _warmActive: 0,
   /// Does the worker fetch for itself? True only with `sw.js` in control, where caching is the
   /// service worker's job — otherwise the fetch stays here, where Cache Storage is. See
   /// `packworker.js`'s header for why that split exists rather than a second cache in the worker.
@@ -189,32 +221,85 @@ const packs = {
   /// **`false` is not an error, it is "do it the old way".** No worker on this page, a 404, a
   /// worker that died — every caller (the prefetch pool below, `Chain::read_async` through
   /// `webpack::resident::warm`) falls back to the path it took before this file had a worker.
-  warmPack(packId, url) {
+  ///
+  /// `priority` orders the wait, not the work: a lower number starts sooner once more than
+  /// `WARM_CONCURRENCY` warms are outstanding. A pack already asked for at a WORSE priority is
+  /// promoted in place — the same read arriving again as "I need this for a collider" must not have
+  /// to wait behind the queue it was already sitting in.
+  warmPack(packId, url, priority = PRIORITY_NORMAL) {
     if (this._resident.has(packId)) return Promise.resolve(true);
     if (!this.worker) return Promise.resolve(false);
     const pending = this._pending.get(packId);
-    if (pending) return pending.promise;
+    if (pending) {
+      if (priority < pending.priority) pending.priority = priority;
+      return pending.promise;
+    }
     let resolve;
     const promise = new Promise((r) => {
       resolve = r;
     });
-    this._pending.set(packId, { promise, resolve });
+    this._pending.set(packId, { promise, resolve, url, priority, started: false });
+    this._warmQueue.push(packId);
+    this._pumpWarms();
+    return promise;
+  },
+
+  /// Start as many queued warms as the concurrency allows, best priority first (ties by arrival —
+  /// the queue is scanned in order and only a STRICTLY better priority displaces the incumbent, so
+  /// a burst of equal-priority reads keeps the order it was asked in).
+  _pumpWarms() {
+    // Re-entrancy guard, because `_startWarm` can settle synchronously (no worker) and every settle
+    // pumps: without this a queue with a dead worker under it would recurse once per entry. Also the
+    // reason the loop below re-reads `_warmActive` rather than trusting a local.
+    if (this._pumping || !this.worker) return;
+    this._pumping = true;
+    try {
+      this._pumpQueue();
+    } finally {
+      this._pumping = false;
+    }
+  },
+  _pumping: false,
+
+  /// `_pumpWarms`'s body, split out so the guard above has one exit to clear itself on.
+  _pumpQueue() {
+    while (this._warmActive < WARM_CONCURRENCY && this._warmQueue.length) {
+      let best = 0;
+      for (let i = 1; i < this._warmQueue.length; i++) {
+        const a = this._pending.get(this._warmQueue[i]);
+        const b = this._pending.get(this._warmQueue[best]);
+        if (!b || (a && a.priority < b.priority)) best = i;
+      }
+      const packId = this._warmQueue.splice(best, 1)[0];
+      const job = this._pending.get(packId);
+      // Settled while it was still queued (the worker died under it) — nothing left to start.
+      if (!job) continue;
+      job.started = true;
+      this._warmActive++;
+      this._startWarm(packId, job);
+    }
+  },
+
+  /// One started warm: hand it to the worker, either as a fetch it does itself or as wire bytes
+  /// this side fetched. Unchanged from what `warmPack` used to do inline — only *when* it runs is
+  /// new.
+  _startWarm(packId, job) {
+    if (!this.worker) return this._settle(packId, false, 'the worker went away');
     if (this._workerFetches) {
       this.worker.postMessage({ type: 'fetch', id: packId });
-      return promise;
+      return;
     }
     // `_fetchWireOnce`, not `fetchWire`: the buffer is TRANSFERRED to the worker and this side
     // loses it, so it must not be one another waiter is holding. The two never race in practice —
     // `read_async` asks here first and only reaches `fetchWire` when there is no worker — and if
     // they somehow did, the cost is a second fetch of the same object, not a detached buffer.
-    this._fetchWireOnce(packId, url).then(
+    this._fetchWireOnce(packId, job.url).then(
       (bytes) => {
         if (!this.worker) return this._settle(packId, false, 'the worker went away');
         this.worker.postMessage({ type: 'decode', id: packId, wire: bytes.buffer }, [bytes.buffer]);
       },
       (e) => this._settle(packId, false, e)
     );
-    return promise;
   },
 
   /// Packs a warm has already failed on — a 404, a worker that died mid-job, a body that would not
@@ -243,10 +328,17 @@ const packs = {
   /// (already here, already coming, already known bad) return before one is made.
   ///
   /// Deliberately returns nothing. A caller that could use the answer should call `warmPack`.
-  prefetch(packId, url) {
-    if (this._resident.has(packId) || this._pending.has(packId)) return;
+  prefetch(packId, url, priority = PRIORITY_NORMAL) {
+    if (this._resident.has(packId)) return;
     if (!this.canWarm(packId)) return;
-    this.warmPack(packId, url).then(
+    // A pack already asked for is not re-asked — but it IS promoted if this ask is the more urgent
+    // one, which is the same in-place promotion `warmPack` does for a caller that wants the answer.
+    const already = this._pending.get(packId);
+    if (already) {
+      if (priority < already.priority) already.priority = priority;
+      return;
+    }
+    this.warmPack(packId, url, priority).then(
       (resident) => {
         if (!resident) this._failed.add(packId);
       },
@@ -260,8 +352,18 @@ const packs = {
     const pending = this._pending.get(packId);
     if (!pending) return;
     this._pending.delete(packId);
+    if (pending.started) {
+      this._warmActive--;
+    } else {
+      // Settled before it ever started (the worker died with a queue behind it). Its slot was never
+      // taken, so only the queue entry has to go.
+      const at = this._warmQueue.indexOf(packId);
+      if (at >= 0) this._warmQueue.splice(at, 1);
+    }
     if (error) console.warn(`wenilla: pack ${packId} —`, error);
     pending.resolve(resident);
+    // A freed slot is the only thing that lets the next queued warm start, so every settle pumps.
+    this._pumpWarms();
   },
 
   // ---- fetching --------------------------------------------------------------------------
