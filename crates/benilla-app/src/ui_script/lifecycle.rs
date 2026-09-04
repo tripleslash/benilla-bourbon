@@ -113,9 +113,20 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
         if let Some(cached) = sizes.borrow().get(path) {
             return *cached;
         }
-        let measured = benilla_assets::sprite_dimensions(&size_chain, size_root.as_deref(), path);
-        sizes.borrow_mut().insert(path.to_string(), measured);
-        measured
+        match benilla_assets::sprite_dimensions(&size_chain, size_root.as_deref(), path) {
+            benilla_assets::SpriteDims::Ready(w, h) => {
+                sizes.borrow_mut().insert(path.to_string(), Some((w, h)));
+                Some((w, h))
+            }
+            benilla_assets::SpriteDims::Missing => {
+                sizes.borrow_mut().insert(path.to_string(), None);
+                None
+            }
+            // In flight (web target): the region measures nothing this pass and is asked again on
+            // the next one. Emphatically NOT memoised — this cache is for the session, and a number
+            // taken before the art arrived would be the number the region keeps forever.
+            benilla_assets::SpriteDims::Pending => None,
+        }
     }));
 }
 

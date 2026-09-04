@@ -253,6 +253,9 @@ impl Plugin for LoadingScreenPlugin {
             .init_resource::<EntryCover>()
             // `First`, ahead of every consumer in `PreUpdate` and `Update` — see [`EntryCover`].
             .add_systems(First, count_entry_cover)
+            // `First` alongside it, and for the same reason it is not `Update`: the budget it sets
+            // governs asset work that lands at the tail of THIS frame.
+            .add_systems(First, pace_asset_budget)
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
             // In `WorldStage::Present` (after Input + Stream): we read residency for the SAME frame's
             // player position — a teleport snaps in Input → the streamer recomputes focus in Stream →
@@ -260,6 +263,25 @@ impl Plugin for LoadingScreenPlugin {
             // the swap never flashes.
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present));
     }
+}
+
+/// Tell the asset decode budget which of its two regimes this frame is in
+/// (`benilla_assets::frame_budget`).
+///
+/// The budget exists to stop asset decoding from eating a frame the player is looking at — but that
+/// is only a cost worth paying when there *is* a frame worth protecting. Behind the loading screen
+/// nothing animates but the bar, the player is waiting on exactly this work, and metering it would
+/// make the load longer for no one's benefit. So the cover raises it to effectively no limit and
+/// clearing the cover puts it back.
+///
+/// Free on native, where the whole module is a no-op: decoding runs on the pool's own threads there
+/// and never touches the frame.
+fn pace_asset_budget(screen: Res<LoadingScreen>) {
+    benilla_assets::frame_budget::set_budget_ms(if screen.covering() {
+        benilla_assets::frame_budget::LOADING_BUDGET_MS
+    } else {
+        benilla_assets::frame_budget::PLAY_BUDGET_MS
+    });
 }
 
 /// Startup: load the LoadingScreens catalog + the bar texture stack off the shared chain, and spawn

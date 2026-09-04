@@ -3,9 +3,8 @@
 //! Both have the same shape of answer: **the page usually already has them**, because `web/boot.js`
 //! fetches them while the wasm module is still downloading, and a synchronous XHR is only the
 //! fallback for a page that did not. That ordering is not an optimisation detail, it is what keeps
-//! the index off the sync path: `crate::web::fetch_sync_range` decodes a body with
-//! `chars().map()`, which is fine at 40 KB and poor at the index's 1.6 MB, and there is no async
-//! seam at `Chain::open` to move it to.
+//! the index off the sync path: `crate::web::fetch_sync_range` is a *blocking* fetch with no async
+//! seam at `Chain::open` to move it to, and the index is 1.6 MB of it.
 //!
 //! The page hands them over as ordinary properties on `window.__wenilla_packs` (a `Uint8Array` for
 //! the index, a string for the listfile), so copying them in costs one `Uint8Array::to_vec` and no

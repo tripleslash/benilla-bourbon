@@ -40,6 +40,8 @@ use benilla_pack::{
     decode_pack_body, frame_bytes, frame_from_body, pack_body, Index, Located, PackMeta,
 };
 
+use crate::TryRead;
+
 pub mod bootstrap;
 pub mod probe;
 pub mod resident;
@@ -132,6 +134,64 @@ impl PackStore {
         let (_, wire) =
             crate::web::fetch_sync_range(&url, None).map_err(|e| fetch_err(name, at.pack_id, e))?;
         self.absorb(name, at, &meta, &wire)
+    }
+
+    /// Read a blob **only if it costs nothing** — the frame thread's lane.
+    ///
+    /// [`Self::read_sync`] is correct and sometimes catastrophic: a resident miss there is a
+    /// synchronous XHR, and a synchronous XHR on the thread that draws is the whole tab frozen for
+    /// a round trip. That is the right trade at boot, where there is no frame to protect and the
+    /// alternative is a client that cannot start. It is the wrong trade for a UI icon or a footstep
+    /// — work whose deadline is "some frame soon", not "this instruction".
+    ///
+    /// So this is the same read with the blocking branch replaced by an answer: `Pending`, plus a
+    /// fire-and-forget warm of the pack ([`resident::prefetch`]) so the retry a frame or two later
+    /// finds it resident and returns [`TryRead::Ready`]. The caller's contract is to ask again and
+    /// **not** to cache `Pending` as a miss.
+    ///
+    /// `Missing` is final and identical to `read_sync`'s missing-file error: the index answered, and
+    /// no amount of waiting puts a blob in the container that was never packed into it.
+    pub fn try_read_sync(&self, name: &str) -> TryRead {
+        let Some((at, _)) = self.locate(name) else {
+            return TryRead::Missing;
+        };
+        match resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+            Some(frame) => match frame_bytes(&frame) {
+                Ok(bytes) => TryRead::Ready(bytes),
+                // A frame that will not decode is not going to decode next frame either, and
+                // reporting it as `Pending` would spin the caller forever on a warm that already
+                // succeeded. Corrupt reads as absent, which is what every caller here handles.
+                Err(_) => TryRead::Missing,
+            },
+            None if resident::can_warm(at.pack_id) => {
+                resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
+                TryRead::Pending
+            }
+            // Nothing here can warm this pack — no decode worker on this page, or this one has
+            // already failed. Answering `Pending` would ask the caller to retry forever, so the
+            // read degrades to the blocking path instead: a stall on a page that was already
+            // going to stall, rather than art that never arrives.
+            None => match self.read_sync(name) {
+                Ok(bytes) => TryRead::Ready(bytes),
+                Err(_) => TryRead::Missing,
+            },
+        }
+    }
+
+    /// Say that `name` will be wanted soon, and return immediately.
+    ///
+    /// The point of a locality group is that fetching one blob's pack warms the few hundred reads
+    /// that come next — but only if something asks before the frame that needs them. This is that
+    /// ask: no bytes come back, nothing is awaited, and a pack already resident or already in
+    /// flight costs a lookup.
+    pub fn prefetch(&self, name: &str) {
+        let Some((at, _)) = self.locate(name) else {
+            return;
+        };
+        if resident::is_resident(at.pack_id) {
+            return;
+        }
+        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id));
     }
 
     /// Read a blob without blocking — the Bevy `AssetReader` lane (`benilla-assets`), which is

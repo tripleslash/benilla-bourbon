@@ -504,7 +504,14 @@ impl AssetLoader for WmoModelLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        let root = parse_wmo_root(&bytes).map_err(to_io)?;
+        // Each CPU-bound stretch of this loader runs under a metered slot: on the web target
+        // there is one thread and this is the one that draws (`crate::frame_budget`). Scoped, not
+        // held to the end of `load`, because the group loop below awaits and a slot must never
+        // span I/O.
+        let root = {
+            let _slot = crate::frame_budget::slot().await;
+            parse_wmo_root(&bytes).map_err(to_io)?
+        };
 
         // Root path → stem for the group files. Lowercased so the suffix strip + group URLs are
         // consistent (MPQ resolution is case-insensitive regardless).
@@ -571,6 +578,10 @@ impl AssetLoader for WmoModelLoader {
             let Ok(gbytes) = ctx.read_asset_bytes(group_url).await else {
                 continue; // a missing/unreadable group is skipped, like the chain reader
             };
+            // One slot per group, which is what makes a cathedral load without a hitch: the
+            // groups are read and gathered one at a time already, so the budget can put the
+            // expensive ones on separate frames instead of the whole building on one.
+            let _group_slot = crate::frame_budget::slot().await;
             // Fill this group's flags + portal-ref span from its MOGP header (what the client's
             // visibility pass reads). Bounds were seeded from MOGI above.
             if let (Some(h), Some(nav)) =
@@ -678,6 +689,9 @@ impl AssetLoader for WmoModelLoader {
                 submesh_group.push(gi as u16);
             }
         }
+        // Nothing is awaited from here to the end of `load`, so the tail — doodad-base resolution,
+        // the portal build, the collider merges — runs under one last slot.
+        let _tail_slot = crate::frame_budget::slot().await;
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
         // light lists are all fixed in the root/groups, so nothing here is ever re-derived. Both
         // MODR inversions come off the same refs: the first-owner one names the MOLR set the

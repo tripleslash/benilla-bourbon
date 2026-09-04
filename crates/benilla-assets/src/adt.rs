@@ -163,7 +163,13 @@ impl AssetLoader for AdtLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        let tile = adt_to_tile_mesh(&bytes).map_err(to_io)?;
+        // Metered, like every CPU-bound stretch in a loader: on the web target this runs on the
+        // thread that draws (`crate::frame_budget`). Scoped rather than held to the end of `load`,
+        // because the chunk loop below awaits layer reads and a slot must never span I/O.
+        let tile = {
+            let _slot = crate::frame_budget::slot().await;
+            adt_to_tile_mesh(&bytes).map_err(to_io)?
+        };
 
         // Layer array: a solid-green fallback at index 0, then each unique referenced layer texture.
         // The layers are collected in their **authored** form and packed only once the tile is fully
@@ -245,6 +251,10 @@ impl AssetLoader for AdtLoader {
         }
 
         let layer_count = layers.len() as u32 + 1;
+        // The tile's second heavy stretch: repacking every layer into one array (and resizing the
+        // ones authored small). Nothing is awaited from here to the end of `load`, so one slot
+        // covers the rest.
+        let _slot = crate::frame_budget::slot().await;
         let packed = pack_layers([107, 133, 82, 0], layers);
         // Which lane this tile took, and what it cost. Per-tile rather than aggregated because the
         // question after a perf report is always "which tiles fell back, and where am I standing" —
@@ -286,6 +296,7 @@ impl AssetLoader for AdtLoader {
 async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
     if let Some(spec) = key.strip_suffix(".blp").map(|stem| format!("{stem}_s.blp")) {
         if let Ok(bytes) = ctx.read_asset_bytes(mpq_url(&spec)).await {
+            let _slot = crate::frame_budget::slot().await;
             if let Ok(chain) = blp_bytes_to_native_chain(&bytes) {
                 return Some(RawLayer {
                     chain,
@@ -295,6 +306,7 @@ async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
         }
     }
     let bytes = ctx.read_asset_bytes(mpq_url(key)).await.ok()?;
+    let _slot = crate::frame_budget::slot().await;
     let chain = blp_bytes_to_native_chain(&bytes).ok()?;
     Some(RawLayer { chain, matte: true })
 }

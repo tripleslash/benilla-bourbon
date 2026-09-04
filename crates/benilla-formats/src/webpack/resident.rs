@@ -31,8 +31,11 @@ const GLOBAL: &str = "__wenilla_packs";
 /// requires both.
 struct Bridge {
     slice: Option<Function>,
+    has: Option<Function>,
     put: Option<Function>,
     warm_pack: Option<Function>,
+    can_warm: Option<Function>,
+    prefetch: Option<Function>,
     fetch_wire: Option<Function>,
     fetch_frame: Option<Function>,
     obj: JsValue,
@@ -57,8 +60,11 @@ fn with_bridge<T>(f: impl FnOnce(&Bridge) -> T) -> Option<T> {
             };
             Some(Bridge {
                 slice: method("slice"),
+                has: method("has"),
                 put: method("put"),
                 warm_pack: method("warmPack"),
+                can_warm: method("canWarm"),
+                prefetch: method("prefetch"),
                 fetch_wire: method("fetchWire"),
                 fetch_frame: method("fetchFrame"),
                 obj,
@@ -103,6 +109,23 @@ pub fn slice(pack_id: u32, off: u32, len: u32) -> Option<Vec<u8>> {
     .flatten()
 }
 
+/// Is this pack's decoded body already on the JS heap? One `Map.has`, no copy — which is what
+/// separates it from [`slice`], the cheapest form of which still marshals a frame across the
+/// boundary. The prefetch path asks this before spending anything at all.
+///
+/// `false` on a page with no bridge, which is correct there: nothing is ever resident.
+pub fn is_resident(pack_id: u32) -> bool {
+    with_bridge(|b| {
+        let Some(f) = b.has.as_ref() else {
+            return false;
+        };
+        f.call1(&b.obj, &JsValue::from_f64(pack_id as f64))
+            .map(|v| v.is_truthy())
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
 /// Hand a decoded pack body to the resident map. Copies into the JS heap, which is the point: the
 /// `Vec` this was decoded into is freed on return and the bytes survive on the collectable side.
 pub fn put(pack_id: u32, body: &[u8]) {
@@ -142,6 +165,49 @@ pub async fn warm(pack_id: u32, url: &str) -> bool {
         .await
         .map(|v| v.is_truthy())
         .unwrap_or(false)
+}
+
+/// Could a warm of this pack be expected to land? The **precondition of the non-blocking lane**.
+///
+/// `false` means there is no accelerator here — no decode worker on this page, or this pack has
+/// already failed one — and a caller that answered "not yet" on that basis would be telling its
+/// own caller to retry something that will never arrive: an icon that never appears, a sound that
+/// never plays. So [`super::PackStore::try_read_sync`] asks first and falls back to the blocking
+/// read when the answer is no, which is the path it took before the lane existed.
+///
+/// This is the decode worker's "accelerator, never a dependency" law, stated for the one caller
+/// that would otherwise have depended on it.
+pub fn can_warm(pack_id: u32) -> bool {
+    with_bridge(|b| {
+        let Some(f) = b.can_warm.as_ref() else {
+            return false;
+        };
+        f.call1(&b.obj, &JsValue::from_f64(pack_id as f64))
+            .map(|v| v.is_truthy())
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
+/// Ask for a pack to be warmed and **do not wait** — the non-blocking lane's whole mechanism.
+///
+/// [`warm`] is the same request with an answer; this is the request without one, for the two
+/// callers that have no await to spend: [`super::PackStore::try_read_sync`], which reports
+/// `Pending` and lets its caller retry a frame later, and [`super::PackStore::prefetch`], which is
+/// a caller saying it will want this before it does.
+///
+/// Idempotent and cheap to spam. `packs.js`'s `prefetch` returns immediately for a pack that is
+/// resident or already in flight, so a UI system asking for the same not-yet-arrived icon on every
+/// frame costs two `Map` lookups per frame and no second fetch.
+pub fn prefetch(pack_id: u32, url: &str) {
+    with_bridge(|b| {
+        let Some(f) = b.prefetch.as_ref() else { return };
+        let _ = f.call2(
+            &b.obj,
+            &JsValue::from_f64(pack_id as f64),
+            &JsValue::from_str(url),
+        );
+    });
 }
 
 /// Fetch a whole `.bpk` asynchronously. Goes through the page when it can, because that is where

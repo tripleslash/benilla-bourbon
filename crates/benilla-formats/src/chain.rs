@@ -42,6 +42,28 @@ pub struct ChainEntry {
     pub size: u64,
 }
 
+/// What [`Chain::try_read`] found — a read that is allowed to answer "not yet".
+///
+/// The third arm is the whole point, and it exists only because the web target's store is a
+/// network. On native every blob is one `pread` away and [`TryRead::Pending`] is unreachable; in a
+/// browser a blob whose pack is not resident costs a round trip, and a round trip taken
+/// synchronously on the thread that draws is a frozen tab.
+///
+/// A caller that takes this lane owes it two things: **ask again next frame**, and **do not cache
+/// `Pending` as a miss**. In exchange the frame it asked on never blocks, and the pack is already
+/// being warmed by the time it asks again.
+pub enum TryRead {
+    /// The bytes, at memcpy cost. On native this is every read that resolves.
+    Ready(Vec<u8>),
+    /// The blob exists but is not here yet; a warm is in flight. Ask again.
+    Pending,
+    /// Not readable, and no waiting changes that — the chain does not hold this name, or the read
+    /// of it failed. The two are one arm on purpose: no caller of this lane does anything different
+    /// with them (they draw nothing, or play nothing, and warn), and splitting them would put a
+    /// `cfg` in every match, since the web target can only ever answer the first.
+    Missing,
+}
+
 /// A priority-ordered patch chain of MPQ archives (`Send + Sync`; reads are `&self` and lock-free).
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Chain {
@@ -209,6 +231,23 @@ impl Chain {
         &self.archives
     }
 
+    /// [`Self::read`] in the shape the web target needs — see [`TryRead`]. Here it is a plain read:
+    /// a local archive has no "not yet", so this only ever answers `Ready` or `Missing` (a failed
+    /// read folding into the latter), and the call sites that use it behave on native exactly as
+    /// they did before the lane existed.
+    pub fn try_read(&self, name: &str) -> TryRead {
+        match self.read(name) {
+            Ok(bytes) => TryRead::Ready(bytes),
+            Err(_) => TryRead::Missing,
+        }
+    }
+
+    /// Say that `name` will be wanted soon. **Nothing to do on native** — a file on disk is not
+    /// warmed by being mentioned — so this is an empty call the optimiser deletes, and the shared
+    /// call sites can say what they mean without a `cfg`.
+    #[inline]
+    pub fn prefetch(&self, _name: &str) {}
+
     /// List the chain's named files with sizes. Dev/extract use only — files absent from every
     /// listfile (most of `texture.MPQ`) are reachable by name but not enumerated.
     ///
@@ -284,6 +323,25 @@ impl Chain {
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
         self.store.read_sync(name)
+    }
+
+    /// Read `name` **without ever blocking the frame** — the lane the UI and the sound engine take.
+    ///
+    /// See [`TryRead`] for the contract and [`crate::webpack::PackStore::try_read_sync`] for what
+    /// each arm costs. A `Pending` has already started warming the pack, so a caller that simply
+    /// asks again next frame converges without a scheduler of its own.
+    pub fn try_read(&self, name: &str) -> TryRead {
+        // Boot-manifest capture; no-op unless the page armed one. Traced on every ask, retries
+        // included — the array is deduplicated by hand and first push is still first need, so a
+        // name that took three frames to arrive appears exactly where it was first wanted.
+        crate::web::trace(name);
+        self.store.try_read_sync(name)
+    }
+
+    /// Warm the pack `name` lives in, and return immediately — see
+    /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
+    pub fn prefetch(&self, name: &str) {
+        self.store.prefetch(name);
     }
 
     /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`

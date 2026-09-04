@@ -18,11 +18,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bevy::prelude::*;
 use kira::sound::PlaybackState;
 
-use benilla_formats::{sound_kit_flags, SoundKitCatalog};
+use benilla_formats::{sound_kit_flags, SoundKitCatalog, TryRead};
 
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::dev_state::DebugState;
@@ -697,8 +697,14 @@ pub(super) fn play_kit_ext(
         .0
         .clone();
 
-    // Decode (cached).
-    let data = kits.sfx(assets, &path)?;
+    // Decode (cached). `None` = the file is not in memory yet (web target only): the pack is now
+    // warming, so warm the kit's other variations with it and let this shot go unplayed rather than
+    // freeze the frame on a fetch. `Ok(false)` is the existing "nothing played" answer, so no caller
+    // has to learn a new one.
+    let Some(data) = kits.sfx(assets, &path)? else {
+        kits.prefetch_kit(assets, id);
+        return Ok(false);
+    };
 
     // Per-shot variation — separate DBC gates (B2): 0x800 volume, 0x400 pitch (no 5875 kit
     // sets 0x800, so volume variation is dormant in this build's data — the gate is faithful).
@@ -931,7 +937,11 @@ pub(crate) fn play_file(
     if config.world_hold {
         return Ok(());
     }
-    let data = kits.sfx(assets, path)?;
+    // Not here yet (web target): the read started the warm, so the addon's next `PlaySoundFile`
+    // finds it. Silence beats a frozen frame — same trade as `play_kit_ext`.
+    let Some(data) = kits.sfx(assets, path)? else {
+        return Ok(());
+    };
     let amp = config.category_amp(category);
     let data = data.volume(mixer::amp_to_db(amp));
     if !claim_voice(out, amp) {
@@ -1040,19 +1050,47 @@ impl SoundKits {
 
     /// Decoded sound for a kit file, via the cache (whole-file chain read + decode on miss —
     /// short SFX; music streams through the scheduler path instead).
-    fn sfx(&mut self, assets: &WorldAssets, path: &str) -> Result<StaticSoundData> {
+    ///
+    /// `Ok(None)` is **"not here yet"**, and it is why this reads through [`Chain::try_read`] rather
+    /// than `read_file`. On the web target the chain is a network: a kit whose pack is not resident
+    /// costs a blocking fetch, taken from a gameplay system, on the thread that draws — a frozen tab
+    /// for a footstep. A sound is the one asset class where that trade is obviously wrong: it is
+    /// worth *hearing* for a hundredth of a second and worth nothing at all a second late, so the
+    /// miss returns silence, the read has already started warming the pack, and the next swing of
+    /// the same sword is a memcpy. (On native `try_read` is a plain read and this arm is
+    /// unreachable.)
+    fn sfx(&mut self, assets: &WorldAssets, path: &str) -> Result<Option<StaticSoundData>> {
         let key = path.to_ascii_lowercase();
         if let Some(d) = self.cache.get(&key) {
-            return Ok(d.clone());
+            return Ok(Some(d.clone()));
         }
-        let bytes = assets
-            .chain
-            .lock_recover()
-            .read_file(path)
-            .with_context(|| format!("reading {path}"))?;
+        let bytes = match assets.chain.lock_recover().try_read(path) {
+            TryRead::Ready(bytes) => bytes,
+            TryRead::Pending => return Ok(None),
+            // Deliberately vaguer than the old `read_file` error it replaces: `TryRead` collapses
+            // "no such file" and "the read failed" into one arm, so claiming either specifically
+            // would be a guess. Sound misses are warned, never acted on.
+            TryRead::Missing => bail!("reading {path}: not readable from the patch chain"),
+        };
         let data = mixer::sfx_from_bytes(bytes)?;
         self.cache.insert(key, data.clone());
-        Ok(data)
+        Ok(Some(data))
+    }
+
+    /// Warm every file a kit could roll, without waiting for any of them.
+    ///
+    /// The pool is the point: [`Self::pick_variation`] chooses among a kit's files at play time, so
+    /// warming only the one that just missed leaves the next roll to miss as well. A kit's files sit
+    /// in the same `snd/` locality group, so this is usually one pack for the whole set. Free on
+    /// native, where `prefetch` is an empty call.
+    fn prefetch_kit(&self, assets: &WorldAssets, id: u32) {
+        let Some(kit) = self.catalog.get(id) else {
+            return;
+        };
+        let chain = assets.chain.lock_recover();
+        for (path, _) in &kit.files {
+            chain.prefetch(path);
+        }
     }
 }
 

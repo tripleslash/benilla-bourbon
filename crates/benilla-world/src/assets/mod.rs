@@ -60,7 +60,13 @@ fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
 /// insert the shared [`WorldAssets`] (chain + dedup caches) + [`RenderConfig`]. If the client data
 /// can't be found or opened, `WorldAssets` is simply absent and downstream startup falls back to
 /// an empty free-fly scene.
-fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
+fn open_world_assets(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    // For `WorldAssets::texture`'s web lane, which hands world-art loads to the AssetServer rather
+    // than decoding them on the frame thread — see that method.
+    server: Res<AssetServer>,
+) {
     // The one shared global-light buffer, created here (RenderDevice is live by Startup) so it exists
     // before any material is built. Inserted FIRST — ahead of the install lookup, so no early return
     // below can skip it: it is cloned into `WorldAssets` (for model materials) and read as the
@@ -99,7 +105,7 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
     });
 
     match open_chain(&data) {
-        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf)),
+        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf, server.clone())),
         Err(e) => error!("failed to open client data: {e:#}"),
     }
 }

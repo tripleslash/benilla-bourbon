@@ -298,8 +298,18 @@ pub(super) fn build_char_skin_materials(
 
     // Body-skin atlas. A character-model NPC loads its shipped, pre-baked atlas directly; a player (or an
     // NPC row without a bake name) composites it live from CharSections + overlays, uploaded + cached
-    // once per appearance ([`SkinComposites`]). The composite reads its half-dozen BLPs synchronously off
-    // the shared chain (like the WDL/clutter main-thread loads) — fine behind the cache (once per look).
+    // once per appearance ([`SkinComposites`]). The composite reads its half-dozen BLPs synchronously
+    // off the shared chain — fine behind the cache (once per look).
+    //
+    // **This is the last blocking chain read on a gameplay path, and on the web it is a real one.**
+    // A stranger of a race nobody has worn yet composites from `Character\<Race>\<Sex>\` and
+    // `Item\TextureComponents\`, and a pack that is not resident costs a fetch on the frame thread.
+    // It is bounded rather than continuous — the reads are locality groups, so it is roughly one
+    // fetch per race/gear family for the session, not one per stranger — which is why it did not
+    // take `Chain::try_read` with the sprite caches and the sound kits. Deferring here needs a look
+    // to be *revisited* (this runs on an appearance edge, and the skin cache is only written on
+    // success), so the honest fix is a retry latch on the entity, not a `None` that would leave a
+    // player permanently untextured.
     let body_tex: Option<Handle<Image>> = match &look.body {
         BodySkin::Baked(name) => Some(asset_server.load::<Image>(baked_npc_url(name))),
         BodySkin::Composite { face } => world_assets.and_then(|world| {

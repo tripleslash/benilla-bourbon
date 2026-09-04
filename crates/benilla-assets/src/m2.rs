@@ -308,6 +308,10 @@ impl AssetLoader for M2ModelLoader {
     ) -> Result<M2Model, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
+        // From here to the end of `load` is CPU with nothing awaited in it, and on the web target
+        // that is CPU on the thread that draws — so it runs under one metered slot
+        // (`crate::frame_budget`). Taken after the read so the frame is never billed for the fetch.
+        let _slot = crate::frame_budget::slot().await;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
 
         // `dir` only feeds creature skin-variation resolution, which is inert here (we pass no skins —

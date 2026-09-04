@@ -76,6 +76,10 @@ impl AssetLoader for BlpImageLoader {
     ) -> Result<Image, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
+        // Everything past here is CPU on the thread that draws, on the web target (there is only
+        // one). The slot is taken AFTER the read so the frame is never billed for the fetch, and
+        // held to the end of the decode so it is billed for what the decode really cost.
+        let _slot = crate::frame_budget::slot().await;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
         Ok(match settings.variant {
             BlpVariant::WorldArt => world_art_image(

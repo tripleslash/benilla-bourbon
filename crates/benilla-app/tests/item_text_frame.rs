@@ -331,7 +331,11 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
     // The host oracle, wired exactly as `ui_script::lifecycle::install_texture_resolvers` wires the
     // live one: the same decoder, so the size the layout resolves with is the size the screen shows.
     s.set_texture_size_probe(Box::new(move |path| {
-        benilla_assets::sprite_dimensions(&chain, None, path)
+        match benilla_assets::sprite_dimensions(&chain, None, path) {
+            benilla_assets::SpriteDims::Ready(w, h) => Some((w, h)),
+            // Native never defers, so `Pending` is unreachable here.
+            benilla_assets::SpriteDims::Pending | benilla_assets::SpriteDims::Missing => None,
+        }
     }));
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {

@@ -132,6 +132,32 @@ const packs = {
     return body.subarray(off, off + len);
   },
 
+  /// Is this pack's body already here? One `Map.has`, for the Rust prefetch path, which asks
+  /// before it spends anything — `slice` would answer the same question but marshals a frame
+  /// across the wasm boundary to do it.
+  has(packId) {
+    return this._resident.has(packId);
+  },
+
+  /// Unpack a synchronous XHR's **binary string** (one code unit per byte — the
+  /// `charset=x-user-defined` contract) into the bytes it stands for.
+  ///
+  /// It lives here rather than in Rust because the string is a JS value and every way of getting
+  /// one into wasm goes through UTF-8: wasm-bindgen would transcode the whole body on the way
+  /// across (near-random bytes grow ~1.5x once every unit above 0x7F becomes two), Rust would copy
+  /// that into a `String`, and `chars()` would decode it back — three passes to move bytes that
+  /// were already bytes. Here the loop runs in the engine and the boundary sees one typed-array
+  /// copy of exactly `len`.
+  ///
+  /// The lane it serves is the ~60 blocking `Chain::read` sites (`benilla_formats::web`), which are
+  /// boot's and which cannot await. Rust keeps its own slower fallback for a page without this.
+  unpackBinary(s) {
+    const n = s.length;
+    const a = new Uint8Array(n);
+    for (let i = 0; i < n; i++) a[i] = s.charCodeAt(i) & 0xff;
+    return a;
+  },
+
   /// Take a decoded pack body from Rust and hold it. The bytes were copied out of wasm memory on
   /// the way in, so this array is ours and outlives the Vec it came from.
   put(packId, body) {
@@ -189,6 +215,43 @@ const packs = {
       (e) => this._settle(packId, false, e)
     );
     return promise;
+  },
+
+  /// Packs a warm has already failed on — a 404, a worker that died mid-job, a body that would not
+  /// decode. Retrying those forever is what a fire-and-forget prefetch would otherwise do: nothing
+  /// ever settles them, so nothing ever stops asking.
+  _failed: new Set(),
+
+  /// Can a warm of this pack be expected to arrive? The **non-blocking read lane's precondition**:
+  /// Rust asks before it answers "not yet", because a caller told to retry a warm that can never
+  /// land would retry forever and the icon would simply never appear. `false` sends that read back
+  /// to the blocking path it took before this lane existed — slower, and exactly as correct.
+  ///
+  /// This is the "accelerator, never a dependency" law of the decode worker, restated for the one
+  /// caller that would otherwise depend on it.
+  canWarm(packId) {
+    return !!this.worker && !this._failed.has(packId);
+  },
+
+  /// `warmPack` with the answer thrown away — the **non-blocking read lane's** whole mechanism
+  /// (`benilla_formats::webpack::resident::prefetch`).
+  ///
+  /// Rust reaches this from two places that have no await to spend: a frame-thread read whose pack
+  /// is not resident, which reports "not yet" and retries a frame later, and a caller saying it
+  /// will want a blob before it does. Neither wants a Promise, and a UI system asking for the same
+  /// not-yet-arrived icon at 60 Hz must not cost 60 of them a second — so the three cheap outcomes
+  /// (already here, already coming, already known bad) return before one is made.
+  ///
+  /// Deliberately returns nothing. A caller that could use the answer should call `warmPack`.
+  prefetch(packId, url) {
+    if (this._resident.has(packId) || this._pending.has(packId)) return;
+    if (!this.canWarm(packId)) return;
+    this.warmPack(packId, url).then(
+      (resident) => {
+        if (!resident) this._failed.add(packId);
+      },
+      () => this._failed.add(packId)
+    );
   },
 
   /// Finish one warm. Every path out of `warmPack` ends here exactly once, including the failures,

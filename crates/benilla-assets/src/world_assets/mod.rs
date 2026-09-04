@@ -26,12 +26,20 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-use benilla_formats::{blp_to_rgba, read_texture_native_chain, tga_to_rgba, Chain, ModelBlend};
+/// Native only: the web target's [`WorldAssets::texture`] hands the same read to the `AssetServer`
+/// instead of decoding it here.
+#[cfg(not(target_arch = "wasm32"))]
+use benilla_formats::read_texture_native_chain;
+use benilla_formats::{blp_to_rgba, tga_to_rgba, Chain, ModelBlend, TryRead};
 
 /// BLP/RGBA -> Bevy `Image` texture helpers (+ solid/cursor/liquid-frame textures). Split out for
 /// size; re-exported so callers keep using `benilla_assets::{solid_layer_chain, …}`.
 mod images;
 pub use images::*;
+
+/// [`WorldAssets::pending_sprite`]'s slot in the `generated` cache. A reserved name, not a path: no
+/// BLP is ever asked for under it.
+const PENDING_SPRITE_KEY: &str = "@pending";
 
 /// Shared asset store: the **one** open patch chain plus dedup caches, used by every model/texture
 /// load (terrain layers, doodads, WMOs, creatures, GameObjects). Replaces the three independent
@@ -40,6 +48,13 @@ pub use images::*;
 /// lets Bevy batch their draw calls.
 #[derive(Resource)]
 pub struct WorldAssets {
+    /// The [`AssetServer`], for the one cache below that hands its loads to it rather than decoding
+    /// them itself: [`Self::texture`] on the **web target** (see that method for why the two targets
+    /// differ). Cheap to hold — an `AssetServer` is an `Arc` handle — and kept on every target so
+    /// `open`'s signature does not fork, which is why native has to say out loud that it is holding
+    /// a field it never reads.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    server: AssetServer,
     /// The **one** open patch chain, behind `Arc<Mutex<…>>` because the streaming loaders thread a
     /// `&mut Chain` (the `read_file` shim); the `Mutex` is `Send + Sync` glue, not a read serializer —
     /// `Chain` reads are `&self` and open a fresh OS handle, so they share no seek state.
@@ -165,21 +180,39 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
     }
 }
 
-/// The **texel dimensions** of a UI sprite reference, or `None` when nothing resolves — the number
-/// the client's `CSimpleTexture` size getters read out of `[tex+0x144]`/`[tex+0x148]` when a region
-/// authored no size on an axis (wow-re `region-size-fallback.md` §2, decision 1349: one texel is one
-/// FrameXML unit).
+/// The **texel dimensions** of a UI sprite reference ([`SpriteDims`]) — the number the client's
+/// `CSimpleTexture` size getters read out of `[tex+0x144]`/`[tex+0x148]` when a region authored no
+/// size on an axis (wow-re `region-size-fallback.md` §2, decision 1349: one texel is one FrameXML
+/// unit).
 ///
 /// It goes through [`decode_sprite`] rather than sniffing a header, so the size layout uses is the
 /// size the screen shows: the same candidate order, the same BLP-vs-TGA content sniff, and the same
 /// verdict on a candidate that reads but will not decode. The caller memoises — this is asked once
-/// per distinct path, for the handful of regions whose rect is derived from their art.
+/// per distinct path, for the handful of regions whose rect is derived from their art — which is
+/// why the answer is three-valued rather than an `Option`: see [`SpriteDims`].
 pub fn sprite_dimensions(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
     path: &str,
-) -> Option<(u32, u32)> {
-    decode_sprite(chain, loose_root, path).map(|(w, h, _)| (w, h))
+) -> SpriteDims {
+    match decode_sprite(chain, loose_root, path) {
+        SpriteLoad::Ready((w, h, _)) => SpriteDims::Ready(w, h),
+        SpriteLoad::Pending => SpriteDims::Pending,
+        SpriteLoad::Missing => SpriteDims::Missing,
+    }
+}
+
+/// [`sprite_dimensions`]'s answer, three-valued for the same reason the sprite caches' is: the
+/// caller **memoises**, and a measurement taken while the art was still in flight must not be the
+/// number a region keeps for the rest of the session.
+///
+/// A `Missing` is worth remembering — a path that resolves to nothing measures nothing however often
+/// it is asked. A `Pending` is worth nothing at all. On native only the first and last arms occur.
+pub enum SpriteDims {
+    Ready(u32, u32),
+    /// The art exists but has not arrived. Ask again; do not remember this.
+    Pending,
+    Missing,
 }
 
 /// Decode a UI sprite key to RGBA8, **warning once per key that fails to resolve**.
@@ -207,27 +240,34 @@ pub fn sprite_dimensions(
 /// `AddOns\` path (Blizzard's own `Blizzard_*` stubs aside, addon art only exists on disk), so the
 /// order between the stores is unobservable; chain-first keeps every non-addon path on exactly the
 /// code it always ran.
-fn decode_sprite(
-    chain: &Mutex<Chain>,
-    loose_root: Option<&Path>,
-    path: &str,
-) -> Option<(u32, u32, Vec<u8>)> {
+fn decode_sprite(chain: &Mutex<Chain>, loose_root: Option<&Path>, path: &str) -> SpriteLoad {
     let candidates = sprite_candidates(path);
-    let mut chain = chain.lock_recover();
+    let chain = chain.lock_recover();
+    // Set by any candidate the store has but has not got here yet. It does not short-circuit the
+    // walk — a later candidate may be resident and answer outright — but it does decide the verdict
+    // if none is, because "not yet" and "not there" must not produce the same cached answer.
+    let mut waiting = false;
     for candidate in &candidates {
-        if let Ok(bytes) = chain.read_file(candidate) {
-            if let Ok(decoded) = decode_sprite_bytes(&bytes) {
-                return Some(decoded);
+        match chain.try_read(candidate) {
+            TryRead::Ready(bytes) => {
+                if let Ok(decoded) = decode_sprite_bytes(&bytes) {
+                    return SpriteLoad::Ready(decoded);
+                }
             }
+            TryRead::Pending => waiting = true,
+            TryRead::Missing => {}
         }
         if let Some(file) = loose_root.and_then(|root| loose_sprite_file(root, candidate)) {
             if let Ok(decoded) = std::fs::read(&file)
                 .map_err(anyhow::Error::from)
                 .and_then(|bytes| decode_sprite_bytes(&bytes))
             {
-                return Some(decoded);
+                return SpriteLoad::Ready(decoded);
             }
         }
+    }
+    if waiting {
+        return SpriteLoad::Pending;
     }
     warn!(
         "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
@@ -238,7 +278,24 @@ fn decode_sprite(
         },
         candidates.join(", ")
     );
-    None
+    SpriteLoad::Missing
+}
+
+/// What [`decode_sprite`] found. The third arm exists for the browser, where a texture whose pack
+/// is not resident is neither a hit nor a miss: it is a fetch in flight, and the caller's job is to
+/// draw without it for a frame or two and ask again.
+///
+/// It matters because every sprite cache below stores **misses as well as hits** — the UI extractor
+/// asks per quad per frame, so an uncached miss would re-walk the chain forever. Caching a `Pending`
+/// under that rule would be permanent: the icon would arrive in the resident map a moment later and
+/// nothing would ever look again.
+enum SpriteLoad {
+    Ready((u32, u32, Vec<u8>)),
+    /// In flight. Do not cache; ask again next frame.
+    Pending,
+    /// Nothing in the chain (or the AddOns folder) resolves this path. Cached, and warned about
+    /// once.
+    Missing,
 }
 
 /// Decode one candidate's bytes to RGBA8, picking the format by content: a `BLP2` magic is a BLP,
@@ -349,8 +406,9 @@ impl WorldAssets {
     /// sit under the renderer: the store's only use of it is `clone()` into every deduped model
     /// material's `light_buf`, so the parameter severs what would otherwise be a dependency on the
     /// lighting layout and, through it, the rig-palette regions (decision 1164).
-    pub fn open(chain: Chain, shared_light: Buffer) -> Self {
+    pub fn open(chain: Chain, shared_light: Buffer, server: AssetServer) -> Self {
         Self {
+            server,
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
             sprites: HashMap::new(),
@@ -391,13 +449,65 @@ impl WorldAssets {
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
-        // Passthrough: world art is uploaded in the form the BLP stores it (decision 1626).
-        // Nothing reads a world texture main-side — the same reasoning that already makes this
-        // lane `RenderAssetUsages::RENDER_WORLD` — so there are no CPU texels to lose.
-        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
-        let handle = images.add(repeat_texture_authored(crate::for_upload(chain), wrap));
+        let handle = self.upload_world_texture(&key.0, wrap, images)?;
         self.textures.insert(key, handle.clone());
         Some(handle)
+    }
+
+    /// [`Self::texture`]'s decode, **on a target whose loaders run on their own threads**: read the
+    /// BLP out of the chain and upload it, here and now.
+    ///
+    /// Passthrough: world art is uploaded in the form the BLP stores it (decision 1626). Nothing
+    /// reads a world texture main-side — the same reasoning that already makes this lane
+    /// `RenderAssetUsages::RENDER_WORLD` — so there are no CPU texels to lose.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn upload_world_texture(
+        &self,
+        key: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), key).ok()?;
+        Some(images.add(repeat_texture_authored(crate::for_upload(chain), wrap)))
+    }
+
+    /// [`Self::texture`]'s decode **in a browser**, where the line above is the single worst thing
+    /// this crate can do to a frame.
+    ///
+    /// A doodad's textures are named by its `M2Model` and read the first time one of its batches
+    /// builds a material — from a spawn system, on the frame thread. The M2 itself arrived through
+    /// the `AssetReader`, but its textures did not, so on the web that read is a blocking fetch of a
+    /// pack nothing warmed: a whole frozen tab per new tree, in the middle of streaming terrain.
+    ///
+    /// So the web target hands the same load to the [`AssetServer`] instead, at the same URL every
+    /// other `mpq://` texture uses. It resolves to [`crate::BlpImageLoader`]'s `WorldArt` variant,
+    /// which is this function's line-for-line twin (`blp::world_art_image` *is* the port of
+    /// `repeat_texture_authored`, address mode and all — the mode rides the URL, decision 0763), so
+    /// the uploaded `Image` is identical; only *when* it exists changes. Until it does, the material
+    /// does not prepare and the batch is not drawn — a doodad that pops in a few frames late instead
+    /// of a client that stops.
+    ///
+    /// **`contains` first, and it is load-bearing.** A path no archive holds must still return
+    /// `None`, because `model_material`'s fallback (an untextured material) is the right answer for
+    /// it; handing back a handle that will only ever fail would leave that batch invisible forever
+    /// rather than untextured. On this target `contains` is a binary search over the in-memory
+    /// index, so the check is free.
+    ///
+    /// Native keeps the synchronous path deliberately. There the read is a `pread` and the decode
+    /// runs on a pool thread beside the frame, so there is nothing to win — and the FPS campaign
+    /// grades that path, which is not a thing to change as a side effect of a browser fix.
+    #[cfg(target_arch = "wasm32")]
+    fn upload_world_texture(
+        &self,
+        key: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let _ = images; // the AssetServer owns the upload on this target
+        if !self.chain.lock_recover().contains(key) {
+            return None;
+        }
+        Some(self.server.load(crate::texture_url(key, wrap)))
     }
 
     /// Decode a BLP into a clamp-sampled **sRGB** sprite image (mip 0 only) — the celestial discs
@@ -421,8 +531,13 @@ impl WorldAssets {
         if let Some(cached) = self.sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
+        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         self.sprites.insert(key, loaded.clone());
         loaded
     }
@@ -432,7 +547,12 @@ impl WorldAssets {
     /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+        match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+            SpriteLoad::Ready(decoded) => Some(decoded),
+            // Uncached and one-shot, so `Pending` folds into `None` here: the caller asks at load
+            // and asks again if it needs to, and there is no cache entry to poison either way.
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        }
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing — the frame `Backdrop` tiled pieces
@@ -449,10 +569,32 @@ impl WorldAssets {
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
+        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image_tiled(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         self.tiled_sprites.insert(key, loaded.clone());
         loaded
+    }
+
+    /// The stand-in a sprite cache hands back while its real art is still coming: **1x1, fully
+    /// transparent**.
+    ///
+    /// `None` would be the obvious answer for "not yet", and it is the wrong one. A UI quad whose
+    /// texture is `None` is not skipped — `ui_pass` draws it with the shared 1x1 *white* image tinted
+    /// by the quad's colour, which for an icon is white, which is an opaque white rectangle at the
+    /// icon's exact rect. That is the same fallback bug B221 was (see [`decode_sprite`]), and having
+    /// every icon flash through it on the way in would be a worse artefact than the stall this lane
+    /// exists to remove. Transparent draws nothing, which is what "not yet" should look like.
+    ///
+    /// One image for the whole process, in the `generated` cache beside the colour picker's wheel —
+    /// so the handle is *stable*, and the quad-list dirty check does not see a new texture every
+    /// frame a load is outstanding.
+    fn pending_sprite(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
+        self.generated_sprite(PENDING_SPRITE_KEY, images, || (1, 1, vec![0, 0, 0, 0]))
     }
 
     /// A sprite whose pixels this client **computes**, cached under `key` and built at most once.
@@ -494,8 +636,13 @@ impl WorldAssets {
         if let Some(cached) = self.portraits.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
+        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(portrait_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         self.portraits.insert(key, loaded.clone());
         loaded
     }
@@ -512,8 +659,13 @@ impl WorldAssets {
         if let Some(cached) = self.masks.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
-            .map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
+        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(mask_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         self.masks.insert(key, loaded.clone());
         loaded
     }

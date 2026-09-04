@@ -213,6 +213,33 @@ whole of its security: two ports, one loopback address.
   time the client's first synchronous read runs, its pack is decoded and resident. It is an
   accelerator and never a dependency: no worker, a wasm that will not load, a worker that dies, and
   every read falls back to the path it took before.
+- **Nothing on the frame thread waits for a byte.** A browser tab has one thread, and it is the one
+  that draws — Bevy's `IoTaskPool` is `wasm_bindgen_futures::spawn_local` there, so an
+  `AssetLoader` is not off-thread work at all. Two rules keep a load from being felt as a stutter:
+  - *The asset lanes are metered.* Each loader takes a slot from a per-frame CPU budget
+    (`benilla_assets::frame_budget`) before its decode, and waits for the next frame when this one is
+    spent. Without it, thirty fetches settling together drain thirty decodes back to back out of the
+    microtask queue with no paint in between. The first slot of a frame is always granted, so loading
+    can never deadlock, and the loading screen raises the budget to "no limit" — behind the cover the
+    frame has nothing better to do. On native the whole module compiles away: decoding is on real
+    pool threads there and was never in the frame.
+  - *The blocking lane is opt-out.* `Chain::try_read` answers `Ready` / `Pending` / `Missing` instead
+    of blocking: a blob whose pack is not resident starts the pack warming through the decode worker
+    and reports `Pending`, and the caller draws without it and asks again next frame. The callers
+    that took it are the ones a stall is most visible in — every UI sprite cache, sound-kit playback,
+    and the zone music and ambience slots (which latch what they wanted and open it when the bytes
+    land). A `Pending` is **never cached as a miss**, and a sprite that is still coming draws
+    transparent rather than through the white-quad fallback. `Chain::read` still blocks and is still
+    right for boot, where there is no frame to protect. On native `try_read` is a plain read and
+    `Pending` is unreachable.
+  - The one place that must still block — a synchronous `XMLHttpRequest` at boot — now unpacks its
+    binary-string body in JS (`packs.js::unpackBinary`) instead of transcoding it through UTF-8 into
+    wasm and decoding it back.
+  - *Known remaining exposure*: the **character skin composite** (`char_skin.rs`) still reads its
+    half-dozen BLPs synchronously, because it runs on an appearance edge and deferring it needs a
+    retry latch on the entity rather than a `None` that would leave a player untextured for good. It
+    is bounded — the reads are locality groups, so it is about one fetch per race/gear family for the
+    session, not one per stranger.
 - **Hosting behind a login.** There is no such thing here any more: the hosted tree is public
   static assets, and the gateway relays to loopback for whoever asks. Accounts are the realm's own
   (mangos `account create`), which is the only gate on the site. A page that wanted to hand the

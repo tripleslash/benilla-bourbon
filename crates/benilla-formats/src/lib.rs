@@ -19,7 +19,7 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 pub use benilla_blp::BlpTexels;
 
 mod chain;
-pub use chain::{Chain, ChainEntry};
+pub use chain::{Chain, ChainEntry, TryRead};
 /// The UI texture table's other half — loose `.tga` art (addon folders; decision 1322).
 mod tga;
 pub use tga::tga_to_rgba;

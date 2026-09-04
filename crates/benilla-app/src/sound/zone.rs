@@ -55,7 +55,7 @@
 
 use bevy::prelude::*;
 
-use benilla_formats::AreaSoundCatalog;
+use benilla_formats::{AreaSoundCatalog, TryRead};
 
 use crate::net::{ServerSoundKind, ServerSoundMessage};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
@@ -178,6 +178,26 @@ pub(super) struct ZoneAudio {
     ambience_kit_vol: f32,
     /// The incoming leg of an ambience crossfade — `Some` while the new bed ramps up.
     ambience_fade_in: Option<FadeIn>,
+    /// **The web target's "not here yet" latch for the music slot** (kit id), retried every frame
+    /// by [`retry_deferred`] until the bytes are in memory.
+    ///
+    /// It exists because a track is a multi-megabyte object and the slot is opened from a *system*:
+    /// reading one that is not resident would block the frame on a fetch — seconds of frozen tab in
+    /// the middle of walking across a zone border. So the open is refused, the pack starts warming,
+    /// and the intent is remembered here rather than lost. Every scheduling decision around it
+    /// (`zone_music`, `intro_last`, `next_track_at`) is unchanged and already committed; the only
+    /// difference is that the track begins a few frames later than it asked to.
+    ///
+    /// Always `None` on native, where a chain read is a file read and nothing ever defers.
+    ///
+    /// It holds the whole **pick** — kit, file and kit volume — not just the kit id, because
+    /// `pick_stream` depletes: re-rolling the kit on every frame of the wait would scatter the warm
+    /// across variations and never finish one. See [`open_music_stream`].
+    music_pending: Option<(u32, String, f32)>,
+    /// [`Self::music_pending`] for the ambience bed: the pick (kit, file, kit volume) and the fade
+    /// it was asked to arrive with. `ambience_kit` is already committed when this is set, so the
+    /// retry re-enters the bed player directly rather than going back through the swap's edge check.
+    ambience_pending: Option<(u32, String, f32, u64)>,
     /// Intro throttle: intro row id → last-played time (secs), against `MinDelayMinutes`.
     intro_last: std::collections::HashMap<u32, f64>,
     /// The last area id acted on (change detection).
@@ -204,6 +224,8 @@ impl Default for ZoneAudio {
             ambience: None,
             ambience_kit_vol: 1.0,
             ambience_fade_in: None,
+            music_pending: None,
+            ambience_pending: None,
             intro_last: std::collections::HashMap::new(),
             area: None,
             interior: None,
@@ -439,6 +461,12 @@ fn zone_audio(
     }
     zone.was_underwater = world.submersion().is_water();
 
+    // ---- deferred opens (web target) ----
+    // A slot that refused to block on a cold pack left its intent latched; the packs it asked for
+    // have been warming since. Retried before the transport below so a track that lands this frame
+    // is playing before anything looks at whether one is.
+    retry_deferred(zone, &mut out, &assets, &config, now);
+
     // ---- music transport ----
     // Reap a finished track → schedule the next after a fresh silence interval.
     if let Some(h) = &zone.music {
@@ -582,17 +610,55 @@ fn start_music_stream(
     if config.music_suppressed {
         return false;
     }
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    if out.mixer.is_none() {
         return false;
-    };
+    }
     let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
         return false;
     };
-    let bytes = {
-        let chain = assets.chain.lock_recover();
-        chain.read(&path)
+    open_music_stream(zone, out, assets, config, kit_id, path, kit_vol)
+}
+
+/// Open a music track that has **already been picked** — the half of [`start_music_stream`] past the
+/// variation roll, split out so the web target's retry ([`retry_deferred`]) can re-enter it with the
+/// same file rather than rolling the kit again.
+///
+/// That distinction is the whole reason for the split. `pick_stream` *depletes*: rolling a kit once
+/// per frame while its pack downloads would churn the pool and scatter warms across every variation
+/// instead of finishing the one that was chosen. The slot's own guards are re-checked here rather
+/// than assumed from the first call — a latch can outlive the state that made it, and a cinematic
+/// that started during the wait must still silence the track.
+fn open_music_stream(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    kit_id: u32,
+    path: String,
+    kit_vol: f32,
+) -> bool {
+    if config.music_suppressed {
+        return false;
+    }
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return false;
     };
-    let data = match bytes.and_then(mixer::stream_from_bytes) {
+    let bytes = match assets.chain.lock_recover().try_read(&path) {
+        TryRead::Ready(bytes) => bytes,
+        // Not in memory yet (web only): the read has started the warm. Remember the pick — file and
+        // all — so the retry opens this track rather than re-rolling the kit, and leave the frame.
+        TryRead::Pending => {
+            zone.music_pending = Some((kit_id, path, kit_vol));
+            return false;
+        }
+        TryRead::Missing => {
+            warn!("zone music: {path} — not readable from the patch chain");
+            zone.music_pending = None;
+            return false;
+        }
+    };
+    zone.music_pending = None;
+    let data = match mixer::stream_from_bytes(bytes) {
         Ok(d) => d,
         Err(e) => {
             warn!("zone music: {path} — {e:#}");
@@ -644,21 +710,75 @@ fn swap_ambience(
     }
     zone.ambience_kit = kit_id;
     zone.ambience_fade_in = None;
+    zone.ambience_pending = None;
     if kit_id == 0 {
         return;
     }
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    open_ambience_bed(zone, out, kits, assets, config, kit_id, fade_ms, now);
+}
+
+/// Open the bed [`swap_ambience`] decided on — the half that touches bytes, split out so the web
+/// target's retry ([`retry_deferred`]) can re-enter it without going back through the edge check
+/// above, which has already committed `ambience_kit`.
+#[allow(clippy::too_many_arguments)]
+fn open_ambience_bed(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    kits: &mut SoundKits,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    kit_id: u32,
+    fade_ms: u64,
+    now: f64,
+) {
+    if out.mixer.is_none() {
         return;
-    };
+    }
     let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
         return;
     };
-    let bytes = {
-        let chain = assets.chain.lock_recover();
-        chain.read(&path)
+    play_ambience_bed(
+        zone, out, assets, config, kit_id, path, kit_vol, fade_ms, now,
+    );
+}
+
+/// Play an ambience bed that has **already been picked** — [`open_ambience_bed`] past the variation
+/// roll, split for the same reason [`open_music_stream`] is: `pick_stream` depletes, and the web
+/// target's retry must re-open the file it chose rather than roll the kit again on every frame the
+/// pack is still coming down.
+#[allow(clippy::too_many_arguments)]
+fn play_ambience_bed(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    kit_id: u32,
+    path: String,
+    kit_vol: f32,
+    fade_ms: u64,
+    now: f64,
+) {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return;
     };
+    let bytes = match assets.chain.lock_recover().try_read(&path) {
+        TryRead::Ready(bytes) => bytes,
+        // Not in memory yet (web only) — latch the pick and the fade it asked for, and let the
+        // per-frame retry open the bed once the pack lands. Blocking here would freeze the frame on
+        // a fetch for a sound the player has not noticed is missing yet.
+        TryRead::Pending => {
+            zone.ambience_pending = Some((kit_id, path, kit_vol, fade_ms));
+            return;
+        }
+        TryRead::Missing => {
+            warn!("ambience: {path} — not readable from the patch chain");
+            zone.ambience_pending = None;
+            return;
+        }
+    };
+    zone.ambience_pending = None;
     // A static loop, NOT a stream: streaming loop beds die at EOF (mixer::loop_from_bytes docs).
-    let data = match bytes.and_then(mixer::loop_from_bytes) {
+    let data = match mixer::loop_from_bytes(bytes) {
         Ok(d) => d,
         Err(e) => {
             warn!("ambience: {path} — {e:#}");
@@ -681,6 +801,42 @@ fn swap_ambience(
             }
         }
         Err(e) => warn!("ambience: {path} — {e:#}"),
+    }
+}
+
+/// Re-attempt the opens the **web target** deferred: a music track or an ambience bed whose bytes
+/// were not in memory when the scheduler asked for them.
+///
+/// It is a per-frame poll and not a callback because that is all it needs to be — the read that
+/// deferred also started the pack warming, so this converges in the handful of frames a fetch takes,
+/// and the poll itself is a `Map` lookup through the resident bridge. **On native both latches are
+/// permanently `None`** (`Chain::try_read` never answers `Pending` there), so this is two `Option`
+/// tests and a return.
+///
+/// Nothing here re-decides anything: the scheduling was settled when the intent was latched, and
+/// this only carries it out. A latch is dropped the moment its open succeeds or the file turns out
+/// to be missing, both inside the openers.
+fn retry_deferred(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    now: f64,
+) {
+    // `take`, not `clone`: the openers re-latch on a second `Pending`, so taking it here avoids
+    // cloning the path on every frame of the wait and leaves exactly one owner of the intent.
+    if let Some((kit, path, kit_vol)) = zone.music_pending.take() {
+        // Suppression (a cinematic) is re-checked inside `open_music_stream`, which is the one place
+        // that owns the slot's gate — a latch that outlives the reason it was made must not route
+        // around it.
+        open_music_stream(zone, out, assets, config, kit, path, kit_vol);
+    }
+    if let Some((kit, path, kit_vol, fade_ms)) = zone.ambience_pending.take() {
+        // Only while the bed is still the one wanted — a second swap during the wait re-latched,
+        // and a swap to silence cleared it. Either way `take` above is the drop.
+        if kit == zone.ambience_kit {
+            play_ambience_bed(zone, out, assets, config, kit, path, kit_vol, fade_ms, now);
+        }
     }
 }
 

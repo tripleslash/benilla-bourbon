@@ -97,11 +97,12 @@ mod wasm {
     /// response type — the normal way to get binary out of an XHR — isn't available here. The
     /// standard workaround, used below, is `override_mime_type("text/plain; charset=x-user-defined")`:
     /// it forces the browser to decode the response body as one code unit (0x00-0xFF) per byte
-    /// instead of guessing UTF-8 and mangling anything non-ASCII into U+FFFD, so `response_text()`
+    /// instead of guessing UTF-8 and mangling anything non-ASCII into U+FFFD, so the response
     /// round-trips arbitrary binary losslessly through `& 0xFF`.
     ///
-    /// That decode is `chars().map()` over the whole body, which is why the pack layout keeps
-    /// bundled objects near 512 KiB and leaves multi-megabyte SINGLETONs to the async lane.
+    /// The unpacking of that binary string happens in JS ([`binary_string_bytes`]), not here. What
+    /// still reaches this function is boot and the character-skin composite — the reads that did not
+    /// move to `Chain::try_read` — so it is worth what it costs past the round trip being small.
     pub fn fetch_sync_range(
         url: &str,
         range: Option<(u64, u64)>,
@@ -118,11 +119,13 @@ mod wasm {
         let status = xhr.status().map_err(js_err)?;
         match status {
             200 | 206 => {
-                let text = xhr.response_text().map_err(js_err)?.unwrap_or_default();
-                Ok((
-                    status,
-                    text.chars().map(|c| (c as u32 & 0xff) as u8).collect(),
-                ))
+                // `response()`, not `response_text()`: the bytes come back as a JS *binary string*
+                // and [`binary_string_bytes`] unpacks it inside JS in one pass. `response_text()`
+                // would first transcode all of it to UTF-8 across the wasm boundary — every byte
+                // above 0x7F becoming two — only for us to decode it back, which is three passes
+                // and two allocations of a body we already had.
+                let value = xhr.response().map_err(js_err)?;
+                Ok((status, binary_string_bytes(&value)))
             }
             404 => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -130,6 +133,51 @@ mod wasm {
             )),
             status => Err(std::io::Error::other(format!("{url}: HTTP {status}"))),
         }
+    }
+
+    /// Unpack an XHR **binary string** (one code unit per byte, the `x-user-defined` charset's
+    /// contract) into the bytes it stands for, with the per-character loop running *in JS*.
+    ///
+    /// Doing it in Rust — `response_text()` then `chars().map()` — costs three passes over the body
+    /// and two allocations of it: wasm-bindgen transcodes the JS string to UTF-8 to hand it across
+    /// the boundary (a body of near-random bytes grows ~1.5x once every unit above 0x7F becomes
+    /// two), Rust copies that into a `String`, and `chars()` decodes it back. The page's
+    /// `unpackBinary` does one `charCodeAt` loop into a `Uint8Array` inside the engine, and the
+    /// boundary then sees a single typed-array copy of exactly `len` bytes.
+    ///
+    /// It is reached the way [`trace`] reaches `__wenilla_boottrace`: a plain global, looked up
+    /// once. **A page that ships no `packs.js` still works** — the Rust loop below is the fallback,
+    /// and it is what this function was before the page grew a helper.
+    fn binary_string_bytes(value: &JsValue) -> Vec<u8> {
+        use wasm_bindgen::JsCast;
+        thread_local! {
+            static UNPACK: std::cell::OnceCell<Option<js_sys::Function>> =
+                const { std::cell::OnceCell::new() };
+        }
+        let unpacked = UNPACK.with(|cell| {
+            let f = cell.get_or_init(|| {
+                let window = web_sys::window()?;
+                let packs = js_sys::Reflect::get(&window, &"__wenilla_packs".into()).ok()?;
+                js_sys::Reflect::get(&packs, &"unpackBinary".into())
+                    .ok()?
+                    .dyn_into::<js_sys::Function>()
+                    .ok()
+            });
+            f.as_ref()?
+                .call1(&JsValue::NULL, value)
+                .ok()?
+                .dyn_into::<js_sys::Uint8Array>()
+                .ok()
+                .map(|a| a.to_vec())
+        });
+        unpacked.unwrap_or_else(|| {
+            value
+                .as_string()
+                .unwrap_or_default()
+                .chars()
+                .map(|c| (c as u32 & 0xff) as u8)
+                .collect()
+        })
     }
 
     /// [`fetch_sync_range`] for a whole object — the shape every pre-container caller wanted.

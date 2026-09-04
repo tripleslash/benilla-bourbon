@@ -22,6 +22,7 @@ use bevy::prelude::*;
 
 pub mod column_grid;
 pub mod coords;
+pub mod frame_budget;
 pub mod materials;
 pub mod minimap_grid;
 mod spatial_cache;
@@ -276,6 +277,11 @@ pub fn register_asset_loaders(app: &mut App) {
     app.register_asset_loader(WmoModelLoader);
     app.register_asset_loader(AdtLoader);
     app.register_asset_loader(WdtIndexLoader);
+    // The per-frame decode budget the four heavy loaders above take their slots from (the WDT index
+    // is a table parse and takes none). It rides here because it is the same fact as registering
+    // them: on the web target a loader is main-thread work, and without the `First` reset every slot
+    // after the first frame's would wait forever. Costs a no-op system on native (`frame_budget`).
+    app.add_plugins(frame_budget::plugin);
     // The render materials' WGSL, compiled in rather than served off the host binary's asset root
     // (decision 1164) — same "after AssetPlugin" requirement as the loaders above, so it rides here.
     materials::register_shaders(app);
