@@ -212,6 +212,17 @@ impl WowLighting {
 /// softer glint that spreads at grazing (sunrise/sunset) sun.
 pub(crate) const WATER_SHININESS: f32 = 6.0;
 
+/// Water surface specular shininess on the **Cataclysm** (`waterDetail 2`) path — a different
+/// number from [`WATER_SHININESS`], and the reference says so twice in the same function.
+///
+/// `Liquid::SetShaderLighting` fills the vertex and pixel constant blocks from one light record and
+/// then writes the exponent into `.w` of the specular register by hand, with a **different literal
+/// for each stage**: `0x40C00000` (6.0) into the vertex block's `c4.w`, `0x42480000` (50.0) into the
+/// pixel block's. `ProcWaterAbove`/`ProcWaterBelow` read `c[4].w` — the pixel one — so cata water's
+/// Blinn exponent is 50, not the 6 the fixed-function 1.12 path uses. It is the difference between
+/// a broad wash across half the lake and a sun track you can see the shape of.
+pub(crate) const CATA_WATER_SHININESS: f32 = 50.0;
+
 /// Quantise a raw `LightParams.glow` (0..1) to the byte the reference packs into the composite-quad
 /// colour: `floor(g·255)/255`. (Elwynn 0.65 → 0.647.)
 pub(crate) fn quantize_glow(glow: f32) -> f32 {

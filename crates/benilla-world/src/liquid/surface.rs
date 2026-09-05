@@ -28,7 +28,7 @@ use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
 use super::ripple;
 use super::screen::LiquidScreenTargets;
 use super::WaterDetail;
-use crate::lighting::WATER_SHININESS;
+use crate::lighting::{CATA_WATER_SHININESS, WATER_SHININESS};
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::materials::{LiquidCataExt, LiquidCataMaterial, LiquidExt, LiquidMaterial};
 use benilla_assets::LockRecover;
@@ -820,8 +820,11 @@ fn cata_foam_params(kind: LiquidKind) -> Vec4 {
 /// The shading lane: view perturb (`c23.y`), specular power (`c4.w`), specular scale (`c27.w`) and
 /// sun-glare scale (`c27.z`).
 ///
-/// The specular power stays on [`WATER_SHININESS`] — water's own exponent, verified for the 1.12
-/// path and unchanged by the renderer swap, because it describes the *surface*, not the program.
+/// The specular power is [`CATA_WATER_SHININESS`], **not** the 1.12 path's [`WATER_SHININESS`].
+/// The exponent is not a property of the surface after all: `Liquid::SetShaderLighting` writes 6.0
+/// into the vertex block's `c4.w` and 50.0 into the pixel block's, out of the same light record, and
+/// `ProcWaterAbove` reads the pixel one. Carrying 6 here gave cata water the fixed-function pipe's
+/// broad wash under a program written for a tight track.
 fn cata_shade_params(kind: LiquidKind) -> Vec4 {
     let glare = match kind {
         // Ocean carries the strongest sun track; it is the one surface with an unbroken horizon.
@@ -829,7 +832,7 @@ fn cata_shade_params(kind: LiquidKind) -> Vec4 {
         LiquidKind::Rapids => 0.22,
         _ => 0.25,
     };
-    Vec4::new(0.55, WATER_SHININESS, 0.6, glare)
+    Vec4::new(0.55, CATA_WATER_SHININESS, 0.6, glare)
 }
 
 /// Decode frames `1..=count` for a kind — each with its BLP **authored mip chain** — into one

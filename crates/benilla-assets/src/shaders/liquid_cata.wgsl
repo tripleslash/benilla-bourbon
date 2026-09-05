@@ -13,13 +13,21 @@
 //     waterDetail 2 → vs ProcWater  + ps ProcWaterAbove/…Below  ← THIS FILE
 //
 // `ProcWaterAbove` ships **54 permutations** over
-// `depthFmt + 2·reflectMode + 6·dynDisplMapCnt + 18·(depthMode−1)`. This is **perm 4**:
-// `samp {0, 2, 3, 5, 6}`, 102 instructions — the variant for `reflectionMode 0` and no dynamic
-// displacement maps. Perm 2 differs only in taking a real planar-reflection render target on
-// `samp1`; perm 4 traces the reflection in screen space against the blurred back buffer instead,
-// with a flat horizon colour where the ray leaves the screen. Choosing perm 4 is not a shortcut —
-// it is the program a Cataclysm player with reflections off actually ran, and it costs one fewer
-// scene render.
+// `depthFmt + 2·reflectMode + 6·dynDisplMapCnt + 18·(depthMode−1)` — the formula read straight off
+// `CMaterialWater::RenderAbove`'s `v6 + 2*a2 + 6*dynDisplMapCnt + 2*(9*depthMode - 9)`, and the
+// count it implies (54, and 27 for `ProcWaterBelow`) is exactly what the shipped containers hold.
+// This is **perm 4**: `samp {0, 2, 3, 5, 6}`, 102 instructions — `reflectMode 2` with no dynamic
+// displacement maps. `SetupRender` binds `GetRealReflectionBuffer()` only when the mode is 1, so
+// mode 2 is the FAKE buffer: perm 2 takes a real planar-reflection render target on `samp1`, perm 4
+// traces the reflection in screen space against the blurred back buffer instead, with a flat
+// horizon colour where the ray leaves the screen. Choosing perm 4 is not a shortcut — it is the
+// program a Cataclysm player with reflections off actually ran, and it costs one fewer scene render.
+//
+// The `fp40` sibling of each container is the same program as **plain ARB text**, and it is the
+// better read: `PARAM c[36] = { program.local[0..31], … }` names the client constants outright,
+// where the SM3 build scatters its literals through `def`s at c2/c9/c10/c11/c12 (registers the
+// client also writes and this program does not read). Both were traced for this port and they
+// agree instruction for instruction.
 //
 // The below-water half is `ProcWaterBelow` **perm 0**: `samp {0, 2, 5, 6}`, 61 instructions — the
 // same surface with the reflection dropped, which is right, because from underneath there is
@@ -558,7 +566,12 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let scene_z = scene_depth_at(uv);
     let depth_ratio = clamp((scene_z - frag_view_z) / max(frag_view_z, 0.001) * 100.0, 0.0, 1.0);
     let offset_amount = clamp((1.2 - fres2) * depth_ratio, 0.0, 1.0);
-    var refract_uv = uv + grad.xy * 0.1 * offset_amount;
+    // **The NORMAL bends the read, not the slope.** `MULR R3.zw, R2.xyxy, R3.z` then
+    // `MULR R5.zw, R3, c[33].z` — `R2` is the normalised shading normal, `c33.z` is 0.1. Driving
+    // this off `grad` instead skips the `c23.y` perturb and the renormalise, which at the shipped
+    // 0.55 perturb is very nearly a doubling: the water bent what was behind it about twice as hard
+    // as the reference does, and disagreed with the surface's own lighting while doing it.
+    var refract_uv = uv + n.xz * 0.1 * offset_amount;
     if (scene_depth_at(refract_uv) < frag_view_z) {
         refract_uv = uv;
     }
@@ -646,22 +659,32 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let clip = view.clip_from_world * vec4<f32>(hit_world, 1.0);
         let ndc = clip.xy / max(clip.w, 0.0001);
         // Two independent validity terms, both from the program:
-        //   * the screen-edge fade `saturate(1 − ndc.y²) · (1 − ndc.x²)`, so a reflection does not
-        //     pop as its source slides off the frame;
-        //   * `0.75 − r.up²`, which kills the trace as the ray tips toward the sky — where there is
-        //     nothing in the back buffer to find.
+        //   * the screen-edge fade `saturate(1 − ndc.x⁴) · saturate(1 − ndc.y⁴)`, so a reflection
+        //     does not pop as its source slides off the frame;
+        //   * `saturate(0.75 − r.up²)`, which kills the trace as the ray tips toward the sky —
+        //     where there is nothing in the back buffer to find.
+        //
+        // **The fade is QUARTIC, and the exponent is the whole of it.** The program squares the NDC
+        // pair, multiplies that by the pair again, and only then subtracts from one — `MULR R0.xy,
+        // R0.zwzw, R0.zwzw` / `MULR R0.xy, R0, R0.zwzw` / `MADR_SAT R1.w, -R0.y, R0, 1`, and the
+        // D3D build spells the same thing with `mad r4.xy, r4.yxzw, -r4.yxzw, 1` over an already
+        // squared register. A quadratic fade instead is 1 − x² where the reference has 1 − x⁴, so it
+        // is at or below the real curve everywhere and worst in between: two thirds of the way to the
+        // screen edge it passes 0.56 of the reflection where the reference passes 0.80, and at half
+        // way 0.75 against 0.94. The reflection was there, correctly weighted, and then thrown away
+        // over most of the frame.
         let q = ndc * ndc;
-        let edge = clamp(1.0 - q.y, 0.0, 1.0) * (1.0 - q.x);
-        let edge_fade = select(0.0, edge, (1.0 - q.x) > 0.0);
-        let skyward = 0.75 - r.y * r.y;
-        let validity = select(0.0, skyward * 1.33333 * edge_fade, skyward > 0.0);
+        let q2 = q * q;
+        let edge = clamp(1.0 - q2.x, 0.0, 1.0) * clamp(1.0 - q2.y, 0.0, 1.0);
+        let skyward = clamp(0.75 - r.y * r.y, 0.0, 1.0);
+        let validity = clamp(skyward * edge * 1.33333, 0.0, 1.0);
         let refl_uv = (ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
         let hit = textureSampleLevel(scene_blur, scene_samp, refl_uv, 0.0).rgb;
         // Where the trace fails, the horizon. `c21` in the program is a constant the client uploads
         // per zone; benilla's equivalent is the fog colour, which in WoW IS the horizon — the sky
         // dome converges on it by construction, so a reflection that falls back to it falls back to
         // something the player can see is right.
-        var reflected = mix(wow_light.fog_color.rgb, hit, clamp(validity, 0.0, 1.0));
+        var reflected = mix(wow_light.fog_color.rgb, hit, validity);
         // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
         // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
         reflected = mix(reflected, body, 0.6);
@@ -671,9 +694,21 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // The sun's broad glare on the surface, modulated by the body so it cannot brighten water that
     // is already dark, and the specular, weighted by the Fresnel square so it only fires at grazing
     // angles.
+    //
+    // **The glare wears the DIFFUSE colour and the specular wears the specular one** — `MULR R2.xyz,
+    // R0.w, c[3]` against `MULR R1.xyz, R1.x, c[4]`, two different registers. `SetShaderLighting`
+    // fills the pixel block straight off the light record: `c2` ambient, `c3` diffuse, `c4` specular
+    // with the Blinn exponent in `.w`. Running both terms off the specular row made the broad sun
+    // track on the water take a colour the sun itself never has at that hour.
     let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
-    rgb += glare * wow_light.light_spec.rgb * body;
-    rgb += w.shade_params.z * spec_color * fres2;
+    rgb += glare * wow_light.light_diffuse.rgb * body;
+    // Below the surface the specular is weighted by the Fresnel square TWICE and by the swatch's
+    // opacity — `ProcWaterBelow` spends `MULR R1.xyz, R1, R3.w` (fres²·ramp.a) and then
+    // `MULR R1.xyz, R1, R2.w` (fres² again) where `ProcWaterAbove` spends one `MULR R1.xyz, R1,
+    // R1.w`. From underneath the sheen is the sun read back down through the water, so it dims with
+    // how much water is in the way and survives only at the shallowest grazing angle.
+    let spec_weight = select(fres2, fres2 * fres2 * ramp.a, below);
+    rgb += w.shade_params.z * spec_color * spec_weight;
     // Foam last, and additively: it sits ON the water rather than being tinted by it, and it is
     // the one term that should survive a dark shoreline at dusk.
     rgb += foam;
