@@ -81,28 +81,53 @@ impl WdlStreamer {
         self.wdl.height_at(wow[0], wow[1])
     }
 
-    /// One tile's coarse surface as **Bevy-space** `(vertices, triangles)`, ready for a parry
-    /// build — `None` where this map authors no such tile.
+    /// One tile's coarse surface as **parry heightfield inputs in Bevy space**: the 17×17 height
+    /// lattice, where to put it, and how far it spans. `None` where this map authors no such tile.
     ///
-    /// The horizon mesh, borrowed for a second job: it is the only description of a tile's ground
+    /// The horizon data, borrowed for a second job: it is the only description of a tile's ground
     /// that exists *before* the tile's own `.adt` has been fetched, because the whole map's copy of
     /// it arrived in one 770 KB file at startup. `terrain_stream::provisional` stands a body on it
-    /// while the real heightfield is still on the wire. 545 verts and 3072 indices per tile — about
-    /// a five-hundredth of the real collider — so building one is not a cost worth pacing.
-    pub(crate) fn coarse_collision(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-    ) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
-        let mesh = self.wdl.tile_mesh(tile_x, tile_y)?;
-        let verts: Vec<Vec3> = mesh.positions.iter().map(|p| wow_to_bevy(*p)).collect();
-        let tris: Vec<[u32; 3]> = mesh
-            .indices
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
-        (!tris.is_empty()).then_some((verts, tris))
+    /// while the real heightfield is still on the wire.
+    ///
+    /// **A lattice, not a mesh, and that is the whole point.** The obvious form is
+    /// `WdlFile::tile_mesh` fed to a trimesh, and it is what this returned first — 3,072 triangles
+    /// per tile, and a parry trimesh means a QBVH build. Nine of those at a tile-boundary crossing
+    /// is a visible hitch on a target whose "async compute pool" is `spawn_local` on the thread that
+    /// draws. A heightfield stores the grid and builds no acceleration structure at all, because a
+    /// regular lattice already is one: 289 floats copied, and the cost stops being worth pacing.
+    ///
+    /// The index order passes through untouched, which is worth stating because it looks like it
+    /// should not. `WdlTileGrid` is `[row][col]` with row along −X and column along −Y (WoW), and
+    /// parry's heightfield is `[row][col]` with row along +Z and column along +X (its own space).
+    /// `wow_to_bevy` maps +X to −Z and +Y to −X, so both flips cancel and each index keeps its axis
+    /// and its direction.
+    pub(crate) fn coarse_floor(&self, tile_x: u32, tile_y: u32) -> Option<CoarseFloor> {
+        self.wdl.tile_height_grid(tile_x, tile_y).map(coarse_floor)
     }
+}
+
+/// One WDL tile's height lattice as parry heightfield inputs — [`WdlStreamer::coarse_floor`]'s
+/// whole body, split out because it is the part with an axis convention in it and therefore the
+/// part worth testing on its own.
+fn coarse_floor(grid: benilla_formats::WdlTileGrid) -> CoarseFloor {
+    CoarseFloor {
+        // `centre` carries no z: the heights are absolute WoW z and parry adds them to the
+        // collider's own origin, so the collider sits at y = 0 and the lattice supplies the height.
+        // (`scale.y` is 1 for the same reason.)
+        at: wow_to_bevy([grid.centre[0], grid.centre[1], 0.0]),
+        scale: Vec3::new(grid.extent, 1.0, grid.extent),
+        heights: grid.heights,
+    }
+}
+
+/// What [`WdlStreamer::coarse_floor`] hands back — a parry heightfield, unbuilt.
+pub(crate) struct CoarseFloor {
+    /// 17×17 absolute heights, `[row][col]`; row indexes Bevy **Z**, column indexes Bevy **X**.
+    pub(crate) heights: Vec<Vec<f32>>,
+    /// Where the lattice's centre sits in Bevy space (`y = 0` — see [`WdlStreamer::coarse_floor`]).
+    pub(crate) at: Vec3,
+    /// Per-axis scale: the tile's edge on X and Z, and `1.0` on Y since the heights are absolute.
+    pub(crate) scale: Vec3,
 }
 
 /// Marks a spawned WDL tile (so a future system could query/cull them as a group if needed).
@@ -315,4 +340,60 @@ fn the_far_band_is_a_fog_hull_not_a_fogged_surface() {
         "wdl.wgsl: the hull reads the SCENE fog distances again — the 33 yd overlap goes partly \
          white at low view distances (the band decision 1521 closed)"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The heights matrix passes through untransposed, and that is a claim worth proving.**
+    ///
+    /// `WdlTileGrid` is `[row][col]` with row along −X and column along −Y in WoW; parry's
+    /// heightfield is `[row][col]` with row along +Z and column along +X in its own space.
+    /// `wow_to_bevy` maps +X to −Z and +Y to −X, so both flips cancel — which is exactly the kind of
+    /// reasoning that is right until it is not, and silently puts a tile's floor sideways when it is
+    /// not.
+    ///
+    /// So: for each corner, where the WDL says that sample is (mapped into Bevy space) against
+    /// where parry will place `heights[i][j]` (its own documented `x_at(j)` / `z_at(i)`). Two
+    /// derivations, one answer.
+    #[test]
+    fn the_height_lattice_lands_where_the_wdl_says_it_does() {
+        const EDGE: usize = 17;
+        let extent = 533.333_3_f32;
+        // A lattice whose rows and columns cannot be confused for one another.
+        let heights: Vec<Vec<f32>> = (0..EDGE)
+            .map(|r| (0..EDGE).map(|c| (r * 100 + c) as f32).collect())
+            .collect();
+        let centre = [1234.5_f32, -678.25_f32];
+        let floor = coarse_floor(benilla_formats::WdlTileGrid {
+            heights: heights.clone(),
+            centre,
+            extent,
+        });
+
+        for (r, row) in heights.iter().enumerate() {
+            for (c, height) in row.iter().enumerate() {
+                // Where the WDL puts this sample: row along −X, column along −Y, then into Bevy.
+                let wow = [
+                    centre[0] + (0.5 - r as f32 / 16.0) * extent,
+                    centre[1] + (0.5 - c as f32 / 16.0) * extent,
+                    *height,
+                ];
+                let want = wow_to_bevy(wow);
+                // Where parry puts `heights[i][j]`: `x_at(j) = (-0.5 + j/16) * scale.x`,
+                // `z_at(i) = (-0.5 + i/16) * scale.z`, plus the collider's own origin.
+                let got = floor.at
+                    + Vec3::new(
+                        (-0.5 + c as f32 / 16.0) * floor.scale.x,
+                        floor.heights[r][c] * floor.scale.y,
+                        (-0.5 + r as f32 / 16.0) * floor.scale.z,
+                    );
+                assert!(
+                    want.distance(got) < 0.01,
+                    "sample [{r}][{c}]: the WDL says {want:?}, parry would place it at {got:?}"
+                );
+            }
+        }
+    }
 }

@@ -319,7 +319,26 @@ pub(super) fn impassable_wall_data(
 /// attaches the result. A few-frame delay in collision for just-streamed *static* geometry is
 /// imperceptible — the streamer loads ahead of the view, so you never reach it before it's solid.
 pub fn build_collider_task(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Task<Collider> {
-    AsyncComputeTaskPool::get().spawn(async move { Collider::trimesh(verts, tris) })
+    AsyncComputeTaskPool::get().spawn(async move {
+        // **Metered, because on the web target this "pool" is the thread that draws.**
+        // `AsyncComputeTaskPool` compiles to `spawn_local` on `wasm32`, so a burst of builds that
+        // become ready together drains as one uninterrupted run of microtasks — and a burst is the
+        // normal case: crossing a tile boundary at a run readies a tile's terrain hull, its
+        // buildings and their props at once. The budget spreads them over frames instead
+        // (`benilla_assets::frame_budget`, the geometry lane), which is the same deferral every
+        // other CPU-bound stretch of a load already takes.
+        //
+        // Deferring the *real* collider is only safe because something else is holding the body up
+        // while it waits — `super::provisional`'s stand-ins, which cost nothing to build and are
+        // retired the frame this one attaches. The two halves are one design: nothing waits, and
+        // nothing is unsupported.
+        //
+        // Free on native, where the pool is real threads and this compiles to nothing.
+        let _slot =
+            benilla_assets::frame_budget::slot_in(benilla_assets::frame_budget::Lane::Geometry)
+                .await;
+        Collider::trimesh(verts, tris)
+    })
 }
 
 #[cfg(test)]

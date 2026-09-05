@@ -282,7 +282,7 @@ mod wdl;
 pub use benilla_wdt::{
     tile_to_world, world_to_chunk, world_to_tile, GlobalWmo, WdtFile, WdtReader, WowVersion,
 };
-pub use wdl::{WdlFile, WdlTileMesh};
+pub use wdl::{WdlFile, WdlTileGrid, WdlTileMesh};
 
 // The map arc (decision 0203), phase 0: the minimap tile hash catalog + the world-map DBCs.
 mod minimap_translate;

@@ -48,6 +48,29 @@ struct MareTile {
     inner: [i16; INNER_N],
 }
 
+/// One tile's outer height grid, as a **regular lattice** rather than a mesh — the shape a
+/// heightfield collider wants.
+///
+/// [`WdlTileMesh`] describes the same surface, but as 545 vertices and 3,072 indices, and building a
+/// parry trimesh out of that costs a QBVH. This is the same data with nothing derived from it: 289
+/// heights, a centre and an edge length, which a heightfield consumes directly and stores as a grid
+/// (no acceleration structure, because a lattice *is* one). That difference is why the streamer's
+/// stand-in floors are free enough to raise while the player is running
+/// (`benilla_world::terrain_stream::provisional`).
+///
+/// The inner 16×16 cell-centre samples are dropped: a heightfield's cell is two triangles from its
+/// four corners, and the centre-fan's fifth sample has nowhere to go. It costs a little fidelity
+/// against the drawn horizon, on a surface that exists to be replaced.
+pub struct WdlTileGrid {
+    /// 17×17 corner heights in absolute WoW `z` yards, `[row][col]` in the on-disk MARE order: row
+    /// steps along **−X** (north → south), column along **−Y** (east → west).
+    pub heights: Vec<Vec<f32>>,
+    /// The tile's centre in raw WoW `(x, y)`. The heights are absolute, so there is no `z`.
+    pub centre: [f32; 2],
+    /// The tile's edge length in yards — the same on both planar axes.
+    pub extent: f32,
+}
+
 /// A coarse WDL tile mesh in raw WoW world coords: positions + a 4-tri-per-cell center-fan index
 /// buffer. No normals (unlit) and no UVs (untextured) — the reference draws this vertex-white + fogged.
 pub struct WdlTileMesh {
@@ -118,6 +141,35 @@ impl WdlFile {
             }
         }
         out
+    }
+
+    /// Tile `(tile_x, tile_y)`'s outer height lattice, or `None` if the map has no such tile.
+    ///
+    /// The lattice positions are [`Self::tile_mesh`]'s own, derived the same way from the **global**
+    /// index so adjacent tiles share an edge exactly; only the form differs (see [`WdlTileGrid`]).
+    pub fn tile_height_grid(&self, tile_x: u32, tile_y: u32) -> Option<WdlTileGrid> {
+        if tile_x >= 64 || tile_y >= 64 {
+            return None;
+        }
+        let tile = self.tiles[tile_index(tile_x, tile_y)].as_ref()?;
+        let cs = CHUNK_SIZE as f64;
+        let lat = |global: f64| (MAP_OFFSET - global * cs) as f32;
+        let heights = (0..OUTER_EDGE)
+            .map(|r| {
+                (0..OUTER_EDGE)
+                    .map(|c| f32::from(tile.outer[r * OUTER_EDGE + c]))
+                    .collect()
+            })
+            .collect();
+        Some(WdlTileGrid {
+            // The lattice midpoint: 8 chunks in from the tile's own origin corner on both axes.
+            centre: [
+                lat(tile_y as f64 * 16.0 + 8.0),
+                lat(tile_x as f64 * 16.0 + 8.0),
+            ],
+            heights,
+            extent: TILE_SIZE,
+        })
     }
 
     /// Build the coarse center-fan mesh for tile `(tile_x, tile_y)`, or `None` if it's absent.
@@ -326,6 +378,58 @@ mod tests {
         assert_eq!(INNER_EDGE * INNER_EDGE * 12, 3072);
         // One WDL cell spans one MCNK.
         assert!((CHUNK_SIZE - TILE_SIZE / 16.0).abs() < 1e-3);
+    }
+
+    /// **The grid and the mesh describe the same lattice** — the test that keeps a heightfield
+    /// collider built from [`WdlFile::tile_height_grid`] on the ground rather than a tile away or
+    /// transposed across it.
+    ///
+    /// Two independent things are pinned per corner: the height at `[row][col]` is the height of
+    /// the mesh vertex at the same index, and the world `(x, y)` that `centre`/`extent` imply for
+    /// that index is that vertex's own. A transposition passes the first and fails the second,
+    /// which is the whole reason the second is here.
+    #[test]
+    fn the_height_grid_and_the_mesh_are_the_same_lattice() {
+        let mut tiles: Vec<Option<MareTile>> = (0..4096).map(|_| None).collect();
+        let mut outer = [0i16; OUTER_N];
+        // Distinct per (row, col) and NOT symmetric under transposition — the whole point.
+        for r in 0..OUTER_EDGE {
+            for c in 0..OUTER_EDGE {
+                outer[r * OUTER_EDGE + c] = (r * 100 + c) as i16;
+            }
+        }
+        let (tx, ty) = (30u32, 41u32);
+        tiles[tile_index(tx, ty)] = Some(MareTile {
+            outer,
+            inner: [0i16; INNER_N],
+        });
+        let wdl = WdlFile { tiles };
+
+        let grid = wdl.tile_height_grid(tx, ty).expect("the tile is present");
+        let mesh = wdl.tile_mesh(tx, ty).expect("the tile is present");
+        assert_eq!(grid.heights.len(), OUTER_EDGE);
+        for (r, row) in grid.heights.iter().enumerate() {
+            assert_eq!(row.len(), OUTER_EDGE);
+            for (c, height) in row.iter().enumerate() {
+                let vertex = mesh.positions[r * OUTER_EDGE + c];
+                assert_eq!(*height, vertex[2], "height at [{r}][{c}]");
+                // `centre` is the lattice midpoint and `extent` its full span, so index `i` of 17
+                // sits at `centre + (0.5 - i/16) * extent` — row along −X, column along −Y.
+                let at = |i: usize, mid: f32| mid + (0.5 - i as f32 / 16.0) * grid.extent;
+                assert!(
+                    (at(r, grid.centre[0]) - vertex[0]).abs() < 0.01,
+                    "row {r} sits at x {} not {}",
+                    at(r, grid.centre[0]),
+                    vertex[0]
+                );
+                assert!(
+                    (at(c, grid.centre[1]) - vertex[1]).abs() < 0.01,
+                    "column {c} sits at y {} not {}",
+                    at(c, grid.centre[1]),
+                    vertex[1]
+                );
+            }
+        }
     }
 
     /// `height_at` must agree with the RENDERED surface — sample it at every `tile_mesh` vertex

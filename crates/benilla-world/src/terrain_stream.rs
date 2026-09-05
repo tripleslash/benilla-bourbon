@@ -256,15 +256,20 @@ pub struct WorldLoadProgress {
     pub scene_ready: bool,
     /// Outstanding collider attaches (decision 0610's queue) — published by `finish_colliders`.
     pub colliders_pending: usize,
-    /// **Is there real collision geometry under the focus tile?** Published by the stand-in lane
+    /// **Is there collision geometry under the focus tile?** Published by the stand-in lane
     /// (`provisional`), which is the only system that both knows the focus tile and can see whether
-    /// its collider has actually attached.
+    /// its collider has attached.
     ///
     /// The scene term plus a quiet collider queue *imply* this on every ordinary frame, and saying
     /// it out loud anyway is the point: the implication runs through four other terms, and the
-    /// thing a body must never be released onto is exactly this one fact. It is deliberately about
-    /// the REAL collider — a stand-in floor does not make it true — so an arrival still waits for
-    /// the ground it is going to stand on rather than for the coarse shape of it.
+    /// thing a body must never be released onto is exactly this one fact.
+    ///
+    /// **A stand-in floor satisfies it.** It did not at first — the term was "the *real* collider
+    /// has attached" — and that made it a hard wait on a network: the body sat frozen while a tile's
+    /// heightfield was fetched, decoded, built and attached. Waiting is the same mistake as falling,
+    /// arrived at from the other side; both come from treating "not here yet" as something to sit
+    /// still for. What the consumers need is that the body is not released over *nothing*, and a
+    /// stand-in is not nothing.
     ///
     /// Vacuously true where the map authors no tile under the focus (open ocean, a map edge, a
     /// WMO-only map), for the same reason `focus_resident` is: waiting there would hang forever on

@@ -84,11 +84,23 @@ const PREFETCH_CONCURRENCY = 6;
 const WARM_CONCURRENCY = 6;
 /// Warm priority: **collision-bearing reads** — terrain tiles, WMO roots and groups, M2 headers
 /// (their bounds and collision hulls) — go ahead of everything else. The classifier is Rust's
-/// (`benilla_formats::webpack::warm_priority`), which is where the extension law already lives;
-/// this file only orders what it is told.
+/// (`benilla_formats::web::warm_priority`), which is where the extension law already lives; this
+/// file only orders what it is told.
 const PRIORITY_GEOMETRY = 0;
 /// Everything else: textures, sounds, DBCs, UI art. The default when a caller names no priority.
 const PRIORITY_NORMAL = 1;
+/// How many of `WARM_CONCURRENCY`'s slots geometry may hold **while anything else is waiting**.
+///
+/// Strict priority is not a queue discipline, it is a starvation policy, and this queue has a
+/// caller that cannot survive one. A UI sprite read answers `Pending` while its pack is missing and
+/// the FrameXML extract gate re-runs a full conversion on every deferral — so art that never
+/// arrives is not "art that never arrives", it is a full UI rebuild every frame for as long as the
+/// geometry queue is non-empty. Running across a zone keeps it non-empty indefinitely.
+///
+/// So geometry gets a big majority and never the whole pool: four of six while art is queued, all
+/// six when it is not. The reservation costs a third of the bandwidth in exactly the moments there
+/// is a backlog, and buys the guarantee that every lane keeps moving.
+const WARM_GEOMETRY_SLOTS = 4;
 /// Stop writing Cache Storage at this fraction of the origin's quota. Going over does not fail
 /// loudly — the browser evicts something, possibly the packs we just wrote — so leaving headroom is
 /// how the cache stays useful rather than thrashing.
@@ -264,21 +276,44 @@ const packs = {
   /// `_pumpWarms`'s body, split out so the guard above has one exit to clear itself on.
   _pumpQueue() {
     while (this._warmActive < WARM_CONCURRENCY && this._warmQueue.length) {
-      let best = 0;
-      for (let i = 1; i < this._warmQueue.length; i++) {
-        const a = this._pending.get(this._warmQueue[i]);
-        const b = this._pending.get(this._warmQueue[best]);
-        if (!b || (a && a.priority < b.priority)) best = i;
-      }
-      const packId = this._warmQueue.splice(best, 1)[0];
+      // The reservation is for work that is actually WAITING, never an absolute cap: past its
+      // share, geometry stands aside for anything else in the queue — and takes the slot anyway
+      // when there is nothing else, because an idle connection helps no lane. Asked per iteration
+      // rather than once, since the answer changes as this loop fills the pool.
+      const withheld = this._geometryActive >= WARM_GEOMETRY_SLOTS;
+      let at = this._bestQueued(withheld);
+      if (at < 0 && withheld) at = this._bestQueued(false);
+      if (at < 0) return;
+      const packId = this._warmQueue.splice(at, 1)[0];
       const job = this._pending.get(packId);
       // Settled while it was still queued (the worker died under it) — nothing left to start.
       if (!job) continue;
       job.started = true;
+      job.startedAs = job.priority;
       this._warmActive++;
+      if (job.startedAs <= PRIORITY_GEOMETRY) this._geometryActive++;
       this._startWarm(packId, job);
     }
   },
+
+  /// Index into `_warmQueue` of the job to start next: best priority first, ties by arrival (the
+  /// scan only moves on a STRICTLY better priority, so equal-priority reads keep the order they
+  /// were asked in). `-1` when nothing in the queue may start.
+  ///
+  /// `skipGeometry` withholds the geometry lane for this pick — see `WARM_GEOMETRY_SLOTS`.
+  _bestQueued(skipGeometry) {
+    let best = -1;
+    for (let i = 0; i < this._warmQueue.length; i++) {
+      const job = this._pending.get(this._warmQueue[i]);
+      if (!job) return i; // a settled ghost: let the caller splice it away
+      if (skipGeometry && job.priority <= PRIORITY_GEOMETRY) continue;
+      if (best < 0 || job.priority < this._pending.get(this._warmQueue[best]).priority) best = i;
+    }
+    return best;
+  },
+
+  /// How many in-flight warms are geometry — the count `WARM_GEOMETRY_SLOTS` caps.
+  _geometryActive: 0,
 
   /// One started warm: hand it to the worker, either as a fetch it does itself or as wire bytes
   /// this side fetched. Unchanged from what `warmPack` used to do inline — only *when* it runs is
@@ -354,6 +389,9 @@ const packs = {
     this._pending.delete(packId);
     if (pending.started) {
       this._warmActive--;
+      // `startedAs`, not `priority`: a job promoted to geometry mid-flight was never counted into
+      // the geometry share, and decrementing on its current priority would leak a slot.
+      if (pending.startedAs <= PRIORITY_GEOMETRY) this._geometryActive--;
     } else {
       // Settled before it ever started (the worker died with a queue behind it). Its slot was never
       // taken, so only the queue entry has to go.
