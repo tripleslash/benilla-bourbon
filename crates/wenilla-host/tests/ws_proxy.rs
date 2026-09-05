@@ -159,3 +159,46 @@ async fn an_allowed_proxy_dials_the_host_the_client_names() {
         .await
         .expect("the client-named host must be dialed");
 }
+
+/// **The port allowlist is not a function of the remote-realm policy.** `--allow-remote-realms`
+/// widens *which box* may be dialed and nothing else — the port set stays the compiled-in
+/// `{3724, 8085}` under either setting, so a gateway sharing the host's network namespace cannot be
+/// aimed at sshd, the database, or its own listener whatever a page asks for.
+///
+/// Written against `wenilla_host::ALLOWED_PORTS` itself — the exact value `main.rs` hands the
+/// router — so widening that constant, or making it conditional, fails here rather than in front of
+/// strangers. The 403 is the assertion that matters: it lands *before* the upgrade, so a port that
+/// slipped through would show up as a successful handshake, not as a refused one.
+#[tokio::test]
+async fn the_port_allowlist_holds_whatever_the_remote_realm_policy_is() {
+    assert_eq!(
+        wenilla_host::ALLOWED_PORTS,
+        [3724, 8085],
+        "the hosted allowlist is realmd + mangosd and nothing else"
+    );
+
+    for remote in [RemoteRealms::Refuse, RemoteRealms::Allow] {
+        let addr = spawn_proxy(wenilla_host::ws::router(
+            UNREACHABLE,
+            wenilla_host::ALLOWED_PORTS,
+            remote,
+        ))
+        .await;
+
+        // What is actually within reach of a `network_mode: host` gateway on the gateway box: sshd,
+        // the mysql the vmangos compose runs, the gateway's own listener, and the near-misses a
+        // mistyped realmlist produces.
+        for port in [22u16, 80, 443, 3306, 8080, 8090, 3723, 3725, 8084, 8086, 65535] {
+            let url = format!("ws://{addr}/ws/{port}?host=127.0.0.1");
+            let err = tokio_tungstenite::connect_async(&url)
+                .await
+                .map(|_| ())
+                .expect_err(&format!("port {port} must never upgrade under {remote:?}"));
+            let err = err.to_string();
+            assert!(
+                err.contains("403") || err.to_lowercase().contains("forbidden"),
+                "port {port} under {remote:?} was refused for the wrong reason: {err}"
+            );
+        }
+    }
+}

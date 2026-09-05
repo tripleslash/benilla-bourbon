@@ -363,9 +363,42 @@ struct ViewCam {
     speed: f32,
 }
 
+/// `WOW_WORLDVIEW_AT=x,y,z` — open the eye at this raw WoW point instead of over [`VIEW_START`],
+/// aimed by `WOW_WORLDVIEW_FACE` (heading degrees, 0 = +X, counter-clockwise) and
+/// `WOW_WORLDVIEW_PITCH` (degrees, + = up). The client's `WOW_CAPTURE=vista` twin, for the engine
+/// binary: `WOW_MAP` picks the continent, so one launch frames any doodad in the world.
+fn start_pose() -> (Vec3, f32, f32) {
+    let Some(at) = std::env::var("WOW_WORLDVIEW_AT").ok().and_then(|v| {
+        let mut it = v.split(',').map(|p| p.trim().parse::<f32>());
+        Some([it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?])
+    }) else {
+        let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, 100.0]);
+        return (
+            start + Vec3::new(0.0, VIEW_START_HEIGHT, VIEW_START_HEIGHT),
+            0.0,
+            -0.5,
+        );
+    };
+    let deg = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .to_radians()
+    };
+    // WoW heading 0 = +X, which `wow_to_bevy` lands on −Z; the fly controller's yaw is measured
+    // the same way its own look-drag writes it, so the two agree on the first frame.
+    (
+        wow_to_bevy(at),
+        deg("WOW_WORLDVIEW_FACE"),
+        deg("WOW_WORLDVIEW_PITCH"),
+    )
+}
+
 fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>) {
-    let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, 100.0]);
+    let (eye, yaw, pitch) = start_pose();
     let far = crate::view::CAM_FAR;
+    let look = eye + Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0) * Vec3::NEG_Z;
     commands.spawn((
         Camera3d::default(),
         crate::view::WorldCamera,
@@ -379,11 +412,10 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
         Hdr,
         Tonemapping::None,
         crate::ffx_glow::FfxGlow::WORLD,
-        Transform::from_translation(start + Vec3::new(0.0, VIEW_START_HEIGHT, VIEW_START_HEIGHT))
-            .looking_at(start, Vec3::Y),
+        Transform::from_translation(eye).looking_at(look, Vec3::Y),
         ViewCam {
-            yaw: 0.0,
-            pitch: -0.5,
+            yaw,
+            pitch,
             speed: 100.0,
         },
     ));
