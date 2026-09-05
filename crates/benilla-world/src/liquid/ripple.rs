@@ -48,8 +48,8 @@ use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::screen::LiquidScreenView;
-use super::{water_surface_at, LiquidClaim, WaterChunkInfo};
 use crate::view::WorldCamera;
+use crate::world_point::{Subject, WorldPoint};
 use crate::world_unit::{ViewerUnit, WorldUnit};
 use benilla_assets::coords::bevy_to_wow;
 
@@ -390,6 +390,14 @@ fn perturbation(x: f32, z: f32, radius: f32, amplitude: f32) -> Vec4 {
 /// within fifty yards whenever the type is rain and the intensity is over 0.2. The wading half is
 /// this port's addition; `water_fx` carries the reference's own answer for a body in water, which
 /// is a decal rather than a wave.
+///
+/// **The wet test goes through [`WorldPoint`], with each body's own [`Subject`].** It used to hand
+/// [`LiquidClaim::Outdoors`] to the raw surface walk, which is not "wherever this body is" — it is
+/// the ADT's MCLQ and *nothing else* (`WaterChunkInfo::answers`: an `Outdoors` claim rejects every
+/// `LiquidSource::WmoGroup`). So a body wading in a WMO pool — Stormwind's canals, the fountains,
+/// every interior pool in the game — pushed no wave at all, and the water it was standing in was
+/// the one water in the world with no dynamic displacement on it. The claim is per-subject for the
+/// same reason every other liquid query's is (0634/0696/0701), and asking for it is one call.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn collect_stamps(
     time: Res<Time>,
@@ -401,13 +409,15 @@ pub(super) fn collect_stamps(
     self_unit: Query<&WorldUnit, With<ViewerUnit>>,
     camera: Query<&Transform, With<WorldCamera>>,
     units: Query<(Entity, &Transform, &WorldUnit), Without<ViewerUnit>>,
-    water: Query<&WaterChunkInfo>,
+    world: WorldPoint,
 ) {
     let dt = time.delta_secs().max(1.0e-4);
     // Track every body every frame — velocity has to be differenced against the LAST frame, not the
     // last step, or a body would appear to teleport between steps.
     let mut seen = bevy::platform::collections::HashMap::new();
-    let mut moving: Vec<(Vec3, f32, f32)> = Vec::new();
+    // The subject rides along with the body: the wet test below is scoped by whose liquid answers,
+    // and by the time it runs the entity the claim is looked up from is out of scope.
+    let mut moving: Vec<(Subject, Vec3, f32, f32)> = Vec::new();
 
     // **The avatar, and it needs its own branch** — `Without<ViewerUnit>` below is not a way of
     // saying "everyone", it is half of a pair. The viewer's body is not read off a `Transform` like
@@ -426,7 +436,7 @@ pub(super) fn collect_stamps(
                 // the decal ring takes — so the unit's scale is applied here exactly as the
                 // streamed branch applies its own.
                 let scale = self_unit.single().map(|u| u.scale).unwrap_or(1.0);
-                moving.push((body, speed, viewer.height * scale.max(0.1)));
+                moving.push((Subject::Player, body, speed, viewer.height * scale.max(0.1)));
             }
         }
     }
@@ -444,7 +454,12 @@ pub(super) fn collect_stamps(
         if speed < WADE_MIN_SPEED {
             continue; // standing still pushes nothing; the wave already made carries on by itself
         }
-        moving.push((pos, speed, unit.height * unit.scale.max(0.1)));
+        moving.push((
+            Subject::Unit(entity),
+            pos,
+            speed,
+            unit.height * unit.scale.max(0.1),
+        ));
     }
     *last = seen;
 
@@ -452,10 +467,12 @@ pub(super) fn collect_stamps(
         return;
     }
 
-    for (pos, speed, height) in moving {
-        // Only where there IS water under it, and only while the body is actually in it.
+    for (who, pos, speed, height) in moving {
+        // Only where there IS water under it, and only while the body is actually in it — and it is
+        // *this body's* water, not the open world's: outdoors that is the ADT's MCLQ, inside a
+        // building it is that placement's own MLIQ pool (see the header note).
         let wow = bevy_to_wow(pos);
-        let Some(surface) = water_surface_at(water.iter(), wow, LiquidClaim::Outdoors) else {
+        let Some(surface) = world.water_surface_at(who, wow) else {
             continue;
         };
         let depth = surface - wow[2];
@@ -689,4 +706,123 @@ pub(super) fn register(app: &mut App) {
             Core3d,
             (Node3d::MainOpaquePass, RippleLabel, Node3d::MainTransparentPass),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::liquid::{LiquidSource, WaterChunkInfo, WmoPool};
+    use crate::view::Viewer;
+    use crate::wmo_portal::{PlayerWmoRoom, WmoRoom};
+    use crate::world_point::init_world_point_resources;
+    use benilla_assets::coords::wow_to_bevy;
+    use benilla_formats::LiquidKind;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::Duration;
+
+    /// One flat 20-yd-square wet cell at `z`, WoW `x`/`y` in `[0, 20]`.
+    fn pool(source: LiquidSource, z: f32) -> WaterChunkInfo {
+        let positions = vec![
+            [0.0, 0.0, z],
+            [20.0, 0.0, z],
+            [0.0, 20.0, z],
+            [20.0, 20.0, z],
+        ];
+        WaterChunkInfo::new(source, LiquidKind::Still, [2, 2], positions, vec![true])
+    }
+
+    /// The pool of the placement `owner`'s group 0, with no floor — the shape a WMO fountain or
+    /// canal spawns with.
+    fn wmo_source(owner: Entity) -> LiquidSource {
+        LiquidSource::WmoGroup(WmoPool {
+            owner: Some(WmoRoom {
+                instance: owner,
+                group: 0,
+            }),
+            floor: f32::NEG_INFINITY,
+        })
+    }
+
+    /// How many stamps a viewer wading across `source`'s pool leaves, with the player's interior
+    /// claim set to `room`.
+    ///
+    /// Two runs of one REGISTERED system, not two `run_system_once`s: the wade speed is differenced
+    /// against a `Local`, and a fresh system has no last frame to difference against.
+    fn stamps_from_a_wading_viewer(source: LiquidSource, room: Option<WmoRoom>) -> usize {
+        let mut world = World::new();
+        init_world_point_resources(&mut world);
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Time>();
+        world.resource_mut::<PlayerWmoRoom>().0 = room;
+
+        let mut field = {
+            let mut images = world.resource_mut::<Assets<Image>>();
+            setup(&mut images)
+        };
+        // The step the collector only fills on. `advance_clock` owns this in the live schedule;
+        // there is no clock to advance here, only the wade to test.
+        field.steps = 1;
+        world.insert_resource(field);
+
+        world.spawn(pool(source, 5.0));
+        world
+            .run_system_once(super::super::maintain_water_index)
+            .expect("index");
+
+        // WoW (10, 10, 4) — inside the cell, one yard under the surface.
+        world.insert_resource(Viewer {
+            at: Some(wow_to_bevy([10.0, 10.0, 4.0])),
+            height: 2.0,
+            ..default()
+        });
+        let collect = world.register_system(collect_stamps);
+        world.run_system(collect).expect("first frame");
+
+        // Half a yard along WoW x in 50 ms — 10 yd/s, well over `WADE_MIN_SPEED`.
+        world.resource_mut::<Time>().advance_by(Duration::from_millis(50));
+        world.resource_mut::<Viewer>().at = Some(wow_to_bevy([10.5, 10.0, 4.0]));
+        world.run_system(collect).expect("second frame");
+
+        world.resource::<RippleField>().stamps.len()
+    }
+
+    /// **A body wading in a WMO pool pushes a wave.** The stamp gate used to hand the surface walk
+    /// a hardcoded [`LiquidClaim::Outdoors`], which is not "wherever this body is" — it is the ADT's
+    /// MCLQ and nothing else, so every WMO pool in the game (Stormwind's canals and fountains, every
+    /// interior pool) was the one water with no dynamic displacement on it.
+    #[test]
+    fn a_wmo_pool_takes_a_wading_bodys_wave() {
+        let owner = Entity::from_raw_u32(7).expect("valid entity id");
+        let room = WmoRoom {
+            instance: owner,
+            group: 0,
+        };
+        assert_eq!(
+            stamps_from_a_wading_viewer(wmo_source(owner), Some(room)),
+            1,
+            "a viewer wading in the pool of the room it is standing in leaves a stamp"
+        );
+    }
+
+    /// The other half of the same law: the claim still SCOPES. A pool the player is not inside of
+    /// answers for nobody, so widening the gate must not turn every pool on the map into a wake.
+    #[test]
+    fn a_pool_in_another_building_takes_nothing() {
+        let owner = Entity::from_raw_u32(7).expect("valid entity id");
+        assert_eq!(
+            stamps_from_a_wading_viewer(wmo_source(owner), None),
+            0,
+            "outdoors, a WMO pool does not answer"
+        );
+    }
+
+    /// And the ADT path it never lost.
+    #[test]
+    fn map_liquid_still_takes_the_wave() {
+        assert_eq!(
+            stamps_from_a_wading_viewer(LiquidSource::AdtChunk, None),
+            1,
+            "outdoors, the ADT's own MCLQ answers"
+        );
+    }
 }

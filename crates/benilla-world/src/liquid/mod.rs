@@ -84,6 +84,7 @@ use benilla_assets::AssetSet;
 mod art;
 mod drift;
 mod query;
+mod reflect;
 mod ripple;
 mod screen;
 #[cfg(test)]
@@ -104,6 +105,7 @@ pub use query::{
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
     Underwater, WaterChunkInfo, WmoPool,
 };
+pub(crate) use reflect::LIQUID_RENDER_LAYER;
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
@@ -242,6 +244,11 @@ impl Plugin for LiquidPlugin {
         screen::register(app);
         // The dynamic ripple displacement map: the wave a wading body pushes into the water.
         ripple::register(app);
+        // The planar mirror `ProcWaterAbove` perm 0 reads on `samp1` — the one input of the cata
+        // water that is a scene render rather than a blit, and therefore a camera rather than a
+        // node. Registered unconditionally: its camera stands itself down off `waterDetail` and
+        // the submersion verdict, and the material binds the target either way.
+        reflect::register(app);
     }
 
     /// The liquid screen pass's edge to `Ssilvb`, which can only be declared once every plugin has

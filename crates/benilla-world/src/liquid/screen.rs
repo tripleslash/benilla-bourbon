@@ -1,24 +1,22 @@
 //! **The cata liquid path's screen-space inputs.**
 //!
-//! `ProcWaterAbove` perm 4 — the permutation this client ports — reads five samplers, and three of
-//! them are pictures of the frame so far:
+//! `ProcWaterAbove` perm 0 — the permutation this client ports — reads six samplers, and four of
+//! them are pictures of the frame:
 //!
 //! | reference stage | reference name | here |
 //! |---|---|---|
 //! | `samp0` | `"LiquidProc BackBufferTex"` | [`LiquidScreenTargets::color`] — refraction |
+//! | `samp1` | `GetFakeReflectionBuffer()` | [`LiquidScreenTargets::reflect`] — the planar mirror |
 //! | `samp3` | `"blurredBack"` | [`LiquidScreenTargets::blur`] — the screen-space reflection |
 //! | `samp6` | `DepthCache::GetDepthSR()` | [`LiquidScreenTargets::depth`] — linear view depth |
 //!
 //! (`samp2`, the 8×64 depth ramp, is evaluated analytically from the shared light instead of being
 //! built as a texture; `samp5` is the bump map in [`super::art`]. Neither needs a pass.)
 //!
-//! **Why perm 4 and not perm 2.** Perm 2 binds a real reflection render target — a second scene
-//! view rendered per frame, which the reference only fills at all because it has a whole
-//! `CWorldScene::RenderReflection` path. Perm 4 is the shipped variant for `reflectionMode 0`: the
-//! reflection is a screen-space ray traced against the *blurred back buffer*, with a constant
-//! horizon colour where the ray leaves the screen or points at the sky. Same program family, same
-//! author, one less render pass and no second camera — and it is what a Cataclysm player with
-//! reflections off actually saw.
+//! Three of the four are filled by the passes in THIS file, which are blits. The fourth is a scene
+//! render and belongs to a camera, not to a node — [`super::reflect`] owns it; this file only
+//! allocates its target, because the resize discipline below is the same for all four and having
+//! one of them keep its own copy of it is how the four drift apart.
 //!
 //! ## Multisampling
 //!
@@ -78,6 +76,17 @@ use crate::view::WorldCamera;
 /// reference blurs its own copy into a fixed 512² for the same reason.
 const BLUR_SHIFT: u32 = 2;
 
+/// How much smaller the **planar reflection** render is than the frame — the reference's
+/// `reflectionDownscale` CVar, whose `CreateReflectionBuffer` sizes the target
+/// `viewport / (1 << downscale)`.
+///
+/// The CVar registers at `"0"` (full frame) and `SetReflectionDownscale` accepts up to 4. One is
+/// taken here rather than zero because this buffer is never read sharp: every fetch of it is a
+/// projected read 20 yards along a bent ray, and the term it feeds is then lerped against a
+/// quarter-resolution blur. A second full-resolution scene render to be read that softly is the one
+/// cost in this feature with nothing to show for it.
+const REFLECT_SHIFT: u32 = 1;
+
 /// The three pictures of the frame the cata water shader reads.
 ///
 /// Handles rather than render-world `CachedTexture`s, because the consumer is a `Material`: it
@@ -92,6 +101,11 @@ pub(crate) struct LiquidScreenTargets {
     /// Linear view depth in yards, `R32Float`, viewport-sized. The refraction guard and the
     /// depth tint (`samp6`).
     pub(crate) depth: Handle<Image>,
+    /// The **planar mirror** — a second, mirrored render of the world about the world plane
+    /// `z = 0`, at [`REFLECT_SHIFT`]. `ProcWaterAbove` perm 0's `samp1`, and the base its
+    /// screen-space trace is laid over. Filled by a camera (`liquid::reflect`), not by a node —
+    /// it is a scene render, not a blit.
+    pub(crate) reflect: Handle<Image>,
     /// The size `color`/`depth` were allocated at. A change here is what triggers the republish.
     pub(crate) size: UVec2,
 }
@@ -101,6 +115,7 @@ impl LiquidScreenTargets {
     pub(crate) fn allocate(images: &mut Assets<Image>, size: UVec2) -> Self {
         let size = size.max(UVec2::ONE);
         let blur_size = (size >> UVec2::splat(BLUR_SHIFT)).max(UVec2::ONE);
+        let reflect_size = (size >> UVec2::splat(REFLECT_SHIFT)).max(UVec2::ONE);
         LiquidScreenTargets {
             color: images.add(target_image(
                 "liquid_scene_color",
@@ -116,6 +131,11 @@ impl LiquidScreenTargets {
                 "liquid_scene_depth",
                 size,
                 TextureFormat::R32Float,
+            )),
+            reflect: images.add(target_image(
+                "liquid_reflection",
+                reflect_size,
+                ViewTarget::TEXTURE_FORMAT_HDR,
             )),
             size,
         }
@@ -225,12 +245,14 @@ pub(crate) fn resize_targets(
         targets.color.clone(),
         targets.blur.clone(),
         targets.depth.clone(),
+        targets.reflect.clone(),
     ];
     *targets = LiquidScreenTargets::allocate(&mut images, size);
     for (_, material) in materials.iter_mut() {
         material.extension.scene_color = targets.color.clone();
         material.extension.scene_blur = targets.blur.clone();
         material.extension.scene_depth = targets.depth.clone();
+        material.extension.reflect_map = targets.reflect.clone();
     }
     for handle in retired {
         images.remove(&handle);

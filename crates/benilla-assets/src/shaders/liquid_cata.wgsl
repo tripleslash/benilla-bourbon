@@ -16,12 +16,21 @@
 // `depthFmt + 2·reflectMode + 6·dynDisplMapCnt + 18·(depthMode−1)` — the formula read straight off
 // `CMaterialWater::RenderAbove`'s `v6 + 2*a2 + 6*dynDisplMapCnt + 2*(9*depthMode - 9)`, and the
 // count it implies (54, and 27 for `ProcWaterBelow`) is exactly what the shipped containers hold.
-// This is **perm 4**: `samp {0, 2, 3, 5, 6}`, 102 instructions — `reflectMode 2` with no dynamic
-// displacement maps. `SetupRender` binds `GetRealReflectionBuffer()` only when the mode is 1, so
-// mode 2 is the FAKE buffer: perm 2 takes a real planar-reflection render target on `samp1`, perm 4
-// traces the reflection in screen space against the blurred back buffer instead, with a flat
-// horizon colour where the ray leaves the screen. Choosing perm 4 is not a shortcut — it is the
-// program a Cataclysm player with reflections off actually ran, and it costs one fewer scene render.
+// This is **perm 0**: `samp {0, 1, 2, 3, 5, 6}`, `reflectMode 0` with no dynamic displacement maps,
+// and it is the arm a `waterDetail 2` player actually runs. `CRenderer::Flush` picks the mode as
+// `v29 = renderer[+0x30]` — 0 for the ordinary renderer, 1 for the real-reflection one — and only
+// then `if (!v29 && instance->settings[+0x24] == 2) v29 = 2`. So mode 1 (perms 2/3) is the
+// `waterDetail > 2` tier and mode 2 (perms 4/5) is a minority arm on one liquid class; mode 0 is
+// the default, and the only one that reads BOTH the reflection buffer on `samp1` and the blurred
+// back buffer on `samp3`, lerping the second over the first.
+//
+// **This file used to port perm 4, and that is the bug it was reported for.** Perm 4 has no
+// `samp1`: its reflection is the screen-space trace alone, with a flat horizon constant where the
+// trace leaves the frame — and `saturate(0.75 − r.up²)` says outright that the trace dies as the
+// ray tips skyward, which is exactly what pitching the camera down does. Water went flat on the
+// pitch a player uses to look at a lake. Perm 0 has a real mirrored render underneath the trace, so
+// that same pitch reveals the mirror instead of a constant. `benilla_world`'s `liquid::reflect`
+// owns the camera that fills it, and carries the cost and the gaps.
 //
 // The `fp40` sibling of each container is the same program as **plain ARB text**, and it is the
 // better read: `PARAM c[36] = { program.local[0..31], … }` names the client constants outright,
@@ -95,6 +104,11 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var scene_color: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var scene_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var scene_blur: texture_2d<f32>;
+/// **The planar reflection buffer** — `ProcWaterAbove`'s `samp1`, filled by a second, mirrored
+/// scene render (`benilla_world`'s `liquid::reflect`). Takes `scene_samp` (106): it is a projected
+/// screen read like the other two, and a fourth sampler on this material costs the frame — see the
+/// note at 104.
+@group(#{MATERIAL_BIND_GROUP}) @binding(115) var reflect_map: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var scene_depth: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var noise_vol: texture_3d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var foam_tex: texture_2d<f32>;
@@ -103,7 +117,8 @@ struct LiquidParams {
     // x = fullbright (magma/slime); y = ocean swatch; z = interior fog; w = sun-sheen shininess.
     kind: vec4<f32>,
     // x = which renderer (0 = ADT MCLQ, 1 = WMO exterior, 2 = WMO interior);
-    // y = BELOW-WATER (1 = the eye is under this surface → the `ProcWaterBelow` combine).
+    // y = BELOW-WATER (1 = the eye is under this surface → the `ProcWaterBelow` combine);
+    // z = is `reflect_map` live this frame (the reference's `HasFakeReflection`).
     path: vec4<f32>,
     // x = reserved; y = frame count; z = scroll flag; w = clock enable.
     anim: vec4<f32>,
@@ -644,7 +659,23 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // below is the world seen up through the surface — carrying the specular and the glare.
         rgb = refracted;
     } else {
-        // ---- ProcWaterAbove perm 4: the screen-space reflection --------------------------------
+        // ---- ProcWaterAbove perm 0: the planar mirror, with the screen-space trace over it -----
+        //
+        // **Perm 0, not perm 4, is what a `waterDetail 2` player runs.** `CRenderer::Flush` picks
+        // the program's `reflectMode` as `v29 = renderer[+0x30]` — 0 for the ordinary renderer, 1
+        // for the real-reflection one — and only then `if (!v29 && instance->settings[+0x24] == 2)
+        // v29 = 2`. So mode 2 (perm 4/5) is a minority arm gated on one liquid class, mode 1 (perm
+        // 2/3) is the `waterDetail > 2` tier, and mode 0 (perm 0/1) is the default. The three are
+        // told apart by their sampler sets in the shipped container: 0 takes `{0,1,2,3,5,6}`, 1
+        // takes `{0,1,2,5,6}`, 2 takes `{0,2,3,5,6}` — mode 0 is the only one that reads BOTH the
+        // reflection buffer (`samp1`) and the blurred back buffer (`samp3`).
+        //
+        // What that buys, and why this port's first cut lost reflections whenever the camera
+        // pitched down: perm 4's reflection is the screen-space trace ALONE, with a flat horizon
+        // constant where the trace leaves the frame. Pan down and the trace always leaves the frame
+        // — `saturate(0.75 − r.up²)` is exactly the term that says so — so the water went flat.
+        // Perm 0 has the mirror underneath it and the trace only layered on top, so the pitch that
+        // kills the trace reveals the render rather than a constant.
         //
         // Reflect the view about a FLATTENED normal (`N · (0.3, 0.3, 1)`, renormalised). Flattening
         // is not an approximation to apologise for: a full-strength normal throws the ray so far
@@ -680,11 +711,45 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let validity = clamp(skyward * edge * 1.33333, 0.0, 1.0);
         let refl_uv = (ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
         let hit = textureSampleLevel(scene_blur, scene_samp, refl_uv, 0.0).rgb;
-        // Where the trace fails, the horizon. `c21` in the program is a constant the client uploads
-        // per zone; benilla's equivalent is the fog colour, which in WoW IS the horizon — the sky
-        // dome converges on it by construction, so a reflection that falls back to it falls back to
-        // something the player can see is right.
-        var reflected = mix(wow_light.fog_color.rgb, hit, validity);
+        // **The mirror's own lookup — a SECOND ray, and a much shorter one.** The program does not
+        // read `samp1` at the fragment's own screen position, which is what a textbook planar
+        // reflection would do; it projects a point 20 yards along
+        //
+        //     ray = V + saturate(V·N · 0.45 + 0.55) · (−N_horizontal − V)
+        //
+        // (`MADR R4.xyz, -R0, c[36].xxyw, -R1` builds `−N_h − V` with the UP component zeroed by
+        // `c36.y = 0`; `MADR_SAT R1.w, R1.w, c[35].y, c[35].z` is the weight; `c35.w = 20` is the
+        // distance). Head-on the weight is ~0.55 and the ray leans off the view direction toward
+        // the wave's own downhill; at a grazing angle it drops toward 0.45·V. That lean IS the
+        // mirror's distortion — the buffer is a flat render about `z = 0`, so a surface that is not
+        // at `z = 0`, or not flat, has to be paid for by displacing the read rather than by
+        // re-rendering per surface.
+        //
+        // **`1 − u`, and it is ours, not the reference's.** The reference mirrors its camera with a
+        // plain `C4Plane::Mirror`, which is a reflection matrix; a Bevy `Transform` holds a `Quat`
+        // and cannot, so `liquid::reflect` builds the mirrored camera as a proper rotation — which
+        // costs a flip of the camera's local X, and therefore a horizontal flip of the picture.
+        // Undoing it here is one subtract, against a second camera that could not exist otherwise.
+        let bend = clamp(dot(v, n) * 0.45 + 0.55, 0.0, 1.0);
+        let mirror_ray = v + bend * (-vec3<f32>(n.x, 0.0, n.z) - v);
+        let mirror_clip = view.clip_from_world * vec4<f32>(in.world_position.xyz + mirror_ray * 20.0, 1.0);
+        let mirror_ndc = mirror_clip.xy / max(mirror_clip.w, 0.0001);
+        var mirror_uv = (mirror_ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
+        mirror_uv.x = 1.0 - mirror_uv.x;
+        // Where the mirror is standing down — the eye submerged, or the legacy tier, the
+        // reference's own `HasFakeReflection` conditions — the horizon takes its place. `c21` in
+        // the program is a constant the client uploads per zone; benilla's equivalent is the fog
+        // colour, which in WoW IS the horizon: the sky dome converges on it by construction, so a
+        // reflection that falls back to it falls back to something the player can see is right.
+        // This is also exactly what perm 4 has in place of the mirror, so the fallback is not a
+        // guess — it is the other shipped program.
+        var base = wow_light.fog_color.rgb;
+        if (w.path.z > 0.5) {
+            base = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
+        }
+        // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
+        // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
+        var reflected = mix(base, hit, validity);
         // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
         // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
         reflected = mix(reflected, body, 0.6);

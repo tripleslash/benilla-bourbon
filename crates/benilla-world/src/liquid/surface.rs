@@ -336,6 +336,10 @@ pub(crate) fn spawn_liquids<'a>(
                     LiquidSoundSource {
                         nibble: lq.sound_nibble,
                     },
+                    // Water is world geometry to every camera EXCEPT the mirror that reflects it
+                    // — see `reflect`'s header, and the reference's own reflection view, which
+                    // never sets the `0x200` water-pass bit.
+                    bevy::camera::visibility::RenderLayers::layer(super::LIQUID_RENDER_LAYER),
                 ));
                 record_lane(&mut ec, lane);
                 ec.id()
@@ -477,6 +481,10 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 LiquidSoundSource {
                     nibble: lq.sound_nibble,
                 },
+                // Water is world geometry to every camera EXCEPT the mirror that reflects it —
+                // see `reflect`'s header, and the reference's own reflection view, which never
+                // sets the `0x200` water-pass bit.
+                bevy::camera::visibility::RenderLayers::layer(super::LIQUID_RENDER_LAYER),
             ));
             record_lane(&mut ec, lane);
             ec.id()
@@ -679,6 +687,7 @@ pub(super) fn setup_liquid(
                     scene_color: targets.color.clone(),
                     scene_blur: targets.blur.clone(),
                     scene_depth: targets.depth.clone(),
+                    reflect_map: targets.reflect.clone(),
                     ripple_map: ripples.map.clone(),
                     kind: Vec4::new(
                         if kind.is_fullbright() { 1.0 } else { 0.0 },
@@ -686,7 +695,9 @@ pub(super) fn setup_liquid(
                         if path.interior_fog() { 1.0 } else { 0.0 },
                         WATER_SHININESS,
                     ),
-                    // `y` starts above-water; `sync_below_water` flips it with the eye.
+                    // `y` starts above-water; `sync_below_water` flips it with the eye. `z`
+                    // starts with the mirror DOWN — `reflect::sync_reflection_flag` raises it once
+                    // that camera has a pose, so no frame ever reads an uninitialised target.
                     path: Vec4::new(path.shader_id(), 0.0, 0.0, 0.0),
                     anim: Vec4::new(
                         0.0,

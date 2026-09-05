@@ -599,6 +599,23 @@ pub struct LiquidCataExt {
     /// Metal's per-stage sampler ceiling is close enough here to be worth not spending twice.
     #[texture(107, visibility(fragment))]
     pub scene_blur: Handle<Image>,
+    /// Stage 1: the **planar reflection buffer** — a mirrored render of the world about the
+    /// world plane `z = 0`, which `ProcWaterAbove` perm 0 samples as the BASE of its reflection
+    /// and lays the screen-space trace over.
+    ///
+    /// `SetupRender` binds this on stage 1 as `a7 == 1 ? GetRealReflectionBuffer() :
+    /// GetFakeReflectionBuffer()`, and the "fake" one is not a fake: `HasFakeReflection()` is
+    /// `waterDetail != 0` outright, and it drives a real second scene render —
+    /// `CWorldScene::RenderReflection(s_defaultReflectionView2, FakeReflectionFB, 0, 0.0)`,
+    /// mirroring the camera with `C4Plane::Mirror` about `(0, 0, 1, −0)`. `benilla_world`'s
+    /// `liquid::reflect` owns the camera that fills it.
+    ///
+    /// **No sampler of its own** — it takes 106 (`scene_samp`), the linear-clamp one the other two
+    /// screen reads use. It is addressed by a projected screen coordinate exactly as they are, and
+    /// the WebGPU 16-sampler cap is close enough here to be worth not spending a fourth on.
+    #[texture(115, visibility(fragment))]
+    pub reflect_map: Handle<Image>,
+
     /// Stage 7: the shoreline foam sheet, sampled twice at two scroll phases and ADDED.
     ///
     /// `ProcWaterAbove`'s `samp7` — `GetTexture(mat, 3, 0)`, the third of the reference's per-liquid
@@ -651,7 +668,11 @@ pub struct LiquidCataExt {
     /// As [`LiquidExt::path`]: `x` = which of the reference's three liquid renderers owns this
     /// surface. `y` = **the below-water flag** — 1 when the camera eye is under this surface, which
     /// is what selects `ProcWaterBelow` over `ProcWaterAbove`. The reference makes the same choice
-    /// per draw (`CMaterialWater::RenderAbove` / `RenderBelow`), not per fragment.
+    /// per draw (`CMaterialWater::RenderAbove` / `RenderBelow`), not per fragment. `z` = **is
+    /// [`Self::reflect_map`] live this frame** — the reference's own `HasFakeReflection()`, which
+    /// stands the mirror down while the camera is submerged (`Liquid::CameraSubmerged`) and
+    /// whenever `waterDetail` is 0; with it clear the shader falls back to the flat horizon colour
+    /// perm 4 uses, rather than reading a frame-old mirror.
     #[uniform(102)]
     pub path: Vec4,
     /// As [`LiquidExt::anim`]: `x` reserved, `y` frame count, `z` scroll flag, `w` clock enable.
