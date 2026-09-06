@@ -31,8 +31,9 @@ fn every_shipped_ui_xml_parses() {
     // into a test that guards zero files while staying green.
     assert!(
         // A sanity floor for the walk, not a census: `assets/ui` retires file by file (1751),
-        // so the floor sits well under the count rather than one step above it (1956).
-        checked >= 10,
+        // so the floor sits well under the count rather than one step above it (1956). Nine
+        // files stand after 2014; the glue screens and the dev frames alone are more than six.
+        checked >= 6,
         "only {checked} xml files swept — sweep broke"
     );
 }
@@ -212,7 +213,7 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
         }
     }
     // The spell book's overlay is the reference's own template resized by SpellBookAdapters.xml's
-    // script (1952), so its number is measured off a VM, not read off an XML.
+    // script (1952/2014), so its number is measured off a VM, not read off an XML.
     let s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     let (overlay, button): (f32, f32) = s
         .eval("return SpellButton1AutoCastable:GetWidth(), SpellButton1:GetWidth()")
@@ -235,134 +236,42 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
     }
 }
 
-/// Every shipped autocast-shine token, and the rim/viewport ratio each one asks for — the one
-/// place the widget's geometry is decided, so the one place to pin it.
+/// The two shipped autocast-shine panes, and the rim/viewport ratio each one asks for — the one
+/// place the widget's geometry is decided, so the one place to pin it. Read off the live panes
+/// (the stock `$parentAutoCast` Models the tile renderer draws, 2013/2014), never an XML.
 ///
 /// The pet button is the REFERENCE's own numbers (`setAllPoints` on 30x30 at `scale="1.2"`), and
 /// its ratio is why that button reads as a rim: the rim square is 1.024x its viewport, so it runs
-/// ON the edge and the widget's scissor halves every star (1387/1391).
+/// ON the edge and the tile's cell — the widget's own scissor — halves every star (1387/1391).
 ///
 /// The spell book is **one deliberate deviation** (decision 1392). The reference writes
 /// `scale="1.22"` into a 36-unit viewport — a 0.87x rim that floats clear of the edge, is never
 /// clipped, and washes the icon; the real 1.12 client looks the same way (director-checked), so
-/// this is taste, not fidelity. We write 1.48 on a 37-unit rim (1393's numbers, set by
-/// SpellBookAdapters.xml over the reference's own template since 1952) to borrow the pet button's
-/// ratio. This test is what stops that drifting, or being "corrected" back to 1.22 by someone
-/// who only read the ref.
+/// this is taste, not fidelity. We re-seat the stock Model to 1.48 on a 37-unit rim (1393's
+/// numbers, SpellBookAdapters.xml) to borrow the pet button's ratio. This test is what stops that
+/// drifting, or being "corrected" back to 1.22 by someone who only read the ref.
 #[test]
-fn the_shine_tokens_ask_for_the_rims_we_meant() {
-    use benilla_ui::framexml::{Element, TopLevel};
-
-    fn walk(el: &Element, out: &mut Vec<(String, f32, f32)>) {
-        for (key, value) in el.attrs() {
-            let scale = crate::autocast_shine::token_model_scale(value);
-            let is_token = key.eq_ignore_ascii_case("file")
-                && value.starts_with(crate::autocast_shine::SHINE_TOKEN);
-            if let (true, Some(scale)) = (is_token, scale) {
-                let view = el
-                    .children
-                    .iter()
-                    .find(|c| c.tag.eq_ignore_ascii_case("Size"))
-                    .and_then(|sz| sz.children.first())
-                    .and_then(|d| {
-                        d.attrs()
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case("x"))
-                            .map(|(_, v)| v.to_string())
-                    })
-                    .and_then(|v| v.parse::<f32>().ok())
-                    // No <Size> means setAllPoints on the pet button, which is 30x30.
-                    .unwrap_or(30.0);
-                out.push((
-                    el.attrs()
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("name"))
-                        .map(|(_, v)| v.to_string())
-                        .unwrap_or_default(),
-                    0.02 * 1280.0 * scale,
-                    view,
-                ));
-            }
-        }
-        for child in &el.children {
-            walk(child, out);
-        }
-    }
-
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("assets/ui") {
-        let path = entry.expect("entry").path();
-        if path.extension().is_none_or(|e| e != "xml") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).expect("read");
-        for item in benilla_ui::framexml::parse(&src).expect("parse").items {
-            match item {
-                TopLevel::Font(el) | TopLevel::Template(el) | TopLevel::Instance(el) => {
-                    walk(&el, &mut found)
-                }
-                TopLevel::Include(_) | TopLevel::Script(_) => {}
-            }
-        }
-    }
-    // The spell book's shine is created by SpellBookAdapters.xml's script beside the reference's
-    // own Model (1952), so its token is read off a VM's extract — where the renderer reads it —
-    // not an XML. (Not `GetTexture`, which answers the path up to its last dot, the reference's
-    // own shape, and so would cut the token's scale in half.)
+fn the_shine_panes_ask_for_the_rims_we_meant() {
+    let mut found: Vec<(String, f32, f32)> = Vec::new();
     let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     s.tick(0.05);
     s.resolve();
-    s.run("SpellButton1Shine:Show()").unwrap();
-    s.resolve();
-    let quads = s.extract();
-    let token = quads
-        .iter()
-        .find_map(|q| match &q.content {
-            benilla_ui::script::QuadContent::Texture { path: Some(p), .. }
-                if p.starts_with(crate::autocast_shine::SHINE_TOKEN) =>
-            {
-                Some(p.clone())
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| {
-            let owned: Vec<_> = quads
-                .iter()
-                .filter(|q| {
-                    s.quad_owner_name(q.target)
-                        .is_some_and(|n| n.starts_with("SpellButton1"))
-                })
-                .map(|q| (s.quad_owner_name(q.target), format!("{:?}", q.content)))
-                .collect();
-            panic!("no shine token among SpellButton1's quads: {owned:?}")
-        });
-    let scale = crate::autocast_shine::token_model_scale(&token).expect("a shine token");
-    let view: f32 = s.eval("return SpellButton1Shine:GetWidth()").unwrap();
-    found.push(("SpellButton1Shine".into(), 0.02 * 1280.0 * scale, view));
-    // The pet button's shine is PetActionBarAdapters.xml's, over the whole button (1953): the
-    // token off the shown marker's quad, the viewport off that quad's own rect.
+    let (scale, view): (f32, f32) = s
+        .eval("return SpellButton1AutoCast:GetModelScale(), SpellButton1AutoCast:GetWidth()")
+        .unwrap();
+    found.push(("SpellButton1AutoCast".into(), 0.02 * 1280.0 * scale, view));
     let s = pet_bar_vm();
-    let (token, view) = s
-        .extract()
-        .into_iter()
-        .find_map(|q| match (&q.content, q.rect) {
-            (benilla_ui::script::QuadContent::Texture { path: Some(p), .. }, Some(r))
-                if p.starts_with(crate::autocast_shine::SHINE_TOKEN) =>
-            {
-                Some((p.clone(), r.right - r.left))
-            }
-            _ => None,
-        })
-        .expect("the pet bar's shine marker (Claw autocasts in the hunter fixture)");
-    let scale = crate::autocast_shine::token_model_scale(&token).expect("a shine token");
-    found.push(("PetActionButton1Shine".into(), 0.02 * 1280.0 * scale, view));
-    assert_eq!(
-        found.len(),
-        2,
-        "expected exactly two shine tokens: {found:?}"
-    );
+    let (scale, view): (f32, f32) = s
+        .eval(
+            "return PetActionButton1AutoCast:GetModelScale(), PetActionButton1AutoCast:GetWidth()",
+        )
+        .unwrap();
+    found.push((
+        "PetActionButton1AutoCast".into(),
+        0.02 * 1280.0 * scale,
+        view,
+    ));
     for (name, rim, view) in &found {
         assert!(
             (rim / view - 1.024).abs() < 1e-3,
@@ -396,11 +305,7 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
             let archive_path = ["file", "bgfile", "edgefile"]
                 .contains(&key.to_ascii_lowercase().as_str())
                 && !value.is_empty();
-            // The autocast-shine token (decision 1383) is a REGISTRATION, not an archive path:
-            // conversion intercepts it before the resolver and it draws nothing, so it is
-            // exempt — through the token's OWN parser, so a typo'd token (or an unparseable
-            // `scale=` suffix) still fails this sweep as the white quad it would actually be.
-            if archive_path && crate::autocast_shine::token_model_scale(value).is_none() {
+            if archive_path {
                 out.push((file.to_string(), el.tag.clone(), value.clone()));
             }
         }
@@ -846,7 +751,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
     // The sweep must never pass by finding nothing to sweep.
     // The same walk floor as above (1956).
-    assert!(swept >= 10, "only {swept} xml files swept — sweep broke");
+    assert!(swept >= 6, "only {swept} xml files swept — sweep broke");
 }
 
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
@@ -1335,10 +1240,9 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 ///
 /// - `CinematicFrame` — the frame being *shown*. The reference declares it with no parent for
 ///   exactly this reason, and `SetFullScreenFrame` shows it in the same breath as hiding UIParent.
-/// - `BenillaFadeDriver` — a 1x1 frame with no textures and no layers, whose only content is an
-///   `OnUpdate` running `UIFrameFadeUpdate`. It draws nothing, and it must not be hidden: a hidden
-///   frame's `OnUpdate` does not run, so parenting it would freeze every in-flight `UIFrameFade`
-///   the instant a cinematic started and leave frames stranded mid-fade.
+/// - (Until 1988 a `BenillaFadeDriver` survived beside it — our fade kit's tick frame. The stock
+///   `UIFrameFadeUpdate` runs from UIParent's own OnUpdate, which a cinematic's `UIParent:Hide()`
+///   stops exactly as the reference's does.)
 #[test]
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
@@ -1360,7 +1264,26 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
 
-    let names = shipped_frame_names();
+    // The sweep's subjects: the frames OUR files declare — plus the reference's own HUD, because
+    // `assets/ui` is nearly empty now (1988 retired the last of the glue) and a sweep over what is
+    // left would pass without ever looking at the interface the cascade actually hides.
+    let mut names = shipped_frame_names();
+    names.extend(
+        [
+            "MainMenuBar",
+            "ChatFrame1",
+            "PlayerFrame",
+            "MinimapCluster",
+            "BuffFrame",
+            "MainMenuBarBackpackButton",
+            "CharacterMicroButton",
+            "UIErrorsFrame",
+            // The frame being SHOWN — the sweep's one expected survivor.
+            "CinematicFrame",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
     let visible = |s: &benilla_ui::script::UiScript, n: &str| -> bool {
         s.eval::<i64>(&format!(
             "local f = getglobal(\"{n}\") \
@@ -1376,9 +1299,9 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     assert!(
         // 50 until 1938 took the three bar files stock, 20 until 1974 took the minimap cluster
         // (its 22 named frames were most of what this sweep counted), 12 until 1987 took the
-        // micro row; the floor follows the census of OUR files down, and 2 is what is left —
-        // the glue and dev frames.
-        before >= 2,
+        // micro row and 1988 the glue. The floor is over the named HUD above now, not over our
+        // files' census, so it stops following the migration down.
+        before >= 6,
         "only {before} frames visible before the cinematic — the sweep found no interface to \
          hide, so it would pass no matter what the cascade did"
     );
@@ -1395,7 +1318,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     after.sort_unstable();
     assert_eq!(
         after,
-        ["BenillaFadeDriver", "CinematicFrame"],
+        ["CinematicFrame"],
         "something is drawing over the fly-by (see this test's header for why exactly these \
          two are allowed to survive)"
     );

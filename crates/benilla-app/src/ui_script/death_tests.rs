@@ -13,14 +13,13 @@ fn setup() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     s
 }
 
@@ -386,11 +385,17 @@ fn the_ghost_predicates() {
             ..Default::default()
         }),
     );
-    assert!(!s.eval::<bool>("return UnitIsDead(\"player\")").unwrap());
-    assert!(s.eval::<bool>("return UnitIsGhost(\"player\")").unwrap());
+    // The trio's shape is 1/nil, never a boolean (decision 2043), so these read the value rather
+    // than its truthiness — `== nil` is the comparison a boolean would invert.
     assert!(s
-        .eval::<bool>("return UnitIsDeadOrGhost(\"player\")")
+        .eval::<bool>("return UnitIsDead(\"player\") == nil")
         .unwrap());
+    assert_eq!(s.eval::<i64>("return UnitIsGhost(\"player\")").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return UnitIsDeadOrGhost(\"player\")")
+            .unwrap(),
+        1
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

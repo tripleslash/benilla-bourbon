@@ -310,7 +310,7 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 }
 
 /// `benilla-config/Diagnostics/` — where the stuck-thread self-sampler drops its profiles
-/// ([`crate::perf::stall`]).
+/// ([`crate::perf::stall`]) and the FPS journal its rows ([`fps_journal_path`]).
 ///
 /// **This was `~/Library/Logs/benilla/` until 2026-08-27, hand-built from `$HOME`** — a platform
 /// log directory, which is the exact shape the one-folder rule names as forbidden ("never a
@@ -326,10 +326,30 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
 /// this instrument was built for — the director's, and the long probe rounds — keep it. The
 /// alternative, an ungated second accessor, would put "which paths are exempt from hermetic?" back
 /// into someone's head, which is what the single rule exists to prevent.
-// Same one reader as `sound::output::device_open`: the macOS-only stall watchdog.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Diagnostics"))
+}
+
+/// `benilla-config/Diagnostics/fps-journal.csv` — the FPS journal's rows while the `fpsJournal`
+/// CVar is on (decision 2008): the file a reporter attaches. `None` on a hermetic run like
+/// everything here; the harness names its own path through `WOW_FPS_JOURNAL` instead.
+///
+/// **And `None` on the page**, which is the one resident of this folder that does not follow
+/// [`home`] into `localStorage`. Every other resident is a small file rewritten when something
+/// changes; the journal is an APPEND once a second whose contents grow for as long as the tab is
+/// open, and a `localStorage` write is synchronous on the thread drawing the frame (`write_meter`
+/// below is the meter that exists because of it) — so the instrument built to find stutter would be the
+/// tab's biggest source of it, worsening the longer a reporter ran it. The browser's own
+/// instrument is `crate::webdiag`, which reports to the console and holds nothing.
+pub(crate) fn fps_journal_path() -> Option<PathBuf> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        diagnostics_dir().map(|d| d.join("fps-journal.csv"))
+    }
 }
 
 /// Make an arbitrary realm/character name safe as one path component: anything outside

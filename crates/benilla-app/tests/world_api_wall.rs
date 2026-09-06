@@ -106,8 +106,13 @@ const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_wa
 const INSTRUMENT_CONSUMERS: &[&str] = &["debug_panel", "perf", "pipe_warm"];
 
 /// Is this file one of the app-side instruments?
+///
+/// The separator set carries the BACKSLASH too: `rel` comes off `Path::display`, so on
+/// Windows every instrument file reads `perf\trace.rs` and matched nothing — which
+/// silently moved the whole instrument bucket into the gated count and made the number this
+/// test prints platform-dependent.
 fn is_instrument_consumer(rel: &str) -> bool {
-    let root = rel.split(['/', '.']).next().unwrap_or("");
+    let root = rel.split(['/', '\\', '.']).next().unwrap_or("");
     INSTRUMENT_CONSUMERS.contains(&root)
 }
 
@@ -365,7 +370,47 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// each whole-scene input of the still-frame skips (1979) read as changed. Counted in the
 /// world crate so the probe names ONE static instead of the four resources the skips read; the
 /// reading is what says whether a gate ever engages.
-const CEILING: usize = 175;
+/// And 175 → 176: `mat_anim_table::affine_row`, a PUBLISH. The mat-anim table's second row
+/// kind (decision 2019): a texture transform's rotation and scale as deltas from the identity,
+/// `[cos − 1, sin, sx − 1, sy − 1]`, so that row 0 — the pinned zero every static material
+/// reads — IS the identity. That encoding is the table's own law (the same zero-is-identity
+/// rule its translation rows and the tint table run under), and the shader's fold is written
+/// against it; a lane that owns rows in the table — the UI model tiles, sampling the cooldown's
+/// quadrant rotations off the pane's play head — has to write them in the table's encoding,
+/// not one of its own. One function, "encode this affine the way the table reads it".
+/// And 176 → 177: `mat_anim_table::MatAnimMirrors`, a PUBLISH — the mat-anim table's twin of
+/// `instance_tint::InstanceTintMirrors` (decision 2023). A lane whose materials bind a light
+/// buffer of their own reads the table out of THAT buffer, so the UI model tiles' rows — the
+/// cooldown sweep's rotations, written every frame off the pane's play head — reached a region
+/// nothing in a tile ever sampled until the tile's buffer was on a mirror list. Registered once
+/// at the tile renderer's startup, the same shape and the same reason as the palette mirror
+/// beside it.
+/// And 177 → 178: `model_fade::UnitRenderAlpha`, a PUBLISH — one streamed unit's live render
+/// alpha, composed from the unit ROOT's own presentation state. `ModelAlphas` beside it is the
+/// read side for a consumer that can wait for `PostUpdate`'s publish; this is the read side for
+/// one that cannot — the blob shadow runs in `Update`, and on the frame a unit's presentation
+/// begins the published component does not exist yet. Published as a door rather than as its
+/// three inputs (`UnitAppearFade`, `DespawnFade`, `model_render_alpha`) precisely because the
+/// lane that reconstructed the answer from parts got it wrong the same way every time: it read
+/// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
+/// shadow on the ground under an invisible creature for the length of a load. A caller asking
+/// one question cannot make that mistake; a caller handed the inputs can.
+/// And 178 → 182: the four doors this fork's own engine work opens, all four of them a PUBLISH
+/// the options page reaches for by name (`ui_script::options`, `cvars`) rather than a lane
+/// reconstructing engine state app-side:
+///
+/// - `liquid::WaterDetail` — the `waterDetail` CVar's knob. WHICH liquid renderer the world
+///   draws is the engine's own state (it decides which of two materials every surface wears),
+///   and the CVar is the one place a player names it; the alternative, a bool the app keeps and
+///   the engine re-derives, is two answers to one question.
+/// - `ssilvb::IndirectLighting` and `ssilvb::SSILVB_RANGE` — the screen-space indirect pass's
+///   two strengths and the range they clamp to. The range crosses with them deliberately: a
+///   slider that clamps to a number the app copied is a slider that drifts from the shader the
+///   day the pass's own limits move.
+/// - `model_render::ShadowOccluder` — the marker that says a streamed part casts into the
+///   player's shadow map. The engine owns the caster pass; the game owns which entities are
+///   in it (a mount is, a spell effect is not), which is exactly the shape 1164 calls a door.
+const CEILING: usize = 182;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

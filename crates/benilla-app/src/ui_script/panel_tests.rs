@@ -4,9 +4,9 @@ use benilla_ui::script::{
 };
 
 /// Load one manifest entry into `s`, panicking on any loader error and returning the frame count
-/// it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot manager)
-/// before the panel frame(s) under test, exactly as `benilla.toc`'s own order does, so
-/// `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
+/// it materialized — the panel tests all load `Interface\FrameXML\UIParent.xml` (decision 0084 §2's
+/// slot manager) before the panel frame(s) under test, exactly as `benilla.toc`'s own order does,
+/// so `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
 ///
 /// This was a private disk-only reader until 1751's second window: `BankFrame.xml` is the
 /// reference's own file off the player's chain now, and a reader that only knows `assets/ui`
@@ -30,7 +30,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
-/// Load the real `assets/ui/GossipFrame.xml` (the shipped gossip window) behind `UiPanels.xml`
+/// Load the stock `Interface\FrameXML\GossipFrame.xml` behind `UIParent.xml`
 /// into a bare engine and drive it with a synthetic gossip menu — the whole phase-3 chain minus
 /// Bevy (decision 0081), now over the UIPanel slot manager (decision 0084): the hidden→shown
 /// lifecycle on GOSSIP_SHOW goes through ShowUIPanel (landing the window at the left slot,
@@ -50,18 +50,19 @@ fn shipped_gossip_frame_drives_end_to_end() {
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
     // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
     // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
@@ -256,18 +257,19 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
@@ -420,18 +422,19 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Three long options — the shape of a real judgement/roleplay menu, every one of them wrapping
@@ -481,8 +484,9 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
             .collect();
         s.set_measured_text_unwrapped(&answers);
     };
-    // Frame 1: the labels are measured (their heights land for the NEXT tick — the round-trip is a
-    // frame late, exactly as the tab-fit and quest-panel resizes already live with).
+    // Frame 1: the labels are measured (their heights land for the NEXT tick — this harness drives
+    // the host's BATCH round-trip by hand, which is a frame late by construction; the app's own
+    // synchronous measurer closes the same loop inside `resolve`).
     answer_measures(&mut s);
     s.resolve();
     // Frame 2: the frame's own settle pass reads those measures and sizes each row.
@@ -539,18 +543,19 @@ fn gossip_show_hide_plays_open_and_close_kits() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -586,17 +591,18 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
@@ -682,17 +688,18 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                         // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                         // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                         // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                         // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                         // and then loses the scrollbar silently.
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
@@ -731,7 +738,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 }
 
 /// Pin §4's pushable path: a higher-`pushable` occupant (loot's future pushable=7 row, already
-/// registered in `UiPanels.xml`) gets pushed to the center slot rather than replaced when a
+/// registered in `UIParent.xml`) gets pushed to the center slot rather than replaced when a
 /// pushable=0 frame (merchant) wants the left spot (UIParent.lua l.734-741) — the synthetic
 /// registrant the pin calls for, since no loot window ships yet. A bare `CreateFrame` with a
 /// distinctive 50×50 size stands in for it: it has no visual layers, but `extract` still emits
@@ -742,13 +749,13 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, "UIParent.xml");
     // The vendor window is the reference's own since 1751, and its `MerchantFrame_UpdateMerchantInfo`
     // calls `TEXT()` while building every row — see `test_ui::MERCHANT_UI` for the rest.
     for f in super::test_ui::MERCHANT_UI {
@@ -851,18 +858,19 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
         load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-        load_xml(&s, "UiPanels.xml");
+        load_xml(&s, r"Interface\FrameXML\UIParent.xml");
         load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
         load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
         load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
         load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-        load_xml(&s, "UIParent.xml");
-        load_xml(&s, "Cooldown.xml");
+        load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
         load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
-        load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                             // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
-                                             // optional: a missing template is a loader *warning*, not an error, so an under-loaded
-                                             // list passes load_xml and then loses the scrollbar silently.
+        load_xml(&s, "ScrollTemplates.xml"); // our file: the two scroll kits + the placeholder icon
+                                             // (BenillaScroll_Step is only this suite's pan driver). The window's own
+                                             // scroll frame inherits the reference's UIPanelScrollFrameTemplate, which
+                                             // lives in UIPanelTemplates.xml (next) — NOT optional: a missing template is
+                                             // a loader *warning*, not an error, so an under-loaded list passes load_xml
+                                             // and then loses the scrollbar silently.
                                              // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
                                              // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
         load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
@@ -940,7 +948,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
@@ -948,7 +956,6 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // Eight wrapping options: ~4 lines each, far past the 334 px scroll frame.
@@ -1102,7 +1109,7 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
@@ -1110,7 +1117,6 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GossipFrame.xml");
 
     // The addon's three lines, in the order an addon writes them.
@@ -1184,14 +1190,14 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
     let s = UiScript::new().unwrap();
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     for probe in [
         // ItemTextFrame — UIParent.lua l.20 (the B288 row).
         "UIPanelWindows['ItemTextFrame'].area == 'left'",
@@ -1203,8 +1209,9 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
         // The whileDead flags the ref authors and 1507 carried (l.21, l.25, Blizzard_TalentUI:71).
         "UIPanelWindows['SpellBookFrame'].whileDead == 1",
         "UIPanelWindows['QuestLogFrame'].whileDead == 1",
-        "UIPanelWindows['TalentFrame'].whileDead == 1",
         // UIChildWindows — UIParent.lua l.44-50 verbatim, all four shipped.
+        // `TalentFrame`'s row is `Blizzard_TalentUI.lua:71`'s, registered when that addon loads
+        // (1988 retired our copy of it, which the reference does not keep in UIParent.lua).
         "table.getn(UIChildWindows) == 4",
         "UIChildWindows[1] == 'OpenMailFrame'",
         "UIChildWindows[2] == 'GuildControlPopupFrame'",
@@ -1229,14 +1236,13 @@ fn a_dead_player_opens_only_whiledead_windows() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -1303,14 +1309,13 @@ fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
 
     // The letter is open; two shipped-row stand-ins take the seats: MerchantFrame (pushable 0)
     // holds left, TradeFrame (pushable 1) then ARRIVES at center (UIParent.lua l.734-741's

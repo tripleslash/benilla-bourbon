@@ -46,7 +46,6 @@ mod area_trigger;
 #[cfg(feature = "dev")]
 mod asset_churn;
 mod aura_visual;
-mod autocast_shine;
 mod bindings;
 mod blob_shadow;
 mod bowstring;
@@ -89,7 +88,7 @@ mod names;
 mod net;
 mod npc_text;
 mod pending_item_ops;
-#[cfg(feature = "dev")]
+/// Ships in part: the FPS journal and the clocks it reads (2008); the rest is `dev` (1173).
 mod perf;
 mod pipe_warm;
 mod player;
@@ -114,6 +113,8 @@ mod name_persist;
 mod shutdown;
 mod smart_rect;
 mod sound;
+/// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
+mod swing_refusal;
 mod target;
 mod textinput;
 mod transport;
@@ -153,6 +154,7 @@ mod ui_macro;
 mod ui_mail;
 mod ui_merchant;
 mod ui_mirror;
+mod ui_models;
 mod ui_net;
 mod ui_party;
 mod ui_pass;
@@ -578,6 +580,10 @@ pub fn run(build: BuildId) -> AppExit {
     // `Update` stamps order against `WorldStage` and its marker schedules splice around the
     // `StateTransition` that `StatesPlugin` seeded.
     .add_plugins(webdiag::plugin)
+    // The FPS journal — the one instrument that ships (2008): `/console fpsJournal 1` in any
+    // build appends a per-second row of position, frame cost and the GPU's per-pass split to
+    // `benilla-config/Diagnostics/fps-journal.csv`; `WOW_FPS_JOURNAL=<csv>` is the harness lever.
+    .add_plugins(perf::FpsJournalPlugin)
     .add_plugins(BowstringPlugin)
     .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)
@@ -653,7 +659,9 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(minimap::MinimapPlugin)
     // The pet-bar / spellbook autocast shine, drawn on the append lane from the conversion's
     // parked sites — zero per-frame script-layout traffic (decision 1383, B282).
-    .add_plugins(autocast_shine::AutocastShinePlugin)
+    // The `<Model>` widgets' M2s, rendered as tiles of one atlas and composited at the
+    // callback rank (decision 2008).
+    .add_plugins(ui_models::UiModelsPlugin)
     // The shared AreaTable catalog + the ZONE_CHANGED event family / zone-text host globals
     // behind GetZoneText & co. (the zone-entry splash arc, decision 0287).
     .add_plugins(area::AreaPlugin)
@@ -708,6 +716,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldPlugin)
     .add_plugins(BattlefieldPositionsPlugin)
     .add_plugins(TutorialPlugin)
+    // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
+    // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
+    // attack target stands and no swing lands.
+    .add_plugins(swing_refusal::SwingRefusalPlugin)
     // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
     // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
     // server-asked question whose only wire answer is yes — and here for that reason.

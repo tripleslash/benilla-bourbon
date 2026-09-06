@@ -15,8 +15,8 @@ use super::{
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
     progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
-    trainer, tutorial, update_object, vendor, world_state, Character, CreatureQueryInfo, JumpInfo,
-    MoveMode, ServerPacket, SpeedKind, SplineMode,
+    trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
+    CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -612,6 +612,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (spell_id, outcome) = pet::read_pet_cast_failed(&mut r)?;
             ServerPacket::PetCastFailed { spell_id, outcome }
         }
+        opcode::SMSG_PET_TAME_FAILURE => ServerPacket::PetTameFailure {
+            reason: pet::read_pet_tame_failure(&mut r)?,
+        },
+        // Both bodies really are empty — the opcode is the whole message on either (vmangos's
+        // `AppendBodyTo` writes nothing, and the reference's handlers read nothing).
+        opcode::SMSG_PET_NAME_INVALID => ServerPacket::PetNameInvalid,
+        opcode::SMSG_PET_BROKEN => ServerPacket::PetBroken,
+        opcode::SMSG_PET_ACTION_SOUND => {
+            let (pet_guid, talk) = pet::read_pet_action_sound(&mut r)?;
+            ServerPacket::PetActionSound { pet_guid, talk }
+        }
+        opcode::SMSG_PET_DISMISS_SOUND => {
+            let (model_id, position) = pet::read_pet_dismiss_sound(&mut r)?;
+            ServerPacket::PetDismissSound { model_id, position }
+        }
         opcode::SMSG_ATTACKSTART => {
             let (attacker, victim) = attack::read_attack_start(&mut r)?;
             ServerPacket::AttackStart { attacker, victim }
@@ -623,6 +638,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_ATTACKERSTATEUPDATE => {
             ServerPacket::AttackerState(attack::read_attacker_state(&mut r)?)
         }
+        // The swing refusals — empty bodies, nothing read. `SMSG_ATTACKSWING_NOTSTANDING` (`0x147`)
+        // is deliberately absent: the reference never registers it and vmangos never sends it, so
+        // it falls to the unknown-opcode arm exactly as it does in the real client's dispatcher.
+        opcode::SMSG_ATTACKSWING_NOTINRANGE => {
+            ServerPacket::AttackSwingError(AttackSwingError::NotInRange)
+        }
+        opcode::SMSG_ATTACKSWING_BADFACING => {
+            ServerPacket::AttackSwingError(AttackSwingError::BadFacing)
+        }
+        opcode::SMSG_ATTACKSWING_DEADTARGET | opcode::SMSG_ATTACKSWING_CANT_ATTACK => {
+            ServerPacket::AttackSwingError(AttackSwingError::DeadOrUnattackable)
+        }
+        // The family's fourth arm, from the spell TU's registration — same empty body, same act.
+        opcode::SMSG_CANCEL_COMBAT => ServerPacket::CancelCombat,
+        opcode::SMSG_FEIGN_DEATH_RESISTED => ServerPacket::FeignDeathResisted,
         opcode::SMSG_AI_REACTION => {
             let (unit, reaction) = attack::read_ai_reaction(&mut r)?;
             ServerPacket::AiReaction { unit, reaction }

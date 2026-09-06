@@ -1,5 +1,5 @@
-//! The shipped `assets/ui/ActionBar.xml`'s performance ("ping") meter — the tinted bar in the
-//! main bar's last empty recess — over the real files, never a stub.
+//! The stock `Interface\FrameXML\ActionBarFrame.xml`'s performance ("ping") meter — the tinted bar
+//! in the main bar's last empty recess — over the real files, never a stub.
 //!
 //! What these guard, in order: the ref geometry that puts the bar IN the recess (the whole point of
 //! the slice); the LOW-strata draw order that makes it show *through* the bar art instead of over
@@ -15,11 +15,11 @@ fn harness(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(&s, "UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -229,7 +229,7 @@ fn get_net_stats_reports_the_pushed_latency() {
 /// tooltip that is quietly one line short.
 #[test]
 fn hovering_the_meter_shows_the_live_latency() {
-    let mut s = harness(&["UIParent.xml"]);
+    let mut s = harness(&[r"Interface\FrameXML\UIParent.xml"]);
     s.set_latency_ms(Some(42));
     // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
     // UIOptionsFrame.lua l.100; ours sits in OptionsFrame.xml's uvar block, 1968), and a harness

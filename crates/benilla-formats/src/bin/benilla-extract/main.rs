@@ -57,6 +57,12 @@ enum Command {
         internal_path: String,
         /// Output `.png` file.
         output: PathBuf,
+        /// Also write every authored mip level (`<stem>.mip<N>.png`) and print a per-level
+        /// texel census: how many texels the author left transparent vs not, the luma range of
+        /// each class, and how many sit below 128 — the set that DARKENS under a Mod2x lane,
+        /// which reads no alpha. The "what does the far sampler see" instrument (B358).
+        #[arg(long)]
+        mips: bool,
     },
     /// Composite ONE character's body atlas off the chain and report what painted what: the
     /// equipment blits in blit order (with the file each region name resolved to, or `MISSING`),
@@ -163,6 +169,15 @@ enum Command {
     /// the variation/replay instrument (decisions 0114/0117; sequences sharing an id are its
     /// variation chain).
     M2seq {
+        /// Internal path to the `.m2` (forward or back slashes accepted).
+        internal_path: String,
+    },
+    /// Dump an M2's **camera table** by raw file index — the index space a `<Model>` widget's
+    /// `Model:SetCamera(n)` walks (decision 2027): type, rest eye/target, diagonal fov, near/far,
+    /// roll, and each track's key count (which says still rig vs authored path). The
+    /// `cameraLookup` table is printed beside it — the portrait bake selects through that, the
+    /// pane does not.
+    M2cam {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
@@ -834,14 +849,41 @@ fn main() -> Result<()> {
         Command::Blp {
             internal_path,
             output,
+            mips,
         } => {
             let name = normalize(&internal_path);
             let data = chain
                 .read_file(&name)
                 .with_context(|| format!("reading '{name}' from chain"))?;
-            let (w, h) = benilla_formats::blp_to_png(&data, &output)
-                .with_context(|| format!("decoding BLP '{name}'"))?;
-            eprintln!("decoded {w}x{h} -> {}", output.display());
+            if mips {
+                let stats = benilla_formats::blp_mips_to_png(&data, &output)
+                    .with_context(|| format!("decoding BLP '{name}'"))?;
+                let luma = |l: Option<(u8, f32, u8)>| match l {
+                    Some((lo, mean, hi)) => format!("{lo:>3}/{mean:>6.1}/{hi:>3}"),
+                    None => "      —       ".to_string(),
+                };
+                println!(
+                    "level  size      outside(a=0)  luma lo/mean/hi   inside(a>0)  luma lo/mean/hi   below128"
+                );
+                for s in &stats {
+                    println!(
+                        "{:>5}  {:>4}x{:<4}  {:>12}  {:>14}  {:>11}  {:>14}  {:>8}",
+                        s.level,
+                        s.width,
+                        s.height,
+                        s.outside,
+                        luma(s.outside_luma),
+                        s.inside,
+                        luma(s.inside_luma),
+                        s.below_128,
+                    );
+                }
+                eprintln!("wrote {} level(s) beside {}", stats.len(), output.display());
+            } else {
+                let (w, h) = benilla_formats::blp_to_png(&data, &output)
+                    .with_context(|| format!("decoding BLP '{name}'"))?;
+                eprintln!("decoded {w}x{h} -> {}", output.display());
+            }
         }
         Command::Dbc {
             internal_path,
@@ -859,6 +901,7 @@ fn main() -> Result<()> {
         }
         Command::Glueextent { batches } => glueextent::glueextent(&mut chain, batches)?,
         Command::M2coll { internal_path } => m2dump::m2coll(&mut chain, &internal_path)?,
+        Command::M2cam { internal_path } => m2dump::m2cam(&mut chain, &internal_path)?,
         Command::M2seq { internal_path } => m2dump::m2seq(&mut chain, &internal_path)?,
         Command::M2events { internal_path } => m2dump::m2events(&mut chain, &internal_path)?,
         Command::M2attach { internal_path } => m2dump::m2attach(&mut chain, &internal_path)?,

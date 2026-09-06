@@ -59,7 +59,7 @@ pub use window::StreamWindow;
 // The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
 // outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
 // `terrain_stream::X` paths, same as the `queries` items below.
-pub use spawn::prop_light::{fold_interior_probe, interior_light_up, PropLobeLight};
+pub use spawn::prop_light::{fold_interior_probe, hex_word, interior_light_up, PropLobeLight};
 // The shared placed-model assembler + the off-thread collider build — also the WMO-gameobject
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
@@ -120,6 +120,10 @@ pub struct TerrainStreamer {
     /// nothing to do and skips the window walk (three window-sized allocations and a scan of
     /// every resident tile, on every still frame — decision 1979's floor).
     settled: bool,
+    /// The focus tile the off-grid tripwire below last reported, so a focus parked outside the
+    /// map's WDT grid says so **once** rather than every frame. `None` while the focus is on the
+    /// grid (so re-entering the state re-reports).
+    off_grid_reported: Option<(i32, i32)>,
 }
 
 /// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
@@ -178,7 +182,7 @@ struct TileState {
 /// own cross-tile dedup (a building straddling N tiles is spawned once and refcounted). The model assets
 /// are loaded by `Handle`, so the `AssetServer` dedups the *decode*; this dedups the *instance*.
 #[derive(Resource, Default)]
-struct Placements {
+pub(crate) struct Placements {
     /// By MDDF/MODF uniqueId: the placement + how many loaded tiles reference it.
     by_id: HashMap<u32, Placement>,
     /// Material dedup, so submeshes sharing a (texture, blend, sidedness, kind, fade-variant) share one
@@ -190,6 +194,18 @@ struct Placements {
     /// steady state). Kept by the register/handoff/release sites here; the spawner itself settles
     /// it as models land (and adds a WMO's props the moment they resolve).
     pending_spawns: usize,
+}
+
+impl Placements {
+    /// Every entity some registered placement owns — the set a despawn walks. The duplicate
+    /// census (`world_census`) subtracts it from the live `WorldObject` population: a placed
+    /// part alive outside this set outlived its registration, which is what a doubled prop is.
+    pub(crate) fn owned(&self) -> std::collections::HashSet<Entity> {
+        self.by_id
+            .values()
+            .flat_map(|p| p.entities.iter().copied())
+            .collect()
+    }
 }
 
 /// A shared placement: its resident model handle, world transform, and spawned submesh entities. Doodad
@@ -861,6 +877,36 @@ fn stream_terrain(
     let mut desired = window.wanted_tiles();
     if let Some(w) = wdt_index {
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
+    }
+
+    // **The focus is off this map's tile grid** — the window touches no tile the WDT authors, so
+    // there is nothing to stream and nothing to wait for. On an ADT map that is never a place a
+    // body can legitimately stand: it means the focus was written in some *other* map's
+    // coordinates (the 2026-09-05 report — a rider composed through a cross-map transport whose
+    // own pose was still the source continent's) or has left the world entirely.
+    //
+    // It earns a tripwire because of what it does DOWNSTREAM and silently: `desired` empty makes
+    // `total == 0`, which [`WorldLoadProgress::is_ready`] reads as *not ready* — so the loading
+    // screen can never clear — while the vacuous arm below reports `focus_resident = true`, so the
+    // backstop that would have re-raised a cover cannot fire either. The player is left staring at
+    // a loading screen whose wait line reads `0/0 resident` with every other term nominal. Naming
+    // the map and the tile turns that into one greppable line. Once per focus tile, never a frame
+    // loop; `global_wmo` maps legitimately author no tiles and are excluded.
+    if wdt_index.is_some() && !state.global_wmo && desired.is_empty() {
+        let focus_tile = window.focus_tile();
+        if state.off_grid_reported != Some(focus_tile) {
+            state.off_grid_reported = Some(focus_tile);
+            let map_name = state.map_dir.clone().unwrap_or_default();
+            warn!(
+                "terrain: view focus [{:.1}, {:.1}] is OFF map {map_name}'s tile grid (tile \
+                 {focus_tile:?}) — the window wants no tile the WDT authors, so nothing streams \
+                 and a loading cover cannot clear. A focus written in another map's coordinates \
+                 is the usual cause.",
+                center[0], center[1],
+            );
+        }
+    } else if !desired.is_empty() {
+        state.off_grid_reported = None;
     }
 
     // Unload tiles no longer desired: despawn the terrain entity, release the placements, drop the

@@ -297,34 +297,13 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
-/// The frame KIND an element materializes as — its tag, with one substitution.
-///
-/// **A `<Model>` playing the cooldown indicator IS this engine's `<Cooldown>` widget.** The
-/// reference draws a cooldown sweep as a `Model` running
-/// `Interface\Cooldown\UI-Cooldown-Indicator.mdx` — that is what `CooldownFrameTemplate` is, and
-/// every consumer writes `<Model … inherits="CooldownFrameTemplate"/>`: the reference's own
-/// `ContainerFrameItemButtonTemplate` (ContainerFrame.xml l.13), its action buttons, and three
-/// corpus addons. benilla renders no FrameXML models at all, and it does not need to for this one:
-/// decision 0263 put the whole scrub/finish-flash machine inside a NATIVE `Cooldown` widget, which
-/// is the same picture by a different route.
-///
-/// So the mapping is on the MODEL FILE, not on the template name — the file is the thing's
-/// identity, an addon may reach the same art without inheriting the template, and a template name
-/// is a string anyone can shadow. Anything else keeps its tag and stays an inert `Model`.
-///
-/// Without this, decision 1751's bag swap silently loses the bag-slot cooldown sweep: our own
-/// `BenillaBagSlotTemplate` carried a real `<Cooldown>` child, the reference's carries a `<Model>`,
-/// and `CooldownFrame_SetTimer`'s Model branch shows and hides the frame and nothing more.
-fn frame_kind_of(el: &Element) -> String {
-    const COOLDOWN_MODEL: &str = "ui-cooldown-indicator.mdx";
-    if el.tag.eq_ignore_ascii_case("Model")
-        && el
-            .attr("file")
-            .is_some_and(|f| f.to_ascii_lowercase().ends_with(COOLDOWN_MODEL))
-    {
-        return "Cooldown".to_string();
-    }
-    el.tag.clone()
+/// Is `tag` one of the four model-pane kinds — the `CSimpleModel` family, whose own `LoadXML`
+/// (`0x76cac0`) reads the `scale=` attribute into the MODEL scale (`geometry.rs`'s
+/// `apply_attrs`, decision 2007).
+pub(super) fn model_kind_tag(tag: &str) -> bool {
+    ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(tag))
 }
 
 /// The `.lua` test `0x6ede10` opens with: `strrchr(path, '.')` on the **whole resolved path**,
@@ -449,18 +428,28 @@ impl Loader<'_> {
     ///
     /// wow-re `system/ui/scratch/rf28-typed-widget-loadxml.md`: `<Button text=>` (l.36) and
     /// `<FontString text=>` (l.115) BOTH resolve through `FrameScript_GetText 0x703bf0`, which
-    /// `scratch/inventory-change-failure-display.md` l.119 carves VERIFIED — it resolves the value as
-    /// a Lua global and, **when that global is not a string, returns a pre-seeded EMPTY string**
-    /// (`0x882748`), never the key name. That is why the reference's `text="LOGOUT"` renders "Logout",
-    /// and why `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
+    /// `scratch/framescript.md` carves VERIFIED — it resolves the value as a Lua global and,
+    /// **when that global is not a string, returns a pre-seeded EMPTY string** (`0x882748`), never
+    /// the key name. That is why the reference's `text="LOGOUT"` renders "Logout", and why
+    /// `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
     ///
-    /// **One deliberate divergence: a miss falls back to the LITERAL** rather than the reference's
-    /// empty string. benilla authors its own FrameXML (0068) and writes plain English in it —
-    /// `text="Send Mail"`, `text="No results found."` — which the reference's rule would blank. The
-    /// fallback is a strict superset for transcriptions (every real key resolves identically) and it
-    /// fails LOUDER than the reference: a **key-shaped** value that misses keeps its key on screen
-    /// *and* warns here — exactly the signal that was missing when the macro window shipped with
-    /// "CREATE_MACROS" across its title bar (0983 → 0991).
+    /// **The MISS falls back to the raw attribute, and that is the reference's own behaviour — not
+    /// a benilla divergence, which is what this comment used to claim.** `0x703bf0`'s empty return
+    /// never reaches a label: all three `text=` readers image-wide test it and substitute the raw
+    /// attribute string. `Button::LoadXML` at `0x778c07` — recorded in wow-re
+    /// `scratch/template-onload-replacement-law.md` §5, "a fallback to the raw attribute when the
+    /// lookup comes back empty (`0x778c31 mov eax,esi`)" — and byte-identically
+    /// `CSimpleFontString::LoadXML` at `0x771006` (`771012 mov esi,eax` … `771029 test eax,eax` /
+    /// `77102b je 0x771032` / `77102d cmp BYTE [eax],0` / `771030 jne` / `771032 mov eax,esi`), and
+    /// the third reader at `0x7292a6`, which expresses the same law through a copy
+    /// (`7292db mov al,[ebp-0x424]` / `7292e1 test al,al`, empty arm pushes `edi` = the raw).
+    ///
+    /// So the reference's `PetPaperDollFrame.xml:70` `text="Level level race class"` really does
+    /// draw that placeholder until Lua overwrites it, and benilla's plain-English `text="Send
+    /// Mail"` renders for the same reason the reference's would. What IS ours is the extra signal:
+    /// a **key-shaped** value that misses warns here as well as keeping its key on screen — the
+    /// signal that was missing when the macro window shipped with "CREATE_MACROS" across its title
+    /// bar (0983 → 0991).
     pub(super) fn resolve_text(&mut self, raw: &str, dbg: &str) -> String {
         if let Ok(s) = self.lua().globals().get::<String>(raw) {
             return s;
@@ -783,7 +772,7 @@ impl Loader<'_> {
             }
         };
         let wrapper: Table =
-            match create.call((frame_kind_of(el), resolved_name.clone(), parent.cloned())) {
+            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
                     self.report.errors.push(format!(

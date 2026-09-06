@@ -10,9 +10,9 @@
 //! Coordinates stay **raw WoW** (the `benilla` boundary applies `bevy = (-y, z, -x)`).
 
 use crate::messages::{
-    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
-    AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    ActionButton, AttackSwingError, AttackerState, AuctionBidderNotification, AuctionCommandTail,
+    AuctionListEntry, AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GmTicket, GossipOption, GroupLootInfo, GroupMemberEntry,
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
@@ -681,6 +681,22 @@ pub enum SessionEvent {
     /// The pet's cast refusal (`SMSG_PET_CAST_FAILED`) — [`Self::CastResult`]'s vocabulary, but
     /// the caster is the pet, so it never touches OUR cast state.
     PetCastFailed { spell_id: u32, reason: Option<u8> },
+    /// A refused tame / Call Pet / Revive Pet (`SMSG_PET_TAME_FAILURE`): one
+    /// `PetTameFailureReason` byte, whose text is a `PETTAME_*` GlobalStrings key filling
+    /// `ERR_TAME_FAILED`.
+    PetTameFailure { reason: u8 },
+    /// A refused pet rename (`SMSG_PET_NAME_INVALID`) — no payload; the reference raises
+    /// `ERR_INVALID_PETNAME` on the strength of the opcode alone.
+    PetNameInvalid,
+    /// The pet's loyalty hit zero and it ran away (`SMSG_PET_BROKEN`) — no payload;
+    /// `ERR_PET_BROKEN`.
+    PetBroken,
+    /// The pet's voice (`SMSG_PET_ACTION_SOUND`) — one of two talk selectors on a named unit,
+    /// resolved against that unit's own `CreatureSoundData` row.
+    PetActionSound { pet_guid: u64, talk: u32 },
+    /// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND`) — a `CreatureModelData` id and
+    /// the raw WoW point to play its column-29 kit at. No guid, because the pet has gone.
+    PetDismissSound { model_id: u32, position: [f32; 3] },
     /// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
     /// `CMSG_ITEM_QUERY_SINGLE`). Keyed by template entry; `None` = the server doesn't know it
     /// (undiscovered) — cached negative, like an unknown creature entry. Boxed for the same reason
@@ -764,6 +780,17 @@ pub enum SessionEvent {
     /// One completed melee swing (`SMSG_ATTACKERSTATEUPDATE`) — the attacker's swing-animation
     /// trigger (decision 0073: one packet = one swing, no client timer).
     AttackerState(AttackerState),
+    /// The server refused our melee swing — `SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/
+    /// `_DEADTARGET`/`_CANT_ATTACK`, in the three arms the reference wires
+    /// ([`crate::messages::AttackSwingError`]). Self-only: the server sends these to the swinging
+    /// player alone.
+    AttackSwingError(AttackSwingError),
+    /// The server forced our attack to stop (`SMSG_CANCEL_COMBAT`) — the swing family's fourth
+    /// arm, whose handler is arm 4's body verbatim: StopAttack, no message.
+    CancelCombat,
+    /// The target resisted our Feign Death (`SMSG_FEIGN_DEATH_RESISTED`) — one red line,
+    /// `ERR_FEIGN_DEATH_RESISTED` ("Resisted"), with no state behind it.
+    FeignDeathResisted,
     /// A creature flared at someone (`SMSG_AI_REACTION`): reaction 2 = HOSTILE (sent on every
     /// creature melee-attack start), 0 = ALERT (stealth pre-aggro detection); any other value is
     /// a no-op. Pure audio in the client — the aggro/alert vocals (decision 0280).

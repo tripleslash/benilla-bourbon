@@ -16,7 +16,7 @@
 //! catch a mistake in a file somebody just edited, and `content::read`'s dev-build probe already
 //! prefers disk for the same reason.
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{QuadContent, UiScript};
 
 /// Load one interface file into `s`, panicking on any loader error, and return how many frames it
 /// materialized (`0` for a `.lua` entry, which materializes none).
@@ -27,8 +27,73 @@ use benilla_ui::script::UiScript;
 ///
 /// **A chain entry needs client data**, so a test that names one has to open with
 /// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
-pub(super) fn load_ui(s: &UiScript, entry: &str) -> usize {
+pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
+}
+
+/// The cooldown indicator's file: `Interface\Cooldown\UI-Cooldown-Indicator.mdx`, as the
+/// stock `CooldownFrameTemplate` names it.
+pub(super) const COOLDOWN_MODEL: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
+
+/// The cooldown indicator's file facts (`benilla-extract m2seq`): sequence 0 = id 0, 1000 ms,
+/// clamp — the sweep `CooldownFrame_OnUpdateModel` scrubs; sequence 1 = id 1, 1000 ms, clamp —
+/// the finish flash, whose completion hides the frame. Handed to the engine the way the app does
+/// once the asset lands (decisions 2007/2019); every pane holding the file arms its Stand.
+pub(super) fn cooldown_facts(s: &mut UiScript) {
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+    let seq = |anim_id, duration_ms| SequenceFacts {
+        anim_id,
+        duration_ms,
+        looping: false,
+    };
+    s.set_model_facts(
+        COOLDOWN_MODEL,
+        ModelFileFacts {
+            sequences: vec![seq(0, 1000), seq(1, 1000)],
+            bbox: ([0.0; 3], [0.0; 3]),
+            cameras: 0,
+        },
+    );
+}
+
+/// The play head `(anim_id, cursor_ms)` of the SHOWN cooldown pane `owner` names (`None` while
+/// it is hidden, or has nothing armed) — what the tile renderer samples the file at. Read the way
+/// the renderer reads it: the pane's quad in the extract joined to the engine's paint list.
+pub(super) fn cooldown_play(s: &UiScript, owner: &str) -> Option<(u16, u32)> {
+    let heads = s.visible_model_panes();
+    s.extract().into_iter().find_map(|q| match &q.content {
+        QuadContent::ModelPane {
+            handle,
+            model: Some(m),
+            ..
+        } if m.eq_ignore_ascii_case(COOLDOWN_MODEL)
+            && s.quad_owner_name(q.target).as_deref() == Some(owner) =>
+        {
+            heads
+                .iter()
+                .find(|p| p.handle == *handle)
+                .and_then(|p| p.play.map(|ph| (ph.anim_id, ph.cursor_ms)))
+        }
+        _ => None,
+    })
+}
+
+/// [`cooldown_play`] for whichever cooldown pane is shown — the bag windows number their slots
+/// from the far end (`ContainerFrame_GenerateFrame`: `Item{j}` carries id `size − j + 1`), so a
+/// test that seats one item asks for "the" sweep rather than a name.
+pub(super) fn cooldown_play_any(s: &UiScript) -> Option<(u16, u32)> {
+    let heads = s.visible_model_panes();
+    s.extract().into_iter().find_map(|q| match &q.content {
+        QuadContent::ModelPane {
+            handle,
+            model: Some(m),
+            ..
+        } if m.eq_ignore_ascii_case(COOLDOWN_MODEL) => heads
+            .iter()
+            .find(|p| p.handle == *handle)
+            .and_then(|p| p.play.map(|ph| (ph.anim_id, ph.cursor_ms))),
+        _ => None,
+    })
 }
 
 /// [`load_ui`], and **a missing template is a failure too**.
@@ -70,13 +135,13 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         "{entry}: loader errors: {:?}",
         report.errors
     );
-    if path
-        .rsplit('/')
-        .next()
-        .is_some_and(|leaf| leaf.eq_ignore_ascii_case("MainMenuBarMicroButtons.xml"))
-    {
+    let leaf = path.rsplit('/').next().unwrap_or("");
+    if leaf.eq_ignore_ascii_case("MainMenuBarMicroButtons.xml") {
         s.run(MICRO_BUTTON_STAND_INS)
             .expect("the micro-button stand-ins");
+    }
+    if leaf.eq_ignore_ascii_case("UIParent.xml") && super::reference_ui::is_chain_entry(&path) {
+        s.run(UIPARENT_STAND_INS).expect("the UIParent stand-ins");
     }
     if no_warnings {
         assert!(
@@ -118,6 +183,102 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
 /// kits' seventy-odd consumers because the dependency is the row's, not any one window's — and
 /// the shipped manifest never needs it. `tests/common/mod.rs` carries the same chunk for the
 /// integration tests, which cannot reach this module (decision 1987).
+/// **What a kit owes the stock `UIParent.xml`.** Its `<OnUpdate>` calls `FCF_OnUpdate`,
+/// `UnitPopup_OnUpdate` and `BattlefieldFrame_OnUpdate` unguarded (the chat, unit-menu and
+/// battlefield files, far below it in the manifest), `UIParent_OnEvent`'s `PLAYER_ENTERING_WORLD`
+/// arm calls `MultiActionBar_Update`, and `ShowUIPanel` calls `CloseAllBags` (the container file's).
+/// A kit that stops short of those files would raise on its first tick or first shown panel, so
+/// [`load_entry`] seats a no-op stand-in under each name the moment the stock file loads. Unlike
+/// the micro row's frames these are FUNCTIONS: a later chunk's `function X()` overwrites a global
+/// outright, so seating at load is safe and the kit's order does not matter (decision 1988).
+pub(super) const UIPARENT_STAND_INS: &str = r#"
+    -- Callees of the stock UIParent.xml's <OnUpdate> and of UIParent_OnEvent's arms that live in
+    -- files a kit may stop short of, plus the bag verbs the stock ShowUIPanel calls and the two
+    -- container constants its window walks read: no-op stand-ins, each overwritten by the real
+    -- definition when its file loads (a chunk's `function X()` is a plain global write, unlike a
+    -- frame's non-overwriting publish — which is why the FRAMES below are seated on first use).
+    FCF_OnUpdate = FCF_OnUpdate or function() end
+    FCF_DockUpdate = FCF_DockUpdate or function() end
+    UnitPopup_OnUpdate = UnitPopup_OnUpdate or function() end
+    BattlefieldFrame_OnUpdate = BattlefieldFrame_OnUpdate or function() end
+    MultiActionBar_Update = MultiActionBar_Update or function() end
+    RaidOptionsFrame_UpdatePartyFrames = RaidOptionsFrame_UpdatePartyFrames or function() end
+    LocalizeFrames = LocalizeFrames or function() end
+    updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
+    -- Ours, not the reference's file: 1.12 keeps UpdateNameplates in UIOptionsFrame.lua and
+    -- benilla's own options window carries it (the options family stays ours).
+    UpdateNameplates = UpdateNameplates or function() end
+    CloseAllBags = CloseAllBags or function() end
+    OpenBackpack = OpenBackpack or function() end
+    CloseBackpack = CloseBackpack or function() end
+    NUM_CONTAINER_FRAMES = NUM_CONTAINER_FRAMES or 0
+    -- The reference's own initial values (`ContainerFrame.lua:11-12`), not zeroes: the tooltip's
+    -- default corner is `-CONTAINER_OFFSET_X - 13, CONTAINER_OFFSET_Y`, so a kit reading zero here
+    -- would seat every default-anchored plate 70 units low.
+    CONTAINER_OFFSET_X = CONTAINER_OFFSET_X or 0
+    CONTAINER_OFFSET_Y = CONTAINER_OFFSET_Y or 70
+    BATTLEFIELD_TAB_OFFSET_Y = BATTLEFIELD_TAB_OFFSET_Y or 210
+    -- The pass writes its `isVar` rows with `setglobal`, but only for a name that already reads
+    -- non-nil (`frame = getglobal(index); if frame then`), so an unseeded one is never written at
+    -- all. These four are the reference's own seeds, from the files that declare them
+    -- (ContainerFrame.lua, PetActionBarFrame.lua, WorldStateFrame.lua).
+    PETACTIONBAR_YPOS = PETACTIONBAR_YPOS or 98
+    PETACTIONBAR_XPOS = PETACTIONBAR_XPOS or 36
+
+    -- The frames these three read UNGUARDED, seated on the call rather than at load: a frame's
+    -- publish to _G is non-overwriting (RF-0023), so a stand-in seated before the real file loads
+    -- would shadow the real window for good.
+    local function benilla_seat(names)
+        for _, name in ipairs(names) do
+            if not getglobal(name) then local f = CreateFrame("Frame") f:Hide() setglobal(name, f) end
+        end
+    end
+    local real_manage = UIParent_ManageFramePositions
+    function UIParent_ManageFramePositions()
+        benilla_seat({ "MainMenuBar", "MultiBarLeft", "MultiBarRight", "MultiBarBottomLeft",
+            "PetActionBarFrame", "ShapeshiftBarFrame", "ReputationWatchBar", "MainMenuExpBar",
+            "MainMenuBarMaxLevelBar", "CastingBarFrame", "QuestTimerFrame", "QuestWatchFrame",
+            "DurabilityFrame", "DurabilityShield", "DurabilityOffWeapon", "DurabilityRanged",
+            "MinimapCluster", "ChatFrame1", "ChatFrame2", "ShapeshiftBarLeft",
+            "ShapeshiftBarMiddle", "ShapeshiftBarRight", "BattlefieldMinimapTab" })
+        -- …and every FRAME the managed table itself names (`frame:IsObjectType` on a nil is what
+        -- a kit missing one raises) — read off the table, so a row added there needs nothing here.
+        -- The `isVar` rows are skipped: those keys are global NUMBERS the pass writes
+        -- (CONTAINER_OFFSET_X/Y, PETACTIONBAR_YPOS…), and a frame seated under one of those names
+        -- would be arithmetic's problem two files later.
+        local named = {}
+        for name, row in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
+            if not row.isVar then table.insert(named, name) end
+        end
+        benilla_seat(named)
+        for _, name in ipairs({ "SlidingActionBarTexture0", "SlidingActionBarTexture1" }) do
+            if not getglobal(name) then setglobal(name, UIParent:CreateTexture()) end
+        end
+        return real_manage()
+    end
+    -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
+    -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
+    -- loads no options window raised on the first bag click; ours answers all three of the
+    -- reference's options windows (1987) and a kit may load none of them.
+    local function benilla_seat_options()
+        benilla_seat({ "GameMenuFrame", "OptionsFrame", "UIOptionsFrame", "SoundOptionsFrame" })
+        if not OptionsFrameCancel then
+            OptionsFrameCancel = CreateFrame("Button")
+            OptionsFrameCancel:Hide()
+        end
+    end
+    local real_option_open = IsOptionFrameOpen
+    function IsOptionFrameOpen()
+        benilla_seat_options()
+        return real_option_open()
+    end
+    local real_toggle_menu = ToggleGameMenu
+    function ToggleGameMenu(clicked)
+        benilla_seat_options()
+        return real_toggle_menu(clicked)
+    end
+"#;
+
 pub(super) const MICRO_BUTTON_STAND_INS: &str = r#"
     local real = UpdateMicroButtons
     function UpdateMicroButtons()
@@ -188,12 +349,37 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
+    "ScrollTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
+];
+
+/// The stock gossip window's dependencies in `benilla.toc` order — the list
+/// `panel_tests::shipped_gossip_frame_drives_end_to_end` and its siblings load by hand, shared so
+/// a feed-level test in `ui_gossip` can drive the reference's own `GossipFrame.xml` (1751).
+/// `UIParent.xml` brings the slot manager (`ShowUIPanel`/`HideUIPanel`) the window's OnEvent
+/// calls; `ScrollTemplates.xml` is our scroll kit the greeting pane inherits — a missing template
+/// is a loader *warning*, so an under-loaded list passes and silently loses the scrollbar.
+///
+/// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
+pub(crate) const GOSSIP_UI: &[&str] = &[
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    r"Interface\FrameXML\UIParent.xml",
+    "ScrollTemplates.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
+    r"Interface\FrameXML\GlobalStrings.lua",
+    r"Interface\FrameXML\BasicControls.xml",
+    r"Interface\FrameXML\LocaleProperties.lua",
+    r"Interface\FrameXML\StaticPopup.xml",
 ];
 
 pub(super) const LOOT_UI: &[&str] = &[
@@ -202,7 +388,7 @@ pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml", // StaticPopup, and the LOOT_BIND / CONFIRM_LOOT_DISTRIBUTION dialogs
+    r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua (the slot manager, the fades; 1988)
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
@@ -214,7 +400,6 @@ pub(super) const LOOT_UI: &[&str] = &[
     // exactly as the reference's own UnitPopup.lua:47-49 does — so its declarer has to precede it.
     // That declarer is UIParent (ref UIParent.lua:65); 1888 moved the table there when Fonts.xml
     // went on the chain, because the reference's Fonts.xml does not declare it.
-    "UIParent.xml",
     "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
     "Interface\\FrameXML\\UnitPopup.xml",
     // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
@@ -285,10 +470,9 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
-    "UiPanels.xml", // CharacterFrameTabButtonTemplate, UIPanelWindows, Show/HideUIPanel
+    r"Interface\FrameXML\UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
+    "Interface\\FrameXML\\Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
@@ -326,6 +510,9 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     "ScrollTemplates.xml", // SkillFrame's faux list + trough
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     // The four options templates off the chain, then ours for the one it does not carry
     // (`UIOptionsCheckButtonTemplate` — decision 1841).
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
@@ -353,8 +540,8 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\BasicControls.xml",
-    "UIParent.xml",
-    "Cooldown.xml",
+    r"Interface\FrameXML\UIParent.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     "Interface\\FrameXML\\ActionButtonTemplate.xml",
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
@@ -367,9 +554,11 @@ pub(super) const SOCIAL_UI: &[&str] = &[
     "ScrollTemplates.xml",
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
+    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
+    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
     "Interface\\FrameXML\\ReputationFrame.xml",
-    "UiPanels.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "KeyBindingsPage.xml",
@@ -418,14 +607,14 @@ pub(super) const BAG_UI: &[&str] = &[
     // `updateContainerFrameAnchors` anchors each open bag to `frame:GetParent()` while
     // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the
     // windows fall out of the cascade and the reference's own layout pass has nothing to measure.
-    "UIParent.xml",
+    r"Interface\FrameXML\UIParent.xml",
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
     // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
     // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
@@ -473,11 +662,10 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
-    // Our adapters over the reference's container files — the keyring tooltip wrapper, the three
-    // bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`), and the item-push
-    // card the reference draws with a `<Model>` this engine does not render (0887). It has to be
+    // Our adapters over the reference's container files — the keyring tooltip wrapper and the
+    // three bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`). It has to be
     // AFTER `ContainerFrame.xml` and after the bar, which is why it is here and not up with
-    // UiPanels.xml.
+    // `UIParent.xml`.
     "ContainerFrameAdapters.xml",
     // `updateContainerFrameAnchors` measures every open bag against `BankFrame:GetRight()`
     // (ContainerFrame.lua l.505) on EVERY open and close, so the bank window is not optional

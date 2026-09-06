@@ -135,6 +135,18 @@ pub fn spawn_model_entities(
     // The shared delta table both registries slot into (decision 1381) — registration allocates
     // here and bakes the slot into the material.
     anim_table: &mut crate::mat_anim_table::MatAnimTable,
+    // **Is this placement a WMO doodad prop hanging off a streamed entity?** (The WMO-gameobject
+    // lane — a transport's deck cargo and cabin furniture.) It is the LANE, where `card_owner`
+    // below is only the anchor: that anchor is minted per placement and only when the model has
+    // billboard batches at all, so it answers "does this prop have cards to follow", never "which
+    // lane is this". Reading it as the lane is what left the marker below un-set on 133 of the
+    // ship's 134 props.
+    //
+    // What it decides here: [`crate::entity_shade::DoodadDefLit`] on every batch, which is the
+    // engine asserting its OWN invariant instead of trusting a caller to remember it (2047 — and
+    // 2041's lesson one level up). A prop's light is its `CMapDoodadDef`'s; it is under the net
+    // entity so it rides the deck, and the entity light node's descendant walk must pass it by.
+    entity_hosted: bool,
     // `Some(anchor)` for a prop spawned ON a streamed entity (the WMO-gameobject path): a boneless
     // model's billboard cards FOLLOW this anchor (`BillboardCard::following` — the entity-path law,
     // decision 0153) instead of baking a world pivot, so they track the moving owner and
@@ -617,9 +629,15 @@ pub fn spawn_model_entities(
         // (`mesh_tag::probe_bits` — bits 16-29 since the 0355 re-lane): this site kept the old
         // bits-0..=15 write through that re-lane, so every static interior prop read probe slot 0,
         // taking whichever probe won the streaming race — the director's inn-doodad regression.
-        let mesh_tag = match interior_slot {
-            Some(slot) if interior_probe => MeshTag(crate::mesh_tag::probe_bits(slot)),
-            _ => MeshTag(alpha_bits(1.0)),
+        // ONE decision for "does this batch's payload carry a probe slot", read twice below —
+        // once for the tag's bits and once for the component that SAYS so
+        // ([`crate::mesh_tag::InteriorProbePayload`]). Two independent predicates could drift,
+        // and a reader that disagrees with the writer about which payload a part is on is
+        // exactly B373.
+        let probe_slot = interior_slot.filter(|_| interior_probe);
+        let mesh_tag = match probe_slot {
+            Some(slot) => MeshTag(crate::mesh_tag::probe_bits(slot)),
+            None => MeshTag(alpha_bits(1.0)),
         };
         // A billboard batch (glow card / chain) faces the camera each frame, so its transform is owned
         // by the billboard system. It still distance-fades with its doodad (same `radius` band) — the
@@ -728,6 +746,26 @@ pub fn spawn_model_entities(
             (entity, local_center)
         };
         by_batch[batch_idx] = Some(entity);
+        // This batch's payload is a PROBE SLOT, said as a component so the exterior-payload
+        // writer can see it (`mesh_tag::InteriorProbePayload`). Cards included, for the same
+        // reason they carry the slot at all: they are batches of the same model, shaded through
+        // the same light node (0778) — and `entity_shade`'s card pass reaches a card by walking
+        // UP from its owner, a route its descendant-walk guard never covers.
+        if probe_slot.is_some() {
+            commands
+                .entity(entity)
+                .insert(crate::mesh_tag::InteriorProbePayload);
+        }
+        // …and, on the entity-hosted lane, that this batch's light is its own doodad def's rather
+        // than its host's. Asserted here rather than by the caller so the rule cannot be half
+        // applied: this is the site that knows about EVERY batch, cards included, and a card is
+        // exactly what the caller cannot reach (it is a world root kept out of the returned list,
+        // and the shade writer's card pass finds it by walking UP to the host).
+        if entity_hosted {
+            commands
+                .entity(entity)
+                .insert(crate::entity_shade::DoodadDefLit);
+        }
         // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
         // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the
         // visibility authority composes the value into the render-alpha tag + the A ≤ 0 cull.

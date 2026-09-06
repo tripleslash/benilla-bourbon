@@ -1,9 +1,9 @@
 //! Shipped end-to-end tests for the chat window + input (decision 0084, the chat arc): the real
-//! `assets/ui/ChatFrame.xml` loaded through the engine loader, driven exactly as the app drives it —
-//! `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the wheel → the Lua
-//! `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input EditBox's ENTER →
-//! `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses it — see
-//! `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
+//! `Interface\FrameXML\ChatFrame.xml` loaded through the engine loader, driven exactly as the app
+//! drives it — `add_chat_message` → `resolve`/`extract` (lines render in the pinned colors), the
+//! wheel → the Lua `OnMouseWheel` handler → `ScrollUp` (which freezes the fade), and the input
+//! EditBox's ENTER → `OnEnterPressed` → `SubmitChatInput` → `take_chat_input` (the app then parses
+//! it — see `crate::ui_chat`'s `parse_line` tests for the `/say`//`/yell`//`/w` mapping).
 
 use benilla_ui::script::{ExtractedQuad, QuadContent, UiScript};
 
@@ -29,13 +29,12 @@ fn chat_frame() -> UiScript {
     // The UIParent slice (RaiseFrameLevel, MouseIsOver, the fade and flash kits) ahead of the
     // bar and the chat files; `FCF_OnUpdate` — the dock's hover, fade and drag driver — runs
     // from UIParent's OnUpdate, as in the reference.
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "UIParent.xml");
     // `FCF_ValidateChatFramePosition` (a tab-drag stop) reads `MainMenuBar:GetHeight()`; the bar's
     // own load-time chain precedes it, as in the action-bar harness.
-    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -379,11 +378,11 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
 
 // ── ChatTypeInfo: the addon-facing color table ────────────────────────────────────────────────
 
-/// `ChatTypeInfo` carries the shipped default chat colors twice: once in `assets/ui/ChatFrame.xml`
-/// for addons to read, and once in [`crate::ui_chat::default_color`] for our own feed to render.
-/// Both are the same wow-re byte table (`chat-color-table.md`, the static registry at
-/// `.rdata 0x804710`) — so this is the gate that makes the duplication safe: every kind we model
-/// must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
+/// `ChatTypeInfo` carries the shipped default chat colors twice: once in
+/// `Interface\FrameXML\ChatFrame.xml` for addons to read, and once in
+/// [`crate::ui_chat::default_color`] for our own feed to render. Both are the same wow-re byte
+/// table (`chat-color-table.md`, the static registry at `.rdata 0x804710`) — so this is the gate
+/// that makes the duplication safe: every kind we model must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
 #[test]
 fn chat_type_info_matches_the_host_color_table() {
     use crate::ui_chat::{default_color, ChatEventKind as K};
@@ -995,7 +994,7 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -1055,5 +1054,240 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
         )
         .unwrap(),
         "and it opened the edit box as SAY"
+    );
+}
+
+/// **A glass window's plate fades in on every hover, not only the first.** A restored window
+/// (the cache's `COLOR 0 0 0 0`, the stock row) keeps its nine plate textures at alpha 0 and
+/// relies on `FCF_OnUpdate`'s hover arm to lift them to `DEFAULT_CHATFRAME_ALPHA` and drop them
+/// back (FloatingChatFrame.lua l.873-877, l.913-916). The director's report (2026-09-05): hovering
+/// the chat window shows the tabs and the buttons but no plate.
+#[test]
+fn a_glass_windows_plate_fades_in_on_every_hover() {
+    let mut s = chat_frame();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    let bg =
+        |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+    assert_eq!(bg(&mut s), 0.0, "a glass window rests at alpha 0");
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    for round in 1..=3 {
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "hover {round}: the plate fades to DEFAULT_CHATFRAME_ALPHA — got {a} (oldAlpha={:?})",
+            s.eval::<Option<f64>>("return ChatFrame1.oldAlpha").unwrap()
+        );
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            a.abs() < 1e-6,
+            "leave {round}: the plate fades back to its saved alpha — got {a}"
+        );
+    }
+}
+
+/// The same law under the WHOLE shipped manifest, driven the way the app drives it.
+#[test]
+fn a_glass_windows_plate_fades_in_on_every_hover_under_the_full_manifest() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "{failures:?}");
+    s.resolve();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    super::fire_chat_login(&mut s);
+    s.resolve();
+    let bg =
+        |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+    assert_eq!(bg(&mut s), 0.0, "a glass window rests at alpha 0");
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    for round in 1..=3 {
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        // The plate as the renderer receives it: one Background quad over ChatFrame1's rect at
+        // the faded alpha, black.
+        let plates: Vec<(Option<benilla_ui::layout::Rect>, f32, Option<[f32; 4]>)> = s
+            .extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    ..
+                } if p.to_ascii_lowercase().contains("chatframebackground") => {
+                    Some((q.rect, q.alpha, *color))
+                }
+                _ => None,
+            })
+            .collect();
+        let (left, bottom): (f32, f32) = s
+            .eval("return ChatFrame1:GetLeft(), ChatFrame1:GetBottom()")
+            .unwrap();
+        // The texture's own anchors: TOPLEFT (-2, 3) and BOTTOMLEFT (-2, -6) off the frame.
+        let over_frame1 = plates.iter().find(|(r, _, _)| {
+            r.is_some_and(|r| {
+                (r.left - (left - 2.0)).abs() < 1.0 && (r.bottom - (bottom - 6.0)).abs() < 1.0
+            })
+        });
+        assert!(
+            over_frame1.is_some_and(|(_, a, c)| {
+                (a - 0.25).abs() < 1e-3 && c.is_some_and(|c| c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0)
+            }),
+            "hover {round}: the extracted plate quad over ChatFrame1 ({left}, {bottom}) — {plates:?}"
+        );
+        let a = bg(&mut s);
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "hover {round}: the plate fades to DEFAULT_CHATFRAME_ALPHA — got {a} (oldAlpha={:?}, hover={:?}, hasBeenFaded={:?}, init={:?})",
+            s.eval::<Option<f64>>("return ChatFrame1.oldAlpha").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.hover").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.hasBeenFaded").unwrap(),
+            s.eval::<Option<f64>>("return ChatFrame1.init").unwrap(),
+        );
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let a = bg(&mut s);
+        assert!(
+            a.abs() < 1e-6,
+            "leave {round}: the plate fades back to its saved alpha — got {a}"
+        );
+    }
+}
+
+/// **The plate comes back after a quick exit and re-entry** (decision 1998 — the director's
+/// report: an existing window shows tabs but no plate on hover; a new one shows the plate; the
+/// tab menu's opacity slider, used once, makes the hover work again).
+///
+/// The stock `FCF_OnUpdate` traps itself: leave the window (the tabs' fade-out is queued with
+/// `FCF_ChatTabFadeFinished` as its finished callback), re-enter inside `CHAT_FRAME_FADE_TIME`,
+/// and the callback fires `chatFrame.oldAlpha = nil` under the live hover — after which the
+/// plate arm (`oldAlpha < DEFAULT_CHATFRAME_ALPHA`) never passes and no leave clears `hover`, so
+/// the hover-start re-read never runs either. Two VMs prove the guard is what makes the
+/// difference: the bare chat stack (the reference's Lua alone) traps, the shipped manifest (the
+/// guard installed by `bootstrap_positions`) does not. The control keeps this from passing
+/// vacuously — if the stock Lua or the engine ever stop trapping, it says so, and the guard is
+/// then a repair of nothing.
+#[test]
+fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
+    fn drive(s: &mut UiScript) -> (f64, f64, f64) {
+        let (x, y): (f32, f32) = s
+            .eval(
+                "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+                 (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+            )
+            .unwrap();
+        let bg =
+            |s: &mut UiScript| -> f64 { s.eval("return ChatFrame1Background:GetAlpha()").unwrap() };
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..4 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        // A stationary hover past CHAT_TAB_SHOW_DELAY and the ramp: the plate is up.
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let first = bg(s);
+        // Out for ~50 ms — inside the 0.15 s fade-out — and back, then stationary.
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..3 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let reentry = bg(s);
+        // Away for a full second, then a fresh hover: whatever the re-entry left behind stays.
+        s.mouse_move(1500.0, 850.0);
+        for _ in 0..60 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        s.mouse_move(x, y);
+        for _ in 0..45 {
+            s.tick(0.016);
+            s.resolve();
+        }
+        let later = bg(s);
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        (first, reentry, later)
+    }
+
+    // The control: the reference's Lua alone.
+    let mut bare = chat_frame();
+    let (first, reentry, later) = drive(&mut bare);
+    assert!((first - 0.25).abs() < 1e-6, "control, first hover: {first}");
+    assert!(
+        reentry.abs() < 1e-6 && later.abs() < 1e-6,
+        "the control must trap — the reference's Lua nils oldAlpha under a live hover \
+         (re-entry {reentry}, later {later}); if it no longer does, the guard is a repair of nothing"
+    );
+    assert!(
+        bare.eval::<bool>("return ChatFrame1Tab:IsVisible() and ChatFrame1.oldAlpha == nil and ChatFrame1.hover == 1")
+            .unwrap(),
+        "the trapped state the director described: tab up, oldAlpha nil, hover stuck"
+    );
+
+    // The shipped interface, with the guard the manifest load installs.
+    let mut shipped = UiScript::new().unwrap();
+    shipped.set_screen_size(1600.0, 900.0);
+    super::test_ui::load_ui(&shipped, "Interface\\FrameXML\\GlobalStrings.lua");
+    let failures = super::load_default_ui(&shipped);
+    assert!(failures.is_empty(), "{failures:?}");
+    shipped.resolve();
+    super::fire_chat_login(&mut shipped);
+    shipped.resolve();
+    let (first, reentry, later) = drive(&mut shipped);
+    assert!((first - 0.25).abs() < 1e-6, "shipped, first hover: {first}");
+    assert!(
+        (reentry - 0.25).abs() < 1e-6,
+        "shipped: the plate comes back on the quick re-entry — got {reentry}"
+    );
+    assert!(
+        (later - 0.25).abs() < 1e-6,
+        "shipped: and on every hover after — got {later}"
     );
 }

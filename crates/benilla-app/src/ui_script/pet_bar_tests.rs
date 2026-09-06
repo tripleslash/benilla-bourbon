@@ -18,8 +18,8 @@ use super::test_ui::load_ui as load_xml;
 pub(super) fn load_pet_bar(s: &UiScript) {
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -35,7 +35,6 @@ pub(super) fn load_pet_bar(s: &UiScript) {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -44,7 +43,6 @@ pub(super) fn load_pet_bar(s: &UiScript) {
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
         "Interface\\FrameXML\\PetActionBarFrame.xml",
-        "PetActionBarAdapters.xml",
         "Interface\\FrameXML\\UIMenu.xml",
         "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
@@ -194,19 +192,25 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "Attack + Defensive are lit; Claw is not"
     );
 
-    // Autocast: the static ring on the one slot that allows it, and the shine MARKER on the one
-    // slot where it is running — the native lane's registration (decision 1383): the extract
-    // carries the token, never sparks, and `autocast_shine::emit_shine` draws the trails at it
-    // on the append lane while the script layer stays settled.
+    // Autocast: the static ring on the one slot that allows it, and the stock shine MODEL on the
+    // one slot where it is running — `$parentAutoCast`, `UI-AutoCastButton.mdx` over the whole
+    // button at `scale="1.2"`, rendered as a tile (decisions 2013/2014). A hidden pane is not
+    // extracted, so one pane is exactly one running shine.
     assert_eq!(
         textures(&quads, "Interface\\Buttons\\UI-AutoCastableOverlay"),
         1,
         "only Claw can autocast"
     );
+    let shines: Vec<_> = quads
+        .iter()
+        .filter(|q| q.rect.is_none_or(|r| (r.top + r.bottom) / 2.0 >= 50.0))
+        .filter(|q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), model_scale, .. }
+            if p == "Interface\\Buttons\\UI-AutoCastButton.mdx" && (*model_scale - 1.2).abs() < 1e-6))
+        .collect();
     assert_eq!(
-        textures(&quads, "benilla:autocast-shine:1.2"),
+        shines.len(),
         1,
-        "the shine marker on Claw alone — enabled, not merely allowed"
+        "the shine pane on Claw alone — enabled, not merely allowed"
     );
 
     // Geometry, quoted from the ref: the bar's TOPLEFT is MainMenuBar's BOTTOMLEFT +(36,97),
@@ -230,7 +234,13 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     s.resolve();
     let gone = s.extract();
     assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
-    assert_eq!(textures(&gone, "benilla:autocast-shine:1.2"), 0);
+    assert!(
+        !gone.iter().any(
+            |q| matches!(&q.content, QuadContent::ModelPane { model: Some(p), .. }
+            if p == "Interface\\Buttons\\UI-AutoCastButton.mdx")
+        ),
+        "the shine pane hides with its bar"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -645,9 +655,9 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-// The autocast trail's MOTION tests (the B228 corner-walk goldens, the 1321 truncating-clock
-// law, the no-seam continuity pin) live with the drawing now: `crate::autocast_shine`'s own
-// test module — the script layer no longer moves a single spark (decision 1383).
+// The autocast trail's MOTION is the model's own since decisions 2013/2014: the stock
+// `$parentAutoCast` Model's four bones and four emitters, rendered as a tile on the pane's clock
+// — the script layer never moves a spark, and no test here needs to.
 
 /// A hunter bar hovered through the REAL gesture, with the real binding registry and the real CVar
 /// table behind it — `mouse_move` runs the shipped `<OnEnter>` with `this` bound, which is the only

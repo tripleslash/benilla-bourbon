@@ -662,9 +662,10 @@ mod tests {
     /// reasoning that widget methods are not in `_G`. True, and it meant the report could not see
     /// a widget method we had *not built*. `MerchantFrame.xml` read `0 engine` and
     /// [`chain_readiness_report`] read CLEAN while the stock row's `<OnEnter>` called
-    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine does not have — so the
-    /// file loaded, every check passed, and hovering a vendor row would have raised in play. Both
-    /// instruments were right about what they measure. Neither measured the window.
+    /// `ShoppingTooltip1:SetMerchantCompareItem(...)`, which this engine did not have then (1802
+    /// built it) — so the file loaded, every check passed, and hovering a vendor row would have
+    /// raised in play. Both instruments were right about what they measure. Neither measured the
+    /// window.
     ///
     /// **A remaining `<?>` in the `fx=` column is usually a LoadOnDemand addon**, not something to
     /// build. `ClassTrainerFrame_Show`, `CraftFrame_Show`, `MacroFrame_SaveMacro`,
@@ -774,7 +775,7 @@ mod tests {
                     "ScrollFrame",
                     "Slider", "ColorSelect", "MessageFrame", "ScrollingMessageFrame",
                     "SimpleHTML", "Model", "PlayerModel", "DressUpModel", "TabardModel",
-                    "Minimap", "MovieFrame", "Cooldown",
+                    "Minimap", "MovieFrame",
                 }}
                 for i = 1, table.getn(types) do
                     local ok, w = pcall(function()
@@ -1791,7 +1792,7 @@ mod tests {
             "Interface/FrameXML/ContainerFrame.xml"
         ));
         assert!(!super::is_chain_entry("BagFrame.xml"));
-        assert!(!super::is_chain_entry("UIParent.xml"));
+        assert!(!super::is_chain_entry("ScrollTemplates.xml"));
     }
     /// Every global function and virtual template name a manifest entry declares.
     ///
@@ -1895,8 +1896,9 @@ mod tests {
     /// read by the next session as if it were live.
     ///
     /// That is not a tidiness problem. Our copies DIVERGE from the reference deliberately, and the
-    /// divergence is what dies: `UiPanels.xml`'s `PanelTemplates_TabResize` carried a benilla-only
-    /// `return tabWidth` that the tab settle reads, and the reference's returns nothing.
+    /// divergence is what dies: our retired `UiPanels.xml` carried a `PanelTemplates_TabResize`
+    /// with a benilla-only `return tabWidth` that our tab settle read, and the reference's
+    /// returns nothing (both are gone — 1988, 1993).
     ///
     /// The reverse direction — ours seated BELOW the chain's, so we silently override the
     /// reference — is a real category too, and a wider audit than this gate.
@@ -2266,6 +2268,72 @@ mod tests {
         // Registered by a chain file we load, produced by nothing. Each is a feature we have not
         // built; none is 1819-shaped, because no PAIR is split (a half-fired pair is the tell).
         const UNPRODUCED: &[(&str, &str)] = &[
+            // ── The stock `UIParent.lua`'s own listeners (1988) — every one is a dialog or a
+            // notice the reference's engine raises for a condition benilla's session does not
+            // reach yet. Each names the arm that would fire.
+            (
+                "ADDON_ACTION_FORBIDDEN",
+                "UIParent.lua — the protected-action refusal; benilla has no protected-call \
+                 taint model, so nothing can raise it",
+            ),
+            (
+                "MACRO_ACTION_FORBIDDEN",
+                "UIParent.lua — the macro half of ADDON_ACTION_FORBIDDEN, same reason",
+            ),
+            (
+                "AUTOEQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm for an AUTOEQUIP (right-click) path; \
+                 benilla's equip path fires the EQUIP_BIND_CONFIRM sibling only",
+            ),
+            (
+                "EQUIP_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-equip confirm; benilla's inventory feed does not \
+                 derive the server's confirm ask yet",
+            ),
+            (
+                "USE_BIND_CONFIRM",
+                "UIParent.lua — the bind-on-use confirm, the same gap from the use path",
+            ),
+            (
+                "BILLING_NAG_DIALOG",
+                "UIParent.lua — the subscription-time nag; vmangos never sends it",
+            ),
+            (
+                "IGR_BILLING_NAG_DIALOG",
+                "UIParent.lua — the internet-cafe billing nag, likewise never sent",
+            ),
+            (
+                "GOSSIP_ENTER_CODE",
+                "UIParent.lua — the code-entry gossip option (a door with a combination); \
+                 benilla's gossip feed carries no code-entry option kind yet",
+            ),
+            (
+                "MEMORY_EXHAUSTED",
+                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
+                 failure is a Rust abort, not a Lua event",
+            ),
+            (
+                "MEMORY_RECOVERED",
+                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
+            ),
+            (
+                "PLAYER_SKINNED",
+                "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
+            ),
+            (
+                "TRADE_REQUEST",
+                "UIParent.lua — the trade ASK dialog, and the one entry on this list that is \
+                 UNPRODUCEABLE rather than unbuilt: the 5875 client registers the event and \
+                 signals it from NOWHERE (a whole-image census, wow-re \
+                 ui/scratch/incoming-trade-request-law.md §3), so StaticPopupDialogs[\"TRADE\"] is \
+                 dead code THERE too. benilla wired the dialog up once and took it back out — \
+                 decision 1764. Producing this would be a divergence, not a fix",
+            ),
+            (
+                "TRADE_REPLACE_ENCHANT",
+                "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
+                 feed does not derive it",
+            ),
             ("BAG_OPEN", "ContainerFrame.lua"),
             (
                 "CLOSE_WORLD_MAP",

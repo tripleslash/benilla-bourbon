@@ -20,8 +20,7 @@ fn chat_ui() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
@@ -37,7 +36,7 @@ fn chat_ui() -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml",
         // `FCF_ValidateChatFramePosition` (a tab-drag stop) reads `MainMenuBar:GetHeight()`; the
         // bar's own load-time chain precedes it, as in the action-bar harness.
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",

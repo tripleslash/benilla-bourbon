@@ -17,6 +17,24 @@ fn setup() -> UiScript {
     s
 }
 
+/// One `/who` row as the app's feed would have resolved it.
+fn who(name: &str, level: u32, class: &str, zone: &str) -> WhoInfo {
+    WhoInfo {
+        name: name.to_string(),
+        guild: String::new(),
+        level,
+        race: "Human".to_string(),
+        class: class.to_string(),
+        zone: zone.to_string(),
+    }
+}
+
+/// The name painted into who row `row`.
+fn who_name(s: &UiScript, row: u32) -> String {
+    s.eval::<String>(&format!("return WhoFrameButton{row}Name:GetText()"))
+        .unwrap()
+}
+
 fn friend(name: &str, level: u32, class: &str, area: &str, connected: bool) -> FriendInfo {
     FriendInfo {
         name: name.to_string(),
@@ -99,6 +117,45 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     // …and toggling the same tab again closes the window (the ref's own second branch).
     s.run("ToggleFriendsFrame(1)").unwrap();
     assert!(!s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
+}
+
+/// **The social window's tabs fit their labels on the first show — through TWO inheritance hops.**
+///
+/// `FriendsFrameTab1..4` inherit `FriendsFrameTabTemplate`, which inherits
+/// `CharacterFrameTabButtonTemplate` (the reference's own file, on the chain since 1993). The
+/// middle template declares an `<OnClick>` and nothing else, and handler replacement is **per
+/// handler name** (wow-re `template-onload-replacement-law.md`) — so the base template's
+/// `<OnShow>` fit still runs, two hops down. That is the arrangement this pins: a row of tabs
+/// still wearing the base template's authored 115 would mean the OnShow was lost on the way.
+#[test]
+fn the_social_tabs_fit_their_labels_on_the_first_show() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    /// `2 * FriendsFrameTab1Left:GetWidth()` — the big tab's two 20-unit end slices.
+    const SIDES: f64 = 40.0;
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The app installs `AtlasMeasurer`; the reference's fit is inline, so a harness that models
+    // the async round trip models a configuration the app does not have (1848's correction).
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
+    super::test_ui::load_social_ui(&mut s);
+    s.run("ToggleFriendsFrame(1)").unwrap();
+    s.resolve();
+
+    for i in 1..=4 {
+        let (label, width): (f64, f64) = s
+            .eval(&format!(
+                "return FriendsFrameTab{i}Text:GetStringWidth(), FriendsFrameTab{i}:GetWidth()"
+            ))
+            .unwrap();
+        assert!(label > 0.0, "tab {i} measured its label");
+        assert_eq!(
+            width,
+            label + SIDES,
+            "tab {i} is its text plus the two end slices, from the base template's OnShow"
+        );
+        assert_ne!(width, 115.0, "tab {i} is still at the authored pre-fit");
+    }
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
 
 /// A friend row shows name/zone/status on its top line and "Level N Class" underneath; an
@@ -398,6 +455,60 @@ fn the_who_dropdown_switches_the_variable_column() {
     );
 }
 
+/// **B365's retest, pinned.** The Who list's column headers sort, the same header clicked twice
+/// REVERSES, and the earlier click survives as a tie-breaker — the reference's seven-slot chain
+/// (`SortWho 0x5ad890`, decision 2030).
+///
+/// What makes this the *window's* test rather than the chain's: every assertion reads the painted
+/// row straight after `Click()`, with **no feed tick in between**. That can only pass if
+/// `WHO_LIST_UPDATE` fires synchronously from inside the binding, the way `SignalEvent` does — the
+/// half of the bug the director could see, since our old sort redrew a tick later and only ever
+/// ascended.
+#[test]
+fn the_who_headers_sort_and_a_repeated_click_reverses() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    push(
+        &mut s,
+        SocialState {
+            who: vec![
+                who("Galas", 60, "Warrior", "Elwynn Forest"),
+                who("Erdrin", 12, "Mage", "Elwynn Forest"),
+            ],
+            who_total: 2,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    let _ = s.take_social_requests();
+    assert_eq!(who_name(&s, 1), "Galas", "the server's order, unsorted");
+
+    // Header 1 is Name (`FriendsFrame.xml:1313`).
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Name, ascending");
+    assert_eq!(
+        s.take_social_requests(),
+        vec![SocialRequest::SortWho("name".to_string())],
+        "and the app hears the click too"
+    );
+
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "the same header again reverses");
+
+    // Header 3 is Level (`:1394`) — ascending puts the level 12 first.
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Erdrin", "Level, ascending");
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "and Level reverses too");
+
+    // Back to Name: promoted from behind, it keeps the descending direction it was left in
+    // rather than flipping — the chain's memory, not a per-click toggle.
+    s.run("WhoFrameColumnHeader1:Click()").unwrap();
+    assert_eq!(who_name(&s, 1), "Galas", "Name, still descending");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// The who buttons need a selected row, and selecting one enables both. A fresh answer clears
 /// the selection — row 3 of the last query is not row 3 of this one.
 #[test]
@@ -671,4 +782,71 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
     assert!(s
         .take_social_requests()
         .contains(&SocialRequest::SelectFriend(2)));
+}
+
+/// **B363 — the who list reaches its last rows.** Liho's `/who` found 49, showed 17, and the knob
+/// travelled while the rows stayed. On the stock window the mechanism is a one-row loss:
+/// `WhoListScrollFrame` is 287 tall (stock `FriendsFrame.xml` l.1661) against seventeen rows of
+/// sixteen, so the child's overflow past the frame, `n × 16 − 287`, sits fifteen pixels under the
+/// bar's `(n − 17) × 16`, and an engine that clamped `SetVerticalScroll` into that overflow
+/// stopped the row offset at `n − 18`. The reference stores the bar's value as given (decision
+/// 2017). Drives the bar to its end and reads the seventeenth row: the forty-ninth name.
+#[test]
+fn the_who_list_reaches_its_last_row_at_the_bars_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.run("ShowWhoPanel()").unwrap();
+    let who: Vec<WhoInfo> = (1..=49)
+        .map(|i| WhoInfo {
+            name: format!("Who{i:02}"),
+            guild: String::new(),
+            level: 60,
+            race: "Human".to_string(),
+            class: "Warrior".to_string(),
+            zone: "Elwynn Forest".to_string(),
+        })
+        .collect();
+    push(
+        &mut s,
+        SocialState {
+            who,
+            who_total: 49,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The reference's own numbers, and the control: the overflow is shorter than the bar.
+    let (_, bar_max) = s
+        .eval::<(f64, f64)>("return WhoListScrollFrameScrollBar:GetMinMaxValues()")
+        .unwrap();
+    assert_eq!(bar_max, 512.0, "(49 − 17) × 16");
+    let overflow = s
+        .eval::<f64>("return WhoListScrollFrame:GetVerticalScrollRange()")
+        .unwrap();
+    assert_eq!(
+        overflow, 497.0,
+        "49 × 16 − 287: the frame is taller than its rows"
+    );
+
+    s.run("WhoListScrollFrameScrollBar:SetValue(512)").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return FauxScrollFrame_GetOffset(WhoListScrollFrame)")
+            .unwrap(),
+        32
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton1Name:GetText()")
+            .unwrap(),
+        "Who33"
+    );
+    assert_eq!(
+        s.eval::<String>("return WhoFrameButton17Name:GetText()")
+            .unwrap(),
+        "Who49",
+        "the last hit is on the last row"
+    );
 }

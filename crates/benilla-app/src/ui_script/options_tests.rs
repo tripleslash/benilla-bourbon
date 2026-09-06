@@ -50,10 +50,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
         // exist by the time they are read, exactly as it does in the manifest (decision 1734).
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -700,7 +699,7 @@ fn audio_harness() -> UiScript {
 fn combat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["UIParent.xml"]);
+    load_definers(&s, &[r"Interface\FrameXML\UIParent.xml"]);
     // The family's definers are the options window's own since 1964 (the reference's
     // UIOptionsFrame.lua block); the addon itself is LoadOnDemand off the chain, seated so the
     // master row's apply can load it the way the client does.
@@ -725,14 +724,15 @@ fn load_definers(s: &UiScript, files: &[&str]) {
 
 /// The Interface page's harness (decision 1136), the same posture as `combat_harness` above: the
 /// **real** definers ahead of the window, in the manifest's own order, so each row captures the
-/// same file-scope value it captures in the client. `SHOW_NEWBIE_TIPS` rides in on `GameTooltip.xml`
-/// which `harness_on` already loads; the two quest globals need their own windows —
-/// `MerchantFrame.xml` for the coin helpers both quest files reuse and `ScrollTemplates.xml` for
-/// the kit `QuestFrame.xml` inherits from (the same chain `quest_tests`/`questlog_tests` load).
-/// `SHOW_BUFF_DURATIONS` arrives with the bar it re-anchors (1139), behind the two files
-/// `buff_tests` loads ahead of it — `Cooldown.xml` (every button's child) and `ActionBar.xml`
-/// (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`. `TextStatusBar.xml` rides in
-/// ahead of them for the Status Bar Text row's consumer — the XP bar's numerals (1140).
+/// same file-scope value it captures in the client. `SHOW_NEWBIE_TIPS` is set by our own
+/// `assets/ui/OptionsFrame.xml` (it lived in our `GameTooltip.xml` until the tooltip went stock,
+/// 1968; the reference keeps it in `UIOptionsFrame.lua`), which `harness_on` already loads; the two
+/// quest globals need their own windows — `MerchantFrame.xml` for the coin helpers both quest files
+/// reuse and `ScrollTemplates.xml` for the kit `QuestFrame.xml` inherits from (the same chain
+/// `quest_tests`/`questlog_tests` load). `SHOW_BUFF_DURATIONS` arrives with the bar it re-anchors
+/// (1139), behind the two files `buff_tests` loads ahead of it — `Cooldown.xml` (every button's
+/// child) and `ActionBar.xml` (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`.
+/// `TextStatusBar.xml` rides in ahead of them for the Status Bar Text row's consumer — the XP bar's numerals (1140).
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
@@ -743,13 +743,12 @@ fn interface_harness() -> UiScript {
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
-            "UiPanels.xml",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\StaticPopup.xml",
-            "UIParent.xml",
             // The target-of-target pair's definer (1576) and the three files ahead of it, all in
             // their manifest seats. The chain is a real load-ORDER requirement rather than
             // tidiness: `UnitFrames`' three menu hosts initialize into the dropdown kit at load
@@ -777,7 +776,7 @@ fn interface_harness() -> UiScript {
             // VARIABLES_LOADED fires the slider exists. A test that fires the event has to have
             // loaded it too.
             "Interface\\FrameXML\\ColorPickerFrame.xml",
-            "Cooldown.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
@@ -791,6 +790,7 @@ fn interface_harness() -> UiScript {
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
             "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\BasicControls.xml",
@@ -818,14 +818,13 @@ fn chat_harness() -> UiScript {
             "Interface\\FrameXML\\Fonts.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
-            "UiPanels.xml",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\StaticPopup.xml",
-            "UIParent.xml",
             "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
@@ -852,8 +851,8 @@ fn actionbars_harness() -> UiScript {
         &s,
         &[
             "Interface\\FrameXML\\Fonts.xml",
-            "UIParent.xml",
-            "Cooldown.xml",
+            r"Interface\FrameXML\UIParent.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
@@ -873,7 +872,6 @@ fn actionbars_harness() -> UiScript {
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
-            "UiPanels.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
             "ScrollTemplates.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -2008,8 +2006,9 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Drive the window a few frames so the frame-late fits (the scroll body, the tab widths)
-/// converge: rects resolve after Lua runs, so OptionsScroll_Fit answers one frame behind.
+/// Drive the window a few frames so the scroll body's frame-late fit converges: rects resolve
+/// after Lua runs, so `OptionsScroll_Fit` answers one frame behind. (The tab widths are not in
+/// that set — 2028 put them on a one-shot `<OnShow>OptionsTab_FitWidth`.)
 fn settle(s: &mut UiScript) {
     for _ in 0..4 {
         s.resolve();
@@ -4133,5 +4132,116 @@ fn the_action_bars_page_toggles_the_real_bars() {
         "MultiBars.xml's own file-scope assignment IS the registered default"
     );
     assert_eq!(s.eval::<f64>("return CONTAINER_OFFSET_Y").unwrap(), 70.0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+// ── The window tabs (decision 2028) ─────────────────────────────────────────────────────────────
+
+/// A measurer that models the one property `FixedWidthFont` throws away: **glyph advances step to
+/// whole physical pixels**, so a label is not proportionally the same width at two scales. Six
+/// units per character at the DRAWN raster size (`6 × scale`, rounded), divided back by the scale
+/// — the shape `ui_text::measurer` really has, small enough to predict by hand.
+struct SteppedFont(f32);
+
+impl benilla_ui::script::TextMeasure for SteppedFont {
+    fn measure(&mut self, req: &benilla_ui::script::MeasureRequest) -> (f32, f32, f32) {
+        let per_glyph = (self.0 * req.scale).round();
+        let natural = req.text.chars().count() as f32 * per_glyph / req.scale;
+        (natural, 12.0, natural)
+    }
+}
+
+/// **Both tabs fit their labels once per show** — the era's width law (`MinimalTab.lua` l.7:
+/// label + 40) on the 1.12 tab template's own seat (`<OnShow>` → `PanelTemplates_TabResize`,
+/// decision 1993), with no OnUpdate poll behind it and no `fitted` latch. The engine's measurer
+/// answers `GetStringWidth` inside the Lua call that asks it, so one call is the whole fit.
+///
+/// **The seat is a show and not the era's OnLoad, and that is what the numbers below pin.**
+/// `GetStringWidth` answers in the region's OWN units, so its number depends on the owner's
+/// effective scale — and this window's scale is set by `OptionsFrame_UpdateScale` in the window's
+/// own `<OnShow>`, after every `<OnLoad>` has already run. At OnLoad these tabs measure at scale 1
+/// (64 and 76 here); on the show, behind the window's own OnShow, they measure at the drawn 0.78.
+#[test]
+fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
+    let mut s = UiScript::new().unwrap();
+    s.set_text_measurer(Box::new(SteppedFont(6.0)));
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.resolve();
+
+    let num = |s: &mut UiScript, expr: &str| -> f32 { s.eval(&format!("return {expr}")).unwrap() };
+    assert_eq!(
+        num(&mut s, "OptionsFrame:GetScale()"),
+        0.78,
+        "ERA_WINDOW_SCALE"
+    );
+
+    // The law, against each tab's own live measure.
+    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+        let w = num(&mut s, &format!("{tab}:GetWidth()"));
+        let l = num(&mut s, &format!("{tab}Text:GetStringWidth()"));
+        assert!(
+            (w - (l + 40.0)).abs() < 0.01,
+            "{tab} is {w} wide; the era's law is its label ({l}) + 40"
+        );
+    }
+    // …and the numbers themselves, which say WHEN it ran. At 0.78 a 6-unit glyph rasterizes at 5
+    // physical px and reads back 5/0.78 units, so "Game" (4) is 25.64 and "AddOns" (6) is 38.46.
+    // An OnLoad fit — before the window's OnShow set the scale — would have measured at 1 and left
+    // these at 64 and 76, which is 3.3 and 15.5 units off the drawn label.
+    let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(close(
+        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        78.461_54
+    ));
+
+    // Nothing re-fits them afterwards: the same two numbers with four frames run, which is the
+    // value the retired OnUpdate settle used to converge to and latch.
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(close(
+        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        78.461_54
+    ));
+
+    // A re-show re-fits rather than latching — the stock template's own behaviour, and what lets
+    // a tab follow the window's scale when the screen changes under it.
+    s.run("HideUIPanel(OptionsFrame) ShowUIPanel(OptionsFrame)")
+        .unwrap();
+    s.resolve();
+    assert!(close(
+        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        65.641_03
+    ));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The falsifier: **with no measurer installed**, the same one-shot measures 0 and each tab comes
+/// out 40 wide — the law's padding and nothing else. That is the engine-less truth (`benilla-ui`
+/// `script/measure.rs`: absent is a supported state, metrics stay 0 until the host's batch
+/// round-trip fills them), and it is why the fit is a *shown* frame's job: by then the app has
+/// seated `AtlasMeasurer` for certain, whatever order the boot took.
+#[test]
+fn without_a_seated_measurer_the_same_fit_reads_zero() {
+    let mut s = harness_on(UiScript::new().unwrap());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.resolve();
+    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+        let w: f32 = s.eval(&format!("return {tab}:GetWidth()")).unwrap();
+        assert!(
+            (w - 40.0).abs() < 0.01,
+            "{tab} is {w} wide, not the bare 40"
+        );
+    }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

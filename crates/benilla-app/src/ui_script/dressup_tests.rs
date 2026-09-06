@@ -38,6 +38,8 @@ const ROOM_UI: &[&str] = &[
     "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
     "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\ItemRef.xml",
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+    "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\StackSplitFrame.xml",
     "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
@@ -49,7 +51,7 @@ const ROOM_UI: &[&str] = &[
     // The reference's own room (1969): its Close/Reset buttons inherit the panel kit's templates,
     // which resolve at load — so after it, as the manifest has it.
     "Interface\\FrameXML\\DressUpFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
 ];
@@ -63,16 +65,15 @@ fn load_room(s: &UiScript) {
         "Interface\\FrameXML\\Fonts.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
     ] {
         load_xml(s, file);
     }
@@ -89,7 +90,7 @@ fn load_room(s: &UiScript) {
 /// **Needs client data**: `BAG_UI` names a chain entry, so its callers open with
 /// `wow_data_or_skip!`.
 fn load_room_with_bags(s: &UiScript) {
-    load_xml(s, "UIParent.xml");
+    load_xml(s, r"Interface\FrameXML\UIParent.xml");
     for file in BAG_UI {
         load_xml(s, file);
     }
@@ -125,7 +126,7 @@ fn shown_paper_doll() -> UiScript {
         "Interface\\FrameXML\\UIPanelTemplates.xml",
         // The reference's room (1969), after the panel kit its buttons inherit from.
         "Interface\\FrameXML\\DressUpFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {

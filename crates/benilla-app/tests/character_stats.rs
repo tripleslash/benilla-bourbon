@@ -44,8 +44,7 @@ const FILES: &[&str] = &[
     // `Model_OnLoad` — the model pane's `<OnLoad>` calls it, so this is a LOAD-time dependency of
     // the paper doll, not of the window. The reference declares it in `UIParent.lua`; ours lives
     // in our counterpart of that file.
-    "UIParent.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
@@ -55,7 +54,7 @@ const FILES: &[&str] = &[
     // buttons runs `PaperDollItemSlotButton_Update` from its own OnLoad, which calls
     // `CooldownFrame_SetTimer` on `$parentCooldown` unconditionally (`PaperDollFrame.lua:692`) —
     // so leaving this out is 20 loader errors before the first assertion.
-    "Cooldown.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
 ];
 

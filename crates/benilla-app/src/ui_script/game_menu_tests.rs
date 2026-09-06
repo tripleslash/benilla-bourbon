@@ -40,10 +40,9 @@ fn harness_with(extra: &[&str]) -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
         // (decision 1734) — UIParent must already be there, as it is in the manifest.
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -206,7 +205,14 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 #[test]
 fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
+    let mut s = bag_harness_with(
+        &[],
+        &[
+            "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
 
@@ -243,7 +249,14 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
 #[test]
 fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(&[], &["Interface\\FrameXML\\MerchantFrame.xml"]);
+    let mut s = bag_harness_with(
+        &[],
+        &[
+            "ScrollTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -270,6 +283,8 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let mut s = bag_harness_with(
         &[],
         &[
+            "ScrollTemplates.xml", // our scroll kit + the placeholder icon
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
             "Interface\\FrameXML\\MerchantFrame.xml",
             // The loot window is the reference's own since 1751 — `test_ui::LOOT_UI` carries
             // what it needs and why, and PartyFrame's `MAX_PARTY_MEMBERS` is needed at LOAD.
@@ -576,7 +591,7 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The stock map's OnShow/OnHide call `UpdateMicroButtons` unguarded (1980), which the
         // micro menu defines over the action bar it sits in — the spellbook kit's cluster.
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -637,7 +652,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         // The action-bar cluster the micro menu sits in — the stock map's OnShow/OnHide call
         // `UpdateMicroButtons` unguarded (1980).
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -646,6 +661,7 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
         r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         r"Interface\FrameXML\WorldMapFrame.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         // The loot window is the reference's own since 1751 — see `test_ui::LOOT_UI` for what
         // each of these buys; `PartyFrame`'s MAX_PARTY_MEMBERS is needed at LOAD time.
@@ -698,19 +714,23 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     // BagFrame.xml precisely because most harnesses load no bar).
     let mut s = bag_harness_with(
         &[
-            "Cooldown.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
             "Interface\\FrameXML\\ActionButtonTemplate.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\Fonts.xml",
-            "UIParent.xml",
+            r"Interface\FrameXML\UIParent.xml",
+            "ScrollTemplates.xml", // our scroll kit + the placeholder icon
             "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\MainMenuBar.xml",
             "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BonusActionBarFrame.xml",
         ],
-        &["Interface\\FrameXML\\MerchantFrame.xml"],
+        &[
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
     );
     s.set_money(0);
     s.set_container(0, Some(backpack()));

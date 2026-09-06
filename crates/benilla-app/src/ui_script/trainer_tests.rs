@@ -1,12 +1,12 @@
 //! The shipped **trainer window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/TrainerFrame.xml` — a client-sorted, collapsible **skill-line tree** with a **dropdown**
-//! state filter and a draggable **scroll bar** (decisions 0247/0251) — loaded behind its deps
-//! (`UiPanels.xml` + `UIDropDownMenu.xml` + `ScrollTemplates.xml` + `MerchantFrame.xml` for the
-//! the stock money frames) and fed a synthetic service list. Covers what only a runtime load
-//! exercises: the Lua parses and every referenced global resolves, the tree renders interleaved
-//! header/service rows, a header click folds its group, the dropdown filter hides a state, the wheel
-//! scrolls the list, the NPC name rides `arg1` into the title, the byte-exact GlobalStrings render, the
-//! Train button gates on available-and-affordable, and the buy queues the row's spell id.
+//! The reference's own `Blizzard_TrainerUI` addon — a client-sorted, collapsible **skill-line
+//! tree** with a **dropdown** state filter and a draggable **scroll bar** (decisions 0247/0251) —
+//! loaded behind its deps (`UiPanels.xml` + `UIDropDownMenu.xml` + `ScrollTemplates.xml` +
+//! `MerchantFrame.xml` for the the stock money frames) and fed a synthetic service list. Covers
+//! what only a runtime load exercises: the Lua parses and every referenced global resolves, the
+//! tree renders interleaved header/service rows, a header click folds its group, the dropdown
+//! filter hides a state, the wheel scrolls the list, the NPC name rides `arg1` into the title, the
+//! byte-exact GlobalStrings render, the Train button gates on available-and-affordable, and the buy queues the row's spell id.
 
 use benilla_ui::script::{
     ExtractedQuad, QuadContent, ScriptValue, SoundRequest, TrainerAbilityReq, TrainerService,
@@ -48,8 +48,8 @@ fn trainer_script_base() -> UiScript {
         "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -64,7 +64,6 @@ fn trainer_script_base() -> UiScript {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
@@ -72,6 +71,7 @@ fn trainer_script_base() -> UiScript {
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
         r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\MerchantFrame.xml",
         "Interface\\FrameXML\\ClassTrainerFrameTemplates.xml",
     ] {

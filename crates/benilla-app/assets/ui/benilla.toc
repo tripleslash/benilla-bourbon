@@ -124,7 +124,24 @@ Interface\FrameXML\BasicControls.xml
 # the reference's toc has it (l.7-8). Needs Fonts.xml's SystemFont above; everything else it
 # names is call-time.
 Interface\FrameXML\WorldFrame.xml
-UIParent.xml
+# UIParent itself and its Lua — the reference's own file (1751; decision 1988), at the slot its
+# toc gives it (l.8, right after BasicControls). UIParent.lua is the whole of the glue this
+# engine used to carry as UIParent.xml + UiPanels.xml: the UIPanelWindows table and the slot
+# manager (Show/HideUIPanel, CloseAllWindows, ToggleGameMenu's ESC ladder), the fade/flash/pulse
+# kits (ticked from UIParent's own OnUpdate, so the three driver frames of ours retired with
+# it), the managed bottom-stack positions, the model turntable, the LoadOnDemand shims, and the
+# sixty-six globally-routed events and their arms. It sources LocaleProperties.lua itself. Its
+# OnUpdate also ticks FCF_OnUpdate, UnitPopup_OnUpdate, BattlefieldFrame_OnUpdate, the
+# battlefield-position ask (1980) and the ready-check timeout (1989) — call-time names, all of
+# them below. LowHealthFrame (parent WorldFrame, above) and OutOfControlFrame ride along —
+# created hidden and never shown: the one function that would flash them, PlayerStatus_OnUpdate,
+# has no caller in the image or the chain (wow-re, decision 1999). Dead code in 5875, kept as
+# the reference keeps it.
+# What stayed ours moved out: the placeholder icon (ScrollTemplates.xml; the window tab template
+# and its settle went with it and are the chain's since 1993), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
+# (ScriptLogFrame.xml), and three aliases in OptionsFrame.xml that answer the reference's three
+# options windows and its Cancel button.
+Interface\FrameXML\UIParent.xml
 # ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
 # `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
 # sits as early as it can be read: no frames, no dependencies of its own, and every window that
@@ -157,9 +174,10 @@ Interface\FrameXML\MoneyFrame.xml
 # It is groundwork rather than a window, and the windows it is groundwork FOR are named so the
 # next session does not have to re-derive it: stock `TradeFrame.xml` and `MailFrame.xml` both build
 # their amount entry from this template and call `MoneyInputFrame_SetMode`/`_GetCopper`/
-# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below —
-# and neither can be sourced until they exist. (Trade still needs four ENGINE verbs beyond this:
-# `AddTradeMoney`, `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`.)
+# `_SetCopper`/`_ClearFocus`/`_SetTextColor`/`_SetOnvalueChangedFunc` — six of the names below.
+# Both windows are migrated now: `MailFrame.xml` at l.897 and `TradeFrame.xml` at l.906, the
+# latter once 1966 bound the four engine verbs it also needed (`AddTradeMoney`,
+# `GetCursorMoney`, `GetTradePlayerItemLink`, `GetTradeTargetItemLink`).
 #
 # **TWO entries, and the `.lua` was missing.** This `.xml` declares only the template and does not
 # source its `.lua`; the reference's toc lists both (l.11-12). Listing the `.xml` alone brought the
@@ -169,12 +187,6 @@ Interface\FrameXML\MoneyFrame.xml
 # `every_chain_xml_brings_its_own_lua` is now a gate so neither can recur.
 Interface\FrameXML\MoneyInputFrame.lua
 Interface\FrameXML\MoneyInputFrame.xml
-# The UIPanel slot manager (decision 0084 §2) and the fade/flash/pulse kits — the UIParent.lua
-# halves this engine still carries itself: script-only but for the kits' tick drivers, loaded
-# before any panel frame so ShowUIPanel/HideUIPanel already exist when those frames' OnLoad/OnEvent
-# reference them. The StaticPopup engine and every dialog it used to carry are the reference's
-# own file now, far below at the reference's own slot after UIPanelTemplates (decision 1960).
-UiPanels.xml
 # ══ THE TOOLTIP — the reference's own, off the player's chain (1751; decision 1968) ══
 # GameTooltip.xml sources HealthBar.lua and GameTooltip.lua and <Include>s GameTooltipTemplate.xml:
 # the two virtual templates (GameTooltipTemplate, ShoppingTooltipTemplate — thirty declared line
@@ -363,6 +375,23 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
+# ══ THE WINDOW TAB — the reference's own, off the player's chain (1751; decision 1993) ══
+# `CharacterFrameTabButtonTemplate`, the big tab along a panel's bottom edge — the character,
+# vendor and social windows' rows, and nothing else in the client (the small `TabButtonTemplate`
+# is UIPanelTemplates.xml's, above).
+#
+# THE REFERENCE NEVER GIVES THIS FILE A TOC LINE. Neither `FrameXML.toc` lists it (base or
+# patch); `UIOptionsFrame.xml` pulls it in with `<Include file="CharacterFrameTemplates.xml"/>`
+# above its own `<Script file=>` — "Need the character tabs here" — and that file is the
+# reference's toc l.21. Our options window is ours, so the row is explicit; l.21 is exactly here,
+# right after the UIPanelTemplates pair (l.16/17) and before StaticPopup (l.23).
+#
+# Its `<OnShow>` fits each tab to its text through `PanelTemplates_TabResize(0)` — which needs
+# the line above it and a SYNCHRONOUS `GetStringWidth`, the reason our own transcription carried
+# an OnUpdate settle instead until the engine gained one (1993 retires it, and 1002's clamp with
+# it: a tab's cap is the reference's own number now, so a long label overflows the plate exactly
+# as it does in the real client).
+Interface\FrameXML\CharacterFrameTemplates.xml
 # ══ THE DIALOG ENGINE — the reference's own, off the player's chain (1751; decision 1960) ══
 # StaticPopup.xml + StaticPopup.lua: StaticPopupDialogs (all 76 of the reference's entries),
 # StaticPopup_Show/Hide/Visible/Resize/OnUpdate, the four dialog instances, the edit boxes and the
@@ -402,9 +431,12 @@ OptionsFrame.xml
 #    (l.73-74). Replaces ActionBar.xml, MultiBars.xml and StanceBar.xml.
 Interface\FrameXML\MainMenuBar.xml
 
-# The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
-# consumers (the action, multibar, bonus and shapeshift buttons; the bag slots).
-Cooldown.xml
+# The cooldown indicator — the reference's own file, off the player's chain (1751; decision
+# 2019): `CooldownFrameTemplate`, a <Model> playing UI-Cooldown-Indicator.mdx whose OnUpdateModel
+# scrubs the sweep and whose OnAnimFinished hides the flash (Cooldown.lua), rendered as a tile
+# (2013) with its four quadrant quads turned by the file's own texture-transform rotation tracks.
+# Before its consumers (the action, multibar, bonus and shapeshift buttons; the bag slots).
+Interface\FrameXML\Cooldown.xml
 # ══ THE ACTION-BUTTON REGIONS — the reference's own, off the player's chain (1751) ══
 # `ActionButtonTemplate`: the REGIONS-ONLY half of the reference's two-level split — icon, count,
 # hotkey, name, border, flash, cooldown and normal texture. It declares NO scripts and calls
@@ -435,14 +467,6 @@ Interface\FrameXML\MultiActionBars.xml
 # right-click dialogs — ABANDON_PET / RENAME_PET / PETRENAMECONFIRM — now live). 0982's
 # transcription is gone.
 Interface\FrameXML\PetActionBarFrame.xml
-# The one adapter the reference's file needs from this engine: its autocast shine is a <Model>
-# (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla draws is
-# its own token texture (1383). BENILLA_ALLOW_OWN_UI=1.
-PetActionBarAdapters.xml
-# The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both, and the
-# reference's toc seats it right after PetActionBarFrame (l.73-74): the bonus buttons'
-# Up/Down call PetActionButtonUp/Down, which PetActionBar.xml above defines.
-Interface\FrameXML\BonusActionBarFrame.xml
 # The micro-button row in the bar's right-hand recess — the reference's own file (1751;
 # decision 1987), which its toc seats right after MainMenuBar (l.34-35). After MainMenuBar.xml:
 # the eight buttons carry parent="MainMenuBarArtFrame", resolved by name at load (1734), and a
@@ -466,8 +490,8 @@ Interface\FrameXML\MainMenuBarMicroButtons.xml
 Interface\FrameXML\BattlefieldFrame.xml
 # Minimap.xml + Minimap.lua: the cluster around the engine-rendered <Minimap> widget hole
 # (`crate::minimap` fills it), the zone text, the zoom buttons, the tracking / mail / meeting
-# stone / battlefield icons, and `MiniMapPing` — a <Model> this engine draws no pixels for; the
-# app's ping sprite (`minimap/ping.rs`) follows that frame's own show/hide and alpha, so the
+# stone / battlefield icons, and `MiniMapPing` — a <Model> that renders its own MinimapPing.mdx
+# since 2013; `minimap/ping.rs` keeps the pin, the click seat and the wire half, so the
 # 5 s lifetime is this file's, as the reference's is. After GameTooltip (the zone-text hover).
 # 0203's transcription is gone.
 Interface\FrameXML\Minimap.xml
@@ -556,8 +580,8 @@ Interface\FrameXML\ColorPickerFrame.xml
 # <Include>s its own blip templates (WorldMapFrameTemplates.xml) before the frames that inherit
 # them. Its player arrow is the Create/Position/Show/UpdateWorldMapArrowFrames family
 # (`script/worldmap_arrow.rs`), an anonymous Model pane the app draws as the minimap's arrow
-# sprite; its WorldMapPing is a MinimapPing.mdx Model pane this engine holds and draws nothing
-# into (named gap, 1980).
+# sprite; its WorldMapPing is the same MinimapPing.mdx Model pane, which draws its own file on
+# the map sheet since 2013 (closing the gap 1980 named).
 Interface\FrameXML\WorldMapFrame.xml
 # ══ THE CAST BAR — the reference's own, off the player's chain (1751) ══
 # `CastingBarFrame` + its Border/Flash/Spark/Text children, driven by the SPELLCAST_* events
@@ -592,14 +616,6 @@ Interface\FrameXML\CastingBarFrame.xml
 #   1.12 never reaches it — vmangos refuses to send that packet and substitutes a full START,
 #   saying so in `Player::SendMirrorTimers` — and `ui_mirror.rs`'s Pause edge carries the note.
 Interface\FrameXML\MirrorTimer.xml
-# ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
-# WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
-# counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,
-# and the battleground SCOREBOARD ours never had — `WorldStateScoreFrame`, over the score family
-# 1972 built (`MSG_PVP_LOG_DATA`, the eleven verbs, `UPDATE_BATTLEFIELD_SCORE`) and UIParent.xml's
-# `BattlefieldMinimap_LoadUI`. Needs Fonts, GameTooltip, the panel kit (its close button, tabs,
-# faux scroll frame) — all above; sits beside the mirror timers, which share its top-centre lane.
-Interface\FrameXML\WorldStateFrame.xml
 # ══ THE DURABILITY ALERT — the reference's own, off the player's chain (1751, window 4) ══
 # The "armor guy" under the minimap: `DurabilityFrame`, its eleven glyph textures, and
 # `DurabilityFrame_SetAlerts` / `_OnUpdate` with `INVENTORY_ALERT_STATUS_SLOTS` and
@@ -686,8 +702,9 @@ Interface\FrameXML\ContainerFrame.xml
 #
 # What the block needs from above, all far up: Fonts.xml (every `inherits=` font object),
 # ItemButtonTemplate.xml (the slot template's base, and the `SetItemButton*` family),
-# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml, UiPanels.xml
-# (`CharacterFrameTabButtonTemplate`, `UIPanelWindows`), UIPanelTemplates.xml (`UIPanelCloseButton`,
+# Cooldown.xml (`CooldownFrameTemplate` + `CooldownFrame_SetTimer`), GameTooltip.xml,
+# CharacterFrameTemplates.xml (`CharacterFrameTabButtonTemplate`), UIParent.xml (`UIPanelWindows`),
+# UIPanelTemplates.xml (`UIPanelCloseButton`,
 # `UIPanelButtonTemplate`, and `PanelTemplates_SetNumTabs`, which `CharacterFrame_OnLoad` calls at
 # LOAD), TextStatusBar.xml (`SetTextStatusBarTextPrefix`, called at load too, plus the
 # `TextStatusBar` the pet page's XP bar inherits), UnitFrames.xml (`PlayerFrameHealthBar` /
@@ -725,12 +742,11 @@ Interface\FrameXML\PetPaperDollFrame.xml
 # legibility, not necessity, in either direction: every verb each file calls of the other resolves
 # at call time, `KEYRING_CONTAINER` included (no top-level read of it exists in ContainerFrame.lua).
 #
-# TWO THINGS THE SWAP DID NOT INHERIT, and both live in ContainerFrameAdapters.xml below rather
-# than being edited into anything of Blizzard's: the item-push card (0887 — the reference's is a
-# `<Model>` playing an .mdx and this engine renders no FrameXML models, so ours samples that
-# model's own tracks and draws a quad), and the GlobalStrings fallbacks the install-less harnesses
-# need. The keyring's SHOW trigger moved the other way — into the main bar's file, which is exactly
-# where the reference keeps it (MainMenuBar.xml l.323-341; stock since 1938).
+# The item-push card is the reference's own `<Model>` since 2015 (0887's Lua card is gone with
+# it): `ItemAnim_OnEvent` puts the icon on the pane and arms it, the tile renderer draws the
+# file (2013), the pane's own clock ends it. The keyring's SHOW trigger moved the other way —
+# into the main bar's file, which is exactly where the reference keeps it (MainMenuBar.xml
+# l.323-341; stock since 1938).
 Interface\FrameXML\MainMenuBarBagButtons.xml
 # The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
 # click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
@@ -824,9 +840,9 @@ Interface\FrameXML\DressUpFrame.xml
 # action-bar files it calls into and after MainMenuBarMicroButtons (UpdateMicroButtons on show). The 'P' binding
 # calls its own ToggleSpellBook(BOOKTYPE_SPELL). 0216's transcription is gone.
 Interface\FrameXML\SpellBookFrame.xml
-# The one adapter the reference's file needs from this engine: its pet-page autocast shine is a
-# <Model> (UI-AutoCastButton.mdx) and this engine's <Model> draws no pixels; the shine benilla
-# draws is its own token texture (1383/1392/1393). BENILLA_ALLOW_OWN_UI=1.
+# The director's two look deviations on the pet page's autocast button (1392/1393), re-seated onto
+# the reference's own Model now that this engine renders it (2013/2014): the corner brackets at
+# 71.53 and the shine pane squared on the button at scale 1.48. BENILLA_ALLOW_OWN_UI=1.
 SpellBookAdapters.xml
 # ══ THE SOCIAL WINDOW — the reference's own, off the player's chain (1751; decision 1959) ══
 # FriendsFrame.xml + FriendsFrame.lua: the O-key window's four tabs — friends/ignore, who, the
@@ -949,7 +965,7 @@ Interface\FrameXML\BankFrame.xml
 # a `CSimpleFrame` and nothing else, so it is `FrameKind::Frame` and the route lines stay what the
 # reference makes them: plain `<Texture>` children rotated by an 8-argument `SetTexCoord`.
 #
-# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney),
+# Pulls only `TaxiFrame.lua`, and still needs only Fonts/UIParent/GameTooltip (SetTooltipMoney),
 # all loaded above — so it keeps its seat in the "NPC session windows grouped" cluster.
 Interface\FrameXML\TaxiFrame.xml
 # The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
@@ -1053,6 +1069,35 @@ Interface\FrameXML\QuestTimerFrame.xml
 # CHAT_MSG_* events the reference's ChatFrame_OnEvent prints from — it no longer prints them itself.
 Interface\FrameXML\ChatFrame.xml
 Interface\FrameXML\FloatingChatFrame.xml
+
+# The bonus (stance-page) bar AND the shapeshift bar — one stock file declares both. The
+# reference's toc seats it at l.74, after PetActionBarFrame (the bonus buttons' Up/Down call
+# PetActionButtonUp/Down). It sits HERE, right before WorldStateFrame at the tail, because the
+# two files depend on each other through the stock UIParent_ManageFramePositions:
+# ShapeshiftBar_OnLoad shows the bar, its OnShow runs the pass, and the pass indexes
+# ReputationWatchBar, QuestTimerFrame, QuestWatchFrame, the chat frames and the rest UNGUARDED
+# (UIParent.lua l.1592-1775) — so this file follows every one of them (ours seats the quest and
+# chat files later than the reference does); and WorldStateAlwaysUpFrame's OnLoad runs the same
+# pass, whose shapeshift-appearance arm indexes ShapeshiftBarLeft/Middle/Right (l.1710-1725) —
+# so that file follows THIS one, as in the reference (l.74 then l.89). Beside the bar files this
+# raised at UIParent.lua:1618 on every login and the shelf was never seated: the shelf art sat
+# at its XML anchor until something re-ran the pass (the director's sliver above Defensive
+# Stance; decision 2001). `every_load_time_runner_of_the_managed_pass_follows_what_it_reads`
+# enforces both directions.
+Interface\FrameXML\BonusActionBarFrame.xml
+# ══ THE WORLD-STATE FRAMES — the reference's own, off the player's chain (1751; decision 1972) ══
+# WorldStateFrame.xml + WorldStateFrame.lua: the always-up readout 1586 built (the tower/flag/base
+# counters at top-centre, `UPDATE_WORLD_STATES` from `crate::world_state_ui`), the capture bars,
+# and the battleground SCOREBOARD ours never had — `WorldStateScoreFrame`, over the score family
+# 1972 built (`MSG_PVP_LOG_DATA`, the eleven verbs, `UPDATE_BATTLEFIELD_SCORE`) and UIParent.xml's
+# `BattlefieldMinimap_LoadUI`. Needs Fonts, GameTooltip, the panel kit (its close button, tabs,
+# faux scroll frame) — all above. It sat beside the mirror timers until 1988: the always-up
+# frame's OnLoad runs the stock UIParent_ManageFramePositions, and that pass indexes half the
+# HUD unguarded — ReputationWatchBar, QuestTimerFrame, QuestWatchFrame (QuestLogFrame.xml),
+# MinimapCluster, DurabilityFrame, the bars and their sliding textures — and ends by calling
+# FCF_DockUpdate and re-anchoring the container frames. So this file sits after all of them,
+# which is why the reference's own toc has it at l.89, near the end (1988).
+Interface\FrameXML\WorldStateFrame.xml
 # ══ THE MACRO WINDOW — the reference's own, off the player's chain (1751, window 32) ══
 # A LoadOnDemand addon with no row here since 1967 (the addons header far above); what stays in
 # this slot is the FrameXML file it needs loaded first.
@@ -1142,8 +1187,8 @@ Interface\FrameXML\TutorialFrame.xml
 # options family, the same chain `MainMenuBarMicroButtons` is deferred behind. All three columns
 # read clean because the file LOADS clean; what it needs is a sibling window, not a verb.
 #
-# Its CAMP/QUIT dialogs and their event driver HAVE moved out, to UiPanels.xml — the reference's
-# own homes (StaticPopup.lua l.564/586 for the dialogs, UIParent.lua l.304-315 for the three
-# events). The ESC menu never owned them; it was just where ours were first needed. That is one
-# less thing to move when the options family lands.
+# Its CAMP/QUIT dialogs and their event driver HAVE moved out — the dialogs to `StaticPopup.xml`,
+# the driver to `UIParent.xml`, the reference's own homes (StaticPopup.lua l.564/586 for the
+# dialogs, UIParent.lua l.304-315 for the three events), both stock since 1988. The ESC menu never
+# owned them; it was just where ours were first needed. That is one less thing to move when the options family lands.
 GameMenuFrame.xml

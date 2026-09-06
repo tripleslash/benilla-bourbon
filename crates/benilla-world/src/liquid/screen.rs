@@ -545,9 +545,11 @@ pub(crate) fn register(app: &mut App) {
                 Node3d::MainTransparentPass,
             ),
         )
-        // After the retained cell pass: Stormwind's walls are opaque world and belong in the
-        // snapshot. `StaticGxPlugin` is already built by the time `LiquidPlugin` is, so this edge
-        // can be declared here; the `Ssilvb` one cannot — see `register_late`.
+        // After the retained cell pass — which since 2016 runs ahead of the opaque one, so this
+        // edge is implied by the pair above rather than load-bearing; kept because Stormwind's
+        // walls belonging in the snapshot is the reason, not the order they happen to draw in.
+        // `StaticGxPlugin` is already built by the time `LiquidPlugin` is, so this edge can be
+        // declared here; the `Ssilvb` one cannot — see `register_late`.
         .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, LiquidScreenLabel);
 }
 

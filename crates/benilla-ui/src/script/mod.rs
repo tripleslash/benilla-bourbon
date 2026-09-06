@@ -64,7 +64,6 @@ mod chat_window;
 mod clip;
 mod colorselect;
 mod container;
-mod cooldown;
 mod craft;
 mod cursor;
 mod death;
@@ -153,6 +152,9 @@ mod trainer;
 mod types;
 mod unit;
 mod weapon_enchant;
+/// The `/who` list's seven-key sort chain and its comparator — its header is the whole
+/// mechanism, including why a repeated header click reverses (decision 2030).
+mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
@@ -202,6 +204,7 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -210,8 +213,9 @@ pub use tabard::{
     emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,
 };
-pub use worldmap_arrow::{ARROW_FOOTPRINT_PX, ARROW_MODEL};
+pub use worldmap_arrow::ARROW_MODEL;
 
+pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -267,6 +271,7 @@ pub use unit::{
     grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
+pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
     WorldMapZoneView,
@@ -446,10 +451,15 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 35] = [
+const SCRIPT_KINDS: [&str; 37] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
+    // The model pane's two: fired by the tick's model pass — `OnUpdateModel` at the top of every
+    // paint of a visible pane, `OnAnimFinished` when a clamped sequence completes (decision 2007;
+    // `object::events_regions::set_script`'s doc has the sites).
+    "OnUpdateModel",
+    "OnAnimFinished",
     "OnShow",
     "OnHide",
     "OnClick",
@@ -660,7 +670,6 @@ impl UiScript {
         colorselect::install(&lua)?;
         minimap::install(&lua)?;
         modelframe::install(&lua)?;
-        cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
         worldstate::install(&lua)?;
@@ -783,6 +792,9 @@ impl UiScript {
         }
         model.screen = new;
         model.touch_layout();
+        drop(model);
+        // The implicit rects are measured in layout units, which follow the aspect (2015).
+        self.reapply_implicit_rects();
         true
     }
 
@@ -1241,7 +1253,14 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         let mut model = self.model_mut();
+        let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
         model.mouse_down_on.clear();
+        // Every button that capture was holding down goes back to NORMAL — the release the OS
+        // never fed us (`0x7793c2`'s transition), without which a button walked off the window
+        // edge mid-press keeps its pushed art for the rest of the session.
+        for h in held {
+            button::settle(&mut model, h);
+        }
         // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
         // behind would aim the next press's raise at whatever the pointer was last holding.
         model.mouse_capture = None;
@@ -1460,7 +1479,6 @@ impl UiScript {
                 crate::widget::FrameKind::MovieFrame => "MovieFrame",
                 crate::widget::FrameKind::GameTooltip => "GameTooltip",
                 crate::widget::FrameKind::Minimap => "Minimap",
-                crate::widget::FrameKind::Cooldown => "Cooldown",
             });
         }
         // The region leaves publish into their own name table (`region_names`), not the arena's —

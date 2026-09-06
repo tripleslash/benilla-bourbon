@@ -1,4 +1,5 @@
-//! Drives the REAL `assets/ui/AuctionFrame.xml` through the engine (decision 1511) — the auction
+//! Drives the reference's own `Blizzard_AuctionUI` addon through the engine (decision 1511; 1971
+//! put it on the player's chain) — the auction
 //! twin of `mail_frame.rs`: it loads the same file chain the app does (cut to the auction window's
 //! dependency prefix), pushes a synthetic `AuctionState`, opens the window with the app's own
 //! `AUCTION_HOUSE_SHOW`/`AUCTION_ITEM_LIST_UPDATE` events, and asserts the transcribed Lua actually
@@ -28,15 +29,17 @@ const FILES: &[&str] = &[
     // the `MoneyInputFrame_*` verbs, replacing our own verbatim copy of both.
     r"Interface\FrameXML\MoneyInputFrame.lua",
     r"Interface\FrameXML\MoneyInputFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `auctionRowName` colours each row from ITEM_QUALITY_COLORS, whose declarer is
     // UIParent (ref UIParent.lua:65) since 1888 put the font registry on the chain.
-    "UIParent.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     "ScrollTemplates.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // `AuctionTabTemplate` inherits `CharacterFrameTabButtonTemplate`, and `inherits=`
+    // resolves at LOAD (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",

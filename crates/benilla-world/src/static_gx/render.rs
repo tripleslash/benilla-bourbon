@@ -27,6 +27,7 @@ use bevy::pbr::{
 };
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -859,6 +860,9 @@ impl ViewNode for StaticGxNode {
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
         let color_attachment = target.get_color_attachment();
+        // The pass's diagnostic span — `render/static_gx/elapsed_gpu` where the device times
+        // passes (Vulkan/DX12), the CPU span everywhere: the journal's `gpu_static` column (2008).
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("static_gx"),
             color_attachments: &[Some(color_attachment)],
@@ -866,6 +870,7 @@ impl ViewNode for StaticGxNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "static_gx");
         let mut view_offsets = vec![
             view_offset.offset,
             view_lights.offset,
@@ -915,6 +920,7 @@ impl ViewNode for StaticGxNode {
                 );
             }
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -947,13 +953,24 @@ pub(super) fn build(app: &mut App) {
             ),
         )
         .add_render_graph_node::<ViewNodeRunner<StaticGxNode>>(Core3d, StaticGxLabel)
+        // BEFORE bevy's opaque pass (decision 2016): the retained statics — every building and
+        // every steady doodad — are the frame's best early-Z occluders, and terrain's fragment is
+        // the frame's dearest (four splat layers, the alpha map, the baked shadow: six samples a
+        // pixel). Drawn first, the walls and trunks fill the depth buffer with early writes and
+        // the terrain behind them is rejected before it samples anything; drawn after (the order
+        // 1429 inherited from "bevy's pass, then ours"), every terrain fragment under a building
+        // was shaded in full and then overwritten. The same holds against the entity lane's
+        // creatures and animated doodads, which stand in front of nothing static as a rule. The
+        // pass takes the depth and colour CLEAR with it (bevy's attachments clear on first use,
+        // `DepthAttachment::get_attachment`); when nothing is visible it returns before touching
+        // either and the opaque pass clears as before. An immediate-mode GPU (the Steam Deck,
+        // every Windows part) is where this counts; a tile-based one (Apple) resolves opaque
+        // order in hardware and reads the same frame either way — which is why no measurement
+        // of this exists on the rig, and the player journal's `gpu_opaque`/`gpu_static` columns
+        // (2008) are where the number lands.
         .add_render_graph_edges(
             Core3d,
-            (
-                Node3d::MainOpaquePass,
-                StaticGxLabel,
-                Node3d::MainTransparentPass,
-            ),
+            (Node3d::StartMainPass, StaticGxLabel, Node3d::MainOpaquePass),
         );
 }
 

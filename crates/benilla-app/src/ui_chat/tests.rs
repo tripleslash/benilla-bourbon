@@ -451,7 +451,7 @@ fn chat_vm() -> benilla_ui::script::UiScript {
         "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
@@ -1316,6 +1316,26 @@ fn real_alias_table_resolves_the_shipped_commands() {
     }
     assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
     assert_eq!(parse_line("/convertraid"), ParsedChat::ConvertRaid);
+    // `/console` from a line that skipped the stock edit box (a probe rig) forwards to the verb
+    // the stock handler calls, so a CVar write lands like a typed one (2008). The long-bracket
+    // quoting steps its level past anything the text could close.
+    assert_eq!(
+        parse_line("/console fpsJournal 1"),
+        ParsedChat::Lua {
+            body: "ConsoleExec([[fpsJournal 1]])".into()
+        }
+    );
+    assert_eq!(
+        parse_line("/console reloadUI"),
+        ParsedChat::Lua {
+            body: "ConsoleExec([[reloadUI]])".into()
+        }
+    );
+    assert_eq!(super::input::lua_long_string("a]]b"), "[=[a]]b]=]");
+    assert_eq!(
+        super::input::lua_long_string("a]]b]=]c"),
+        "[==[a]]b]=]c]==]"
+    );
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
     // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct
@@ -2039,37 +2059,47 @@ fn both_dock_windows_carry_the_same_chrome() {
     }
 }
 
-/// **No docked chat window may appear in `UIParent.xml`'s managed-position table.**
+/// **A docked chat window survives the managed-position pass.**
 ///
-/// The structural guard on the root cause. That pass owns a frame's whole seat — it
-/// `ClearAllPoints()` first, by design (decision 1499) — so a row naming a *docked* window wipes
-/// the anchors that tie it to the dock and re-seats it with a single point and no size: an
-/// unresolvable rect. The reference's own ChatFrame2 row is for an UNDOCKED window, which is chat
-/// settings and not built (0288 §2); carrying it here cost B297 a visible fix.
-///
-/// A string check because that is the level the bug lives at — the row's mere presence is the
-/// defect, whatever it contains.
+/// The pass owns a frame's whole seat — it `ClearAllPoints()` first, by design (decision 1499) —
+/// and the reference's own table carries a `ChatFrame2` row. That row cost B297 a visible fix
+/// while the pass was ours, and our answer then was to drop the row from our copy. The stock pass
+/// is the one that runs now (1988), row and all, and it ends by calling `FCF_DockUpdate()` —
+/// which re-anchors every docked window onto `DEFAULT_CHAT_FRAME` in the same breath. That is the
+/// reference's answer to its own row, and this is the behavioural check that it holds: after the
+/// pass, the docked window is still exactly on the dock.
 #[test]
-fn no_docked_chat_window_is_managed_by_uiparent() {
+fn a_docked_chat_window_survives_the_managed_position_pass() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let xml = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/UIParent.xml"),
-    )
-    .expect("UIParent.xml");
-    for line in xml.lines() {
-        let code = line.trim_start();
-        if code.starts_with("--") {
-            continue; // the comment explaining why the row is gone names it, deliberately
-        }
-        assert!(
-            !code.starts_with("ChatFrame2 ="),
-            "ChatFrame2 is DOCKED — a managed row clears its dock anchors: {code}"
-        );
-    }
-    assert!(
-        xml.contains("ChatFrame1 = {baseY = 85"),
-        "ChatFrame1 IS managed (it is the dock's own seat) — this test must not pass vacuously"
+    let mut s = benilla_ui::script::UiScript::new().expect("VM");
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
     );
+    assert!(crate::ui_script::load_default_ui(&s).is_empty());
+    s.resolve();
+    // Dock the combat log the way the reference's own default layout does, then run the pass.
+    s.run("FCF_DockFrame(ChatFrame2, 2, nil) UIParent_ManageFramePositions()")
+        .unwrap();
+    s.resolve();
+    let rect = |name: &str| {
+        s.eval::<(f64, f64, f64, f64)>(&format!(
+            "return {name}:GetLeft(), {name}:GetBottom(), {name}:GetRight(), {name}:GetTop()"
+        ))
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    assert_eq!(
+        rect("ChatFrame2"),
+        rect("ChatFrame1"),
+        "the docked window still sits exactly on the dock"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 /// **What does NOT gate a `/sit` underwater** — the negative that sends B155's refusal to the
@@ -2154,5 +2184,46 @@ fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
     assert!(
         log.take_level_up_gains(10).is_none(),
         "the entry was taken, not copied"
+    );
+}
+
+/// `detailDoodadAlpha` — the reference's own console command (`0x6739a0`), and the dial that
+/// decides where ground clutter first appears (the detail-doodad draw alpha-tests
+/// `texel.a × distance_ramp` against it). It is a **console command**, not a CVar (registrar
+/// `0x63f9e0`, not `CVar::Register`), so it arrives through the console drain rather than the
+/// CVar store `ConsoleExec` writes — this pins the classifier that splits the two. The three
+/// cases the reference distinguishes: in range sets it, out of range is REJECTED rather than
+/// saturated (`0x6739b9: cmp eax,0xff; jbe`), and unparseable is that same rejection.
+#[test]
+fn console_detail_doodad_alpha_parses() {
+    use super::input::{console_command, ParsedChat};
+    assert_eq!(
+        console_command("detailDoodadAlpha 8"),
+        ParsedChat::DetailDoodadAlpha { value: Some(8) }
+    );
+    // The console is case-insensitive, like the engine's own table lookup.
+    assert_eq!(
+        console_command("DETAILDOODADALPHA 255"),
+        ParsedChat::DetailDoodadAlpha { value: Some(255) }
+    );
+    assert_eq!(
+        console_command("detailDoodadAlpha 256"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    assert_eq!(
+        console_command("detailDoodadAlpha wat"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    // Bare = report the current value; and the sibling command still routes.
+    assert_eq!(
+        console_command("detailDoodadAlpha"),
+        ParsedChat::DetailDoodadAlpha { value: None }
+    );
+    assert_eq!(console_command("reloadUI"), ParsedChat::ReloadUi);
+    assert_eq!(
+        console_command("nosuchthing"),
+        ParsedChat::ConsoleUnknown {
+            cmd: "nosuchthing".to_string()
+        }
     );
 }

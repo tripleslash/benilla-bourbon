@@ -24,6 +24,64 @@ impl Loader<'_> {
                 self.call(wrapper, "SetAlpha", a, dbg);
             }
         }
+        // `scale=` on a MODEL pane is the model's own scale, not the frame's: `CSimpleModel::
+        // LoadXML` (`0x76cac0`) writes it into `+0x3a0` at `76cb61` — the field `SetModelScale`
+        // writes — and raises `Frame %s: Invalid model scale: %s` at `76cb92` for `≤ 0` (a raise,
+        // not a clamp; wow-re `modelframe-render-law.md` §2). Every `scale=` in the shipped
+        // FrameXML sits on a model pane (the cooldown indicator's 0.75, the autocast shine's
+        // 1.2/1.22, the pings' 0.4, the dressing room's 2.0), and until decision 2007 the loader
+        // read none of them. Whether the generic frame loader (`0x769820`) reads a `scale`
+        // attribute of its own is not carved; a plain frame's `scale=` is left as it was.
+
+        // `file=` on a model pane is `SetModel` (`CSimpleModel::LoadXML` `0x76cac0` installs the
+        // file into the widget, resident or streaming — decision 2013). Until 2013 no XML-declared
+        // pane ever held a file: the loader read `file=` only to turn the cooldown indicator's
+        // pane into a native widget of ours (retired by 2019), and the pings, the shine and the
+        // item card were bare panes to the engine.
+        let model_kind = super::model_kind_tag(&el.tag);
+        if model_kind {
+            if let Some(file) = el.attr("file") {
+                let text = self.resolve_text(file, dbg);
+                self.call(wrapper, "SetModel", text, dbg);
+            }
+        }
+        if let Some(scale) = el.attr("scale") {
+            if model_kind {
+                match scale.trim().parse::<f32>() {
+                    Ok(s) if s > 0.0 => self.call(wrapper, "SetModelScale", s, dbg),
+                    _ => self.warn_once(
+                        &format!("model-scale:{dbg}"),
+                        format!("Frame {dbg}: Invalid model scale: {scale}"),
+                    ),
+                }
+            }
+        }
+        // The model pane's own fog attributes and `<FogColor>` child (`CSimpleModel::LoadXML`
+        // `0x76cac0`, render law §5.4). `fogNear`/`fogFar` are **clamped at `≥ 0`** here and only
+        // here (`76cbbb`-`76cbd2` / `76cbf3`-`76cc0a`: `0.0 fcomp value ; jne store ; else store
+        // 0.0`) — the Lua setters store raw. The `<FogColor>` child writes the packed colour AND
+        // arms the fog bit, so it is `SetFogColor` in every respect; nothing in XML touches the
+        // light. Decision 2027.
+        if model_kind {
+            for (attr, verb) in [("fogNear", "SetFogNear"), ("fogFar", "SetFogFar")] {
+                if let Some(v) = el.attr(attr).and_then(|v| v.trim().parse::<f32>().ok()) {
+                    self.call(wrapper, verb, v.max(0.0), dbg);
+                }
+            }
+            if let Some(fc) = children_named(el, "FogColor").next() {
+                let ch = |k: &str, d: f32| {
+                    fc.attr(k)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .unwrap_or(d)
+                };
+                self.call(
+                    wrapper,
+                    "SetFogColor",
+                    (ch("r", 0.0), ch("g", 0.0), ch("b", 0.0), ch("a", 1.0)),
+                    dbg,
+                );
+            }
+        }
         if let Some(id) = el.attr("id") {
             if let Ok(n) = id.parse::<i64>() {
                 self.call(wrapper, "SetID", n, dbg);
@@ -104,8 +162,8 @@ impl Loader<'_> {
             self.call(wrapper, "SetToplevel", true, dbg);
         }
         // `enableKeyboard="true"` — the XML half of the flag, which enables BOTH key kinds
-        // (`scripts-auto-enable.md` §1-2). The flag is now real and round-trips; key delivery is
-        // still not gated on it, which the method's own doc states rather than this warning.
+        // (`scripts-auto-enable.md` §1-2). The flag is real, and `script::keyboard`'s delivery
+        // walk is what reads it (1319).
         if el.attr_bool("enableKeyboard") {
             self.call(wrapper, "EnableKeyboard", true, dbg);
         }

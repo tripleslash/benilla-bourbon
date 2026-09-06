@@ -1,7 +1,7 @@
 //! The shipped **inspect window** driven end-to-end, engine-only (no Bevy): the real
-//! `assets/ui/InspectFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml` and fed a
-//! synthetic target snapshot + a foreign equipment view (decision 0631). `character_tests.rs`'s
-//! harness, turned onto the other paper doll.
+//! The reference's own `Blizzard_InspectUI` addon loaded behind
+//! `Fonts.xml`/`UIParent.xml`/`GameTooltip.xml` and fed a synthetic target snapshot + a foreign
+//! equipment view (decision 0631). `character_tests.rs`'s harness, turned onto the other paper doll.
 //!
 //! What these are here to falsify, in order of how quietly it could have shipped broken:
 //!
@@ -119,14 +119,16 @@ fn armed() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
@@ -162,14 +164,16 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+    load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     // `InspectUnit` lives here now — the reference's own home for that name, and no longer in the
     // window's own file (decision 1832). The manifest's order, and 49 other harnesses'.
-    load_xml(&s, "UIParent.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
     // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the

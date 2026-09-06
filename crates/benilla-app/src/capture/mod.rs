@@ -106,10 +106,12 @@ mod probe_goquest;
 mod probe_guard_poi;
 mod probe_mail;
 mod probe_melee;
+mod probe_model_camera;
 mod probe_partner;
 mod probe_rig;
 mod probe_service;
 mod probe_taxi;
+mod probe_vendor_swap;
 mod probes;
 mod scenarios;
 use crate::run_mode::CaptureMode;
@@ -133,10 +135,12 @@ pub(crate) use probe_goquest::ProbeGoQuestPlugin;
 pub(crate) use probe_guard_poi::ProbeGuardPoiPlugin;
 pub(crate) use probe_mail::ProbeMailPlugin;
 pub(crate) use probe_melee::ProbeMeleePlugin;
+pub(crate) use probe_model_camera::ProbeModelCameraPlugin;
 pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_service::ProbeServicePlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
+pub(crate) use probe_vendor_swap::ProbeVendorSwapPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,
     JitterMeterPlugin, LiftCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin,

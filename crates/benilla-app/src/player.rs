@@ -35,7 +35,6 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
 use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
-use crate::ui_script::PointerOverUi;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
@@ -116,17 +115,17 @@ pub(crate) use follow::{FollowRequest, FollowState};
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
-    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
-    STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR,
-    WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD,
+    TURN_RATE, TURN_RATE_MOVING, WALK_RATIO, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL,
+    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 // `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
 // resident world is still the departed map's (0710).
 pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, DEFAULT_COLLISION_HEIGHT,
-    FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT,
-    TERMINAL_VELOCITY,
+    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, CREATURE_STEP_UP_HEIGHT,
+    DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT,
+    SETTLE_TIMEOUT, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
@@ -432,6 +431,18 @@ impl Plugin for PlayerPlugin {
                 // capture keeps the doodad rail static: a pinned camera that a passing kodo
                 // could nudge is not a regression baseline any more.
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+        )
+        // **Which mouse buttons the world owns** (ledger B364) — decoded once, ahead of all
+        // three readers: `/follow`'s both-button cancel below, the look session, and the camera's
+        // input command word. `control` cannot own it, because `steer_follow` runs before
+        // `control` and would then read it a frame late.
+        .add_systems(
+            Update,
+            camera::latch_world_mouse
+                .in_set(WorldStage::Input)
+                .before(control)
+                .before(follow::steer_follow)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
         )
         // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
         // input immediately BEFORE the controller, which folds the flag into its forward axis.

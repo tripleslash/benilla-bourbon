@@ -1,5 +1,5 @@
 //! The world-map data feed (decision 0203 phase 2) — the app half behind
-//! `assets/ui/WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
+//! stock `Interface\FrameXML\WorldMapFrame.xml` and benilla-ui's `script/worldmap.rs` bindings.
 //!
 //! Two systems, the quest-log seam shape:
 //! - [`load_world_map_ui`] (once, when the chain + VM + Map.dbc catalog all exist): builds the
@@ -217,6 +217,17 @@ fn load_world_map_ui(
                                 .filter(|&&aid| aid != 0)
                                 .filter_map(|&aid| areas.get(aid).map(|r| r.explore_flag))
                                 .collect(),
+                            hit_rect: (
+                                o.hit_rect_top,
+                                o.hit_rect_left,
+                                o.hit_rect_bottom,
+                                o.hit_rect_right,
+                            ),
+                            // The zone-level hover's label inside that rect: the FIRST area
+                            // slot's AreaTable name — `0x4a7fa0` reads `+0x8` only (wow-re
+                            // 15b2a8ea §1d); a slot that resolves to no row makes the overlay
+                            // invisible to the hover, never to the draw.
+                            area_name: areas.name(o.area_id[0]).map(str::to_string),
                         })
                         .collect(),
                 })

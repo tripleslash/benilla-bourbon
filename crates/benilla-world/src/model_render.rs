@@ -115,7 +115,7 @@ pub struct MatKey {
     zfill: bool,
     /// This batch is part of a **WMO skybox** ([`crate::skybox`]) — the building-owned painted sky,
     /// drawn on this lane like any other M2 since decision 1264. Its own key axis because the lane
-    /// changes pipeline state ([`SKY_DEPTH_MARKER`]: forced far depth, no early-Z) and sort rung
+    /// changes pipeline state ([`SKY_DEPTH_MARKER`]: the far depth pinned at the vertex) and sort rung
     /// ([`skybox_sort_bias`]), so a skybox batch must never dedupe onto the identical-looking world
     /// batch — `CavernsOfTimeSky` and Elwynn share no texture today, but nothing enforces that and
     /// the collision would be a world doodad silently drawn at the far plane.
@@ -144,8 +144,12 @@ pub struct MatKey {
 /// intensity per instance via the `MeshTag` shade byte ([`crate::entity_shade`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShadeSel {
-    /// Lit ground, the boosted intensity family (the binary's 2.5): ADT map doodads on unshadowed
-    /// ground, and every entity M2.
+    /// Lit ground, the boosted intensity family (the binary's 2.5): **every entity M2, and only
+    /// those** — a unit, a player, a GameObject. The 2.5 and its 3.3333/s chase live on the
+    /// WENTITY light node (vtable `0x810810`, hung off `[obj+0xe0]`); an object without one
+    /// cannot reach either. ADT map doodads were on this variant until 2050 and are not entities:
+    /// they are `CMapDoodadDef`s, whose `[+0xa4]` is only ever {0.0, 0.5, 1.0} and which have no
+    /// ramp target field at all (`+0xf8` is `m[2][3]` of their world matrix).
     ///
     /// Entities still select this, but what it *means* for them changed in 0809. The selector is
     /// only the static half — the per-instance `MeshTag` shade byte carries the rest, and
@@ -154,8 +158,14 @@ pub enum ShadeSel {
     /// GameObjects keep the real 2.5/0.5 chase. So for an entity this variant reads "on the light-node
     /// path"; the node decides the amplitude.
     Lit,
-    /// Lit ground, intensity 1.0: an exterior WMO MODD prop — §8b, byte-verified never to reach
-    /// the 2.5 site (a Stormwind street fountain is NOT brightened like an Elwynn tree).
+    /// Lit ground, intensity 1.0: **either doodad class** — an exterior WMO MODD prop *and* an ADT
+    /// map doodad, byte-verified never to reach the 2.5 site.
+    ///
+    /// The parenthetical this doc carried until 2050 — "a Stormwind street fountain is NOT
+    /// brightened like an Elwynn tree" — was exactly backwards about the tree: both are
+    /// `CMapDoodadDef`s and both commit 1.0 lit / 0.5 shadowed. What is brightened is the
+    /// *entity* walking past them. Measured over six trace frames: 111 identified MDDF
+    /// placements, 356 draws, gains only ∈ {0.5, 1.0}.
     Matte,
     /// The base sits on MCSH-shadowed terrain: the dim intensity (the binary's 0.5).
     Shaded,
@@ -514,11 +524,11 @@ pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
 pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 
 /// `clutter_fade.z` marker bit 13: the **WMO-skybox lane** — this batch is part of a building's
-/// painted sky, so `specialize` compiles the shader's `WOW_SKY_DEPTH` branch (forced far depth) and
-/// drops the rasterizer bias constant. It *is* a
-/// [`benilla_assets::materials::WowModelKey`] axis, unlike [`ENV_MAP_MARKER`]: writing
-/// `@builtin(frag_depth)` costs the pipeline its early-Z, so exactly one camera-anchored model may
-/// pay it and every other draw in the frame must keep the pipeline that doesn't.
+/// painted sky, so `specialize` compiles the shader's `WOW_SKY_DEPTH` branch (the far depth,
+/// pinned at the vertex — decision 2016) and drops the rasterizer bias constant. It *is* a
+/// [`benilla_assets::materials::WowModelKey`] axis, unlike [`ENV_MAP_MARKER`]: the pin belongs
+/// to exactly one camera-anchored model, and every other draw in the frame must keep the
+/// pipeline that leaves its depth real.
 pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
 
 /// Sort-bias step per authored batch on the **WMO-skybox lane** — [`BATCH_ORDER_SORT_EPS`]'s job,
@@ -1129,8 +1139,17 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<ModelMaterials>()
         .add_systems(Update, (scope_model_materials, evict_model_materials));
     // Deferred realization (`lazy`): a built material becomes an asset the frame something
-    // visible binds it. `Last`, after every writer and the `PostUpdate` twin spawns.
-    app.add_systems(Last, lazy::realize_bound);
+    // visible binds it. The top of `PostUpdate` — `Assets::insert` only QUEUES its
+    // `AssetEvent::Added`, so the sweep has to land before the store publishes
+    // (`AssetEventSystems`) or the bound entity loses a frame of drawing, and before
+    // `VisibilityPropagate` clears the view-visibility bits it reads. Both bounds and why they
+    // are the only two available: `lazy`'s module doc.
+    app.add_systems(
+        PostUpdate,
+        lazy::realize_bound
+            .before(bevy::asset::AssetEventSystems)
+            .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+    );
     // Parking (`park`): a long-hidden streamed part puts its `Mesh3d` down. `Update`, after the
     // authority, on last frame's propagated verdict — the order the module doc explains.
     if park::enabled() {

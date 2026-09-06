@@ -1,5 +1,5 @@
-//! `GameTooltipTemplate` as an ADDON sees it — the shipped `assets/ui/GameTooltip.xml` driven the
-//! way the corpus drives it.
+//! `GameTooltipTemplate` as an ADDON sees it — the stock `Interface\FrameXML\GameTooltip.xml`
+//! driven the way the corpus drives it.
 //!
 //! **This is not a test of our tooltip window** (that is `tooltip_anchor_tests` /
 //! `tooltip_compare_tests`, and they are the regression suite this refactor had to leave
@@ -43,7 +43,7 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",

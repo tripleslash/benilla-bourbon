@@ -371,14 +371,16 @@ fn shown_inspect_honor_page() -> UiScript {
         "Interface\\FrameXML\\BasicControls.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        "UiPanels.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "ScrollTemplates.xml", // our scroll kit + the placeholder icon
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        // The inspect window's four tabs (`Blizzard_InspectUI`) inherit it (1993).
+        r"Interface\FrameXML\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         // `InspectUnit`'s home since 1832.
-        "UIParent.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         // Before the inspect addon — its honor page inherits this file's row templates and calls
         // its two shared painters, and `inherits=` resolves at load (the manifest's own order).

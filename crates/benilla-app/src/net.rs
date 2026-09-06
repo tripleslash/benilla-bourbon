@@ -32,7 +32,8 @@ mod apply;
 pub(crate) mod io;
 mod motion;
 
-use apply::{apply_net_updates, tag_self_player};
+pub(crate) use apply::apply_net_updates;
+use apply::tag_self_player;
 
 // The per-frame motion model lives in [`motion`]: `RemoteMotion`/`Spline` are re-exported for the
 // crate (the animation selector reads them); the integration systems + pose helpers stay `pub(super)`
@@ -74,6 +75,28 @@ pub(crate) struct NetPlugin {
 /// this one says the attempt was never made and no packet can ever arrive.
 #[derive(Resource)]
 pub(crate) struct NetOffline;
+
+/// Release the ask-once latches at world enter — the counterpart to the disconnect teardown in
+/// `apply::session`, which clears them when a socket DIES but never when one is born.
+///
+/// The asymmetry was load-bearing and wrong. `Items::template` (and `NameCache`'s resolvers) mark
+/// an id pending *before* sending the query, and a command sent while the io thread holds no
+/// writer evaporates with a warn — so an ask made before the first connect latched the id for the
+/// life of the process. On 2026-09-06 that emptied the mail send tab's stationery list for an
+/// entire session, in silence. The ask site that did it is fixed; this makes the class harmless,
+/// because a redundant re-ask costs one packet and a wrong latch costs a dead feature nobody can
+/// see is dead.
+fn release_ask_once_latches_on_enter(
+    mut entered: MessageReader<EnteredWorldMessage>,
+    mut items: ResMut<crate::items::Items>,
+    mut names: ResMut<crate::names::NameCache>,
+) {
+    if entered.read().count() == 0 {
+        return;
+    }
+    items.clear_pending();
+    names.clear_pending();
+}
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
@@ -134,6 +157,8 @@ impl Plugin for NetPlugin {
             .add_message::<ServerSoundMessage>()
             .add_message::<EmoteMessage>()
             .add_message::<AiReactionMessage>()
+            .add_message::<PetTalkMessage>()
+            .add_message::<PetDismissSoundMessage>()
             .add_message::<WorldportMessage>()
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
@@ -149,6 +174,7 @@ impl Plugin for NetPlugin {
                 Update,
                 (
                     apply_net_updates,
+                    release_ask_once_latches_on_enter,
                     tag_self_player,
                     sample_splines,
                     // Derive each creature's swim state from the water over its feet (the wire never
@@ -169,12 +195,13 @@ impl Plugin for NetPlugin {
                     drive_display_facing,
                 )
                     .chain()
-                    .in_set(WorldStage::Net)
-                    // `drive_display_facing` reads `InteractNpc`; ordering the chain after its
-                    // writer keeps the read deterministic rather than schedule-order-dependent.
-                    // The cost is that the writer sees last frame's window state, which cannot
-                    // matter: a window is open for seconds and the ease takes ~8 frames.
-                    .after(crate::ui_session::feed_interact_npc),
+                    .in_set(WorldStage::Net),
+                // `InteractNpc`'s writer (`ui_session::feed_interact_npc`) seats itself INSIDE
+                // this chain — after `apply_net_updates`, before `drive_display_facing` — and
+                // declares both edges itself. It used to sit ahead of the whole chain, which
+                // read the window state one frame late; harmless for an ~8-frame facing ease,
+                // and exactly the frame the `"npc"` unit token was stale on when a window's
+                // own `MERCHANT_SHOW` handler read it (decision 2022).
             )
             // Not part of the movement chain above: one send on the world-enter message.
             .add_systems(Update, send_query_time.in_set(WorldStage::Net))
@@ -431,7 +458,7 @@ pub(crate) struct ActiveMover;
 
 /// The inbound event channel — drained each frame by [`apply_net_updates`].
 #[derive(Resource)]
-struct NetEvents(Receiver<SessionEvent>);
+pub(crate) struct NetEvents(Receiver<SessionEvent>);
 
 /// The outbound command channel — cloned by the player/chat systems to send movement + chat.
 #[derive(Resource)]
@@ -2585,6 +2612,17 @@ pub(crate) struct SelfMoveMessage {
     pub(crate) pitch: f32,
     pub(crate) fall_time: u32,
     pub(crate) jump: Option<benilla_protocol::JumpInfo>,
+    /// The `ON_TRANSPORT` tail — **the server's own deck-local pose for us**, when it sent one.
+    ///
+    /// This used to be dropped here, and the consumer re-derived the local pose as
+    /// `world − boat.translation` against whatever the client's transport tick had last written.
+    /// That is only equal to the server's answer while the two agree about where the boat *is* —
+    /// and the one moment they provably do not is a cross-map seam, where our path clock has not
+    /// crossed yet and [`crate::transport::tick_transports`] is holding the transform frozen at the
+    /// far continent's pose. Re-deriving there yields a local offset the size of the gap between
+    /// two continents, which the next honest boat pose then multiplies into a fling off the deck.
+    /// The authoritative answer was on the wire the whole time (decision 2026).
+    pub(crate) transport: Option<benilla_protocol::TransportPose>,
 }
 
 /// The server granted or revoked control of a unit (`SMSG_CLIENT_CONTROL_UPDATE`). Written by
@@ -2718,6 +2756,26 @@ pub(crate) enum EmoteKind {
 pub(crate) struct AiReactionMessage {
     pub(crate) unit: Entity,
     pub(crate) hostile: bool,
+}
+
+/// The pet spoke (`SMSG_PET_ACTION_SOUND`, bridged from the Net drain; decision 2039): `talk` is
+/// the wire's own selector (`PET_TALK_ORDER` / `PET_TALK_ATTACK`), not a `SoundEntries` id — the
+/// kit comes off the pet's own `CreatureSoundData` row. Pure audio in the client (`0x6040c0`
+/// resolves the guid and calls the bark dispatcher, nothing else); consumer: `sound::creature`.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct PetTalkMessage {
+    pub(crate) unit: Entity,
+    pub(crate) talk: u32,
+}
+
+/// A dismissed pet's parting sound (`SMSG_PET_DISMISS_SOUND`, decision 2039): a
+/// `CreatureModelData` id and the point, already in Bevy space. **No entity** — the packet names
+/// no guid and the pet is gone by the time it arrives, which is the whole reason it carries a
+/// position at all. Consumer: `sound::creature`.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct PetDismissSoundMessage {
+    pub(crate) model_id: u32,
+    pub(crate) pos: Vec3,
 }
 
 #[cfg(test)]

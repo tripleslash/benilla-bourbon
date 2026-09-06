@@ -32,11 +32,11 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Interface\\FrameXML\\Fonts.xml",
-        "Cooldown.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "UIParent.xml",
+        r"Interface\FrameXML\UIParent.xml",
         // The eight labels and their NEWBIE_TOOLTIP_* lines, read at each button's OnLoad…
         "Interface\\FrameXML\\GlobalStrings.lua",
         // …through `TEXT()`.

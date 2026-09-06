@@ -150,9 +150,7 @@ impl BlpTexels {
     /// How many bytes a `width x height` level occupies in this form.
     ///
     /// Block forms round **up** to whole 4x4 blocks, which is why a 2x2 or 1x1 tail mip still costs
-    /// one full block — and what wgpu expects to receive. It is NOT always what the BLP stores: a
-    /// non-square texture reaches a level one block wide and several tall, and the file has one
-    /// block for it either way. [`short_level`] is where that ends the chain.
+    /// one full block — exactly what the BLP stores for it, and what wgpu expects to receive.
     pub fn level_bytes(self, width: u32, height: u32) -> usize {
         match self {
             Self::Rgba8Unorm => (width as usize) * (height as usize) * 4,
@@ -190,8 +188,10 @@ pub struct NativeMip {
     pub width: u32,
     pub height: u32,
     /// Block bytes (DXTC) or RGBA8 pixels — per [`NativeBlp::texels`]. Always exactly
-    /// [`BlpTexels::level_bytes`] long — the chain ends where the file stops providing a whole
-    /// level rather than carrying a padded one ([`short_level`]).
+    /// [`BlpTexels::level_bytes`] long: a sub-block tail level the header under-stores is
+    /// completed from the bytes that follow it in the file, as the reference copies it
+    /// (`Header::dxt_level_span`), and only a level the file ends inside is zero-padded —
+    /// matching what [`decode`] does before handing blocks to the codec.
     pub bytes: Vec<u8>,
 }
 
@@ -281,6 +281,43 @@ impl Header<'_> {
             .ok_or(Error::OutOfBounds { level })
     }
 
+    /// The bytes of DXTC level `level` **as the reference copies them** — `need` bytes from the
+    /// level's file offset, not the `sizes[level]` the header records — or `None` when the chain
+    /// ends early (same rule as [`Self::level_data`]).
+    ///
+    /// The two disagree exactly on the **sub-block tail**. The BLP encoder stores a level as
+    /// `max(1, (w/4)·(h/4))` blocks — ONE block for a 2×16 or a 1×8 level, where the block grid the
+    /// GPU decodes needs four and two. The reference never reads the header's size for a DXT level.
+    /// On its shipped Direct3D default the fill copies each level through the block copier
+    /// `0x5a5780`, `max(4,w)·max(4,h)` bytes flat from `fileImage + mipOffsets[level]`; on the
+    /// OpenGL arm it hands the upload that same pointer (`0x5a8555`, no copy) and `0x59f270` sizes
+    /// the read from the format alone, `bpp · max(4, wL) · max(4, hL) / 8` (`0x59f4e6`–`0x59f515`).
+    /// Either way the GPU gets the full block grid from the level's offset, so a short level is
+    /// completed with the bytes that FOLLOW it in the file: the next levels' own authored blocks
+    /// (wow-re `system/image/scratch/dxt-level-span-law.md`, both arms VERIFIED; decisions
+    /// 2020/2024). Padding the difference with
+    /// zeros instead (an all-zero BC block = colour black, alpha 0) is what turned the far rain
+    /// black: `RainDrop01.blp`'s levels 3 and 4 came out three-quarters and half black, and its
+    /// Mod2x lane reads no alpha (decision 2020, B358/B225). Only a level the FILE itself ends
+    /// inside is left short here, for [`pad_to`] to zero-fill — the reference reads past the file
+    /// into whatever its shared read buffer held before, which is nothing to be faithful to.
+    fn dxt_level_span<'b>(
+        &self,
+        bytes: &'b [u8],
+        level: usize,
+        need: usize,
+    ) -> Result<Option<&'b [u8]>> {
+        let Some(stored) = self.level_data(bytes, level)? else {
+            return Ok(None);
+        };
+        if stored.len() >= need {
+            return Ok(Some(stored));
+        }
+        let off = self.offsets[level] as usize;
+        let end = (off + need).min(bytes.len());
+        Ok(Some(&bytes[off..end]))
+    }
+
     /// Which block form this file's DXTC levels are in. `alpha_type` 0→DXT1, 1→DXT3, 7→DXT5;
     /// anything else (a stale byte — e.g. `2` on alpha-less particle atlases) → DXT1, since
     /// `alpha_bits` already governs whether alpha is meaningful.
@@ -303,12 +340,17 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
     let mut mips = Vec::with_capacity(n);
     for level in 0..n {
         let (lw, lh) = level_size(h.width, h.height, level);
-        let Some(data) = h.level_data(bytes, level)? else {
+        // DXTC levels span what the reference copies (`dxt_level_span`), not what the header
+        // records — the two differ on the sub-block tail, and the difference was black.
+        let data = if h.compression == 2 {
+            let texels = h.dxt_texels();
+            h.dxt_level_span(bytes, level, texels.level_bytes(lw, lh))?
+        } else {
+            h.level_data(bytes, level)?
+        };
+        let Some(data) = data else {
             break;
         };
-        if short_level(&h, data, lw, lh, level) {
-            break;
-        }
         let rgba = match h.compression {
             1 => decode_raw1(h.palette, data, lw, lh, h.alpha_bits),
             2 => decode_dxt(data, lw, lh, h.dxt_texels()),
@@ -334,10 +376,9 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
 ///
 /// DXTC levels come back as block bytes with [`NativeBlp::texels`] naming the variant; Raw1/Raw3
 /// files, which have no block form, are decoded exactly as [`decode`] would and report
-/// [`BlpTexels::Rgba8Unorm`]. Either way every level carries its full
+/// [`BlpTexels::Rgba8Unorm`]. Either way every level is padded to its full
 /// [`BlpTexels::level_bytes`], so a caller can concatenate the chain and hand it to the GPU without
-/// re-deriving sizes — and the chain STOPS at the last level the file completed rather than padding
-/// one out ([`short_level`]).
+/// re-deriving sizes.
 pub fn decode_native(bytes: &[u8]) -> Result<NativeBlp> {
     let h = parse_header(bytes)?;
     let texels = if h.compression == 2 {
@@ -350,15 +391,18 @@ pub fn decode_native(bytes: &[u8]) -> Result<NativeBlp> {
     let mut mips = Vec::with_capacity(n);
     for level in 0..n {
         let (lw, lh) = level_size(h.width, h.height, level);
-        let Some(data) = h.level_data(bytes, level)? else {
+        let need = texels.level_bytes(lw, lh);
+        let data = if h.compression == 2 {
+            h.dxt_level_span(bytes, level, need)?
+        } else {
+            h.level_data(bytes, level)?
+        };
+        let Some(data) = data else {
             break;
         };
-        if short_level(&h, data, lw, lh, level) {
-            break;
-        }
         let bytes = match h.compression {
             1 => decode_raw1(h.palette, data, lw, lh, h.alpha_bits)?,
-            2 => pad_to(data, texels.level_bytes(lw, lh)),
+            2 => pad_to(data, need),
             3 => decode_raw3(data, lw, lh)?,
             other => return Err(Error::UnknownCompression(other)),
         };
@@ -394,36 +438,12 @@ pub fn decode_level(texels: BlpTexels, width: u32, height: u32, bytes: &[u8]) ->
     out
 }
 
-/// **Is this block level short of what its own dimensions need?** — the cut that ends a mip chain.
-///
-/// A BLP stores one buffer per authored level and states no size for any of them, so a reader takes
-/// what is there. For a SQUARE texture that is always the whole level: its tail (2x2, 1x1) is one
-/// 4x4 block, which is exactly what the file holds. For a **non-square** one it is not.
-/// `textures/weather/raindrop01.blp` — the rain streak — is 16x128 DXT3, so its level 3 is 2x16:
-/// one block wide but FOUR tall, 64 bytes, and the file stores 16. Level 4 (1x8) wants 32 and
-/// stores 16.
-///
-/// [`pad_to`] used to fill that gap with **zeros**, and a zeroed DXT block is not "missing", it is
-/// **opaque black**: three quarters of level 3 and half of level 4 decoded to solid black squares.
-/// That was benilla's black rain (reported 2026-09-02). A rain streak is a thin, near-edge-on
-/// triangle — the one geometry whose UV derivatives push it onto exactly those levels — and it
-/// draws under Mod2x, where grey-128 is the neutral and black is a total wipe, so every distant
-/// streak multiplied the scene behind it down toward nothing. The texture's own bytes are innocent:
-/// grey 124..165 at every level the file actually carries.
-///
-/// So the chain ENDS at the last level the file completed. Padding is the wrong answer twice over —
-/// the missing texels cannot be invented, and the value it invents is the most destructive one the
-/// format has. Level 0 is exempt: a short mip 0 is a truncated file, a different fault, and every
-/// caller needs a level 0 to exist.
-fn short_level(h: &Header, data: &[u8], w: u32, h_px: u32, level: usize) -> bool {
-    level > 0 && h.compression == 2 && data.len() < h.dxt_texels().level_bytes(w, h_px)
-}
-
 /// `data` grown to exactly `need` bytes with zeros (or truncated if the file over-stores).
 ///
-/// Still the codec's guard for a level 0 that a truncated file left short, and for
-/// [`decode_level`]'s re-decode of one level in isolation. It is no longer how a tail mip is
-/// handled — see [`short_level`] for why a zero pad is the one fill a block format cannot take.
+/// After `Header::dxt_level_span` this only ever pads a level the FILE ends inside (a truncated
+/// archive) — the sub-block tail the encoder under-stores is completed from the following levels
+/// first, the way the reference does. Zero here is a BC block that decodes to black at alpha 0,
+/// which is why the span comes first (decision 2020).
 fn pad_to(data: &[u8], need: usize) -> Vec<u8> {
     let mut out = vec![0u8; need];
     let n = data.len().min(need);
@@ -488,9 +508,9 @@ fn decode_raw3(data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// DXTC → RGBA8. The variant comes from [`Header::dxt_texels`]. Undersized small-mip data is
-/// zero-padded so it still decodes — which callers reach only for level 0 now, the chain builders
-/// having cut the short tail before this ([`short_level`]).
+/// DXTC → RGBA8. The variant comes from [`Header::dxt_texels`]. `data` is the level's span as
+/// the reference copies it (`Header::dxt_level_span`); anything still short of the block size —
+/// a file that ends inside the level — is zero-padded so the level decodes.
 fn decode_dxt(data: &[u8], w: u32, h: u32, texels: BlpTexels) -> Result<Vec<u8>> {
     let fmt = texels.codec().expect("dxt_texels never returns Rgba8Unorm");
     let blocks = pad_to(data, fmt.compressed_size(w as usize, h as usize));
@@ -666,82 +686,104 @@ mod tests {
         );
     }
 
-    /// A tail level the file under-stores **ends the chain** — it is not padded out. See
-    /// [`short_level`]: the only fill a block format has is zeros, and a zeroed DXT block is opaque
-    /// black, so padding turns a missing level into a level that paints black.
+    /// A level the header under-stores is completed from the bytes that FOLLOW it in the file —
+    /// the reference's upload (`0x59f4e6`–`0x59f515`: `bpp·max(4,w)·max(4,h)/8` bytes read from
+    /// the level's file offset) — so the concatenated chain a caller uploads is always exactly
+    /// the size wgpu expects, and it is the file's bytes, not zeros. Zeros were the bug: an
+    /// all-zero BC block is black.
     #[test]
-    fn a_short_tail_level_ends_the_chain() {
+    fn a_short_level_is_completed_from_the_bytes_that_follow_it() {
         let mut b = dxt_blp(0, 8);
-        // Level 2 is the 2x2 tail — one whole BC1 block. Shrink its recorded size to 3 bytes.
-        b[84 + 2 * 4..88 + 2 * 4].copy_from_slice(&3u32.to_le_bytes());
-        let native = decode_native(&b).expect("a short tail still decodes what is whole");
+        // Level 2 is the 2x2 tail — one whole BC1 block. Shrink its recorded size to 3 bytes; the
+        // 1x1 level's 8 bytes follow it in the file.
+        let short = 3u32;
+        b[84 + 2 * 4..88 + 2 * 4].copy_from_slice(&short.to_le_bytes());
+        let off = native_level_offset(&b, 2);
+        let native = decode_native(&b).expect("short tail still decodes");
         let tail = native.mips.last().unwrap();
+        assert_eq!((tail.width, tail.height), (2, 2));
+        assert_eq!(tail.bytes.len(), 8, "one whole BC1 block");
         assert_eq!(
-            (tail.width, tail.height),
-            (4, 4),
-            "the chain stops at the last COMPLETE level"
+            &tail.bytes[..],
+            &b[off..off + 8],
+            "the level is the file's next 8 bytes, the header's 3 and the 1x1's first 5"
         );
-        assert_eq!(native.mips.len(), 2);
-        assert_eq!(
-            tail.bytes.len(),
-            BlpTexels::Bc1.level_bytes(4, 4),
-            "and what it keeps is whole"
+        assert!(
+            tail.bytes[short as usize..].iter().any(|&x| x != 0),
+            "nothing was zero-filled — that was B358's black"
         );
-        // Both entry points cut at the same level — a GPU upload and a CPU read of the same file
-        // must not disagree about how many levels it has.
-        assert_eq!(decode(&b).unwrap().mips.len(), native.mips.len());
+        // And decode() reads the same span — the two paths complete identically.
+        let decoded = decode(&b).unwrap();
+        assert_eq!(decoded.mips.len(), native.mips.len());
+        let mut out = vec![0u8; 2 * 2 * 4];
+        texpresso::Format::Bc1.decompress(&tail.bytes, 2, 2, &mut out);
+        assert_eq!(out, decoded.mips.last().unwrap().rgba);
     }
 
-    /// **The black-rain fence.** Real Blizzard art hits the same cut with no corruption at all: a
-    /// NON-SQUARE BLP reaches a level that is one block wide and several tall, and the file stores
-    /// one block for it regardless. `textures/weather/raindrop01.blp` is 16x128 DXT3 and does
-    /// exactly this from level 3 (2x16) down. Padded, those levels were three-quarters black, and
-    /// the rain streak — thin, near-edge-on, drawn under Mod2x where black is a total wipe — is the
-    /// geometry that samples them.
+    /// **The shipped shape of the bug**, in miniature: a DXT3 texture taller than it is wide,
+    /// whose 2×8 level the encoder stores as ONE block (`max(1, (2/4)·(8/4))`) where the block
+    /// grid needs two. The reference uploads `8·max(4,2)·max(4,8)/8 = 32` bytes from that level's
+    /// offset — the stored block plus the 1×4 level's block after it. `RainDrop01.blp` is this at
+    /// 16×128: its 2×16 and 1×8 levels store 16 bytes each where the grid needs 64 and 32.
     #[test]
-    fn a_non_square_chain_stops_where_the_file_stops_storing_whole_levels() {
-        // 16x128 DXT3 with the file's real storage law: whole blocks while both axes are >= 4,
-        // one block for every level after that.
+    fn a_sub_block_dxt3_level_spans_into_its_successors_as_the_reference_copies_it() {
+        // 4x16 DXT3: levels 4x16 (4 blocks), 2x8 (grid: 2 blocks; STORED: 1), 1x4 (1 block),
+        // 1x2 (1 block). mip_chain_count(4, 16, true) = 4, so all four are read.
         let mut offsets = [0u32; 16];
         let mut sizes = [0u32; 16];
         let mut payload = Vec::new();
         let base = (HEADER_SIZE + PALETTE_SIZE) as u32;
-        let mut level = 0;
-        let (mut w, mut h) = (16u32, 128u32);
-        loop {
-            let n = if w >= 4 && h >= 4 {
-                BlpTexels::Bc2.level_bytes(w, h)
-            } else {
-                16 // the file's one-block tail
-            };
-            offsets[level] = base + payload.len() as u32;
-            sizes[level] = n as u32;
-            payload.extend((0..n).map(|k| (k as u32 * 37 + level as u32 * 11) as u8));
-            if w == 1 && h == 1 {
-                break;
-            }
-            (w, h) = ((w / 2).max(1), (h / 2).max(1));
-            level += 1;
+        for (i, (blocks_stored, fill)) in [(4usize, 0x10u8), (1, 0x20), (1, 0x30), (1, 0x40)]
+            .into_iter()
+            .enumerate()
+        {
+            offsets[i] = base + payload.len() as u32;
+            sizes[i] = (blocks_stored * 16) as u32;
+            payload.extend(std::iter::repeat_n(fill, blocks_stored * 16));
         }
-        let mut b = header(2, 8, 1, 1, 16, 128, offsets, sizes);
+        let mut b = header(2, 8, 1, 1, 4, 16, offsets, sizes);
         b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
         b.extend_from_slice(&payload);
 
-        let native = decode_native(&b).expect("the rain streak's shape decodes");
-        assert_eq!(
-            native.mips.len(),
-            3,
-            "16x128, 8x64 and 4x32 are whole; 2x16 wants four blocks and the file has one"
+        let native = decode_native(&b).expect("decodes");
+        assert_eq!(native.texels, BlpTexels::Bc2);
+        assert_eq!(native.mips.len(), 4);
+        let l1 = &native.mips[1];
+        assert_eq!((l1.width, l1.height), (2, 8));
+        assert_eq!(l1.bytes.len(), 32, "two BC2 blocks for a 1x2 block grid");
+        assert!(
+            l1.bytes[..16].iter().all(|&x| x == 0x20),
+            "first block: the level's own"
         );
-        for (i, mip) in native.mips.iter().enumerate() {
-            assert_eq!(
-                mip.bytes.len(),
-                BlpTexels::Bc2.level_bytes(mip.width, mip.height),
-                "level {i} ({}x{}) must carry its own size",
-                mip.width,
-                mip.height,
-            );
-        }
+        assert!(
+            l1.bytes[16..].iter().all(|&x| x == 0x30),
+            "second block: the 1x4 level's, which follows it in the file — never zeros"
+        );
+        // The levels that ARE a whole block are untouched by the rule.
+        assert!(native.mips[2].bytes.iter().all(|&x| x == 0x30));
+        assert!(native.mips[3].bytes.iter().all(|&x| x == 0x40));
+        // A short level the FILE ends inside is the one case left for the zero pad: the same
+        // texture authored with only its first two levels, the file ending right after the 2x8
+        // level's single stored block — the completion has nothing to read.
+        let mut offsets = [0u32; 16];
+        let mut sizes = [0u32; 16];
+        offsets[0] = base;
+        sizes[0] = 64;
+        offsets[1] = base + 64;
+        sizes[1] = 16;
+        let mut b = header(2, 8, 1, 1, 4, 16, offsets, sizes);
+        b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
+        b.extend(std::iter::repeat_n(0x10u8, 64));
+        b.extend(std::iter::repeat_n(0x20u8, 16));
+        let native = decode_native(&b).expect("still decodes what it has");
+        assert_eq!(native.mips.len(), 2, "the chain ends where the file does");
+        let l1 = &native.mips[1];
+        assert_eq!(l1.bytes.len(), 32);
+        assert!(l1.bytes[..16].iter().all(|&x| x == 0x20));
+        assert!(
+            l1.bytes[16..].iter().all(|&x| x == 0),
+            "past EOF there is only the pad"
+        );
     }
 
     #[test]

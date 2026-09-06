@@ -6,7 +6,7 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
     s.take_action_uses().into_iter().map(|u| u.action).collect()
 }
 
-/// Load the real `assets/ui/ActionBar.xml` (the shipped default bar) into a bare engine and
+/// Load the stock `Interface\FrameXML\ActionBarFrame.xml` into a bare engine and
 /// drive it with a synthetic action snapshot — the slice-1 chain minus Bevy: template
 /// expansion over 12 instances, the vanilla bonus-page formula, icon paint on events, empty
 /// slots drawing no icon, and a physical click queuing the right UseAction id.
@@ -14,14 +14,14 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
 fn shipped_action_bar_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     // `load_ui` returns the same `report.frames` the disk reader asserted on, so this
     // count is the one that always stood here — moved, not re-derived.
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GameTooltip.xml");
@@ -180,12 +180,12 @@ fn shipped_action_bar_drives_end_to_end() {
 }
 
 fn load_action_bar(s: &UiScript) {
-    super::test_ui::load_ui(s, "Cooldown.xml");
+    super::test_ui::load_ui(s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(s, "UIParent.xml");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -208,7 +208,6 @@ fn load_action_bar(s: &UiScript) {
     // The options window: `LOCK_ACTIONBAR` and `ALWAYS_SHOW_MULTIBARS` are declared there, as the
     // reference declares them in UIOptionsFrame_Init (1938) — and the manifest loads it before
     // the bars.
-    super::test_ui::load_ui(s, "UiPanels.xml");
     // The dialog engine — the keybindings page registers its two confirms into its table (1960).
     super::test_ui::load_ui(s, r"Interface\FrameXML\BasicControls.xml"); // `TEXT`
     super::test_ui::load_ui(s, r"Interface\FrameXML\LocaleProperties.lua"); // `GetText`
@@ -252,17 +251,18 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         }),
     );
     s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    // The stock machine (decision 2019): `CooldownFrame_SetTimer` arms sequence 0 and shows the
+    // pane; the next paint's `OnUpdateModel` scrubs it to `(GetTime() − start) / duration`.
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
     s.resolve();
-    let sweep = s.extract().into_iter().find_map(|q| match q.content {
-        QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
-        _ => None,
-    });
-    let (fraction, flash) = sweep.expect("the button's Cooldown widget is showing");
-    assert!(
-        (fraction - 0.4).abs() < 1e-3,
-        "6 s of 10 s left ⇒ the sweep sits at 40%, got {fraction}"
+    let play = super::test_ui::cooldown_play(&s, "ActionButton1Cooldown")
+        .expect("the button's cooldown pane is showing, sequence 0 armed");
+    assert_eq!(
+        play,
+        (0, 400),
+        "6 s of 10 s left ⇒ the sweep sits at 40 %: sequence 0 at 400 ms"
     );
-    assert_eq!(flash, None);
 
     // The checked ring on the current action (the transcribed UpdateState).
     s.set_action_state(
@@ -352,7 +352,11 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
         &|c| matches!(c, QuadContent::Texture { path: Some(p), .. } if p.contains("UI-Quickslot2")),
     )
     .expect("the NormalTexture ring quad");
-    let sweep = pos(&|c| matches!(c, QuadContent::Cooldown { .. })).expect("the sweep quad");
+    let sweep = pos(&|c| {
+        matches!(c, QuadContent::ModelPane { model: Some(m), .. }
+            if m.eq_ignore_ascii_case(super::test_ui::COOLDOWN_MODEL))
+    })
+    .expect("the sweep pane's quad");
     assert!(
         icon < sweep,
         "the sweep (index {sweep}) must paint over the icon (index {icon})"
@@ -794,19 +798,20 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The shipped **bag BAR** — `assets/ui/BagFrame.xml` — materialized frame for frame, and then
-/// driven end to end: the bar's own backpack toggle opens the backpack window, the fed stack
-/// paints in its slot's well, the slot's clicks queue the right intents, and the toggle shuts it
-/// again. It lives in this file because the bar seats on `MainMenuBarArtFrame` (ActionBar.xml) —
-/// the toggle's anchor arithmetic below is the reason.
+/// The **bag BAR** — stock `Interface\FrameXML\MainMenuBarBagButtons.xml` — materialized frame
+/// for frame, and then driven end to end: the bar's own backpack toggle opens the backpack
+/// window, the fed stack paints in its slot's well, the slot's clicks queue the right intents,
+/// and the toggle shuts it again. It lives in this file because the bar seats on
+/// `MainMenuBarArtFrame` (`ActionBarFrame.xml`) — the toggle's anchor arithmetic below is the
+/// reason.
 ///
 /// **What decision 1751 changed.** This asserted `report.frames == 259` over a breakdown that
 /// counted five bag WINDOWS and a keyring window (37 + 4×42 + 42, plus the bar's own handful).
-/// Those windows are gone from this file: the live ones are the reference's `ContainerFrame1..12`,
-/// executed off the player's own patch chain, and `BagFrame.xml` is the BAR and nothing else —
-/// this client's stand-in for the reference's `MainMenuBarBagButtons.xml`. So the count is
-/// recounted from what the file declares today, and the drive reaches the reference's window
-/// through the bar's own button rather than showing one of ours by name.
+/// Those windows are gone: the live ones are the reference's `ContainerFrame1..12`, executed off
+/// the player's own patch chain, and the bar is the reference's own
+/// `MainMenuBarBagButtons.xml` (1783). So the count is recounted from what that file declares,
+/// and the drive reaches the reference's window through the bar's own button rather than showing
+/// one of ours by name.
 #[test]
 fn shipped_bag_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -825,17 +830,17 @@ fn shipped_bag_frame_drives_end_to_end() {
     //   * StackSplit.xml and MerchantFrame.xml after the bags — the reference's
     //     `ContainerFrameItemButton_OnClick` reads `StackSplitFrame` on both arms and
     //     `MerchantFrame:IsShown()` on the right one, so a slot click raises without them. That
-    //     dependency is the reference's, not ours; MerchantFrame.xml is additionally the home of
-    //     the `BenillaMoney_*` coin rig this chain's windows call.
+    //     dependency is the reference's, not ours.
     let mut bar_frames = 0;
     for file in BAG_UI {
         let frames = load_ui(&s, file);
-        if *file == "Cooldown.xml" {
+        if *file == "Interface\\FrameXML\\Cooldown.xml" {
             load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
             load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
             load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-            load_ui(&s, "UIParent.xml");
+            load_ui(&s, r"Interface\FrameXML\UIParent.xml");
+            load_ui(&s, "ScrollTemplates.xml"); // our scroll kit + the placeholder icon
             load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
             load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
             load_ui(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
@@ -846,6 +851,7 @@ fn shipped_bag_frame_drives_end_to_end() {
         }
     }
     load_ui(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
+    load_ui(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
     load_ui(&s, "Interface\\FrameXML\\MerchantFrame.xml");
 
     assert_eq!(
@@ -906,9 +912,9 @@ fn shipped_bag_frame_drives_end_to_end() {
     // Click the toggle → the backpack window opens and slot 1 paints the jerky. The toggle seats
     // on the bar's art frame BOTTOMRIGHT +(-6,2), 37×37: art frame BOTTOMRIGHT is the bar's
     // (full-width, bottom-anchored) corner (1024,0) ⇒ toggle x[981,1018] y[2,39], center
-    // (999.5,20.5). That arithmetic is THIS file's — the button is `BagFrame.xml`'s and its seat
-    // is `ActionBar.xml`'s — so the click stays at literal coordinates rather than going through
-    // `centre_of`: hitting them is part of what is being tested.
+    // (999.5,20.5). That arithmetic is THIS file's — the button is `MainMenuBarBagButtons.xml`'s
+    // and its seat is `ActionBarFrame.xml`'s — so the click stays at literal coordinates rather
+    // than going through `centre_of`: hitting them is part of what is being tested.
     s.mouse_button(999.0, 20.0, "LeftButton", true);
     s.mouse_button(999.0, 20.0, "LeftButton", false);
     s.resolve();
@@ -1350,8 +1356,8 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     for file in [
         // Fonts first: the pane's check-box labels colour from `RED_FONT_COLOR` in their own OnLoad.
         "Interface\\FrameXML\\Fonts.xml",
-        "UIParent.xml",
-        "Cooldown.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
@@ -1371,7 +1377,6 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
-        "UiPanels.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
@@ -1518,12 +1523,12 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
 fn bonus_bar_slides_up_with_sound_and_down_without() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -1740,12 +1745,12 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
 fn bonus_bar_turnaround_continues_from_position() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -1822,12 +1827,12 @@ fn bonus_bar_turnaround_continues_from_position() {
 fn the_page_arrows_do_not_steal_each_other_s_clicks() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    super::test_ui::load_ui(&s, "Cooldown.xml");
+    super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    super::test_ui::load_ui(&s, "UIParent.xml");
+    super::test_ui::load_ui(&s, r"Interface\FrameXML\UIParent.xml");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     super::test_ui::load_ui(&s, r"Interface\FrameXML\MoneyFrame.lua");

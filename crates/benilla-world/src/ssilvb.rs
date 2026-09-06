@@ -630,8 +630,9 @@ impl Plugin for SsilvbPlugin {
                     Node3d::MainTransparentPass,
                 ),
             )
-            // …and after the retained cell pass, which draws between those two: without this edge
-            // the gather could run before Stormwind's walls had written any depth at all.
+            // …and after the retained cell pass, which since 2016 draws ahead of the opaque one:
+            // without this edge the gather could run before Stormwind's walls had written any
+            // depth at all.
             .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, SsilvbLabel);
     }
 }

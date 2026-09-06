@@ -30,6 +30,7 @@ use bevy::prelude::*;
 /// closes. `Plugin::build` runs at `add_plugins` time, and both binaries add `DefaultPlugins`
 /// (which creates the registry these calls fill) before `WorldPlugins`.
 pub(crate) fn plugin(app: &mut App) {
+    bevy::asset::embedded_asset!(app, "shaders/sky_vertex.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/sky.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/star.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/cloud.wgsl");
@@ -85,7 +86,8 @@ mod tests {
         // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass); 8 since
         // `ssilvb.wgsl` (screen-space indirect lighting); 9 since `liquid_screen.wgsl` (the cata
         // water path's scene-colour/blur/depth capture); 10 since `liquid_ripple.wgsl` (the wave
-        // step behind the dynamic ripple displacement map).
-        assert_eq!(found, 10, "the engine's shader set changed size");
+        // step behind the dynamic ripple displacement map); 11 since 2016 added `sky_vertex.wgsl`
+        // (the sky's shared far-depth vertex stage).
+        assert_eq!(found, 11, "the engine's shader set changed size");
     }
 }

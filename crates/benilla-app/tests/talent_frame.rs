@@ -1,4 +1,4 @@
-//! Drives the REAL `assets/ui/TalentFrame.xml` through the engine — the first test that
+//! Drives the reference's own `Blizzard_TalentUI` addon through the engine — the first test that
 //! executes the transcribed talent Lua at all (before this, the window's machinery only ever
 //! ran inside a live client session; both of the director's day-one reports — no prereq branch
 //! lines, no tooltip on first hover — slipped through that gap).
@@ -29,9 +29,8 @@ const FILES: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "UiPanels.xml",
+    r"Interface\FrameXML\UIParent.xml",
     // `ToggleTalentFrame` lives here now, not in the window's own file (decision 1833).
-    "UIParent.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
     // `UIPanelScrollFrameTemplate` — the stock scroll frame's whole substance: its `$parentScrollBar`
     // Slider AND its `<OnMouseWheel>`. Nothing else in the tree declares it, and a missing template
@@ -41,6 +40,9 @@ const FILES: &[&str] = &[
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    // `TalentTabTemplate` inherits `CharacterFrameTabButtonTemplate`, and `inherits=`
+    // resolves at LOAD (1993).
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "ScrollTemplates.xml",
     // Stock `TalentFrame_OnShow` opens with `SetButtonPulse(TalentMicroButton, 0, 1)` and then
     // `UpdateMicroButtons()` — both live here, and a nil `TalentMicroButton` throws out of OnShow
