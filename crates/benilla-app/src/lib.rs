@@ -191,6 +191,10 @@ mod vplates;
 /// `benilla_app::webenv::var` by that exact path; every in-crate caller still just writes
 /// `crate::webenv::var` like any other module.
 pub mod webenv;
+// The browser stutter probe. NOT under `dev` (which is off in the web build, `--no-default-
+// features --features webgpu`) — it is the web build's own instrument, and gating it behind the
+// feature that compiles the desktop instrument stack out is what would make it unshippable.
+mod webdiag;
 mod webprogress;
 mod world_backdrop;
 mod world_state;
@@ -284,6 +288,27 @@ pub use benilla_world::build_id::BuildId;
 /// Its shim (`benilla-worldview`) is this library's second caller; see [`worldview`].
 pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
+
+/// Take `LogPlugin` off the **web** build while the stutter probe is armed, so the browser console
+/// carries the probe's lines and nothing else.
+///
+/// A browser console has no `grep` and no scrollback a reader can pipe: the one thing a player can
+/// do with it is select all and paste, and at `info` the client writes enough per second that a
+/// probe line is unfindable in the paste. So diagnostic mode owns the console outright —
+/// [`webdiag`] writes through `console.log` directly, precisely so it still speaks with no
+/// subscriber installed. `?diag=0` puts the ordinary log back (and silences the probe).
+///
+/// Native is never touched: [`webdiag::armed`] is false off wasm32, so a `cargo run` logs as it always
+/// has. Panics still reach the console either way — `wenilla`'s shim sets `console_error_panic_hook`
+/// itself, before this crate is entered.
+fn quiet_console_on_web(
+    plugins: bevy::app::PluginGroupBuilder,
+) -> bevy::app::PluginGroupBuilder {
+    if webdiag::armed() {
+        return plugins.disable::<bevy::log::LogPlugin>();
+    }
+    plugins
+}
 
 /// Build and run the client app. `build` is the launcher shim's compile-time git stamp
 /// ([`build_id`]) — passed in as plain data so the sha lives in the shim's fingerprint, not
@@ -417,7 +442,7 @@ pub fn run(build: BuildId) -> AppExit {
     // now compiled in by `crate::shaders` and addressed `embedded://benilla_app/shaders/…`,
     // because `embedded_asset!` is per-crate by construction. Only the directory is gone.
 
-    app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
+    app.add_plugins(quiet_console_on_web(benilla_world::boot::tuned_default_plugins(Window {
         title: "World of Warcraft".into(),
         // **Born in the player's display mode, not flipped into it** (decision 1627). `gxWindow`
         // is read straight off `config.toml` here rather than waiting for `Startup`'s
@@ -520,7 +545,7 @@ pub fn run(build: BuildId) -> AppExit {
             bevy::window::WindowLevel::Normal
         },
         ..default()
-    }))
+    })))
     // The game's own WGSL, compiled into the binary (decision 1175) — before anything that could
     // ask for one. The engine's seven register themselves inside `WorldPlugins` below.
     .add_plugins(shaders::plugin)
@@ -548,6 +573,11 @@ pub fn run(build: BuildId) -> AppExit {
     // context the perf pill needs). `--no-default-features` compiles every one of them out; see
     // `dev.rs` for what is in the group and the one rule that governs the boundary.
     .add_plugins(dev::DevToolsPlugin)
+    // The browser stutter probe (`webdiag`), which the group above cannot carry: that group is
+    // `dev`-gated and the web build compiles it out. After `WorldPlugins`, because the probe's
+    // `Update` stamps order against `WorldStage` and its marker schedules splice around the
+    // `StateTransition` that `StatesPlugin` seeded.
+    .add_plugins(webdiag::plugin)
     .add_plugins(BowstringPlugin)
     .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)

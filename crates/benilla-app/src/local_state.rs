@@ -352,9 +352,68 @@ fn file_token(s: &str) -> String {
 /// every resident of the folder.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     #[cfg(target_arch = "wasm32")]
-    return web_store::set(path, contents);
+    {
+        // Metered (see [`write_meter`]): on the page this call is a **synchronous**
+        // `localStorage.setItem` on the frame's own thread, and every byte of it is spent there.
+        let t0 = bevy::platform::time::Instant::now();
+        let r = web_store::set(path, contents);
+        write_meter::record(
+            path,
+            contents.len(),
+            t0.elapsed().as_secs_f32() * 1000.0,
+        );
+        return r;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     write_atomic_fs(path, contents)
+}
+
+/// **What the page's state writes cost the frame** — the meter `perf::webdiag` reports.
+///
+/// `write_atomic` is one line on native (a file write on a thread nobody is waiting for) and
+/// something else entirely on the web: `localStorage.setItem` is synchronous, it blocks the thread
+/// that calls it, and that thread is the one drawing the frame. So a resident of this folder that
+/// is rewritten on a timer, and whose contents *grow* with the session, is a stutter that gets
+/// worse the longer the tab is open — and it is invisible to every frame-cost meter we have, which
+/// can say a frame went long but not that a storage write is why.
+///
+/// The meter names the file as well as the cost, because "state writes cost 41 ms this window" and
+/// "`<realm>.tsv` cost 41 ms this window" are one round trip apart.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod write_meter {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    thread_local! {
+        /// `file name -> (writes, bytes on the last one, total ms)` since the last [`take`].
+        static SEEN: RefCell<Vec<(String, u32, usize, f32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(path: &Path, bytes: usize, ms: f32) {
+        let name = path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        SEEN.with(|s| {
+            let mut s = s.borrow_mut();
+            match s.iter_mut().find(|(n, ..)| *n == name) {
+                Some((_, calls, last_bytes, total)) => {
+                    *calls += 1;
+                    *last_bytes = bytes;
+                    *total += ms;
+                }
+                None => s.push((name, 1, bytes, ms)),
+            }
+        });
+    }
+
+    /// Drain the window's writes, costliest first.
+    pub(crate) fn take() -> Vec<(String, u32, usize, f32)> {
+        SEEN.with(|s| {
+            let mut v = std::mem::take(&mut *s.borrow_mut());
+            v.sort_by(|a, b| b.3.total_cmp(&a.3));
+            v
+        })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

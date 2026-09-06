@@ -349,41 +349,60 @@ impl NameCache {
     /// **`pending_*` is deliberately not written.** An in-flight ask is a fact about this
     /// connection, not about the names; persisting it would make a cache reloaded mid-query
     /// believe an answer was coming that never will.
+    /// Written with `write!` straight into one pre-sized buffer, not `push_str(&format!(…))` per
+    /// record: the old form allocated a `String` per line and threw it away, so a cache of a few
+    /// thousand records was a few thousand transient allocations every time it was persisted — and
+    /// on the web that cost is spent on the frame's own thread (see `name_persist`'s
+    /// `SAVE_COST_RATIO`). `write!` to a `String` cannot fail, hence the discarded results.
     pub(crate) fn to_tsv(&self, realm: &str) -> String {
-        let mut out =
-            format!("{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{CACHE_LOCALE}\t{realm}\n");
+        use std::fmt::Write as _;
+        // ~48 bytes a line across the three record shapes; over-shooting one growth step is much
+        // cheaper than the handful of reallocs a from-empty `String` would do at this size.
+        let rows = self.players.len() + self.creatures.len() + self.pets.len();
+        let mut out = String::with_capacity(128 + rows * 48);
+        let _ = writeln!(
+            out,
+            "{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{CACHE_LOCALE}\t{realm}"
+        );
         for (guid, name) in &self.players {
             match name {
                 // `P` — a known player. The traits ride the same line they arrived on.
                 Some(name) => {
                     let (race, class, gender) =
                         self.player_traits.get(guid).copied().unwrap_or((0, 0, 0));
-                    out.push_str(&format!("P\t{guid}\t{race}\t{class}\t{gender}\t{name}\n"));
+                    let _ = writeln!(out, "P\t{guid}\t{race}\t{class}\t{gender}\t{name}");
                 }
                 // `p` — asked, and the server did not know. Worth keeping for the same reason it
                 // is worth caching in memory: it stops us re-asking a dead guid forever.
-                None => out.push_str(&format!("p\t{guid}\n")),
+                None => {
+                    let _ = writeln!(out, "p\t{guid}");
+                }
             }
         }
         for (entry, rec) in &self.creatures {
             match rec {
-                Some(r) => out.push_str(&format!(
-                    "C\t{entry}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                    r.creature_type,
-                    r.pet_family,
-                    r.rank,
-                    r.type_flags,
-                    u8::from(r.civilian),
-                    u8::from(r.racial_leader),
-                    r.display_id,
-                    r.name,
-                    r.subname.as_deref().unwrap_or("")
-                )),
-                None => out.push_str(&format!("c\t{entry}\n")),
+                Some(r) => {
+                    let _ = writeln!(
+                        out,
+                        "C\t{entry}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        r.creature_type,
+                        r.pet_family,
+                        r.rank,
+                        r.type_flags,
+                        u8::from(r.civilian),
+                        u8::from(r.racial_leader),
+                        r.display_id,
+                        r.name,
+                        r.subname.as_deref().unwrap_or("")
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "c\t{entry}");
+                }
             }
         }
         for (pet_number, name) in &self.pets {
-            out.push_str(&format!("E\t{pet_number}\t{name}\n"));
+            let _ = writeln!(out, "E\t{pet_number}\t{name}");
         }
         out
     }

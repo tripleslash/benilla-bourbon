@@ -80,15 +80,26 @@
       Patched.prototype = Orig.prototype;
       window[name] = Patched;
     }
+    // The listener has to outlive the first gesture — the wasm mixer usually creates its context
+    // *after* the click that started the run — but it must go quiet once there is nothing left to
+    // wake, or every keydown (and every key-repeat while a key is held) prints a line.
+    const events = ['pointerdown', 'keydown', 'touchstart'];
     const resume = () => {
-      console.log(`audio: gesture — ${contexts.length} context(s): ${contexts.map((c) => c.state).join(',') || 'none'}`);
-      for (const ctx of contexts) {
-        if (ctx.state !== 'running') {
-          ctx.resume().then(() => console.log(`audio: context resumed (${ctx.state})`), () => {});
+      const asleep = contexts.filter((c) => c.state !== 'running');
+      if (!asleep.length) {
+        // Nothing to do. Once a context exists and all of them run, the job is done for good.
+        if (contexts.length) {
+          for (const ev of events) window.removeEventListener(ev, resume, { capture: true });
         }
+        return;
+      }
+      // Silent: this fires on gestures, and diagnostic mode keeps the console for `[diag]` lines
+      // alone (see `perf::webdiag`). Everything else left on this page speaks only on an error.
+      for (const ctx of asleep) {
+        ctx.resume().then(() => {}, () => {});
       }
     };
-    for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
+    for (const ev of events) {
       window.addEventListener(ev, resume, { capture: true, passive: true });
     }
   })();
