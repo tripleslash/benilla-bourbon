@@ -78,11 +78,38 @@
 //!   marker reason. Both are whole-frame filters on the world view, and the reference clears a
 //!   comparable pile of view flags on its own reflection view before rendering it.
 //!
-//! And one thing the mirror contains that the reference's does not: **everything below the water**.
-//! The reference clips its reflection view against the mirror plane; `Projection` has no oblique
-//! near-plane hook here, so the riverbed is reflected too. It is nearly harmless in this program,
-//! because every read of this buffer is 20 yards along a bent ray and then lerped against the
-//! screen-space trace — but it is a real difference and it is why this file names the plane.
+//! ## Only what is above the water, and only where the mirror is about this water
+//!
+//! The first cut of this file rendered the mirror unclipped, and the riverbed came back up onto the
+//! surface as a reflection of the world *below* it. Three things fix that, and only the first is
+//! the reference's:
+//!
+//! 1. **The oblique clip plane.** `RenderReflection` transforms the mirror plane into view space
+//!    and wraps `CWorldView::Render` in `CShaderEffect::SetClipPlane` / `SetClipEnabled(1)`, so
+//!    every one of its shaders discards the far side. benilla has no per-view clip term in its
+//!    material shaders and could not gain one without editing every world shader it has — so it
+//!    takes the other standard route to the same clip, Lengyel's oblique near plane, which lives
+//!    entirely in the projection matrix and therefore applies to every draw with no shader change
+//!    at all. Bevy ships it as `PerspectiveProjection::near_clip_plane`, already adapted to its
+//!    reversed-Z convention. [`view_space_clip_plane`] builds the plane; the tests check a point
+//!    above the water renders and one below it does not.
+//! 2. **The plane follows the water, not sea level.** The reference passes `0.0` for the fake
+//!    buffer and keeps its tracked `GetClosestReflectionHeight` for the real one. Sea level is the
+//!    right plane for an ocean and badly wrong for anything else — mirroring a mountain lake about
+//!    `z = 0` reflects a slab of world from hundreds of yards below it — and, worse for the bug
+//!    above, clipping at `z = 0` for a lake at `z = 200` clips nothing that lake can see. So the
+//!    plane is the height of the water the eye is over, resolved through the same per-subject
+//!    liquid query everything else asks.
+//! 3. **A height guard in the shader.** One mirrored render is about one height, and a surface at
+//!    some other height would wear a picture of the world reflected about someone else's
+//!    waterline. `liquid_cata.wgsl` fades the mirror out over `MIRROR_PLANE_FADE_START..END` yards
+//!    of disagreement, back to the flat horizon colour perm 4 uses. It carries a second guard for
+//!    the same family of ghost: the bent-ray read leaves the mirror's frame at the margins, and
+//!    every screen target here is ClampToEdge, so unguarded that smears one border column across
+//!    yards of water.
+//!
+//! Guards 2 and 3 are this port's, not the reference's, and they exist because this renders **one**
+//! mirror per frame where the reference re-renders per instance group.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
@@ -93,7 +120,27 @@ use bevy::render::view::Hdr;
 use super::screen::LiquidScreenTargets;
 use super::{Underwater, WaterDetail};
 use crate::view::WorldCamera;
+use crate::world_point::{Subject, WorldPoint};
+use benilla_assets::coords::bevy_to_wow;
 use benilla_assets::materials::LiquidCataMaterial;
+
+/// **The mirror plane this frame, and whether it is usable** — the reference's
+/// `Liquid::GetClosestReflectionHeight`, resolved for the fake buffer too.
+///
+/// The reference passes `0.0` as `RenderReflection`'s plane for the fake buffer and reserves the
+/// tracked closest height for the real one. Sea level is the right plane for an ocean and the wrong
+/// one for everything else, and "the wrong plane" is not a subtle error: mirroring a mountain lake
+/// about `z = 0` reflects a slab of world from four hundred yards below it onto the surface. So the
+/// plane here is the height of the water the eye is actually over, and [`plane`] is published to
+/// the shader so a surface at some *other* height can fade the mirror out rather than wear a
+/// picture that was never about it.
+#[derive(Resource, Default, Clone, Copy)]
+pub(crate) struct ReflectionPlane {
+    /// World Y (Bevy) of the surface the mirror is about. Meaningless while `live` is false.
+    plane: f32,
+    /// Is the mirror rendering this frame at all?
+    live: bool,
+}
 
 /// The render layer every liquid surface rides, so the reflection camera can be the one world view
 /// that does not draw water.
@@ -188,16 +235,30 @@ fn spawn_reflection_camera(
     ));
 }
 
+/// The minimum height the eye must sit above the mirror plane for the mirror to run.
+///
+/// At zero separation the mirrored camera coincides with the real one and the oblique clip plane
+/// passes through the eye: `near_clip_plane`'s `w` goes to zero, Lengyel's scale factor `a =
+/// −Qz / (C · Q)` divides by ~0, and the projection comes out as garbage rather than as a
+/// degenerate-but-safe matrix. Standing the mirror down for the half yard either side of the
+/// waterline costs nothing visible — at that height the surface is edge-on and the Fresnel term
+/// that weights the reflection is at its own floor.
+const MIN_EYE_HEIGHT: f32 = 0.5;
+
 /// Mirror the world camera into it, and decide whether the mirror runs at all.
 ///
-/// The three conditions are the reference's own: `HasFakeReflection()` is `waterDetail != 0`, and
-/// `RenderReflection` is skipped outright while `Liquid::CameraSubmerged()` — from underneath there
-/// is nothing above the surface to mirror, and `ProcWaterBelow` does not sample `samp1` in any
-/// permutation.
+/// The conditions are the reference's own plus one: `HasFakeReflection()` is `waterDetail != 0`,
+/// and `RenderReflection` is skipped outright while `Liquid::CameraSubmerged()` — from underneath
+/// there is nothing above the surface to mirror, and `ProcWaterBelow` does not sample `samp1` in
+/// any permutation. The one addition is [`MIN_EYE_HEIGHT`].
+#[allow(clippy::too_many_arguments)]
 fn sync_reflection_camera(
     detail: Res<WaterDetail>,
     underwater: Res<Underwater>,
     targets: Option<Res<LiquidScreenTargets>>,
+    world: WorldPoint,
+    mut plane_out: ResMut<ReflectionPlane>,
+    mut held: Local<f32>,
     world_cam: Query<
         (&GlobalTransform, &Projection, &Camera),
         (With<WorldCamera>, Without<LiquidReflectionCamera>),
@@ -212,12 +273,34 @@ fn sync_reflection_camera(
     };
     let Ok((world_pose, world_projection, world_camera)) = world_cam.single() else {
         camera.is_active = false;
+        plane_out.live = false;
         return;
     };
-    let wanted = detail.is_cata() && !underwater.0.any();
+
+    // **The plane, and it is the water the eye is over — not sea level.** `water_surface_at` is the
+    // same per-subject query every other liquid consumer asks, so an interior pool answers for a
+    // camera inside its building and the ADT's MCLQ answers outdoors. Where the eye is over no
+    // water at all the last plane is HELD rather than snapped to zero: stepping off a shore would
+    // otherwise move the mirror four hundred yards in one frame, and the height guard in the shader
+    // already fades a surface that disagrees with the plane. Zero is only the value before the eye
+    // has ever been over water.
+    let eye = world_pose.translation();
+    let plane = match world.water_surface_at(Subject::Eye, bevy_to_wow(eye)) {
+        Some(surface) => {
+            *held = surface;
+            surface
+        }
+        None => *held,
+    };
+
+    let wanted = detail.is_cata() && !underwater.0.any() && eye.y - plane > MIN_EYE_HEIGHT;
     if camera.is_active != wanted {
         camera.is_active = wanted;
     }
+    *plane_out = ReflectionPlane {
+        plane,
+        live: wanted,
+    };
     if !wanted {
         return;
     }
@@ -243,46 +326,108 @@ fn sync_reflection_camera(
     camera.clear_color = world_camera.clear_color.clone();
     *projection = world_projection.clone();
 
-    // `M = diag(1, −1, 1)` — WoW `z = 0` is Bevy `y = 0`. See the header for why this is
-    // `looking_to` and not a reflection matrix, and what the shader owes it.
-    let mirrored = |v: Vec3| Vec3::new(v.x, -v.y, v.z);
-    let world = world_pose.compute_transform();
-    let want = Transform::from_translation(mirrored(world.translation))
-        .looking_to(mirrored(*world.forward()), mirrored(*world.up()));
+    // The mirror about `y = plane`. A DIRECTION reflects the same whatever the plane's height —
+    // only the position carries it — which is why the two halves are spelled differently.
+    // See the header for why this is `looking_to` and not a reflection matrix, and what the shader
+    // owes it.
+    let want = mirror_pose(&world_pose.compute_transform(), plane);
     if *pose != want {
         *pose = want;
     }
+
+    // **The oblique clip plane — the whole of the "only things ABOVE the water" rule.**
+    //
+    // The reference does this with a user clip plane: `RenderReflection` transforms the mirror
+    // plane into view space and spends `CShaderEffect::SetClipPlane` / `SetClipEnabled(1)` around
+    // `CWorldView::Render`, so every one of its shaders discards the far side. benilla has no such
+    // per-view term in its material shaders and could not gain one without touching every world
+    // shader it has — so it takes the other standard route to the same clip, Lengyel's oblique
+    // near plane, which lives entirely in the projection matrix and therefore applies to every
+    // draw the mirror makes with no shader changes at all. Bevy ships it as
+    // `PerspectiveProjection::near_clip_plane`, already adapted to its reversed-Z convention.
+    //
+    // Without it the mirror renders the riverbed, the lake floor and every rock under the surface,
+    // and the water shader reads them back out as a reflection of the world *below* it — which is
+    // the ghost this exists to remove.
+    if let Projection::Perspective(perspective) = &mut *projection {
+        perspective.near_clip_plane = view_space_clip_plane(&want, plane);
+    }
 }
 
-/// Tell the water whether the mirror is live this frame — `LiquidParams.path.z`.
+/// The mirrored pose of `world` about the horizontal plane `y = plane`.
+///
+/// Split out so the two things a test can actually pin — that this is a rotation, and that its
+/// right hand is negated (the shader's `1 − u`) — are pinned against the function the camera uses
+/// rather than against a copy of it.
+fn mirror_pose(world: &Transform, plane: f32) -> Transform {
+    let flip = |v: Vec3| Vec3::new(v.x, -v.y, v.z);
+    let position = Vec3::new(
+        world.translation.x,
+        2.0 * plane - world.translation.y,
+        world.translation.z,
+    );
+    Transform::from_translation(position).looking_to(flip(*world.forward()), flip(*world.up()))
+}
+
+/// The world plane `y = plane` in the VIEW space of `pose`, in the form
+/// `PerspectiveProjection::near_clip_plane` wants: a unit normal pointing at the side that survives,
+/// and `w = −(N · Q)` for any `Q` on the plane.
+///
+/// The surviving side is world `+Y` — everything above the water. The mirror's camera sits *below*
+/// the plane looking up, so `+Y` also points away from it, which is the orientation the field
+/// documents.
+fn view_space_clip_plane(pose: &Transform, plane: f32) -> Vec4 {
+    let view_from_world = pose.to_matrix().inverse();
+    // A direction, so `w = 0` — the translation must not reach it.
+    let normal = (view_from_world * Vec4::new(0.0, 1.0, 0.0, 0.0))
+        .truncate()
+        .normalize_or_zero();
+    let point = (view_from_world * Vec4::new(0.0, plane, 0.0, 1.0)).truncate();
+    normal.extend(-normal.dot(point))
+}
+
+/// Tell the water whether the mirror is live this frame and what plane it is about —
+/// `LiquidParams.path.z` and `.w`.
 ///
 /// Value-watched, the shape `surface::sync_below_water` already uses: a write here marks every cata
-/// material changed and rebuilds its bind group, so the steady frame must not make one. With the
-/// flag clear the shader falls back to the flat horizon colour, which is not a guess — it is what
-/// perm 4 has in the mirror's place.
+/// material changed and rebuilds its bind group, so the steady frame must not make one. The plane
+/// moves continuously as the eye crosses water, so the watch has a dead band rather than an
+/// equality test — a tenth of a yard is well under the scale the shader's height guard fades over,
+/// and it is the difference between rebuilding thirty bind groups on the frames the plane really
+/// moved and rebuilding them on every frame a boat rocks.
+///
+/// With the flag clear the shader falls back to the flat horizon colour, which is not a guess — it
+/// is what perm 4 has in the mirror's place.
 fn sync_reflection_flag(
     mut materials: ResMut<Assets<LiquidCataMaterial>>,
-    mirror: Query<&Camera, With<LiquidReflectionCamera>>,
-    mut last: Local<Option<bool>>,
+    reflection: Res<ReflectionPlane>,
+    mut last: Local<Option<(bool, f32)>>,
 ) {
-    let live = mirror.single().is_ok_and(|c| c.is_active);
-    if *last == Some(live) {
-        return;
+    /// How far the plane may drift before the materials are told. See the doc above.
+    const PLANE_DEAD_BAND: f32 = 0.1;
+
+    let want = (reflection.live, reflection.plane);
+    if let Some((live, plane)) = *last {
+        if live == want.0 && (plane - want.1).abs() < PLANE_DEAD_BAND {
+            return;
+        }
     }
-    *last = Some(live);
-    let flag = if live { 1.0 } else { 0.0 };
+    *last = Some(want);
+    let flag = if want.0 { 1.0 } else { 0.0 };
     for (_, material) in materials.iter_mut() {
         material.extension.path.z = flag;
+        material.extension.path.w = want.1;
     }
 }
 
 /// Wire the mirror into the app. Called from [`super::LiquidPlugin`].
 pub(super) fn register(app: &mut App) {
-    app.add_systems(
-        Startup,
-        keep_water_on_the_world_camera.after(super::surface::setup_liquid),
-    )
-    .add_systems(
+    app.init_resource::<ReflectionPlane>()
+        .add_systems(
+            Startup,
+            keep_water_on_the_world_camera.after(super::surface::setup_liquid),
+        )
+        .add_systems(
         Update,
         (
             // The world camera can spawn after `Startup` (the fallback free-fly path spawns a
@@ -304,25 +449,56 @@ pub(super) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::camera::CameraProjection;
+
+    /// The clip test wgpu applies, on a world point: kept iff `0 ≤ clip.z ≤ clip.w`.
+    ///
+    /// Written against the real `PerspectiveProjection` — Bevy's own Lengyel implementation for its
+    /// reversed-Z convention — rather than against a restatement of it, because the whole value of
+    /// these tests is that they fail if that convention ever moves.
+    fn is_rendered(pose: &Transform, plane: f32, world_point: Vec3) -> bool {
+        let projection = PerspectiveProjection {
+            fov: std::f32::consts::FRAC_PI_4,
+            aspect_ratio: 16.0 / 9.0,
+            near: 0.1,
+            far: 1000.0,
+            near_clip_plane: view_space_clip_plane(pose, plane),
+        };
+        let clip = projection.get_clip_from_view()
+            * pose.to_matrix().inverse()
+            * world_point.extend(1.0);
+        clip.z >= 0.0 && clip.z <= clip.w
+    }
+
+    /// A camera over water, looking down at it — the pose the report was taken at.
+    fn eye_over_water() -> Transform {
+        Transform::from_translation(Vec3::new(0.0, 10.0, 0.0))
+            .looking_to(Vec3::new(0.0, -0.5, -1.0).normalize(), Vec3::Y)
+    }
 
     /// **The mirror is a rotation, and its picture is flipped left-to-right.** Both halves are the
     /// contract `liquid_cata.wgsl`'s `1 − u` depends on, and neither is visible at the call site.
     #[test]
     fn the_mirrored_pose_is_a_rotation_with_its_right_hand_flipped() {
-        // Looking north-ish and down, from above the mirror plane — the pose the report was taken
-        // at.
-        let world = Transform::from_translation(Vec3::new(3.0, 10.0, -7.0))
-            .looking_to(Vec3::new(0.0, -0.5, -1.0).normalize(), Vec3::Y);
-        let m = |v: Vec3| Vec3::new(v.x, -v.y, v.z);
-        let mirror = Transform::from_translation(m(world.translation))
-            .looking_to(m(*world.forward()), m(*world.up()));
+        let world = eye_over_water();
+        let mirror = mirror_pose(&world, 0.0);
+        let flip = |v: Vec3| Vec3::new(v.x, -v.y, v.z);
 
         // Under the plane, by as much as the world camera is over it.
-        assert!((mirror.translation - Vec3::new(3.0, -10.0, -7.0)).length() < 1e-5);
+        assert!((mirror.translation - Vec3::new(0.0, -10.0, 0.0)).length() < 1e-5);
         // The view direction is the reflected one — this is what makes it a mirror at all.
-        assert!((*mirror.forward() - m(*world.forward())).length() < 1e-5);
+        assert!((*mirror.forward() - flip(*world.forward())).length() < 1e-5);
         // And the right hand is the NEGATED reflection, which is the whole of the shader's debt.
-        assert!((*mirror.right() + m(*world.right())).length() < 1e-5);
+        assert!((*mirror.right() + flip(*world.right())).length() < 1e-5);
+    }
+
+    /// The plane is not always sea level, and the mirror has to follow it — a camera 10 yards over
+    /// a lake at 200 mirrors to 10 yards under **that** lake, not to −10.
+    #[test]
+    fn the_mirror_hangs_below_the_plane_it_is_given() {
+        let world = Transform::from_translation(Vec3::new(4.0, 210.0, -3.0));
+        let mirror = mirror_pose(&world, 200.0);
+        assert!((mirror.translation - Vec3::new(4.0, 190.0, -3.0)).length() < 1e-4);
     }
 
     /// A camera looking straight down mirrors to one looking straight up from the same depth — the
@@ -331,11 +507,49 @@ mod tests {
     fn straight_down_mirrors_to_straight_up() {
         let world =
             Transform::from_translation(Vec3::new(0.0, 25.0, 0.0)).looking_to(Vec3::NEG_Y, Vec3::Z);
-        let m = |v: Vec3| Vec3::new(v.x, -v.y, v.z);
-        let mirror = Transform::from_translation(m(world.translation))
-            .looking_to(m(*world.forward()), m(*world.up()));
+        let mirror = mirror_pose(&world, 0.0);
         assert!((mirror.translation - Vec3::new(0.0, -25.0, 0.0)).length() < 1e-5);
         assert!((*mirror.forward() - Vec3::Y).length() < 1e-5);
+    }
+
+    /// **The reported bug: the mirror rendered what was UNDER the water.** The oblique clip plane
+    /// is the whole fix, and this is the test that says so — a shoreline tree survives, the
+    /// riverbed a yard under the same spot does not.
+    #[test]
+    fn the_mirror_clips_everything_below_the_water_plane() {
+        let mirror = mirror_pose(&eye_over_water(), 0.0);
+        // Well inside the frustum, straight ahead of the mirrored eye.
+        let above = Vec3::new(0.0, 6.0, -40.0);
+        let below = Vec3::new(0.0, -6.0, -40.0);
+        assert!(
+            is_rendered(&mirror, 0.0, above),
+            "geometry above the water must reach the mirror"
+        );
+        assert!(
+            !is_rendered(&mirror, 0.0, below),
+            "geometry below the water must not — this is the ghost reflection"
+        );
+    }
+
+    /// And the plane it clips at is the one it was handed, not zero. A lake at 200 keeps its shore
+    /// and drops its bed; sea level is 200 yards of world *below* that bed and must be gone too.
+    #[test]
+    fn the_clip_plane_follows_the_water_height() {
+        let eye = Transform::from_translation(Vec3::new(0.0, 210.0, 0.0))
+            .looking_to(Vec3::new(0.0, -0.5, -1.0).normalize(), Vec3::Y);
+        let mirror = mirror_pose(&eye, 200.0);
+        assert!(is_rendered(&mirror, 200.0, Vec3::new(0.0, 206.0, -40.0)));
+        assert!(!is_rendered(&mirror, 200.0, Vec3::new(0.0, 194.0, -40.0)));
+        assert!(!is_rendered(&mirror, 200.0, Vec3::new(0.0, 0.0, -40.0)));
+    }
+
+    /// A point ON the plane is the boundary case the water surface itself sits at, and it must not
+    /// land on the clipped side — the shoreline where land meets water is exactly here, and losing
+    /// it would put a bald ring around every lake in the mirror.
+    #[test]
+    fn the_waterline_itself_survives_the_clip() {
+        let mirror = mirror_pose(&eye_over_water(), 0.0);
+        assert!(is_rendered(&mirror, 0.0, Vec3::new(0.0, 0.0, -40.0)));
     }
 
     /// The layer this crate claims must not be the one app layer it can name. The rest of the

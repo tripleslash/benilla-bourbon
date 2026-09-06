@@ -118,7 +118,8 @@ struct LiquidParams {
     kind: vec4<f32>,
     // x = which renderer (0 = ADT MCLQ, 1 = WMO exterior, 2 = WMO interior);
     // y = BELOW-WATER (1 = the eye is under this surface → the `ProcWaterBelow` combine);
-    // z = is `reflect_map` live this frame (the reference's `HasFakeReflection`).
+    // z = is `reflect_map` live this frame (the reference's `HasFakeReflection`);
+    // w = the world Y the mirror was rendered about (`liquid::reflect`'s plane).
     path: vec4<f32>,
     // x = reserved; y = frame count; z = scroll flag; w = clock enable.
     anim: vec4<f32>,
@@ -245,6 +246,17 @@ fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     let factor = clamp((fog_span.y - eye_z) / denom, 0.0, 1.0);
     return mix(fog_color.xyz, rgb, factor);
 }
+
+/// Where the mirror starts and stops being about this surface — the fade in guard 2 above, in
+/// yards of height between the fragment and the plane `liquid::reflect` mirrored about.
+///
+/// **Both are ours**, with no reference value to take: the reference has no single-plane mirror to
+/// guard, because it re-renders per instance group. They are chosen against what the mirror is
+/// actually for — a lake's own surface is flat to well under a yard, so the start is far enough out
+/// that no real body of water fades against its own ripple, and the end is inside the height at
+/// which a mirror about the wrong plane stops resembling the world at all.
+const MIRROR_PLANE_FADE_START: f32 = 2.0;
+const MIRROR_PLANE_FADE_END: f32 = 12.0;
 
 // ─────────────────────────────────────────────────────────────────────────────────── the swatch
 
@@ -736,6 +748,37 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let mirror_ndc = mirror_clip.xy / max(mirror_clip.w, 0.0001);
         var mirror_uv = (mirror_ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
         mirror_uv.x = 1.0 - mirror_uv.x;
+
+        // ---- The two guards on the mirror read, and BOTH are ours ------------------------------
+        //
+        // The reference needs neither, because it re-renders its mirror per liquid instance group
+        // and clamps at the border of a buffer whose frustum is the water's own. This port renders
+        // ONE mirror per frame about ONE plane, so it has two ways to be handed a picture that was
+        // never about this fragment — and a planar reflection that is confidently wrong is worse
+        // than none, because it moves with the camera and reads as a ghost sliding under the
+        // surface rather than as a flat sheen.
+        //
+        // **Guard 1: the read left the mirror's frame.** `mirror_uv` is a projection of a bent ray
+        // and lands outside `[0, 1]` at the margins. The sampler is ClampToEdge (every screen
+        // target here is — see `liquid/screen.rs`), so out of range does not read black, it reads
+        // the border texel smeared across the whole margin: one column of the mirror painted over
+        // yards of water. The fade is the same quartic shape the program already spends on the
+        // screen-space trace, for the same reason, on this read's own NDC.
+        let mq = mirror_ndc * mirror_ndc;
+        let mq2 = mq * mq;
+        let mirror_edge =
+            clamp(1.0 - mq2.x, 0.0, 1.0) * clamp(1.0 - mq2.y, 0.0, 1.0)
+            * step(0.0, mirror_clip.w);
+
+        // **Guard 2: this surface is not at the mirror's plane.** One mirrored render can only be
+        // about one height, and `liquid::reflect` puts it at the water the eye is over. A surface
+        // somewhere else — the lake below the waterfall, a fountain two storeys up, the ocean seen
+        // from an inland pond — would wear a picture of the world reflected about someone else's
+        // waterline, which is exactly the ghost this guard exists for. It fades over yards rather
+        // than cutting, so a stepped pool does not show a hard line between its tiers.
+        let plane_gap = abs(in.world_position.y - w.path.w);
+        let mirror_height = 1.0 - smoothstep(MIRROR_PLANE_FADE_START, MIRROR_PLANE_FADE_END, plane_gap);
+        let mirror_valid = mirror_edge * mirror_height;
         // Where the mirror is standing down — the eye submerged, or the legacy tier, the
         // reference's own `HasFakeReflection` conditions — the horizon takes its place. `c21` in
         // the program is a constant the client uploads per zone; benilla's equivalent is the fog
@@ -745,7 +788,8 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // guess — it is the other shipped program.
         var base = wow_light.fog_color.rgb;
         if (w.path.z > 0.5) {
-            base = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
+            let mirror = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
+            base = mix(base, mirror, mirror_valid);
         }
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
         // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
