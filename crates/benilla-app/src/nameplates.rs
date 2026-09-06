@@ -620,7 +620,22 @@ pub(crate) fn drive_nameplates(
                     scale: Vec3::splat(scale),
                 };
                 let plate = commands
-                    .spawn((Mesh3d(mesh), MeshMaterial3d(material), place, NamePlate))
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        place,
+                        NamePlate,
+                        // **Out of the water's mirror.** A plate is a world-pass mesh (see the
+                        // header) but it is a BILLBOARD: `facing` above is the world camera's
+                        // basis, re-read every frame, and a billboard has exactly one viewer by
+                        // construction. The liquid mirror (`benilla_world::liquid::reflect`) is a
+                        // second camera on the same scene, so an unlayered plate was rendered into
+                        // it aimed at a viewer that view does not have — a legible name floating
+                        // upside down in the lake. Every camera renders this layer except that one.
+                        bevy::camera::visibility::RenderLayers::layer(
+                            benilla_world::liquid::UNMIRRORED_RENDER_LAYER,
+                        ),
+                    ))
                     .id();
                 plates.live.insert(entity, (plate, lines, color));
             }

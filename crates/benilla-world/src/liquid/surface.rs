@@ -339,7 +339,7 @@ pub(crate) fn spawn_liquids<'a>(
                     // Water is world geometry to every camera EXCEPT the mirror that reflects it
                     // — see `reflect`'s header, and the reference's own reflection view, which
                     // never sets the `0x200` water-pass bit.
-                    bevy::camera::visibility::RenderLayers::layer(super::LIQUID_RENDER_LAYER),
+                    bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
                 ));
                 record_lane(&mut ec, lane);
                 ec.id()
@@ -484,7 +484,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 // Water is world geometry to every camera EXCEPT the mirror that reflects it —
                 // see `reflect`'s header, and the reference's own reflection view, which never
                 // sets the `0x200` water-pass bit.
-                bevy::camera::visibility::RenderLayers::layer(super::LIQUID_RENDER_LAYER),
+                bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
             ));
             record_lane(&mut ec, lane);
             ec.id()

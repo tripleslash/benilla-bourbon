@@ -105,7 +105,7 @@ pub use query::{
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
     Underwater, WaterChunkInfo, WmoPool,
 };
-pub(crate) use reflect::LIQUID_RENDER_LAYER;
+pub use reflect::UNMIRRORED_RENDER_LAYER;
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,

@@ -56,7 +56,7 @@
 //! layer 0, which is what this wants.
 //!
 //! Water is kept out of its own mirror by the opposite move: liquid surfaces ride
-//! [`LIQUID_RENDER_LAYER`] and this camera does not. That is the reference's own arrangement — its
+//! [`UNMIRRORED_RENDER_LAYER`] and this camera does not. That is the reference's own arrangement — its
 //! reflection view never sets the `0x200` water-pass bit, so `RenderAlphaWater` simply does not run
 //! for it.
 //!
@@ -142,46 +142,59 @@ pub(crate) struct ReflectionPlane {
     live: bool,
 }
 
-/// The render layer every liquid surface rides, so the reflection camera can be the one world view
-/// that does not draw water.
-///
-/// **31 is the player shadow's and 2.. is the portrait ladder's**; this is the one layer claimed
-/// from `benilla-world` rather than from `benilla-app`'s ladder, because the entities on it are
-/// spawned here and the camera that must not see them is spawned here. It is deliberately at the
-/// far end of the range from the app's growing ladder, and it is asserted distinct from the one
-/// fixed app layer this crate can see.
+/// **The layer for things the world draws and the mirror must not** — the one render layer whose
+/// meaning is a negation.
 ///
 /// Unlike a booth layer this is ADDITIVE: the world camera renders layer 0 *and* this one
-/// ([`keep_water_on_the_world_camera`]), because water is part of the world. Only the mirror is
-/// missing it.
-pub(crate) const LIQUID_RENDER_LAYER: usize = 30;
+/// ([`keep_unmirrored_on_the_world_camera`]), so everything on it is a full citizen of the frame.
+/// Only [`LiquidReflectionCamera`], which carries no `RenderLayers` at all and therefore sees layer
+/// 0 alone, is missing it.
+///
+/// Two kinds of thing belong here, and the second is why this is not called the water's layer:
+///
+/// * **Liquid surfaces.** Water must not appear in its own mirror. That is the reference's own
+///   arrangement — its reflection view never sets the `0x200` water-pass bit, so `RenderAlphaWater`
+///   simply does not run for it.
+/// * **World-pass billboards that face the WORLD camera.** An overhead unit name
+///   (`benilla_app::nameplates`) is a real depth-tested mesh in the 3-D pass, not an overlay, and
+///   it is oriented every frame to the world camera's basis. Seen from anywhere else that basis is
+///   wrong by construction, so the mirror rendered a plate that was aimed at a viewer it does not
+///   have — legible text, upside down, floating in the lake. A reflection is not a second opinion
+///   about a billboard; a billboard has exactly one viewer, and this layer is how the frame says so.
+///
+/// **31 is the player shadow's and 2.. is the portrait ladder's**; this is the one layer claimed
+/// from `benilla-world` rather than from `benilla-app`'s ladder, because the camera that must not
+/// see it is spawned here. It is deliberately at the far end of the range from the app's growing
+/// ladder, and it is asserted distinct from the one fixed app layer this crate can see.
+pub const UNMIRRORED_RENDER_LAYER: usize = 30;
 
 /// The mirror's camera. One per world camera, spawned once the targets exist.
 #[derive(Component)]
 pub(crate) struct LiquidReflectionCamera;
 
-/// Add [`LIQUID_RENDER_LAYER`] to the world camera, so it still draws the water the mirror does not.
+/// Add [`UNMIRRORED_RENDER_LAYER`] to the world camera, so it still draws everything the mirror
+/// does not.
 ///
 /// Guarded and additive, and it has to be both: `player_shadow` writes the same component with the
 /// same shape, and its teardown removes the whole component only when it was the one that inserted
 /// it. Running this from `Startup` means the component already exists by the time the shadow lane
 /// first touches it, so that branch never fires — and if it ever did, the next frame repairs it.
-fn keep_water_on_the_world_camera(
+fn keep_unmirrored_on_the_world_camera(
     mut commands: Commands,
     mut cams: Query<(Entity, Option<&mut RenderLayers>), With<WorldCamera>>,
 ) {
     for (entity, layers) in &mut cams {
         match layers {
             Some(mut layers) => {
-                if layers.intersects(&RenderLayers::layer(LIQUID_RENDER_LAYER)) {
+                if layers.intersects(&RenderLayers::layer(UNMIRRORED_RENDER_LAYER)) {
                     continue; // guarded — the steady frame never flags the component changed
                 }
-                *layers = layers.clone().with(LIQUID_RENDER_LAYER);
+                *layers = layers.clone().with(UNMIRRORED_RENDER_LAYER);
             }
             None => {
                 commands
                     .entity(entity)
-                    .insert(RenderLayers::default().with(LIQUID_RENDER_LAYER));
+                    .insert(RenderLayers::default().with(UNMIRRORED_RENDER_LAYER));
             }
         }
     }
@@ -425,7 +438,7 @@ pub(super) fn register(app: &mut App) {
     app.init_resource::<ReflectionPlane>()
         .add_systems(
             Startup,
-            keep_water_on_the_world_camera.after(super::surface::setup_liquid),
+            keep_unmirrored_on_the_world_camera.after(super::surface::setup_liquid),
         )
         .add_systems(
         Update,
@@ -433,7 +446,7 @@ pub(super) fn register(app: &mut App) {
             // The world camera can spawn after `Startup` (the fallback free-fly path spawns a
             // different one), so both the layer patch and the spawn stay in `Update`. Both are
             // guarded, so the steady frame is one query and a compare.
-            keep_water_on_the_world_camera,
+            keep_unmirrored_on_the_world_camera,
             spawn_reflection_camera,
             sync_reflection_camera,
             sync_reflection_flag,
@@ -552,6 +565,19 @@ mod tests {
         assert!(is_rendered(&mirror, 0.0, Vec3::new(0.0, 0.0, -40.0)));
     }
 
+    /// **The layer has to be a layer the mirror is missing, and layer 0 is the one it has.**
+    /// Setting this constant to 0 would compile, would look like an ordinary layer assignment at
+    /// every call site, and would silently put water and every unit name straight back into the
+    /// reflection — the mirror carries no `RenderLayers` at all, which Bevy reads as layer 0.
+    #[test]
+    fn the_unmirrored_layer_is_not_the_layer_the_mirror_renders() {
+        assert_ne!(
+            UNMIRRORED_RENDER_LAYER, 0,
+            "the mirror renders layer 0; the unmirrored layer must be a different one"
+        );
+        assert!(!RenderLayers::default().intersects(&RenderLayers::layer(UNMIRRORED_RENDER_LAYER)));
+    }
+
     /// The layer this crate claims must not be the one app layer it can name. The rest of the
     /// ladder is asserted in `portrait`, where it lives.
     #[test]
@@ -559,6 +585,6 @@ mod tests {
         // `benilla_app::player_shadow::PLAYER_SHADOW_LAYER` — restated rather than imported,
         // because the dependency runs the other way.
         const PLAYER_SHADOW_LAYER: usize = 31;
-        assert_ne!(LIQUID_RENDER_LAYER, PLAYER_SHADOW_LAYER);
+        assert_ne!(UNMIRRORED_RENDER_LAYER, PLAYER_SHADOW_LAYER);
     }
 }
