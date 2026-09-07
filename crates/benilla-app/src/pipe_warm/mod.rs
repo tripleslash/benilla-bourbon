@@ -186,6 +186,12 @@ fn watch_pipelines(
                 // THE TRIPWIRE: after 0837, a live compile is a stall the director can feel —
                 // this line in a session log means the warm pass has a coverage hole.
                 warn!("pipeline compiled LIVE [{id}] {line}");
+                // The same line, on the console the web build actually has. `quiet_console_on_web`
+                // takes `LogPlugin` off whenever the probe is armed, so the `warn!` above reaches
+                // nobody there — on the one target where a live compile is worst, because
+                // `bevy_render`'s `create_pipeline_task` `block_on`s the build on `wasm32`. No-op
+                // off wasm and when the probe is not armed.
+                crate::webdiag::note_live_pipeline(id, &line);
             }
             if let Ok(path) = std::env::var("WOW_PIPE_TRACE") {
                 use std::io::Write;

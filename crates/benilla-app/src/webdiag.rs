@@ -89,6 +89,9 @@ const BASELINE_SKIP_SECS: f32 = 20.0;
 const TOP_N: usize = 12;
 /// Phase spans listed in a report line.
 const TOP_PHASES: usize = 6;
+/// Live-pipeline lines printed per session before the rest are silenced — see
+/// [`note_live_pipeline`].
+const LIVE_PIPE_CAP: usize = 24;
 
 /// The marker schedules spliced between the main ones — the index is the position, so the splice
 /// table below reads as the frame's shape.
@@ -126,6 +129,9 @@ struct Diag {
 
     next_report: f32,
     next_growth: f32,
+    /// `PipeWatch::created` at the previous report, so `pipes` is a per-window delta like every
+    /// other growth number on the line.
+    prev_pipes: usize,
     /// Counts at the previous report — the `d` on each line.
     prev: Counts,
     /// Counts at the baseline, once taken — the growers block's cumulative move.
@@ -184,6 +190,7 @@ pub(super) fn plugin(app: &mut App) {
         slow_spans: HashMap::new(),
         decode_ms: 0.0,
         marks: Vec::with_capacity(16),
+        prev_pipes: 0,
         next_report: REPORT_SECS,
         next_growth: BASELINE_SKIP_SECS + GROWTH_SECS,
         prev: Counts::default(),
@@ -334,6 +341,19 @@ fn report(world: &mut World) {
     let activity = world
         .get_resource_mut::<benilla_world::terrain_stream::StreamActivity>()
         .map(|mut a| std::mem::take(&mut *a));
+    // The pipeline cache's own pair. On this target a cold variant is a SYNCHRONOUS compile on the
+    // thread that draws (`bevy_render`'s `create_pipeline_task` has a `target_arch = "wasm32"` arm
+    // that `block_on`s the build), so a window whose `pipes` moved and whose worst frame sat in
+    // `render+present` has already explained itself — and `pending` says whether more is coming.
+    let pipes = world
+        .get_resource::<crate::pipe_warm::PipeWatch>()
+        .map(|w| {
+            use std::sync::atomic::Ordering;
+            // `settled` first: the pair is published unsynchronised, so reading it first can only
+            // over-report pending, never invent a negative.
+            let settled = w.0.settled.load(Ordering::Relaxed);
+            (w.0.created.load(Ordering::Relaxed), settled)
+        });
     let mut d = world.resource_mut::<Diag>();
     d.next_report = now + REPORT_SECS;
 
@@ -362,10 +382,13 @@ fn report(world: &mut World) {
     // reads straight off the line. Zero here with a non-zero mesh delta is the answer this probe
     // was extended to give — the decode left the frame thread and the stream cost did not.
     let decode = if n > 0 { d.decode_ms / n as f32 } else { 0.0 };
+    // Hoisted for the same reason `decode` is: the `format!` below borrows `d` immutably for the
+    // whole call, and this reading advances the previous-report cursor.
+    let pipes = pipes_field(&mut d, pipes);
     let mut line = format!(
         "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} decode={decode:.1} \
          | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} | mesh={} {} img={} {} mat={} {} \
-         | wasm={} {} js={} {} | thr={}",
+         | wasm={} {} js={} {} | thr={} pipes={}",
         d.slow,
         counts.entities,
         signed(de),
@@ -383,6 +406,7 @@ fn report(world: &mut World) {
         mb(counts.js_heap),
         signed_mb(dj),
         worker_threads(),
+        pipes,
     );
 
     // What a slow frame was made of, averaged over the slow frames in this window only.
@@ -575,6 +599,51 @@ fn stream_line(a: benilla_world::terrain_stream::StreamActivity, frames: usize) 
     ))
 }
 
+/// `+new/pending` for the pipeline cache this window, or `-` where there is no cache to ask
+/// (a headless run, or a render app that never came up).
+///
+/// A non-zero `+` here beside a `render+present`-dominated slow frame is the whole diagnosis: the
+/// pipeline was compiled synchronously on the drawing thread because the warm pass did not already
+/// own that variant. `note_live_pipeline` names which one.
+fn pipes_field(d: &mut Diag, pipes: Option<(usize, usize)>) -> String {
+    let Some((created, settled)) = pipes else {
+        return "-".to_string();
+    };
+    let new = created.saturating_sub(d.prev_pipes);
+    d.prev_pipes = created;
+    format!("+{new}/{}", created.saturating_sub(settled))
+}
+
+/// A pipeline compiled **live** — say so on the console the web build actually has.
+///
+/// `pipe_warm`'s tripwire is a `warn!`, and on this target that goes nowhere: `quiet_console_on_web`
+/// takes `LogPlugin` off whenever this probe is armed, so the console carries the diag and nothing
+/// else. Which means the single most explanatory line the client can emit — the one that says a
+/// frame just spent 300 ms compiling a shader variant the warm pass missed — was silenced on
+/// exactly the build where the stall is worst.
+///
+/// **Worst there for a reason that is not this module's:** `bevy_render`'s `create_pipeline_task`
+/// has a `target_arch = "wasm32"` arm that `block_on`s the build unconditionally, so on the web a
+/// cold variant is a synchronous compile on the thread that draws. That is not a stall the app can
+/// pace; it is only one it can move behind the loading cover, which is what the menagerie is for.
+/// So a line here is not a curiosity — it names a variant the warm pass has to grow to cover.
+///
+/// Capped per session. A coverage hole is usually a whole family of variants, and the first
+/// [`LIVE_PIPE_CAP`] name it as well as five hundred would.
+pub(crate) fn note_live_pipeline(id: usize, what: &str) {
+    if !armed() {
+        return;
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    let n = SEEN.fetch_add(1, Ordering::Relaxed);
+    if n < LIVE_PIPE_CAP {
+        out(&format!("[diag] pipeline compiled LIVE [{id}] {what}"));
+    } else if n == LIVE_PIPE_CAP {
+        out("[diag] pipeline compiled LIVE — further ones silenced this session.");
+    }
+}
+
 /// Worker threads on the two pools offloaded work reaches, as `async/compute`.
 ///
 /// **The one fact about a threaded build a pasted report could not previously state.** `0/0` is
@@ -665,7 +734,7 @@ fn js_heap() -> u64 {
 /// The report's only way out. `console.log` directly rather than `info!`, so the probe still
 /// speaks on a build whose `LogPlugin` has been taken off to quiet the console.
 #[cfg(target_arch = "wasm32")]
-fn out(s: &str) {
+pub(crate) fn out(s: &str) {
     use wasm_bindgen::prelude::wasm_bindgen;
     #[wasm_bindgen]
     extern "C" {
