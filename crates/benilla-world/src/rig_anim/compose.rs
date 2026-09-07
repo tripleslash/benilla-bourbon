@@ -58,16 +58,33 @@ pub struct PosePost;
 /// composed frame (or by `RigPose::new`/`anchor_for` at bind pose), its consumers are out of the
 /// draw set by the same gate that parked it, and the wake drops the marker before this pass runs,
 /// so the first unparked frame composes the current pose before anything reads it.
+///
+/// **Two passes, because only one of them can be parallel.** The fold is per-rig and writes
+/// nothing but that rig's own `model` array, so it takes `par_iter_mut` — the same argument, over
+/// the same population, that decision 1945 made for `evaluate_rig_poses` one step earlier in the
+/// frame (a raid stands ~400 live rigs / ~12 k bones, and this system is on the main thread's
+/// critical path). The anchor re-seat cannot join it: an anchor is an arbitrary entity and
+/// `Query<&mut Transform>` is a random-access write, which is exactly what a parallel iterator may
+/// not do. So it runs after, serially, reading the composed frames the first pass left.
+///
+/// Splitting them costs one extra walk of the rig query. That is a per-rig branch on `pose_dirty`
+/// against a per-BONE affine chain, and the two are three orders of magnitude apart.
 fn compose_rig_models(
     mut rigs: Query<&mut RigPose, Without<AnimParked>>,
     mut anchors: Query<&mut Transform>,
 ) {
-    for rig in &mut rigs {
+    // Pass 1 — the fold, in parallel. `into_inner` only on a dirty rig, so a clean one is still
+    // not marked changed (reading `pose_dirty` through the `Mut` does not raise the flag).
+    rigs.par_iter_mut().for_each(|rig| {
+        if rig.pose_dirty {
+            rig.into_inner().compose();
+        }
+    });
+    // Pass 2 — re-seat the consumer anchors from those frames, serially.
+    for rig in rigs.iter() {
         if !rig.pose_dirty {
             continue;
         }
-        let rig = rig.into_inner();
-        rig.compose();
         for &(bone, anchor) in &rig.anchors {
             let Some(m) = rig.model.get(bone as usize) else {
                 continue;

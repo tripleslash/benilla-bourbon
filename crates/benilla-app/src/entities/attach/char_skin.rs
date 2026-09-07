@@ -5,6 +5,23 @@
 //! CreatureDisplayInfoExtra for a character-model NPC, decision 0041), its worn-equipment display ids
 //! ([`WornEquip`], decision 0074), and the per-appearance material quints over the composited body
 //! atlas / hair / cape textures ([`build_char_skin_materials`], decisions 0044 / 0045).
+//!
+//! ## The body composite does not run on the browser's frame thread
+//!
+//! One look's atlas is a base skin plus up to fifteen overlays, each of them a BLP decode, blended
+//! per texel — and on the web the thread that would run it is the thread that draws. So the work is
+//! cut where the platform cuts it: [`benilla_formats::CompositePlan::read`] pulls the blobs off the
+//! chain (which only this thread can reach — see its doc for why the type system does not say so),
+//! and [`benilla_formats::CompositeBlobs::blend`] is plain bytes in linear memory and goes to a
+//! worker through `AsyncComputeTaskPool::spawn_pooled`. The look is deferred while its blend is in
+//! flight, through the same [`SKIN_DEFERRALS`] latch a not-yet-arrived read already used, so no
+//! caller learned a new state — a body that is not finished is simply not stamped, and comes back.
+//!
+//! **Native is unchanged and deliberately so.** There the blend runs inline in the frame it is
+//! asked for, exactly as it always has: a native read is a file read, the decode is native-speed,
+//! and buying a frame of a naked body to move work off a thread that has cores to spare is not a
+//! trade anything has asked for. The gate is a `cfg`, not a runtime dial, so the native arm cannot
+//! be reached by a mis-set flag.
 
 use benilla_formats::{CharSkinSlot, ModelBlend};
 use benilla_protocol::EntityKind;
@@ -123,21 +140,130 @@ pub(super) fn resolve_char_look(
     None
 }
 
-/// How many body composites have been put off because their textures had not arrived — the signal
-/// `attach_entity_visuals` reads to know it must come back to a unit.
+/// How many body composites have been put off — because their textures had not arrived, or because
+/// the blend they need is still running on a worker. The signal `attach_entity_visuals` reads to
+/// know it must come back to a unit.
 ///
 /// A counter rather than a return value because the answer has to cross
 /// [`build_char_skin_materials`], whose four-part return is already the whole of a character's
 /// materials and has no room for a status. The caller brackets the call: unequal before and after
 /// means "this unit was not finished", and it simply does not stamp `VisualAttached`.
 ///
-/// Permanently zero on native, where `Chain::ready` never says no.
+/// Permanently zero on native, where `Chain::ready` never says no and the blend is never deferred.
 static SKIN_DEFERRALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Note one deferral, and answer `None` — the shape every "come back next frame" arm below wants.
+fn defer<T>() -> Option<T> {
+    SKIN_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    None
+}
 
 /// Read [`SKIN_DEFERRALS`]. Snapshot around [`build_char_skin_materials`]; a change means the unit
 /// must be attached again next frame.
 pub(crate) fn skin_deferrals() -> u64 {
     SKIN_DEFERRALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Upload a finished atlas and cache it under the look it answers.
+///
+/// Through the upload gate like every other texture: a composite is layered texel-by-texel on the
+/// CPU so it is already RGBA8, and `for_upload` is a no-op on it — but going through it is what
+/// makes the format and the bytes provably agree (decision 1626).
+fn upload_composite(
+    ready: &mut benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
+    images: &mut Assets<Image>,
+    key: SkinKey,
+    composed: benilla_formats::BlpMipChain,
+) -> Option<Handle<Image>> {
+    let handle = images.add(repeat_texture_authored(
+        benilla_assets::for_upload(composed),
+        (true, true),
+    ));
+    ready.insert(key, handle.clone());
+    Some(handle)
+}
+
+/// A finished blend, or `None` while it is still running. One place, because the composite arm and
+/// [`drain_skin_composites`] must not disagree about what "done" means.
+fn poll_blend(task: &mut BlendTask) -> Option<Option<benilla_formats::BlpMipChain>> {
+    bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(task))
+}
+
+/// One look's blend, in flight.
+type BlendTask = bevy::tasks::Task<Option<benilla_formats::BlpMipChain>>;
+
+/// Hand the CPU half of a composite to a worker — `Ok(task)` — or give the blobs back when there is
+/// no worker to take it, in which case the caller blends inline exactly as this always did.
+///
+/// **Native always gets the blobs back, by `cfg` rather than by a runtime answer.** There the blend
+/// runs in the frame it was asked for and always has: a native read is a file read, the decode is
+/// native-speed, and buying a frame of an undressed body to move work off a thread with cores to
+/// spare is a trade nothing has asked for. Keeping it a `cfg` means the native arm cannot be
+/// reached by a mis-set flag, and that native behaviour does not move — the rule the rest of the
+/// offload work in this tree holds to.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_blend(
+    blobs: benilla_formats::CompositeBlobs,
+) -> Result<BlendTask, benilla_formats::CompositeBlobs> {
+    Err(blobs)
+}
+
+/// See the native definition above for the contract; this is the browser half.
+///
+/// The `Send` bound on `spawn_pooled` is what makes this safe rather than merely intended:
+/// [`benilla_formats::CompositeBlobs`] is `Vec<u8>`s and `Copy` rects, and a payload that could
+/// reach a `JsValue`, the DOM or the pack map would not compile here. That is exactly the wall
+/// `CompositePlan::read` exists to put the chain on the other side of.
+#[cfg(target_arch = "wasm32")]
+fn spawn_blend(
+    blobs: benilla_formats::CompositeBlobs,
+) -> Result<BlendTask, benilla_formats::CompositeBlobs> {
+    // `cfg`, not just the runtime gate: `spawn_pooled` does not exist on a wasm build without
+    // atomics (`bevy_tasks` swaps in `single_threaded_task_pool.rs`), so this has to be compiled
+    // away rather than merely skipped. `pooled_work_runs` answers `false` there too, so the two
+    // agree; the attribute is what keeps the agreement from having to compile.
+    #[cfg(target_feature = "atomics")]
+    if benilla_assets::frame_budget::pooled_work_runs() {
+        return Ok(bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn_pooled(async move { blobs.blend().ok() }));
+    }
+    // No worker to take it. Inline on the frame thread, which is what this build always did — and
+    // deliberately NOT under a `frame_budget` slot: the caller is a system, not an `async` loader,
+    // so there is nothing here that can await one.
+    Err(blobs)
+}
+
+/// Land every body composite a worker has finished, and reap the ones nobody is waiting for.
+///
+/// The composite arm polls its own key, so this is not what makes a waiting body dress — it is what
+/// stops a look from leaking. A job outlives its asker whenever the unit that wanted it walks out
+/// of the streamer's window (or the booth closes) between the spawn and the finish, and a finished
+/// `BlpMipChain` nobody drains is a megabyte and a half held for the session. Draining it into the
+/// cache also means the look is *ready* if that body comes back, which is the same bet the cache
+/// itself makes.
+///
+/// Compiles to a walk over an always-empty map on native, where nothing ever queues a blend.
+pub(crate) fn drain_skin_composites(
+    mut composites: ResMut<super::super::SkinComposites>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if composites.blending.is_empty() {
+        return;
+    }
+    // Destructured, so the two halves are disjoint borrows and a finished atlas can be uploaded
+    // in place instead of being collected and walked a second time.
+    let super::super::SkinComposites { ready, blending } = composites.as_mut();
+    blending.retain(|key, task| {
+        let Some(blended) = poll_blend(task) else {
+            return true; // still running
+        };
+        // A blend that failed drops out of the map with nothing cached — the next asker plans and
+        // reads it again, which is what the inline version did too.
+        if let Some(chain) = blended {
+            upload_composite(ready, &mut images, *key, chain);
+        }
+        false
+    });
 }
 
 /// The `mpq://` URL for a pre-baked NPC body atlas (a CreatureDisplayInfoExtra bake name) under
@@ -317,7 +443,7 @@ pub(super) fn build_char_skin_materials(
     world_assets: Option<&WorldAssets>,
     parts: &[EntityPart],
     images: &mut Assets<Image>,
-    skin_cache: &mut benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
+    composites: &mut super::super::SkinComposites,
     asset_server: &AssetServer,
     mats: &mut benilla_world::model_render::M2BatchMaterials,
 ) -> CharSkinMaterials {
@@ -339,8 +465,7 @@ pub(super) fn build_char_skin_materials(
 
     // Body-skin atlas. A character-model NPC loads its shipped, pre-baked atlas directly; a player (or an
     // NPC row without a bake name) composites it live from CharSections + overlays, uploaded + cached
-    // once per appearance ([`SkinComposites`]). The composite reads its half-dozen BLPs synchronously
-    // off the shared chain — fine behind the cache (once per look).
+    // once per appearance ([`SkinComposites`]).
     //
     // **This is the last blocking chain read on a gameplay path, and on the web it is a real one.**
     // A stranger of a race nobody has worn yet composites from `Character\<Race>\<Sex>\` and
@@ -350,7 +475,9 @@ pub(super) fn build_char_skin_materials(
     // take `Chain::try_read` with the sprite caches and the sound kits. Deferring here needs a look
     // to be *revisited* (this runs on an appearance edge, and the skin cache is only written on
     // success), so the honest fix is a retry latch on the entity, not a `None` that would leave a
-    // player permanently untextured.
+    // player permanently untextured. That latch is `SKIN_DEFERRALS`, and it is what the off-thread
+    // blend below rides on too: "still coming" and "still blending" are the same answer to the
+    // caller, so moving the CPU half to a worker needed no new state anywhere above this function.
     let body_tex: Option<Handle<Image>> = match &look.body {
         BodySkin::Baked(name) => Some(asset_server.load::<Image>(baked_npc_url(name))),
         BodySkin::Composite { face } => world_assets.and_then(|world| {
@@ -384,60 +511,76 @@ pub(super) fn build_char_skin_materials(
                     tabard_preview: false,
                 };
             }
-            match skin_cache.fetch(&key) {
-                Some(handle) => Some(handle),
-                None => {
-                    // The worn ItemDisplayInfo rows whose region textures dress the atlas
-                    // (decision 0074); an unknown/zero display id contributes nothing.
-                    let catalog = displays.map(|d| &d.catalog);
-                    let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
-                    if let Some(catalog) = catalog {
-                        for (i, id) in equip.iter().enumerate() {
-                            if *id != 0 {
-                                worn[i] = catalog.get(*id);
-                            }
-                        }
+            if let Some(handle) = composites.ready.fetch(&key) {
+                return Some(handle);
+            }
+            // Already blending on a worker: poll it here rather than only in the drain pass, so a
+            // look that finished since the last frame dresses this body now instead of next frame.
+            // Not finished ⇒ the same deferral a not-yet-arrived read takes.
+            if let Some(task) = composites.blending.get_mut(&key) {
+                let Some(done) = poll_blend(task) else {
+                    return defer();
+                };
+                composites.blending.remove(&key);
+                // A blend that failed answers like the fused version's `.ok()?` always did: no
+                // atlas, nothing cached, and this body keeps its built material.
+                return upload_composite(&mut composites.ready, images, key, done?);
+            }
+            // The worn ItemDisplayInfo rows whose region textures dress the atlas
+            // (decision 0074); an unknown/zero display id contributes nothing.
+            let catalog = displays.map(|d| &d.catalog);
+            let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
+            if let Some(catalog) = catalog {
+                for (i, id) in equip.iter().enumerate() {
+                    if *id != 0 {
+                        worn[i] = catalog.get(*id);
                     }
-                    let chain = &mut world.chain.lock_recover();
-                    // What this appearance needs, worked out before a byte is read
-                    // (`CharSections::composite_plan`). The split exists for the browser: the atlas
-                    // below is blended once and cached per appearance for the session, so a layer
-                    // that has not arrived yet cannot be skipped and picked up later — it would be a
-                    // tabard missing for as long as the player wears it. `ready` warms every path
-                    // and says whether they are all in memory; until they are, this whole unit's
-                    // attach is deferred (see the caller) rather than the frame blocked on a fetch.
-                    // On native `ready` is always true and none of this runs.
-                    let plan = sections.0.composite_plan(
-                        key.race,
-                        key.sex,
-                        key.skin,
-                        key.face,
-                        key.facial_hair,
-                        key.hair_style,
-                        key.hair_color,
-                        worn,
-                        key.emblem,
-                        key.tabard_preview,
-                    )?;
-                    // `fold`, not `all`: every path must be ASKED, because asking is what starts the
-                    // warm. A short-circuit would warm the first missing one and leave the rest for
-                    // the next frame to discover, one round trip at a time.
-                    let ready = plan.paths().fold(true, |acc, p| chain.ready(p) && acc);
-                    if !ready {
-                        SKIN_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return None;
-                    }
-                    let composed = sections.0.composite_from_plan(chain, &plan).ok()?;
-                    // Through the upload gate like every other texture: a composite is
-                    // layered texel-by-texel on the CPU so it is already RGBA8, and
-                    // `for_upload` is a no-op on it — but going through it is what makes
-                    // the format and the bytes provably agree (decision 1626).
-                    let handle = images.add(repeat_texture_authored(
-                        benilla_assets::for_upload(composed),
-                        (true, true),
-                    ));
-                    skin_cache.insert(key, handle.clone());
-                    Some(handle)
+                }
+            }
+            // The chain guard is scoped: nothing past the read needs it, and holding a lock
+            // across a task spawn (or an `Assets<Image>` insert) is a habit worth not forming.
+            let blobs = {
+                let chain = &mut world.chain.lock_recover();
+                // What this appearance needs, worked out before a byte is read
+                // (`CharSections::composite_plan`). The split exists for the browser: the atlas
+                // below is blended once and cached per appearance for the session, so a layer
+                // that has not arrived yet cannot be skipped and picked up later — it would be
+                // a tabard missing for as long as the player wears it. `ready` warms every path
+                // and says whether they are all in memory; until they are, this whole unit's
+                // attach is deferred (see the caller) rather than the frame blocked on a fetch.
+                // On native `ready` is always true and none of this runs.
+                let plan = sections.0.composite_plan(
+                    key.race,
+                    key.sex,
+                    key.skin,
+                    key.face,
+                    key.facial_hair,
+                    key.hair_style,
+                    key.hair_color,
+                    worn,
+                    key.emblem,
+                    key.tabard_preview,
+                )?;
+                // `fold`, not `all`: every path must be ASKED, because asking is what starts
+                // the warm. A short-circuit would warm the first missing one and leave the rest
+                // for the next frame to discover, one round trip at a time.
+                let ready = plan.paths().fold(true, |acc, p| chain.ready(p) && acc);
+                if !ready {
+                    return defer();
+                }
+                // The chain half, and the only half that has to be here
+                // (`CompositePlan::read`). Every path is resident by the line above, so this is
+                // a memcpy out of the pack map and a frame decode each — not a fetch.
+                plan.read(chain).ok()?
+            };
+            // …and the CPU half, which is plain bytes and goes to a worker where there is one.
+            match spawn_blend(blobs) {
+                Ok(task) => {
+                    composites.blending.insert(key, task);
+                    defer()
+                }
+                Err(blobs) => {
+                    upload_composite(&mut composites.ready, images, key, blobs.blend().ok()?)
                 }
             }
         }),

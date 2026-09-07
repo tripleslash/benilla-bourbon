@@ -29,7 +29,7 @@ use super::{
     SkinSections, VisualAttached,
 };
 
-mod char_skin;
+pub(in crate::entities) mod char_skin;
 use char_skin::{build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip};
 mod dress;
 mod merge;
@@ -759,7 +759,7 @@ pub(super) fn attach_entity_visuals(
                     world_assets.as_deref(),
                     parts,
                     &mut images,
-                    &mut skin_composites.0,
+                    &mut skin_composites,
                     &asset_server,
                     &mut mats,
                 ),

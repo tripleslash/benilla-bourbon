@@ -27,7 +27,7 @@ pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
 pub use geosets::{CharacterGeosets, EquipGeosets};
 pub use sections::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharSections, CompositePlan, EmblemLayer, EquipBlit, GuildEmblem,
+    BlitSource, CharSections, CompositeBlobs, CompositePlan, EmblemLayer, EquipBlit, GuildEmblem,
 };
 
 // The appearance tables' schemas, for the `benilla-extract dbc` CSV dump (`crate::schema_for`) —

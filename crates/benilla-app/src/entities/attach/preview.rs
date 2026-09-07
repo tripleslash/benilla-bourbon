@@ -696,7 +696,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         ctx.world_assets,
         parts,
         ctx.images,
-        &mut ctx.skin_composites.0,
+        ctx.skin_composites,
         ctx.asset_server,
         ctx.mats,
     );

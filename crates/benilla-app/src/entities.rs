@@ -540,8 +540,24 @@ pub(crate) struct CharCreate(pub(crate) CharCreateCatalog);
 /// composites + uploads its 256² skin once, and every player sharing that look reuses the handle. A
 /// composite is a fresh `Image` asset per build (unlike an `asset_server.load` path, which dedups by
 /// path), so without this cache every player would re-composite and break material dedup downstream.
+///
+/// Two maps, because on the web a look is not composited in the frame it is asked for. The blend is
+/// a base skin plus up to fifteen overlays of BLP decode and per-texel source-over, and the
+/// browser's frame thread is the thread that draws — so [`attach::char_skin`] reads the plan's
+/// blobs off the chain (the half that must be on this thread) and hands the CPU half to a worker.
+/// `blending` holds those in flight, keyed by the look they will answer, so a second body wearing
+/// the same look joins the one job instead of starting a second — which matters most exactly where
+/// it is worst: the char-select booth, and a raid of strangers arriving together. **Native never
+/// populates it**; there the blend runs inline as it always has.
 #[derive(Resource, Default)]
-struct SkinComposites(benilla_assets::SpatialCache<SkinKey, Handle<Image>>);
+struct SkinComposites {
+    /// Looks whose atlas is uploaded and ready. The distance sweep ([`scope_entity_art`]) and the
+    /// map-change teardown both act on this half.
+    ready: benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
+    /// Looks whose blend is on a worker thread. Drained into `ready` by
+    /// [`attach::char_skin::drain_skin_composites`], or picked up in place by the next asker.
+    blending: HashMap<SkinKey, bevy::tasks::Task<Option<benilla_formats::BlpMipChain>>>,
+}
 
 /// The appearance fields that determine a composited body skin (decision 0044): race/sex pick the
 /// CharSections rows; skin/face/facialHair/hairStyle/hairColor pick the base + overlay variations;
@@ -616,9 +632,12 @@ fn evict_display_caches(
         items.as_ref().map_or(0, |i| i.models.len()),
         fx.models.len(),
         glows.as_ref().map_or(0, |g| g.models.len()),
-        composites.0.len(),
+        composites.ready.len(),
     );
-    composites.0.clear();
+    composites.ready.clear();
+    // The in-flight blends go too: their look belongs to the map being left, and a `Task` dropped
+    // here is cancelled rather than left to finish for a cache that no longer wants it.
+    composites.blending.clear();
     fx.models.clear();
     if let Some(mut c) = creatures {
         c.models.clear();
@@ -645,7 +664,10 @@ fn scope_entity_art(
     mut scope: benilla_world::art_scope::ArtScope,
     mut composites: ResMut<SkinComposites>,
 ) {
-    scope.apply(&mut composites.0, benilla_world::art_scope::ArtSlot::Skins);
+    scope.apply(
+        &mut composites.ready,
+        benilla_world::art_scope::ArtSlot::Skins,
+    );
 }
 
 /// **The armed idle's authored CAaBox for a built body**, model space — recorded by
@@ -812,6 +834,16 @@ impl Plugin for EntitiesPlugin {
         // The map-scope teardown (`world_map::MapChange`): drop every display/material dedup
         // so a map's assets actually die with it — the #bugs teleport leak.
         .add_systems(Update, (evict_display_caches, scope_entity_art))
+        // Land every body composite a worker finished (web only — native blends inline and never
+        // queues one). **Before `DisplayBuildSet`**, which heads the chain the three composite
+        // callers sit in, so a look that finished between frames is in the cache before the same
+        // frame's attach asks for it rather than a frame later. Correctness does not depend on
+        // that — each caller also polls its own key in place, and an unclaimed job is what this
+        // pass exists to reap — but the ordering is free and one frame of a naked body is not.
+        .add_systems(
+            Update,
+            attach::char_skin::drain_skin_composites.before(DisplayBuildSet),
+        )
         // Every streamed unit's collision height, the frame after `apply_net_updates` spawns it
         // (that stage's Commands are what create the entity, so this cannot be earlier). Its
         // consumers all read `Option<&CollisionHeight>` against the ctor default, so a unit's

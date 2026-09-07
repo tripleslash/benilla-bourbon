@@ -39,7 +39,8 @@ pub mod web;
 pub mod webpack;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositeBlobs, CompositePlan,
+    DialRanges,
     EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;

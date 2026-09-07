@@ -184,7 +184,7 @@ pub(in crate::entities) fn redress_player_looks(
                 world_assets.as_deref(),
                 parts,
                 &mut images,
-                &mut skin_composites.0,
+                &mut skin_composites,
                 &asset_server,
                 &mut mats,
             ),
