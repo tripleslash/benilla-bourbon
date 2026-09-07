@@ -524,7 +524,11 @@ impl AssetLoader for WmoModelLoader {
                 (parse_wmo_root(&bytes), id, lights)
             })
             .await;
-        let root = root.map_err(to_io)?;
+        // **`Arc`, so a group's geometry parse can take the root with it.** `wmo_group_submeshes`
+        // needs the root's material and batch tables, and it is the one call in the group loop
+        // heavy enough to be worth a crossing. The root is never mutated after this line (31 uses,
+        // all reads), so sharing it costs nothing and copies nothing.
+        let root = std::sync::Arc::new(root.map_err(to_io)?);
 
         // Root path → stem for the group files. Lowercased so the suffix strip + group URLs are
         // consistent (MPQ resolution is case-insensitive regardless).
@@ -591,14 +595,31 @@ impl AssetLoader for WmoModelLoader {
             let Ok(gbytes) = ctx.read_asset_bytes(group_url).await else {
                 continue; // a missing/unreadable group is skipped, like the chain reader
             };
+            // `Arc`, not `clone`: the geometry parse below takes the buffer to a worker while the
+            // collision walks keep reading it here, and a group file is megabytes — copying it per
+            // group would hand back in memcpy what the crossing saves in parse.
+            let gbytes = std::sync::Arc::new(gbytes);
+            // **The group's render geometry goes to a worker; the rest of this body does not.**
+            // The collision gathers below write into the loader's own accumulators with index
+            // offsets computed against their current length, and moving those would mean moving
+            // that arithmetic too — for geometry a body stands on, which is not a place to be
+            // clever under measurement pressure. `wmo_group_submeshes` needs none of it: it is a
+            // pure `(bytes, root) -> submeshes`, and it is the heaviest call in the loop.
+            //
+            // Read BEFORE the slot below, so the crossing is not made while holding the meter.
+            let subs = {
+                let gbytes = gbytes.clone();
+                let root = root.clone();
+                crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+                    wmo_group_submeshes(&gbytes, &root)
+                })
+                .await
+                .map_err(to_io)?
+            };
             // One slot per group, which is what makes a cathedral load without a hitch: the
             // groups are read and gathered one at a time already, so the budget can put the
-            // expensive ones on separate frames instead of the whole building on one.
-            // Metered rather than offloaded: the stretch this guards writes straight into the
-            // loader's own accumulators (`group_nav`, the collision buffers, `submeshes`), so a
-            // `Send + 'static` closure would have to take and give back every one of them. The
-            // root parse above moved because it was a pure `bytes -> value`; this is the shape
-            // that has to be restructured first, not merely relabelled.
+            // expensive ones on separate frames instead of the whole building on one. What it
+            // still meters is the collision walk — real work, but a fraction of the parse above.
             let _group_slot =
                 crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
             // Fill this group's flags + portal-ref span from its MOGP header (what the client's
@@ -648,7 +669,6 @@ impl AssetLoader for WmoModelLoader {
                     }
                 }
             }
-            let subs = wmo_group_submeshes(&gbytes, &root).map_err(to_io)?;
             // This group's MODR (which MODD placements it owns/instantiates) + MOLR (which MOLT
             // lights fold into its doodads' committed light) — the per-doodad base resolution below
             // consumes both (wow-re trace-forensics-abbey-interior-d3d §1.1/§4).

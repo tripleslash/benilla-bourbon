@@ -386,28 +386,49 @@ impl AssetLoader for M2ModelLoader {
     ) -> Result<M2Model, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        // From here to the end of `load` is CPU with nothing awaited in it, and on the web target
-        // that is CPU on the thread that draws — so it runs under one metered slot
-        // (`crate::frame_budget`). Taken after the read so the frame is never billed for the fetch.
-        //
-        // The **geometry** lane: this parse yields the model's bounding box and its collision hull,
-        // which are what a placement is stood on before (and after) its art arrives.
-        //
-        // **Metered, not offloaded, and that is a scope judgement rather than a limitation.** The
-        // parses below genuinely are pure over `bytes` and would cross to a worker on their own;
-        // what does not cross is the submesh loop between them, which calls `ctx.load::<Image>`
-        // per texture and so must stay on this thread. Moving this loader would therefore mean
-        // splitting one 400-line function into "every pure parse" and "everything that touches
-        // `ctx`" — worth doing, too large to do beside the sites that were a straight swap
-        // (`blp`, `adt`, and this file's WMO sibling's root parse). Until then this stays exactly
-        // as it was.
-        let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
+        // **`Arc`, so the heavy half can leave.** This loader reads `bytes` at a dozen points
+        // spread over four hundred lines, interleaved with `ctx.load::<Image>` calls that cannot
+        // leave the page's thread — which is why it stayed metered when `blp`, `adt` and the WMO
+        // root moved. Sharing the buffer instead of moving it is what lets the expensive parses go
+        // to a worker while the `ctx` half stays here, with no second copy of the file.
+        let bytes = std::sync::Arc::new(bytes);
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
 
-        // `dir` only feeds creature skin-variation resolution, which is inert here (we pass no skins —
-        // skins are applied at the spawn site from CreatureDisplayInfo), so an empty dir is correct.
-        let subs = parse_m2_render_submeshes(&bytes, "", &[]).map_err(to_io)?;
-        let bounds = parse_m2_bounds(&bytes).ok();
+        // **The block that was the frame.** Measured on the hosted client: with every other
+        // decode already offloaded, this loader's remaining slot still showed `decode=87.4 ms`
+        // averaged over the slow frames of a window that streamed models — a single 294.9 ms
+        // frame among them, because `frame_budget` always grants a frame's FIRST slot however
+        // expensive it turns out to be, and one model's geometry parse is expensive.
+        //
+        // All three of these are pure over the file. Together in one closure rather than three,
+        // because `offload` costs a frame of latency per crossing and three crossings would make
+        // a model take three frames to appear for no gain — they are one unit of work and they
+        // travel as one.
+        //
+        // `dir` only feeds creature skin-variation resolution, which is inert here (we pass no
+        // skins — skins are applied at the spawn site from CreatureDisplayInfo), so an empty dir
+        // is correct.
+        let geometry = {
+            let bytes = bytes.clone();
+            crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+                let subs = parse_m2_render_submeshes(&bytes, "", &[])?;
+                let bounds = parse_m2_bounds(&bytes).ok();
+                // Collide-iff-hull: keep only a non-empty mesh so the spawn site can skip
+                // hull-less props cheaply.
+                let collision = parse_m2_collision_hull(&bytes)
+                    .ok()
+                    .filter(|c| !c.is_empty());
+                Ok::<_, anyhow::Error>((subs, bounds, collision))
+            })
+            .await
+            .map_err(to_io)?
+        };
+        let (subs, bounds, collision) = geometry;
+
+        // What remains below is the `ctx`-touching half plus the small header/animation parses,
+        // and it is still metered for the reason the whole module exists: on a build with no
+        // workers `offload` above ran inline too, and this is one thread either way.
+        let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         // The owner-last draw-order bound, once for the whole model: every effect this model
         // authors (quad emitters, ribbon trails, model-particle instances) takes the rung it sizes,
         // because the reference draws them all in the one post-batch bracket.
@@ -424,12 +445,6 @@ impl AssetLoader for M2ModelLoader {
                 b.sphere_radius,
             )
         });
-        // The collision hull (collide-iff-hull): keep only a non-empty mesh so the spawn site can skip
-        // hull-less props cheaply.
-        let collision = parse_m2_collision_hull(&bytes)
-            .ok()
-            .filter(|c| !c.is_empty());
-
         let mut submeshes = Vec::with_capacity(subs.len());
         for sub in subs {
             // No meshes built here (decision 0834): the geometry ships on the submesh and the app
