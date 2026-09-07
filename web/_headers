@@ -3,13 +3,21 @@
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
 /*
-  # NOT for SharedArrayBuffer: the atomics build does not compile at all — bevy_render enables
-  # wgpu's `fragile-send-sync-non-atomic-wasm`, which makes every wgpu handle !Send + !Sync under
-  # `+atomics` while RenderDevice/RenderQueue are #[derive(Resource)] and require both. The
-  # fetch/decode worker that shipped instead (`web/packworker.js`) posts transferable
-  # ArrayBuffers and needs none of this — every asset it loads is same-origin, which `require-corp`
-  # allows unconditionally. Kept because it costs nothing and is the precondition if a threaded
-  # build ever becomes possible upstream.
+  # **This IS for SharedArrayBuffer now.** It was pre-positioned rather than needed: the note that
+  # stood here said the atomics build "does not compile at all", because bevy_render enabled wgpu's
+  # `fragile-send-sync-non-atomic-wasm` and every wgpu handle went !Send + !Sync under `+atomics`
+  # while RenderDevice/RenderQueue are #[derive(Resource)]. bevy 0.18.1 fixed that upstream —
+  # `WgpuWrapper` becomes a `send_wrapper::SendWrapper` on exactly `wasm32 + atomics` — and a
+  # measured build on 2026-09-06 compiled and linked the whole client with zero errors.
+  #
+  # So these two lines are now load-bearing, and they are the FIRST thing to check if the threaded
+  # bundle stops booting. A page that is not cross-origin isolated cannot construct a
+  # SharedArrayBuffer, the module's linear memory IS one, and the failure is a bare
+  # `WebAssembly.Memory` TypeError that names nothing. `wenilla-host::static_site` and `Trunk.toml`'s
+  # `[serve] headers` set the same pair so local dev and the site agree.
+  #
+  # The fetch/decode worker (`web/packworker.js`) still wants none of this — every asset it loads
+  # is same-origin, which `require-corp` allows unconditionally.
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
 

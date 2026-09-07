@@ -75,6 +75,11 @@ ready. The build is now:
 
   WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # -> web/dist, then web/site
 
+or, for the build with worker threads (nightly + -Zbuild-std + shared memory; same output dirs,
+and it verifies the emitted module really came out threaded):
+
+  scripts/web-build-threads.sh
+
 and the game data is a separate, far slower, one-time job:
 
   cargo run --release -p benilla-packer --bin benilla-pack -- \

@@ -32,6 +32,20 @@ scripts/web-setup.sh                                    # once
 WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist, then web/site
 ```
 
+The same build **with worker threads** — nightly, `-Zbuild-std`, shared memory — is one script, and
+it checks the module it produced rather than the flags that were meant to produce it:
+
+```bash
+scripts/web-build-threads.sh
+```
+
+It needs a cross-origin-isolated origin to run in, because its linear memory is a
+`SharedArrayBuffer`; `web/_headers`, `wenilla-host::static_site` and `Trunk.toml`'s `[serve]` all
+set the same COOP/COEP pair so the site, `--www` and `trunk serve` agree. What the threads
+actually carry is narrow and deliberate — the collider builds and the `par_iter_mut` sweeps, not
+asset loading, which awaits `JsFuture`s and stays on the page's thread. See
+`third_party/bevy_tasks/BENILLA.md`.
+
 Game data is a **separate, far slower, one-time job** — it reads 6.3 GiB of MPQ and writes 3.3 GiB
 of container, so it is not part of the build and must not be re-run per code change:
 

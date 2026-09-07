@@ -24,3 +24,13 @@ export function path_remove_directory() { return ENOSYS; }
 export function path_rename() { return ENOSYS; }
 export function path_unlink_file() { return ENOSYS; }
 export function proc_exit(code) { throw new Error('proc_exit ' + code); }
+// Threads build only: linking Lua against wasi-sdk's `wasm32-wasip1-threads` sysroot pulls this in
+// (`scripts/web-build-threads.sh`; the plain sysroot does not import it). Nothing in the client
+// calls it — it arrives with libc — but an import that is not callable is a LinkError at
+// instantiation and the whole module fails to load, so it has to exist either way.
+//
+// **Returns 0, not ENOSYS**, and that is the deliberate half. `sched_yield` is a hint, and the
+// contract a caller checks is "did the yield succeed", not "did anything actually get scheduled".
+// A no-op that reports success is what a single-threaded agent honestly does with a yield; ENOSYS
+// would make a spin loop that yields politely look like a spin loop that failed.
+export function sched_yield() { return 0; }

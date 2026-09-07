@@ -15,11 +15,18 @@
 // By the time the client's first synchronous `Chain::read` runs, its pack is decoded and resident
 // and the read is a memcpy.
 //
-// **Why not threads.** The plan's original answer was `+atomics` and a shared heap, and it does not
-// compile: `bevy_render` enables wgpu's `fragile-send-sync-non-atomic-wasm`, which makes every wgpu
-// handle `!Send + !Sync` under `+atomics` while `RenderDevice`/`RenderQueue` are `#[derive(Resource)]`
-// and require both. A plain worker exchanging transferable buffers needs no nightly, no `build-std`
-// and no forked Bevy, and it delivers the thing that was actually wanted.
+// **Why this stayed, once threads arrived.** The note here used to say `+atomics` "does not
+// compile" — bevy_render enabled wgpu's `fragile-send-sync-non-atomic-wasm`, every wgpu handle went
+// `!Send + !Sync` under `+atomics`, and `RenderDevice`/`RenderQueue` are `#[derive(Resource)]`. That
+// stopped being true (bevy 0.18.1's `WgpuWrapper`), and the client now has a shared-memory build
+// with real worker threads (`scripts/web-build-threads.sh`).
+//
+// This worker is untouched by that, and it is not redundant. Threads move work that is `Send`;
+// fetching a pack is not. The read path awaits `JsFuture`s and reaches `window` — the resident map
+// is `window.__wenilla_packs` on the main thread's JS heap — so `TaskPool::spawn` on wasm is still
+// the microtask queue and `bevy_asset`'s loads still run on the thread that draws. A worker that
+// owns its own `fetch` and its own decoder is how that work gets off the frame, with or without
+// atomics. See `third_party/bevy_tasks/BENILLA.md` for where the `spawn`/`spawn_pooled` line falls.
 //
 // **Why a second wasm module.** The browser cannot decompress zstd — `DecompressionStream` speaks
 // gzip and deflate only — and a JS re-implementation of the frame format would be a second copy of

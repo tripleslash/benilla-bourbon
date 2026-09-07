@@ -270,6 +270,14 @@ fn evaluate_rig_poses(
         // order — sorted children folded through a LIFO stack, see the module doc). One scratch
         // per worker thread, reused across rigs: a `Vec` per rig per frame was an allocation
         // and a free for every live rig on every frame (decision 1979's floor).
+        //
+        // **`thread_local!` is correct here and is not a stand-in for a global.** It gains one
+        // copy per worker, which is the point — the copies are what make the scratch reusable
+        // without a lock. On the threaded browser build (`third_party/bevy_tasks/BENILLA.md`)
+        // that is now several copies rather than one, which changes nothing about this code and
+        // is worth saying because the tree's OTHER `thread_local!`s exist for the opposite
+        // reason: `benilla_formats::webpack::resident`'s is a global with the right lifetime,
+        // written when wasm had exactly one thread, and it must stay on the main thread.
         thread_local! {
             static ACTIVE: std::cell::RefCell<Vec<Active>> =
                 const { std::cell::RefCell::new(Vec::new()) };

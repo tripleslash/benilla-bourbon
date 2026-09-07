@@ -63,40 +63,7 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         // (user-initiated — above default, below the frame itself). The render thread has no spawn
         // hook; `ThreadQosPlugin` promotes it from inside.
         .set(TaskPoolPlugin {
-            task_pool_options: TaskPoolOptions {
-                io: bevy::app::TaskPoolThreadAssignmentPolicy {
-                    min_threads: 2,
-                    max_threads: 8,
-                    percent: 0.5,
-                    on_thread_spawn: Some(std::sync::Arc::new(|| {
-                        thread_qos::promote_current_thread(thread_qos::QosClass::UserInitiated)
-                    })),
-                    on_thread_destroy: None,
-                },
-                async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                    on_thread_spawn: Some(std::sync::Arc::new(|| {
-                        thread_qos::promote_current_thread(thread_qos::QosClass::UserInitiated)
-                    })),
-                    ..TaskPoolOptions::default().async_compute
-                },
-                compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                    on_thread_spawn: Some(std::sync::Arc::new(|| {
-                        thread_qos::promote_current_thread(thread_qos::QosClass::UserInteractive)
-                    })),
-                    // `WOW_THREADS=1` serialises the systems that run this frame. Not a performance
-                    // dial — a **diagnostic**: a defect that alternates frame to frame with no
-                    // camera, geometry or draw-order change behind it is what an unordered write
-                    // between two systems looks like, and that is separable from every other cause
-                    // only by taking the concurrency away. Anything that survives `WOW_THREADS=1`
-                    // is not a race.
-                    max_threads: match std::env::var("WOW_THREADS").ok().as_deref() {
-                        Some("1") => 1,
-                        _ => TaskPoolOptions::default().compute.max_threads,
-                    },
-                    ..TaskPoolOptions::default().compute
-                },
-                ..default()
-            },
+            task_pool_options: task_pool_options(),
         })
         // Sound is kira behind our own mixer seam (decision 0070). Bevy's `AudioPlugin` used to be
         // disabled here (0530) so it would not open a second, never-used OS output stream — but
@@ -125,4 +92,79 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse (0997).
         .disable::<bevy::gilrs::GilrsPlugin>()
+}
+
+/// The task-pool sizing, split out because the browser wants a different shape and the native
+/// numbers are too hard-won to restate.
+///
+/// See the call site for what each native policy is for. **On the web the split changes**, and the
+/// reason is that only two of the three pools have anything to run on a thread there:
+///
+/// - **IO gets no workers at all.** `TaskPool::spawn` on wasm is the browser's microtask queue, not
+///   a worker — it has to be, because an `AssetReader` read awaits `JsFuture`s and reaches
+///   `window` (`benilla_formats::webpack::resident`), and a `JsValue` cannot leave the agent that
+///   made it. `bevy_asset` spawns every load that way, so IO worker threads would be Web Workers
+///   that never receive a task: a module instance and a stack each, for nothing. The fetch/decode
+///   work that CAN go off-thread already does, in `web/packworker.js`.
+/// - **Async-compute and compute get the machine**, because they are reached through
+///   `spawn_pooled` and `scope`, which do run on workers: the collider builds
+///   (`terrain_stream::collider`) and the `par_iter_mut` sweeps (`model_render::visibility`,
+///   `rig_anim::pose`).
+///
+/// The QoS hooks are left as they are: bevy ignores `on_thread_spawn` under
+/// `all(target_arch = "wasm32", feature = "web")`, and Darwin QoS classes mean nothing to a Web
+/// Worker anyway.
+fn task_pool_options() -> TaskPoolOptions {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut options = TaskPoolOptions {
+        io: bevy::app::TaskPoolThreadAssignmentPolicy {
+            min_threads: 2,
+            max_threads: 8,
+            percent: 0.5,
+            on_thread_spawn: Some(std::sync::Arc::new(|| {
+                thread_qos::promote_current_thread(thread_qos::QosClass::UserInitiated)
+            })),
+            on_thread_destroy: None,
+        },
+        async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+            on_thread_spawn: Some(std::sync::Arc::new(|| {
+                thread_qos::promote_current_thread(thread_qos::QosClass::UserInitiated)
+            })),
+            ..TaskPoolOptions::default().async_compute
+        },
+        compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+            on_thread_spawn: Some(std::sync::Arc::new(|| {
+                thread_qos::promote_current_thread(thread_qos::QosClass::UserInteractive)
+            })),
+            // `WOW_THREADS=1` serialises the systems that run this frame. Not a performance
+            // dial — a **diagnostic**: a defect that alternates frame to frame with no
+            // camera, geometry or draw-order change behind it is what an unordered write
+            // between two systems looks like, and that is separable from every other cause
+            // only by taking the concurrency away. Anything that survives `WOW_THREADS=1`
+            // is not a race.
+            max_threads: match std::env::var("WOW_THREADS").ok().as_deref() {
+                Some("1") => 1,
+                _ => TaskPoolOptions::default().compute.max_threads,
+            },
+            ..TaskPoolOptions::default().compute
+        },
+        ..default()
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        options.io.min_threads = 0;
+        options.io.max_threads = 0;
+        options.io.percent = 0.0;
+        // Half the workers each, and `min_threads: 1` on both so a two-core machine still gets a
+        // thread for each rather than starving one pool to fill the other.
+        options.async_compute.min_threads = 1;
+        options.async_compute.max_threads = usize::MAX;
+        options.async_compute.percent = 0.5;
+        options.compute.min_threads = 1;
+        options.compute.max_threads = usize::MAX;
+        options.compute.percent = 1.0;
+    }
+
+    options
 }

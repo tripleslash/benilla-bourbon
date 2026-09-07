@@ -205,21 +205,52 @@ impl Build {
             // proposal, with the runtime half in wasi-libc's `libsetjmp.a`. `WASI_SDK` names
             // the SDK root (default: `<repo>/tools/wasi-sdk`, where `scripts/web-setup.sh`
             // unpacks it).
+            //
+            // **Two sysroots, chosen by the consuming build's target features.** With
+            // `-Ctarget-feature=+atomics` (the threaded browser build,
+            // `scripts/web-build-threads.sh`), rustc links with `--shared-memory`, and `wasm-ld`
+            // refuses any object that was not itself built with atomics + bulk-memory — which is
+            // every archive in the plain `wasm32-wasip1` sysroot. wasi-sdk ships
+            // `wasm32-wasip1-threads` for exactly this: same ABI, same headers, archives compiled
+            // with the features on. So the whole of threading's cost here is which directory three
+            // `.a` files come from, plus the matching `-m` flags on Lua's own sources.
+            //
+            // `CARGO_CFG_TARGET_FEATURE` is how a build script learns what rustc was told, so this
+            // follows the build rather than being a knob someone has to remember to turn. Lua
+            // itself never spawns a thread and the VM stays `!Send` (`mlua` has no `send`
+            // feature) — the atomics build is about linking beside a shared-memory module, not
+            // about making Lua concurrent. `-pthread` is deliberately NOT passed: it would drag
+            // `wasi:thread-spawn` into the import list for a library that never calls it.
             _ if target == "wasm32-unknown-unknown" => {
                 let sdk = env::var("WASI_SDK")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| manifest_dir.join("../../tools/wasi-sdk"));
                 let sysroot = sdk.join("share/wasi-sysroot");
-                let sys_lib = sysroot.join("lib/wasm32-wasip1");
+                let atomics = env::var("CARGO_CFG_TARGET_FEATURE")
+                    .map(|f| f.split(',').any(|feat| feat == "atomics"))
+                    .unwrap_or(false);
+                // The clang target and the sysroot lib directory share a name; compiler-rt is
+                // filed under the `-unknown-` spelling of the same triple.
+                let triple = if atomics {
+                    "wasm32-wasip1-threads"
+                } else {
+                    "wasm32-wasip1"
+                };
+                let rt_triple = if atomics {
+                    "wasm32-unknown-wasip1-threads"
+                } else {
+                    "wasm32-unknown-wasip1"
+                };
+                let sys_lib = sysroot.join("lib").join(triple);
                 if !sys_lib.join("libsetjmp.a").exists() {
                     Err(format!(
-                        "wasi-sdk not found at {} (set WASI_SDK); need share/wasi-sysroot/lib/wasm32-wasip1/libsetjmp.a",
+                        "wasi-sdk not found at {} (set WASI_SDK); need share/wasi-sysroot/lib/{triple}/libsetjmp.a",
                         sdk.display()
                     ))?;
                 }
                 config
                     .compiler(sdk.join("bin/clang"))
-                    .target("wasm32-wasip1")
+                    .target(triple)
                     .flag(format!("--sysroot={}", sysroot.display()))
                     .flag("-mllvm").flag("-wasm-enable-sjlj")
                     .flag("-fno-exceptions")
@@ -231,17 +262,29 @@ impl Build {
                     // `%d` formats through `long long`, matching the 64-bit `lua_Integer` that
                     // `luaconf.h` defines for wasm32 (see third_party/mlua-sys/BENILLA.md).
                     .define("LUA_USELONGLONG", None);
+                if atomics {
+                    // Spelled out rather than left to the target's defaults: these three are
+                    // exactly the RUSTFLAGS the Rust half carries, and `wasm-ld` compares the
+                    // producing features of every object it is given.
+                    config
+                        .flag("-matomics")
+                        .flag("-mbulk-memory")
+                        .flag("-mmutable-globals");
+                }
                 // The link needs libsetjmp + libc + compiler-rt from the sysroot; `Artifacts`
                 // carries one search dir, so they are copied beside liblua.
                 fs::create_dir_all(&lib_dir)?;
                 for f in &["libsetjmp.a", "libc.a"] {
                     fs::copy(sys_lib.join(f), lib_dir.join(f))?;
                 }
+                let rt_rel = format!("lib/{rt_triple}/libclang_rt.builtins.a");
                 let rt = fs::read_dir(sdk.join("lib/clang"))?
                     .filter_map(|e| e.ok())
-                    .map(|e| e.path().join("lib/wasm32-unknown-wasip1/libclang_rt.builtins.a"))
+                    .map(|e| e.path().join(&rt_rel))
                     .find(|p| p.exists())
-                    .ok_or("wasi-sdk: libclang_rt.builtins.a for wasm32-unknown-wasip1 not found")?;
+                    .ok_or(format!(
+                        "wasi-sdk: libclang_rt.builtins.a for {rt_triple} not found"
+                    ))?;
                 fs::copy(&rt, lib_dir.join("libclang_rt.builtins.a"))?;
                 libs.push("setjmp".to_string());
                 libs.push("c".to_string());

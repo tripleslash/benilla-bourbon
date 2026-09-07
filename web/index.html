@@ -12,6 +12,11 @@
      (2026-08-29) — and the feature list must match what rustc emitted or wasm-opt refuses the
      module.
 
+     `--enable-threads` is on both links unconditionally and is NOT a statement that this build has
+     threads. wasm-opt refuses a module that uses a feature it was not told about, but permitting an
+     unused one costs nothing — so one flag list serves the plain build and the shared-memory one
+     (`scripts/web-build-threads.sh`) alike, and there is no second `index.html` to keep in step.
+
      `--strip-debug --strip-producers` stands in for the old wasm-bindgen
      `--remove-name-section --remove-producers-section`, which Trunk does not expose: wasm-opt's
      `--strip-debug` drops the names section too, so the result is the same and it happens in the
@@ -25,7 +30,7 @@
       data-bindgen-target="web"
       data-cargo-no-default-features data-cargo-features="webgpu"
       data-target-name="wenilla" data-wasm-opt="3"
-      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers"
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers"
       data-no-demangle />
 <!-- The pack fetch/decode Web Worker's wasm half (phase 6): `benilla-pack`'s reader on its own, so
      a pack's zstd stream is undone off the frame thread. `data-type="worker"` is what lets a second
@@ -39,11 +44,18 @@
      the client for the same reason (the feature list must match what rustc emitted). -->
 <link data-trunk rel="rust" href="../crates/wenilla-packdecode/Cargo.toml"
       data-type="worker" data-target-name="packdecode" data-wasm-opt="3"
-      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers" />
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers" />
 <link data-trunk rel="copy-file" href="wasi_stubs.js" />
 <link data-trunk rel="copy-file" href="boot.js" />
 <link data-trunk rel="copy-file" href="packs.js" />
 <link data-trunk rel="copy-file" href="packworker.js" />
+<!-- The task pools' thread spawner and the worker it starts. `threads.js` installs the page
+     contract `window.__wenilla_threads`; `threadworker.js` is one pool thread, and it imports
+     `./wenilla.js` by name, so both must land beside it at the dist root. Shipped in EVERY
+     build: a module without shared memory simply never asks for a thread, and a page that
+     carries two unused scripts is cheaper than two index.html files to keep in step. -->
+<link data-trunk rel="copy-file" href="threads.js" />
+<link data-trunk rel="copy-file" href="threadworker.js" />
 <link data-trunk rel="copy-file" href="platform.js" />
 <!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
      directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
@@ -104,6 +116,14 @@
     }
   })();
 </script>
+<!-- A FALLBACK now, not the mechanism. `wasm-bindgen` emits the Lua VM's WASI imports as the
+     bare specifier `wasi_snapshot_preview1` (it is the wasm import module's name), and this map
+     is what used to resolve it. It only ever worked for the page: import maps are a document
+     feature and a Web Worker inherits none, so every task-pool thread importing `./wenilla.js`
+     died at module resolution with an error event carrying no message. `scripts/stage-packs.sh`
+     now rewrites the specifier to `./wasi_stubs.js` in the built glue, which the page and a
+     worker resolve identically. Kept for a build driven by cargo + wasm-bindgen by hand, with
+     no Trunk hook to do the rewrite. -->
 <script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
 <script>
   // WGSL compile errors are otherwise invisible: wgpu's browser backend never asks the module for
@@ -215,6 +235,13 @@
       });
     })
     .catch((e) => console.warn('platform.js:', e));
+  // **Before `boot(init)`, and that ordering is load-bearing.** `init()` builds the plugin graph,
+  // and `TaskPoolPlugin` creates all three task pools inside it — so the spawner has to be on the
+  // page before the module starts, not merely early. A bridge installed afterwards would find every
+  // pool already built and empty. Cheap and total: on a build without shared memory this installs a
+  // global nothing ever calls.
+  const { installThreads } = await import('./threads.js');
+  installThreads();
   const w = await boot(init);
   bind(w.memory);
 </script>

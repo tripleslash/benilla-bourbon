@@ -379,8 +379,6 @@ dependencies = [
 [[package]]
 name = "async-executor"
 version = "1.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -1143,8 +1141,6 @@ dependencies = [
 [[package]]
 name = "bevy_ecs"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9cf7a3ee41342dd7b5a5d82e200d0e8efb933169247fce853b4ad633d51e87d"
 dependencies = [
  "arrayvec",
  "bevy_ecs_macros",
@@ -1773,8 +1769,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "243523e33fe5dfcebc4240b1eb2fc16e855c5d4c0ea6a8393910740956770f44"
 dependencies = [
  "async-channel",
  "bevy_app",
@@ -1960,8 +1954,6 @@ dependencies = [
 [[package]]
 name = "bevy_tasks"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384eb04d80aa38664d69988fd30cbbe03e937ecb65c66aa6abe60ce0bca826aa"
 dependencies = [
  "async-channel",
  "async-executor",
@@ -7742,6 +7734,7 @@ dependencies = [
  "benilla-app",
  "benilla-buildstamp",
  "console_error_panic_hook",
+ "js-sys",
  "wasm-bindgen",
 ]
 

@@ -88,6 +88,24 @@ export async function boot(init, opts = {}) {
   try {
     w = await init({ module_or_path: wasm });
   } catch (e) {
+    // **Cross-origin isolation, checked here rather than up front.** The threaded build's linear
+    // memory is a SharedArrayBuffer, and a page that is not cross-origin isolated cannot construct
+    // one — so `init()` throws before anything else happens, with a message
+    // (`WebAssembly.Memory(): shared memory is not enabled`) that names the symptom and not the
+    // cause. Checking after the failure rather than before it keeps the PLAIN build unaffected:
+    // that one has ordinary memory, needs no isolation, and must not be refused for lacking it.
+    //
+    // `web/_headers` sets COOP/COEP on the site, `wenilla-host::static_site` for `--www` and
+    // `Trunk.toml`'s `[serve]` for `trunk serve`. If this fires, one of those three is not in play
+    // — most likely the page is being served by something else entirely.
+    if (typeof crossOriginIsolated !== 'undefined' && !crossOriginIsolated) {
+      ui.fail(
+        'This build needs cross-origin isolation (COOP/COEP) and this page does not have it, ' +
+          'so its shared memory could not be created. Serve it with ' +
+          'Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.'
+      );
+      throw e;
+    }
     ui.fail('The client failed to start: ' + (e && e.message ? e.message : e));
     throw e;
   }

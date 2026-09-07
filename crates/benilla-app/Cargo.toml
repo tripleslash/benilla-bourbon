@@ -227,6 +227,9 @@ js-sys = "0.3"
 # cannot perturb the device the mixer owns.
 web-sys = { version = "0.3", features = [
     "Window",
+    # `navigator.hardwareConcurrency` — how many worker threads the task pools ask for
+    # (`web_threads`). The only thing this crate reads off Navigator.
+    "Navigator",
     "Location",
     "Storage",
     "AudioBuffer",

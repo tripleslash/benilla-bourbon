@@ -63,6 +63,34 @@ mlua-sys = { path = "third_party/mlua-sys" }
 # kira 0.12.1 with one patch: spatial gains and the volume tween evaluated per CHUNK and
 # interpolated, not per frame (decision 1945; `third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
+# bevy_tasks 0.18.1, forked so the browser build can have threads at all. Upstream gates its
+# `multi_threaded` alias on `target_arch` rather than `target_feature`, which makes "wasm" and "has
+# no threads" the same statement — they stopped being the same statement when the browser got shared
+# memory. The fork also supplies the threads themselves (`std::thread::spawn` is the `unsupported`
+# stub on wasm32 even with atomics) and keeps the main thread out of `Atomics.wait`, which traps
+# there rather than erroring. One patch entry covers the graph: every bevy crate depends on this one.
+# `third_party/bevy_tasks/BENILLA.md` has the hunk list and the verifying diff.
+bevy_tasks = { path = "third_party/bevy_tasks" }
+# bevy_ecs 0.18.1, forked for the same reason and in the same shape: 13 threading gates in
+# `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
+# "has no threads". Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
+# purpose — decisions 1366/1437 measured the multi-threaded executor as a LOSS on this app
+# (~60% of Update systems are non-Send), and `benilla_app::run` sets the kinds explicitly
+# anyway. `third_party/bevy_ecs/BENILLA.md` has the list and the verifying diff.
+bevy_ecs = { path = "third_party/bevy_ecs" }
+# async-executor 1.14.0, forked for ONE `use` line. It guards its state with `std::sync::Mutex` and
+# `RwLock`, which on wasm32+atomics are futex-based — and the browser main thread may not execute
+# `memory.atomic.wait32`: it throws rather than waiting. This executor is shared between that thread
+# and the Web Worker pool, so the locks are contended across the boundary on every frame that runs a
+# `par_iter_mut`. The fork swaps them for spin equivalents on that target alone.
+# `third_party/async-executor/BENILLA.md` has the argument and the verifying diff.
+async-executor = { path = "third_party/async-executor" }
+# bevy_render 0.18.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
+# `SendWrapper` under wasm+atomics and panics if dereferenced off its creating thread; upstream
+# guards `renderer/mod.rs` for exactly that and misses `batching::gpu_preprocessing`, which hands
+# `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
+# scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
+bevy_render = { path = "third_party/bevy_render" }
 
 # Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
 # unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.

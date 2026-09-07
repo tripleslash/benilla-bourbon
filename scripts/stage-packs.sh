@@ -47,6 +47,36 @@ for candidate in "${TRUNK_STAGING_DIR:-}" web/dist/.stage web/dist; do
 done
 [ -n "${DIST}" ] || { echo "no build found in web/dist or web/dist/.stage — run \`trunk build --release\` first" >&2; exit 1; }
 echo "staging from ${DIST}"
+
+# ---------------------------------------------------------------------------------------------
+# Rewrite the glue's ONE bare module specifier, before anything links or copies this build.
+#
+# `wasm-bindgen --target web` emits `import * as importN from "wasi_snapshot_preview1"` — one line
+# per WASI function the C Lua VM imports — because that is the wasm import module's NAME, and
+# wasm-bindgen has no way to know it is meant to be a file. `web/index.html` resolves it with an
+# import map, which works for the page and **does not work for a Web Worker**: import maps are a
+# document feature, a worker does not inherit the page's, and there is no way to give one its own.
+#
+# So a worker that imports `./wenilla.js` — which is every task-pool thread (`web/threadworker.js`)
+# — fails at module resolution before it runs a line. The failure surfaces as an `error` event on
+# the Worker with no message, no filename and no line number, which is as close to undebuggable as
+# the platform gets. Measured 2026-09-06: 15 workers, 15 opaque error events, empty pools.
+#
+# Rewriting the specifier to the relative path the import map pointed at makes the page and the
+# worker resolve it the same way, through the ordinary module resolver. `index.html` keeps its
+# import map as a fallback for anyone driving cargo + wasm-bindgen by hand without this hook.
+#
+# **Here, and not in `scripts/web-build-threads.sh`.** This must happen before the `cp -l` below:
+# the site is HARDLINKED to these files, `sed -i` replaces an inode rather than editing one, and
+# a rewrite afterwards would fix `dist` while leaving `site` pointing at the old bytes.
+for js in "${DIST}"/*.js; do
+  [ -f "${js}" ] || continue
+  if grep -q 'wasi_snapshot_preview1' "${js}" 2>/dev/null; then
+    sed -i -e 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g'            -e "s|from 'wasi_snapshot_preview1'|from './wasi_stubs.js'|g" "${js}"
+    echo "  rewrote the wasi_snapshot_preview1 specifier in $(basename "${js}") (workers have no import map)"
+  fi
+done
+# ---------------------------------------------------------------------------------------------
 [ -d "${PACKS}" ] || echo "warning: no ${PACKS} — staging the client with no game data (benilla-pack build)" >&2
 
 mkdir -p "${SITE}"

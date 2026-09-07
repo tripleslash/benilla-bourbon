@@ -40,6 +40,16 @@ downgrade, and it is the entire reason this is a one-hunk fork rather than a ven
 5.1 and only 5.1, and a fork that still *offered* the other four would answer a request for one with
 a missing directory at build time instead of a compile error.
 
+`src/lib.rs`'s **wasm32 browser arm** gained a second sysroot. It compiles the C sources against
+the wasi-sdk sysroot, and since the threading work it picks *which* one out of
+`CARGO_CFG_TARGET_FEATURE`: `wasm32-wasip1` normally, `wasm32-wasip1-threads` when the consuming
+build set `-Ctarget-feature=+atomics`. That is not a tuning choice — rustc links an atomics build
+with `--shared-memory`, and `wasm-ld` rejects any object compiled without the matching features, so
+the plain sysroot's `libc.a`, `libsetjmp.a` and `libclang_rt.builtins.a` cannot go into the threaded
+module at all. Lua itself stays single-threaded and `-pthread` is deliberately NOT passed — it
+would drag `wasi:thread-spawn` into the import list for a library that never spawns anything. The
+only thing that changes is which archives Lua links beside.
+
 | file | hunk | why | record |
 |---|---|---|---|
 | `lvm.c` | 5.0's `OP_TFORPREP` table→`next` substitution, folded into the top of `OP_TFORLOOP` | `for k, v in someTable do` raised "attempt to call a table value"; it was the first session-start error for **60** corpus addons | 1215 |

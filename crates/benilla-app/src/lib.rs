@@ -198,6 +198,10 @@ pub mod webenv;
 // feature that compiles the desktop instrument stack out is what would make it unshippable.
 mod webdiag;
 mod webprogress;
+// Web Worker threads for the browser build's task pools — the platform half of the forked
+// `bevy_tasks`'s thread-spawner hook. Inert on every other target, and inert on a browser build
+// without shared memory.
+mod web_threads;
 mod world_backdrop;
 mod world_state;
 mod world_state_ui;
@@ -328,6 +332,11 @@ pub fn run(build: BuildId) -> AppExit {
         dev::print_scenario_names();
         return AppExit::Success;
     }
+
+    // **Before anything builds a task pool.** `TaskPoolPlugin` creates all three inside
+    // `Plugin::build`, so the spawner and the thread count have to be in place ahead of
+    // `add_plugins`, not merely early. Compiles to nothing off a shared-memory browser build.
+    web_threads::install();
 
     let mut app = App::new();
     // The stamp is plain data from here on — the panel footer and preflight banner read it back.
@@ -914,6 +923,17 @@ pub fn run(build: BuildId) -> AppExit {
     // runs everything on the render thread (`get_metal_layer cannot be called in non-ui thread`,
     // a startup panic). One system pins the schedule; its 1.06 ms/f self stays on the table
     // until that coupling changes upstream.
+    //
+    // **On wasm all of this is already true and none of it is a choice.** `ExecutorKind`'s default
+    // is `SingleThreaded` on `target_arch = "wasm32"`, and `third_party/bevy_ecs` deliberately does
+    // NOT touch that gate (only the `par_iter` ones) — so every schedule the fork does not name,
+    // `Render` and `ExtractSchedule` included, is single-threaded there whatever this block does.
+    // That is required rather than merely convenient: under `+atomics` `bevy_render`'s
+    // `WgpuWrapper` is a `send_wrapper::SendWrapper`, which panics the moment its value is touched
+    // or dropped off the thread that made it, and the render app's thread is the page's. The other
+    // half of the same guarantee is upstream's: `PipelinedRenderingPlugin` is gated on a bare
+    // `not(target_arch = "wasm32")`, so it never joins the graph and there is no render thread for
+    // anything to be routed to.
     //
     // Lives HERE, not beside its siblings: the render sub-app only exists once the plugin chain
     // has built (pipelining detaches it at cleanup, later still).
