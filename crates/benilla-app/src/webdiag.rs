@@ -329,6 +329,11 @@ fn report(world: &mut World) {
     }
 
     let counts = census(world);
+    // Taken here, before `Diag` is borrowed: `report` holds that borrow to the end of the line it
+    // is building, and the streamer's counters live in a second resource.
+    let activity = world
+        .get_resource_mut::<benilla_world::terrain_stream::StreamActivity>()
+        .map(|mut a| std::mem::take(&mut *a));
     let mut d = world.resource_mut::<Diag>();
     d.next_report = now + REPORT_SECS;
 
@@ -395,6 +400,15 @@ fn report(world: &mut World) {
                 line.push_str(&format!(" {name}={ms:.1}"));
             }
         }
+    }
+    // Which STREAMING system spent the frame. The counters already existed and were already
+    // written on every target — `benilla_world`'s streamer has self-timed its five systems since
+    // 0832 — but the only consumer was `perf::trace`, which is behind the `dev` feature and so is
+    // not in the web build at all. On this target they were therefore write-only: nothing read
+    // them, and nothing cleared them either. Reading them here is most of the answer to "what is
+    // left on the frame thread now that decode is off it", and it costs one `take` per report.
+    if let Some(stream) = activity.and_then(|a| stream_line(a, n)) {
+        line.push_str(&stream);
     }
     // State writes are `localStorage.setItem` on this thread — synchronous, and charged to
     // whatever frame made them. A file here whose ms and bytes both climb with the session is a
@@ -520,6 +534,45 @@ fn short(full: &str) -> String {
     let base = full.split('<').next().unwrap_or(full);
     let segs: Vec<&str> = base.split("::").collect();
     segs[segs.len().saturating_sub(2)..].join("::")
+}
+
+/// The streamer's five self-timed systems, as **per-frame ms over the window**, plus what they
+/// actually produced — or `None` on a window where the streamer did nothing at all.
+///
+/// The ms are the question ("which system is spending the frame"); the counts are what keeps the
+/// answer honest, because a lane that is expensive *because it is doing a lot* reads completely
+/// differently from one that is expensive per item. `mfurnish` at 3 ms with `mmesh=0` is a bug;
+/// `mfurnish` at 3 ms with `mmesh=1400` is the paced budget working as designed.
+///
+/// The caller **takes the resource**, which is safe for a reason worth stating rather than assuming: the
+/// counters are per-frame by contract and `perf::trace` is what clears them — and `perf` is `dev`,
+/// so on the web nothing has ever cleared them and nothing has ever read them (`any_event` has no
+/// caller outside that module). Taking them per report is therefore not stealing a reading from
+/// another consumer; it is giving them their first one on this target.
+fn stream_line(a: benilla_world::terrain_stream::StreamActivity, frames: usize) -> Option<String> {
+    let per = |ms: f32| if frames > 0 { ms / frames as f32 } else { 0.0 };
+    let busy = a.stream_ms + a.furnish_ms + a.mfurnish_ms + a.spawn_ms + a.collider_ms;
+    // A settled world runs every one of these systems every frame and spends ~nothing in them;
+    // a line of zeroes each report would bury the windows that matter.
+    if busy < 0.05 && !a.any_event() {
+        return None;
+    }
+    Some(format!(
+        "
+[diag]   stream ms/f: furnish={:.2} mfurnish={:.2} spawn={:.2} collider={:.2}          stream={:.2} prov={:.2} | cells={} mmesh={} placed={} attached={} tiles={} prov_live={}",
+        per(a.furnish_ms),
+        per(a.mfurnish_ms),
+        per(a.spawn_ms),
+        per(a.collider_ms),
+        per(a.stream_ms),
+        per(a.provisional_ms),
+        a.cells_spawned,
+        a.model_meshes_built,
+        a.placements_spawned,
+        a.colliders_attached,
+        a.tiles_spawned,
+        a.provisional_live,
+    ))
 }
 
 /// Worker threads on the two pools offloaded work reaches, as `async/compute`.
