@@ -295,14 +295,15 @@ pub use benilla_world::build_id::BuildId;
 pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
 
-/// Take `LogPlugin` off the **web** build while the stutter probe is armed, so the browser console
-/// carries the probe's lines and nothing else.
+/// Take `LogPlugin` off the **web** build — always in a shipped one, and in a debug one while the
+/// stutter probe is armed, so the browser console carries the probe's lines and nothing else.
 ///
 /// A browser console has no `grep` and no scrollback a reader can pipe: the one thing a player can
 /// do with it is select all and paste, and at `info` the client writes enough per second that a
 /// probe line is unfindable in the paste. So diagnostic mode owns the console outright —
 /// [`webdiag`] writes through `console.log` directly, precisely so it still speaks with no
-/// subscriber installed. `?diag=0` puts the ordinary log back (and silences the probe).
+/// subscriber installed. In a debug build `?diag=0` puts the ordinary log back (and silences the
+/// probe); in a shipped one the log is gone either way and `?diag=1` is what turns the probe on.
 ///
 /// Native is never touched: [`webdiag::armed`] is false off wasm32, so a `cargo run` logs as it always
 /// has. Panics still reach the console either way — `wenilla`'s shim sets `console_error_panic_hook`
@@ -310,7 +311,16 @@ pub use bevy::app::AppExit;
 fn quiet_console_on_web(
     plugins: bevy::app::PluginGroupBuilder,
 ) -> bevy::app::PluginGroupBuilder {
-    if webdiag::armed() {
+    // **A shipped browser build writes nothing to the console.** Two reasons it is off rather than
+    // merely quiet: every line is a wasm→JS bridge call, and `LogPlugin`'s web subscriber makes one
+    // per event with no batching — so an `info!` in a per-frame system is a per-frame crossing that
+    // nobody reads. `?diag=1` swaps the ordinary log for the probe (which owns the console when it
+    // is on — see `webdiag::armed`), and neither is on by default here.
+    //
+    // A DEBUG wasm build keeps the old rule: the log unless the probe is armed. That is the build a
+    // person is looking at a console for.
+    let web_release = cfg!(target_arch = "wasm32") && !cfg!(debug_assertions);
+    if web_release || webdiag::armed() {
         return plugins.disable::<bevy::log::LogPlugin>();
     }
     plugins

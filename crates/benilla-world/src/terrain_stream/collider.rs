@@ -128,6 +128,8 @@ pub(super) fn finish_colliders(
     // `stream_terrain` already applies to its tile spawns).
     let mut attached = 0u32;
     let deadline = Instant::now() + ATTACH_BUDGET;
+    /// Attaches between deadline checks — see the check below.
+    const DEADLINE_STRIDE: u32 = 16;
     for entity in ready {
         // The entity may have streamed out (despawned) while its collider was building, or had its
         // slot reused — a no-op rather than a panic.
@@ -148,7 +150,14 @@ pub(super) fn finish_colliders(
             entity_mut.insert(layers);
         }
         attached += 1;
-        if Instant::now() >= deadline {
+        // **The clock is read every [`DEADLINE_STRIDE`] attaches, not every one.** On the web
+        // `Instant::now()` is `performance.now()` across the wasm→JS boundary, and this loop can
+        // run several hundred times in a frame during a stream-in — so a per-iteration check
+        // spends a bridge call to save a fraction of an attach. The budget still bites: the
+        // overshoot it buys back is at most a stride of the *cheapest* attaches, which is what
+        // this loop is made of once the expensive part (the build) has already happened
+        // off-thread.
+        if attached % DEADLINE_STRIDE == 0 && Instant::now() >= deadline {
             break;
         }
     }

@@ -266,7 +266,24 @@ fn render_census(world: &mut World) {
 /// nothing else. One flag, because the two are one intent — *diagnostic mode* is a console with
 /// only the diagnostic on it, and `?diag=0` restores both the probe's silence and the ordinary log.
 pub(crate) fn armed() -> bool {
-    cfg!(target_arch = "wasm32") && crate::webenv::var("WOW_DIAG").as_deref() != Some("0")
+    if !cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    match crate::webenv::var("WOW_DIAG").as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        // **Release is silent by default; a debug build still talks.** Every line this probe emits
+        // is a `console.log`, which is a wasm→JS bridge call — and the probe is not one line a
+        // frame, it is a `performance.now()` at each of thirteen schedule marks *per frame* before
+        // it prints anything. That is the right price for a diagnostic and the wrong one for a
+        // player who never opens the console, so a shipped build pays neither: `armed()` false
+        // takes the marks, the stamps and the report out of the schedule entirely (see `plugin`,
+        // which returns before adding any of them).
+        //
+        // `?diag=1` is the way back, and it is the same URL the last three stutter reports came
+        // from — nothing about the instrument changed except who has to ask for it.
+        _ => cfg!(debug_assertions),
+    }
 }
 
 /// One exclusive stamp closing the named span.
