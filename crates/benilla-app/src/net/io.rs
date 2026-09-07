@@ -42,6 +42,19 @@ use crossbeam_channel::{Receiver, Sender};
 
 use super::{CharRequest, ChatKind, ClientCommand};
 
+/// Say a login failure out loud, on every path that ends one.
+///
+/// Through bevy's log **and**, on the web, straight to the browser console. The duplication is
+/// deliberate: the screen shows a mapped, player-facing string and the chain that produced it used
+/// to go nowhere, so a login could fail with an empty console — the one situation where a bug
+/// report has nothing to carry. Going direct as well means the message survives a log subscriber
+/// that is missing, filtered, or wedged.
+fn say_login_failed(what: &str) {
+    bevy::log::warn!("{what}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(what));
+}
+
 /// **The inbound census** — every packet the read thread pulls off the world socket, whatever its
 /// opcode, and the wall-clock of the most recent one (unix ms). Two numbers, one job: telling a
 /// *silent server* apart from a *dead socket* (decision 0621).
@@ -428,6 +441,10 @@ async fn run(
         let _ = events_tx.send(SessionEvent::LoginStage { stage: s });
     };
     let fail = |refusal: Option<benilla_protocol::LoginRefusal>, reason: String| {
+        // The screen shows a mapped, player-facing string; the chain that produced it went
+        // nowhere. On the web that meant a login could fail with an empty console, which is the
+        // one place a bug report has nothing to carry.
+        say_login_failed(&format!("net: login failed — {reason}"));
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal,
             reason,
@@ -440,6 +457,7 @@ async fn run(
     // now that the address is something a player types (1667). Kept separate from `fail` so the
     // classification happens once, at the one place holding the error object.
     let fail_dial = |dial: benilla_protocol::DialFailure, reason: String| {
+        say_login_failed(&format!("net: login failed to dial {} — {reason}", dial.address));
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal: None,
             reason,
@@ -450,6 +468,7 @@ async fn run(
     };
     // A failure resubmitting cannot fix — the app shows it and stops (no paced retry).
     let fail_terminal = |reason: String| {
+        say_login_failed(&format!("net: login failed (terminal) — {reason}"));
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal: None,
             reason,

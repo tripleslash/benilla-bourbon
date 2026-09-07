@@ -230,6 +230,10 @@ web-sys = { version = "0.3", features = [
     # `navigator.hardwareConcurrency` — how many worker threads the task pools ask for
     # (`web_threads`). The only thing this crate reads off Navigator.
     "Navigator",
+    # A login failure has to be visible even if the log subscriber is not: `net::io` reports it
+    # through bevy's log AND straight to the console, because the one place a bug report has
+    # nothing to carry is a page that failed silently.
+    "console",
     "Location",
     "Storage",
     "AudioBuffer",

@@ -147,8 +147,28 @@ impl Conn {
             ws.set_onopen(None);
             ws.set_onerror(None);
             ws.set_onclose(None);
-            opened.map_err(|_| {
-                io::Error::new(ErrorKind::ConnectionRefused, format!("cannot open {url}"))
+            opened.map_err(|e| {
+                // **Say WHY.** The rejection value is the `close`/`error` event that beat `open`,
+                // and a `CloseEvent` carries the code and reason the other end gave — which is the
+                // difference between "cannot open <url>" (true of every failure, and actionable
+                // for none) and "the gateway accepted the upgrade and then hung up 1011". A dial
+                // that fails after a successful 101 looks identical to one that never connected
+                // unless this is reported, and telling those apart by hand costs a packet capture.
+                let detail = e
+                    .dyn_ref::<web_sys::CloseEvent>()
+                    .map(|c| {
+                        let reason = c.reason();
+                        if reason.is_empty() {
+                            format!("closed with code {}", c.code())
+                        } else {
+                            format!("closed with code {} ({reason})", c.code())
+                        }
+                    })
+                    .unwrap_or_else(|| "socket error before open".to_string());
+                io::Error::new(
+                    ErrorKind::ConnectionRefused,
+                    format!("cannot open {url}: {detail}"),
+                )
             })?;
         }
 
