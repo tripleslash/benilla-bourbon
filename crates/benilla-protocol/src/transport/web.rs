@@ -282,7 +282,28 @@ impl Write for ConnWriter {
 /// `write_all` on the upstream socket, so a packet stays a packet across the relay. `send` buffers
 /// and returns, which is why writes never had to become `async`.
 fn send(sock: &Socket, buf: &[u8]) -> io::Result<usize> {
-    sock.ws.send_with_u8_array(buf).map_err(js_err)?;
+    // **Copy out of linear memory before sending, and that is not an optimisation to undo.**
+    //
+    // `send_with_u8_array` hands `send` a `Uint8Array` VIEW over wasm memory. In the shared-memory
+    // build (`scripts/web-build-threads.sh`) that memory is a `SharedArrayBuffer`, and
+    // `WebSocket.send` refuses a shared-backed view outright:
+    //
+    //     Failed to execute 'send' on 'WebSocket':
+    //     The provided ArrayBufferView value must not be shared.
+    //
+    // Which is how a login could reach 101 and then send nothing at all: the socket was fine and
+    // every packet bounced off `send`. The spec forbids it because `send` may read the buffer
+    // asynchronously and another thread could write it underneath.
+    //
+    // So allocate on the JS heap, copy, and send that — an ordinary `ArrayBuffer`, which `send`
+    // accepts. One code path rather than a `cfg`: `send_with_u8_array` copies inside the browser
+    // anyway, the packets are tens to hundreds of bytes, and a transport that behaves the same on
+    // both builds is worth more than an allocation this size.
+    let array = js_sys::Uint8Array::new_with_length(buf.len() as u32);
+    array.copy_from(buf);
+    sock.ws
+        .send_with_array_buffer(&array.buffer())
+        .map_err(js_err)?;
     Ok(buf.len())
 }
 
