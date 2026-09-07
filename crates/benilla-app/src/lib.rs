@@ -30,6 +30,25 @@
 // (a `cfg` attribute per item) would spread seam knowledge back across the gameplay modules 1174
 // spent its whole diff clearing it out of. Dev builds still warn normally.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
+// **Nightly, but only on the one target that is already nightly.** The audio render worker waits on
+// the worklet's read index with `core::arch::wasm32::memory_atomic_wait32`
+// (`sound::web_output::render_loop`) — the wasm instruction a Web Worker is allowed to execute and
+// the page's main thread is not, and the only way to block on a counter a JavaScript
+// `Atomics.notify` will wake. It is still unstable (rust#77839).
+//
+// The `cfg_attr` is what keeps that off every other build: on stable, native or wasm without
+// atomics, the predicate is false and no `feature` attribute is emitted at all. The threaded
+// browser build is nightly regardless — `scripts/web-build-threads.sh` needs `-Zbuild-std` to
+// compile std with `+atomics` in the first place — so this asks nothing of it that it did not
+// already require.
+//
+// The stable alternative is `js_sys::Atomics::wait_with_timeout`, which is a JS call per wait on a
+// path whose whole point is not to cross the boundary; it is the fallback if this feature is ever
+// withdrawn rather than stabilised.
+#![cfg_attr(
+    all(target_arch = "wasm32", target_feature = "atomics"),
+    feature(stdarch_wasm_atomic_wait)
+)]
 
 /// The realtime-audio allocation tripwire (decision 1857). In debug builds an allocation inside
 /// the output IO callback or the render pass (`sound::output`'s `no_alloc` scopes) aborts the

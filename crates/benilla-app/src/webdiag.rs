@@ -49,10 +49,16 @@
 //! and the first streaming burst — all of which legitimately add tens of thousands of entities —
 //! do not sit in the number as a permanent, meaningless `+`.
 //!
-//! **Web-only, and on by default there.** This is a diagnostic build's instrument: the reporter
-//! reaches for `console.log` directly rather than the `tracing` subscriber, so it still speaks
-//! after `LogPlugin` is taken off the web build (`crate::quiet_console_on_web`) to leave the
-//! console carrying nothing but these lines. `?diag=0` silences it.
+//! **Web-only, and opt-in on a shipped build.** This is a diagnostic build's instrument: the
+//! reporter reaches for `console.log` directly rather than the `tracing` subscriber, so it still
+//! speaks after `LogPlugin` is taken off the web build (`crate::quiet_console_on_web`) to leave the
+//! console carrying nothing but these lines.
+//!
+//! In a **debug** build it is on unless `?diag=0`. In a **release** one it is off unless `?diag=1`,
+//! because every line is a wasm→JS bridge call and the probe takes an `Instant::now()` — which is
+//! `performance.now()` across that boundary — at each of thirteen schedule marks *every frame*
+//! before it prints anything. A player who never opens the console should pay for none of it, and
+//! [`armed`] false takes the marks, the stamps and the report out of the schedule entirely.
 //!
 //! It lives here rather than under `perf` for a build reason worth stating: `perf` is behind the
 //! `dev` feature, and the web build is `--no-default-features --features webgpu` (see `Trunk.toml`)
@@ -405,7 +411,7 @@ fn report(world: &mut World) {
     let mut line = format!(
         "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} decode={decode:.1} \
          | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} | mesh={} {} img={} {} mat={} {} \
-         | wasm={} {} js={} {} | thr={} pipes={}",
+         | wasm={} {} js={} {} | thr={} pipes={} audio={}",
         d.slow,
         counts.entities,
         signed(de),
@@ -424,6 +430,7 @@ fn report(world: &mut World) {
         signed_mb(dj),
         worker_threads(),
         pipes,
+        audio_field(),
     );
 
     // What a slow frame was made of, averaged over the slow frames in this window only.
@@ -614,6 +621,40 @@ fn stream_line(a: benilla_world::terrain_stream::StreamActivity, frames: usize) 
         a.tiles_spawned,
         a.provisional_live,
     ))
+}
+
+/// Which output the mix is playing through, and whether it is keeping up.
+///
+/// Three facts, because they fail independently and sound identical:
+///
+/// - **`worklet` vs `cpal`** — did `sound::web_output` get the `AudioWorklet` (drain on the
+///   browser's audio thread, fill on a Web Worker, neither of them the thread that draws), or did
+///   it fall back to kira's cpal backend, whose `ScriptProcessorNode` callback runs on the main
+///   thread with the mix inside it? On `cpal` every frame hitch is audible by construction, and a
+///   report of stuttering sound means something completely different than it does on `worklet`.
+/// - **`ctx=`** — `AudioContext.state`. `suspended` is a tab still waiting on a user gesture, which
+///   is silence with no fault at all.
+/// - **`under=`** — frames the worklet had to invent because the ring was empty, since boot. The
+///   one audible failure this design leaves, counted rather than guessed. It should stay at 0; a
+///   number that climbs means the render worker is not keeping ahead.
+#[cfg(target_arch = "wasm32")]
+fn audio_field() -> String {
+    format!(
+        "{} ctx={} under={}",
+        if crate::sound::web_output::on_worklet() {
+            "worklet"
+        } else {
+            "cpal"
+        },
+        crate::sound::web_output::context_state(),
+        crate::sound::web_output::underruns(),
+    )
+}
+
+/// Native has its own owned output layer and its own meters (`sound::output`); nothing here.
+#[cfg(not(target_arch = "wasm32"))]
+fn audio_field() -> String {
+    String::new()
 }
 
 /// `+new/pending` for the pipeline cache this window, or `-` where there is no cache to ask

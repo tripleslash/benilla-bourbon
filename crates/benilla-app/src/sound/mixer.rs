@@ -53,11 +53,18 @@ use super::output::{self, Event, OutputBackend, OutputSettings};
 /// CoreAudio on macOS (decision 1857) and cpal everywhere else (1920), one ring, one render
 /// thread and one set of meters above a single platform seam.
 ///
-/// **wasm32 is the exception, and it is not a port that is merely missing.** That layer's shape
-/// is a render thread running ahead of the device into a ring, and the page has no threads to
-/// give it — so the browser build plays through kira's own cpal backend instead, which on wasm32
-/// is Web Audio, whose context the autoplay policy suspends until a gesture resumes it (the
-/// page's own hook, `web/index.html`).
+/// **wasm32 has its own, for the same reasons and in the same shape.** The paragraph that used to
+/// stand here said the browser could not have this layer — "the page has no threads to give it" —
+/// and so played through kira's cpal backend, which on wasm32 is Web Audio through a
+/// `ScriptProcessorNode` whose callback runs **on the main thread, with the mix inside it**. That
+/// made every frame hitch audible: the 292 ms frame in the 2026-09-07 stutter report is ~27 missed
+/// device cycles. The page has threads now, so [`super::web_output`] is the same idea built out of
+/// what a browser has — an `AudioWorklet` for the drain (the browser's own audio thread, which
+/// nothing the page does can block) and a Web Worker for the fill. It keeps kira's cpal backend
+/// inside it as the degradation, so a page that cannot do better still plays exactly as it did.
+///
+/// The autoplay policy is unchanged either way: a context is suspended until a gesture resumes it
+/// (the page's own hook, `web/index.html`).
 ///
 /// The consequence for the mix-health report: the owned backend's deadline meters
 /// ([`OutputWindow`]) do not exist on the page. There [`MixHealth`] carries what kira's backend
@@ -66,7 +73,7 @@ use super::output::{self, Event, OutputBackend, OutputSettings};
 #[cfg(not(target_arch = "wasm32"))]
 type PlatformBackend = OutputBackend;
 #[cfg(target_arch = "wasm32")]
-type PlatformBackend = CpalBackend;
+type PlatformBackend = super::web_output::WebOutput;
 
 /// The output backend's per-window meters, re-exported for the report in `sound::poll_mix_health`.
 pub(super) type OutputWindow = Window;

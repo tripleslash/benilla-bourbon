@@ -56,6 +56,13 @@
      carries two unused scripts is cheaper than two index.html files to keep in step. -->
 <link data-trunk rel="copy-file" href="threads.js" />
 <link data-trunk rel="copy-file" href="threadworker.js" />
+<!-- The output. `audio.js` installs `window.__wenilla_audio`; `audioworklet.js` is loaded by
+     `audioWorklet.addModule` at a URL resolved relative to `audio.js`, so both must land beside
+     each other at the dist root. Shipped in EVERY build, like the thread pair above: a module
+     that cannot use them (no shared memory, no AudioContext) simply falls back to kira's cpal
+     backend and never asks. -->
+<link data-trunk rel="copy-file" href="audio.js" />
+<link data-trunk rel="copy-file" href="audioworklet.js" />
 <link data-trunk rel="copy-file" href="platform.js" />
 <!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
      directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
@@ -242,6 +249,12 @@
   // global nothing ever calls.
   const { installThreads } = await import('./threads.js');
   installThreads();
+  // Beside the threads and for the same reason: the mixer is built inside the plugin graph
+  // `init()` constructs, so `window.__wenilla_audio` has to be on the page before the module
+  // starts. A bridge installed afterwards would find the device already opened kira's cpal way —
+  // the main-thread `ScriptProcessorNode` that makes every frame hitch audible.
+  const { installAudio } = await import('./audio.js');
+  installAudio();
   const w = await boot(init);
   bind(w.memory);
 </script>

@@ -59,6 +59,10 @@ mod weather;
 // Every audio path on this target reads through it; native decodes inline as it always has.
 #[cfg(target_arch = "wasm32")]
 mod web_decode;
+// The browser's output — an `AudioWorklet` drain and a Web Worker fill, so neither half of the mix
+// sits on the thread that draws. What the comment above `output` used to say was impossible.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web_output;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 /// First-play kit decodes so far (`kit::DECODES`) — the probe's tail annotation.

@@ -42,7 +42,7 @@
 pub fn install() {}
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub use imp::install;
+pub use imp::{install, spawn_detached};
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 mod imp {
@@ -96,26 +96,21 @@ mod imp {
     /// to [`wenilla_thread_entry`], which is the only thing that ever reads it, exactly once.
     type Body = Box<dyn FnOnce() + Send + 'static>;
 
-    /// Start one pool thread as a Web Worker.
-    fn spawn(request: ThreadRequest) -> Result<SpawnedThread, ThreadRequest> {
-        let ThreadRequest {
-            name,
-            stack_size,
-            body,
-        } = request;
-
+    /// Start one Web Worker running `body`, or hand `body` back if the page would not.
+    ///
+    /// The whole mechanism, factored out of [`spawn`] so it has a second caller: the audio render
+    /// thread (`crate::sound::web_output`). That thread is not a pool thread — it runs one loop for
+    /// the session and must not occupy a pool worker — but it needs exactly this, a Web Worker
+    /// running the same module against the same memory, and there is no second way to make one.
+    fn start_worker(name: &str, stack_size: Option<usize>, body: Body) -> Result<(), Body> {
         let Some((obj, spawn_fn)) = bridge("spawn") else {
             // No bridge on the page. Not an error — see the module header.
-            return Err(ThreadRequest {
-                name,
-                stack_size,
-                body,
-            });
+            return Err(body);
         };
 
         let ptr = Box::into_raw(Box::new(body)) as u32;
         let args = js_sys::Array::of5(
-            &name.as_str().into(),
+            &name.into(),
             &JsValue::from_f64(f64::from(ptr)),
             &stack_size.map_or(JsValue::NULL, |n| JsValue::from_f64(n as f64)),
             &wasm_bindgen::module(),
@@ -123,21 +118,42 @@ mod imp {
         );
 
         match spawn_fn.apply(&obj, &args) {
-            Ok(v) if v.is_truthy() => Ok(SpawnedThread::detached()),
+            Ok(v) if v.is_truthy() => Ok(()),
             _ => {
                 // The worker never started, so nothing will ever claim that pointer. Take it back
-                // rather than leaking a closure (and, with it, everything the pool captured).
+                // rather than leaking a closure (and, with it, everything it captured).
                 //
                 // SAFETY: `ptr` came from `Box::into_raw` immediately above and has not been handed
                 // to a worker — `spawn` either started one and returned truthy, or it did not.
-                let body = unsafe { *Box::from_raw(ptr as *mut Body) };
-                Err(ThreadRequest {
-                    name,
-                    stack_size,
-                    body,
-                })
+                Err(unsafe { *Box::from_raw(ptr as *mut Body) })
             }
         }
+    }
+
+    /// Start one pool thread as a Web Worker.
+    fn spawn(request: ThreadRequest) -> Result<SpawnedThread, ThreadRequest> {
+        let ThreadRequest {
+            name,
+            stack_size,
+            body,
+        } = request;
+        match start_worker(&name, stack_size, body) {
+            Ok(()) => Ok(SpawnedThread::detached()),
+            Err(body) => Err(ThreadRequest {
+                name,
+                stack_size,
+                body,
+            }),
+        }
+    }
+
+    /// Start a **non-pool** worker running `body` once. `true` if the page started one.
+    ///
+    /// For work that owns a thread for the session rather than taking one from a pool — see
+    /// [`start_worker`]. Dropping the returned unit does not stop it; the body is expected to
+    /// watch its own stop flag.
+    pub fn spawn_detached(name: &str, body: impl FnOnce() + Send + 'static) -> bool {
+        start_worker(name, None, Box::new(body)).is_ok()
     }
 
     /// The entry point a spawned worker calls once it has instantiated the module against the
