@@ -91,6 +91,21 @@ async-executor = { path = "third_party/async-executor" }
 # `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
 # scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
 bevy_render = { path = "third_party/bevy_render" }
+# event-listener 5.4.1, forked for ONE `use` line, and the least obvious of the four. `Event` is
+# what `async-channel` parks on, so its mutex is taken on every send/recv that registers or notifies
+# a listener -- and in the threaded browser build the main thread and a worker per core are on
+# opposite ends of those channels. With `std` on, the crate takes `intrusive.rs` and a real
+# `std::sync::Mutex` on EVERY target including wasm (its own spinning mutex in `slab.rs` is the
+# no_std path only), so a contended send on the page thread threw `Atomics.wait cannot be called in
+# this context`. `third_party/event-listener/BENILLA.md` has the diff.
+event-listener = { path = "third_party/event-listener" }
+# parking 2.2.1, forked for ONE function. `futures_lite::block_on` parks worker threads on it, and
+# `Unparker::unpark` -- which the main thread calls whenever spawning work wakes a sleeping worker --
+# takes a `std::sync::Mutex` to close a race with the parker. That lock is the last blocking call an
+# unparking thread makes, and on the page thread it threw. `try_lock` in a spin instead, same
+# semantics; `park` is untouched because a worker may block.
+# `third_party/parking/BENILLA.md` has the diff.
+parking = { path = "third_party/parking" }
 
 # Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
 # unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.

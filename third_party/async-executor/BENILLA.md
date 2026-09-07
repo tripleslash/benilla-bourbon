@@ -63,25 +63,37 @@ rather than a *trapped* one. **A stall is recoverable; a trap is not.**
 
 Two precedents, both of which this fork is deliberately imitating:
 
-- **`event-listener` already does exactly this**, and for exactly this reason: its own `Mutex`
-  (`event-listener/src/slab.rs`) spins and then gives up rather than blocking. It is why
-  `async-channel` is safe on the main thread and this crate was not.
-- **Rust's own wasm allocator does it too.** `library/std/src/sys/alloc/wasm.rs` spins on its global
-  `dlmalloc` lock, and its comment is the clearest statement of the constraint anywhere:
-
-  > The main thread in a web browser *cannot ever block*, no exceptions.
-
-  Without that, every `malloc` racing a worker would have the same failure this fork fixes.
-
+- **Rust's own wasm allocator does it**, and its comment is the clearest statement of the
+  constraint anywhere: `library/std/src/sys/alloc/wasm.rs` spins on the global `dlmalloc` lock
+  because *"the main thread in a web browser cannot ever block, no exceptions"*. Without that, every
+  `malloc` racing a worker would fail the way this fork fixes.
+- **`event-listener` has the same spin lock in `slab.rs`** — written for this hazard. Read that and
+  it looks as though the smol stack is already safe here. **It is not**, and this is the trap: that
+  file is the `no_std` path. With `std` on, the crate compiles `intrusive.rs` and a real
+  `std::sync::Mutex` on every target, wasm included. `third_party/event-listener` fixes that
+  separately, and `third_party/parking` a third instance in `Unparker::unpark`.
 ## What this does NOT fix
 
 It does not make blocking legal — it removes it from *this* crate. Anything else the main thread
-shares with a worker has to satisfy the same rule. As of this fork the audited set is:
-`concurrent-queue` and `crossbeam-queue` (lock-free), `event-listener` (spins, above), the global
-allocator (spins, above), `bevy_platform`'s `OnceLock`s (initialised on the main thread at boot,
-before any worker exists), and `bevy_ecs`'s `MultiThreadedExecutor` (a `std::sync::Mutex`, and the
-reason `ExecutorKind`'s wasm default is deliberately left `SingleThreaded` — see
-`third_party/bevy_ecs/BENILLA.md`).
+shares with a worker has to satisfy the same rule, and **three separate crates turned out to need
+the same treatment** before the client stopped throwing:
+
+| crate | where | fork |
+|---|---|---|
+| `async-executor` | `sleepers`, `active`, `local_queues` — taken on every `Scope::spawn` and tick | this one |
+| `event-listener` | `intrusive.rs`'s list — taken by every `async-channel` send/recv that registers or notifies | `third_party/event-listener` |
+| `parking` | `Unparker::unpark` — taken whenever spawning work wakes a sleeping worker | `third_party/parking` |
+
+Audited and clean: `concurrent-queue`, `crossbeam-queue` and `async-task` (lock-free), the global
+allocator (std spins, above), `bevy_platform`'s `OnceLock`s (initialised on the main thread at boot,
+before a worker exists), `bevy_ecs`'s `MultiThreadedExecutor` (a `std::sync::Mutex`, and the reason
+`ExecutorKind`'s wasm default is deliberately left `SingleThreaded` — see
+`third_party/bevy_ecs/BENILLA.md`), and `parking_lot` (reached through wgpu, which only the main
+thread may touch, so its locks are never contended).
+
+**Still conditional, and worth knowing:** `tracing-subscriber` takes locks a worker would contend
+*if a worker logs*. Nothing in the threaded paths logs today — the collider build and the
+`par_iter` sweeps are silent — but a `warn!` added inside one would reintroduce the hazard.
 
 ## Verifying against upstream
 
