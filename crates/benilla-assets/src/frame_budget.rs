@@ -1,6 +1,6 @@
 //! A per-frame CPU budget for asset work, and the reason the browser build needs one.
 //!
-//! **On the web there is exactly one thread.** Bevy's `IoTaskPool` compiles to
+//! **On the web an asset loader runs on the thread that draws.** Bevy's `IoTaskPool` compiles to
 //! `wasm_bindgen_futures::spawn_local` there (`bevy_tasks::Task::wrap_future`), so an
 //! [`AssetLoader`](bevy::asset::AssetLoader) is not "off-thread work" at all — it is a chain of
 //! microtasks on the thread that draws, and the stretch between two `await`s is a stretch the frame
@@ -36,6 +36,19 @@
 //! yields its turn while geometry is backed up — for at most [`ART_YIELD_FRAMES`] frames, so this
 //! is a head start and never a starvation. Nothing about the *budget* changes: the same
 //! milliseconds are spent, in a better order.
+//!
+//! ## The browser has threads now, and a loader still is not on one
+//!
+//! Since `scripts/web-build-threads.sh` the browser build has real worker threads, so "the web
+//! target has one thread" is no longer the flat fact this module was written under. It is still
+//! the fact *here*, and for a reason no thread count changes: `TaskPool::spawn` on wasm is the
+//! microtask queue by deliberate design, because a load awaits `JsFuture`s and reaches `window`
+//! (`benilla_formats::webpack::resident`), and a `JsValue` cannot leave the agent that made it.
+//! `bevy_asset` spawns every load that way. So the metering below is exactly as load-bearing as
+//! it was — what changed is that the CPU-bound *interior* of a decode, which is plain bytes in
+//! linear memory, could now be handed to a worker with `TaskPool::spawn_pooled` and leave the
+//! frame entirely. Whether it may is [`pooled_work_runs`]; where it has already happened is
+//! `terrain_stream::collider`.
 //!
 //! **Native builds get none of it.** There the pool is real threads, decoding already runs beside
 //! the frame rather than inside it, and a shared counter would only serialise work that is currently
@@ -76,10 +89,153 @@ pub enum Lane {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{begin_frame, set_budget_ms, slot, slot_in, Slot};
+pub use wasm::{begin_frame, set_budget_ms, slot, slot_in, spent_ms, Slot};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{begin_frame, set_budget_ms, slot, slot_in, Slot};
+pub use native::{begin_frame, set_budget_ms, slot, slot_in, spent_ms, Slot};
+
+/// Will work handed to `TaskPool::spawn_pooled` actually run — or is this a build where it would
+/// sit in the queue forever?
+///
+/// **The web build has nothing to drive an idle pool.** `bevy_app`'s `TaskPoolPlugin` gates its
+/// `tick_global_task_pools` system on `not(all(target_arch = "wasm32", feature = "web"))`, so the
+/// browser never schedules it; `TaskPool::scope` covers itself (`third_party/bevy_tasks` forces a
+/// tick when `threads.is_empty()`); and nothing in this tree calls `TaskPool::try_tick`. So a
+/// pooled task on a page whose workers never started has neither a thread to run it nor a ticker
+/// to poll it — and it is not slow, it never completes at all.
+///
+/// That page is a supported configuration rather than a corner: `?nothreads=1`, an origin that is
+/// not cross-origin isolated (no `SharedArrayBuffer`, so no shared memory and no workers), or a
+/// browser that simply refuses a `Worker`. `web/threads.js` announces each of them, and
+/// `third_party/bevy_tasks/BENILLA.md` calls the resulting zero-worker pool "the designed
+/// fallback" — this predicate is what makes it one for `spawn_pooled` too. A caller that gets
+/// `false` has to do the work the way the single-threaded build always did: on the frame thread,
+/// under a metered [`slot`].
+///
+/// **Native is unconditionally `true`** and never consults the pool. There a refused thread is
+/// still a panic (the fork keeps upstream's `expect` everywhere `std::thread` is real), so a
+/// native pool that came up empty is not a state this could report — it is one that already
+/// aborted. Asking `thread_num()` there could only invent a native behaviour that does not exist
+/// today, and these forks hold to native not moving.
+pub fn pooled_work_runs() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return true;
+
+    // The kill switch, web-only and checked first. See [`set_offload_enabled`].
+    #[cfg(target_arch = "wasm32")]
+    if !OFFLOAD.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+
+    // The async-compute pool specifically, because it is the one `spawn_pooled` work goes to on
+    // this target (the collider builds, and whatever later joins them). `ComputeTaskPool` is
+    // reached through `scope`, which already drives itself at zero workers.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    return bevy::tasks::AsyncComputeTaskPool::try_get().is_some_and(|p| p.thread_num() > 0);
+
+    // **A wasm build without atomics has no `spawn_pooled` to ask about**, so the answer is a
+    // constant rather than a reading. `bevy_tasks` swaps in `single_threaded_task_pool.rs` on this
+    // target and that `TaskPool` does not define the method at all — a caller reaching it here
+    // would not be slow, it would not compile.
+    //
+    // It also must not be asked the obvious way, which is the trap this arm exists to close:
+    // `single_threaded_task_pool`'s `thread_num()` returns **1**, meaning "the calling thread",
+    // not "one worker". A `thread_num() > 0` written without this `cfg` is therefore `true` here
+    // — the one answer that is certainly wrong — and it is wrong silently, in the same shape as
+    // the `feature = "std"` trap `third_party/bevy_tasks/BENILLA.md` documents.
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    return false;
+}
+
+/// The offload kill switch. `true` until a host says otherwise.
+#[cfg(target_arch = "wasm32")]
+static OFFLOAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Turn worker offload off (or back on) for the whole client — `?offload=0` on the page.
+///
+/// **Why a switch exists for this and not for the rest of the module.** Every other fallback here
+/// is exercised by an ordinary browser: the metered path is what a page without shared memory
+/// runs, so it cannot rot unnoticed. The *offloaded* path is the new one, and its mechanism —
+/// awaiting a worker's result from a future on the page's own thread — rests on `js-sys` waking a
+/// `spawn_local` task through `Atomics.waitAsync` under `+atomics`. That is real and supported,
+/// and it is not something this client had ever asked a browser to do before. A page that turns
+/// out to disagree needs a way back that is not a re-upload, and `?offload=0` is it: the client
+/// then decodes exactly the way it did before any of this, on the frame thread under the budget.
+///
+/// Off on this switch also parks the collider builds, which is the honest meaning of the lever —
+/// it is "no `spawn_pooled` at all", the one state the whole module is already written for.
+#[cfg(target_arch = "wasm32")]
+pub fn set_offload_enabled(on: bool) {
+    OFFLOAD.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Native: nothing to switch, and saying so keeps the call site one text on both targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_offload_enabled(_on: bool) {}
+
+/// Run one CPU-bound, self-contained piece of work **off the frame thread if this build can**, and
+/// under the frame budget if it cannot.
+///
+/// This is the whole of the offload story for the loaders, in one call, because every decision it
+/// makes is a property of the target rather than of the caller:
+///
+/// - **Native** runs `work` inline and consults nothing. A loader there is already on an
+///   `IoTaskPool` thread, so the frame is not paying for it and a hop to a second pool would only
+///   add latency and a channel. This is the same reasoning that makes [`slot`] a no-op on native,
+///   and it keeps this function from being a native behaviour change.
+/// - **A browser with workers** hands `work` to one and awaits the result. The `Send + 'static`
+///   bounds are what make that safe rather than merely intended: a closure that touched a
+///   `JsValue`, the DOM or a `LoadContext` does not satisfy them and does not compile, which is
+///   exactly the wall that has to exist here (`third_party/bevy_tasks/BENILLA.md` on the
+///   `spawn`/`spawn_pooled` split). The await is not a block — the returned `Task` is an
+///   `async_channel` receiver, and the worker's send wakes this future through the `+atomics`
+///   `js-sys` task queue.
+/// - **A browser without them** takes a metered [`slot_in`] and runs `work` on the frame thread:
+///   the pre-threads behaviour, unchanged, and the reason `lane` is still a parameter.
+///
+/// **`lane` matters only in the last case**, and the reason is worth stating rather than glossing:
+/// an offloaded decode is not competing for the frame's budget, so there is no budget order for a
+/// lane to express. Pass the lane the work would have taken and the fallback stays exactly as
+/// correct as it was.
+///
+/// What that costs is honest to name. The lanes exist because at a zone boundary one tile's decode
+/// must not queue behind the several hundred `.blp`s of the buildings standing on it — the tile is
+/// where the collider under the player comes from. Offloaded, that ordering is gone: the pool's
+/// executor is FIFO and a `Lane::Geometry` closure takes its turn behind whatever was spawned
+/// first. The trade is a good one and it is not a wash — the same work now runs on every core
+/// instead of 4 ms of one, so the tile lands sooner in wall-clock terms even from further back in
+/// the queue, and `terrain_stream::provisional`'s stand-ins hold the body up meanwhile exactly as
+/// they always did. But it IS a change of ordering guarantee, not just of venue, and if a
+/// stand-on-nothing report ever comes back from a threaded page this paragraph is the first thing
+/// to re-read.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn offload<T, F>(_lane: Lane, work: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    work()
+}
+
+/// See the native definition above for the contract; this is the browser half.
+#[cfg(target_arch = "wasm32")]
+pub async fn offload<T, F>(lane: Lane, work: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    // `cfg`, not just the runtime gate: `spawn_pooled` does not exist on a wasm build without
+    // atomics (`bevy_tasks` swaps in `single_threaded_task_pool.rs`), so this call has to be
+    // compiled away rather than merely skipped. `pooled_work_runs` answers `false` there too.
+    #[cfg(target_feature = "atomics")]
+    if pooled_work_runs() {
+        return bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn_pooled(async move { work() })
+            .await;
+    }
+    let _slot = slot_in(lane).await;
+    work()
+}
 
 /// Resets the budget once per frame, in [`First`] — before any system that could raise it for a
 /// loading screen, so such a raise applies to the frame that asked for it.
@@ -118,6 +274,13 @@ mod native {
 
     #[inline]
     pub fn set_budget_ms(_ms: f64) {}
+
+    /// Always zero: nothing here is metered, so no frame is ever charged. Kept so the reporters
+    /// read the same text on both targets (`benilla_app::webdiag`).
+    #[inline]
+    pub fn spent_ms() -> f64 {
+        0.0
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -245,6 +408,19 @@ mod wasm {
     /// is up, [`super::PLAY_BUDGET_MS`] once there is a world to draw.
     pub fn set_budget_ms(ms: f64) {
         STATE.with(|s| s.borrow_mut().budget_ms = ms.max(0.0));
+    }
+
+    /// What the current frame has been charged for decode so far — the running total [`Slot`]'s
+    /// `Drop` accumulates, zeroed by [`begin_frame`].
+    ///
+    /// **Read it before `First`, or it reads zero.** The decodes this counts are microtask
+    /// continuations, and the browser drains those only once the frame's animation-frame callback
+    /// has returned — so a frame's charge lands *after* its own `Last` and sits in the counter
+    /// until the next frame's [`begin_frame`] clears it. The one place that can sample it and
+    /// name the right frame is therefore a reader that runs ahead of `First`, which is exactly
+    /// where `benilla_app::webdiag` closes its tape.
+    pub fn spent_ms() -> f64 {
+        STATE.with(|s| s.borrow().spent_ms)
     }
 
     /// Resolves on the first [`begin_frame`] after it was polled, remembering which lane parked so

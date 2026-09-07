@@ -14,10 +14,21 @@
 //!   at each main-schedule boundary is a hard sync point, so it cannot float), but **aggregated
 //!   over the slow frames only** rather than printed one line per frame — a stutter storm would
 //!   otherwise emit hundreds of lines a second and bury the growth signal it is meant to sit next
-//!   to. The residue between the end of `Last` and the next frame's opening stamp is the render
-//!   sub-app and the present, and it is reported as its own span for exactly the reason the
-//!   phases module gives: the first cut of that instrument closed its tape at the end of `Last`
-//!   and reported a 506 ms frame as fitting inside 20 ms of `Main`.
+//!   to. The residue between the end of `Last` and the next frame's opening stamp is reported as
+//!   its own span for exactly the reason the phases module gives: the first cut of that instrument
+//!   closed its tape at the end of `Last` and reported a 506 ms frame as fitting inside 20 ms of
+//!   `Main`.
+//!
+//!   **That residue is two things, and it used to be reported as one.** It is the render sub-app
+//!   and the present — and it is also every asset decode, because on this target a loader is a
+//!   chain of microtasks and the browser drains those only once the frame's animation-frame
+//!   callback has returned (`benilla_assets::frame_budget`, whose own header says so). So a
+//!   window whose worst frames were mostly BLP and ADT decode read `render+present=47.0` and
+//!   pointed at the renderer, which is the one part of this client that cannot be moved off the
+//!   frame thread at all (`WgpuWrapper` is a `SendWrapper` under `+atomics`). The two are now
+//!   split: `decode` is what `frame_budget` charged the frame, `render+present` is the rest. The
+//!   difference is the whole question of what is worth offloading, so it is worth two lines of
+//!   arithmetic to stop guessing at it.
 //! - **What is growing?** Entity count by **component**, summed across archetypes — a leak splits
 //!   its entities over several archetypes as unrelated components come and go, so an archetype
 //!   table hides the very population it is meant to name, while `Mesh3d: +3800` does not. Beside
@@ -106,6 +117,10 @@ struct Diag {
     /// can say what a slow frame is *made of* rather than what an average frame is.
     slow_total_ms: f32,
     slow_spans: HashMap<&'static str, f32>,
+    /// Asset-decode ms over EVERY frame this window, not just the slow ones — the steady-state
+    /// cost of the work that could leave the thread, which is a different question from what a
+    /// stutter is made of and is answered on the other line.
+    decode_ms: f32,
     /// `(span name, instant at its END)` for the frame in flight; the first entry is its t0.
     marks: Vec<(&'static str, Instant)>,
 
@@ -156,11 +171,18 @@ pub(super) fn plugin(app: &mut App) {
         return;
     }
     out("[diag] armed — one line every 5 s, growers every 30 s. `?diag=0` silences it.");
+    // The `thr=` on every line below is this pair, said once in full. `0/0` is a page with no
+    // workers, where every offload in this client is back on the frame thread.
+    out(&format!(
+        "[diag] worker threads: {} async-compute/compute.",
+        worker_threads()
+    ));
     app.insert_resource(Diag {
         frames: Vec::with_capacity(512),
         slow: 0,
         slow_total_ms: 0.0,
         slow_spans: HashMap::new(),
+        decode_ms: 0.0,
         marks: Vec::with_capacity(16),
         next_report: REPORT_SECS,
         next_growth: BASELINE_SKIP_SECS + GROWTH_SECS,
@@ -259,6 +281,13 @@ fn close_frame(d: &mut Diag) {
     let end = Instant::now();
     let total = (end - t0).as_secs_f32() * 1000.0;
     d.frames.push(total);
+    // The frame that is closing here is the one `frame_budget` has been charging, and this runs
+    // ahead of `First` — so it is the last moment the counter still names that frame rather than
+    // the one beginning. See `frame_budget::spent_ms`, which documents the same ordering from its
+    // side; a reader in `Last` would sample a frame whose decodes had not happened yet and get
+    // zero every time.
+    let decode = (benilla_assets::frame_budget::spent_ms() as f32).min(total);
+    d.decode_ms += decode;
     if total >= SLOW_MS {
         d.slow += 1;
         d.slow_total_ms += total;
@@ -278,8 +307,16 @@ fn close_frame(d: &mut Diag) {
         for (name, ms) in spans {
             *d.slow_spans.entry(name).or_default() += ms;
         }
+        // The residue, split. Decode is charged inside this window (microtasks drain after the
+        // callback returns), so it comes OUT of the residue rather than being reported beside it —
+        // two spans that sum to what the one span used to say, which is what makes the new number
+        // comparable to an old paste. `max(0.0)` because the two clocks are not the same
+        // instrument: `frame_budget` times each slot's own `Drop` while this times the whole gap,
+        // and a rounding disagreement must not print a negative renderer.
         let residue = (end - prev).as_secs_f32() * 1000.0;
-        *d.slow_spans.entry("render+present").or_default() += residue;
+        let decode = decode.min(residue);
+        *d.slow_spans.entry("decode").or_default() += decode;
+        *d.slow_spans.entry("render+present").or_default() += (residue - decode).max(0.0);
     }
     d.marks.clear();
 }
@@ -316,10 +353,14 @@ fn report(world: &mut World) {
     let dw = counts.wasm_bytes as i64 - prev.wasm_bytes as i64;
     let dj = counts.js_heap as i64 - prev.js_heap as i64;
 
+    // Per FRAME, not per window: the same unit as the p50 beside it, so "decode is 3 of my 14 ms"
+    // reads straight off the line. Zero here with a non-zero mesh delta is the answer this probe
+    // was extended to give — the decode left the frame thread and the stream cost did not.
+    let decode = if n > 0 { d.decode_ms / n as f32 } else { 0.0 };
     let mut line = format!(
-        "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} \
+        "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} decode={decode:.1} \
          | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} | mesh={} {} img={} {} mat={} {} \
-         | wasm={} {} js={} {}",
+         | wasm={} {} js={} {} | thr={}",
         d.slow,
         counts.entities,
         signed(de),
@@ -336,12 +377,14 @@ fn report(world: &mut World) {
         signed_mb(dw),
         mb(counts.js_heap),
         signed_mb(dj),
+        worker_threads(),
     );
 
     // What a slow frame was made of, averaged over the slow frames in this window only.
     if d.slow > 0 {
         let slow = d.slow as f32;
-        let mut spans: Vec<(&str, f32)> = d.slow_spans.iter().map(|(k, v)| (*k, v / slow)).collect();
+        let mut spans: Vec<(&str, f32)> =
+            d.slow_spans.iter().map(|(k, v)| (*k, v / slow)).collect();
         spans.sort_by(|a, b| b.1.total_cmp(&a.1));
         line.push_str(&format!(
             "\n[diag]   slow frame avg={:.1}ms:",
@@ -367,6 +410,7 @@ fn report(world: &mut World) {
 
     d.slow = 0;
     d.slow_total_ms = 0.0;
+    d.decode_ms = 0.0;
     d.slow_spans.clear();
     ms.clear();
     d.frames = ms;
@@ -478,6 +522,26 @@ fn short(full: &str) -> String {
     segs[segs.len().saturating_sub(2)..].join("::")
 }
 
+/// Worker threads on the two pools offloaded work reaches, as `async/compute`.
+///
+/// **The one fact about a threaded build a pasted report could not previously state.** `0/0` is
+/// an ordinary, supported outcome — a page that ships no thread bridge, an origin that is not
+/// cross-origin isolated, or `?nothreads=1` — and on it every offload in this client falls back to
+/// the frame thread (`benilla_assets::frame_budget::pooled_work_runs`). So a frame time being
+/// explained by "the browser has threads now" is only explicable next to this number, and it goes
+/// on every line rather than on the armed line alone because a report is pasted five lines at a
+/// time and a constant nobody can see is a constant nobody can check.
+///
+/// `AsyncComputeTaskPool` is where `spawn_pooled` work goes; `ComputeTaskPool` is what the
+/// `par_iter_mut` sweeps run their scopes on. `IoTaskPool` is deliberately absent — it is sized to
+/// zero workers on this target on purpose (`benilla_world::boot`), so printing it would only
+/// invite the reading that something is broken.
+fn worker_threads() -> String {
+    let async_compute = bevy::tasks::AsyncComputeTaskPool::try_get().map_or(0, |p| p.thread_num());
+    let compute = bevy::tasks::ComputeTaskPool::try_get().map_or(0, |p| p.thread_num());
+    format!("{async_compute}/{compute}")
+}
+
 fn signed(v: i64) -> String {
     if v == 0 {
         String::new()
@@ -577,7 +641,10 @@ mod tests {
     /// A row names its population without printing a paragraph, and generics never widen it.
     #[test]
     fn component_names_shorten_to_their_last_two_segments() {
-        assert_eq!(short("bevy_render::mesh::components::Mesh3d"), "components::Mesh3d");
+        assert_eq!(
+            short("bevy_render::mesh::components::Mesh3d"),
+            "components::Mesh3d"
+        );
         assert_eq!(short("benilla_app::names::NameCache"), "names::NameCache");
         assert_eq!(short("bevy_asset::handle::Handle<Mesh>"), "handle::Handle");
         assert_eq!(short("Bare"), "Bare");

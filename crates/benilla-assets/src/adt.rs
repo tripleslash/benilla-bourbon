@@ -195,10 +195,11 @@ impl AssetLoader for AdtLoader {
         // that heightfield IS the terrain collider (`terrain_stream::collider`). It must not queue
         // behind the several hundred layer/doodad textures the same zone boundary asks for — that
         // race is the one that leaves a body standing on ground with no collider under it.
-        let tile = {
-            let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
-            adt_to_tile_mesh(&bytes).map_err(to_io)?
-        };
+        let tile = crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+            adt_to_tile_mesh(&bytes)
+        })
+        .await
+        .map_err(to_io)?;
 
         // Layer array: a solid-green fallback at index 0, then each unique referenced layer texture.
         // The layers are collected in their **authored** form and packed only once the tile is fully
@@ -284,21 +285,31 @@ impl AssetLoader for AdtLoader {
         // ones authored small). Nothing is awaited from here to the end of `load`, so one slot
         // covers the rest. The **art** lane (the default): the collider was already derivable from
         // the chunks above, and nothing about a splat array holds a body up.
-        let _slot = crate::frame_budget::slot().await;
-        let packed = pack_layers([107, 133, 82, 0], layers);
+        // The pack and the three array uploads go together, because they are one uninterrupted
+        // stretch of CPU over buffers this loader already owns — and owning them is what lets the
+        // whole stretch move. The `debug!` cannot go with it (it reads `ctx`), so the two facts it
+        // wants come back out of the closure instead of the whole `packed`.
+        let (layer_array, alpha_array, shadow_array, format, kib) =
+            crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+                let packed = pack_layers([107, 133, 82, 0], layers);
+                let (format, kib) = (packed.format, packed.data.len() >> 10);
+                (
+                    layer_array_image(LAYER_TEX_SIZE, layer_count, packed),
+                    alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf),
+                    shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf),
+                    format,
+                    kib,
+                )
+            })
+            .await;
         // Which lane this tile took, and what it cost. Per-tile rather than aggregated because the
         // question after a perf report is always "which tiles fell back, and where am I standing" —
         // and one greppable format name per tile answers it from a player's log with no machinery
         // (`grep -c Bc2RgbaUnorm` against `grep -c Rgba8Unorm`) (1646).
         debug!(
-            "adt {}: layer array {layer_count} x {:?}, {} KiB",
-            ctx.path(),
-            packed.format,
-            packed.data.len() >> 10
+            "adt {}: layer array {layer_count} x {format:?}, {kib} KiB",
+            ctx.path()
         );
-        let layer_array = layer_array_image(LAYER_TEX_SIZE, layer_count, packed);
-        let alpha_array = alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf);
-        let shadow_array = shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf);
 
         Ok(AdtTile {
             shading,
@@ -326,8 +337,11 @@ impl AssetLoader for AdtLoader {
 async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
     if let Some(spec) = key.strip_suffix(".blp").map(|stem| format!("{stem}_s.blp")) {
         if let Ok(bytes) = ctx.read_asset_bytes(mpq_url(&spec)).await {
-            let _slot = crate::frame_budget::slot().await;
-            if let Ok(chain) = blp_bytes_to_native_chain(&bytes) {
+            let decoded = crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+                blp_bytes_to_native_chain(&bytes)
+            })
+            .await;
+            if let Ok(chain) = decoded {
                 return Some(RawLayer {
                     chain,
                     matte: false,
@@ -336,8 +350,11 @@ async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
         }
     }
     let bytes = ctx.read_asset_bytes(mpq_url(key)).await.ok()?;
-    let _slot = crate::frame_budget::slot().await;
-    let chain = blp_bytes_to_native_chain(&bytes).ok()?;
+    let chain = crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+        blp_bytes_to_native_chain(&bytes)
+    })
+    .await
+    .ok()?;
     Some(RawLayer { chain, matte: true })
 }
 

@@ -512,10 +512,19 @@ impl AssetLoader for WmoModelLoader {
         // All three of this loader's slots take the **geometry** lane: a building's groups are
         // where both per-WMO collider bakes come from, so every stretch here is on the path to a
         // floor and none of it may queue behind the art hanging on that floor.
-        let root = {
-            let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
-            parse_wmo_root(&bytes).map_err(to_io)?
-        };
+        // Everything this loader ever reads out of the ROOT file is read here, in one closure, and
+        // that is what lets `bytes` move: the id and the light list used to be parsed hundreds of
+        // lines further down, which would have meant keeping the whole root buffer alive on this
+        // side to re-borrow it. Both are small and neither depends on anything the group loop
+        // learns, so they come back with the root instead.
+        let (root, wmo_id, lights) =
+            crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+                let id = benilla_formats::wmo_root_id(&bytes);
+                let lights = parse_wmo_lights(&bytes);
+                (parse_wmo_root(&bytes), id, lights)
+            })
+            .await;
+        let root = root.map_err(to_io)?;
 
         // Root path → stem for the group files. Lowercased so the suffix strip + group URLs are
         // consistent (MPQ resolution is case-insensitive regardless).
@@ -585,6 +594,11 @@ impl AssetLoader for WmoModelLoader {
             // One slot per group, which is what makes a cathedral load without a hitch: the
             // groups are read and gathered one at a time already, so the budget can put the
             // expensive ones on separate frames instead of the whole building on one.
+            // Metered rather than offloaded: the stretch this guards writes straight into the
+            // loader's own accumulators (`group_nav`, the collision buffers, `submeshes`), so a
+            // `Send + 'static` closure would have to take and give back every one of them. The
+            // root parse above moved because it was a pure `bytes -> value`; this is the shape
+            // that has to be restructured first, not merely relabelled.
             let _group_slot =
                 crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
             // Fill this group's flags + portal-ref span from its MOGP header (what the client's
@@ -700,6 +714,8 @@ impl AssetLoader for WmoModelLoader {
         // Nothing is awaited from here to the end of `load`, so the tail — doodad-base resolution,
         // the portal build, the collider merges — runs under one last slot. The collider merges are
         // the reason it, too, is the geometry lane.
+        // Metered for the same reason as the group loop above: this tail reads a dozen locals the
+        // groups accumulated and is not a pure function of anything one closure could own.
         let _tail_slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
         // light lists are all fixed in the root/groups, so nothing here is ever re-derived. Both
@@ -732,7 +748,7 @@ impl AssetLoader for WmoModelLoader {
         let group_collision_grids = collision_tri_grids(&group_collision_tris);
         let group_footprint_grids = footprint_tri_grids(&group_footprints);
         Ok(WmoModel {
-            wmo_id: benilla_formats::wmo_root_id(&bytes),
+            wmo_id,
             submeshes,
             submesh_group,
             portal_vertices: portals.vertices.clone(),
@@ -750,7 +766,7 @@ impl AssetLoader for WmoModelLoader {
             collision_camera,
             doodads: root.doodads().to_vec(),
             doodad_sets: root.doodad_sets().to_vec(),
-            lights: parse_wmo_lights(&bytes),
+            lights,
             group_bounds: root.group_infos().to_vec(),
             doodad_base,
             doodad_owner,

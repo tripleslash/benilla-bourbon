@@ -392,6 +392,15 @@ impl AssetLoader for M2ModelLoader {
         //
         // The **geometry** lane: this parse yields the model's bounding box and its collision hull,
         // which are what a placement is stood on before (and after) its art arrives.
+        //
+        // **Metered, not offloaded, and that is a scope judgement rather than a limitation.** The
+        // parses below genuinely are pure over `bytes` and would cross to a worker on their own;
+        // what does not cross is the submesh loop between them, which calls `ctx.load::<Image>`
+        // per texture and so must stay on this thread. Moving this loader would therefore mean
+        // splitting one 400-line function into "every pure parse" and "everything that touches
+        // `ctx`" — worth doing, too large to do beside the sites that were a straight swap
+        // (`blp`, `adt`, and this file's WMO sibling's root parse). Until then this stays exactly
+        // as it was.
         let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
 

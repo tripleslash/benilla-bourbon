@@ -8,8 +8,8 @@
 //! mass-property hook), and the async pool finishes a streamed burst together — so a tile boundary
 //! used to attach the whole burst in a single frame. Decision 0610 measured that path and caps it.
 
-use std::time::Duration;
 use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use avian3d::prelude::{Collider, CollisionLayers, RigidBody};
 use benilla_assets::coords::wow_to_bevy;
@@ -320,21 +320,41 @@ pub(super) fn impassable_wall_data(
 /// imperceptible — the streamer loads ahead of the view, so you never reach it before it's solid.
 pub fn build_collider_task(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Task<Collider> {
     // **Real threads: `spawn_pooled`, and no budget.** Native has always had them; the browser has
-    // them whenever the module was built with shared memory (`scripts/web-build-threads.sh`). The
-    // `Send` bound on `spawn_pooled` is what says this is safe to move — the payload is two plain
-    // `Vec`s in linear memory and parry's output, nothing that belongs to a JS agent — and once the
-    // work is genuinely off the frame thread there is nothing left for a per-frame budget to meter.
-    // Taking a `frame_budget` slot here would be worse than pointless: its `Slot` is `!Send`, so it
-    // would not cross to a worker, and waiting for frame budget on a thread that is not drawing
-    // would just delay the collider for no one's benefit.
+    // them whenever the module was built with shared memory (`scripts/web-build-threads.sh`) AND
+    // the page actually started the workers. The `Send` bound on `spawn_pooled` is what says this
+    // is safe to move — the payload is two plain `Vec`s in linear memory and parry's output,
+    // nothing that belongs to a JS agent — and once the work is genuinely off the frame thread
+    // there is nothing left for a per-frame budget to meter. Taking a `frame_budget` slot here
+    // would be worse than pointless: its `Slot` is `!Send`, so it would not cross to a worker, and
+    // waiting for frame budget on a thread that is not drawing would just delay the collider for
+    // no one's benefit.
+    //
+    // **The question is asked at run time, not by `cfg`, and that is the fix for a real stall.**
+    // A `+atomics` module whose workers never started (`?nothreads=1`, an origin that is not
+    // cross-origin isolated, a browser that refused a `Worker`) has a pool with zero threads, and
+    // on the web nothing ever ticks an idle pool — `bevy_app` does not add its
+    // `tick_global_task_pools` system there and no caller in this tree drives one. The old `cfg`
+    // arm read `+atomics` as "there are threads" and handed every collider to that pool, where it
+    // sat forever: not a slow load, a permanent one, with `super::provisional`'s stand-ins never
+    // retiring and the settle release never presentable. `pooled_work_runs` is the honest
+    // question, and its `false` lands on the metered path below — which is precisely the shape
+    // that page needs.
+    // The `cfg` that remains is not the old "are there threads" question — it is that
+    // `spawn_pooled` does not EXIST on a wasm build without atomics (`bevy_tasks` swaps in
+    // `single_threaded_task_pool.rs` there, which defines no such method), so the call has to be
+    // compiled away rather than merely skipped. `pooled_work_runs` answers `false` on that target
+    // too, so the two agree; this attribute is what keeps the agreement from having to compile.
     #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
-    return AsyncComputeTaskPool::get().spawn_pooled(async move { Collider::trimesh(verts, tris) });
+    if benilla_assets::frame_budget::pooled_work_runs() {
+        return AsyncComputeTaskPool::get()
+            .spawn_pooled(async move { Collider::trimesh(verts, tris) });
+    }
 
     // **One thread: metered, because this "pool" is the thread that draws.**
-    // Without atomics `AsyncComputeTaskPool` compiles to `spawn_local` on `wasm32`, so a burst of
-    // builds that become ready together drains as one uninterrupted run of microtasks — and a burst
-    // is the normal case: crossing a tile boundary at a run readies a tile's terrain hull, its
-    // buildings and their props at once. The budget spreads them over frames instead
+    // With no worker to take it, `AsyncComputeTaskPool::spawn` is `spawn_local` on `wasm32`, so a
+    // burst of builds that become ready together drains as one uninterrupted run of microtasks —
+    // and a burst is the normal case: crossing a tile boundary at a run readies a tile's terrain
+    // hull, its buildings and their props at once. The budget spreads them over frames instead
     // (`benilla_assets::frame_budget`, the geometry lane), which is the same deferral every other
     // CPU-bound stretch of a load already takes.
     //
@@ -342,13 +362,12 @@ pub fn build_collider_task(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Task<Collid
     // while it waits — `super::provisional`'s stand-ins, which cost nothing to build and are
     // retired the frame this one attaches. The two halves are one design: nothing waits, and
     // nothing is unsupported.
-    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
-    return AsyncComputeTaskPool::get().spawn(async move {
+    AsyncComputeTaskPool::get().spawn(async move {
         let _slot =
             benilla_assets::frame_budget::slot_in(benilla_assets::frame_budget::Lane::Geometry)
                 .await;
         Collider::trimesh(verts, tris)
-    });
+    })
 }
 
 #[cfg(test)]

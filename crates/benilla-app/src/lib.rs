@@ -338,6 +338,16 @@ pub fn run(build: BuildId) -> AppExit {
     // `add_plugins`, not merely early. Compiles to nothing off a shared-memory browser build.
     web_threads::install();
 
+    // The offload lever, read once and applied before the first asset can be asked for.
+    // `?offload=0` puts every `spawn_pooled` caller back on the frame thread under the asset
+    // budget — the exact behaviour the browser build had before it had workers — so a page that
+    // turns out to disagree with the cross-worker await has a way out that is not a re-upload. See
+    // `benilla_assets::frame_budget::set_offload_enabled` for why this one has a switch and the
+    // rest of that module does not.
+    benilla_assets::frame_budget::set_offload_enabled(
+        webenv::var("WOW_OFFLOAD").as_deref() != Some("0"),
+    );
+
     let mut app = App::new();
     // The stamp is plain data from here on — the panel footer and preflight banner read it back.
     app.insert_resource(build);

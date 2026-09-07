@@ -76,45 +76,66 @@ impl AssetLoader for BlpImageLoader {
     ) -> Result<Image, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        // Everything past here is CPU on the thread that draws, on the web target (there is only
-        // one). The slot is taken AFTER the read so the frame is never billed for the fetch, and
-        // held to the end of the decode so it is billed for what the decode really cost.
-        let _slot = crate::frame_budget::slot().await;
-        let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        Ok(match settings.variant {
-            BlpVariant::WorldArt => world_art_image(
-                // The blocks go straight to the GPU where it can take them (decision 1626);
-                // `for_upload` decodes only when it cannot, and hands back the matching format.
-                for_upload(blp_bytes_to_native_chain(&bytes).map_err(to_io)?),
-                // The address mode rides the asset path (`crate::texture_url`, decision 0763): the
-                // sampler is a property of this upload, and one `.blp` legitimately has two.
-                crate::sampler_mode_of(&ctx.path().to_string()),
-            ),
-            BlpVariant::Sprite => {
-                let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
-                sprite_image(w, h, rgba)
-            }
-            BlpVariant::MapTile => {
-                let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
-                map_tile_image(w, h, rgba)
-            }
-            BlpVariant::Effect => {
-                let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
-                effect_image(w, h, rgba)
-            }
-            BlpVariant::PointSprite => point_sprite_image(for_upload(
-                blp_bytes_to_native_chain(&bytes).map_err(to_io)?,
-            )),
-            BlpVariant::Cursor => {
-                let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
-                cursor_image(w, h, rgba)
-            }
+        // Everything past here is CPU over bytes already in linear memory — no `JsValue`, no
+        // `LoadContext` — which is the whole precondition for leaving the frame thread. So it goes
+        // through `frame_budget::offload`: a worker where this build has one, and the same metered
+        // slot it always took where it does not. Taken AFTER the read either way, so the frame is
+        // never billed for the fetch.
+        //
+        // The two things the decode needs from the page are resolved out here, before the closure,
+        // because neither can cross: `variant` is settings the loader was called with, and the
+        // address mode rides the asset path (`crate::texture_url`, decision 0763 — the sampler is a
+        // property of this upload, and one `.blp` legitimately has two). `sampler_mode_of` is a
+        // string test, so computing it for the variants that ignore it costs nothing worth a
+        // branch.
+        let variant = settings.variant;
+        let wrap = crate::sampler_mode_of(&ctx.path().to_string());
+        crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+            decode(variant, wrap, &bytes)
         })
+        .await
     }
 
     fn extensions(&self) -> &[&str] {
         &["blp"]
     }
+}
+
+/// One BLP decoded into its [`Image`] — the loader's whole CPU half, as a free function.
+///
+/// Free rather than inline in `load` because it has to be nameable from a `move` closure with a
+/// `Send + 'static` bound (`crate::frame_budget::offload`). Everything it touches is a `&[u8]` and
+/// two `Copy` settings; nothing here can reach the page, which is what makes the offload legal and
+/// is enforced by that bound rather than by this comment.
+fn decode(variant: BlpVariant, wrap: (bool, bool), bytes: &[u8]) -> Result<Image, std::io::Error> {
+    let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
+    Ok(match variant {
+        BlpVariant::WorldArt => world_art_image(
+            // The blocks go straight to the GPU where it can take them (decision 1626);
+            // `for_upload` decodes only when it cannot, and hands back the matching format.
+            for_upload(blp_bytes_to_native_chain(bytes).map_err(to_io)?),
+            wrap,
+        ),
+        BlpVariant::Sprite => {
+            let (w, h, rgba) = blp_to_rgba(bytes).map_err(to_io)?;
+            sprite_image(w, h, rgba)
+        }
+        BlpVariant::MapTile => {
+            let (w, h, rgba) = blp_to_rgba(bytes).map_err(to_io)?;
+            map_tile_image(w, h, rgba)
+        }
+        BlpVariant::Effect => {
+            let (w, h, rgba) = blp_to_rgba(bytes).map_err(to_io)?;
+            effect_image(w, h, rgba)
+        }
+        BlpVariant::PointSprite => {
+            point_sprite_image(for_upload(blp_bytes_to_native_chain(bytes).map_err(to_io)?))
+        }
+        BlpVariant::Cursor => {
+            let (w, h, rgba) = blp_to_rgba(bytes).map_err(to_io)?;
+            cursor_image(w, h, rgba)
+        }
+    })
 }
 
 /// The gamma-byte lane's uncompressed format — non-sRGB, so the GPU does not linearize on sample
