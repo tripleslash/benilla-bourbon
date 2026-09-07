@@ -153,14 +153,16 @@ static OFFLOAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 
 /// Turn worker offload off (or back on) for the whole client — `?offload=0` on the page.
 ///
-/// **Why a switch exists for this and not for the rest of the module.** Every other fallback here
-/// is exercised by an ordinary browser: the metered path is what a page without shared memory
-/// runs, so it cannot rot unnoticed. The *offloaded* path is the new one, and its mechanism —
-/// awaiting a worker's result from a future on the page's own thread — rests on `js-sys` waking a
-/// `spawn_local` task through `Atomics.waitAsync` under `+atomics`. That is real and supported,
-/// and it is not something this client had ever asked a browser to do before. A page that turns
-/// out to disagree needs a way back that is not a re-upload, and `?offload=0` is it: the client
-/// then decodes exactly the way it did before any of this, on the frame thread under the budget.
+/// **Why a switch exists for this and not for the rest of the module, and why it earned its keep
+/// on the first day.** Every other fallback here is exercised by an ordinary browser: the metered
+/// path is what a page without shared memory runs, so it cannot rot unnoticed. The *offloaded*
+/// path was the new one, and the first cut of it shipped broken — [`offload`] `.await`ed the
+/// pooled `Task`, which makes a worker responsible for waking a future on the page's own thread,
+/// and nothing an `AssetLoader` produced ever arrived. `?offload=0` is what a live client was
+/// steered onto while that was diagnosed, with no re-upload: it decodes exactly the way it did
+/// before any of this, on the frame thread under the budget. The lever stays for the next such
+/// day. (The mechanism itself is fixed — [`offload`] polls now, the way
+/// `terrain_stream::collider` always did.)
 ///
 /// Off on this switch also parks the collider builds, which is the honest meaning of the lever —
 /// it is "no `spawn_pooled` at all", the one state the whole module is already written for.
@@ -229,9 +231,28 @@ where
     // compiled away rather than merely skipped. `pooled_work_runs` answers `false` there too.
     #[cfg(target_feature = "atomics")]
     if pooled_work_runs() {
-        return bevy::tasks::AsyncComputeTaskPool::get()
-            .spawn_pooled(async move { work() })
-            .await;
+        // **Polled once a frame, not awaited, and the difference is the whole bug this shape
+        // exists to avoid.** Awaiting the `Task` makes the worker's `send` responsible for waking
+        // a future that lives on the page's thread — `js-sys`'s `+atomics` task queue and
+        // `Atomics.waitAsync`. Shipped that way, nothing an `AssetLoader` produced ever arrived.
+        //
+        // `terrain_stream::collider` had the answer already and had had it all along: it polls
+        // its `Task` from a system every frame and never waits on a waker, which is why the
+        // collider offload worked while this did not. Same shape here. `poll_once` still
+        // registers the cross-thread waker, so a wake that DOES land is taken immediately and the
+        // frame tick is only the floor; a wake that does not land costs one frame and self-heals,
+        // which is the property the await did not have. A decode is not on this frame's critical
+        // path — that is the premise of the whole module — so a frame of latency buys nothing
+        // back and is not worth a cleverer wait.
+        let mut task = bevy::tasks::AsyncComputeTaskPool::get().spawn_pooled(async move { work() });
+        loop {
+            if let Some(done) =
+                bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(&mut task))
+            {
+                return done;
+            }
+            wasm::next_frame().await;
+        }
     }
     let _slot = slot_in(lane).await;
     work()
@@ -421,6 +442,17 @@ mod wasm {
     /// where `benilla_app::webdiag` closes its tape.
     pub fn spent_ms() -> f64 {
         STATE.with(|s| s.borrow().spent_ms)
+    }
+
+    /// Resolve on the next [`begin_frame`] — the same-thread tick [`super::offload`] polls its
+    /// worker `Task` on.
+    ///
+    /// Parks in [`Lane::Art`] deliberately: this is not a budget waiter and must not be counted as
+    /// one. Only a `Lane::Geometry` park bumps `geometry_parked`, which is the signal an art slot
+    /// reads to decide whether to stand aside — a poll tick registering there would make real
+    /// decodes yield to work that is not competing for the frame at all.
+    pub(super) async fn next_frame() {
+        NextFrame::park(Lane::Art).await;
     }
 
     /// Resolves on the first [`begin_frame`] after it was polled, remembering which lane parked so
