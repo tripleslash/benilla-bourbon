@@ -43,3 +43,15 @@ pub trait ReadExactAsync {
     /// native socket's own timeout raises).
     async fn read_exact_async(&mut self, buf: &mut [u8]) -> std::io::Result<()>;
 }
+
+/// A byte buffer reads as itself — `std::io::Read for &[u8]`, awaited.
+///
+/// For the parsers' own tests: a packet built in memory is the only way to pin a wire layout
+/// without a server, and moving the reads behind this trait had taken that away (the parsers no
+/// longer name `impl Read`). Nothing on either connection path goes through here; it exists so a
+/// test can hand `&mut bytes.as_slice()` to the same function the socket path calls.
+impl ReadExactAsync for &[u8] {
+    async fn read_exact_async(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        std::io::Read::read_exact(self, buf)
+    }
+}

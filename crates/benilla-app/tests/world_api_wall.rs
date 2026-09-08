@@ -395,9 +395,21 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
 /// shadow on the ground under an invisible creature for the length of a load. A caller asking
 /// one question cannot make that mistake; a caller handed the inputs can.
-/// And 178 → 182: the four doors this fork's own engine work opens, all four of them a PUBLISH
-/// the options page reaches for by name (`ui_script::options`, `cvars`) rather than a lane
-/// reconstructing engine state app-side:
+/// And 178 → 179: `interior::NodeAmbient`, a PUBLISH — one light node's committed
+/// **ambient word alone**, the ramped chase toward `cap96(MOCV)`. `ParticleLight` beside it is
+/// the same words folded into the whole fixed-function term (`ambient + 0.9·diffuse + Σ lamps`),
+/// which is what a lit particle quad receives; this is the read side for a draw whose vertex
+/// format carries **no normal**, so the normal array is disabled outright and its term is the
+/// ambient product and nothing else (the weapon swing trail, decisions 2079/2086). Published
+/// rather than reconstructed for the reason the entry above gives: the caller cannot rebuild it
+/// from `ParticleLight` — the diffuse lobe and the MOLT points are already summed in and cannot
+/// be subtracted back out — and a caller that reached for the *scene* ambient instead, which is
+/// what this replaces, tinted every indoor trail with the sky.
+///
+/// And 179 → 185: the six doors this fork's own engine work opens. Four are a PUBLISH the
+/// options page reaches for by name (`ui_script::options`, `cvars`) rather than a lane
+/// reconstructing engine state app-side; the last two are named below them and were opened
+/// without being written down here, which this merge is where they get their entry:
 ///
 /// - `liquid::WaterDetail` — the `waterDetail` CVar's knob. WHICH liquid renderer the world
 ///   draws is the engine's own state (it decides which of two materials every surface wears),
@@ -410,7 +422,22 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// - `model_render::ShadowOccluder` — the marker that says a streamed part casts into the
 ///   player's shadow map. The engine owns the caster pass; the game owns which entities are
 ///   in it (a mount is, a spell effect is not), which is exactly the shape 1164 calls a door.
-const CEILING: usize = 182;
+/// - `liquid::UNMIRRORED_RENDER_LAYER` — the render layer the water's mirror camera does not
+///   carry. A game-side BILLBOARD has exactly one viewer by construction, so a nameplate had to
+///   be able to say "every camera but that one"; the layer number is the reflection camera's own
+///   arrangement (`liquid::reflect`'s header), and a copy of it app-side would be a second
+///   answer that goes stale the day the mirror picks a different layer.
+/// - `terrain_stream::StreamActivity` — the streamer's per-frame account. It is an
+///   *instrument's* read everywhere else and would sit in the probes' bucket, but this fork's
+///   browser stutter probe (`webdiag`) is deliberately NOT under `dev` — it is the web build's
+///   own instrument, and gating it behind the feature that compiles the desktop instrument stack
+///   out is what would make it unshippable — so the scanner counts it as a game file and the
+///   item lands on this side of the line.
+///
+/// **The number is the union, not the sum.** Upstream's own surface measures 179 and this
+/// branch's measured 184; the merged tree is 185 because the two sets are not nested —
+/// `interior::NodeAmbient` is upstream's alone and the six above are this fork's alone.
+const CEILING: usize = 185;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

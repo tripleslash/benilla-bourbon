@@ -120,12 +120,14 @@ mod preflight;
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod realm_select;
 mod realmlist;
 mod run_mode;
 mod screen_fade;
 mod screenshot;
 mod shaders;
 
+mod game_tip;
 mod name_persist;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
@@ -135,6 +137,7 @@ mod sound;
 /// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
 mod swing_refusal;
 mod target;
+mod text_filter;
 mod textinput;
 mod transport;
 mod tutorial;
@@ -207,6 +210,7 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+mod weapon_trail;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
 /// module doc. `pub` because the plan's "Env/config on web" interface names it as
 /// `benilla_app::webenv::var` by that exact path; every in-crate caller still just writes
@@ -633,6 +637,7 @@ pub fn run(build: BuildId) -> AppExit {
     // `benilla-config/Diagnostics/fps-journal.csv`; `WOW_FPS_JOURNAL=<csv>` is the harness lever.
     .add_plugins(perf::FpsJournalPlugin)
     .add_plugins(BowstringPlugin)
+    .add_plugins(weapon_trail::WeaponTrailPlugin)
     .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)
     // Pipeline-compile counters + the live-compile tripwire (decision 0837: macOS builds every
@@ -685,6 +690,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The login screen (decision 0539): the faithful AccountLogin glue + the credential policy
     // that answers the IO thread's pre-logon park.
     .add_plugins(login::LoginPlugin)
+    // The realm list: the faithful RealmList glue + the policy that answers the IO thread's
+    // realm park. The client used to take `realms.first()` and offer no way to say otherwise.
+    .add_plugins(realm_select::RealmSelectPlugin)
     // The character-creation screen + its live preview booth (decision 0423).
     .add_plugins(char_create::CharCreatePlugin)
     // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).
@@ -763,6 +771,8 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldScorePlugin)
     .add_plugins(BattlefieldPlugin)
     .add_plugins(BattlefieldPositionsPlugin)
+    .add_plugins(crate::game_tip::GameTipPlugin)
+    .add_plugins(crate::text_filter::TextFilterPlugin)
     .add_plugins(TutorialPlugin)
     // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
     // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an

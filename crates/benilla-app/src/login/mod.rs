@@ -27,7 +27,7 @@
 //! [`screen`] (the authored layout, transcribed from `AccountLogin.xml`), [`smoke`] (the
 //! `WOW_LOGIN_SMOKE` headless prover).
 
-mod queue;
+pub(crate) mod queue;
 mod screen;
 mod smoke;
 
@@ -43,6 +43,7 @@ use bevy::prelude::*;
 use benilla_protocol::{DialFailure, LoginRefusal, LoginStage};
 
 use crate::char_select::ClientState;
+use crate::glue::dialog::{DialogKind, GlueDialog};
 use crate::glue_strings::GlueStrings;
 use crate::net::{
     CharListMessage, DisconnectedMessage, LoginAbandon, LoginFailedMessage, LoginQueuedMessage,
@@ -67,7 +68,6 @@ impl Plugin for LoginPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LoginIntent>()
             .init_resource::<LoginForm>()
-            .init_resource::<LoginDialog>()
             .add_systems(OnEnter(ClientState::Login), enter_login)
             .add_systems(OnExit(ClientState::Login), screen::exit_login)
             .add_systems(
@@ -82,13 +82,25 @@ impl Plugin for LoginPlugin {
                         tick_login_caret,
                         screen::refresh_boxes,
                         screen::refresh_checkbox,
-                        drive_dialog,
-                        screen::refresh_realmlist,
-                        crate::glue::art_swaps,
-                        crate::glue::glue_button_visuals,
-                        crate::glue::sync_outlines,
+                        // The shared glue dialog (2084) — the widget is `crate::glue::dialog`'s
+                        // and the select screen runs the same system over the same resource; what
+                        // a press *means* here is [`answer_dialog`]'s, right behind it. It sits
+                        // inside this chain rather than being hoisted out with a `before`/`after`
+                        // pair, because the shared painters below are in this chain too and
+                        // ordering across it makes a painter transitively ordered against its own
+                        // `SystemTypeSet` — rejected at schedule build, so it panics at boot and
+                        // no unit test sees it (2071).
+                        crate::glue::dialog::drive_glue_dialog,
+                        answer_dialog,
+                        // Both after the driver: it is what spawns the dialog's edit box, and a
+                        // realmlist Okay is what changes the address this repaints.
+                        (
+                            crate::glue::dialog::refresh_dialog_box,
+                            screen::refresh_realmlist,
+                        ),
                     )
                         .chain()
+                        .before(crate::glue::GlueVisuals)
                         .run_if(in_state(ClientState::Login)),
                     (smoke::debug_login_smoke, screen::debug_login_shot),
                 )
@@ -365,7 +377,7 @@ fn without_dead_url(text: &str) -> std::borrow::Cow<'_, str> {
 /// table `0x836b78` — the long `LOGIN_*` family; the world server's resolve against `0x85cae8` —
 /// the short `AUTH_*` family ([`world_refusal_text`]). The chain is grunt opcode table `0x85e278`
 /// → `Logon::OnAuthResult 0x5b2c90` (byte-index table `0x5b2ea4` + jump table `0x5b2e78`) →
-/// `CGlueMgr::OnLoginState 0x46b0f0` → `CGlueMgr::UpdateLoginDialog 0x46b140`.
+/// `CGlueMgr::OnLoginState 0x46b0f0` → `CGlueMgr::UpdateGlueDialog 0x46b140`.
 ///
 /// Two consequences worth stating outright:
 ///
@@ -444,7 +456,8 @@ fn logon_refusal_text(strings: &GlueStrings, code: Option<u8>) -> &str {
 #[allow(clippy::too_many_arguments)]
 fn drive_policy(
     mut attempt: Attempt,
-    mut dialog: ResMut<LoginDialog>,
+    realm_list_up: Res<crate::realm_select::Realms>,
+    mut dialog: ResMut<GlueDialog>,
     strings: Option<Res<GlueStrings>>,
     time: Res<Time>,
     mut stages: MessageReader<LoginStageMessage>,
@@ -511,6 +524,13 @@ fn drive_policy(
         if matches!(dialog.kind, Some(DialogKind::Status)) {
             dialog.set_text(stage_text(strings, msg.stage));
         }
+    }
+    // The realm list answers the same question the status dialog is asking ("what are we
+    // connecting to?"), and the reference does not stack them: reaching the realm list means the
+    // login state moved past `LOGIN_STATE_CONNECTING`, and `CGlueMgr::UpdateGlueDialog` clears
+    // the dialog when it does. Ours would otherwise sit behind the list saying "Connecting".
+    if realm_list_up.shown && matches!(dialog.kind, Some(DialogKind::Status)) {
+        dialog.close();
     }
     // **The queue** (decision 1681): each packet is one sample, and the first one turns the
     // connecting dialog into the queue dialog. A queue is not a failure — the attempt is still in
@@ -644,7 +664,7 @@ fn drive_policy(
 fn to_select_on_roster(
     mut msgs: MessageReader<CharListMessage>,
     mut intent: ResMut<LoginIntent>,
-    mut dialog: ResMut<LoginDialog>,
+    mut dialog: ResMut<GlueDialog>,
     state: Res<State<ClientState>>,
     mut next: ResMut<NextState<ClientState>>,
 ) {
@@ -654,7 +674,15 @@ fn to_select_on_roster(
     intent.in_flight = false;
     intent.park = IoPark::Active;
     intent.retry_at = None;
-    dialog.close();
+    // **Only the dialogs the roster ANSWERS.** This used to close whatever was up, which was
+    // right while the only dialog that could be up here was this screen's own "Connecting…". It
+    // stopped being right when a refused *character* login started raising an `Error` on the
+    // select screen: the refusal's relist produces a roster a second later, and closing on it
+    // would take the message off the screen before the player had read it — the same silent
+    // refusal, one layer up. An `Error` is dismissed by its Okay, never by an arriving packet.
+    if matches!(dialog.kind, Some(DialogKind::Status | DialogKind::Queued)) {
+        dialog.close();
+    }
     if *state.get() == ClientState::Login {
         next.set(ClientState::CharSelect);
     }
@@ -769,6 +797,7 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
 /// buttons / toggle the checkbox.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn login_input(
+    realms: Res<crate::realm_select::Realms>,
     presses: Query<(Entity, &LoginAction, Ref<Interaction>)>,
     clicks: Res<crate::glue::GlueClicks>,
     mut keyboard: MessageReader<KeyboardInput>,
@@ -778,11 +807,17 @@ fn login_input(
     raw_handle: Query<&bevy::window::RawHandleWrapper, With<bevy::window::PrimaryWindow>>,
     mut form: ResMut<LoginForm>,
     mut attempt: Attempt,
-    mut dialog: ResMut<LoginDialog>,
+    mut dialog: ResMut<GlueDialog>,
     strings: Option<Res<GlueStrings>>,
     mut sounds: MessageWriter<GlueSound>,
     mut video: ResMut<VideoConfig>,
 ) {
+    // The realm list stands **over** this screen rather than replacing it (the reference's
+    // `RealmList` is a DIALOG-strata frame, not a glue screen), so while it is up the boxes,
+    // buttons and keys underneath are inert — including ESCAPE, which is its Cancel, not our Quit.
+    if realms.shown {
+        return;
+    }
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
@@ -832,20 +867,29 @@ fn login_input(
                 if !form.save {
                     save_account("");
                 }
-            }
-            // The dialog's own button is [`drive_dialog`]'s, and this loop is skipped entirely
-            // while one is open.
-            LoginAction::Dialog => {}
+            } // The dialog's own buttons are `crate::glue::dialog`'s, and this loop is
+              // skipped entirely while one is open.
         }
     }
 
     let mods = textinput::mods_now(&keys);
     let wl = textinput::wayland_display(raw_handle.iter().next());
     for ev in keyboard.read() {
-        // A dialog owns the keyboard while it is up — the ref's `GlueDialog` is `toplevel` with
-        // `enableKeyboard="true"`, so the boxes behind it hear nothing. ENTER and ESCAPE still come
-        // back unclaimed; [`drive_dialog`] reads them as its button.
+        // A dialog with an edit box owns the keyboard while it is up — the ref's `GlueDialog` is
+        // `toplevel` with `enableKeyboard="true"`, so the boxes behind it hear nothing. ENTER and
+        // ESCAPE still come back unclaimed; [`crate::glue::dialog::drive_glue_dialog`] reads
+        // them as its two buttons.
         if dialog_open {
+            if dialog.kind.is_some_and(DialogKind::has_edit_box) {
+                textinput::feed_key(
+                    &mut dialog.edit,
+                    ev,
+                    mods,
+                    &mut clipboard,
+                    wl,
+                    textinput::CharFilter::Any,
+                );
+            }
             continue;
         }
         // The shared law first (editing, caret, selection, the clipboard trio); only what it
@@ -935,10 +979,16 @@ fn login_input(
 /// `caret_shown` simply never left its `true` default, so the login caret was the one glue caret
 /// that sat solid.
 ///
-/// A dialog eats the keys, not the clock: no dialog carries an edit box any more, so the form's
-/// caret keeps blinking behind whichever one is up.
-fn tick_login_caret(mut form: ResMut<LoginForm>, time: Res<Time>) {
-    textinput::tick_caret(form.focused(), true, time.delta_secs());
+/// **A dialog with an edit box takes the focus with the keys** (1667): its box blinks and the
+/// form's stops, so the screen never shows two live carets at once. Every other dialog leaves the
+/// form's caret running — a dialog eats the keys, not the clock.
+fn tick_login_caret(mut form: ResMut<LoginForm>, mut dialog: ResMut<GlueDialog>, time: Res<Time>) {
+    let dt = time.delta_secs();
+    let in_dialog = dialog.kind.is_some_and(DialogKind::has_edit_box);
+    textinput::tick_caret(form.focused(), !in_dialog, dt);
+    if in_dialog {
+        textinput::tick_caret(&mut dialog.edit, true, dt);
+    }
 }
 
 /// Editing the account box away from the saved name clears the save + unchecks (the ref's
@@ -978,208 +1028,95 @@ fn leave_fullscreen(video: &mut VideoConfig) -> bool {
 
 // ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
 
-/// Which dialog is up: the connecting status (Cancel button, text driven by the stages) or an
-/// error (Okay button).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DialogKind {
-    Status,
-    Error,
-    /// **Queued for a full realm** (decision 1681). The reference has no queue dialog *type*: it
-    /// opens the ordinary `CANCEL` status dialog and re-texts it every frame, relabelling the one
-    /// button to `CHANGE_REALM`. This is that, as a kind — the relabel is the only thing that
-    /// distinguishes it from [`Self::Status`], and a kind is how this screen spells "different
-    /// button caption".
-    Queued,
-}
+/// What the realmlist dialog says when the box holds something that is not an address. It replaces
+/// the prompt in place and **leaves the typed text alone**, so the fix is an edit rather than a
+/// retype — the reason a bad value does not close the dialog or become an error dialog of its own.
+const REALMLIST_BAD: &str =
+    "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
 
-impl DialogKind {
-    /// The button's caption — `GlueDialogTypes`' own `button1` field, in the ref's centred
-    /// single-button layout. (`button2` and `hasEditBox` are the reference's too; benilla's one
-    /// user of either was 1667's realmlist editor, and that left with the realmlist button.)
-    pub(super) fn button(self, strings: &GlueStrings) -> &str {
-        match self {
-            DialogKind::Status => strings.text("CANCEL", "Cancel"),
-            // The reference's own relabel: leaving a queue is "Change Realm", not "Cancel".
-            DialogKind::Queued => strings.text("CHANGE_REALM", "Change Realm"),
-            DialogKind::Error => strings.text("OKAY", "Okay"),
-        }
-    }
-}
-
-/// Whether a key press answers the dialog's button — the keyboard half of [`drive_dialog`]'s
-/// button; the mouse half is OR-ed in beside it. That button is the affirmative one on every kind
-/// (Cancel on the status dialog, Okay on an error). ENTER confirms, ESCAPE dismisses; on a
-/// one-button dialog — and every dialog is one now — they are the same button.
-///
-/// **`on_screen` is the whole of the second bug fixed on 2026-08-29.** Pressing ENTER on an empty
-/// login form played the sound and showed nothing, while *clicking* Login showed the dialog
-/// (director's report). The two systems poll the same [`ButtonInput`]: [`login_input`] opened the
-/// error dialog on the ENTER edge, and [`drive_dialog`] — later in the same chained frame, with
-/// `keys` untouched — read *the same* `just_pressed(Enter)` as that dialog's own Okay and closed
-/// it before it had ever been drawn. Both sounds played, which is exactly what was heard.
-///
-/// The reference cannot have this bug because it is event-driven: the ENTER that fires
-/// `AccountLogin_Login` is *dispatched* to the focused edit box (`OnEnterPressed`), and a dialog
-/// that does not exist yet is not in the dispatch. Polling is our seam, so the gate has to be
-/// ours too, and it says the same thing the dispatch does — **a dialog answers only keys pressed
-/// while it was already on screen**. Not "not this frame": on screen. It is passed the same
-/// `fresh` flag that drives the (re)spawn, so the two cannot drift apart.
-fn dialog_keys(kind: DialogKind, on_screen: bool, enter: bool, escape: bool) -> bool {
-    if !on_screen {
-        return false;
-    }
-    match kind {
-        // The status dialog's one button IS Cancel, so ESCAPE is it. The queue's button is the
-        // same act under another name, so it answers to ESCAPE the same way.
-        DialogKind::Status | DialogKind::Queued => escape,
-        DialogKind::Error => escape || enter,
-    }
-}
-
-/// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
-/// despawns the tree (respawning on a kind change — the button caption differs) and updates the
-/// text in place.
-#[derive(Resource, Default)]
-pub(crate) struct LoginDialog {
-    pub(super) kind: Option<DialogKind>,
-    pub(super) text: String,
-    pub(super) dirty: bool,
-    pub(super) root: Option<Entity>,
-    /// The queue's sample ring and the realm it is for — live only while [`DialogKind::Queued`]
-    /// is up, and rebuilt from empty on every fresh queue so a second login never inherits the
-    /// first one's estimate.
-    pub(super) queue: queue::QueueEstimate,
-    queue_realm: Option<String>,
-    /// The kind the spawned tree was built for.
-    spawned: Option<DialogKind>,
-    /// The glue scale the spawned tree was built at — a resize rebuilds it.
-    spawned_s: f32,
-}
-
-impl LoginDialog {
-    fn open_status(&mut self, text: &str) {
-        self.kind = Some(DialogKind::Status);
-        self.set_text(text);
-    }
-    fn open_error(&mut self, text: &str) {
-        self.kind = Some(DialogKind::Error);
-        self.set_text(text);
-    }
-    /// Enter the queue: a fresh ring (a second login must not inherit the first one's estimate)
-    /// and the realm's name for the `_NAME` text variants.
-    fn open_queued(&mut self, realm: Option<String>) {
-        self.kind = Some(DialogKind::Queued);
-        self.queue = queue::QueueEstimate::default();
-        self.queue_realm = realm;
-        self.set_text("");
-    }
-    fn set_text(&mut self, text: &str) {
-        if self.text != text {
-            self.text = text.to_string();
-            self.dirty = true;
-        }
-    }
-    fn close(&mut self) {
-        self.kind = None;
-        self.text.clear();
-        self.dirty = false;
-    }
-}
-
-/// Spawn/despawn the dialog tree with the resource, update its text, and run its one button:
-/// Status's Cancel bumps the abandon generation (the in-flight attempt discards at its next
-/// stage boundary) and forgets the intent; Error's Okay just closes. Esc = the button; Enter
-/// confirms an error.
-#[allow(clippy::too_many_arguments)]
-fn drive_dialog(
+/// **What a glue-dialog press means, on this screen.** The widget itself
+/// ([`crate::glue::dialog::drive_glue_dialog`]) owns the tree, the keys and the click sound, and
+/// ends an `Error` on its own; everything below is behaviour only the login screen can define, and
+/// none of it is reachable from any other screen — `Status`, `Queued` and `Realmlist` can only be
+/// *opened* from here.
+fn answer_dialog(
     mut commands: Commands,
-    mut dialog: ResMut<LoginDialog>,
+    mut answers: MessageReader<crate::glue::dialog::GlueDialogAnswer>,
+    mut dialog: ResMut<GlueDialog>,
     mut intent: ResMut<LoginIntent>,
+    mut realmlist: ResMut<crate::realmlist::Realmlist>,
+    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     abandon: Res<LoginAbandon>,
-    art: Res<crate::glue::art::GlueArt>,
-    assets: Res<AssetServer>,
-    strings: Option<Res<GlueStrings>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    buttons: Query<(Entity, &LoginAction)>,
-    clicks: Res<crate::glue::GlueClicks>,
-    mut texts: Query<&mut Text, With<screen::DialogText>>,
-    mut sounds: MessageWriter<GlueSound>,
-    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    let empty = GlueStrings::default();
-    let strings = strings.as_deref().unwrap_or(&empty);
-
-    let Some(kind) = dialog.kind else {
-        if let Some(root) = dialog.root.take() {
-            commands.entity(root).despawn();
-        }
-        dialog.spawned = None;
-        return;
-    };
-
-    // (Re)spawn on the open edge, a kind change (the button caption differs), or a window resize
-    // (the tree bakes the glue scale); a text-only change updates the message line in place.
-    //
-    // `fresh` is *this dialog appearing*, as opposed to a resize rebuilding a dialog already up —
-    // and it is the same flag [`dialog_keys`] takes as `!on_screen`, so the frame the dialog is
-    // drawn on and the frame it starts answering keys on are one decision, not two.
-    let s = crate::glue::screen_scale(window.single().ok());
-    let fresh = dialog.root.is_none() || dialog.spawned != Some(kind);
-    if fresh || dialog.spawned_s != s {
-        if let Some(root) = dialog.root.take() {
-            commands.entity(root).despawn();
-        }
-        dialog.root = Some(screen::spawn_dialog(
-            &mut commands,
-            &art,
-            &assets,
-            strings,
-            kind,
-            &dialog.text,
-            s,
-        ));
-        dialog.spawned = Some(kind);
-        dialog.spawned_s = s;
-        dialog.dirty = false;
-    } else if dialog.dirty {
-        for mut t in &mut texts {
-            if t.0 != dialog.text {
-                t.0 = dialog.text.clone();
+    for answer in answers.read() {
+        match answer.kind {
+            // The widget's own — it has already dismissed it.
+            DialogKind::Error => {}
+            DialogKind::Realmlist => {
+                // Okay: take the typed address, or say why it cannot be taken and stay open with
+                // the text as typed — the fix is then an edit, not a retype. **The only press
+                // that does not end its dialog**, which is exactly why the widget cannot own
+                // this arm. Cancel (button 2, or ESCAPE, which this kind routes to it) closes.
+                if answer.button1 {
+                    let typed = dialog.edit.text.clone();
+                    if accept_realmlist(&typed, &mut realmlist, script.as_deref_mut()) {
+                        dialog.dismiss(&mut commands);
+                    } else {
+                        dialog.set_text(REALMLIST_BAD);
+                    }
+                } else if answer.button2 {
+                    dialog.dismiss(&mut commands);
+                }
+            }
+            DialogKind::Status | DialogKind::Queued => {
+                // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
+                // must not silently resubmit later.
+                abandon.0.fetch_add(1, Ordering::SeqCst);
+                intent.in_flight = false;
+                intent.clear();
+                dialog.dismiss(&mut commands);
             }
         }
-        dialog.dirty = false;
     }
+}
 
-    // The button, from the mouse or the keys. A click needs no `fresh` guard of its own: the
-    // button it would hit did not exist to be clicked on the frame the tree spawned.
-    let hit = |want: LoginAction| buttons.iter().any(|(e, a)| *a == want && clicks.hit(e));
-    let key = dialog_keys(
-        kind,
-        !fresh,
-        keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter),
-        keys.just_pressed(KeyCode::Escape),
-    );
-    let button = hit(LoginAction::Dialog) || key;
-
-    // **Every glue dialog button clicks** — `GlueDialog_OnClick` ends with
-    // `PlaySound("gsTitleOptionOK")` whatever the dialog's type. Ours played nothing at all.
-    // Emitted here, before the kinds diverge, so no arm can forget it.
-    if button {
-        sounds.write(GlueSound("gsTitleOptionOK"));
-    }
-    if button {
-        if matches!(kind, DialogKind::Status | DialogKind::Queued) {
-            // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
-            // must not silently resubmit later.
-            abandon.0.fetch_add(1, Ordering::SeqCst);
-            intent.in_flight = false;
-            intent.clear();
+/// Take the realmlist dialog's Okay: normalize what was typed, point the session at it, and mirror
+/// it into the `realmList` CVar so it is still there next launch. `false` = the box holds nothing
+/// usable and the caller should keep the dialog open.
+///
+/// The persistence leg is `char_select`'s `lastCharacterIndex` pattern exactly (1131/1293): an
+/// **engine-side** write rides the change queue like a Lua `SetCVar`, so `cvars::sync_cvars` folds
+/// it into the knob and marks the file dirty, and `save_config` writes `config.toml`. A write to a
+/// name the VM has not registered yet is a deliberate silent no-op there, so this reports that
+/// case rather than claiming a save that did not happen — the **session** value stands either way,
+/// which is the half that matters for the login about to be attempted.
+fn accept_realmlist(
+    typed: &str,
+    realmlist: &mut crate::realmlist::Realmlist,
+    script: Option<&mut benilla_ui::script::UiScript>,
+) -> bool {
+    let Some(address) = crate::realmlist::normalize(typed) else {
+        return false;
+    };
+    realmlist.set(&address);
+    let name = crate::realmlist::CVAR_REALMLIST;
+    match script {
+        Some(script) => {
+            script.set_cvar_engine(name, &address);
+            if script.cvar(name).is_some() {
+                info!("login: realmlist -> {address}");
+            } else {
+                warn!(
+                    "login: realmlist -> {address} for this session, but the VM has not registered \
+                     {name} yet, so it was not saved"
+                );
+            }
         }
-        dialog.close();
-        if let Some(root) = dialog.root.take() {
-            commands.entity(root).despawn();
+        None => {
+            warn!("login: realmlist -> {address} for this session only — no UI VM to persist it")
         }
     }
+    true
 }
 
 // ── The saved account name (decision 0539 §4) ────────────────────────────────────────────────────
@@ -1235,10 +1172,17 @@ mod tests {
             display: DisplayMode::Fullscreen,
             ..VideoConfig::default()
         };
-        assert!(leave_fullscreen(&mut video), "the first press did something");
+        assert!(
+            leave_fullscreen(&mut video),
+            "the first press did something"
+        );
         assert_eq!(video.display, DisplayMode::Windowed);
         assert!(!leave_fullscreen(&mut video), "the second press did not");
-        assert_eq!(video.display, DisplayMode::Windowed, "and never toggles back");
+        assert_eq!(
+            video.display,
+            DisplayMode::Windowed,
+            "and never toggles back"
+        );
     }
 
     /// Stand `drive_policy` up on its own with the env fast path already spent, so the policy
@@ -1249,7 +1193,12 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<LoginIntent>()
-            .init_resource::<LoginDialog>()
+            // The dialog is `GluePlugin`'s resource now (2084), so a harness that stands this
+            // screen's systems up without that plugin has to seat it.
+            .init_resource::<GlueDialog>()
+            // The policy asks whether the realm list is standing over this screen; in a harness
+            // that never raises one the answer is a default `Realms` — always "no".
+            .init_resource::<crate::realm_select::Realms>()
             // Literal, not Default: `Realmlist::default()` reads `$WOW_HOST`, and every probe
             // recipe in this repo exports it — a suite run from such a shell would otherwise
             // assert against whatever that shell happened to be pointing at.
@@ -1298,7 +1247,7 @@ mod tests {
              account back off the client that displaced us",
         );
         assert!(intent.retry_at.is_none(), "and nothing is scheduled");
-        let dialog = app.world().resource::<LoginDialog>();
+        let dialog = app.world().resource::<GlueDialog>();
         assert_eq!(dialog.kind, Some(DialogKind::Error));
         // The fallback literal: this App has no GlueStrings, and the table's own row is
         // `DISCONNECTED = "Disconnected from server";` (GlueStrings.lua) — the same words.
@@ -1330,9 +1279,52 @@ mod tests {
              straight back",
         );
         assert!(
-            app.world().resource::<LoginDialog>().kind.is_none(),
+            app.world().resource::<GlueDialog>().kind.is_none(),
             "with no dialog: nothing went wrong",
         );
+    }
+
+    /// **A roster does not take a refusal off the screen.**
+    ///
+    /// [`to_select_on_roster`] closes the dialog because a roster is the answer to this screen's
+    /// "Connecting…" — but since a refused *character* login raises an `Error` on the SELECT
+    /// screen, and its own relist produces a roster a second later, an unscoped close would wipe
+    /// the message before it could be read. That is the original bug (a refusal nobody sees) one
+    /// layer up, and nothing else would catch it: the build is green either way and the window is
+    /// a second long.
+    #[test]
+    fn an_arriving_roster_closes_the_connecting_dialog_but_not_an_error() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::CharSelect)
+            .init_resource::<LoginIntent>()
+            .init_resource::<GlueDialog>()
+            .add_message::<CharListMessage>()
+            .add_systems(Update, to_select_on_roster);
+
+        // The refusal's dialog survives its own relist.
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .open_error("World server is down");
+        app.world_mut().write_message(CharListMessage {
+            characters: Vec::new(),
+            realm: None,
+        });
+        app.update();
+        let dialog = app.world().resource::<GlueDialog>();
+        assert_eq!(dialog.kind, Some(DialogKind::Error));
+        assert_eq!(dialog.text, "World server is down");
+
+        // …and the connecting dialog the roster IS the answer to still closes.
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .open_status("Connecting");
+        app.world_mut().write_message(CharListMessage {
+            characters: Vec::new(),
+            realm: None,
+        });
+        app.update();
+        assert!(app.world().resource::<GlueDialog>().kind.is_none());
     }
 
     /// An **unattended** run keeps 0065's paced reconnect on a lost session — the verdict rides
@@ -1356,7 +1348,7 @@ mod tests {
             Some(RETRY_DELAY_SECS),
             "paced by the flat 3 s off a zeroed clock, not fired on the spot",
         );
-        assert!(app.world().resource::<LoginDialog>().kind.is_none());
+        assert!(app.world().resource::<GlueDialog>().kind.is_none());
     }
 
     /// **The submitted attempt dials the configured realmlist** (decision 1667) — the whole
@@ -1402,50 +1394,153 @@ mod tests {
         );
     }
 
-    /// The dialog kinds' own shape: one button each, and `spawn_dialog` lays out from it. The
-    /// ref's `button2`/`hasEditBox` pair had exactly one user — 1667's realmlist editor — and it
-    /// went out with the realmlist button, so a kind that asked for either would now be a kind the
-    /// screen cannot draw.
+    /// The dialog's Okay: what the box holds becomes the session's address, including the
+    /// `realmlist.wtf` line a player pastes off a server's setup page. No VM here, so the
+    /// persistence leg is the `None` arm — the session value is what this asserts, and it is the
+    /// half the next login attempt reads.
+    ///
+    /// **Nothing on this fork's login screen opens that dialog** — the browser client's address
+    /// is `/config.json`'s and nothing else (`crate::realmlist`'s header), so the Realmlist button
+    /// went out with Quit. The widget and this answer stay whole and tested: the kind is the glue
+    /// layer's, not this screen's, and a shared widget that only half-works is the worse shape.
     #[test]
-    fn every_dialog_kind_has_one_button() {
-        let strings = GlueStrings::default();
-        assert_eq!(DialogKind::Status.button(&strings), "Cancel");
-        assert_eq!(DialogKind::Queued.button(&strings), "Change Realm");
-        assert_eq!(DialogKind::Error.button(&strings), "Okay");
+    fn the_realmlist_dialog_takes_what_was_typed() {
+        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
+        assert!(accept_realmlist(
+            r#"  SET realmlist "logon.example.org"  "#,
+            &mut realmlist,
+            None,
+        ));
+        assert_eq!(realmlist.address(), "logon.example.org");
     }
 
-    /// **A dialog never answers the key press that opened it.** ENTER on an empty login form
-    /// opened the error dialog in `login_input` and then, later in the *same* frame with the same
-    /// `ButtonInput`, `drive_dialog` read that identical `just_pressed(Enter)` as the dialog's own
-    /// Okay — so the popup appeared and vanished inside one frame and only the two sounds were
-    /// heard (director's report, 2026-08-29). The gate is being on screen, not a frame count.
+    /// …and a box holding something that is not an address changes nothing and reports it, so the
+    /// caller keeps the dialog open over the text as typed rather than closing on a silent no-op.
     #[test]
-    fn a_dialog_does_not_answer_the_key_that_opened_it() {
-        // The frame it appears on: the key that opened it is not its answer.
-        assert!(!dialog_keys(DialogKind::Error, false, true, false));
-        assert!(!dialog_keys(DialogKind::Error, false, false, true));
-        // Once it is up, the same press is.
-        assert!(dialog_keys(DialogKind::Error, true, true, false));
-    }
-
-    /// Which key answers the button, per kind: ENTER and ESCAPE are the same button on an error
-    /// dialog; ESCAPE alone works the Cancel-shaped ones, which have no affirmative to confirm.
-    #[test]
-    fn each_dialog_kind_maps_its_own_keys() {
-        for (kind, enter, escape, want) in [
-            (DialogKind::Error, true, false, true),
-            (DialogKind::Error, false, true, true),
-            (DialogKind::Status, true, false, false),
-            (DialogKind::Status, false, true, true),
-            (DialogKind::Queued, false, true, true),
-            (DialogKind::Queued, true, false, false),
-        ] {
-            assert_eq!(
-                dialog_keys(kind, true, enter, escape),
-                want,
-                "{kind:?} enter={enter} escape={escape}",
+    fn a_bad_address_leaves_the_realmlist_alone() {
+        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
+        for typed in ["", "   ", "logon.example.org and more", "host:notaport"] {
+            assert!(
+                !accept_realmlist(typed, &mut realmlist, None),
+                "{typed:?} is not an address",
             );
+            assert_eq!(realmlist.address(), "localhost");
         }
+    }
+
+    /// **The seam the move opened** (2084): the widget publishes a press, this screen answers it.
+    ///
+    /// `accept_realmlist` and the cancel bookkeeping are each covered on their own above, and the
+    /// widget's keys and kinds are covered in `crate::glue::dialog` — but nothing covered the
+    /// *wiring* between them, which is the one thing the move could break silently. A dialog whose
+    /// press reaches nobody looks exactly like a dialog that works until you click it.
+    #[test]
+    fn a_published_press_reaches_the_login_screens_answer() {
+        use crate::glue::dialog::GlueDialogAnswer;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<LoginIntent>()
+            .init_resource::<GlueDialog>()
+            .insert_resource(crate::realmlist::Realmlist::unpinned("localhost"))
+            .insert_resource(LoginAbandon(std::sync::Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )))
+            .add_message::<GlueDialogAnswer>()
+            .add_systems(Update, answer_dialog);
+
+        // The status dialog's Cancel: the attempt is abandoned and the credentials forgotten, so
+        // nothing resubmits behind the player's back.
+        app.world_mut().resource_mut::<LoginIntent>().creds = Some(("one".into(), "pone".into()));
+        app.world_mut().resource_mut::<LoginIntent>().in_flight = true;
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .open_status("Connecting");
+        app.world_mut().write_message(GlueDialogAnswer {
+            kind: DialogKind::Status,
+            button1: true,
+            button2: false,
+        });
+        app.update();
+        let intent = app.world().resource::<LoginIntent>();
+        assert!(
+            !intent.in_flight,
+            "the cancelled attempt is no longer in flight"
+        );
+        assert!(intent.creds.is_none(), "and it does not silently resubmit");
+        assert_eq!(
+            app.world()
+                .resource::<LoginAbandon>()
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the abandon generation moved, so the attempt still in flight is discarded",
+        );
+        assert!(app.world().resource::<GlueDialog>().kind.is_none());
+
+        // The realmlist editor's Okay: the typed address becomes the session's.
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .open_realmlist("Address of realm list server", "localhost");
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .edit
+            .set_text("logon.example.org");
+        app.world_mut().write_message(GlueDialogAnswer {
+            kind: DialogKind::Realmlist,
+            button1: true,
+            button2: false,
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::realmlist::Realmlist>()
+                .address(),
+            "logon.example.org",
+        );
+        assert!(app.world().resource::<GlueDialog>().kind.is_none());
+
+        // …and its Okay over a bad address keeps the dialog up, with the text replaced — the one
+        // press in the whole widget that does not end its own dialog.
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .open_realmlist("Address of realm list server", "logon.example.org");
+        app.world_mut()
+            .resource_mut::<GlueDialog>()
+            .edit
+            .set_text("not an address at all");
+        app.world_mut().write_message(GlueDialogAnswer {
+            kind: DialogKind::Realmlist,
+            button1: true,
+            button2: false,
+        });
+        app.update();
+        let dialog = app.world().resource::<GlueDialog>();
+        assert_eq!(dialog.kind, Some(DialogKind::Realmlist), "it stays open");
+        assert_eq!(dialog.text, REALMLIST_BAD, "saying why");
+        assert_eq!(
+            app.world()
+                .resource::<crate::realmlist::Realmlist>()
+                .address(),
+            "logon.example.org",
+            "and the address it refused is unchanged",
+        );
+    }
+
+    /// Opening the editor seats the current address in the box, selected whole — so typing a new
+    /// server replaces the old one instead of appending to it.
+    #[test]
+    fn opening_the_editor_preselects_the_current_address() {
+        let mut dialog = GlueDialog::default();
+        dialog.open_realmlist("Address of realm list server", "logon.example.org");
+        assert_eq!(dialog.kind, Some(DialogKind::Realmlist));
+        assert_eq!(dialog.edit.text, "logon.example.org");
+        assert_eq!(
+            dialog.edit.selected_text().as_deref(),
+            Some("logon.example.org")
+        );
+        assert_eq!(dialog.edit.max_letters, crate::realmlist::MAX_LETTERS);
+        assert!(!dialog.edit.password, "an address is not a secret");
     }
 
     /// Did this update ask the app to quit?
@@ -1470,7 +1565,7 @@ mod tests {
         });
         app.update();
         assert_eq!(
-            app.world().resource::<LoginDialog>().kind,
+            app.world().resource::<GlueDialog>().kind,
             Some(DialogKind::Error),
             "every refusal shows the dialog, exit or not",
         );
@@ -1756,10 +1851,10 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<LoginForm>()
+            .init_resource::<GlueDialog>()
             // The clock now asks which box owns the focus (1667): a dialog with an edit box takes
             // it. No dialog is open here, so the form's box keeps it — which is the case this
             // asserts.
-            .init_resource::<LoginDialog>()
             .add_systems(Update, tick_login_caret);
 
         let past_the_period = |app: &mut App| {
