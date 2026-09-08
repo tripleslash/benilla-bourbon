@@ -53,6 +53,30 @@ struct Cli {
     /// the local stand-in for the object store the hosted client reads. Replaces `--data`.
     #[arg(long, conflicts_with = "data")]
     packs: Option<PathBuf>,
+    /// The optional updated-character-model layer's container (`benilla-pack build --data
+    /// .../patch-A.mpq --out web/packs-hd`), served at `/data-hd/*` beside `--packs`.
+    ///
+    /// Only reached when the player has the `hdCharacterModels` CVar on: with it off the client
+    /// never requests this tree, which is exactly what serving it here lets you verify.
+    #[arg(long, requires = "packs")]
+    packs_hd: Option<PathBuf>,
+    /// Record every chain name the client reads into `<file>`, in `web/boot-manifest.json`'s own
+    /// shape — the server-side capture of a read set, and the input to `benilla-pack sidecars`.
+    ///
+    /// Fed from two places, because the two serving modes see different things:
+    ///
+    /// - **`--packs`** (what everyone runs): the host sees pack objects, and a pack id names a few
+    ///   hundred files at once — so the *client* reports instead. Open the page with
+    ///   `?boottrace=1` and `web/boot.js` posts its collected read set to `POST /__boottrace`,
+    ///   which this flag arms.
+    /// - **`--data`**: the per-name route carries the name in the URL, so every read is recorded
+    ///   as it arrives, with no page cooperation at all.
+    ///
+    /// Either way the file is written when the host shuts down cleanly (Ctrl-C), so a capture is
+    /// "start the host, boot the client, get where you want the manifest to cover, stop the host".
+    /// Translate it into a container's prefetch with `benilla-pack sidecars`.
+    #[arg(long)]
+    log_reads: Option<PathBuf>,
     /// Answer every request as if the host had no HTTP `Range` support — which is what a static host
     /// measurably does. Only meaningful with `--packs`, and the only way to actually exercise the
     /// client's whole-object fallback locally.
@@ -88,13 +112,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let serves_data = cli.data.is_some() || cli.packs.is_some();
+    // Held past the router so the shutdown path can write it — see `--log-reads`.
+    let mut read_log: Option<Arc<wenilla_host::data::ReadLog>> = None;
     let game = match (&cli.data, &cli.packs) {
         (Some(data), None) => {
+            // The layer is a mount decision and this host makes it the way every other tool does:
+            // `$WOW_HD_MODELS`. A read-set capture against the updated character models is
+            // `WOW_HD_MODELS=1 wenilla-host --data ... --log-reads ...`, and the manifest that comes
+            // out names the HD art because the chain that answered it was the HD chain.
+            let hd = benilla_formats::layers::hd_models_env().unwrap_or(false);
             let chain = Arc::new(
-                Chain::open(data).with_context(|| format!("opening {}", data.display()))?,
+                Chain::open_layered(data, hd)
+                    .with_context(|| format!("opening {}", data.display()))?,
             );
-            tracing::info!(data = %data.display(), "patch chain open");
-            wenilla_host::data::router(chain)
+            tracing::info!(data = %data.display(), hd_character_models = hd, "patch chain open");
+            let log = cli.log_reads.as_ref().map(|p| {
+                tracing::info!(file = %p.display(), "recording the read set");
+                Arc::new(wenilla_host::data::ReadLog::new(p.clone()))
+            });
+            read_log = log.clone();
+            wenilla_host::data::router_logged(chain, log)
         }
         (None, Some(packs)) => {
             if !packs.join("index.bpi").is_file() {
@@ -105,7 +142,30 @@ async fn main() -> Result<()> {
                 ranges = !cli.no_ranges,
                 "serving a BENPACK container"
             );
-            wenilla_host::packs::router(packs, !cli.no_ranges)
+            let mut router = wenilla_host::packs::router(packs, !cli.no_ranges);
+            // The trace sink, in the mode that needs it: against a container the host cannot see
+            // names, so the client posts them. See `--log-reads` and `data::trace_router`.
+            if let Some(p) = &cli.log_reads {
+                tracing::info!(
+                    file = %p.display(),
+                    "recording the read set — open the page with ?boottrace=1, then Ctrl-C here"
+                );
+                let log = Arc::new(wenilla_host::data::ReadLog::new(p.clone()));
+                read_log = Some(Arc::clone(&log));
+                router = router.merge(wenilla_host::data::trace_router(log));
+            }
+            if let Some(hd) = &cli.packs_hd {
+                if !hd.join("index.bpi").is_file() {
+                    anyhow::bail!(
+                        "{} has no index.bpi — run `benilla-pack build --data <Data>/patch-A.mpq                          --out {}` first",
+                        hd.display(),
+                        hd.display()
+                    );
+                }
+                tracing::info!(packs_hd = %hd.display(), "serving the updated-character-model layer");
+                router = router.merge(wenilla_host::packs::hd_router(hd, !cli.no_ranges));
+            }
+            router
         }
         // Neither: a gateway. Not an error — it is the *hosted* shape, where the container is
         // static objects on a static host and this process exists only for the two sockets.
@@ -174,7 +234,33 @@ async fn main() -> Result<()> {
         remote_realms = cli.allow_remote_realms,
         "wenilla-host listening"
     );
-    axum::serve(listener, app).await.context("serving")
+    // Ctrl-C is a NORMAL end to a capture run, not a fault: `--log-reads` records the read set in
+    // memory and this is where it lands on disk. Without a graceful shutdown the process would die
+    // mid-boot-capture with nothing written, which is the one way to lose a capture that took a
+    // login and a walk around Elwynn to produce.
+    //
+    // Armed only when there is something to write. A gateway run keeps the old behaviour exactly:
+    // `axum::serve` with no shutdown signal, and Ctrl-C ends the process the way it always did.
+    let result = match &read_log {
+        None => axum::serve(listener, app).await.context("serving"),
+        Some(_) => axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutting down — writing the read set");
+            })
+            .await
+            .context("serving"),
+    };
+    if let Some(log) = read_log {
+        match log.write() {
+            Ok(n) => tracing::info!(
+                names = n,
+                "read set written — translate it with `benilla-pack sidecars --packs <container>                  --boot-manifest <this file>`"
+            ),
+            Err(e) => tracing::error!(error = %e, "could not write the read set"),
+        }
+    }
+    result
 }
 
 /// Is this upstream on the machine the host is running on? Only used to decide whether the

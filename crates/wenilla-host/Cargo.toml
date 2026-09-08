@@ -14,7 +14,15 @@ anyhow.workspace = true
 clap.workspace = true
 benilla-formats = { path = "../benilla-formats", default-features = false }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+# `signal` is for `--log-reads` and nothing else: a read-set capture ends with Ctrl-C, and the
+# manifest is written on the way out, so the shutdown has to be graceful rather than a kill.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "signal",
+] }
 # Splits `axum::extract::ws::WebSocket` into independent read/write halves — it implements
 # Stream + Sink but has no `.split()` of its own, and the proxy needs both directions live at
 # once. `sink`/`std` only: no futures executor of our own, tokio already is one.

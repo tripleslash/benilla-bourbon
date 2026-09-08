@@ -1,4 +1,4 @@
-# Static-host headers (the `_headers` format). Seven rules of the 100 allowed.
+# Static-host headers (the `_headers` format). Eleven rules of the 100 allowed.
 #
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
@@ -55,6 +55,29 @@
   # it already holds is still the corpus this origin serves. `sw.js` keeps it network-first for that
   # reason, and holding it would defeat the check — a client with a stale pointer never learns a
   # re-pack happened. ~10 KB, and the only game-data request a warm repeat visit makes.
+  Cache-Control: no-cache
+
+# ---------------------------------------------------------------------------------------------
+# The optional updated-character-model layer, at /data-hd. The same four rules as /data, for the
+# same four reasons — it is the same container format, built by the same packer, and the arguments
+# above (a pack's name IS its content; an index a re-pack rewrites; a listfile likewise; a pointer
+# that must never be held) do not change because the tree is optional.
+#
+# They are spelled out rather than folded into a /data* glob deliberately: `/data*` would also match
+# a future sibling nobody has thought about yet, and these are cache lifetimes — the class of rule
+# where "it also applied to that" is discovered months later as a client holding bytes it should
+# have re-fetched.
+/data-hd/p/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data-hd/index.bpi
+  Cache-Control: public, max-age=604800
+
+/data-hd/listfile.txt
+  Cache-Control: public, max-age=604800
+
+/data-hd/boot-packs.json
   Cache-Control: no-cache
 
 /sw.js

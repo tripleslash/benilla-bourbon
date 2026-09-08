@@ -65,6 +65,72 @@ because a fallback that is never run is a fallback that does not work.
 MPQ chain. **The current client does not use it**; it is how a session runs without spending half an
 hour packing a container, and it goes away once the container path has run in anger.
 
+### The optional updated-character-model layer
+
+`patch-A.MPQ` — HD player models and their skins, backported to 1.12's own formats — is packed
+into its **own** container and served beside the corpus at `/data-hd`. The client mounts it only
+when the player ticks *Use updated character models* on the Graphics page (`hdCharacterModels`, off
+by default), and with the box off the page never fetches so much as the layer's index.
+
+Building it is three steps, and the middle one is the reason it is not one:
+
+```bash
+# 1. the layer's character art as loose files
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    extract --data "/path/to/WoW 1.12.1/Data/patch-A.mpq" --prefix "Character\\" --out /tmp/hd-char
+# 2. resample it to 2x, in place (~7k textures, a few minutes)
+python scripts/upscale-hd-textures.py /tmp/hd-char
+# 3. pack the archive, taking those names from the loose tree instead
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    build --data "/path/to/WoW 1.12.1/Data/patch-A.mpq" --out web/packs-hd --replace-from /tmp/hd-char
+
+cargo run --release -p wenilla-host -- --www web/dist --packs web/packs --packs-hd web/packs-hd
+```
+
+**Why the upscale.** `characters::sections` composites a body from a base skin plus up to fifteen
+overlays, and its tile table is authored at `UPSCALE_FACTOR = 2` — a 512-square atlas over the
+reference's 256-square partition. The compositor copies a source texel to a destination texel and
+clamps, so every input has to already be at its tile's size. The vanilla corpus satisfies that
+because `patch-U`/`patch-V` resample the character tree to 2x; `patch-A` does not (256-square skins,
+128x32 and 128x64 overlays — exactly 1x), so an unscaled layer renders a character with no
+armour, no underwear and an unpainted head strip. Step 2 brings the layer up to the same 2x
+everything else already speaks, which is why the compositor needs no changes at all.
+
+`Character\` only, and that bound matters: the composite reads its base skin and every overlay from
+there, while `Textures\` is the models' own bound art, already 512-1024, and doubling it would take
+the container somewhere nobody should download. The resample is Lanczos — `upscale_rgba` in the
+script is the one seam a neural upscaler drops into, if the weights and a runtime ever land in the
+tree.
+
+A second container rather than more entries in the first, and the reason is in the data: **4,115 of
+the layer's 16,156 names already exist in the corpus** — every character `.m2`, all seven
+`DBFilesClient\Char*.dbc`, and some four thousand textures. `index.bpi` maps a name hash to exactly
+one location, so one index cannot hold both answers for those keys without a format change; two
+indices hold the same information with none. The split also keeps the two builds independent (the
+layer can be re-packed without touching 3.3 GiB of corpus, and vice versa) and keeps the layer's
+16,158 index entries off the boot of every visitor who declined it.
+
+Before packing art you did not build, run the reporter over it:
+
+```bash
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    inspect --data "/path/to/WoW 1.12.1/Data/patch-A.mpq"
+```
+
+It prints the entry/extension/directory shape, encodes the largest blobs as singletons to check them
+against the 24 MiB object cap **as served** (three of this layer's models are over it raw and none is
+over it packed), parses every `.m2` through the client's own reader with a version histogram, prints
+every `.dbc` header — `field_count`/`record_size` are the whole compatibility question, since
+every DBC reader here is a fixed offset walk — and decodes a sample of the textures.
+
+On the desktop the same switch drops `patch-A.MPQ` out of the mount order, so a `Data` folder that
+has it behaves exactly like one that does not until the box is ticked. `WOW_HD_MODELS=1` forces the
+layer on for a session, which is how the model suite is run against it:
+
+```bash
+WOW_HD_MODELS=1 cargo test -p benilla-m2 -p benilla-formats --no-fail-fast
+```
+
 **A `wenilla-host` that serves files is for local use.** `/data` and `--www` hand the game files
 you point them at to anyone who can reach the socket, with no login, so the bind defaults to
 `127.0.0.1` — the files are Blizzard's, and whoever serves them is distributing them. The public

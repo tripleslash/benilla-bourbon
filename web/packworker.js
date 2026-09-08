@@ -61,6 +61,24 @@ const wasmReady = wasm_bindgen({ module_or_path: './wenilla-packdecode_bg.wasm' 
 /// job before that is refused rather than queued, because the page does not send one until it has
 /// been told the container is open.
 let container = null;
+/// The updated-character-model layer's container, opened by a second `open` with `hd: true`. Null
+/// whenever the player has the option off, which is the default — see `packs.js::bootstrapHd`.
+///
+/// A **second container**, not a second index in the first: a `.bpk` does not restate its pack's
+/// codec or decoded size, so decoding needs the index the pack came from, and the two containers
+/// number their packs from 0 independently. `containerFor` is where that is resolved.
+let hdContainer = null;
+
+/// **The key space.** Twin of `benilla_formats::layers::HD_PACK_KEY_BASE` and of `packs.js`'s own
+/// constant; all three must agree. Every id crossing this file is a RESIDENT key, and the container
+/// it belongs to plus its id inside that container are recovered here and nowhere else.
+const HD_PACK_KEY_BASE = 1 << 30;
+
+/// Which container a resident key names, and what its id is inside it.
+function containerFor(key) {
+  if (key >= HD_PACK_KEY_BASE) return { c: hdContainer, id: key - HD_PACK_KEY_BASE };
+  return { c: container, id: key };
+}
 
 self.onmessage = (event) => {
   const msg = event.data;
@@ -70,7 +88,7 @@ self.onmessage = (event) => {
       open(msg);
       break;
     case 'fetch':
-      run(msg.id, () => fetchPack(msg.id));
+      run(msg.id, (id, c) => fetchPack(id, c));
       break;
     case 'decode':
       run(msg.id, () => Promise.resolve(new Uint8Array(msg.wire)));
@@ -88,15 +106,26 @@ self.onmessage = (event) => {
 async function open(msg) {
   try {
     await wasmReady;
-    container = new wasm_bindgen.Container(msg.base, new Uint8Array(msg.index));
+    const opened = new wasm_bindgen.Container(msg.base, new Uint8Array(msg.index));
+    if (msg.hd) hdContainer = opened;
+    else container = opened;
     self.postMessage({
       type: 'opened',
-      buildId: container.buildId(),
-      packCount: container.packCount(),
+      hd: !!msg.hd,
+      buildId: opened.buildId(),
+      packCount: opened.packCount(),
     });
   } catch (e) {
-    container = null;
-    self.postMessage({ type: 'failed', error: String(e && e.message ? e.message : e) });
+    // Only the corpus is fatal. A layer that will not open leaves `hdContainer` null and every warm
+    // of a layer key falls back to the page's own fetch — the same degradation as no worker at all,
+    // which is what the "accelerator, never a dependency" law asks for.
+    if (msg.hd) hdContainer = null;
+    else container = null;
+    self.postMessage({
+      type: 'failed',
+      hd: !!msg.hd,
+      error: String(e && e.message ? e.message : e),
+    });
   }
 }
 
@@ -107,11 +136,13 @@ async function open(msg) {
 ///
 /// A failure is reported as a `miss`, not thrown: the page's read path can still fetch that pack
 /// the ordinary way, and one unreadable object must not take the worker down with it.
-async function run(id, source) {
+async function run(key, source) {
+  const id = key;
   try {
-    if (!container) throw new Error('no container open');
-    const wire = await source();
-    const body = container.decode(id, wire);
+    const { c, id: inner } = containerFor(key);
+    if (!c) throw new Error('no container open');
+    const wire = await source(inner, c);
+    const body = c.decode(inner, wire);
     self.postMessage({ type: 'body', id, body: body.buffer }, [body.buffer]);
   } catch (e) {
     self.postMessage({ type: 'miss', id, error: String(e && e.message ? e.message : e) });
@@ -124,10 +155,80 @@ async function run(id, source) {
 ///
 /// A dedicated worker created by a controlled document is itself controlled, so this `fetch` goes
 /// through `sw.js` and is answered off disk on every load after the first.
-async function fetchPack(id) {
-  const url = container.packUrl(id);
+async function fetchPack(id, c) {
+  const url = c.packUrl(id);
   if (!url) throw new Error(`pack ${id} is not in this container`);
-  const r = await fetch(url);
+  const r = await fetchRetry(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return new Uint8Array(await r.arrayBuffer());
 }
+
+// ---- transient-failure retry -------------------------------------------------------------
+//
+// A copy of `packs.js`'s helper; see the note there for why there are three. This worker fetches
+// packs itself whenever `sw.js` is in control, so a rate-limited burst reaches it directly.
+/// How many times a transient failure is re-tried before the caller is told it failed. Four
+/// attempts total, so the worst case adds ~1.4 s of backoff before giving up.
+const RETRY_ATTEMPTS = 4;
+/// First backoff, doubled per attempt: 150, 300, 600 ms, plus jitter.
+const RETRY_BASE_MS = 150;
+/// The statuses worth asking again for. **429 is the one this exists for** — A static host rate-limits
+/// a burst of object requests, and the boot prefetch is exactly a burst of object requests — with
+/// the 5xx family alongside it because an edge under load answers those the same way, transiently.
+///
+/// **404 is deliberately absent, and so is every other 4xx.** A missing pack is a fact about the
+/// hosted tree, not a hiccup: `Chain::read` turns it into the correct "file not in patch chain",
+/// and retrying it three times would turn one honest error into four and delay it by a second.
+const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/// `fetch` with backoff on the failures a static object store actually produces under load.
+///
+/// The corpus is a few thousand objects fetched six-wide at boot and again at every zone edge, so
+/// "the origin said 429 once" is a normal event in a normal session, not an outage. Before this,
+/// one of those became a pack the resident map never got: the read path fell back to a blocking
+/// XHR, or the prefetch simply dropped it and the first frame that wanted it paid a round trip —
+/// and on a genuinely rate-limited burst, dozens did at once.
+///
+/// `Retry-After` is honoured when the origin sends one (seconds, or an HTTP date), because an
+/// origin that tells you when to come back knows better than the schedule below. It is clamped, so
+/// a header saying "an hour" costs one attempt rather than hanging the boot.
+///
+/// Jittered, because the whole point is that six workers hit the limit at the same instant; a fixed
+/// backoff would have all six come back at the same instant too.
+async function fetchRetry(url, init, attempts = RETRY_ATTEMPTS) {
+  let lastErr;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (e) {
+      // A rejected fetch is a network-layer failure (offline, DNS, a dropped connection). Those are
+      // exactly the transient class, so they retry — but the last one is re-thrown, not swallowed,
+      // because a caller that asked for bytes must not be handed `undefined`.
+      lastErr = e;
+      if (attempt + 1 >= attempts) throw e;
+      await sleep(retryDelayMs(attempt, null));
+      continue;
+    }
+    if (!RETRY_STATUS.has(response.status) || attempt + 1 >= attempts) return response;
+    await sleep(retryDelayMs(attempt, response.headers.get('Retry-After')));
+  }
+  // Unreachable: the loop either returns a response or throws on its last attempt.
+  throw lastErr || new Error(`fetch(${url}) exhausted ${attempts} attempts`);
+}
+
+/// The wait before attempt `n + 1` — `Retry-After` when the origin sent a usable one, else
+/// exponential backoff with up to 50% jitter. Capped at 5 s so a hostile header cannot stall a boot.
+function retryDelayMs(attempt, retryAfter) {
+  const capped = (ms) => Math.max(0, Math.min(5000, ms));
+  if (retryAfter) {
+    const secs = Number(retryAfter);
+    if (Number.isFinite(secs)) return capped(secs * 1000);
+    const when = Date.parse(retryAfter);
+    if (Number.isFinite(when)) return capped(when - Date.now());
+  }
+  const base = RETRY_BASE_MS * 2 ** attempt;
+  return capped(base + Math.random() * base * 0.5);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

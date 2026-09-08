@@ -34,6 +34,15 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PACKS=web/packs
+# The optional updated-character-model layer's container, built from `patch-A.MPQ` alone:
+#
+#   benilla-pack build --data ".../Data/patch-A.mpq" --out web/packs-hd
+#
+# A SEPARATE tree, hosted at `/data-hd`, and that is the feature rather than an implementation
+# detail: a player with the option off never fetches its index, so the ~1.5 GiB of objects here cost
+# them nothing at all. Absent is an ordinary state -- the site simply has no layer, the client
+# says so once in the console and runs on the original art.
+PACKS_HD=web/packs-hd
 SITE=web/site
 
 # First candidate that exists and is non-empty. Staging outranks `dist` so a hook run stages THIS
@@ -78,11 +87,12 @@ for js in "${DIST}"/*.js; do
 done
 # ---------------------------------------------------------------------------------------------
 [ -d "${PACKS}" ] || echo "warning: no ${PACKS} — staging the client with no game data (benilla-pack build)" >&2
+[ -d "${PACKS_HD}" ] || echo "note: no ${PACKS_HD} — staging without the updated-character-model layer" >&2
 
 mkdir -p "${SITE}"
 # Everything EXCEPT data/. Deleting a junction or symlink never touches its target, but leaving it
 # in place also skips re-creating it, and on Windows that is one fewer `cmd //c` per build.
-find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data ! -name data-hd -exec rm -rf {} +
 
 # Git Bash maps `cp -l` to CreateHardLink, so this is metadata-only even for the 90 MB wasm. The
 # fallback copy is for a filesystem that refuses links (a FAT stick, a mounted share).
@@ -136,16 +146,19 @@ if [ -n "${oversize}" ]; then
   exit 1
 fi
 
+# $1 = the container directory, $2 = the name it takes under ${SITE} (`data`, `data-hd`).
 link_data() {
+  src="$1"
+  dst="${SITE}/$2"
   case "${STAGE_PACKS_LINK:-dir}" in
     hardlink)
-      rm -rf "${SITE}/data"
-      mkdir -p "${SITE}/data"
+      rm -rf "${dst}"
+      mkdir -p "${dst}"
       # -r follows the tree, -l hardlinks the leaves: no bytes move.
-      cp -lr "${PACKS}"/. "${SITE}/data"/
+      cp -lr "${src}"/. "${dst}"/
       ;;
     *)
-      [ -e "${SITE}/data" ] && return 0
+      [ -e "${dst}" ] && return 0
       case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
           # A DIRECTORY JUNCTION, not a symlink: junctions need no administrator rights and no
@@ -157,16 +170,17 @@ link_data() {
           # `/c` literally — otherwise it ignores the arguments and opens an interactive shell that
           # exits successfully having done nothing. Both were observed, in that order.
           MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J \
-            "$(cygpath -w "${SITE}/data")" "$(cygpath -w "${PACKS}")" >/dev/null
+            "$(cygpath -w "${dst}")" "$(cygpath -w "${src}")" >/dev/null
           ;;
         *)
-          ln -s ../packs "${SITE}/data"
+          ln -s "../$(basename "${src}")" "${dst}"
           ;;
       esac
       ;;
   esac
 }
-[ -d "${PACKS}" ] && link_data
+[ -d "${PACKS}" ] && link_data "${PACKS}" data
+[ -d "${PACKS_HD}" ] && link_data "${PACKS_HD}" data-hd
 
 echo "staged ${SITE}:"
 ls -la "${SITE}"

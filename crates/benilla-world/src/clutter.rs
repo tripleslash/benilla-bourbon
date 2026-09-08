@@ -185,7 +185,13 @@ impl Default for ClutterConfig {
             // stop is a divergence; High was simply the dearest one, and this is alpha-tested
             // overdraw on the ground — the thing a bandwidth-bound part has least of. Medium is the
             // nearest stop no sparser than a fresh install, and the row is one drag from High.
-            density: env("WOW_CLUTTER_DENSITY").unwrap_or(2.0).max(0.0),
+            //
+            // **Back to x3/High on 2026-09-08, the director's call.** The paragraph above is
+            // the 1649 reasoning and it still stands as *analysis*; what it does not settle is
+            // which stop a fresh client should start on, and that is a look call. It is taken here
+            // rather than left to the row because this literal and the CVar's registered default
+            // are the same fact spelled twice, welded by `cvars::tests`.
+            density: env("WOW_CLUTTER_DENSITY").unwrap_or(3.0).max(0.0),
             scale: env("WOW_CLUTTER_SCALE").unwrap_or(1.0).max(0.01),
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)

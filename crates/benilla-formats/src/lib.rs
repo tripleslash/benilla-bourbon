@@ -20,6 +20,10 @@ pub use benilla_blp::BlpTexels;
 
 mod chain;
 pub use chain::{Chain, ChainEntry, TryRead};
+/// The optional content layers a chain may carry — today the updated character models. Paired with
+/// [`Chain`]: this says *whether*, that mounts it.
+pub mod layers;
+pub use layers::{hd_character_models, set_hd_character_models, HD_MODELS_ARCHIVE};
 /// The UI texture table's other half — loose `.tga` art (addon folders; decision 1322).
 mod tga;
 pub use tga::tga_to_rgba;

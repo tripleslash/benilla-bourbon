@@ -62,6 +62,23 @@ pub struct PackStore {
     /// `{origin}/data`, no trailing slash — [`crate::web::data_base`].
     base: String,
     index: Index,
+    /// What this container's pack ids are offset by **as resident-map keys** — 0 for the base
+    /// corpus, [`crate::layers::HD_PACK_KEY_BASE`] for the HD layer.
+    ///
+    /// Two containers are open at once now, both numbering their packs from 0, and the resident map
+    /// is one `Map` on the JS heap keyed by a plain number. Without an offset the layer's pack 7 and
+    /// the base corpus's pack 7 are the same entry, and a read of one is served the other's body —
+    /// which surfaces as a zstd error if you are lucky and as a frame decoded out of the wrong bytes
+    /// if you are not. Keys are offset; **URLs are not** ([`Self::pack_url`] uses the container's own
+    /// id, because `p/<hi>/<id>.bpk` is the path the packer wrote).
+    key_base: u32,
+    /// Which page properties hold this container's prefetched index and listfile — `index` /
+    /// `listfile` for the base corpus, `hdIndex` / `hdListfile` for the layer.
+    ///
+    /// Two containers hand themselves over through the one `window.__wenilla_packs` object, so the
+    /// property names have to differ or the second overwrites the first. See [`bootstrap`].
+    index_property: &'static str,
+    listfile_property: &'static str,
     /// `Chain::list`'s answer, built on first ask. `None` inside = the container shipped no
     /// listfile, which is not fatal: only `load_macro_icons` enumerates, and it degrades to an
     /// empty icon picker rather than a failed boot.
@@ -75,18 +92,59 @@ impl PackStore {
     /// it *nothing* is readable — there is no per-name route left to fall back to — so a clear
     /// error at open beats thousands of identical failures at every read site.
     pub fn open(base: String) -> Result<Self> {
-        let bytes = bootstrap::index_bytes(&base)?;
+        Self::open_at(base, 0, "index", "listfile")
+    }
+
+    /// The **updated-character-model layer**'s container, at `/data-hd`.
+    ///
+    /// Same format, same code, two differences that both come from it being the *second* container
+    /// open in one page: its resident keys are offset ([`Self::key_base`]) and it reads its
+    /// prefetched index and listfile from their own page properties, so `packs.js` can hand over two
+    /// containers without either overwriting the other.
+    ///
+    /// Unlike [`Self::open`], a failure here is recoverable by the caller — see
+    /// [`crate::Chain::open_layered`], which reports it and runs on the base corpus.
+    pub fn open_hd(base: String) -> Result<Self> {
+        Self::open_at(
+            base,
+            crate::layers::HD_PACK_KEY_BASE,
+            "hdIndex",
+            "hdListfile",
+        )
+    }
+
+    fn open_at(
+        base: String,
+        key_base: u32,
+        index_property: &'static str,
+        listfile_property: &'static str,
+    ) -> Result<Self> {
+        let bytes = bootstrap::index_bytes(&base, index_property)?;
         let index = Index::parse(bytes).map_err(|e| anyhow!("{e}"))?;
         Ok(Self {
             base,
             index,
+            key_base,
+            index_property,
+            listfile_property,
             listfile: std::sync::OnceLock::new(),
         })
+    }
+
+    /// This container's resident-map key for one of its pack ids — see [`Self::key_base`].
+    fn key(&self, pack_id: u32) -> u32 {
+        self.key_base + pack_id
     }
 
     /// The index — for the boot progress bar's byte total and for diagnostics.
     pub fn index(&self) -> &Index {
         &self.index
+    }
+
+    /// Where this container came from and which page slot handed it over — the diagnostics line's
+    /// half of "which corpus is this session actually running on".
+    pub fn origin(&self) -> (&str, &'static str) {
+        (&self.base, self.index_property)
     }
 
     /// Where a name's blob lives, plus its pack's metadata. `None` when the container has no such
@@ -119,7 +177,7 @@ impl PackStore {
             // Byte-identical wording to the native path: callers match on this text.
             return Err(anyhow!("file not in patch chain: {name}"));
         };
-        if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+        if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
             return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
         }
         let url = self.pack_url(at.pack_id);
@@ -160,7 +218,7 @@ impl PackStore {
         let Some((at, _)) = self.locate(name) else {
             return TryRead::Missing;
         };
-        match resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+        match resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
             Some(frame) => match frame_bytes(&frame) {
                 Ok(bytes) => TryRead::Ready(bytes),
                 // A frame that will not decode is not going to decode next frame either, and
@@ -168,8 +226,12 @@ impl PackStore {
                 // succeeded. Corrupt reads as absent, which is what every caller here handles.
                 Err(_) => TryRead::Missing,
             },
-            None if resident::can_warm(at.pack_id) => {
-                resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
+            None if resident::can_warm(self.key(at.pack_id)) => {
+                resident::prefetch(
+                self.key(at.pack_id),
+                &self.pack_url(at.pack_id),
+                warm_priority(name),
+            );
                 TryRead::Pending
             }
             // Nothing here can warm this pack — no decode worker on this page, or this one has
@@ -200,10 +262,14 @@ impl PackStore {
         let Some((at, _)) = self.locate(name) else {
             return true;
         };
-        if resident::is_resident(at.pack_id) || !resident::can_warm(at.pack_id) {
+        if resident::is_resident(self.key(at.pack_id)) || !resident::can_warm(self.key(at.pack_id)) {
             return true;
         }
-        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
+        resident::prefetch(
+                self.key(at.pack_id),
+                &self.pack_url(at.pack_id),
+                warm_priority(name),
+            );
         false
     }
 
@@ -217,10 +283,14 @@ impl PackStore {
         let Some((at, _)) = self.locate(name) else {
             return;
         };
-        if resident::is_resident(at.pack_id) {
+        if resident::is_resident(self.key(at.pack_id)) {
             return;
         }
-        resident::prefetch(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name));
+        resident::prefetch(
+                self.key(at.pack_id),
+                &self.pack_url(at.pack_id),
+                warm_priority(name),
+            );
     }
 
     /// Read a blob without blocking — the Bevy `AssetReader` lane (`benilla-assets`), which is
@@ -235,7 +305,7 @@ impl PackStore {
         let Some((at, meta)) = self.locate(name) else {
             return Err(anyhow!("file not in patch chain: {name}"));
         };
-        if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+        if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
             return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
         }
         // The **Web Worker** first (`web/packworker.js`): it fetches the object and undoes the
@@ -243,15 +313,20 @@ impl PackStore {
         // map. That is strictly better than either branch below — both of which would do the same
         // work here, on the thread that draws — so it is asked first and the rest is what happens
         // when there is no worker to ask.
-        if resident::warm(at.pack_id, &self.pack_url(at.pack_id), warm_priority(name)).await {
-            if let Some(frame) = resident::slice(at.pack_id, at.frame_off, at.frame_len) {
+        if resident::warm(
+            self.key(at.pack_id),
+            &self.pack_url(at.pack_id),
+            warm_priority(name),
+        )
+        .await {
+            if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
                 return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
             }
         }
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
             let (start, end) = at.wire_range();
             let (ranged, body) =
-                resident::fetch_frame(at.pack_id, &self.pack_url(at.pack_id), start, end)
+                resident::fetch_frame(self.key(at.pack_id), &self.pack_url(at.pack_id), start, end)
                     .await
                     .map_err(|e| anyhow!("{name}: fetching pack {}: {e}", at.pack_id))?;
             if ranged && body.len() as u64 == end - start + 1 {
@@ -260,7 +335,7 @@ impl PackStore {
             probe::demote();
             return self.absorb(name, at, &meta, &body);
         }
-        let wire = resident::fetch_wire(at.pack_id, &self.pack_url(at.pack_id))
+        let wire = resident::fetch_wire(self.key(at.pack_id), &self.pack_url(at.pack_id))
             .await
             .map_err(|e| anyhow!("{name}: fetching pack {}: {e}", at.pack_id))?;
         self.absorb(name, at, &meta, &wire)
@@ -275,7 +350,7 @@ impl PackStore {
     fn absorb(&self, name: &str, at: Located, meta: &PackMeta, wire: &[u8]) -> Result<Vec<u8>> {
         let body = pack_body(wire, at.pack_id).map_err(|e| anyhow!("{name}: {e}"))?;
         let body = decode_pack_body(body, meta).map_err(|e| anyhow!("{name}: {e}"))?;
-        resident::put(at.pack_id, &body);
+        resident::put(self.key(at.pack_id), &body);
         frame_from_body(&body, &at).map_err(|e| anyhow!("{name}: {e}"))
     }
 
@@ -287,7 +362,7 @@ impl PackStore {
     pub fn listfile(&self) -> Result<Vec<crate::ChainEntry>> {
         let names = self
             .listfile
-            .get_or_init(|| bootstrap::listfile_names(&self.base))
+            .get_or_init(|| bootstrap::listfile_names(&self.base, self.listfile_property))
             .as_ref()
             .ok_or_else(|| anyhow!("this container ships no listfile.txt"))?;
         Ok(names

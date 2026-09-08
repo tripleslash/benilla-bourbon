@@ -31,7 +31,11 @@ scripts/web-build-threads.sh                           # …or the same build WI
 # once per install: 6.3 GiB of MPQ → a 3.3 GiB container of ~4,700 static objects
 cargo run --release -p benilla-packer --bin benilla-pack -- \
     build --data /path/to/WoW/Data --out web/packs
-cargo run --release -p wenilla-host -- --www web/dist --packs web/packs
+# optional, if the install has patch-A.MPQ: the updated character models, own container
+#   (extract -> scripts/upscale-hd-textures.py -> build --replace-from; see web/README.md)
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    build --data /path/to/WoW/Data/patch-A.mpq --out web/packs-hd --replace-from /tmp/hd-char
+cargo run --release -p wenilla-host -- --www web/dist --packs web/packs --packs-hd web/packs-hd
 # open http://127.0.0.1:8090/
 ```
 

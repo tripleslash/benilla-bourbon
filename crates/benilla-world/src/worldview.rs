@@ -111,6 +111,13 @@ pub fn run(build: BuildId) -> AppExit {
             .add_systems(Update, end_check);
     }
 
+    // Optional content layers, before either chain opens. `$WOW_HD_MODELS` is the whole of the
+    // ladder here: this probe has no CVar host and no `config.toml`, so the environment is the only
+    // thing that could name a layer — which is exactly what the env arm exists for.
+    benilla_formats::set_hd_character_models(
+        benilla_formats::layers::hd_models_env().unwrap_or(false),
+    );
+
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)
     // builds — same order, same reason, same install resolver (1175) as the client's boot.
     match benilla_formats::wow_data() {

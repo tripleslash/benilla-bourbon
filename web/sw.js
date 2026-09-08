@@ -41,7 +41,7 @@
 //
 // ## Scope
 //
-// `/data/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
+// `/data/` and `/data-hd/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
 // (the gateway address and the realmlist, which must never be held: re-uploading it is how a client
 // gets repointed) — is not passed to `respondWith` at all, so it keeps its ordinary `no-cache`
 // behaviour and a rebuilt bundle still lands on a reload. A service worker that made the dev loop
@@ -66,6 +66,21 @@ const LEGACY_PREFIX = 'wenilla-packs-';
 const QUOTA_CEILING = 0.8;
 
 const DATA_PREFIX = '/data/';
+/// The optional updated-character-model layer's tree, laid out identically beside the corpus. Twin
+/// of `benilla_formats::layers::HD_DATA_SEGMENT`.
+///
+/// Cached on the SAME terms and in the same cache, which is the answer to the question this prefix
+/// raises: the layer is ~1.5 GiB of `immutable` objects whose names are their content, exactly like
+/// the corpus, so nothing about the permanence argument changes for them. What differs is that a
+/// player can turn the layer off — and the cache is then simply never asked for those names again.
+/// Sweeping them at that moment would be the wrong instinct: turning it back on is one click, and
+/// the alternative to a stale-but-unread 1.5 GiB is re-downloading it.
+///
+/// The layer's own `boot-packs.json` carries its own build id, and `syncBuild` is keyed on the
+/// CORPUS's — so a re-pack of the layer alone does not purge here. That is safe for the same reason
+/// the corpus's `p/*` rule is: a pack's URL names its content, so a rebuilt layer either produces
+/// the same object at the same id or a different id nothing holds.
+const HD_DATA_PREFIX = '/data-hd/';
 /// Network-first with a cache fallback: the build-id pointer.
 const POINTER = 'boot-packs.json';
 
@@ -93,8 +108,13 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (!url.pathname.startsWith(DATA_PREFIX)) return;
-  const name = url.pathname.slice(DATA_PREFIX.length);
+  const prefix = url.pathname.startsWith(DATA_PREFIX)
+    ? DATA_PREFIX
+    : url.pathname.startsWith(HD_DATA_PREFIX)
+      ? HD_DATA_PREFIX
+      : null;
+  if (!prefix) return;
+  const name = url.pathname.slice(prefix.length);
   if (name === POINTER) {
     event.respondWith(pointer(url));
     return;
@@ -138,7 +158,7 @@ async function syncBuild(buildId) {
 /// `boot-packs.json`: the origin's answer when there is one, the last one we saw when there is not.
 async function pointer(url) {
   try {
-    const response = await fetch(url.href, { cache: 'no-cache' });
+    const response = await fetchRetry(url.href, { cache: 'no-cache' });
     if (response.ok) {
       const buf = await response.arrayBuffer();
       await store(url.pathname, buf, response.headers, 'no-cache');
@@ -205,7 +225,7 @@ function fetchOnce(key, href) {
     // The default cache mode on purpose: `/data/p/*` is served `immutable`, so a browser that still
     // holds the object in its HTTP cache answers this without a network round trip, and we get to
     // promote it into permanent storage for free.
-    const response = await fetch(href);
+    const response = await fetchRetry(href);
     if (!response.ok) throw new Error(`${key}: HTTP ${response.status}`);
     const buf = await response.arrayBuffer();
     await store(key, buf, response.headers);
@@ -317,3 +337,74 @@ async function roomFor(bytes) {
   quota.usage += bytes;
   return !quota.quota || quota.usage < quota.quota * QUOTA_CEILING;
 }
+
+// ---- transient-failure retry -------------------------------------------------------------
+//
+// A copy of `packs.js`'s helper; see the note there for why there are three. With this worker in
+// control EVERY `/data` request in the session passes through `fetchOnce`, so this is the single
+// most load-bearing of the three copies.
+/// How many times a transient failure is re-tried before the caller is told it failed. Four
+/// attempts total, so the worst case adds ~1.4 s of backoff before giving up.
+const RETRY_ATTEMPTS = 4;
+/// First backoff, doubled per attempt: 150, 300, 600 ms, plus jitter.
+const RETRY_BASE_MS = 150;
+/// The statuses worth asking again for. **429 is the one this exists for** — A static host rate-limits
+/// a burst of object requests, and the boot prefetch is exactly a burst of object requests — with
+/// the 5xx family alongside it because an edge under load answers those the same way, transiently.
+///
+/// **404 is deliberately absent, and so is every other 4xx.** A missing pack is a fact about the
+/// hosted tree, not a hiccup: `Chain::read` turns it into the correct "file not in patch chain",
+/// and retrying it three times would turn one honest error into four and delay it by a second.
+const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/// `fetch` with backoff on the failures a static object store actually produces under load.
+///
+/// The corpus is a few thousand objects fetched six-wide at boot and again at every zone edge, so
+/// "the origin said 429 once" is a normal event in a normal session, not an outage. Before this,
+/// one of those became a pack the resident map never got: the read path fell back to a blocking
+/// XHR, or the prefetch simply dropped it and the first frame that wanted it paid a round trip —
+/// and on a genuinely rate-limited burst, dozens did at once.
+///
+/// `Retry-After` is honoured when the origin sends one (seconds, or an HTTP date), because an
+/// origin that tells you when to come back knows better than the schedule below. It is clamped, so
+/// a header saying "an hour" costs one attempt rather than hanging the boot.
+///
+/// Jittered, because the whole point is that six workers hit the limit at the same instant; a fixed
+/// backoff would have all six come back at the same instant too.
+async function fetchRetry(url, init, attempts = RETRY_ATTEMPTS) {
+  let lastErr;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (e) {
+      // A rejected fetch is a network-layer failure (offline, DNS, a dropped connection). Those are
+      // exactly the transient class, so they retry — but the last one is re-thrown, not swallowed,
+      // because a caller that asked for bytes must not be handed `undefined`.
+      lastErr = e;
+      if (attempt + 1 >= attempts) throw e;
+      await sleep(retryDelayMs(attempt, null));
+      continue;
+    }
+    if (!RETRY_STATUS.has(response.status) || attempt + 1 >= attempts) return response;
+    await sleep(retryDelayMs(attempt, response.headers.get('Retry-After')));
+  }
+  // Unreachable: the loop either returns a response or throws on its last attempt.
+  throw lastErr || new Error(`fetch(${url}) exhausted ${attempts} attempts`);
+}
+
+/// The wait before attempt `n + 1` — `Retry-After` when the origin sent a usable one, else
+/// exponential backoff with up to 50% jitter. Capped at 5 s so a hostile header cannot stall a boot.
+function retryDelayMs(attempt, retryAfter) {
+  const capped = (ms) => Math.max(0, Math.min(5000, ms));
+  if (retryAfter) {
+    const secs = Number(retryAfter);
+    if (Number.isFinite(secs)) return capped(secs * 1000);
+    const when = Date.parse(retryAfter);
+    if (Number.isFinite(when)) return capped(when - Date.now());
+  }
+  const base = RETRY_BASE_MS * 2 ** attempt;
+  return capped(base + Math.random() * base * 0.5);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

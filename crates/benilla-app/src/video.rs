@@ -226,7 +226,13 @@ impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             vsync: !novsync_env(),
-            world_shadows: false,
+            // ON since 2026-09-08 (the director's call). It shipped off because off was the value
+            // at which no frame moved — the honest default for a path that was new — and the
+            // argument for that has expired: the shadow map has been the thing this client looks
+            // like for long enough that the blob decal now reads as the fallback rather than the
+            // baseline. `worldShadows` registers "1" to match, and the two are welded by
+            // `cvars::tests`.
+            world_shadows: true,
             display: if windowed_env() {
                 DisplayMode::Windowed
             } else {

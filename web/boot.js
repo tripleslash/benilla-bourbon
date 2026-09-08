@@ -34,8 +34,24 @@
 // load, which is how the Range/HTTP-cache fallback (and `wenilla-host --no-ranges`) stays
 // exercisable; `?noworker=1` skips the fetch/decode worker, putting every pack decode back on the
 // frame thread. None of them skips the index — without it nothing is readable at all.
+//
+// ## Regenerating `boot-manifest.json`
+//
+// Two ways, and the second is now the easy one.
+//
+//  1. `?boottrace=1` here: the arrays below fill in first-need order and a person copies the
+//     deduplicated result out of the console. It is the only way that works against a CONTAINER,
+//     because a container serves pack objects and a pack id does not say which name inside it was
+//     wanted.
+//  2. `wenilla-host --data "<WoW>/Data" --log-reads web/boot-manifest.json`: the per-name route
+//     carries the name in the URL, so the HOST can record the read set with no console at all.
+//     Boot, get to the character screen, Ctrl-C the host, and the manifest is written in the shape
+//     `benilla-pack` parses. Add `WOW_HD_MODELS=1` to capture against the updated character models.
+//
+// Either way the names are then translated into each container's `boot-packs.json`:
+// `benilla-pack sidecars --packs web/packs` and again `--packs web/packs-hd`.
 
-import { bootstrap, prefetchWorld } from './packs.js';
+import { bootstrap, prefetchWorld, fetchRetry } from './packs.js';
 
 // The wasm travels brotli-compressed: content-length counts .br bytes while the counted stream
 // yields decompressed ones. Dividing the two on a real build gives ~5.0; it drifts a little per
@@ -49,7 +65,16 @@ const READY_TIMEOUT_MS = 20000;
 export async function boot(init, opts = {}) {
   const q = new URLSearchParams(location.search);
   const ui = createBootUi();
-  if (q.get('boottrace') === '1') window.__wenilla_boottrace = [];
+  if (q.get('boottrace') === '1') {
+    window.__wenilla_boottrace = [];
+    // The layer half of the capture (`benilla_formats::web::trace_hd`). A separate array, so the
+    // pasteable manifest stays a flat name list, and the thing it answers is the one a re-capture
+    // has to: with the updated-character-model option ON, WHICH names the layer served — and
+    // therefore whether it is being read at all. Empty with the option off, which is correct;
+    // empty with it on means the layer is mounted and nothing wants it, which is a bug the base
+    // trace cannot show you.
+    window.__wenilla_boottrace_hd = [];
+  }
   const skipPrefetch = q.get('boottrace') === '1' || q.get('noprefetch') === '1';
   installProgressHook(ui, skipPrefetch);
 
@@ -138,8 +163,8 @@ export async function boot(init, opts = {}) {
 async function fetchWasm(url, onBytes) {
   const manifest = await fetchPartsManifest(url);
   const responses = manifest
-    ? await Promise.all(manifest.parts.map((name) => fetch(new URL(name, url))))
-    : [await fetch(url)];
+    ? await Promise.all(manifest.parts.map((name) => fetchRetry(new URL(name, url))))
+    : [await fetchRetry(url)];
   // Handed back as-is so init surfaces the real status — and still gets its non-streaming
   // fallback — rather than an error invented here.
   const failed = responses.find((r) => !r.ok || !r.body);
@@ -204,7 +229,7 @@ async function fetchWasm(url, onBytes) {
 /// about a manifest the reader has never heard of.
 async function fetchPartsManifest(url) {
   try {
-    const r = await fetch(new URL('./wenilla_bg.parts.json', url));
+    const r = await fetchRetry(new URL('./wenilla_bg.parts.json', url));
     if (!r.ok) return null;
     const m = await r.json();
     return Array.isArray(m.parts) && m.parts.length ? m : null;
@@ -240,7 +265,7 @@ async function fetchPartsManifest(url) {
 /// `no-cache`, and it is one of exactly two things a warm repeat visit still puts on the wire.
 async function loadConfig(origin) {
   try {
-    const r = await fetch(`${origin}/config.json`, { cache: 'no-cache' });
+    const r = await fetchRetry(`${origin}/config.json`, { cache: 'no-cache' });
     window.__wenilla_config = r.ok ? await r.json() : {};
   } catch (_) {
     window.__wenilla_config = {};
@@ -261,6 +286,11 @@ function installProgressHook(ui, skipPrefetch) {
     if (stage === 'startup') ui.setStage('Loading interface…');
     else if (stage === 'ready') {
       ui.hide();
+      // A trace capture ends at the first glue screen, which is exactly what the BOOT read set is.
+      // Posting it here rather than at unload is deliberate: `beforeunload` is not guaranteed to
+      // run a fetch to completion, and a capture that is sometimes lost is a capture nobody trusts.
+      // Ask again later (`__wenilla_post_boottrace()` from the console) to fold in the world set.
+      postBootTrace();
       if (!skipPrefetch) {
         const corner = createCornerLine();
         prefetchWorld((done, total) =>
@@ -272,6 +302,54 @@ function installProgressHook(ui, skipPrefetch) {
     }
   };
 }
+
+/// Hand the boot trace to `wenilla-host --log-reads`, which writes `web/boot-manifest.json` from it.
+///
+/// The alternative this replaces is a person opening devtools, deduplicating an array by eye and
+/// pasting it into a file — which works, and which nobody does often enough to keep the manifest
+/// fresh. The host has been able to record a read set from its per-name `/data/<name>` route for a
+/// while; what it could never do is record one against a CONTAINER, where it sees pack objects and
+/// a pack id names a few hundred files at once. This closes that: the client already knows every
+/// name it asked for and in what order, so it sends the list.
+///
+/// A no-op unless `?boottrace=1` armed the array, and a failed POST is silent by design — a host
+/// that was not started with `--log-reads` answers 404, which is the ordinary case for every run
+/// that is not a capture.
+///
+/// Exposed as `window.__wenilla_post_boottrace()` so a session can post again after walking into
+/// the world; `ReadLog` merges in first-need order, so a second post appends what is new.
+function postBootTrace() {
+  const names = window.__wenilla_boottrace;
+  if (!Array.isArray(names) || !names.length) return Promise.resolve(false);
+  // Deduplicated HERE, keeping first-need order, so the host receives the manifest's own shape and
+  // the two sides cannot disagree about what "first need" meant.
+  const seen = new Set();
+  const ordered = [];
+  for (const n of names) {
+    const key = String(n).replace(/\//g, '\\').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ordered.push(n);
+  }
+  const hd = window.__wenilla_boottrace_hd;
+  if (Array.isArray(hd)) {
+    console.log(
+      `wenilla: boot trace — ${ordered.length} names, ${new Set(hd).size} of them served by the ` +
+        `updated-character-model layer`,
+    );
+  }
+  return fetch('/__boottrace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ordered),
+  })
+    .then((r) => {
+      if (r.ok) console.log(`wenilla: posted ${ordered.length} names to the host's read log`);
+      return r.ok;
+    })
+    .catch(() => false);
+}
+window.__wenilla_post_boottrace = postBootTrace;
 
 const mb = (n) => (n / (1024 * 1024)).toFixed(0);
 

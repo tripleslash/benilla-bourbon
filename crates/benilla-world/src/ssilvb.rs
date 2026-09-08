@@ -71,17 +71,26 @@ pub struct IndirectLighting {
 /// narrower-row / wider-clamp split `renderScale` uses.
 pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
-/// The shipped AO strength. Non-zero, unlike `worldShadows` and `renderScale`, on the director's
-/// call: this is meant to be what the game looks like, not an opt-in experiment.
+/// The shipped AO strength. **0 since 2026-09-08 (the director's call): the pass is off out of the
+/// box**, and joins `worldShadows` and `renderScale` as a row whose default is the value at which
+/// no frame moves.
 ///
-/// **It is the row's midpoint, and that is the point.** The shader carries a gain (`AO_GAIN` /
-/// `GI_GAIN` in `shaders/ssilvb.wgsl`) sized so that 0.5 lands on the intended look with the top
-/// half of the slider left as headroom. Turn either half up here and the slider stops being
-/// centred on the shipped look; turn the strength up in the shader gain instead.
-pub const AO_DEFAULT: f32 = 0.5;
+/// It shipped at 0.5 on the argument that screen-space occlusion is "what the game looks like"
+/// rather than an opt-in experiment. What that argument left out is the cost: the gather is a
+/// per-frame full-screen pass over depth, and the browser build runs on whatever GPU the tab
+/// happens to have. A default a player must find and turn OFF to get their frame rate back is the
+/// wrong way round for an effect the reference does not have at all.
+///
+/// **0 is exact, not merely small** — the fragment returns its source untouched rather than going
+/// through a lossy decode/encode pair, so the shipped look is now byte-identical to no pass.
+///
+/// The row's own geometry is unchanged: the slider is 0—100%, and the shader gain (`AO_GAIN` /
+/// `GI_GAIN` in `shaders/ssilvb.wgsl`) still puts the intended look at 0.5, so a player who drags to
+/// the middle gets exactly what this used to ship. Raise the look in the gain, never here.
+pub const AO_DEFAULT: f32 = 0.0;
 
-/// The shipped indirect strength. See [`AO_DEFAULT`].
-pub const GI_DEFAULT: f32 = 0.5;
+/// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
+pub const GI_DEFAULT: f32 = 0.0;
 
 impl Default for IndirectLighting {
     /// `$WOW_SSAO` / `$WOW_SSGI` override the shipped defaults, **session-only** — the A/B levers,
@@ -657,8 +666,10 @@ mod tests {
     /// `benilla-app` (which welds its registered strings to these) cannot drift from the engine.
     #[test]
     fn the_shipped_defaults_are_the_ones_the_cvars_register() {
-        assert_eq!(AO_DEFAULT, 0.5);
-        assert_eq!(GI_DEFAULT, 0.5);
+        // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
+        // than derived, so turning the pass back on out of the box is a deliberate edit here too.
+        assert_eq!(AO_DEFAULT, 0.0);
+        assert_eq!(GI_DEFAULT, 0.0);
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
         // The row offers 0–1; the clamp leaves headroom above it for a hand-typed CVar.

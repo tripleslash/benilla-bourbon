@@ -1246,20 +1246,19 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The **Display Mode** row (1650) — modern Classic's own control, which 1627 had already given us
-/// the two states for. Blizzard's `Blizzard_SettingsDefinitions_Shared/Graphics.lua` (identical on
-/// live, classic and classic_era) builds a boolean proxy as a dropdown with exactly two entries,
-/// `VIDEO_OPTIONS_WINDOWED_FULLSCREEN` and `VIDEO_OPTIONS_WINDOWED`, and no Fullscreen entry at all.
+/// The **Use updated character models** row — the Graphics page's one content switch, and the
+/// only row on it whose effect is not visible until the next start.
 ///
-/// **The polarity is the thing worth pinning.** `gxWindow` is 1.12's CVar and keeps 1.12's sense —
-/// `"1"` is WINDOWED — so the FIRST entry, the borderless one this client defaults to, is the CVar's
-/// `"0"`. A row whose label and value run opposite ways is exactly the kind that gets silently
-/// inverted by a later edit, and until this test there was no coverage of the row at all.
+/// Two things worth holding, and the second is the reason this test exists at all. The box writes
+/// `hdCharacterModels` on the click like any ordinary checkbox — there is no Apply staging, because
+/// there is nothing live to apply to (a chain decides its mounts when it opens). And it must NOT be
+/// marked `deferred`: a row that stages to Apply and then commits to nothing is a row that silently
+/// loses the player's click, which is exactly the failure a "restart required" setting invites.
 #[test]
-fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
-    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowDisplayMode";
+fn the_updated_character_models_box_writes_its_cvar_on_the_click() {
+    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowHdModels";
     let mut s = audio_harness();
-    s.set_cvar_host("gxWindow", "0");
+    s.set_cvar_host("hdCharacterModels", "0");
     let mut s = harness_on(s);
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
@@ -1267,43 +1266,29 @@ fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
             .unwrap(),
-        "Display Mode"
+        "Use updated character models"
     );
-    // "0" is NOT windowed, which 1627 redefined as the borderless fullscreen window.
-    assert_eq!(
-        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+    assert!(
+        !s.eval::<bool>(&format!("return {ROW}Check:GetChecked() and true or false"))
             .unwrap(),
-        "Windowed (Fullscreen)"
+        "the layer is off by default"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
-        "reading the table on select must not write it back"
+        "reading the value on show must not write it back"
     );
-
-    // Two entries, and only two — the modern list has no Fullscreen row, because 8.0.1 removed
-    // the exclusive mode those clients had and 1627 ships none for its own platform reasons.
-    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
-    assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
-    assert_eq!(
-        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
-        2.0
+    // Not staged: the click IS the write. Nothing downstream can act on it this session, so there
+    // is no Apply for it to wait behind.
+    assert!(
+        !s.eval::<bool>(&format!("return {ROW}.deferred and true or false"))
+            .unwrap(),
+        "a restart-required row must not stage to Apply — there is nothing to commit"
     );
-    assert!(s
-        .eval::<bool>("return DropDownList1Button1Check:IsVisible()")
-        .unwrap());
-
-    // Picking Windowed writes the CVar's "1", closes the list, and repaints the capsule.
-    s.run("DropDownList1Button2:Click()").unwrap();
+    s.run(&format!("{ROW}Check:Click()")).unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("gxWindow".to_string(), "1".to_string())]
+        vec![("hdCharacterModels".to_string(), "1".to_string())]
     );
-    assert_eq!(
-        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
-            .unwrap(),
-        "Windowed"
-    );
-    assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -2414,19 +2399,20 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode, the World Shadows
-        // toggle, the two indirect-lighting sliders, and 1847 Enable Sound in Background). None
-        // has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale has no
-        // era row at all, Display Mode's era row was a CHECKBOX whose string says "Check to…", and
-        // 1.12 has no background-sound setting at all (it mutes on its window-activation event and
-        // offers no way out) — and each is a row a player needs a description for. Each carries one
+        // The deliberate exceptions (1639 Render Scale, Use updated character models, the World
+        // Shadows toggle, the two indirect-lighting sliders, and 1847 Enable Sound in Background).
+        // None has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale
+        // has no era row at all, 1.12 has no optional content and so nothing to describe for the
+        // models row, and it has no background-sound setting either (it mutes on its
+        // window-activation event and offers no way out) — and each is a row a player needs a
+        // description for. Each carries one
         // under a `BENILLA_` prefix so the reference's namespace stays the reference's, which is
         // exactly what this guard is here to protect. Everything the guard was built to catch — an
         // invented or typo'd `OPTION_TOOLTIP_` key that silently resolves to nothing — is
         // untouched: the pairing below is exact, so a `BENILLA_` key on the wrong row still fails.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
-            ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
+            ("BENILLA_TOOLTIP_HD_MODELS", "GraphicsRowHdModels"),
             ("BENILLA_TOOLTIP_WORLD_SHADOWS", "GraphicsRowWorldShadows"),
             (
                 "BENILLA_TOOLTIP_AMBIENT_OCCLUSION",
@@ -2463,8 +2449,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     }
     // 27 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
     // Information + Guild Member Alert are 1589's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's, its Display Mode
-    // 1627's (a dropdown since 1650) and its Multisampling 1632's; Camera Following Style
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's and its Multisampling
+    // 1632's (both rows since pulled: Display Mode 2026-09-08, Multisampling 1648); Camera Following Style
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
     // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
@@ -2474,10 +2460,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 59 of the 66 are 1.12's own; the other seven are Render Scale (1639), Display Mode
-    // (1650), Enable Sound in Background (1847), World Shadows, the two indirect-lighting
+    // 59 of the 66 are 1.12's own; the other seven are Render Scale (1639), Use updated character
+    // models, Enable Sound in Background (1847), World Shadows, the two indirect-lighting
     // sliders (Ambient Occlusion, Indirect Lighting) and Water Detail, whose descriptions
-    // are benilla's and whose carve-out is above.
+    // are benilla's and whose carve-out is above. The count is unchanged across 2026-09-08's
+    // Graphics edit because it was one row out (Display Mode) and one row in (the models switch).
     // The 28th CVar row is Block Trades (1764), on the Controls page — its key
     // OPTION_TOOLTIP_BLOCK_TRADES is the reference's, so it is counted here like the rest; the
     // 29th is Enable Error Speech (1815), 1.12's own fourth Sound checkbox, ditto; the 30th is

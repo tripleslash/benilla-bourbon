@@ -108,6 +108,24 @@ const QUOTA_CEILING = 0.8;
 /// Where the probe result is remembered per origin, so a repeat visit starts with the right policy
 /// instead of paying a demotion to learn it again.
 const POLICY_KEY = 'wenilla-range-policy';
+/// **The updated-character-model layer's pack-key offset.** Twin of
+/// `benilla_formats::layers::HD_PACK_KEY_BASE`; the two MUST agree.
+///
+/// Two containers can be open at once — the corpus at `/data` and the optional layer at `/data-hd`
+/// — and both number their packs from 0, while the resident map below is ONE `Map` keyed by a plain
+/// number. Without an offset the layer's pack 7 and the corpus's pack 7 are the same entry, and a
+/// read of one is answered with the other's body. So every key that crosses this file, the wasm
+/// boundary or the worker is `HD_PACK_KEY_BASE + id` for the layer and `id` for the corpus; the
+/// URL keeps the container's own id, because that is the object the packer wrote.
+const HD_PACK_KEY_BASE = 1 << 30;
+/// Where the layer's container is served from, beside `/data`. Twin of
+/// `benilla_formats::layers::HD_DATA_SEGMENT`.
+const HD_DATA_SEGMENT = 'data-hd';
+/// The `localStorage` entry the client keeps its CVars in — `benilla-app/src/local_state.rs`'s
+/// `web_store::key` over `config_path()`. Read here, before any wasm exists, for exactly one key:
+/// whether to fetch the optional layer at all. See `hdWanted`.
+const CONFIG_KEY = 'benilla:/benilla-config/config.toml';
+
 /// The decode worker's script, beside this one at the dist root (Trunk `copy-file`).
 const WORKER_URL = './packworker.js';
 /// How long to wait for the worker to say it has parsed the index. It is a wasm instantiation of a
@@ -126,6 +144,11 @@ function packPath(id) {
 const packs = {
   /// `{origin}/data`, no trailing slash. Set by bootstrap().
   base: '',
+  /// `{origin}/data-hd`, or '' when the optional layer is off — which is the DEFAULT and the
+  /// common case. Empty here means the layer's index was never fetched, so a player who has not
+  /// asked for the updated character models pays nothing at all for them: no index, no pack, not
+  /// even the round trip that would discover the container is absent.
+  hdBase: '',
   /// 'range' | 'whole'. Read by Rust before every miss; written by Rust on a demotion (a range
   /// request answered with a full 200) and by reprobe() on a promotion.
   policy: 'whole',
@@ -139,6 +162,13 @@ const packs = {
   index: null,
   /// `listfile.txt` as text, likewise. Only `load_macro_icons` reads it.
   listfile: null,
+  /// The layer's own index and listfile, in their own slots — `PackStore::open_hd` reads
+  /// `hdIndex`/`hdListfile` where the corpus reads `index`/`listfile`. Null with the layer off,
+  /// which is how Rust is told there is no second container to open.
+  hdIndex: null,
+  hdListfile: null,
+  /// The layer's `boot-packs.json`, same shape as `manifest`. Null with the layer off.
+  hdManifest: null,
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
@@ -427,7 +457,7 @@ const packs = {
   async _fetchWireOnce(packId, url) {
     const cached = await this._cacheMatch(url);
     if (cached) return cached;
-    const r = await fetch(url);
+    const r = await fetchRetry(url);
     if (!r.ok) throw new Error(`pack ${packId}: HTTP ${r.status}`);
     const bytes = new Uint8Array(await r.arrayBuffer());
     await this._cachePut(url, bytes);
@@ -438,7 +468,7 @@ const packs = {
   /// a 200 with the whole object came back — not an error, just a static host on a cache miss — and
   /// Rust absorbs that body rather than throwing away a response already paid for.
   async fetchFrame(packId, url, start, end) {
-    const r = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+    const r = await fetchRetry(url, { headers: { Range: `bytes=${start}-${end}` } });
     if (!r.ok) throw new Error(`pack ${packId}: HTTP ${r.status}`);
     const bytes = new Uint8Array(await r.arrayBuffer());
     if (r.status === 206) return { ranged: true, bytes };
@@ -448,8 +478,15 @@ const packs = {
     return { ranged: false, bytes };
   },
 
-  /// The URL one pack is served at.
+  /// The URL one pack is served at, for a **resident key** — so a key in the layer's space
+  /// (see `HD_PACK_KEY_BASE`) resolves against the layer's base and its own container id.
+  ///
+  /// Rust does not go through this: it passes the URL it built alongside every key, from the store
+  /// that owns the id. This is for the page's own prefetch, which has only the manifest's numbers.
   url(packId) {
+    if (packId >= HD_PACK_KEY_BASE) {
+      return `${this.hdBase}/${packPath(packId - HD_PACK_KEY_BASE)}`;
+    }
     return `${this.base}/${packPath(packId)}`;
   },
 
@@ -587,6 +624,13 @@ export async function bootstrap(base, onProgress = () => {}, opts = {}) {
   // path below reads as it did before phase 6.
   await startWorker(opts.worker !== false);
 
+  // The optional layer, BEFORE the prefetch's early return. `?boottrace=1` and `?noprefetch=1` both
+  // skip the pack warm and neither may skip the layer's INDEX: a manifest capture with the updated
+  // character models on has to run against the composite the player would see, and a client whose
+  // layer never opened reads the original art and records the original names. `bootstrapHd` honours
+  // `opts.prefetch` itself — it opens the container and warms nothing.
+  await bootstrapHd(opts);
+
   const boot = (packs.manifest && packs.manifest.boot) || { packs: [], bytes: 0 };
   if (opts.prefetch === false) return onProgress(0, 0);
 
@@ -603,8 +647,144 @@ export async function bootstrap(base, onProgress = () => {}, opts = {}) {
   }
 }
 
+/// Open the updated-character-model layer, if the player has it on and this origin serves one.
+///
+/// **The whole point of this function is the early return.** With the option off it makes no
+/// request at all: no index, no manifest, no HEAD to find out whether `/data-hd` is even hosted.
+/// That is the feature — the layer is ~1.5 GiB of objects, and a player who never turned it on must
+/// not pay a byte or a round trip for it.
+///
+/// With it on, a missing container is NOT an error. `/data-hd` is hosted separately from the
+/// corpus (`scripts/stage-packs.sh` links it only if it was built), so "the option is on and this
+/// origin has no layer" is an ordinary state of an ordinary site, and the right answer to it is
+/// the game in its original art plus one console line. `Chain::open_layered` says the same thing on
+/// the Rust side for the same reason.
+async function bootstrapHd(opts = {}) {
+  if (!hdWanted()) return;
+  // `location.origin`, character for character what `benilla_formats::web::hd_data_base()` builds
+  // and the twin of boot.js's `${location.origin}/data`. The two must agree or the client would
+  // open a container at an address the page never warmed.
+  const base = `${location.origin}/${HD_DATA_SEGMENT}`;
+  try {
+    packs.hdIndex = await fetchIndex(base);
+  } catch (e) {
+    console.warn(
+      `wenilla: updated character models are on, but this origin serves no /${HD_DATA_SEGMENT} ` +
+        `container — running on the original art (${e.message})`,
+    );
+    return;
+  }
+  // Only now is the layer real: `hdBase` is what `url()` resolves layer keys against, and Rust
+  // opens `PackStore::open_hd` off `hdIndex`, so setting it after the fetch means a failed fetch
+  // leaves the page in exactly the state it would have been in with the option off.
+  packs.hdBase = base;
+  packs.hdManifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
+  packs.hdListfile = await fetchRetry(`${base}/listfile.txt`)
+    .then((r) => (r.ok ? r.text() : null))
+    .catch(() => null);
+  // The decode worker needs the layer's OWN index to decode its packs — a `.bpk` does not restate
+  // its codec or decoded size — so it is opened as a second container there, keyed by the same
+  // offset this file uses. Without this every layer warm falls back to a page-side fetch and a
+  // decode on the frame thread, which works and is exactly what it costs.
+  await openHdInWorker();
+  if (opts.prefetch === false) return;
+  const hdBoot = (packs.hdManifest && packs.hdManifest.boot) || { packs: [] };
+  // Offset into the layer's key space before anything is warmed — see `HD_PACK_KEY_BASE`. The
+  // manifest holds the container's own ids, and every key that leaves this line is a resident key.
+  const keyed = hdBoot.packs.map(([id, bytes]) => [id + HD_PACK_KEY_BASE, bytes]);
+  await prefetch(keyed, () => {});
+}
+
+/// Hand the layer's index to the decode worker as a second container.
+///
+/// Fire-and-forget in spirit but awaited in fact, because the boot prefetch that follows should go
+/// through the worker rather than race it. A worker that refuses the layer is not an error here:
+/// `packworker.js` keeps its corpus container and answers layer keys with a `miss`, which the page
+/// already handles as "fetch it yourself".
+async function openHdInWorker() {
+  const worker = packs.worker;
+  if (!worker || !packs.hdIndex) return;
+  const copy = packs.hdIndex.slice().buffer;
+  await new Promise((resolve) => {
+    const done = (ok) => {
+      clearTimeout(timer);
+      worker.removeEventListener('message', onMessage);
+      resolve(ok);
+    };
+    const onMessage = (e) => {
+      const m = e.data;
+      if (m && m.hd && (m.type === 'opened' || m.type === 'failed')) {
+        if (m.type === 'failed') {
+          console.warn('wenilla: pack worker would not open the model layer —', m.error);
+        }
+        done(m.type === 'opened');
+      }
+    };
+    const timer = setTimeout(() => done(false), WORKER_OPEN_TIMEOUT_MS);
+    worker.addEventListener('message', onMessage);
+    worker.postMessage({ type: 'open', hd: true, base: packs.hdBase, index: copy }, [copy]);
+  });
+}
+
+/// Does the player want the updated character models? The `hdCharacterModels` CVar, read straight
+/// out of `localStorage` because this runs long before the wasm module that owns CVars exists ―
+/// with the `?hd_models=1` / `__wenilla_env` lever ahead of it, on `webenv::var`'s own ladder.
+///
+/// **A twin of `benilla_app::cvars::apply_boot_layers`, and it has to stay one.** If the page
+/// fetched the layer and the client did not open it, the visitor pays 1.5 GiB for art they do not
+/// see; if the client opened it and the page never warmed it, every character read is a cold round
+/// trip. Both read the same key out of the same file and parse it the same lax way (`= "1"`,
+/// `= "0"`, whitespace anywhere), so the failure mode of a mismatch is the one thing neither can
+/// produce on its own.
+///
+/// Absent, unreadable, or unparseable all mean **off**, which is the registered default.
+function hdWanted() {
+  // The URL/env lever FIRST, exactly as `benilla_app::webenv::var` orders it: the page env object
+  // (`window.__wenilla_env.hd_models`), then `?hd_models=1`, then the saved setting. The key is the
+  // `$WOW_` prefix dropped and lowercased, which is that function's own rule for every switch it
+  // serves. Without this arm the lever would move the client and not the page — the client would
+  // mount a layer the page never fetched, and every character read would be a cold round trip.
+  const env = window.__wenilla_env;
+  if (env && env.hd_models !== undefined && env.hd_models !== null) {
+    return layerSwitch(String(env.hd_models)) === true;
+  }
+  const q = new URLSearchParams(location.search).get('hd_models');
+  if (q !== null) return layerSwitch(q) === true;
+
+  let text = null;
+  try {
+    text = localStorage.getItem(CONFIG_KEY);
+  } catch (_) {
+    return false; // a browser refusing site data has no saved setting to honour
+  }
+  if (!text) return false;
+  for (const line of text.split(/\r?\n/)) {
+    const eq = line.indexOf('=');
+    if (eq < 0) continue;
+    if (line.slice(0, eq).trim().toLowerCase() !== 'hdcharactermodels') continue;
+    const raw = line
+      .slice(eq + 1)
+      .trim()
+      .replace(/^"(.*)"$/, '$1');
+    return layerSwitch(raw) === true;
+  }
+  return false;
+}
+
+/// `benilla_formats::layers::layer_switch`, spelled for the page: `0`/`false`/`off` are off,
+/// an empty value is no answer at all (`null`), anything else is on.
+///
+/// One rule, three readers (here, the client, and every `$WOW_HD_MODELS` tool), because the one
+/// thing none of them can survive is disagreeing: a page that read `"0"` as truthy downloads
+/// 1.5 GiB the client then refuses to mount.
+function layerSwitch(raw) {
+  const v = String(raw).trim();
+  if (v === '') return null;
+  return !(v === '0' || v === 'false' || v === 'off');
+}
+
 async function fetchIndex(base) {
-  const r = await fetch(`${base}/index.bpi`);
+  const r = await fetchRetry(`${base}/index.bpi`);
   if (!r.ok) throw new Error(`no container at ${base}/index.bpi (HTTP ${r.status})`);
   return new Uint8Array(await r.arrayBuffer());
 }
@@ -723,7 +903,10 @@ async function startWorker(enabled) {
   const opened = new Promise((resolve) => {
     const onMessage = (e) => {
       const m = e.data;
-      if (m && (m.type === 'opened' || m.type === 'failed')) finishOpen(m);
+      // `!m.hd` — the layer opens through its own handshake (`openHdInWorker`) and its reply must
+      // not settle this one. They cannot overlap today (the layer is opened after this returns),
+      // but a handshake that reads any reply is a handshake that breaks the first time one does.
+      if (m && !m.hd && (m.type === 'opened' || m.type === 'failed')) finishOpen(m);
     };
     const timer = setTimeout(() => finishOpen(null), WORKER_OPEN_TIMEOUT_MS);
     finishOpen = (answer) => {
@@ -845,7 +1028,7 @@ async function prefetch(list, onProgress, extraUrls = []) {
         if (job.id === null) {
           // The listfile rides along: it is the one side file the client fetches lazily, and
           // fetching it here means `Chain::list` never blocks on it.
-          const r = await fetch(job.url);
+          const r = await fetchRetry(job.url);
           if (r.ok) packs.listfile = await r.text();
         } else if (packs.worker) {
           // Through the worker, so the pack lands DECODED in the resident map and the first read
@@ -901,3 +1084,76 @@ function safeLocalSet(key, value) {
     /* nothing to do; the probe just runs again next visit */
   }
 }
+
+// ---- transient-failure retry -------------------------------------------------------------
+//
+// Three copies of this live in the tree — here, `packworker.js` and `sw.js` — because the three
+// run in different worlds: this is an ES module, the pack worker is `importScripts`, and the
+// service worker is a classic worker with no module graph at all. A shared file would have to be
+// authored for all three loaders at once, which is more machinery than fifty lines deserve. They
+// are kept identical on purpose; change one, change all three.
+/// How many times a transient failure is re-tried before the caller is told it failed. Four
+/// attempts total, so the worst case adds ~1.4 s of backoff before giving up.
+const RETRY_ATTEMPTS = 4;
+/// First backoff, doubled per attempt: 150, 300, 600 ms, plus jitter.
+const RETRY_BASE_MS = 150;
+/// The statuses worth asking again for. **429 is the one this exists for** — A static host rate-limits
+/// a burst of object requests, and the boot prefetch is exactly a burst of object requests — with
+/// the 5xx family alongside it because an edge under load answers those the same way, transiently.
+///
+/// **404 is deliberately absent, and so is every other 4xx.** A missing pack is a fact about the
+/// hosted tree, not a hiccup: `Chain::read` turns it into the correct "file not in patch chain",
+/// and retrying it three times would turn one honest error into four and delay it by a second.
+const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/// `fetch` with backoff on the failures a static object store actually produces under load.
+///
+/// The corpus is a few thousand objects fetched six-wide at boot and again at every zone edge, so
+/// "the origin said 429 once" is a normal event in a normal session, not an outage. Before this,
+/// one of those became a pack the resident map never got: the read path fell back to a blocking
+/// XHR, or the prefetch simply dropped it and the first frame that wanted it paid a round trip —
+/// and on a genuinely rate-limited burst, dozens did at once.
+///
+/// `Retry-After` is honoured when the origin sends one (seconds, or an HTTP date), because an
+/// origin that tells you when to come back knows better than the schedule below. It is clamped, so
+/// a header saying "an hour" costs one attempt rather than hanging the boot.
+///
+/// Jittered, because the whole point is that six workers hit the limit at the same instant; a fixed
+/// backoff would have all six come back at the same instant too.
+export async function fetchRetry(url, init, attempts = RETRY_ATTEMPTS) {
+  let lastErr;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (e) {
+      // A rejected fetch is a network-layer failure (offline, DNS, a dropped connection). Those are
+      // exactly the transient class, so they retry — but the last one is re-thrown, not swallowed,
+      // because a caller that asked for bytes must not be handed `undefined`.
+      lastErr = e;
+      if (attempt + 1 >= attempts) throw e;
+      await sleep(retryDelayMs(attempt, null));
+      continue;
+    }
+    if (!RETRY_STATUS.has(response.status) || attempt + 1 >= attempts) return response;
+    await sleep(retryDelayMs(attempt, response.headers.get('Retry-After')));
+  }
+  // Unreachable: the loop either returns a response or throws on its last attempt.
+  throw lastErr || new Error(`fetch(${url}) exhausted ${attempts} attempts`);
+}
+
+/// The wait before attempt `n + 1` — `Retry-After` when the origin sent a usable one, else
+/// exponential backoff with up to 50% jitter. Capped at 5 s so a hostile header cannot stall a boot.
+function retryDelayMs(attempt, retryAfter) {
+  const capped = (ms) => Math.max(0, Math.min(5000, ms));
+  if (retryAfter) {
+    const secs = Number(retryAfter);
+    if (Number.isFinite(secs)) return capped(secs * 1000);
+    const when = Date.parse(retryAfter);
+    if (Number.isFinite(when)) return capped(when - Date.now());
+  }
+  const base = RETRY_BASE_MS * 2 ** attempt;
+  return capped(base + Math.random() * base * 0.5);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

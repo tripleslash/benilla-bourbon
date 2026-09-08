@@ -13,11 +13,12 @@
 //! ```
 
 mod group;
+mod inspect;
 mod plan;
 mod sidecars;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{bail, Context, Result};
@@ -52,6 +53,33 @@ enum Cmd {
     /// corpus is repacked — a `?boottrace=1` capture is minutes, a build is half an hour over
     /// 6.3 GiB — and translating names to pack ids needs only the index.
     Sidecars(SidecarArgs),
+    /// Report what an archive holds and whether this client's readers can read it — run this
+    /// BEFORE building a container out of unfamiliar art. See `inspect.rs`.
+    Inspect(inspect::InspectArgs),
+    /// Write an archive's blobs out as loose files, for a tool that is not this one to rewrite.
+    ///
+    /// Exists for exactly one pipeline: the HD layer's art is authored 1x and the character
+    /// compositor is built at `UPSCALE_FACTOR = 2`, so `scripts/upscale-hd-textures.py` has to see
+    /// the BLPs. Extract, upscale in place, then `build --replace-from` the same directory.
+    Extract(ExtractArgs),
+}
+
+#[derive(Parser)]
+struct ExtractArgs {
+    /// The `Data` directory or a single `.MPQ`.
+    #[arg(long)]
+    data: PathBuf,
+    /// Where the loose tree goes, mirroring chain paths with `/` for `\`.
+    #[arg(long)]
+    out: PathBuf,
+    /// Only names starting with this, matched case-insensitively — e.g. `Character\`.
+    ///
+    /// Not a nicety: the HD layer's `Textures\` tree is 2.9 GiB already authored at 512-1024, and
+    /// doubling it would take the container somewhere nobody should download. The composite reads
+    /// its base skin and every overlay from `Character\`, so that prefix IS the set whose
+    /// resolution the atlas size depends on.
+    #[arg(long, default_value = "")]
+    prefix: String,
 }
 
 #[derive(Parser)]
@@ -88,6 +116,17 @@ struct BuildArgs {
     /// The world-entry read-set manifest, same treatment.
     #[arg(long, default_value = "web/world-manifest.json")]
     world_manifest: PathBuf,
+    /// Prefer a blob's bytes from this directory when it holds one, over the archive's own.
+    ///
+    /// The other half of the `extract` pipeline: the layer is packed from `patch-A.MPQ` as usual,
+    /// except that every name `scripts/upscale-hd-textures.py` rewrote comes from the loose tree
+    /// instead. Doing it here rather than by rebuilding the MPQ means no MPQ writer has to exist,
+    /// and the archive on disk stays exactly what the player installed.
+    ///
+    /// Lookup is by the same `\` to `/` path mapping `extract` wrote, case-insensitively, so a name
+    /// with no loose file simply comes from the archive.
+    #[arg(long, value_name = "DIR")]
+    replace_from: Option<PathBuf>,
     /// Plan and report, but write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -123,6 +162,8 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Build(a) => build(a),
         Cmd::Verify(a) => verify(a),
+        Cmd::Inspect(a) => inspect::inspect(a),
+        Cmd::Extract(a) => extract(a),
         Cmd::Sidecars(a) => {
             let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -169,6 +210,102 @@ fn resolve(chain: &Chain) -> Vec<Blob> {
     // A HashMap drain is arbitrary; sort so the whole build is deterministic from here on.
     out.sort_unstable_by_key(|b| b.key);
     out
+}
+
+/// The loose path a chain name takes on disk: backslashes become separators, everything else is
+/// kept verbatim. The twin of [`replace_lookup`]'s key, and the reason both live next to each other.
+fn loose_path(out: &Path, name: &str) -> PathBuf {
+    let mut p = out.to_path_buf();
+    for seg in name.split(['\\', '/']).filter(|s| !s.is_empty()) {
+        p.push(seg);
+    }
+    p
+}
+
+/// `benilla-pack extract` — the archive's blobs as loose files, for a tool that is not this one.
+fn extract(a: ExtractArgs) -> Result<()> {
+    let chain = Chain::open(&a.data).with_context(|| format!("opening {}", a.data.display()))?;
+    let prefix = a.prefix.to_ascii_lowercase().replace('/', "\\");
+    let entries: Vec<String> = chain
+        .list()
+        .context("reading the listfile")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            prefix.is_empty() || n.to_ascii_lowercase().replace('/', "\\").starts_with(&prefix)
+        })
+        .collect();
+    eprintln!(
+        "extracting {} entries{} to {}",
+        entries.len(),
+        if a.prefix.is_empty() {
+            String::new()
+        } else {
+            format!(" under {}", a.prefix)
+        },
+        a.out.display()
+    );
+
+    // Sequential, and deliberately: the read is a decompress off one file handle and the write is
+    // one create per blob, so this is disk-bound either way — and a failure here should name the
+    // one file it happened on rather than arrive interleaved from eight threads.
+    let mut written = 0usize;
+    let mut bytes = 0u64;
+    for name in &entries {
+        let data = match chain.read(name) {
+            Ok(d) => d,
+            // A listfile can name a file the composite chain tombstoned. That is not an error here
+            // any more than it is at read time — it is simply not part of the composite.
+            Err(_) => continue,
+        };
+        let path = loose_path(&a.out, name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&path, &data).with_context(|| format!("writing {}", path.display()))?;
+        written += 1;
+        bytes += data.len() as u64;
+        if written % 1000 == 0 {
+            eprintln!("  {written}/{}", entries.len());
+        }
+    }
+    eprintln!(
+        "wrote {written} files, {:.1} MiB\nnow: python scripts/upscale-hd-textures.py {}",
+        bytes as f64 / (1024.0 * 1024.0),
+        a.out.display()
+    );
+    Ok(())
+}
+
+/// The loose-file overrides `--replace-from` supplies, keyed the way the container is.
+///
+/// Walked once into a `key -> path` map rather than probed per blob, because the probe would be a
+/// `stat` per name over ~16,000 names and the walk is one directory traversal. Keyed by
+/// [`benilla_mpq::name_key`] — MPQ's own hash — so the case-insensitive, `/`-equals-`\` matching
+/// comes from the same place every other name comparison in this tree gets it, rather than being
+/// restated as a string rule that could drift.
+fn replace_lookup(dir: &Path) -> Result<HashMap<u64, PathBuf>> {
+    fn walk(dir: &Path, rel: &mut Vec<String>, out: &mut HashMap<u64, PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            if path.is_dir() {
+                rel.push(name);
+                walk(&path, rel, out)?;
+                rel.pop();
+            } else {
+                rel.push(name);
+                out.insert(name_key(&rel.join("\\")), path.clone());
+                rel.pop();
+            }
+        }
+        Ok(())
+    }
+    let mut out = HashMap::new();
+    walk(dir, &mut Vec::new(), &mut out)?;
+    Ok(out)
 }
 
 /// Every name any archive's `(listfile)` mentions, keyed the way the container is. Names are a
@@ -233,6 +370,24 @@ fn build(a: BuildArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Loaded before the encode, so a missing or unreadable directory fails in a second rather than
+    // forty minutes in. Empty when the flag is absent, which costs one hash lookup per blob.
+    let replacements = match &a.replace_from {
+        Some(dir) => {
+            let map = replace_lookup(dir)
+                .with_context(|| format!("walking {}", dir.display()))?;
+            let covered = blobs.iter().filter(|b| map.contains_key(&b.key)).count();
+            eprintln!(
+                "--replace-from: {} loose files, {covered} of {} blobs come from {}",
+                map.len(),
+                blobs.len(),
+                dir.display()
+            );
+            map
+        }
+        None => HashMap::new(),
+    };
+
     std::fs::create_dir_all(&a.out)?;
     let archives = chain.archives();
     let done = AtomicUsize::new(0);
@@ -250,6 +405,15 @@ fn build(a: BuildArgs) -> Result<()> {
             let plan_blobs = g
                 .iter()
                 .map(|b| {
+                    // The loose override first — see `--replace-from`. A read failure here is fatal
+                    // rather than a silent fall back to the archive: the whole point of the flag is
+                    // that these bytes ship, and a container that quietly used the un-upscaled
+                    // original would be a character that renders wrong with nothing to point at.
+                    if let Some(path) = replacements.get(&b.key) {
+                        let bytes = std::fs::read(path)
+                            .with_context(|| format!("reading override {}", path.display()))?;
+                        return Ok((b.key, bytes));
+                    }
                     let bytes = archives[b.archive]
                         .read_block(b.block)
                         .map_err(|e| anyhow::anyhow!("reading block {} : {e}", b.block))?;

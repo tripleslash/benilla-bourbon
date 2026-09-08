@@ -88,6 +88,16 @@ pub struct Chain {
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     store: crate::webpack::PackStore,
+    /// The updated-character-model layer, when the player has it on: a **second container**, at
+    /// `/data-hd`, consulted ahead of `store` for every question.
+    ///
+    /// `None` is the default and the cheap state — not "an empty overlay" but *no overlay*, which
+    /// is the whole point of the option: nothing above is fetched, not even the 400 KB index that
+    /// would say what the layer holds. Every method below reads as `hd.and_then(…).unwrap_or_else(base)`
+    /// for that reason: overlay-first resolution is exactly MPQ's own priority rule
+    /// (`patch-A.MPQ` mounts above every numbered patch), restated here because the wasm target has
+    /// no archive stack to inherit it from.
+    hd: Option<crate::webpack::PackStore>,
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
@@ -144,6 +154,22 @@ impl Chain {
     /// modder's malformed `patch-3.MPQ` — into cryptic missing-file failures far downstream. Same
     /// composite on a healthy install; a clear error instead of a quirk on a broken one (1300).
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_layered(path, crate::layers::hd_character_models())
+    }
+
+    /// [`Chain::open`] with the optional layers named outright instead of read off the process-wide
+    /// switch — for a tool, a test, or the packer, each of which wants *this* composite rather than
+    /// whatever the client was last configured for.
+    ///
+    /// `hd_models` mounts (or leaves out) [`crate::HD_MODELS_ARCHIVE`]. Leaving it out is a filter
+    /// over [`mount_order`]'s result and never a change to the law itself: the reference has no
+    /// notion of an optional archive, so there is nothing here to be faithful to, and the one thing
+    /// worth protecting is that the order the remaining archives mount in is still the order the
+    /// reference would have mounted them in.
+    ///
+    /// Single-`.MPQ` opens ignore the flag: naming an archive is an instruction to mount it, and a
+    /// caller that passes `patch-A.MPQ` by path means that archive (the packer's HD build does).
+    pub fn open_layered(path: &Path, hd_models: bool) -> Result<Self> {
         let mut archives = Vec::new();
         if path.is_dir() {
             let mut names: Vec<String> = std::fs::read_dir(path)
@@ -158,6 +184,12 @@ impl Chain {
             // read_dir order is arbitrary; sort so case-variant ties resolve deterministically.
             names.sort();
             for name in mount_order(&names) {
+                // The one filter over the law: an optional layer the player did not ask for is not
+                // in the composite at all. Applied here rather than inside `mount_order` so that
+                // function stays the reference's rule and nothing else (decision 1300).
+                if !hd_models && name.eq_ignore_ascii_case(crate::HD_MODELS_ARCHIVE) {
+                    continue;
+                }
                 let mpq = path.join(&name);
                 archives.push(
                     Archive::open(&mpq).with_context(|| format!("opening {}", mpq.display()))?,
@@ -303,9 +335,59 @@ impl Chain {
     /// deferral: without `index.bpi` nothing resolves at all, so a missing or malformed index is
     /// reported once, here, instead of as thousands of identical read failures with no cause.
     pub fn open(_path: &Path) -> Result<Self> {
-        Ok(Self {
-            store: crate::webpack::PackStore::open(crate::web::data_base())?,
-        })
+        Self::open_layered(_path, crate::layers::hd_character_models())
+    }
+
+    /// [`Chain::open`] with the optional layers named outright — the web twin of the native
+    /// signature, so a caller that decides the layer itself writes one line for both targets.
+    ///
+    /// A layer that **fails to open** is reported and dropped, not propagated, and that is the one
+    /// place the two targets deliberately differ. Natively an unopenable archive is fatal (decision
+    /// 1300: a corrupt `dbc.MPQ` must not become mystery missing-file errors); here the only way to
+    /// fail is that `/data-hd/index.bpi` is not hosted, and the right answer to "this origin
+    /// ships no HD layer" is the game in its original art, not a refusal to boot.
+    pub fn open_layered(_path: &Path, hd_models: bool) -> Result<Self> {
+        let store = crate::webpack::PackStore::open(crate::web::data_base())?;
+        let hd = hd_models
+            .then(|| crate::webpack::PackStore::open_hd(crate::web::hd_data_base()))
+            .and_then(|opened| match opened {
+                Ok(store) => Some(store),
+                Err(e) => {
+                    crate::web::console_warn(&format!(
+                        "updated character models are on but this origin serves no {} container \
+                         ({e:#}) — running on the original art",
+                        crate::layers::HD_DATA_SEGMENT
+                    ));
+                    None
+                }
+            });
+        Ok(Self { store, hd })
+    }
+
+    /// The layer that should answer for `name`: the HD overlay when it holds it, else the base
+    /// container. **The whole of the priority law on this target**, in one place so no method below
+    /// restates it.
+    ///
+    /// `contains` on a `PackStore` is a binary search over an index already in memory, so asking the
+    /// overlay first costs ~17 probes and no I/O — cheap enough that there is no reason for any
+    /// caller to shortcut it.
+    fn layer_for(&self, name: &str) -> &crate::webpack::PackStore {
+        match &self.hd {
+            Some(hd) if hd.contains(name) => {
+                // The layer half of the boot trace, so a `?boottrace=1` capture can say whether the
+                // layer is being read at all and which names reach it — see `web::trace_hd`. A
+                // no-op unless the page armed the array, exactly like its twin.
+                crate::web::trace_hd(name);
+                hd
+            }
+            _ => &self.store,
+        }
+    }
+
+    /// Whether the updated-character-model layer is mounted on this chain — for the boot report and
+    /// the diagnostics line, which should say which corpus a session is actually running on.
+    pub fn hd_character_models(&self) -> bool {
+        self.hd.is_some()
     }
 
     /// Whether the container holds `name` (accepts `/` or `\`; case-insensitive — the equivalence is
@@ -313,7 +395,7 @@ impl Chain {
     ///
     /// No I/O, no allocation, no network: a binary search over the index's sorted key array.
     pub fn contains(&self, name: &str) -> bool {
-        self.store.contains(name)
+        self.hd.as_ref().is_some_and(|hd| hd.contains(name)) || self.store.contains(name)
     }
 
     /// No archive *files* exist on the web target — a blob's home is a pack id, not a path — so
@@ -329,7 +411,7 @@ impl Chain {
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-        self.store.read_sync(name)
+        self.layer_for(name).read_sync(name)
     }
 
     /// Read `name` **without ever blocking the frame** — the lane the UI and the sound engine take.
@@ -342,7 +424,7 @@ impl Chain {
         // included — the array is deduplicated by hand and first push is still first need, so a
         // name that took three frames to arrive appears exactly where it was first wanted.
         crate::web::trace(name);
-        self.store.try_read_sync(name)
+        self.layer_for(name).try_read_sync(name)
     }
 
     /// Would [`Self::try_read`] answer without deferring? Starts the warm if not — see
@@ -352,13 +434,13 @@ impl Chain {
     /// For a caller whose work reads several blobs and is only correct once it can read all of them:
     /// it asks first, does nothing while the answer is no, and the packs warm in the meantime.
     pub fn ready(&self, name: &str) -> bool {
-        self.store.is_ready(name)
+        self.layer_for(name).is_ready(name)
     }
 
     /// Warm the pack `name` lives in, and return immediately — see
     /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
     pub fn prefetch(&self, name: &str) {
-        self.store.prefetch(name);
+        self.layer_for(name).prefetch(name);
     }
 
     /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`
@@ -371,7 +453,7 @@ impl Chain {
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name);
-        self.store.read_async(name).await
+        self.layer_for(name).read_async(name).await
     }
 
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.
@@ -385,7 +467,26 @@ impl Chain {
     /// lookup per entry to report one), so every entry reports `size: 0` — unchanged from what the
     /// web target reported before, and the one web caller, `load_macro_icons`, reads only names.
     pub fn list(&self) -> Result<Vec<ChainEntry>> {
-        self.store.listfile()
+        let mut out = self.store.listfile()?;
+        // The overlay's names are APPENDED, not merged: `Chain::list` is a name enumeration, its one
+        // web caller (`load_macro_icons`) walks it for a prefix, and a name held by both layers is
+        // the same name either way — which layer would *answer* a read of it is `layer_for`'s
+        // business, not this list's. An HD container shipping no listfile is simply no extra names,
+        // on the same terms as the base container shipping without one.
+        if let Some(hd) = &self.hd {
+            if let Ok(extra) = hd.listfile() {
+                let seen: std::collections::HashSet<String> = out
+                    .iter()
+                    .map(|e| e.name.replace('/', "\\").to_ascii_lowercase())
+                    .collect();
+                out.extend(
+                    extra.into_iter().filter(|e| {
+                        !seen.contains(&e.name.replace('/', "\\").to_ascii_lowercase())
+                    }),
+                );
+            }
+        }
+        Ok(out)
     }
 
     /// The store behind this chain — for the boot progress UI, which wants the container's byte

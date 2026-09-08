@@ -53,6 +53,10 @@ web-sys = { version = "0.3.99", features = [
     "Response",
     "XmlHttpRequest",
     "XmlHttpRequestResponseType",
+    # One call site: `web::console_warn`, for the optional-layer open that has to tell a player
+    # their HD container is not hosted. `tracing` is off on the web build
+    # (`quiet_console_on_web`), so the console is the only place left to say it.
+    "console",
 ] }
 # The container's reader. Default features only — the `write` half is the native packer's, and
 # keeping it off is what lets this dependency exist at all on wasm32.

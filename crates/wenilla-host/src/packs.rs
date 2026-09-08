@@ -29,6 +29,18 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// honest. It is also the header that makes an edge *store* the object — the precondition for
 /// range slicing — so serving it here keeps local and hosted behaviour aligned.
 pub fn router(packs: &Path, allow_ranges: bool) -> axum::Router {
+    mount(packs, allow_ranges, "/data")
+}
+
+/// The optional updated-character-model layer's container, at `/data-hd` — the same tree shape,
+/// the same headers, the same everything. It is a second mount rather than a subdirectory of the
+/// first because that is how it is hosted (`scripts/stage-packs.sh`, `web/_headers`), and a local
+/// host whose URL layout differs from the site's is a local host that cannot reproduce its bugs.
+pub fn hd_router(packs: &Path, allow_ranges: bool) -> axum::Router {
+    mount(packs, allow_ranges, "/data-hd")
+}
+
+fn mount(packs: &Path, allow_ranges: bool, at: &str) -> axum::Router {
     let serve = ServeDir::new(packs).append_index_html_on_directories(false);
     let inner = axum::Router::new().fallback_service(
         tower::ServiceBuilder::new()
@@ -43,7 +55,7 @@ pub fn router(packs: &Path, allow_ranges: bool) -> axum::Router {
     } else {
         inner.layer(axum::middleware::from_fn(strip_range))
     };
-    axum::Router::new().nest_service("/data", inner)
+    axum::Router::new().nest_service(at, inner)
 }
 
 /// Drop the request's `Range` header, so the response is always the whole object with a 200 — what

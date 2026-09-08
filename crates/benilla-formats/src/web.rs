@@ -135,6 +135,27 @@ mod wasm {
         format!("{origin}/data")
     }
 
+    /// The root the **updated-character-model layer** is served from: `/data-hd`, beside `/data` on
+    /// the same origin, laid out identically (`index.bpi`, `listfile.txt`, `p/<hi>/<id>.bpk`).
+    ///
+    /// A sibling directory rather than a subdirectory of `/data`, because `web/sw.js` is scoped to
+    /// `/data/` and the two containers have different cache lifetimes to a player who turns the
+    /// layer off: a nested tree would be swept by rules written for the corpus that is always there.
+    pub fn hd_data_base() -> String {
+        let origin = web_sys::window()
+            .expect("benilla_formats::web only runs inside a browser tab")
+            .location()
+            .origin()
+            .expect("window.location.origin");
+        format!("{origin}/{}", crate::layers::HD_DATA_SEGMENT)
+    }
+
+    /// One `console.warn`, for the handful of places that must say something to a player's console
+    /// on a target where `tracing` has been taken off the build (`quiet_console_on_web`).
+    pub fn console_warn(msg: &str) {
+        web_sys::console::warn_1(&JsValue::from_str(msg));
+    }
+
     /// Append `name` to the page's boot-read trace, if the page armed one — the input to
     /// `web/boot-manifest.json` (see `web/boot.js`). A page that wants the trace defines
     /// `window.__wenilla_boottrace = []` before `init()` (the `?boottrace=1` switch does);
@@ -152,6 +173,40 @@ mod wasm {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
                 js_sys::Reflect::get(&window, &"__wenilla_boottrace".into())
+                    .ok()?
+                    .dyn_into::<js_sys::Array>()
+                    .ok()
+            });
+            if let Some(arr) = arr {
+                arr.push(&name.into());
+            }
+        });
+    }
+
+    /// The **layer half** of the boot trace: `name` was answered by the updated-character-model
+    /// layer rather than by the base corpus.
+    ///
+    /// A second array (`window.__wenilla_boottrace_hd`), not a second column in the first one, and
+    /// that is deliberate. `boot-manifest.json` is a flat list of names that
+    /// `benilla-app/tests/boot_manifest.rs` guards the shape of and `benilla-pack sidecars`
+    /// translates against *each* container's index — one name list, two trees, no format change.
+    /// Adding a layer tag to it would have made the manifest a different file for the sake of a
+    /// fact the manifest does not need.
+    ///
+    /// What the second array is for is the question a re-capture actually has to answer: **is the
+    /// layer being read at boot at all, and where.** With the option on and this array empty, the
+    /// layer is mounted and nothing wants it — a wiring bug that is otherwise invisible, because a
+    /// container that is never read looks exactly like a container that is working.
+    pub fn trace_hd(name: &str) {
+        use wasm_bindgen::JsCast;
+        thread_local! {
+            static TRACE_HD: std::cell::OnceCell<Option<js_sys::Array>> =
+                const { std::cell::OnceCell::new() };
+        }
+        TRACE_HD.with(|cell| {
+            let arr = cell.get_or_init(|| {
+                let window = web_sys::window()?;
+                js_sys::Reflect::get(&window, &"__wenilla_boottrace_hd".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -276,4 +331,6 @@ mod wasm {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{data_base, fetch_sync, fetch_sync_range, trace};
+pub use wasm::{
+    console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base, trace, trace_hd,
+};

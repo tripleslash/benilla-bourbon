@@ -9,6 +9,10 @@
 //! The page hands them over as ordinary properties on `window.__wenilla_packs` (a `Uint8Array` for
 //! the index, a string for the listfile), so copying them in costs one `Uint8Array::to_vec` and no
 //! parse at all — the index is binary-searched in place from there on.
+//!
+//! **Which properties** is a parameter now, not a constant, because two containers can be open at
+//! once: the base corpus arrives as `index`/`listfile` and the updated-character-model layer as
+//! `hdIndex`/`hdListfile`. One object, two slots — see [`crate::webpack::PackStore::open_hd`].
 
 use anyhow::{anyhow, Context, Result};
 use wasm_bindgen::JsCast;
@@ -17,8 +21,8 @@ use wasm_bindgen::JsCast;
 ///
 /// A failure here is fatal to the client and should be: the index is the *only* way to resolve a
 /// name to bytes now that the per-name HTTP route is gone, so there is nothing to degrade to.
-pub fn index_bytes(base: &str) -> Result<Vec<u8>> {
-    if let Some(bytes) = super::resident::property("index")
+pub fn index_bytes(base: &str, property: &str) -> Result<Vec<u8>> {
+    if let Some(bytes) = super::resident::property(property)
         .and_then(|v| v.dyn_into::<js_sys::Uint8Array>().ok())
         .map(|a| a.to_vec())
     {
@@ -38,8 +42,8 @@ pub fn index_bytes(base: &str) -> Result<Vec<u8>> {
 /// one web caller of which is `load_macro_icons` (the macro icon picker enumerates
 /// `Interface\Icons\`). A container without one still plays; the picker is just empty. So this is
 /// deliberately lossy about *why* it failed — there is nothing a caller could do differently.
-pub fn listfile_names(base: &str) -> Option<Vec<String>> {
-    let text = match super::resident::property("listfile").and_then(|v| v.as_string()) {
+pub fn listfile_names(base: &str, property: &str) -> Option<Vec<String>> {
+    let text = match super::resident::property(property).and_then(|v| v.as_string()) {
         Some(text) => text,
         None => {
             let bytes = crate::web::fetch_sync(&format!("{base}/listfile.txt")).ok()?;

@@ -918,16 +918,20 @@
             .. "Sounds keep running while they are silenced, so a long one may have finished by "
             .. "the time you return."
 
-        -- Display Mode (1650). 1.12's own OPTION_TOOLTIP_WINDOWED_MODE cannot ride this row: it
-        -- is written for the checkbox it belonged to ("Check to play in a non-fullscreen
-        -- window..."), and its second half describes a desktop-gamma consequence of an exclusive
-        -- mode-set we do not do. The row also has to answer the question a player arrives with —
-        -- "where is Fullscreen?" — which no reference string was ever written to answer.
-        BENILLA_TOOLTIP_DISPLAY_MODE =
-            "Windowed (Fullscreen) fills the screen with a borderless window; Windowed runs in "
-            .. "an ordinary one.\n\n"
-            .. "There is no exclusive fullscreen mode. WoW itself removed one in 8.0.1, and "
-            .. "modern Classic offers these same two."
+        -- Updated character models. benilla's own row on the plainest terms of all: 1.12 has no
+        -- optional content at all, so there is not even a near-miss reference string to adapt.
+        --
+        -- The tooltip carries THREE things a player cannot find out by clicking, in the order
+        -- they will be wanted. First what changes — only characters, so a player who turns it
+        -- on and looks at a tree knows why nothing happened. Then the restart, which is the whole
+        -- reason the row is not self-evident. Then, on the web build, the download: a browser
+        -- client about to ask for 1.7 GB must say so before the click, not after it.
+        BENILLA_TOOLTIP_HD_MODELS =
+            "Uses the updated, higher-detail player character models and animations in place of "
+            .. "the original ones. Creatures, buildings and the world are unaffected.\n\n"
+            .. "Takes effect the next time you start the game.\n\n"
+            .. "In the browser this downloads an additional ~1.7 GB of game data the first time "
+            .. "it is on. With it off, none of that data is fetched."
 
         BENILLA_TOOLTIP_WORLD_SHADOWS =
             "Renders real dynamic silhouettes for players, NPCs, creatures, and mounts. Terrain, "
@@ -971,7 +975,15 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
-                "RowDisplayMode", "RowVerticalSync", "RowWorldShadows",
+                -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
+                -- window states and the window's own title-bar control already moves between
+                -- them, so the row was a second way to say one thing. `gxWindow` survives as the
+                -- CVar and as `$WOW_WIN` — what went is the row, on exactly the terms 1648
+                -- pulled Multisampling's.
+                --
+                -- Updated Character Models closes the "what the world IS" group: it is the only
+                -- row on the page that changes the ART rather than how the art is drawn.
+                "RowVerticalSync", "RowWorldShadows", "RowHdModels",
                 -- The indirect-lighting pair sits between the shadow toggle and Render Scale:
                 -- everything above it is what the world IS, Render Scale is how big it gets
                 -- drawn, and Render Scale keeps the last seat its own note below claims.
@@ -2781,50 +2793,10 @@
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowDisplayMode" inherits="OptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- Display Mode (1650): MODERN CLASSIC's row, not
-                                                -- 1.12's, because 1627 already gave us modern
-                                                -- Classic's two states and a checkbox could only
-                                                -- name one of them.
-                                                --
-                                                -- Blizzard_SettingsDefinitions_Shared/Graphics.lua
-                                                -- (live, classic AND classic_era, all identical):
-                                                -- a BOOLEAN proxy rendered as a dropdown, with
-                                                -- exactly two entries -- container:Add(true,
-                                                -- VIDEO_OPTIONS_WINDOWED_FULLSCREEN) and
-                                                -- container:Add(false, VIDEO_OPTIONS_WINDOWED).
-                                                -- There is no Fullscreen entry anywhere in it;
-                                                -- 8.0.1 removed the exclusive mode those clients
-                                                -- had, which is the same reason 1627 ships none.
-                                                --
-                                                -- It rides gxWindow, OUR persisted CVar, not the
-                                                -- gxMaximize the modern client uses -- that client
-                                                -- deleted gxWindow entirely and had to move; we
-                                                -- did not, and repointing would orphan every
-                                                -- config.toml already holding the row for nothing.
-                                                -- Polarity is gxWindow's own: "0" is not-windowed,
-                                                -- which 1627 redefined as the borderless window.
-                                                --
-                                                -- Not deferred, for the same reason as Vertical
-                                                -- Sync below: the reference row carries
-                                                -- gxRestart = 1 and ours applies on the click.
-                                                OptionsRow_OnLoad(self, "gxWindow", "Display Mode",
-                                                    "BENILLA_TOOLTIP_DISPLAY_MODE")
-                                                OptionsDropdownRow_Setup(self, {
-                                                    { text = "Windowed (Fullscreen)", value = "0" },
-                                                    { text = "Windowed", value = "1" },
-                                                })
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Vertical Sync: 1.12's own Video Options checkbox
@@ -2847,10 +2819,48 @@
                                                     "BENILLA_TOOLTIP_WORLD_SHADOWS")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowAmbientOcclusion" inherits="OptionsSliderRowTemplate">
+                                        <Frame name="$parentRowHdModels" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Use updated character models -- benilla's own
+                                                -- row, and the only one on this page that changes
+                                                -- what the world is MADE of rather than how it is
+                                                -- drawn. The player supplies the art (patch-A.MPQ
+                                                -- beside the other archives; a /data-hd container
+                                                -- in the browser) and this box is whether the
+                                                -- chain mounts it.
+                                                --
+                                                -- RESTART, not deferred, and the distinction
+                                                -- matters. `deferred` stages a value to the Apply
+                                                -- button, which then commits it live; there is no
+                                                -- live commit here to reach. A chain decides its
+                                                -- mounts when it OPENS, the client holds two open
+                                                -- chains, and every model, skin and DBC already
+                                                -- loaded came out of them. So the box writes the
+                                                -- CVar on the click like any other, and the next
+                                                -- start is what reads it
+                                                -- (cvars::boot_cvar, the way gxWindow is read).
+                                                --
+                                                -- So the row carries NO flag of its own,
+                                                -- and deliberately not an inert one: the
+                                                -- page reads `deferred` and nothing else,
+                                                -- and a `restart = 1` no code consults is
+                                                -- a promise of machinery that is not
+                                                -- there. The tooltip carries the fact, in
+                                                -- as many words, which is where a player
+                                                -- looks before clicking rather than after.
+                                                OptionsRow_OnLoad(self, "hdCharacterModels",
+                                                    "Use updated character models",
+                                                    "BENILLA_TOOLTIP_HD_MODELS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAmbientOcclusion" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Ambient Occlusion -- the AO half of the

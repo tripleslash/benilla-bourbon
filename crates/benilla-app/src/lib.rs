@@ -473,6 +473,11 @@ pub fn run(build: BuildId) -> AppExit {
         benilla_protocol::transport::web::set_ws_base(base);
     }
 
+    // **Which optional content layers this run mounts**, resolved before ANY chain opens — the
+    // `mpq://` source below is the first of two, and a chain decides its mounts at open. See
+    // `cvars::apply_boot_layers` and `benilla_formats::layers`.
+    crate::cvars::apply_boot_layers();
+
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)
     // builds. Finds the install the one way anything does (`benilla_formats::wow_data`, decision
     // 1175) — the same answer the `WorldAssets` foundation gets. On failure the source is simply

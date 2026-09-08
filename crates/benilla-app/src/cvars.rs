@@ -477,7 +477,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // registered, 24 after `hwDetect` reads `VideoHardware.dbc` (row 170 on any D3D9-class part,
     // 8 on the weakest). 24 is on no stop of ours; 1649 broke that tie toward the denser stop,
     // because erring sparse is the worse failure for a knob about ground cover.
-    same("WorldDetail", "1"),
+    //
+    // **Registered "2" (High) since 2026-09-08 — the director's call, and a knowing deviation.**
+    // Everything above is why the *reference* reads Medium at boot, and that is still true; this
+    // row no longer follows it. 1649 chose Medium over High on a cost argument (alpha-tested ground
+    // overdraw is what a bandwidth-bound part has least of) and left the row "one drag from High";
+    // the call here is that the drag should not be needed, because ground cover is most of what the
+    // world looks like at eye level and a fresh client should look its best. The cost argument is
+    // unchanged and the row still moves both ways — what moved is which stop a player starts on.
+    // Welded to `ClutterConfig::default().density` (stop = density - 1).
+    deviates(
+        "WorldDetail",
+        "2",
+        "1",
+        "the reference's own boot pair is inconsistent and its own slider reads Medium; ours starts \
+         at High because ground cover is most of what the world looks like, and the stop is one \
+         drag away either way",
+    ),
     // Mouse Sensitivity (1140): 1.12's own MOUSE_SENSITIVITY slider (`UIOptionsFrameSliders` row
     // 1, 0.5..1.5 step 0.05), a MULTIPLIER over the camera's own per-pixel rate — which was a
     // frozen constant until this row. Default "1" is the shipped feel exactly, welded to
@@ -625,12 +641,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("gxVSync", "1"),
     // Benilla's opt-in Wrath-style character shadow-map path. Static world assets keep their
     // authored shading; players, NPCs, creatures and mounts cast realtime silhouettes.
+    // **Default "1" since 2026-09-08** (the director's call), where it was "0". The old note said
+    // "0 is the default no frame moves at", which was the right reason for a path that had just
+    // landed and is not the question any more: what the client should LOOK like out of the box is,
+    // and the answer is with the shadows on. Welded to `VideoConfig::default().world_shadows`
+    // below, so the registered string and the knob cannot drift.
     ours(
         "worldShadows",
-        "0",
+        "1",
         "benilla's own — 1.12 has no shadow map to switch on; the unit shadow it does draw is \
-         the blob decal `blob_shadow.rs` still owns at 0, which is why 0 is the default no \
-         frame moves at",
+         the blob decal `blob_shadow.rs` still owns at 0",
     ),
     // **Display mode** (decisions 1627, 1650) — 1.12's own `gxWindow`, worn since 1650 as modern
     // Classic's two-entry *Display Mode* dropdown rather than 1.12's *Windowed Mode* checkbox: the
@@ -803,13 +823,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `ssaoStrength` — how much of the gathered occlusion to apply. `0` is off, and off is exact:
     // the fragment returns its source untouched rather than through a lossy decode/encode pair.
     //
-    // **Registered non-zero**, unlike `worldShadows` and `renderScale`, whose defaults are the
-    // values at which no frame moves. Those two are opt-in experiments; this is meant to be what
-    // the game looks like. The engine owns the number ([`AO_DEFAULT`]) and this string is welded to
-    // it below, so the two cannot drift. `$WOW_SSAO` overrides session-only.
+    // **Registered at 0 since 2026-09-08** (the director's call), where it was 0.5. It now sits with
+    // `worldShadows` and `renderScale`: a default at the value where no frame moves, and an effect a
+    // player opts into rather than one they have to find and switch off. The reasoning lives on the
+    // engine constant; the engine owns the number ([`AO_DEFAULT`]) and this string is welded to it
+    // below, so the two cannot drift. `$WOW_SSAO` overrides session-only.
     ours(
         "ssaoStrength",
-        "0.5",
+        "0",
         "benilla's own — the reference renders straight to the backbuffer with no depth to \
          gather over, and its ambient IS the authored `LightParams` row",
     ),
@@ -817,7 +838,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // off and is exact, on the same terms. `$WOW_SSGI` overrides session-only.
     ours(
         "ssgiStrength",
-        "0.5",
+        "0",
         "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
          split across two rows only so a player can move them apart",
     ),
@@ -839,6 +860,36 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "waterDetail",
         "2",
         "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below) and keeps 1.12.1's renderer on tier 0",
+    ),
+    // **`hdCharacterModels` — the updated-character-model layer, off by default.**
+    //
+    // benilla's own, on `waterDetail`'s terms but for a different kind of thing: the rows above
+    // choose between renderers we ship, and this one chooses whether a body of ART is in the
+    // composite at all. `patch-A.MPQ` natively, a second BENPACK container (`/data-hd`) in the
+    // browser; either way [`benilla_formats::layers`] is what reads it and
+    // [`benilla_formats::Chain::open`] is where it lands.
+    //
+    // **Registered "0", and this default is not a taste call.** Three reasons, in order of how much
+    // they cost to get wrong:
+    //
+    //  1. On the web build the layer is another **1.7 GiB download**. A player who never asked for
+    //     it must never pay for it, and "off" is the only default that guarantees that — with the
+    //     row off, the page does not fetch the layer's index, let alone a pack.
+    //  2. The art is not ours and is not 1.12's. Every visual golden in this tree is denominated in
+    //     the original character models; a default-on layer would silently re-render all of them.
+    //  3. A player who has no `patch-A.MPQ` and no `/data-hd` is the common case, and a default-on
+    //     row would put them one warning line into every boot for a feature they do not have.
+    //
+    // **Read at boot, applied at boot** ([`crate::cvars::boot_cvar`], like `gxWindow`), because a
+    // chain's mounts are decided when it opens and the client holds two open chains. There is no
+    // knob resource for the same reason: nothing downstream can act on a change mid-session, so the
+    // row is marked `restart` in the options window and says so in its tooltip rather than
+    // pretending to swap the world's art under a running frame. `$WOW_HD_MODELS` overrides
+    // session-only, which is how the model test suite runs against the layer.
+    ours(
+        "hdCharacterModels",
+        "0",
+        "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts          whatever `patch-?.MPQ` archives it finds and never asks",
     ),
     // **The FPS journal** (decision 2008) — benilla's own, and the one instrument that ships:
     // `/console fpsJournal 1` appends a per-second row of position, frame cost and the GPU's
@@ -1400,6 +1451,16 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     if std::env::var_os("WOW_WATER_DETAIL").is_some() {
         persist.env_overridden.insert("waterdetail".into());
     }
+    // `$WOW_HD_MODELS` is the content-layer A/B lever, session-only on `$WOW_WATER_DETAIL`'s law
+    // and for a sharper version of the same reason: it is how the model test suite is pointed at
+    // the updated character models (`WOW_HD_MODELS=1 cargo test -p benilla-formats models::`) and
+    // how `benilla-worldview` — which has no CVar host — reaches the layer at all. A value that
+    // stuck in the file would leave a player's client mounting 1.7 GiB of art because a test run
+    // once wanted it. `benilla_formats::layers` has already taken it (`boot_layers` in `lib.rs`);
+    // this keeps it off disk.
+    if std::env::var_os("WOW_HD_MODELS").is_some() {
+        persist.env_overridden.insert("hdcharactermodels".into());
+    }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
     // whatever a test dialed. `Realmlist::default()` has already taken it; this keeps it off disk.
@@ -1558,6 +1619,34 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
             .map(|(_, v)| v),
         StoredConfig::Absent | StoredConfig::Bad(_) => None,
     }
+}
+
+/// **Which optional content layers this run mounts**, resolved and published to
+/// `benilla_formats::layers` before the `App` exists (decision: see that module).
+///
+/// A sibling of [`boot_cvar`]'s single caller and for the same structural reason: the client opens
+/// two chains — the Bevy `AssetReader`'s and the world store's — and both are built during
+/// plugin setup, long before a resource could carry the answer. A layer is a MOUNT, and a mounted
+/// chain has already decided; there is nothing a later read of the CVar could act on.
+///
+/// Environment first, file second, off if neither says otherwise, which is the ladder every other
+/// `$WOW_*` override in this module follows. The env arm is what points the model test suite and
+/// `benilla-worldview` at the layer, neither of which has a `config.toml` to read.
+pub(crate) fn apply_boot_layers() {
+    // `webenv::var`, not `std::env` — so the switch is `$WOW_HD_MODELS` natively and
+    // `?hd_models=1` (or `__wenilla_env`) in a browser tab, which is the ladder every other
+    // env-overridable CVar in this file already takes. The parse is
+    // `benilla_formats::layers::layer_switch`'s, shared with the page and with the tools, because
+    // three readers of one setting that disagree about what "on" means is a client that mounts
+    // what the page did not download.
+    let hd = crate::webenv::var("WOW_HD_MODELS")
+        .and_then(|v| benilla_formats::layers::layer_switch(&v))
+        .unwrap_or_else(|| {
+            boot_cvar("hdCharacterModels")
+                .and_then(|v| benilla_formats::layers::layer_switch(&v))
+                .unwrap_or(false)
+        });
+    benilla_formats::set_hd_character_models(hd);
 }
 
 /// Per frame: seed the VM's table once it exists (registered set + the RESOLVED session values,
@@ -1983,6 +2072,11 @@ mod tests {
             names,
             vec![
                 "SoundReverb",
+                // 2026-09-08: the Environment Detail row starts at High where the reference's own
+                // slider reads Medium. A look call, argued at the row; it is here because a stop a
+                // player did not choose is exactly the kind of difference this list exists to keep
+                // visible.
+                "WorldDetail",
                 "autoSelfCast",
                 "gxColorBits",
                 "gxDepthBits",
@@ -2105,7 +2199,7 @@ mod tests {
         // the env-less ×2 literal (clutter.rs: "Default ×2 = Medium", 1649) on the panel's 0..2
         // scale. The weld is the point: the CVar's default and the engine's must be the same
         // ground cover, or a fresh config writes a row the world does not agree with.
-        assert_eq!(d["WorldDetail"], 1.0);
+        assert_eq!(d["WorldDetail"], 2.0);
         // The bubble pair (1139) welds to BubbleConfig's defaults — both the binary's own since
         // 1804 (`ChatBubbles` "1", `ChatBubblesParty` "0"; the party half was 0598's director pin).
         let bubbles = BubbleConfig::default();
