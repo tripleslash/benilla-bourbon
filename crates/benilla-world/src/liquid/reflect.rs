@@ -60,22 +60,36 @@
 //! reflection view never sets the `0x200` water-pass bit, so `RenderAlphaWater` simply does not run
 //! for it.
 //!
+//! ## The retained static pass, which this view DOES carry
+//!
+//! The buildings are not entities. Every WMO group's geometry, every merged ADT-doodad cell and
+//! every WMO prop region leaves bevy_pbr for `static_gx`'s retained buffers, drawn by one custom
+//! node keyed on its own view marker — and while that marker sat on the world camera alone, the
+//! mirror rendered a world with no buildings and no trees in it. A lake reflected its terrain, its
+//! creatures and its animated doodads, and *not* the town on its shore, which is the one thing a
+//! player looks at a reflection to see. The screen-space trace over the top carried them wherever
+//! it landed, so the symptom was a shore that faded out of the water as the camera pitched down
+//! rather than one that was never there — which is exactly why it read as a water bug and not as a
+//! missing pass.
+//!
+//! So this camera spawns with [`StaticGxView::MIRROR`](crate::static_gx::StaticGxView::MIRROR),
+//! and the retained node runs for it. Every
+//! piece of view state that node uses — the target, the depth, the view uniform, and with it the
+//! oblique near plane below — comes out of its `ViewQuery`, so the mirror's draws are the mirror's
+//! matrices with no second copy of anything.
+//!
+//! What it reuses rather than rebuilds is the **cull list**, which is the world camera's frustum,
+//! farclip and portal flood. For every cell in that list the mirror's picture is exact; a cell the
+//! mirror's frustum contains and the world camera's does not is missing, which is the near-vertical
+//! shot (pitch straight down and the mirror wants what is overhead and behind you). The marker's
+//! own doc carries why a second cull list is not the trade this port takes.
+//!
 //! ## What the mirror does NOT contain, and why each is left out
 //!
-//! Standing a node down for this view is free; teaching one to run for it is not, because several
-//! of them carry a cull list that is the world camera's by construction. Three are out:
+//! Standing a node down for this view is free; teaching one to run for it is not. Two stay out:
 //!
-//! * **The retained static pass** (`static_gx`) — the merged ADT-doodad cells and WMO prop regions.
-//!   Its marker exists precisely because "the cull list is the world camera's", so running it here
-//!   would paint the world camera's visible set with the mirror's matrices. **This is the one gap a
-//!   player can see**: where a zone's trees and props are baked into the retained pass rather than
-//!   drawn as entities, they are missing from the mirror. The screen-space trace still carries them
-//!   wherever it lands, which is most of the frame at the shallow angles a reflection reads
-//!   strongest at — so the symptom is a lake that reflects its shore and its buildings but thins
-//!   out on the props as the camera pitches down, not one that goes flat. Closing it means a second
-//!   cull list for that pass, which is its own piece of work.
-//! * **The indirect-lighting multiply** (`ssilvb`) and **the glow** (`ffx_glow`), for the same
-//!   marker reason. Both are whole-frame filters on the world view, and the reference clears a
+//! * **The indirect-lighting multiply** (`ssilvb`) and **the glow** (`ffx_glow`), for the marker
+//!   reason. Both are whole-frame filters on the world view, and the reference clears a
 //!   comparable pile of view flags on its own reflection view before rendering it.
 //!
 //! ## Only what is above the water, and only where the mirror is about this water
@@ -220,6 +234,10 @@ fn spawn_reflection_camera(
     commands.spawn((
         Camera3d::default(),
         LiquidReflectionCamera,
+        // **The retained static pass runs for this view** — the buildings, the merged doodad
+        // cells and the WMO props, none of which are entities and all of which were absent from
+        // the mirror while this marker lived on the world camera alone. See the header.
+        crate::static_gx::StaticGxView::MIRROR,
         Camera {
             // Before the world camera (which is 0), and inactive until `sync` says the mirror is
             // wanted — the first frame has no pose for it yet.
@@ -463,6 +481,7 @@ pub(super) fn register(app: &mut App) {
 mod tests {
     use super::*;
     use bevy::camera::CameraProjection;
+    use bevy::render::view::Msaa;
 
     /// The clip test wgpu applies, on a world point: kept iff `0 ≤ clip.z ≤ clip.w`.
     ///
@@ -576,6 +595,48 @@ mod tests {
             "the mirror renders layer 0; the unmirrored layer must be a different one"
         );
         assert!(!RenderLayers::default().intersects(&RenderLayers::layer(UNMIRRORED_RENDER_LAYER)));
+    }
+
+    /// **The buildings ride the retained pass, and the mirror has to be a view that pass draws
+    /// into** — the bug this marker closes: WMO group geometry, merged doodad cells and WMO props
+    /// are not entities, so no render layer and no visibility term reaches them. They appear in
+    /// the mirror if and only if `static_gx`'s own view marker is on this camera, and the failure
+    /// is silent (a lake that reflects its terrain and its creatures and none of its town).
+    ///
+    /// Asserted through the real spawn rather than by reading the bundle, because the marker is
+    /// one line in a ten-element tuple and deleting it compiles.
+    #[test]
+    fn the_mirror_is_a_view_the_retained_static_pass_draws_into() {
+        let mut app = App::new();
+        app.insert_resource(LiquidScreenTargets {
+            color: Handle::default(),
+            blur: Handle::default(),
+            depth: Handle::default(),
+            reflect: Handle::default(),
+            size: UVec2::ONE,
+        });
+        app.world_mut().spawn((
+            WorldCamera,
+            Projection::from(PerspectiveProjection::default()),
+            Msaa::Off,
+        ));
+        app.add_systems(Update, spawn_reflection_camera);
+        app.update();
+
+        let mut mirrors = app
+            .world_mut()
+            .query_filtered::<&crate::static_gx::StaticGxView, With<LiquidReflectionCamera>>();
+        let marker = mirrors
+            .iter(app.world())
+            .next()
+            .copied()
+            .expect("the mirror camera must carry the retained pass's view marker");
+        // And it must be the SECONDARY one: `prepare_static_gx` caches the four pipelines against
+        // one view's `(samples, format)`, and two primaries would let that key flip per frame.
+        assert!(
+            !marker.primary,
+            "the mirror is not the view the retained pass takes its pipeline key from"
+        );
     }
 
     /// The layer this crate claims must not be the one app layer it can name. The rest of the

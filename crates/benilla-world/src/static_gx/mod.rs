@@ -141,6 +141,12 @@ mod render;
 /// the node, so the module itself stays private and only the label comes out.
 pub(crate) use render::StaticGxLabel;
 
+/// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
+/// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the
+/// water's reflection instead of only in the screen-space trace laid over it. The marker's own
+/// doc carries what that view does and does not get.
+pub(crate) use render::StaticGxView;
+
 /// The doodad spatial cell — ¼ ADT tile, the same 133⅓-yd locality key the merge lanes use
 /// (`terrain_stream::merge::CELL`; 1413 round 2 proved the locality load-bearing).
 const CELL: f32 = 533.333_3 / 4.0;

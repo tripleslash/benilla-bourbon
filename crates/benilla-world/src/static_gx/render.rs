@@ -100,19 +100,59 @@ pub(crate) struct GxCellDraw {
     pub sets: Vec<std::sync::Arc<[u16]>>,
 }
 
-/// Marks the ONE view the retained pass draws into — the world camera. Without this the node
-/// would run for EVERY Core3d view, including the portrait-booth bakes, and paint world cells
-/// into a portrait with the booth's view matrices (the cull list is the world camera's).
+/// Marks a view the retained pass draws into. Without it the node would run for EVERY Core3d
+/// view, including the portrait-booth bakes, and paint world cells into a portrait with the
+/// booth's view matrices.
+///
+/// **Two views carry it, and [`primary`](Self::primary) is which.** The world camera is the
+/// [`WORLD`](Self::WORLD) one; the water's planar mirror (`liquid::reflect`) is the
+/// [`MIRROR`](Self::MIRROR) one. The distinction exists for exactly one consumer —
+/// [`prepare_static_gx`] specializes the four pipelines for ONE view's `(samples, format)` and
+/// caches that key, so it has to always ask the same view rather than whichever the query
+/// yields first.
+///
+/// **What the mirror gets, and what it does not.** The draw list ([`GxWorld::visible`] /
+/// [`GxWorld::visible_wmos`]) is [`super::cull::cull_cells`]'s, and that walk is the world
+/// camera's: its frustum, its farclip, its portal flood. Drawing that list under the mirror's
+/// matrices is geometrically exact for every cell IN it — the node reads all of its view state
+/// out of the `ViewQuery`, including the oblique near plane that clips the mirror below the
+/// waterline — so the buildings and props the world camera can see reflect correctly. What it
+/// cannot produce is a cell the MIRROR's frustum contains and the world camera's does not,
+/// which is the near-vertical shot: pitch straight down at the water and the mirror wants what
+/// is overhead and behind you, which the world frustum excludes.
+///
+/// Closing that needs a second cull list — a second CPU scene walk per frame, or a union
+/// frustum that admits the mirror's cells into the world pass too, where they are invisible.
+/// Both cost the frame thread this port spends its budget defending, for a half-resolution
+/// buffer the water then bends a 20-yard ray through; the trade taken here buys the whole of
+/// the common shot — a shore, its trees and its buildings across a lake — for no CPU at all.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
-pub(crate) struct StaticGxView;
+pub(crate) struct StaticGxView {
+    /// Is this the view [`prepare_static_gx`] takes its pipeline key from? True on the world
+    /// camera, false on the mirror.
+    pub(crate) primary: bool,
+}
+
+impl StaticGxView {
+    /// The world camera's — the pipeline key's view.
+    pub(crate) const WORLD: Self = Self { primary: true };
+    /// The water's planar mirror (`liquid::reflect`). Its `(samples, format)` are the world
+    /// camera's by construction — that camera copies the `Msaa` at spawn and carries the same
+    /// `Hdr` — which is what makes reusing the world's specialization correct rather than
+    /// merely convenient.
+    pub(crate) const MIRROR: Self = Self { primary: false };
+}
 
 /// Insert the marker on the world camera (idempotent — the camera can respawn).
+///
+/// The mirror's copy is not inserted here: it rides that camera's own spawn bundle, beside the
+/// markers it deliberately does NOT carry (`liquid::reflect`'s header is the list).
 fn mark_world_camera(
     mut commands: Commands,
     cam: Query<Entity, (With<crate::view::WorldCamera>, Without<StaticGxView>)>,
 ) {
     for e in &cam {
-        commands.entity(e).insert(StaticGxView);
+        commands.entity(e).insert(StaticGxView::WORLD);
     }
 }
 
@@ -369,8 +409,13 @@ fn prepare_static_gx(
     views: Query<GxViewKey>,
 ) {
     let _t = super::gx_perf_guard(3);
-    // The world view's pipeline key (the marker keeps booth views out of it).
-    let Some((view, msaa, _, _)) = views.iter().next() else {
+    // The world view's pipeline key (the marker keeps booth views out of it) — and the PRIMARY
+    // one specifically: the water's mirror carries the marker too (`StaticGxView::MIRROR`), and
+    // a key cached from whichever view the query happened to yield first would flip between
+    // them on any frame their `(samples, format)` disagreed, clearing and re-queuing all four
+    // pipelines every frame. They cannot disagree today (the mirror copies both at spawn);
+    // asking for the one view by name is what keeps that from being load-bearing.
+    let Some((view, msaa, _, _)) = views.iter().find(|(_, _, _, marker)| marker.primary) else {
         return;
     };
     let format = if view.hdr {
@@ -778,7 +823,8 @@ impl ViewNode for StaticGxNode {
         &'static ViewEnvironmentMapUniformOffset,
         Option<&'static OrderIndependentTransparencySettingsOffset>,
         &'static MeshViewBindGroup,
-        // The world camera only — a booth bake must never receive world cells (see the marker).
+        // The world camera and the water's planar mirror — a booth bake must never receive
+        // world cells (see the marker).
         &'static StaticGxView,
     );
 
