@@ -708,7 +708,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
     let shows = |p: &EntityPart| {
         visible
             .as_ref()
-            .is_none_or(|vis| vis.contains(&p.geoset_id))
+            .is_none_or(|vis| benilla_formats::geoset_shown(vis, p.geoset_id))
     };
     let preview_parts: Vec<PreviewPart> = parts
         .iter()

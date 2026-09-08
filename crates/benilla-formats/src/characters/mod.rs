@@ -24,7 +24,7 @@ mod geosets;
 mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
-pub use geosets::{CharacterGeosets, EquipGeosets};
+pub use geosets::{geoset_shown, CharacterGeosets, EquipGeosets, UNMANAGED_GEOSET_BASE};
 pub use sections::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     BlitSource, CharSections, CompositeBlobs, CompositePlan, EmblemLayer, EquipBlit, GuildEmblem,

@@ -17,6 +17,40 @@ const REGION_BASES: [u16; 16] = [
     1, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,
 ];
 
+/// The first geoset id **outside** the sixteen region groups the 1.12 selection law knows about
+/// ([`REGION_BASES`] stops at group 15, the cloak).
+///
+/// A geoset in one of those sixteen groups is a CHOICE — the law picks exactly one member per
+/// group and hides the rest, which is what makes the selection an allowlist. A geoset above this
+/// line is not a choice the law can make: 1.12 has no branch that would ever name it, so an
+/// allowlist built from the law alone hides it forever.
+///
+/// **Measured across both corpora.** The shipped 1.12.1 character models author NOTHING here —
+/// 18 of 18 bodies, zero ids >= 1600 — so the rule below costs the original art exactly nothing.
+/// The updated-character-model layer ([`crate::layers`]) authors four, on 20 of its 23 bodies:
+/// **1801** the waist band (8 models), **2001**/**2002** the feet (10), and **1702** the night
+/// elves' eye glow (2). Every one of them is body the model always draws — the later clients
+/// these were authored for split the feet and the waistline out of the trunk mesh, and 1.12 never
+/// did — so hiding them takes a bite out of the character. That was the reported bug: HD orcs and
+/// dwarves standing on stumps, HD humans and trolls with a gap where the belt goes.
+///
+/// Nothing here is layer-specific: the rule is "the law does not manage this group", not "this is
+/// the HD layer", so `hd_character_models()` is not consulted and does not need to be.
+pub const UNMANAGED_GEOSET_BASE: u16 = 1600;
+
+/// **Does a body submesh with this geoset id draw?** — the one predicate every consumer of
+/// [`CharacterGeosets::visible_geosets`] filters with.
+///
+/// `visible` is that function's allowlist, which covers the sixteen managed groups. Above
+/// [`UNMANAGED_GEOSET_BASE`] the allowlist has nothing to say and the answer is yes — see that
+/// constant for why "yes" and not "no". It lives here, beside the law it completes, rather than
+/// as a `contains` at each of the three call sites (the world build, the gear-change re-dress and
+/// the dress-up booth), because a predicate spelled three times is a predicate two of them can
+/// drift out of.
+pub fn geoset_shown(visible: &[u16], geoset_id: u16) -> bool {
+    geoset_id >= UNMANAGED_GEOSET_BASE || visible.contains(&geoset_id)
+}
+
 /// The customization → geoset tables, resolving an appearance to the set of visible geosets.
 pub struct CharacterGeosets {
     /// (race, sex, hairStyle) → hair `GeosetID` (group 0).

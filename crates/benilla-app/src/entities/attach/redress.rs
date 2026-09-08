@@ -199,7 +199,8 @@ pub(in crate::entities) fn redress_player_looks(
         }
         // No look (a druid form, a GM morph — a Player-kind entity on a beast display) means no
         // geoset filter, exactly as at build: every batch the model authors draws.
-        let shows = |geoset: u16| visible.as_ref().is_none_or(|v| v.contains(&geoset));
+        let shows =
+            |geoset: u16| visible.as_ref().is_none_or(|v| benilla_formats::geoset_shown(v, geoset));
         // The grouping the new gear asks for (`merge`): a standing group survives exactly when
         // the new grouping contains its member set unchanged — then it re-points in place like
         // any part; otherwise it is torn down and the new group spawns whole. Keyed by first

@@ -836,9 +836,9 @@ pub(super) fn attach_entity_visuals(
                 Some(rb) => parts
                     .iter()
                     .filter(|part| {
-                        !visible_geosets
-                            .as_ref()
-                            .is_some_and(|vis| !vis.contains(&part.geoset_id))
+                        visible_geosets.as_ref().is_none_or(|vis| {
+                            benilla_formats::geoset_shown(vis, part.geoset_id)
+                        })
                     })
                     .filter_map(|part| part.billboard.as_ref().map(|b| b.bone))
                     .filter_map(|bone| {
@@ -877,7 +877,7 @@ pub(super) fn attach_entity_visuals(
             let shows = |part: &super::EntityPart| {
                 visible_geosets
                     .as_ref()
-                    .is_none_or(|vis| vis.contains(&part.geoset_id))
+                    .is_none_or(|vis| benilla_formats::geoset_shown(vis, part.geoset_id))
             };
             let groups = merge::guard_groups(merge::group_parts(parts, shows), parts, &char_mats);
             for group in &groups {

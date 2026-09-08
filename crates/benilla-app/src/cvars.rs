@@ -1208,6 +1208,11 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
         "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
+        // The mix-ahead depth (1857): no knob, because it is LATCHED — `sound::mixer` reads it
+        // through `boot_cvar` once, when the output device opens. Claimed for exactly the reason
+        // `hdCharacterModels` below is: the next launch is its only reader, so a change that does
+        // not dirty the config is a change that launch never sees.
+        "soundbuffersize" => {}
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
@@ -1270,6 +1275,13 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // and the gate reads the live table — but a KNOWN key, so a toggle dirties the config
         // and persists (the statusBarText posture).
         "checkaddonversion" => {}
+        // **Clear AFK** — the same posture, and it was missing until the census below went
+        // looking. Both readers (`ui_chat::away`, `ui_chat::input`) take the PERSISTED value
+        // through `CvarPersist::stored`, which is composed from the file — so an unclaimed key
+        // left the Interface row unable to turn the behaviour off at all: not next session, and
+        // not this one either, because `stored` answers out of `persist.file` and only a save
+        // writes that.
+        "autoclearafk" => {}
         // The remembered character row (1622) — same posture again: the live value is the select
         // screen's own, which writes this key rather than reading it back. Known, so entering the
         // world dirties the config and the memory survives to the next launch.
@@ -1304,6 +1316,20 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // clamps, and anything unrecognised reads as cata (the default, and the one that cannot
         // look broken).
         "waterdetail" => *knobs.water_detail = WaterDetail::from_cvar(v),
+        // The updated-character-model layer (the row on the Graphics page). No knob, and there
+        // cannot be one: a chain decides its mounts when it OPENS, and both of this run's chains
+        // opened before the `App` did (`apply_boot_layers`, off `boot_cvar`). What the click has
+        // to reach is therefore the FILE — the next start is its only reader — so the key is
+        // claimed here for exactly the reason `statusBarText` and `lastCharacterIndex` are.
+        //
+        // **Unclaimed, the row did nothing at all**, and the shape of that failure is why this
+        // arm carries a comment of its own. `sync_cvars` marks the config dirty only for a change
+        // this function CONSUMED, so an unknown key drained out of the VM and stopped there: the
+        // debounced save never armed, `config.toml` never took the value, and the restart the
+        // tooltip promises read the old one back. A restart-required row that loses the click is
+        // indistinguishable from a feature that does not work — which is how it was reported
+        // (2026-09-08, against the hosted page).
+        "hdcharactermodels" => {}
         // The FPS journal switch (2008): a flag, the client's int-parse + `!= 0`. The journal
         // system reads the knob every frame, so the file opens on the next second and closes
         // the second it is turned off.
@@ -1335,6 +1361,11 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
             }
             knobs.msaa.samples = granted;
         }
+        // The multisample format's descriptive pair (1643). No knob and nothing to steer — the
+        // dropdown's `SetMultisampleFormat` writes them from the chosen entry and
+        // `GetCurrentMultisampleFormat` looks the entry up by them. Claimed so the pair persists
+        // on its own account rather than riding whatever `gxMultisample` write shared its gesture.
+        "gxcolorbits" | "gxdepthbits" => {}
         // The filter policy's two halves. Both write the PENDING value — latched, like
         // `gxMultisample`: the process policy is published once at the end of `load_config` and
         // nothing reads this resource afterwards. `anisotropic` takes the reference's own
@@ -2514,6 +2545,21 @@ mod tests {
         assert!(apply_to_knobs("uiScale", "banana", &mut knobs));
         assert_eq!(knobs.scale.0, 0.9);
         assert!(!apply_to_knobs("bogus", "1", &mut knobs));
+        // **Every registered row is CLAIMED here**, knob or no knob — the census
+        // `hdCharacterModels` fell out of. A row this function does not consume never marks the
+        // config dirty in `sync_cvars`, so the player's change reaches the VM table and stops:
+        // no save, and a restart-scoped row (the only kind that can afford to be knobless) reads
+        // its old value back on the start that was supposed to honour it. The knobless ones say
+        // so with an empty arm; this is what makes leaving one out impossible to do quietly.
+        let unclaimed: Vec<&str> = REGISTERED
+            .iter()
+            .filter(|r| !apply_to_knobs(r.name, r.default, &mut knobs))
+            .map(|r| r.name)
+            .collect();
+        assert!(
+            unclaimed.is_empty(),
+            "unclaimed by apply_to_knobs, so no change to one can ever dirty the config: {unclaimed:?}"
+        );
     }
 
     #[test]
@@ -2577,6 +2623,54 @@ mod tests {
         let text = std::fs::read_to_string(tmp.join("config.toml"))
             .expect("config.toml written by the quiet-second save, with no AppExit in sight");
         assert!(text.contains("MusicVolume = \"0.33\""), "{text}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// **A row with no host knob still reaches the file** — `hdCharacterModels`, and the bug it
+    /// shipped with (reported 2026-09-08: "the toggle does nothing, even if I reload the page").
+    ///
+    /// The layer is a MOUNT, decided before the `App` exists, so this row has nothing live to
+    /// write and no knob to write it to. That made it look like a key `apply_to_knobs` could
+    /// skip. It is not: an unclaimed key is not marked dirty, the debounced save never runs, and
+    /// `boot_cvar` reads the old value back on the next start — which on the page is a reload,
+    /// the very thing the tooltip tells the player to do. The row was live, correct, and
+    /// completely inert.
+    #[test]
+    fn the_knobless_hd_models_row_lands_in_config_toml() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-hd-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+
+        let mut app = cvar_app();
+        app.update();
+        // What the checkbox does, and the whole of what it can do (`OptionsFrame.xml`, the
+        // Graphics page): no Apply staging, no knob — one `SetCVar` and out.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(r#"SetCVar("hdCharacterModels", 1)"#)
+            .unwrap();
+        app.update();
+        app.world_mut().write_message(AppExit::Success);
+        app.update();
+        let text = std::fs::read_to_string(tmp.join("config.toml"))
+            .expect("the click must reach config.toml — the next start is its only reader");
+        assert!(text.contains("hdCharacterModels = \"1\""), "{text}");
+        // And `benilla_formats::layers` is what reads it back, through the same lax parse the
+        // page uses — the twin of this value in `web/packs.js` decides a 1.5 GiB download.
+        assert_eq!(
+            benilla_formats::layers::layer_switch(
+                &toml::from_str::<LocalConfig>(&text).unwrap().cvars["hdCharacterModels"]
+            ),
+            Some(true)
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
