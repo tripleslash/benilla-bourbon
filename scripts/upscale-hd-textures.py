@@ -227,7 +227,10 @@ def write_blp(img: Image.Image, fourcc: bytes, alpha_type: int, alpha_bits: int)
     levels = []
     for level in range(min(max(chain, 1), MAX_LEVELS)):
         lw, lh = level_size(width, height, level)
-        lvl = img if level == 0 else img.resize((lw, lh), Image.LANCZOS)
+        # Through `resample`, not `Image.resize`: a premultiplying mip chain darkens every
+        # transparent-edged texel toward black as the levels shrink, which is the same defect the
+        # top level had, spread over the minified lanes.
+        lvl = img if level == 0 else resample(img, (lw, lh))
         levels.append(_encode_dxt(lvl, fourcc))
 
     offsets = [0] * MAX_LEVELS
@@ -252,14 +255,42 @@ def write_blp(img: Image.Image, fourcc: bytes, alpha_type: int, alpha_bits: int)
 # ---------------------------------------------------------------------------------------------
 # The resample itself — the one seam a better upscaler drops into.
 # ---------------------------------------------------------------------------------------------
+def resample(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """Lanczos to `size`, with alpha resampled **separately from the colour**.
+
+    The separation is the whole of it, and it is not a nicety. **Pillow premultiplies alpha when it
+    resamples an RGBA image** (measured on 12.3.0: LANCZOS and BICUBIC both zero the colour under a
+    fully transparent texel; NEAREST is the only filter that leaves it), so a plain
+    `img.resize(...)` here destroys every texel this layer painted under alpha 0.
+
+    That is the right answer for art whose transparent regions are empty, and the wrong one for
+    this layer, which has such texels and DRAWS them: `Character\Gnome\Hair00_0*.blp` carries a
+    fully painted right half at alpha 0, the gnome models' hair batches are `Opaque` (measured —
+    vanilla's are `AlphaTest`), and an Opaque batch samples the colour and never looks at the
+    alpha. Premultiplied through this function, that half encoded to black and every gnome FEMALE
+    — whose hair geosets are the ones that UV into it — rendered with black hair on the hosted
+    page while the same character was correct natively, off the un-upscaled archive (2026-09-08).
+
+    Resampling the two independently is what the docstring below has always claimed this does:
+    alpha is a fourth channel here, not a weight.
+    """
+    rgb = img.convert("RGB").resize(size, Image.LANCZOS)
+    alpha = img.getchannel("A").resize(size, Image.LANCZOS)
+    out = rgb.convert("RGBA")
+    out.putalpha(alpha)
+    return out
+
+
 def upscale_rgba(img: Image.Image, factor: int) -> Image.Image:
     """`factor`x, Lanczos, alpha carried through.
 
     RGB is resampled with alpha as a plain fourth channel rather than premultiplied, because BLP
     alpha here is a cutout/blend mask over art whose transparent texels still carry their authored
-    colour — the composite's own blend reads them the same way.
+    colour — the composite's own blend reads them the same way, and a model batch that ignores
+    alpha reads nothing else. [`resample`] is what makes that true against a Pillow that would
+    otherwise premultiply.
     """
-    return img.resize((img.width * factor, img.height * factor), Image.LANCZOS)
+    return resample(img, (img.width * factor, img.height * factor))
 
 
 def choose_format(img: Image.Image, meta: dict) -> tuple[bytes, int, int]:
