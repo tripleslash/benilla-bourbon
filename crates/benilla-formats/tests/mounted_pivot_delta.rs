@@ -94,3 +94,54 @@ fn the_mounted_pivot_delta_is_the_mount_box_measured_against_stand() {
         "no Mount sequence → no correction"
     );
 }
+
+/// **The saddle is the mount model's authored attachment 0** — the other half of the mounted
+/// preset, and the half whose *staticness* is the point.
+///
+/// `0x50ce1c`-`0x50ce56` reads it with `hasAttachment(mount, 0)` / `getAttachment(mount, &out, 0)`,
+/// which is `0x712cf0` — the same call that answers the rider's own pivot, and one with no bone
+/// matrix anywhere in its call tree. Reading the posed joint instead made the camera creep, wobble
+/// with the idle and lift on a MountSpecial (reported 2026-09-09); this pins the source, not just
+/// the number.
+///
+/// Resolved through `M2Model::attachment`, the reference's own `0x710310` — the AttachLookup with
+/// its bounds check and `0xffff` sentinel — never a scan of the record table, whose ids repeat.
+#[test]
+fn the_mount_seat_is_attachment_zero_off_the_mount_model() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open chain");
+
+    // The Black Qiraji Resonating Crystal's mount, and an ordinary riding horse for contrast —
+    // both authored within 5 cm of each other, which is what a saddle height looks like.
+    for (path, seat) in [
+        (r"Creature\RidingSilithid\RidingSilithid.mdx", 1.817_f32),
+        (r"Creature\RidingHorse\RidingHorse.mdx", 1.866),
+    ] {
+        let b = load_m2_bounds(&mut chain, path).unwrap_or_else(|e| panic!("bounds {path}: {e}"));
+        assert!(
+            (b.mount_seat_z - seat).abs() < 0.002,
+            "{path}: mount_seat_z {:.4} should be attachment 0's model-space Z {seat}",
+            b.mount_seat_z
+        );
+    }
+
+    // **Slot 0 is overloaded, and this is the trap the reader has to be pointed away from.** The
+    // same id is the SHIELD anchor on a character — a human male authors it at 1.036, a gnome
+    // female at 0.385 — so "authors attachment 0" is not "is a mount", and a reader that took this
+    // field off the RIDER would hang every unmounted body 0.4-1.0 yd of phantom saddle.
+    //
+    // The reference reads it off the mount model specifically (`0x50ce1c` takes `[unit+0xdc]`, the
+    // model it picked at the top, which is the mount when the unit is mounted), and
+    // `player::mirror_mount_seat_lift` reads it off the MOUNT CHILD entity for the same reason.
+    for (path, shield) in [
+        (r"Character\Human\Male\HumanMale.mdx", 1.036_f32),
+        (r"Character\Gnome\Female\GnomeFemale.mdx", 0.385),
+    ] {
+        let b = load_m2_bounds(&mut chain, path).expect("character bounds");
+        assert!(
+            (b.mount_seat_z - shield).abs() < 0.002,
+            "{path}: slot 0 is the shield anchor here, not a saddle — got {}",
+            b.mount_seat_z
+        );
+    }
+}

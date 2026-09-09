@@ -82,6 +82,30 @@ pub struct M2Bounds {
     /// Only the Mount arm is read here. The seated postures need the unit's posture word, which is
     /// not a model fact, and their preset would belong beside it.
     pub mounted_pivot_delta: f32,
+    /// **Attachment id 0's model-space Z**, in model-local yards, pre-scale — where a rider sits,
+    /// *on a mount model*. `0.0` for a model that authors no slot-0 attachment.
+    ///
+    /// **Slot 0 is overloaded and this field is only meaningful on a mount.** The same id is the
+    /// SHIELD anchor on a character (a human male authors it at z 1.036, a gnome female at 0.385),
+    /// so "does this model author attachment 0" is not "is this a mount". That is why the reference
+    /// reads it off the mount model specifically — `0x50ce1c` loads `[ebp-8]`, the model the
+    /// function picked at its top, which is `[unit+0xdc]` when the unit is mounted — and why
+    /// benilla reads it off the MOUNT CHILD entity and never off the rider's own.
+    ///
+    /// The other half of the mounted camera preset, and the reason it is a FILE CONSTANT rather
+    /// than a posed bone. `0x50ce1c`-`0x50ce56` reads it off the **mount's** model —
+    /// `hasAttachment(mount, 0)` then `getAttachment(mount, &out, 0)`, the same `0x712cf0` that
+    /// answers [`Self::pivot_z`] — scales it, and `0x50cf77`-`0x50cf9e` adds it to all three
+    /// presets. `0x712cf0` returns the record's authored position; no bone matrix appears anywhere
+    /// in that call tree.
+    ///
+    /// Reading the **live seated** position instead is a defect with three faces, all reported
+    /// against the hosted page on 2026-09-09: the camera creeps up over seconds instead of
+    /// rising once (the target moves every frame, so the pivot glide re-arms every frame and
+    /// crawls toward it), it then wobbles with the mount's idle animation, and a MountSpecial
+    /// flourish lifts it further. The reference has none of those because the preset is computed
+    /// when the model event lands and is a constant until the next one.
+    pub mount_seat_z: f32,
 }
 
 /// Read an M2's authored bounds + the vertex-derived radius (see [`M2Bounds`]). Uses the same path
@@ -212,5 +236,9 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         pivot_z: model.pivot_attach_z,
         stand_box_z: rz.max(0.0),
         mounted_pivot_delta: mounted_pivot_delta(bytes).unwrap_or(0.0),
+        // Through `M2Model::attachment`, which is the reference's own id→record resolve
+        // (`0x710310`: the AttachLookup, its bounds check and its `0xffff` sentinel) — never a
+        // scan of the record table, whose ids are not unique.
+        mount_seat_z: model.attachment(0).map_or(0.0, |a| a.position[2]),
     })
 }

@@ -926,6 +926,7 @@ pub(super) fn attach_entity_visuals(
             commands.entity(entity).insert(CameraPivot {
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
                 mounted_delta_local: dm.map(|d| d.mounted_pivot_delta_local).unwrap_or(0.0),
+                seat_z_local: dm.map(|d| d.mount_seat_z_local).unwrap_or(0.0),
             });
             // The overhead-anchor fallback input (combat text over a model with no PlayerName
             // attachment — `0x608640`'s defensive branch).

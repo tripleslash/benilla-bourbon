@@ -958,6 +958,14 @@ pub(crate) struct CameraPivot {
     /// `0.0` for a model authoring no `Mount` sequence, which is every model that cannot be
     /// ridden.
     pub mounted_delta_local: f32,
+    /// **Where a rider sits on this model** — attachment 0's model-space Z, pre-scale
+    /// ([`benilla_formats::M2Bounds::mount_seat_z`]), `0.0` for anything that is not a mount.
+    ///
+    /// Read off the MOUNT CHILD, not off the body: `0x50ce1c` fetches it from the mount's own
+    /// model. It is the model's authored record and never a posed bone, so the mounted pivot does
+    /// not breathe with the idle, does not lift on a MountSpecial, and arrives in one step when the
+    /// mount model does.
+    pub seat_z_local: f32,
 }
 
 /// Mouse-look session state machine — start/stop/hand-off between the two look buttons, cursor
@@ -1770,51 +1778,63 @@ mod tests {
         assert_eq!(model_pivot_height(&p, 100.0), CAM_PIVOT_CEIL);
     }
 
-    /// **Mounting raises the framing pivot, and it takes both halves to do it** (the reported
-    /// bug: the camera stayed at standing head height on a mount).
+    /// **Mounting raises the framing pivot once, to a fixed height** — the reported bug, all
+    /// three faces of it.
     ///
-    /// The reference's preset is measured in the model's own frame, so mounting moves two things
-    /// at once — the pose it is measured in (`0x50cba8`: `UNIT_FIELD_MOUNTDISPLAYID` non-zero
-    /// forces animation 91 `Mount`, and `0x50cddf` corrects the preset by that box's `max.z`
-    /// against Stand's) and the origin it is measured from (the character model is parented to the
-    /// mount's attachment-0 saddle). The numbers here are a human male's, read off the shipped M2:
-    /// pivot `attach17.z + 0.0972 = 1.9002`, `Mount.max.z − Stand.max.z = −0.95179`
-    /// (`benilla-formats` `mounted_pivot_delta`), on a horse whose saddle sits 1.7 yd up.
+    /// The reference's preset moves two things when `UNIT_FIELD_MOUNTDISPLAYID` goes non-zero: the
+    /// pose the rider's pivot is measured in (`0x50cba8` forces animation 91 `Mount`, `0x50cddf`
+    /// corrects by that box against Stand's) and the origin it is measured from (`0x50ce1c` adds
+    /// the MOUNT model's attachment 0, and `0x50cf77` folds it into all three presets). Only then
+    /// does `0x50cfa4` clamp.
     ///
-    /// The assertion that matters is the **pairing**: each half on its own is worse than neither.
+    /// Every number here is read off the shipped files: a gnome female's attachment 17 is 0.711 so
+    /// her pivot is 0.8082, her `Mount.max.z − Stand.max.z` is −0.21209
+    /// (`benilla-formats` `mounted_pivot_delta`), and `Creature\RidingSilithid\RidingSilithid.m2`
+    /// — the Black Qiraji Resonating Crystal — authors attachment 0 at z 1.817.
+    ///
+    /// The three assertions are the three reports. It rises (it used not to move at all); it lands
+    /// on a FIXED height, because the seat is the model's authored record and not the posed joint
+    /// (the first version read the live seat, so the camera crept up over seconds, wobbled with the
+    /// idle and lifted again on a MountSpecial); and the clamp runs on the total, because a gnome's
+    /// Mount-pose pivot is 0.596 — under the `5/6` floor — so clamping the halves separately would
+    /// floor that and ride 0.24 yd high on exactly the race the correction matters most for.
     #[test]
     fn mounting_measures_the_pivot_in_the_mount_pose_from_the_saddle() {
-        let human = CameraPivot {
-            height_local: 1.9002,
-            mounted_delta_local: -0.951_79,
+        let gnome = CameraPivot {
+            height_local: 0.8082,
+            mounted_delta_local: -0.212_09,
+            seat_z_local: 0.0, // a character model seats nobody
         };
-        let target = |lift| crate::player::body_pose::pivot_target(Some(&human), None, lift);
+        // The saddle comes off the MOUNT's own `CameraPivot`, scaled — `player::mirror_mount_seat_lift`
+        // reads it there, off the mount child, and never off the rider.
+        let qiraji_tank = 1.817_f32;
+        let target = |lift| crate::player::body_pose::pivot_target(Some(&gnome), None, lift);
 
         let standing = target(None).expect("a modeled body always has a target");
-        assert!((standing - 1.9002).abs() < 1e-4, "unmounted is unchanged");
-
-        let mounted = target(Some(1.7)).expect("mounted target");
-        assert!(
-            (mounted - (1.7 + 1.9002 - 0.951_79)).abs() < 1e-4,
-            "saddle + the Mount-pose neck, got {mounted}"
-        );
-        assert!(
-            mounted > standing,
-            "the camera RISES on a mount — {mounted} vs {standing}"
+        assert_eq!(
+            standing, CAM_PIVOT_FLOOR,
+            "a gnome's 0.8082 is under the reference's own floor"
         );
 
-        // Half one alone (the seat, bind-pose neck) floats a standing head above the saddle…
+        let mounted = target(Some(qiraji_tank)).expect("mounted target");
+        let want = 0.8082 - 0.212_09 + qiraji_tank;
         assert!(
-            mounted < 1.7 + standing,
-            "…and that is 0.95 yd higher than the reference puts it"
+            (mounted - want).abs() < 1e-4,
+            "saddle + Mount-pose neck, got {mounted}"
         );
-        // …and half two alone (the Mount pose, measured from the feet) is *below* standing, which
-        // is the camera inside the horse.
-        let pose_only = 1.9002 - 0.951_79;
+        assert!(mounted > standing, "the camera RISES on a mount");
+
+        // The clamp is on the total. Floored separately the rider's half would be 5/6 rather than
+        // 0.596, and the answer 0.237 too high — a real, visible difference on a gnome.
+        let halves_clamped = CAM_PIVOT_FLOOR + qiraji_tank;
         assert!(
-            pose_only < standing,
-            "the correction is negative by itself — it is not a lift, it is a re-measure"
+            mounted < halves_clamped - 0.2,
+            "clamping the halves apart rides high: {mounted} vs {halves_clamped}"
         );
+
+        // A seat of 0 is a mount whose model authors no attachment 0 — the rider stays at the unit
+        // matrix, and the pivot is then the Mount pose alone, floored.
+        assert_eq!(target(Some(0.0)).unwrap(), CAM_PIVOT_FLOOR);
     }
 
     /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.

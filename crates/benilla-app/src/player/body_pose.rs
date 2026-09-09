@@ -118,11 +118,15 @@ pub(super) fn pivot_target(
     let scale = net.map_or(1.0, |n| n.scale);
     pivot.map(|p| match mount_seat_lift {
         None => model_pivot_height(p, scale),
-        Some(seat) => {
-            seat + super::camera::clamp_pivot_height(
-                (p.height_local + p.mounted_delta_local) * scale,
-            )
-        }
+        // **The clamp is on the TOTAL, not on the model-relative half.** `0x50ca90` adds the
+        // saddle into all three presets at `0x50cf77`-`0x50cf9e` and only then runs its per-preset
+        // `[5/6, 15]` clamp at `0x50cfa4`. Clamping the halves separately floors the rider's own
+        // Mount-pose height — which is BELOW 5/6 on a gnome (0.67) — and then adds the saddle on
+        // top of the floored value, riding ~0.17 yd high on exactly the race where the correction
+        // matters most.
+        Some(seat) => super::camera::clamp_pivot_height(
+            (p.height_local + p.mounted_delta_local) * scale + seat,
+        ),
     })
 }
 

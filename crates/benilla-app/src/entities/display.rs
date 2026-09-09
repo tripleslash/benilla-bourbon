@@ -239,6 +239,11 @@ pub(crate) struct DisplayModel {
     /// ([`benilla_formats::M2Bounds::mounted_pivot_delta`]). Stamped onto each instance as part of
     /// [`CameraPivot`]. `0.0` for a display whose model authors no `Mount` sequence.
     pub(super) mounted_pivot_delta_local: f32,
+    /// **Where a rider sits on this model** — attachment 0's model-space Z, model-local yards,
+    /// pre-scale ([`benilla_formats::M2Bounds::mount_seat_z`]). Stamped onto each instance as part
+    /// of [`CameraPivot`], where the camera reads it off the MOUNT CHILD rather than off the body.
+    /// `0.0` for everything that is not a mount.
+    pub(super) mount_seat_z_local: f32,
     /// The M2 vertex-box CENTRE in Bevy model-local (pre-scale) — the interior fold's MOLR
     /// reference point for a GameObject's footprint bake (the byte-cited `[def+0x5c]` anchor
     /// family; `benilla_world::interior`). `Vec3::ZERO` for a bounds-less / WMO / model-less display.
@@ -355,6 +360,7 @@ pub(crate) fn empty_shell() -> DisplayModel {
         bbox_z_local: 0.0,
         stand_box_z_local: 0.0,
         mounted_pivot_delta_local: 0.0,
+        mount_seat_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
         terrain_tilt: 0,
         is_character_body: false,
@@ -410,6 +416,7 @@ pub(super) fn build_parts(
     let mut bbox_z_local = 0.0;
     let mut stand_box_z_local = 0.0;
     let mut mounted_pivot_delta_local = 0.0;
+    let mut mount_seat_z_local = 0.0;
     let mut bake_center_local = Vec3::ZERO;
     let parts = match &dm.handle {
         ModelHandle::M2(h) => {
@@ -456,6 +463,8 @@ pub(super) fn build_parts(
             stand_box_z_local = model.bounds.map_or(0.0, |b| b.stand_box_z);
             // The mounted pivot correction, off the same sequence-box read (see the field).
             mounted_pivot_delta_local = model.bounds.map_or(0.0, |b| b.mounted_pivot_delta);
+            // The saddle — a file constant, which is the whole point (see the field).
+            mount_seat_z_local = model.bounds.map_or(0.0, |b| b.mount_seat_z);
             // The vertex-box centre (Bevy local) — a GameObject's interior-fold reference point.
             bake_center_local = model.bounds.map_or(Vec3::ZERO, |b| {
                 benilla_assets::coords::wow_to_bevy([
@@ -607,6 +616,7 @@ pub(super) fn build_parts(
     dm.bbox_z_local = bbox_z_local;
     dm.stand_box_z_local = stand_box_z_local;
     dm.mounted_pivot_delta_local = mounted_pivot_delta_local;
+    dm.mount_seat_z_local = mount_seat_z_local;
     dm.bake_center_local = bake_center_local;
     dm.terrain_tilt = terrain_tilt;
 }

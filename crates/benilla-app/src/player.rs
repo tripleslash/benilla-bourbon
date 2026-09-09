@@ -509,46 +509,46 @@ fn mirror_mover_collision_height(
     }
 }
 
-/// Mirror the driven body's **seat lift** onto [`Player`] — how far its model frame rides above its
-/// feet ([`Player::mount_seat_lift`]), which is `None` unless it is mounted.
+/// Mirror the driven body's **seat lift** onto [`Player`] — how far the saddle sits above its feet
+/// ([`Player::mount_seat_lift`]), `None` unless it is mounted on a model we can measure.
 ///
-/// `RigPose::joints_root` is the rig's model frame and its `GlobalTransform` is `world_from_model`,
-/// which is exactly the origin the reference's camera preset is measured from. Standing, that
-/// entity is the body itself (or its terrain-conform node) and the lift is zero; mounted,
-/// `entities::mount` has re-rooted it under the mount's attachment-0 seat anchor, so the lift is
-/// the saddle — live, so it breathes with the gallop the way the reference's does.
+/// **The saddle is the mount model's authored attachment 0, scaled — never the posed joint.**
+/// `0x50ce1c`-`0x50ce56` reads it with `getAttachment(mountModel, &out, 0)`, the same `0x712cf0`
+/// that answers the rider's own pivot, and there is no bone matrix anywhere in that call tree; the
+/// preset it feeds is computed on the model event and constant until the next one.
 ///
-/// The mount **field**, not the frame, is what says "mounted": a rider whose mount model has not
-/// finished loading is still seated at its own feet for a frame or two, and `Some(0.0)` there is
-/// the right answer — it keeps the Mount-pose correction and the seat arriving together, rather
-/// than dropping the camera to standing height and gliding it back up when the model lands.
+/// This function read `RigPose::joints_root`'s live `GlobalTransform` until 2026-09-09, which is
+/// the seated position *after* the mount's skeleton has posed it — one mistake with three reported
+/// faces. The camera crept upward over seconds instead of rising once (a target that moves every
+/// frame re-arms [`camera::PivotGlide`] every frame, and a glide whose duration is `|Δ| / 1.2` s
+/// restarted from its own midpoint never arrives); it then wobbled with the mount's idle; and a
+/// MountSpecial flourish lifted it further. All three are the same read.
 ///
-/// The `GlobalTransform` read is one frame stale (Bevy propagates in `PostUpdate`, this runs in
-/// `Update`). That is the same lag the reference carries by recomputing its preset on model events
-/// rather than per frame, and a saddle moves slowly enough that a frame of it is invisible.
+/// `None` while the mount model has not attached yet — no `MountChild`, or a child that has not
+/// been built — rather than `Some(0.0)`. The rider really is standing at its own feet in those
+/// frames, so the standing pivot is where the camera already is: answering `0.0` would glide it
+/// down to the Mount-pose height at ground level and then back up when the model landed, two
+/// glides for one mount. It is also the reference's own shape — it skips the camera update
+/// entirely while a model is unresolved (`0x50e907`).
 fn mirror_mount_seat_lift(
     mut player: ResMut<Player>,
     mover: Query<
         (
-            Entity,
-            &benilla_world::rig_anim::RigPose,
             Option<&crate::net::ObjectStore>,
+            Option<&crate::entities::mount::MountChild>,
         ),
         With<Embodied>,
     >,
-    frames: Query<&GlobalTransform>,
+    mounts: Query<(&CameraPivot, &crate::net::NetEntity)>,
 ) {
-    let lift = mover.single().ok().and_then(|(body, rig, store)| {
-        let mounted = store.is_some_and(|s| s.0.unit_mount_display_id() != 0);
-        if !mounted {
-            return None;
-        }
-        if rig.joints_root == body {
-            return Some(0.0); // seated at our own feet — the mount model is still loading
-        }
-        let feet = frames.get(body).ok()?.translation().y;
-        let seat = frames.get(rig.joints_root).ok()?.translation().y;
-        Some((seat - feet).max(0.0))
+    let lift = mover.single().ok().and_then(|(store, child)| {
+        // The FIELD is what says mounted, and the CHILD is what says measurable.
+        store.filter(|s| s.0.unit_mount_display_id() != 0)?;
+        let child = child?.0;
+        let (pivot, net) = mounts.get(child).ok()?;
+        // A mount whose model authors no attachment 0 seats the rider at the unit matrix
+        // (`entities::mount` warns and does exactly that), so a zero here is the right lift.
+        Some((pivot.seat_z_local * net.scale).max(0.0))
     });
     if player.mount_seat_lift != lift {
         player.mount_seat_lift = lift;
