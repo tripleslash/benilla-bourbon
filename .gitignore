@@ -34,8 +34,13 @@ trace-*.json
 # for the optional updated-character-model layer, built from `patch-A.MPQ` alone and hosted
 # beside the corpus at `/data-hd` — a separate tree so a player with the option off downloads none
 # of it.
-/web/packs/
-/web/packs-hd/
+#
+# The glob is deliberate and the trailing slash is what makes it safe: a container rebuild is
+# routinely done beside the live one (`web/packs-hd.premultiplied/` is the pre-2026-09-08 layer,
+# kept while the un-premultiplied one was verified), and each of those is another 1-3 GiB that an
+# ordinary `git add -A` would try to commit. Matching directories only leaves `web/packs.js` —
+# a real, tracked source file — alone.
+/web/packs*/
 /web/site/
 
 # the upload tool local state (account id cache) — machine-local, not the project.
