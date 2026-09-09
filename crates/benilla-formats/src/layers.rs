@@ -23,12 +23,18 @@
 //! exactly this — one value, decided before the `App` is built, read wherever it is needed — and
 //! this follows it.
 //!
-//! **The default is OFF**, and that is load-bearing beyond the feature: this repo's golden tests
-//! read the real install, and a machine with `patch-A.MPQ` in its `Data` folder would otherwise
-//! silently start asserting HD art against 1.12 expectations. Off by default means dropping the
-//! archive in changes nothing until something turns it on — [`crate::Chain::open_layered`] for a
-//! tool or a test that wants it by name, and the client's own `hdCharacterModels` CVar for a
-//! player.
+//! **This static's default is OFF**, and that is load-bearing beyond the feature: this repo's
+//! golden tests read the real install, and a machine with `patch-A.MPQ` in its `Data` folder would
+//! otherwise silently start asserting HD art against 1.12 expectations. Off by default means
+//! dropping the archive in changes nothing until something turns it on —
+//! [`crate::Chain::open_layered`] for a tool or a test that wants it by name, and the client's own
+//! `hdCharacterModels` CVar for a player.
+//!
+//! **The CLIENT's default is ON** (that CVar is registered `"1"` since 2026-09-09, so its options
+//! row is an opt-out), and the two are deliberately not the same statement. A player gets the
+//! updated art; a test binary, a packer run and `benilla-worldview` get 1.12's, because none of
+//! them reads the CVar and nothing here reads back into them. The one lever that crosses both is
+//! [`hd_models_env`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

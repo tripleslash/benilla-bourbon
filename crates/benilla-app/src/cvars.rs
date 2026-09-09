@@ -861,7 +861,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "2",
         "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below) and keeps 1.12.1's renderer on tier 0",
     ),
-    // **`hdCharacterModels` — the updated-character-model layer, off by default.**
+    // **`hdCharacterModels` — the updated-character-model layer, ON by default.**
     //
     // benilla's own, on `waterDetail`'s terms but for a different kind of thing: the rows above
     // choose between renderers we ship, and this one chooses whether a body of ART is in the
@@ -869,16 +869,25 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // browser; either way [`benilla_formats::layers`] is what reads it and
     // [`benilla_formats::Chain::open`] is where it lands.
     //
-    // **Registered "0", and this default is not a taste call.** Three reasons, in order of how much
-    // they cost to get wrong:
+    // **Registered "1", so the row is an OPT-OUT.** It was registered "0" until 2026-09-09, on
+    // three recorded reasons; the flip answers each rather than overruling it:
     //
-    //  1. On the web build the layer is another **1.7 GiB download**. A player who never asked for
-    //     it must never pay for it, and "off" is the only default that guarantees that — with the
-    //     row off, the page does not fetch the layer's index, let alone a pack.
-    //  2. The art is not ours and is not 1.12's. Every visual golden in this tree is denominated in
-    //     the original character models; a default-on layer would silently re-render all of them.
-    //  3. A player who has no `patch-A.MPQ` and no `/data-hd` is the common case, and a default-on
-    //     row would put them one warning line into every boot for a feature they do not have.
+    //  1. *"On the web build the layer is another 1.7 GiB download, and a player who never asked
+    //     for it must never pay for it."* Still true, and still the only reason the layer is a
+    //     separate container at all — turning the box OFF fetches no index and no pack, exactly as
+    //     before. What changed is which way round the question is asked: this site ships the
+    //     layer, so the art a player gets by default is the art the site is for. The tooltip
+    //     states the size before the click either way.
+    //  2. *"Every visual golden in this tree is denominated in the original character models."*
+    //     Still true, and untouched — the goldens do not read this row. `benilla_formats::layers`'
+    //     own static stays **off**, so every test, tool and `benilla-worldview` probe keeps
+    //     asserting 1.12 art unless `$WOW_HD_MODELS` says otherwise. This row moves the CLIENT's
+    //     answer and nothing else.
+    //  3. *"A player with no `patch-A.MPQ` and no `/data-hd` would take a warning line every
+    //     boot."* Measured: they do not. Natively the archive is simply not in the folder and
+    //     `Chain::open`'s layer filter has nothing to skip — no warning, original art. On the web
+    //     `Chain::open_layered` warns **once to the console** and runs on the original art, which
+    //     is the state that arm was written for.
     //
     // **Read at boot, applied at boot** ([`crate::cvars::boot_cvar`], like `gxWindow`), because a
     // chain's mounts are decided when it opens and the client holds two open chains. There is no
@@ -888,7 +897,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // session-only, which is how the model test suite runs against the layer.
     ours(
         "hdCharacterModels",
-        "0",
+        "1",
         "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts          whatever `patch-?.MPQ` archives it finds and never asks",
     ),
     // **The FPS journal** (decision 2008) — benilla's own, and the one instrument that ships:
@@ -1652,6 +1661,20 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
+/// One CVar's **registered** default, matched case-insensitively — what the VM's registrar would
+/// seed the table with, for the boot-time readers that run before the VM exists.
+///
+/// [`boot_cvar`] answers from `config.toml` and only from it, so it is `None` for a player who has
+/// never changed a setting — which is every player's first launch. A boot reader that treats that
+/// `None` as "off" is not reading the default, it is inventing a second one, and the two drift the
+/// moment the row is re-registered. [`apply_boot_layers`] is where that bit.
+pub(crate) fn registered_default(name: &str) -> Option<&'static str> {
+    REGISTERED
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(name))
+        .map(|r| r.default)
+}
+
 /// **Which optional content layers this run mounts**, resolved and published to
 /// `benilla_formats::layers` before the `App` exists (decision: see that module).
 ///
@@ -1660,9 +1683,16 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
 /// plugin setup, long before a resource could carry the answer. A layer is a MOUNT, and a mounted
 /// chain has already decided; there is nothing a later read of the CVar could act on.
 ///
-/// Environment first, file second, off if neither says otherwise, which is the ladder every other
-/// `$WOW_*` override in this module follows. The env arm is what points the model test suite and
-/// `benilla-worldview` at the layer, neither of which has a `config.toml` to read.
+/// Environment first, file second, the row's own registered default if neither says otherwise —
+/// the ladder every other `$WOW_*` override in this module follows. The env arm is what points the
+/// model test suite and `benilla-worldview` at the layer, neither of which has a `config.toml` to
+/// read.
+///
+/// **The last rung is [`registered_default`], not a literal**, and that is the bug the opt-in →
+/// opt-out flip would otherwise have shipped: `boot_cvar` answers only from `config.toml`, so a
+/// player who has never touched a setting has no row at all — and a hardcoded `false` there would
+/// have left the layer off for exactly the players the default is for, until the first time they
+/// changed something unrelated and the file got written.
 pub(crate) fn apply_boot_layers() {
     // `webenv::var`, not `std::env` — so the switch is `$WOW_HD_MODELS` natively and
     // `?hd_models=1` (or `__wenilla_env`) in a browser tab, which is the ladder every other
@@ -1674,6 +1704,7 @@ pub(crate) fn apply_boot_layers() {
         .and_then(|v| benilla_formats::layers::layer_switch(&v))
         .unwrap_or_else(|| {
             boot_cvar("hdCharacterModels")
+                .or_else(|| registered_default("hdCharacterModels").map(str::to_string))
                 .and_then(|v| benilla_formats::layers::layer_switch(&v))
                 .unwrap_or(false)
         });
@@ -2626,6 +2657,49 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// **The page and the client must default the layer the same way** — the tripwire for the
+    /// opt-in → opt-out flip.
+    ///
+    /// `web/packs.js`'s `hdWanted()` decides whether the PAGE fetches `/data-hd`;
+    /// [`apply_boot_layers`] decides whether the CLIENT mounts it. Its own doc comment calls the
+    /// two "a twin ... and it has to stay one", and neither can detect a disagreement on its own:
+    /// a page defaulting off against a client defaulting on makes every character read a cold
+    /// round trip, and the other way round makes a visitor pay 1.7 GB for art they never see.
+    /// Before the flip both defaulted off and the pairing was invisible; a re-registration that
+    /// moves one and not the other is exactly what this catches.
+    ///
+    /// Read the way a human reads it, like `web_names.rs`'s key-space tripwire: `hdWanted`'s
+    /// fallback legs are bare `return <bool>;` lines, while its env/query arms all end in
+    /// `=== true;`, so "which way does it fall back" is a substring question with one answer.
+    #[test]
+    fn the_pages_layer_default_is_the_registered_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root");
+        let js = std::fs::read_to_string(root.join("web/packs.js")).expect("web/packs.js");
+        let body = js
+            .split_once("function hdWanted() {")
+            .expect("web/packs.js still defines hdWanted()")
+            .1;
+        let end = body.find("\n}").expect("hdWanted's closing brace");
+        let body = &body[..end];
+
+        let registered = registered_default("hdCharacterModels").expect("the row is registered");
+        let on = benilla_formats::layers::layer_switch(registered)
+            .expect("the registered default is a value, not an empty string");
+        assert!(on, "this assertion is the flip itself: the row ships ON");
+
+        assert!(
+            !body.contains("return false;"),
+            "hdCharacterModels is registered {registered:?} (on), but web/packs.js's hdWanted()              still falls back to false — the page would not fetch /data-hd for a player whose              client mounts it"
+        );
+        assert!(
+            body.contains("return true;"),
+            "hdWanted() has no fallback at all — every leg now depends on a saved setting"
+        );
+    }
+
     /// **A row with no host knob still reaches the file** — `hdCharacterModels`, and the bug it
     /// shipped with (reported 2026-09-08: "the toggle does nothing, even if I reload the page").
     ///
@@ -2635,6 +2709,11 @@ mod tests {
     /// `boot_cvar` reads the old value back on the next start — which on the page is a reload,
     /// the very thing the tooltip tells the player to do. The row was live, correct, and
     /// completely inert.
+    ///
+    /// The click driven here is the row's **opt-out** — `SetCVar(…, 0)` — because since 2026-09-09
+    /// the row is registered `"1"`. Writing `1` would be a no-op against the default and would
+    /// prove nothing about the file: the only click a player can make that has to survive a
+    /// restart is now the one that turns the layer off.
     #[test]
     fn the_knobless_hd_models_row_lands_in_config_toml() {
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
@@ -2655,21 +2734,21 @@ mod tests {
         // Graphics page): no Apply staging, no knob — one `SetCVar` and out.
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
-            .run(r#"SetCVar("hdCharacterModels", 1)"#)
+            .run(r#"SetCVar("hdCharacterModels", 0)"#)
             .unwrap();
         app.update();
         app.world_mut().write_message(AppExit::Success);
         app.update();
         let text = std::fs::read_to_string(tmp.join("config.toml"))
             .expect("the click must reach config.toml — the next start is its only reader");
-        assert!(text.contains("hdCharacterModels = \"1\""), "{text}");
+        assert!(text.contains("hdCharacterModels = \"0\""), "{text}");
         // And `benilla_formats::layers` is what reads it back, through the same lax parse the
         // page uses — the twin of this value in `web/packs.js` decides a 1.5 GiB download.
         assert_eq!(
             benilla_formats::layers::layer_switch(
                 &toml::from_str::<LocalConfig>(&text).unwrap().cvars["hdCharacterModels"]
             ),
-            Some(true)
+            Some(false)
         );
         std::fs::remove_dir_all(&tmp).ok();
     }

@@ -737,7 +737,12 @@ async function openHdInWorker() {
 /// `= "0"`, whitespace anywhere), so the failure mode of a mismatch is the one thing neither can
 /// produce on its own.
 ///
-/// Absent, unreadable, or unparseable all mean **off**, which is the registered default.
+/// Absent, unreadable, or unparseable all mean **on**, which is the registered default since
+/// 2026-09-09 (`hdCharacterModels` is registered `"1"`; the options row is an opt-out). That flip
+/// had to happen here in the same commit as the CVar: this function decides whether the PAGE
+/// fetches `/data-hd`, and a page still defaulting to off against a client defaulting to on is
+/// exactly the mismatch the paragraph above says neither side can produce alone — the client
+/// would mount the layer and every character read would be a cold round trip.
 function hdWanted() {
   // The URL/env lever FIRST, exactly as `benilla_app::webenv::var` orders it: the page env object
   // (`window.__wenilla_env.hd_models`), then `?hd_models=1`, then the saved setting. The key is the
@@ -755,9 +760,11 @@ function hdWanted() {
   try {
     text = localStorage.getItem(CONFIG_KEY);
   } catch (_) {
-    return false; // a browser refusing site data has no saved setting to honour
+    // A browser refusing site data has no saved setting to honour — and the client, reading the
+    // same store through the same wall, falls to the same registered default.
+    return true;
   }
-  if (!text) return false;
+  if (!text) return true; // never changed a setting: the default, which is on
   for (const line of text.split(/\r?\n/)) {
     const eq = line.indexOf('=');
     if (eq < 0) continue;
@@ -766,9 +773,11 @@ function hdWanted() {
       .slice(eq + 1)
       .trim()
       .replace(/^"(.*)"$/, '$1');
-    return layerSwitch(raw) === true;
+    // An unparseable value is not an answer (`layerSwitch` answers null for an empty one), so it
+    // falls through to the default rather than reading as off.
+    return layerSwitch(raw) !== false;
   }
-  return false;
+  return true; // a config file that never mentions the row is the default too
 }
 
 /// `benilla_formats::layers::layer_switch`, spelled for the page: `0`/`false`/`off` are off,

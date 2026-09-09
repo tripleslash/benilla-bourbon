@@ -923,15 +923,16 @@
         --
         -- The tooltip carries THREE things a player cannot find out by clicking, in the order
         -- they will be wanted. First what changes — only characters, so a player who turns it
-        -- on and looks at a tree knows why nothing happened. Then the restart, which is the whole
-        -- reason the row is not self-evident. Then, on the web build, the download: a browser
-        -- client about to ask for 1.7 GB must say so before the click, not after it.
+        -- off and looks at a tree knows why nothing happened. Then the restart, which is the whole
+        -- reason the row is not self-evident. Then, on the web build, the download: the row is ON
+        -- by default now, so what a browser client needs before the click is what turning it OFF
+        -- saves rather than what turning it on costs.
         BENILLA_TOOLTIP_HD_MODELS =
             "Uses the updated, higher-detail player character models and animations in place of "
             .. "the original ones. Creatures, buildings and the world are unaffected.\n\n"
             .. "Takes effect the next time you start the game.\n\n"
-            .. "In the browser this downloads an additional ~1.7 GB of game data the first time "
-            .. "it is on. With it off, none of that data is fetched."
+            .. "On by default. In the browser these models are an additional ~1.7 GB of game "
+            .. "data; turning this off fetches none of it and plays on the original art."
 
         BENILLA_TOOLTIP_WORLD_SHADOWS =
             "Renders real dynamic silhouettes for players, NPCs, creatures, and mounts. Terrain, "
