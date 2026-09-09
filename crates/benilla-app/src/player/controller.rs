@@ -479,9 +479,9 @@ pub(super) fn control(
                 0.0,
                 player.pos,
                 head,
-                body.single()
-                    .ok()
-                    .and_then(|(_, _, _, pivot, .., net)| body_pose::pivot_target(pivot, net)),
+                body.single().ok().and_then(|(_, _, _, pivot, .., net)| {
+                    body_pose::pivot_target(pivot, net, player.mount_seat_lift)
+                }),
                 view_subject,
                 &mut rig,
                 &mut cam,

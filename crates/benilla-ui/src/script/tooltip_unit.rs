@@ -94,7 +94,7 @@ fn rank_key(rank: u32) -> Option<&'static str> {
 fn level_line(lua: &Lua, u: &UnitState, player_level: u32) -> Option<String> {
     let get = |key: &str| crate::strings::global(lua, key);
     // The "??" gate, byte-pinned (0x529fe0 §2-LEVEL): much-higher HOSTILE — internal reaction
-    // ≤ 1 = hated/hostile = UnitReaction ≤ 2 on our 1..8 API scale (the UnitIsEnemy mapping) —
+    // ≤ 1 = hated/hostile = UnitReaction ≤ 2 on the 1..=7 API scale (the UnitIsEnemy mapping) —
     // with playerLevel ≤ targetLevel−10; OR WorldBoss; OR level ≤ 0. Players NEVER read "??".
     // Shared with `UnitLevel`'s −1 return, so the tooltip and the target frame can never
     // disagree on who reads "??" ([`level_reads_unknown`]).

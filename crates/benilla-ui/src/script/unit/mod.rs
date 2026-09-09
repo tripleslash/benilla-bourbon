@@ -153,7 +153,8 @@ pub struct UnitState {
     /// 0308 §1). Only meaningful for player tokens; creatures stay `false`.
     pub ghost: bool,
     /// The unit's reaction toward the player on the `UnitReaction` scale (`1` hated … `4` neutral …
-    /// `8` exalted; `0` = unknown → `UnitReaction` returns nil). The app resolves it from the
+    /// `7` honored-and-better, the client's own ceiling; `0` = unknown → `UnitReaction` returns
+    /// nil). The app resolves it from the
     /// faction-template / reputation decode (the same one the selection ring uses) for the `"target"`
     /// token; other tokens leave it `0`. Read by `UnitReaction`, which the target frame tints its
     /// name plate by (`TargetFrame_CheckFaction`).

@@ -256,6 +256,82 @@ fn auction_house_show_opens_the_window_on_the_browse_tab() {
     assert!(s.errors().is_empty(), "clean open: {:?}", s.errors());
 }
 
+/// **`AUCTION_OWNED_LIST_UPDATE` is the answer to a question only the Auctions tab asks** — the
+/// reference's own law, asserted against the reference's own file, because breaking it is what
+/// crashed the window at the Booty Bay auctioneer.
+///
+/// `AuctionFrameAuctions_Update` reads `AuctionFrameAuctions.page` unguarded
+/// (Blizzard_AuctionUI.lua l.837/840) and **nothing else in the addon ever assigns it**:
+/// `AuctionFrameAuctions_OnShow` sets it at l.817, three lines under the file's single
+/// `GetOwnerAuctionItems()` call (l.814). So Blizzard's handler is safe only because the event
+/// cannot arrive before the tab has been shown — the owned list is not queried until then.
+///
+/// benilla broke that by holding one "a result landed" flag for all three lists and firing all
+/// three events off it, so the first thing that moved after walking up to an auctioneer delivered
+/// the owned event to a window still on Browse:
+/// `Blizzard_AuctionUI.lua:837: attempt to perform arithmetic on field 'page' (a nil value)`.
+/// The reference has no such routine — its window message handler `0x4ca230` is a five-case switch
+/// whose jump table (`0x4ca3a4`) picks exactly ONE of the three event ids and falls into a single
+/// `call 0x496720`. `ui_auction::tests::a_landed_page_owes_only_its_own_list` is the feed side of
+/// this; here is the consequence, spelled out in the addon's own Lua.
+#[test]
+fn the_owned_list_event_is_never_broadcast_to_an_unshown_auctions_tab() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui_with_classes(&mut s);
+    seat_player(&mut s, 500_000);
+    s.set_auction(Some(state(vec![row(
+        "Linen Cloth",
+        1000,
+        5000,
+        0,
+        "Seller",
+    )])));
+
+    // Walk up: the window opens on Browse and the Auctions tab has never been shown.
+    s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    assert!(!s
+        .eval::<bool>("return AuctionFrameAuctions:IsShown()")
+        .unwrap());
+    assert!(
+        s.eval::<bool>("return AuctionFrameAuctions.page == nil")
+            .unwrap(),
+        "the field the handler indexes is nil until the tab's OnShow assigns it"
+    );
+    assert!(s.take_errors().is_empty(), "the open itself is clean");
+
+    // The browse page repainting is fine — that IS this tab's event.
+    s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
+    assert!(
+        s.take_errors().is_empty(),
+        "the visible tab's own event repaints cleanly"
+    );
+
+    // The owned event, delivered here, is the crash. This is the pin: it asserts the reference's
+    // file really does raise, so a feed that broadcasts can never be called harmless again.
+    s.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
+    let raised = s.take_errors();
+    assert!(
+        raised.iter().any(|e| e.contains("page")),
+        "the stock Auctions handler raises on a nil page — got {raised:?}"
+    );
+
+    // …and once the tab has been shown, the same event is welcome: OnShow set the field.
+    s.run("AuctionFrameTab_OnClick(3)").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return AuctionFrameAuctions.page").unwrap(),
+        0,
+        "OnShow seats page 0"
+    );
+    assert!(s.take_errors().is_empty(), "showing the tab is clean");
+    s.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
+    assert!(
+        s.errors().is_empty(),
+        "after the tab's first show the owned event repaints cleanly: {:?}",
+        s.errors()
+    );
+}
+
 /// The part that proves it works: a fed snapshot paints the Browse rows.
 #[test]
 fn the_browse_list_populates_from_the_fed_snapshot() {

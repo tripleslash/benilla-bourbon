@@ -557,9 +557,10 @@ pub(super) fn push_ring(
 ///
 /// Deferred pieces of the real orchestration: contested-guard flag, forced reactions
 /// (`SMSG_SET_FORCED_REACTIONS`), and the summon +1 tail. Returns the **raw reaction rank**
-/// (`0..=7` — the scale the ring palette indexes: 0–1 red, 2 orange, 3 yellow, 4–7 green); the
-/// comparator's `{1, 3, 4}` sit on the same scale. **3 (neutral)** when anything is missing (no
-/// catalog, fields not yet streamed) — the reference resolver's own fall-through is the yellow branch.
+/// (`0..=`[`MAX_FACTION_REACTION`] — the scale the ring palette indexes: 0–1 red, 2 orange,
+/// 3 yellow, 4+ green); the comparator's `{1, 3, 4}` sit on the same scale. **3 (neutral)** when
+/// anything is missing (no catalog, fields not yet streamed) — the reference resolver's own
+/// fall-through is the yellow branch.
 pub(crate) fn ring_reaction(
     factions: Option<&Factions>,
     reputations: &Reputations,
@@ -592,8 +593,40 @@ pub(crate) fn ring_reaction(
         let self_tpl = catalog.template(self_store.0.unit_faction_template()?)?;
         Some(target_tpl.reaction_toward(self_tpl) as u8)
     })();
-    resolved.unwrap_or(Reaction::Neutral as u8)
+    // The ceiling on the faction leg's answer — every rung above returned before it, unclamped,
+    // exactly as the duel and FFA rungs do in the binary.
+    resolved
+        .unwrap_or(Reaction::Neutral as u8)
+        .min(MAX_FACTION_REACTION)
 }
+
+/// The ceiling `UnitReaction 0x6061e0` puts on the faction leg's answer — byte-verified at
+/// `0x606439`, on the three instructions that follow the `call 0x606530` this function's `resolved`
+/// closure transcribes:
+///
+/// ```text
+/// 0x606432  call 0x606530        ; reputation rank first, else the template comparator
+/// 0x606437  mov  esi, eax
+/// 0x606439  cmp  esi, 6
+/// 0x60643f  jl   0x606449        ; < 6 -> keep it
+/// 0x606441  mov  esi, 6          ; >= 6 -> six
+/// ```
+///
+/// So **exalted (rank 7) never reaches Lua**, and that is not a rounding detail. Lua's
+/// `UnitReaction` pushes this value *plus one* (`0x51683e inc eax`), and the stock target plate
+/// indexes `UnitReactionColor[reaction]` **unguarded** (ref TargetFrame.lua l.183) off a table with
+/// exactly **seven** rows (l.6-14). An unclamped rank 7 asks for the eighth and raises
+/// `attempt to index field '?' (a nil value)` — which it did here on every NPC of a faction the
+/// player is exalted with. The raise is also why the plate looked *blue*: both of that branch's
+/// `TargetFrameNameBackground:SetVertexColor` calls (l.186 green, l.188 the nil-reaction blue) sit
+/// **below** l.183, so once the raise starts happening the texture is never re-tinted and keeps
+/// whatever colour the last target left on it.
+///
+/// The 4.1.0 reference clamps in the same spot but to **7** (`Unit_C.cpp` 9650:
+/// `v4 = 7; if (v3 < 7) return v3; return v4;`), because by then `UnitReactionColor` was gone and
+/// `FACTION_BAR_COLORS` — eight rows — had taken over the index. The constant tracks the FrameXML
+/// table of its own version; ours is 1.12's.
+const MAX_FACTION_REACTION: u8 = 6;
 
 /// `UNIT_FLAG_PVP_ATTACKABLE` — `UNIT_FIELD_FLAGS` bit 3. Behaviourally "player-controlled": the
 /// local player and other players carry it, wild creatures do not. `UnitReaction 0x606217`/
@@ -1218,6 +1251,77 @@ mod tests {
             "a neutral critter still takes the sword — the comparator, not at-war"
         );
         assert!(!interactable(&chicken, &quiet));
+    }
+
+    /// **Exalted does not raise in the target frame** — the reported bug, on the real build-5875
+    /// DBC, naming the ceiling.
+    ///
+    /// Targeting an NPC of a faction the player is exalted with raised
+    /// `TargetFrame.lua:183: attempt to index field '?' (a nil value)` and left the name plate its
+    /// art's own blue. The chain: [`ring_reaction`] answered the raw reputation rank **7**,
+    /// `UnitReaction` pushes rank + 1 = **8**, and `TargetFrame_CheckFaction` indexes
+    /// `UnitReactionColor[reaction]` off a **seven**-row table. The client never lets 8 out:
+    /// [`MAX_FACTION_REACTION`] is the `cmp esi, 6` at `0x606439`.
+    ///
+    /// The pin asserts the divergence rather than the clamp's arithmetic: the *unclamped* rank for
+    /// this standing is 7 — [`benilla_formats::reputation_rank`] says so on the same number — and
+    /// what leaves this function is 6. Deleting the `.min` fails here on real data.
+    #[test]
+    fn an_exalted_faction_never_answers_past_the_frame_xml_palette() {
+        use crate::net::{ObjectStore, Reputations};
+        use benilla_protocol::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = Factions(benilla_formats::load_faction_catalog(&mut chain).expect("dbc"));
+        // 35 = UNIT_FIELD_FACTIONTEMPLATE, 46 = UNIT_FIELD_FLAGS.
+        let unit = |tpl: u32| ObjectStore(ObjectFields::from_pairs(&[(35, tpl)]));
+        let me = ObjectStore(ObjectFields::from_pairs(&[
+            (35, 1), // Human
+            (46, UNIT_FLAG_PVP_ATTACKABLE),
+        ]));
+
+        // FactionTemplate 12 → faction 72 "Stormwind", which owns a reputation slot: the same
+        // subject the plate-category pin uses, where a quiet install already reads 4 (friendly).
+        let guard = unit(12);
+        let faction = factions.0.template(12).expect("FT 12").faction;
+        let info = *factions
+            .0
+            .reputation_faction(faction)
+            .expect("Stormwind has a reputation slot");
+        let mut slots = vec![(0u8, 0i32); 64];
+        // Human warrior; the wire standing that puts base + standing past 42000, the exalted floor.
+        let base = info.base_for(1, 1);
+        slots[info.rep_index as usize] = (0, 42_000 - base);
+        let exalted = Reputations(slots);
+
+        assert_eq!(
+            benilla_formats::reputation_rank(base + (42_000 - base)),
+            7,
+            "the control: this standing IS exalted, rank 7 — the clamp is what hides it"
+        );
+        assert_eq!(
+            ring_reaction(Some(&factions), &exalted, Some(&guard), Some(&me)),
+            6,
+            "…and 0x606439 caps it at 6, so Lua's UnitReaction answers 7 — the LAST row of              UnitReactionColor (TargetFrame.lua l.6-14), not the eighth that does not exist"
+        );
+
+        // The ranks below the ceiling are untouched: honored (9000) and revered (21000) still
+        // answer themselves, so the clamp cannot be read as flattening the top of the scale.
+        for (standing, rank) in [(9_000, 5), (21_000, 6)] {
+            let mut slots = vec![(0u8, 0i32); 64];
+            slots[info.rep_index as usize] = (0, standing - base);
+            assert_eq!(
+                ring_reaction(
+                    Some(&factions),
+                    &Reputations(slots),
+                    Some(&guard),
+                    Some(&me)
+                ),
+                rank,
+                "standing {standing} is rank {rank} with or without the ceiling"
+            );
+        }
     }
 
     /// **The PLAYER subject** — the arm 1530 landed and left unpinned, on the real DBC.

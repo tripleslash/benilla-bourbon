@@ -1016,6 +1016,22 @@ pub(crate) struct Player {
     /// zero every depth line collapses to 0 and the avatar swims on dry land. It defaults to
     /// [`DEFAULT_COLLISION_HEIGHT`] and is replaced once our body's display id resolves.
     pub(crate) collision_height: crate::entities::CollisionHeight,
+    /// **How far our body's model frame rides above its feet** — the mount's attachment-0 saddle,
+    /// in world yards, or `None` while we are not mounted.
+    ///
+    /// The camera's framing pivot is a height above the **model's own origin**, not above the
+    /// ground: the reference's preset (`0x50ca90`) measures attachment 17 and the posture
+    /// correction in model space, and the camera then adds the finished preset to the model's live
+    /// world matrix. Standing, that origin is the feet and the two are the same point. Mounted, the
+    /// character model is parented to the mount's attachment-0 joint, so the origin is the saddle —
+    /// which is the whole of why the camera rises when you mount, and why it rises *with the
+    /// gallop* rather than by a constant.
+    ///
+    /// Mirrored onto this resource by [`super::mirror_mount_seat_lift`] for the same reason
+    /// [`Self::collision_height`] is: the camera seat runs off the resource. `None` and `Some(0.0)`
+    /// are different answers — `None` means "not mounted", which is what selects the plain
+    /// bind-pose pivot over the Mount-pose one.
+    pub(crate) mount_seat_lift: Option<f32>,
     /// The **mover pitch** (radians, +up) — the client's persistent per-unit pitch
     /// (`CMovement+0x20`, the swim §5's TU-B): **held** when unsteered (an idle floater keeps its
     /// pitch — never auto-leveled; the only zeroing writer `0x7c6e80` fires from

@@ -873,8 +873,8 @@ pub(crate) struct UnitStores<'w, 's> {
 }
 
 /// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
-/// its cache-resolved name and its `UnitReaction` value (`1..8`, or `0` for tokens whose reaction we
-/// don't resolve — everything but `"target"`; see [`feed_units`]).
+/// its cache-resolved name and its `UnitReaction` value (`1..=7`, or `0` for tokens whose reaction
+/// we don't resolve — everything but `"target"`; see [`feed_units`]).
 ///
 /// `classes` is `ChrClasses.dbc`, absent when the client data failed to load. Only the relic column
 /// is read off it — the class NAMES are this file's own table, because they are localized display
@@ -1545,10 +1545,11 @@ fn feed_units(
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.all.get(e).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
-        // The target's reaction toward us, on the `UnitReaction` 1..8 scale — the same decode the
-        // selection ring runs (reputation-first, else the faction-template comparator). `ring_reaction`
-        // returns the raw 0..7 rank (neutral its no-data fallback), which is `UnitReaction − 1`; +1
-        // lands it on the Lua scale the name-plate palette (`UnitReactionColor`) indexes.
+        // The target's reaction toward us, on the `UnitReaction` 1..=7 scale — the same decode the
+        // selection ring runs (reputation-first, else the faction-template comparator).
+        // `ring_reaction` returns the raw 0..=6 rank (neutral its no-data fallback, six its ceiling
+        // — see `MAX_FACTION_REACTION`), which is `UnitReaction − 1`; +1 lands it on the Lua scale
+        // the name-plate palette (`UnitReactionColor`, seven rows) indexes.
         let reaction = ring_reaction(
             factions.as_deref(),
             &reputations,

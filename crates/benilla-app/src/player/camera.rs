@@ -601,7 +601,14 @@ pub(super) const CAM_PIVOT_FALLBACK: f32 = 1.8;
 /// One modeled unit's world head height: its model-local [`CameraPivot`] × the given scale, clamped
 /// to `[CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL]` — the reference's per-preset clamp in `0x50ca90`.
 pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32) -> f32 {
-    (pivot.height_local * scale).clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
+    clamp_pivot_height(pivot.height_local * scale)
+}
+
+/// The reference's per-preset clamp on a world pivot height (`0x50ca90`), split out so the mounted
+/// preset — which is the same height plus [`CameraPivot::mounted_delta_local`] — cannot end up
+/// clamped differently from the standing one.
+pub(super) fn clamp_pivot_height(h: f32) -> f32 {
+    h.clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
 }
 
 /// World head height above a modeled unit's feet — [`model_pivot_height`], or the neck-height
@@ -937,9 +944,20 @@ impl FlyCam {
 /// ([`crate::entities`]); `control` reads it off the [`Embodied`], multiplies that body's live scale,
 /// and floors at [`CAM_PIVOT_FLOOR`] to get the world pivot the third-person camera looks at (and the
 /// first-person eye). `0.0` for a bounds-less display (→ floor).
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Default)]
 pub(crate) struct CameraPivot {
     pub height_local: f32,
+    /// The **mounted** correction to that height, model-local and pre-scale
+    /// ([`benilla_formats::M2Bounds::mounted_pivot_delta`]): `Mount.max.z − Stand.max.z` off the
+    /// model's own sequence boxes, which the reference adds to the preset whenever
+    /// `UNIT_FIELD_MOUNTDISPLAYID` is non-zero (`0x50cba8` picks animation 91, `0x50cddf` applies
+    /// the difference). Negative on every character, and paired with
+    /// [`Player::mount_seat_lift`][crate::player::Player] — the correction alone would sink the
+    /// camera into the mount, the seat alone would ride a head too high.
+    ///
+    /// `0.0` for a model authoring no `Mount` sequence, which is every model that cannot be
+    /// ridden.
+    pub mounted_delta_local: f32,
 }
 
 /// Mouse-look session state machine — start/stop/hand-off between the two look buttons, cursor
@@ -1743,10 +1761,60 @@ mod tests {
     /// and a shrink cannot bury it in the floor.
     #[test]
     fn the_pivot_target_is_clamped_to_the_references_band() {
-        let p = CameraPivot { height_local: 2.0 };
+        let p = CameraPivot {
+            height_local: 2.0,
+            ..CameraPivot::default()
+        };
         assert_eq!(model_pivot_height(&p, 1.0), 2.0);
         assert_eq!(model_pivot_height(&p, 0.01), CAM_PIVOT_FLOOR);
         assert_eq!(model_pivot_height(&p, 100.0), CAM_PIVOT_CEIL);
+    }
+
+    /// **Mounting raises the framing pivot, and it takes both halves to do it** (the reported
+    /// bug: the camera stayed at standing head height on a mount).
+    ///
+    /// The reference's preset is measured in the model's own frame, so mounting moves two things
+    /// at once — the pose it is measured in (`0x50cba8`: `UNIT_FIELD_MOUNTDISPLAYID` non-zero
+    /// forces animation 91 `Mount`, and `0x50cddf` corrects the preset by that box's `max.z`
+    /// against Stand's) and the origin it is measured from (the character model is parented to the
+    /// mount's attachment-0 saddle). The numbers here are a human male's, read off the shipped M2:
+    /// pivot `attach17.z + 0.0972 = 1.9002`, `Mount.max.z − Stand.max.z = −0.95179`
+    /// (`benilla-formats` `mounted_pivot_delta`), on a horse whose saddle sits 1.7 yd up.
+    ///
+    /// The assertion that matters is the **pairing**: each half on its own is worse than neither.
+    #[test]
+    fn mounting_measures_the_pivot_in_the_mount_pose_from_the_saddle() {
+        let human = CameraPivot {
+            height_local: 1.9002,
+            mounted_delta_local: -0.951_79,
+        };
+        let target = |lift| crate::player::body_pose::pivot_target(Some(&human), None, lift);
+
+        let standing = target(None).expect("a modeled body always has a target");
+        assert!((standing - 1.9002).abs() < 1e-4, "unmounted is unchanged");
+
+        let mounted = target(Some(1.7)).expect("mounted target");
+        assert!(
+            (mounted - (1.7 + 1.9002 - 0.951_79)).abs() < 1e-4,
+            "saddle + the Mount-pose neck, got {mounted}"
+        );
+        assert!(
+            mounted > standing,
+            "the camera RISES on a mount — {mounted} vs {standing}"
+        );
+
+        // Half one alone (the seat, bind-pose neck) floats a standing head above the saddle…
+        assert!(
+            mounted < 1.7 + standing,
+            "…and that is 0.95 yd higher than the reference puts it"
+        );
+        // …and half two alone (the Mount pose, measured from the feet) is *below* standing, which
+        // is the camera inside the horse.
+        let pose_only = 1.9002 - 0.951_79;
+        assert!(
+            pose_only < standing,
+            "the correction is negative by itself — it is not a lift, it is a re-measure"
+        );
     }
 
     /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.

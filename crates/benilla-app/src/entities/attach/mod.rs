@@ -925,6 +925,7 @@ pub(super) fn attach_entity_visuals(
             // camera controller to target ~neck height instead of a fixed offset (harmless on NPCs).
             commands.entity(entity).insert(CameraPivot {
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
+                mounted_delta_local: dm.map(|d| d.mounted_pivot_delta_local).unwrap_or(0.0),
             });
             // The overhead-anchor fallback input (combat text over a model with no PlayerName
             // attachment — `0x608640`'s defensive branch).

@@ -158,7 +158,10 @@ mod tests {
             .world_mut()
             .spawn((
                 Transform::from_xyz(100.0, 0.0, 0.0),
-                CameraPivot { height_local: 2.0 },
+                CameraPivot {
+                    height_local: 2.0,
+                    ..CameraPivot::default()
+                },
             ))
             .id();
 

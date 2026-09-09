@@ -61,7 +61,7 @@ pub(super) fn drive(
                 descent: player.fall_start_y - player.pos.y,
             });
         }
-        cam_pivot_target = pivot_target(pivot, net_entity);
+        cam_pivot_target = pivot_target(pivot, net_entity, player.mount_seat_lift);
         if let Some(mut motion) = motion {
             // A swimmer's stroke rate takes the flag-scalar directional speed (full rate at
             // any pitch — a vertical climb must not freeze the stroke); the ground gaits
@@ -101,11 +101,29 @@ pub(super) fn drive(
 ///
 /// The **raw** scale (not the transform's eased one) is the reference's own input — see
 /// [`super::camera::head_height`] for the byte citation and why the distinction is visible.
+///
+/// `mount_seat_lift` is [`Player::mount_seat_lift`], and its two halves arrive together
+/// (`0x50ca90`, and see [`CameraPivot::mounted_delta_local`]): while mounted the preset is measured
+/// in the **Mount** pose rather than the bind pose, and the origin it is measured from is the
+/// saddle rather than the feet. Applying either alone is worse than applying neither — the
+/// correction is negative on every character, so the Mount pose without the seat drops the camera
+/// to a sitting height at ground level, and the seat without the correction floats a standing neck
+/// above the saddle. The clamp stays on the model-relative half, which is the half the reference
+/// clamps.
 pub(super) fn pivot_target(
     pivot: Option<&CameraPivot>,
     net: Option<&crate::net::NetEntity>,
+    mount_seat_lift: Option<f32>,
 ) -> Option<f32> {
-    pivot.map(|p| model_pivot_height(p, net.map_or(1.0, |n| n.scale)))
+    let scale = net.map_or(1.0, |n| n.scale);
+    pivot.map(|p| match mount_seat_lift {
+        None => model_pivot_height(p, scale),
+        Some(seat) => {
+            seat + super::camera::clamp_pivot_height(
+                (p.height_local + p.mounted_delta_local) * scale,
+            )
+        }
+    })
 }
 
 /// `WOW_TWIST_GAP=<radians>`: pin the body counter-twist's yaw gap instead of deriving it from

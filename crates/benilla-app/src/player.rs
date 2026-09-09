@@ -426,6 +426,15 @@ impl Plugin for PlayerPlugin {
                 .in_set(WorldStage::Input)
                 .before(control),
         )
+        // …and the mounted camera's other half beside it, for the same reasons: the seat is a
+        // property of the body we drive, it changes when a mount is summoned or dismissed or when
+        // a worldport re-streams the entity, and the camera seat reads it off the resource.
+        .add_systems(
+            Update,
+            mirror_mount_seat_lift
+                .in_set(WorldStage::Input)
+                .before(control),
+        )
         // The camera shake (B298, decision 1540) lands on the camera AFTER `control` has
         // seated it: the applier adds its offset to the pose `seat_camera` just wrote, so the
         // eye it measures the distance falloff against is the un-shaken one. `control` is at
@@ -497,5 +506,51 @@ fn mirror_mover_collision_height(
         if player.collision_height != h {
             player.collision_height = h;
         }
+    }
+}
+
+/// Mirror the driven body's **seat lift** onto [`Player`] — how far its model frame rides above its
+/// feet ([`Player::mount_seat_lift`]), which is `None` unless it is mounted.
+///
+/// `RigPose::joints_root` is the rig's model frame and its `GlobalTransform` is `world_from_model`,
+/// which is exactly the origin the reference's camera preset is measured from. Standing, that
+/// entity is the body itself (or its terrain-conform node) and the lift is zero; mounted,
+/// `entities::mount` has re-rooted it under the mount's attachment-0 seat anchor, so the lift is
+/// the saddle — live, so it breathes with the gallop the way the reference's does.
+///
+/// The mount **field**, not the frame, is what says "mounted": a rider whose mount model has not
+/// finished loading is still seated at its own feet for a frame or two, and `Some(0.0)` there is
+/// the right answer — it keeps the Mount-pose correction and the seat arriving together, rather
+/// than dropping the camera to standing height and gliding it back up when the model lands.
+///
+/// The `GlobalTransform` read is one frame stale (Bevy propagates in `PostUpdate`, this runs in
+/// `Update`). That is the same lag the reference carries by recomputing its preset on model events
+/// rather than per frame, and a saddle moves slowly enough that a frame of it is invisible.
+fn mirror_mount_seat_lift(
+    mut player: ResMut<Player>,
+    mover: Query<
+        (
+            Entity,
+            &benilla_world::rig_anim::RigPose,
+            Option<&crate::net::ObjectStore>,
+        ),
+        With<Embodied>,
+    >,
+    frames: Query<&GlobalTransform>,
+) {
+    let lift = mover.single().ok().and_then(|(body, rig, store)| {
+        let mounted = store.is_some_and(|s| s.0.unit_mount_display_id() != 0);
+        if !mounted {
+            return None;
+        }
+        if rig.joints_root == body {
+            return Some(0.0); // seated at our own feet — the mount model is still loading
+        }
+        let feet = frames.get(body).ok()?.translation().y;
+        let seat = frames.get(rig.joints_root).ok()?.translation().y;
+        Some((seat - feet).max(0.0))
+    });
+    if player.mount_seat_lift != lift {
+        player.mount_seat_lift = lift;
     }
 }

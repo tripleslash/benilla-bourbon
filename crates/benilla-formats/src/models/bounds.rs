@@ -58,6 +58,30 @@ pub struct M2Bounds {
     ///
     /// Falls back to the header render-box Z extent for a model with no sequences, like the ring.
     pub stand_box_z: f32,
+    /// The **mounted** correction to the follow-camera pivot (model-local, pre-scale):
+    /// `Mount.max.z − Stand.max.z` off the same sequence boxes, `0.0` for a model authoring no
+    /// Mount sequence.
+    ///
+    /// The reference's follow-camera preset is not the bind-pose attachment alone — `0x50ca90`
+    /// corrects [`Self::pivot_z`] by the difference between the box of the animation the unit's
+    /// POSTURE selects and the box of Stand, all in the model's own frame. Its switch picks
+    /// SitGround / Sleep / SitChairLow-Med-High / Dead / KneelLoop from the posture word, and then
+    /// one branch overrides all of them: `0x50cba8` reads `UNIT_FIELD_MOUNTDISPLAYID` and, when it
+    /// is non-zero, forces animation **91 (`Mount`)**. The correction itself is `0x50cddf`-
+    /// `0x50ce09`: `preset -= (stand.max.z − anim.max.z) × scale`, applied to the posture preset
+    /// and — under the `cmp ebx, 0x5b` that singles Mount out — to the standing preset as well.
+    ///
+    /// **It is negative on every character** (human −0.95, gnome −0.21, tauren −0.69, night elf
+    /// −1.19), because the Mount pose hangs the legs below the model origin and drops the neck
+    /// with them. That is not the camera going down: while mounted the character model's origin is
+    /// the mount's attachment-0 **saddle**, so the world pivot is `saddle + (pivot_z + this)·scale`
+    /// and the net move is up by the seat height less this. Adding the seat without this
+    /// correction rides a head too high; applying this without the seat sinks the camera into the
+    /// mount.
+    ///
+    /// Only the Mount arm is read here. The seated postures need the unit's posture word, which is
+    /// not a model fact, and their preset would belong beside it.
+    pub mounted_pivot_delta: f32,
 }
 
 /// Read an M2's authored bounds + the vertex-derived radius (see [`M2Bounds`]). Uses the same path
@@ -97,6 +121,30 @@ pub const DEGENERATE_RING_FOOTPRINT: f32 = 1.2;
 /// read on the other axis (1406) — one parse, one Stand-sequence resolution, two consumers, so the
 /// ring and the bubble can never drift onto different animations.
 fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
+    let rec = sequence_record(bytes, STAND_ANIM, true)?;
+    // CAaBox @ rec+0x24: min C3 (+0x24), max C3 (+0x30). Horizontal (X,Y) extents; squared in the ring
+    // formula so an unsorted box is harmless.
+    let dx = bytes.f32_at(rec + 0x30)? - bytes.f32_at(rec + 0x24)?;
+    let dy = bytes.f32_at(rec + 0x34)? - bytes.f32_at(rec + 0x28)?;
+    let dz = bytes.f32_at(rec + 0x38)? - bytes.f32_at(rec + 0x2c)?;
+    Some((dx, dy, dz))
+}
+
+/// `AnimationData.dbc` id **0** — Stand, the box every other sequence's box is read against.
+const STAND_ANIM: usize = 0;
+/// `AnimationData.dbc` id **91** — `Mount`, the pose `0x50cbbb` forces on a unit whose
+/// `UNIT_FIELD_MOUNTDISPLAYID` is non-zero (`mov ebx, 0x5b`). Named against the shipped DBC.
+const MOUNT_ANIM: usize = 91;
+
+/// The file offset of one `M2Sequence` record, resolved the way the reference resolves an animation
+/// id: through `animationLookup` (array at MD20 `0x24`/`0x28`, `u16` each), **not** by record order.
+///
+/// `fall_back_to_first` is the difference between the two callers. The ring/bubble ask for Stand,
+/// which every model has, and take record 0 when the lookup cannot answer — the reference's own
+/// static-model leg. The mount correction asks for a sequence most models genuinely lack, and
+/// there "no Mount" must stay `None` rather than silently measuring whatever record 0 is: reading a
+/// chicken's flap as its mount pose would move the camera on a model that can never be ridden.
+fn sequence_record(bytes: &[u8], anim: usize, fall_back_to_first: bool) -> Option<usize> {
     let anim_count = bytes.u32_at(0x1c)? as usize;
     let anim_ofs = bytes.u32_at(0x20)? as usize;
     let lookup_count = bytes.u32_at(0x24)? as usize;
@@ -104,23 +152,27 @@ fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     if anim_count == 0 {
         return None;
     }
-    // Stand (anim id 0) → its sequence index via animationLookup[0]; fall back to record 0 if the lookup
-    // is absent, out of bounds, or points nowhere (0xffff / out of range).
-    let idx = if lookup_count > 0 {
-        match bytes.u16_at(lookup_ofs) {
-            Some(i) if (i as usize) != 0xffff && (i as usize) < anim_count => i as usize,
-            _ => 0,
-        }
-    } else {
-        0
+    let looked_up = (anim < lookup_count)
+        .then(|| bytes.u16_at(lookup_ofs + anim * 2))
+        .flatten()
+        .map(usize::from)
+        .filter(|&i| i != 0xffff && i < anim_count);
+    let idx = match looked_up {
+        Some(i) => i,
+        None if fall_back_to_first => 0,
+        None => return None,
     };
-    let rec = anim_ofs.checked_add(idx * 0x44)?;
-    // CAaBox @ rec+0x24: min C3 (+0x24), max C3 (+0x30). Horizontal (X,Y) extents; squared in the ring
-    // formula so an unsorted box is harmless.
-    let dx = bytes.f32_at(rec + 0x30)? - bytes.f32_at(rec + 0x24)?;
-    let dy = bytes.f32_at(rec + 0x34)? - bytes.f32_at(rec + 0x28)?;
-    let dz = bytes.f32_at(rec + 0x38)? - bytes.f32_at(rec + 0x2c)?;
-    Some((dx, dy, dz))
+    anim_ofs.checked_add(idx * 0x44)
+}
+
+/// `Mount.max.z − Stand.max.z` — the reference's mounted pivot correction (see
+/// [`M2Bounds::mounted_pivot_delta`]). `None` for a model with no sequences or no `Mount`.
+fn mounted_pivot_delta(bytes: &[u8]) -> Option<f32> {
+    let stand = sequence_record(bytes, STAND_ANIM, true)?;
+    let mount = sequence_record(bytes, MOUNT_ANIM, false)?;
+    // `max.z` alone, not the extent: the preset is a height above the model origin, and the
+    // reference reads `out+0x20` (the box's max C3's Z) on both sides of its subtraction.
+    Some(bytes.f32_at(mount + 0x38)? - bytes.f32_at(stand + 0x38)?)
 }
 
 /// Read an **in-memory** M2's authored bounds + vertex-derived radius (see [`M2Bounds`]). The bytes-in
@@ -159,5 +211,6 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         ring_footprint,
         pivot_z: model.pivot_attach_z,
         stand_box_z: rz.max(0.0),
+        mounted_pivot_delta: mounted_pivot_delta(bytes).unwrap_or(0.0),
     })
 }
