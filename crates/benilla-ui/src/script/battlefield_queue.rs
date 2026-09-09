@@ -28,7 +28,9 @@
 //! Every required index is shape A (`lua_isnumber`, so a numeric string passes; truncated toward
 //! zero; a non-number raises the binding's own `Usage:`), 1-based with the reference's unsigned
 //! `dec; cmp; jae` gate that rejects 0 and negatives in one branch. `GetBattlefieldStatus`
-//! answers **five values on every leg** — `(nil, nil, 0, 0, 0)` off the three slots.
+//! answers **five values on every leg** — `(nil, nil, 0, 0, 0)` off the three slots, and a CLEARED
+//! slot (`"none", nil, 0, 0, 0`) for an in-range index the app has not pushed yet, because the
+//! reference's array is fixed and always holds three.
 //! `GetBattlefieldInfo` answers nine or none. `GetBattlefieldInstanceInfo` raises with
 //! `GetBattlefieldInfo`'s usage string — the shipped client's own mislabel, reproduced.
 //! `CloseBattlefield` does nothing (`xor eax,eax; ret`).
@@ -276,13 +278,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // `GetBattlefieldStatus(index)` — five values on EVERY leg (§3.2): off 1..3 it is
     // `(nil, nil, 0, 0, 0)`, never a raise and never zero values.
+    //
+    // **The gate and the lookup are separate, and that separation is the whole of B-battlefield.**
+    // The reference's queue is a FIXED three-slot array (§2.2), so an index that passes the gate
+    // always finds a slot — a cleared one is `status = 0`, which `status_text` answers `"none"`
+    // for. Ours arrives as a `Vec` the app pushes each frame, and it is EMPTY until the first
+    // `feed_battlefield` runs: on a `/reload` the model is rebuilt from scratch, and anything that
+    // asks before that frame used to fall into the off-index leg and get a **nil status** for an
+    // in-range slot.
+    //
+    // Stock `BattlefieldFrame_Update` cannot survive that. It loops `i = 1, MAX_BATTLEFIELD_QUEUES`
+    // (= 3, so always in range) and its guard is `queueStatus ~= "none"` — a nil status passes it,
+    // and the very next term is `queueMapName.." "..queueInstanceID`:
+    // `BattlefieldFrame.lua:242: attempt to concatenate local 'queueMapName' (a nil value)`, on
+    // the first `PARTY_LEADER_CHANGED` (l.44) after a reload. `"none"` is what makes that guard
+    // do its job, so an in-range index answers the zeroed slot the reference's array already holds.
     g.set(
         "GetBattlefieldStatus",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldStatus(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(slot) = slot_index(index, 3).and_then(|i| model.battlefield_slots.get(i))
-            else {
+            let Some(i) = slot_index(index, 3) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -291,6 +307,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Number(0.0),
                 ]));
             };
+            let cleared = BattlefieldQueueSlot::default();
+            let slot = model.battlefield_slots.get(i).unwrap_or(&cleared);
             let name = match &slot.map_name {
                 Some(n) => Value::String(lua.create_string(n)?),
                 None => Value::Nil,
@@ -618,6 +636,69 @@ mod tests {
                 .unwrap(),
             "no row: a real nil"
         );
+    }
+
+    /// **An in-range slot the app has not pushed yet is CLEARED, not out of range** — the reload
+    /// raise (`BattlefieldFrame.lua:242: attempt to concatenate local 'queueMapName'`).
+    ///
+    /// The model is rebuilt empty on every `/reload` and the app fills it on its next frame, so
+    /// anything the interface does in between asks a `Vec` that is shorter than the reference's
+    /// fixed three-slot array. Answering the off-index leg there hands Lua a **nil status**, and
+    /// stock `BattlefieldFrame_Update` guards its concatenation with `queueStatus ~= "none"` —
+    /// a guard nil walks straight through, on a loop that runs `1..MAX_BATTLEFIELD_QUEUES` and is
+    /// therefore always in range. `"none"` is the only answer that makes the stock guard work.
+    ///
+    /// Off-index (`0`, `4`) still answers nil: that leg is the reference's own and is untouched.
+    #[test]
+    fn an_unpushed_in_range_slot_reads_none_not_nil() {
+        let mut s = UiScript::new().unwrap();
+        // Nothing pushed at all — the state a fresh VM is in until `feed_battlefield` runs once.
+        for i in 1..=3 {
+            let got = s
+                .eval::<String>(&format!(
+                    "local st, name, id, lo, hi = GetBattlefieldStatus({i})                      return st .. '|' .. tostring(name) .. '|' .. id .. lo .. hi"
+                ))
+                .unwrap();
+            assert_eq!(got, "none|nil|000", "slot {i} of an unpushed queue");
+        }
+        // The guard is load-bearing, proved rather than asserted: the stock line with a NIL
+        // status really does raise, so answering "none" is what stops it — not a nicety.
+        let raised = s
+            .run(
+                "local queueStatus, queueMapName, queueInstanceID = nil, nil, 0                  if ( queueStatus ~= 'none' and queueMapName .. ' ' .. queueInstanceID == 'x' )                  then end"
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            raised.contains("concatenate"),
+            "a nil status is BattlefieldFrame.lua:242's raise — got {raised}"
+        );
+        // The stock window's own line, verbatim, against what the binding actually answers.
+        assert!(
+            s.eval::<bool>(
+                "local queueStatus, queueMapName, queueInstanceID = GetBattlefieldStatus(1)                  if ( queueStatus ~= 'none' and queueMapName .. ' ' .. queueInstanceID == 'x' )                  then return false end return true"
+            )
+            .unwrap(),
+            "BattlefieldFrame.lua:242 must short-circuit on the status"
+        );
+        // A SHORT push is the same case: slot 1 real, 2 and 3 never sent.
+        s.set_battlefield_queue(vec![slot(489, 1, 5)], 0);
+        assert_eq!(
+            s.eval::<String>("return (GetBattlefieldStatus(1))")
+                .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            s.eval::<String>("return (GetBattlefieldStatus(3))")
+                .unwrap(),
+            "none",
+            "a slot past the pushed end is cleared, not out of range"
+        );
+        // …and the genuinely out-of-range leg is unchanged.
+        let off = s
+            .eval::<String>("local st = GetBattlefieldStatus(4) return tostring(st)")
+            .unwrap();
+        assert_eq!(off, "nil");
     }
 
     /// The clock-shaped getters read the pushed ms and answer 0 off the slots; the instance

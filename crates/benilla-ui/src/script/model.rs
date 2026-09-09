@@ -893,6 +893,12 @@ pub(crate) struct Model {
     /// `[0xb6eba0]` — the selected instance id (a VALUE; `SetSelectedBattlefield` writes it).
     pub(crate) battlefield_selected: u32,
     /// The three queue slots (1974), pushed each frame with their clock-shaped values reduced.
+    ///
+    /// **Empty until the app's first push**, which is every frame of a `/reload` before
+    /// `feed_battlefield` runs. The reference's array is fixed at three and always exists, so the
+    /// readers treat a missing entry as a CLEARED slot rather than as an out-of-range index — see
+    /// `GetBattlefieldStatus`, where the difference is a nil the stock battleground window
+    /// concatenates.
     pub(crate) battlefield_slots: Vec<super::battlefield_queue::BattlefieldQueueSlot>,
     /// `GetBattlefieldInstanceExpiration()`'s answer, pushed each frame.
     pub(crate) battlefield_instance_expiration_ms: u32,
