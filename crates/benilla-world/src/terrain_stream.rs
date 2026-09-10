@@ -832,6 +832,19 @@ fn stream_terrain(
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
+    // **Tell the warm queue where terrain is being streamed from** — the web target's fetch order
+    // (`benilla_formats::web::warm_priority`). The queue sees names and nothing else, so without
+    // this the tile a body is about to walk onto shares one lane with every doodad and building of
+    // the zone it is standing in; six connections drained in arrival order then land it after the
+    // art, which is the ADT that only turns up once you have stepped onto it. Naming the focus tile
+    // and the neighbour it is nearest to is the whole of what the queue needs to order the eight.
+    //
+    // Published BEFORE the settled skip below, and cheap enough to mean it: a lock read and a
+    // compare, with a write only when the answer moved. (The skip's own precondition is a world
+    // with nothing outstanding, so a stale focus behind it could not order anything — but this is
+    // not the kind of fact to leave correct by coincidence.) Nothing reads it on native: there the
+    // chain is a filesystem and there is no queue to put in an order.
+    benilla_formats::web::set_terrain_focus(&dir, (cx, cy), window.lean_tile());
     let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
     // Never while a load is in flight: `paced` is false from a snap until the body settles, and
     // the tail this skip bypasses is where the load is RELEASED — the retained pass's undrawn
@@ -1474,6 +1487,9 @@ fn release_world(
     state.map_dir = None;
     state.wdt = None;
     state.wdt_ungated = false;
+    // Nothing left to be near to: the warm queue's terrain tiers go back to naming no tile in
+    // particular (`benilla_formats::web::set_terrain_focus`, published by `stream_terrain`).
+    benilla_formats::web::clear_terrain_focus();
     // The residency the loading screen reads is about a world that no longer exists; leaving it
     // standing would let the next entry clear its cover against the previous world's counts.
     if let Some(p) = progress.as_mut() {

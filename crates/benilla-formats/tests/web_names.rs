@@ -87,3 +87,48 @@ fn the_layer_key_space_is_the_same_number_in_rust_and_in_the_page() {
         benilla_formats::layers::HD_DATA_SEGMENT
     );
 }
+
+/// **The warm ladder is spelled twice and must be one order.**
+///
+/// `benilla_formats::web`'s five `PRIORITY_*` constants here, and five `const PRIORITY_* = n;`
+/// lines in `web/packs.js` there. Rust classifies a name into a number; the page sorts its six
+/// connections by that number and reserves slots against `priority <= PRIORITY_GEOMETRY`. Neither
+/// side validates the other, and a disagreement does not error — it silently *reorders the
+/// network*: swap two tiers and the tile a body is about to walk onto queues behind the art again,
+/// which is a streaming regression nothing in a build catches and only a player standing at a tile
+/// edge notices.
+///
+/// Read the way a human would, like the layer key space above.
+#[test]
+fn the_warm_ladder_is_the_same_order_in_rust_and_in_the_page() {
+    use benilla_formats::web::{
+        PRIORITY_GEOMETRY, PRIORITY_NORMAL, PRIORITY_TERRAIN, PRIORITY_TERRAIN_FOCUS,
+        PRIORITY_TERRAIN_NEAR,
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let packs = std::fs::read_to_string(root.join("web/packs.js")).expect("web/packs.js");
+    for (name, value) in [
+        ("PRIORITY_TERRAIN_FOCUS", PRIORITY_TERRAIN_FOCUS),
+        ("PRIORITY_TERRAIN_NEAR", PRIORITY_TERRAIN_NEAR),
+        ("PRIORITY_TERRAIN", PRIORITY_TERRAIN),
+        ("PRIORITY_GEOMETRY", PRIORITY_GEOMETRY),
+        ("PRIORITY_NORMAL", PRIORITY_NORMAL),
+    ] {
+        let want = format!("const {name} = {value};");
+        assert!(
+            packs.contains(&want),
+            "web/packs.js does not spell `{want}` — the warm ladder has drifted from              benilla_formats::web"
+        );
+    }
+    // The property the page's slot reservation rests on: every terrain tier is inside the
+    // collision lane, which `packs.js` tests as one `priority <= PRIORITY_GEOMETRY`.
+    const {
+        assert!(PRIORITY_TERRAIN_FOCUS < PRIORITY_TERRAIN_NEAR);
+        assert!(PRIORITY_TERRAIN_NEAR < PRIORITY_TERRAIN);
+        assert!(PRIORITY_TERRAIN < PRIORITY_GEOMETRY);
+        assert!(PRIORITY_GEOMETRY < PRIORITY_NORMAL);
+    }
+}

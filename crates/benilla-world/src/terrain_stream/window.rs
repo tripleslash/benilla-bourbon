@@ -62,6 +62,42 @@ impl StreamWindow {
         )
     }
 
+    /// **The neighbouring tile the focus is nearest to** — the one a body walking this way is
+    /// likeliest to step onto next.
+    ///
+    /// It exists for the warm queue's terrain tiers (`benilla_formats::web::warm_priority`), which
+    /// order the eight neighbours and need one of them named as the urgent one. The answer is the neighbour whose edge is
+    /// fewest chunks away, resolved per axis and then between the two axes — and it is always an
+    /// **axis** neighbour, never a diagonal, because a corner tile's nearest point is
+    /// `√(dx² + dy²)` away and that is never closer than `min(dx, dy)`. A tie between the axes goes
+    /// to x, arbitrarily: at a tie the two are equally close and both are in the near ring anyway.
+    ///
+    /// Clamped to the grid, so at a map edge this reports the focus tile itself rather than a tile
+    /// that does not exist. That is harmless — the focus tile shares the same tier.
+    pub fn lean_tile(&self) -> (i32, i32) {
+        // Per axis: which way the nearer edge is, and how many chunks of this tile lie before it.
+        let toward_edge = |chunk: i32| {
+            let within = chunk.rem_euclid(CHUNKS_PER_TILE);
+            let back = within;
+            let forward = CHUNKS_PER_TILE - 1 - within;
+            if forward < back {
+                (1, forward)
+            } else {
+                (-1, back)
+            }
+        };
+        let (step_x, reach_x) = toward_edge(self.focus.0);
+        let (step_y, reach_y) = toward_edge(self.focus.1);
+        let (tx, ty) = self.focus_tile();
+        let (ox, oy) = if reach_x <= reach_y {
+            (step_x, 0)
+        } else {
+            (0, step_y)
+        };
+        let last = CHUNK_MAX / CHUNKS_PER_TILE;
+        ((tx + ox).clamp(0, last), (ty + oy).clamp(0, last))
+    }
+
     /// The inclusive tile range `((min_x, min_y), (max_x, max_y))` touched by the outer window
     /// grown by `band` chunks, clamped to the 64×64 tile grid.
     fn tile_range(&self, band: i32) -> ((i32, i32), (i32, i32)) {
@@ -192,6 +228,41 @@ mod tests {
         for t in w.wanted_tiles() {
             assert!(w.keeps(t));
         }
+    }
+
+    /// The lean tile is the neighbour whose edge is nearest, on the nearer axis alone — never a
+    /// diagonal, since a corner tile is `√2` further away than the axis tile beside it.
+    #[test]
+    fn the_lean_tile_is_the_nearest_neighbour() {
+        // Chunk 15 of 16 on x, mid-tile on y: the +x neighbour is 0 chunks away and wins.
+        assert_eq!(at_chunk(777.0, (32, 44), (15, 7)).lean_tile(), (33, 44));
+        // Chunk 0 on x: the −x neighbour, same reasoning from the other side.
+        assert_eq!(at_chunk(777.0, (32, 44), (0, 7)).lean_tile(), (31, 44));
+        // Mid-tile on x, chunk 15 on y: now y is the nearer axis.
+        assert_eq!(at_chunk(777.0, (32, 44), (7, 15)).lean_tile(), (32, 45));
+        assert_eq!(at_chunk(777.0, (32, 44), (7, 0)).lean_tile(), (32, 43));
+        // In the corner chunk both axes read 0 — the tie goes to x, not to the diagonal, because
+        // the diagonal tile's nearest point is further than either axis tile's.
+        assert_eq!(at_chunk(777.0, (32, 44), (15, 15)).lean_tile(), (33, 44));
+        // Dead centre still names a nearest neighbour; it is just further off.
+        let lean = at_chunk(777.0, (32, 44), (7, 7)).lean_tile();
+        assert_eq!((lean.0 - 32).abs() + (lean.1 - 44).abs(), 1);
+        // Whatever it is, it is always one of the eight — and always a tile the window wants.
+        for cx in 0..16 {
+            for cy in 0..16 {
+                let w = at_chunk(777.0, (32, 44), (cx, cy));
+                let (lx, ly) = w.lean_tile();
+                assert!((lx - 32).abs() <= 1 && (ly - 44).abs() <= 1, "{cx},{cy}");
+                assert!(w.wanted_tiles().contains(&(lx, ly)), "{cx},{cy}");
+            }
+        }
+    }
+
+    /// At the grid's edge there is no neighbour to name on that side, so the clamp reports the
+    /// focus tile itself rather than a tile the map does not author.
+    #[test]
+    fn the_lean_tile_clamps_at_the_map_edge() {
+        assert_eq!(at_chunk(777.0, (0, 63), (0, 15)).lean_tile(), (0, 63));
     }
 
     /// The windows clamp at the map's edge instead of naming tiles that do not exist.

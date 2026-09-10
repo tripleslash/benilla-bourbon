@@ -48,10 +48,15 @@ pub mod resident;
 
 pub use probe::Policy;
 
-// The warm priority a name is asked for at lives in `crate::web` — it is plain string math with no
-// browser dependency, and this module compiles only on `wasm32`, so keeping it here would put its
-// law where no native test can reach it (the same reasoning that keeps `encode_name` there).
-pub use crate::web::{warm_priority, PRIORITY_GEOMETRY, PRIORITY_NORMAL};
+// The warm priority a name is asked for at lives in `crate::web` — string math over a name and a
+// tile grid, with no browser dependency, and this module compiles only on `wasm32`, so keeping it
+// here would put its law where no native test can reach it (the same reasoning that keeps
+// `encode_name` there). The terrain streamer's `set_terrain_focus` is over there for the same
+// reason: the writer is a Bevy system that runs on every target.
+pub use crate::web::{
+    warm_priority, PRIORITY_GEOMETRY, PRIORITY_NORMAL, PRIORITY_TERRAIN, PRIORITY_TERRAIN_FOCUS,
+    PRIORITY_TERRAIN_NEAR,
+};
 
 /// The container, open and ready to read: the parsed index plus the base URL its objects hang off.
 ///

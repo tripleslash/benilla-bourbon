@@ -82,14 +82,28 @@ const PREFETCH_CONCURRENCY = 6;
 /// Six matches what the browser would have allowed anyway, so throughput is unchanged; what
 /// changes is that WE choose which six, by `priority` (see `warmPack`).
 const WARM_CONCURRENCY = 6;
-/// Warm priority: **collision-bearing reads** — terrain tiles, WMO roots and groups, M2 headers
-/// (their bounds and collision hulls) — go ahead of everything else. The classifier is Rust's
-/// (`benilla_formats::web::warm_priority`), which is where the extension law already lives; this
-/// file only orders what it is told.
-const PRIORITY_GEOMETRY = 0;
+/// Warm priority: **collision-bearing reads** — terrain tiles and the layer art that completes
+/// them, WMO roots and groups, M2 headers (their bounds and collision hulls) — go ahead of
+/// everything else, and terrain near the player goes ahead of the rest of that. The classifier is
+/// Rust's (`benilla_formats::web::warm_priority`), which is where the name law already lives; this
+/// file only orders what it is told, and `benilla-formats`' `web_names` test pins the five numbers
+/// below against their Rust twins.
+///
+/// The tile under the view focus, the one neighbouring tile the body is nearest to stepping onto,
+/// and the map's WDT.
+const PRIORITY_TERRAIN_FOCUS = 0;
+/// The rest of the focus tile's 8 neighbours.
+const PRIORITY_TERRAIN_NEAR = 1;
+/// Terrain further out, the WDL horizon, and `Tileset\` layer art.
+const PRIORITY_TERRAIN = 2;
+/// Collision-bearing model art: `.wmo` roots and groups, `.m2`/`.mdx`. **The bottom of the
+/// collision lane** — the reservation below spans `priority <= PRIORITY_GEOMETRY`, so every terrain
+/// tier is inside it and the test stays one comparison.
+const PRIORITY_GEOMETRY = 3;
 /// Everything else: textures, sounds, DBCs, UI art. The default when a caller names no priority.
-const PRIORITY_NORMAL = 1;
-/// How many of `WARM_CONCURRENCY`'s slots geometry may hold **while anything else is waiting**.
+const PRIORITY_NORMAL = 4;
+/// How many of `WARM_CONCURRENCY`'s slots the collision lane may hold **while anything else is
+/// waiting**.
 ///
 /// Strict priority is not a queue discipline, it is a starvation policy, and this queue has a
 /// caller that cannot survive one. A UI sprite read answers `Pending` while its pack is missing and
@@ -97,9 +111,9 @@ const PRIORITY_NORMAL = 1;
 /// arrives is not "art that never arrives", it is a full UI rebuild every frame for as long as the
 /// geometry queue is non-empty. Running across a zone keeps it non-empty indefinitely.
 ///
-/// So geometry gets a big majority and never the whole pool: four of six while art is queued, all
-/// six when it is not. The reservation costs a third of the bandwidth in exactly the moments there
-/// is a backlog, and buys the guarantee that every lane keeps moving.
+/// So the collision lane gets a big majority and never the whole pool: four of six while art is
+/// queued, all six when it is not. The reservation costs a third of the bandwidth in exactly the
+/// moments there is a backlog, and buys the guarantee that every lane keeps moving.
 const WARM_GEOMETRY_SLOTS = 4;
 /// Stop writing Cache Storage at this fraction of the origin's quota. Going over does not fail
 /// loudly — the browser evicts something, possibly the packs we just wrote — so leaving headroom is
@@ -172,8 +186,14 @@ const packs = {
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
-  /// seam is readable from a console and so the two constants have exactly one definition.
-  PRIORITY: { geometry: PRIORITY_GEOMETRY, normal: PRIORITY_NORMAL },
+  /// seam is readable from a console and so each tier has exactly one definition in this file.
+  PRIORITY: {
+    terrainFocus: PRIORITY_TERRAIN_FOCUS,
+    terrainNear: PRIORITY_TERRAIN_NEAR,
+    terrain: PRIORITY_TERRAIN,
+    geometry: PRIORITY_GEOMETRY,
+    normal: PRIORITY_NORMAL,
+  },
 
   // ---- the resident map ------------------------------------------------------------------
 
