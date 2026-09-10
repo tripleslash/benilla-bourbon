@@ -352,7 +352,23 @@ fn drive_game_tip(
     };
     let Some(tip) = tips.shown() else {
         *vis = Visibility::Hidden;
-        commands.entity(entity).despawn_related::<Children>();
+        // The root's own `Text` is cleared alongside the children, and the empty string is not
+        // cosmetic — it is the only thing that tells Bevy the block moved. Despawning the LAST
+        // child *removes* `Children` from the root, and a removal is not a `Changed<Children>`,
+        // so `detect_text_needs_rerender` never fires: the `ComputedTextBlock` keeps both the
+        // shaped buffer of the tip we just tore down and its list of span entities. Nothing
+        // reads that while the node is hidden — until a window resize, when `ComputedNode`
+        // moves and `text_system` re-runs `update_text_layout_info` with no measure pass in
+        // front of it. That pass rebuilds `glyph_info` by walking the stale entity list through
+        // a `&TextFont` query, the despawned span drops silently out, and the buffer's
+        // surviving glyph metadata then indexes past the end — `index out of bounds: the len
+        // is 1 but the index is 1`, a panic that fires *ingame*, long after the loading screen
+        // is gone, on the first resize. Touching `Text` sets `Changed<Root>`, the block
+        // re-renders empty, and buffer and entity list agree again.
+        commands
+            .entity(entity)
+            .insert(Text::new(String::new()))
+            .despawn_related::<Children>();
         return;
     };
     // The 4:3 content box is `100vh` tall and `100vh · 4/3` wide, so the window's height is the
@@ -667,5 +683,33 @@ mod tests {
             .world()
             .get::<Children>(tip)
             .is_none_or(|c| c.is_empty()));
+    }
+
+    /// **The dismiss clears the ROOT run too, not only the children** — the half of the teardown
+    /// nothing on the loading screen can see and a *resize* can crash on. Despawning the last
+    /// child REMOVES `Children` rather than changing it, and `bevy_text`'s rerender detector
+    /// watches `Changed<Children>`; with no touch on `Text` the block keeps a shaped buffer whose
+    /// glyphs still carry the dead span's index, and the first `text_system` pass a resize forces
+    /// (`ComputedNode` moved, no measure pass in front of it) walks that index off the end of a
+    /// one-entry `glyph_info`. The node is hidden and the player is ingame by then, so the panic
+    /// lands with nothing on screen to point back at the loading screen.
+    #[test]
+    fn the_dismiss_empties_the_root_run_so_no_buffer_outlives_its_spans() {
+        let (mut app, tip) = tip_app();
+        set_edge(&mut app, crate::loading_screen::TipEdge::Pick);
+        app.update();
+        assert_eq!(
+            app.world().get::<Children>(tip).map(|c| c.len()),
+            Some(1),
+            "the picked tip is a root run plus one span child"
+        );
+
+        set_edge(&mut app, crate::loading_screen::TipEdge::Clear);
+        app.update();
+        assert_eq!(
+            app.world().get::<Text>(tip).map(|t| t.0.as_str()),
+            Some(""),
+            "the root run has to go with them, or the block never learns its spans are gone"
+        );
     }
 }
