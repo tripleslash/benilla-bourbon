@@ -348,6 +348,41 @@ whole of its security: two ports, one loopback address.
   *press-and-hold* of Esc (it says so once, in its own toast). The lock follows F11 and every
   other way in or out too — it is driven by `fullscreenchange`, not by the button. Chromium
   only; elsewhere the button is plain full screen.
+- **"Device Hung", and the GPU guard that answers it** (`web/gpu.js`). A driver TDR — Windows'
+  watchdog resetting a GPU that took longer than ~2 s on one submission — reaches the page as a
+  lost `GPUDevice`, and everything wgpu holds dies with it. There is no in-place recovery: the
+  `RenderDevice` is built once, in `RenderPlugin::finish`. The page therefore does two things.
+  - *Prevention, always on: the resize governor.* A window drag used to be a `ResizeObserver`
+    notification per frame, and every one of them re-allocated the frame's whole memory — the
+    swapchain, both `Rgba16Float` view targets, depth and prepass, and `world_backdrop`'s
+    full-resolution backdrop image, which is retired and re-published by design. At 2560×1600 that
+    is hundreds of megabytes of allocate-and-free *per frame* on an integrated GPU sharing system
+    memory, which is exactly what the watchdog was written to catch. The page now owns the canvas's
+    CSS box (which is why `benilla_world::boot` turns `fit_canvas_to_parent` off) and commits a new
+    size only after the viewport has been quiet for 180 ms, stretching the gap with a CSS
+    `transform: scale()` — one gesture, one re-allocation, and a picture that stretches and then
+    snaps crisp exactly as a native window does. Input is unaffected: winit reads pointer positions
+    from `offsetX`/`offsetY`, which are defined in the element's own untransformed space, and the
+    backing store follows `devicePixelContentBoxSize`, which excludes transforms.
+  - *Recovery: the device watchdog.* `GPUDevice.lost` is the only signal there is — wgpu's browser
+    backend never reads it — so the page wraps `requestDevice` and watches it itself. A loss with
+    reason `"unknown"` (a `"destroyed"` one is teardown) steps a persisted **graphics tier** down,
+    explains itself over the dead frame, and reloads: the packs are in the service worker's cache
+    and the wasm in the HTTP cache, so a restart is seconds. Each tier caps the canvas's backing
+    store to a pixel budget — the same transform, now with the committed box *smaller* than the
+    viewport, which is "render at 1080p on a 4K panel" — and hands the client a lower `renderScale`
+    through `__wenilla_env`, session-only, so a recovery never writes itself into the player's saved
+    settings. Tier 0 is untouched: the budget is the price of a device that has actually hung, not
+    a default. A fourth loss inside ten minutes stops auto-reloading and gives the player a button
+    and the driver's own message, because a reload loop is worse than an honest error. A burst of
+    `GPUInternalError`s — the device in trouble but still alive — takes the budget down one rung
+    live, without a reload. A tier nobody has needed for three days walks itself back up.
+  - `?gputier=N` pins a tier (`0` clears one), `?gpubudget=<megapixels>` overrides its budget alone,
+    and `window.__wenilla_gpu` reports the tier and the backing-store size a session actually ran
+    at — which is the one thing no other line in a pasted console log can imply. It also carries
+    `simulateLoss()`, because a real TDR cannot be provoked on demand (`device.destroy()` reports
+    `"destroyed"`, which is teardown and correctly ignored) and the overlay, the ladder and the
+    reload cap would otherwise only ever be seen on the machine that has the fault.
 - **Persistence** — the state folder (`config.toml`, macros, key bindings, layouts, chat
   settings, saved variables, the remembered account name) lives in the browser's `localStorage`,
   one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser

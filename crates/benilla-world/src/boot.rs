@@ -23,10 +23,29 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
     // `web/index.html` already gives it — so bind to that one by id instead and let it own the
     // surface. `prevent_default_event_handling` stops the page from scrolling/zooming under our
     // own keyboard and touch/wheel input (the browser's defaults for those events).
+    //
+    // **`fit_canvas_to_parent` is OFF, and that is a decision, not an omission.** All the flag
+    // does is write `width: 100%; height: 100%` onto the canvas's inline style once, at window
+    // creation — after which every frame of a window drag is a `ResizeObserver` notification, a
+    // `Resized` event, and a full re-allocation of the frame's memory: the swapchain, both
+    // `Rgba16Float` view targets, the depth and prepass targets, and
+    // `benilla_app::world_backdrop`'s backdrop image, which is retired and re-published by
+    // design (decision 1647). At a 2560×1600 canvas that is hundreds of megabytes of
+    // allocate-and-free per frame, and on an integrated GPU sharing system memory it is what the
+    // browser reports back as **"Device Hung"** — a driver TDR, taking the WebGPU device and
+    // every resource on it with it.
+    //
+    // The page owns the box instead (`web/gpu.js`): it commits a size only once a resize has
+    // settled and stretches the gap with a CSS transform, so one drag re-allocates once rather
+    // than sixty times, and the same transform carries the pixel budget a recovered device drops
+    // to. Leaving the flag on would put Bevy's one-shot write *after* the governor's first
+    // commit and take the box straight back. A page that fails to install the governor is still
+    // whole: `web/index.html`'s stylesheet carries `100vw × 100vh` as the fallback, which is what
+    // the flag was producing anyway.
     #[cfg(target_arch = "wasm32")]
     {
         primary_window.canvas = Some("#benilla".into());
-        primary_window.fit_canvas_to_parent = true;
+        primary_window.fit_canvas_to_parent = false;
         primary_window.prevent_default_event_handling = true;
     }
     DefaultPlugins

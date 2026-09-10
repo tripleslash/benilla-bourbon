@@ -64,6 +64,12 @@
 <link data-trunk rel="copy-file" href="audio.js" />
 <link data-trunk rel="copy-file" href="audioworklet.js" />
 <link data-trunk rel="copy-file" href="platform.js" />
+<!-- The GPU guard: the resize governor that keeps a window drag from reallocating the frame's
+     whole memory sixty times a second, and the device-lost watchdog that recovers from the TDR
+     that used to cause. Loaded by the page ahead of `boot(init)` — it has to wrap `requestDevice`
+     before wgpu asks for a device, own the canvas box before winit reads it, and put its recovery
+     tier into `__wenilla_env` before the client looks. See `web/gpu.js`'s own header. -->
+<link data-trunk rel="copy-file" href="gpu.js" />
 <!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
      directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
 <link data-trunk rel="copy-file" href="sw.js" />
@@ -75,7 +81,12 @@
 <link data-trunk rel="copy-file" href="_headers" />
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
-  #benilla { display: block; width: 100vw; height: 100vh; }
+  /* `width`/`height` here are the FALLBACK, for a page that failed to install web/gpu.js: the
+     resize governor overrides both with an inline pixel size it commits only once a resize has
+     settled, and stretches the gap with `transform` (see gpu.js's header). `position: fixed` +
+     `transform-origin: 0 0` are what let a canvas smaller than the viewport still cover it. */
+  #benilla { display: block; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+             transform-origin: 0 0; }
   /* Top-right, over the canvas: the canvas is the whole viewport, so there is no bar to sit in. */
   #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
         background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
@@ -231,6 +242,14 @@
   // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
   // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
   // linear memory exists to write into, and `init()` is what creates it.
+  // **First, and before `boot(init)`.** The guard wraps `GPUAdapter.prototype.requestDevice`
+  // (which wgpu calls from inside `init()`), commits the canvas's size (which winit reads when it
+  // creates the window), and writes its recovery tier into `__wenilla_env` (which `webenv` reads
+  // once). All three are one-shot and all three land inside `init()`, so "before" is the whole
+  // contract. Awaited rather than fired off: a guard installed a frame late would miss the device
+  // it exists to watch.
+  const { installGpuGuard } = await import('./gpu.js');
+  installGpuGuard(document.getElementById('benilla'));
   // Full-screen key capture: in full screen the page also takes a Keyboard Lock, so Esc, Tab and
   // Ctrl+W reach the game instead of the browser. Dynamic, unawaited and never load-bearing —
   // see web/platform.js. Durable storage is not asked for here; `packs.js::bootstrap` does it on
