@@ -230,6 +230,34 @@ mod tests {
         }
     }
 
+    /// **The focus TILE is not a key for this window, and treating it as one loses a tile.**
+    ///
+    /// The window is centred on the focus *chunk*, so walking across the tile it is standing on
+    /// grows [`Self::wanted_tiles`] well before the tile line is reached — at the registrar
+    /// default that is 13 chunks, 433 yd, of warning. `stream_terrain`'s settled skip used to
+    /// compare the focus tile and so read every one of those frames as "nothing changed": the
+    /// neighbouring ADT was never requested until the body stepped onto it and the focus tile
+    /// finally moved. This is that fact, stated where the window law lives.
+    #[test]
+    fn crossing_a_chunk_line_can_want_a_tile_the_focus_tile_never_moved_for() {
+        // Two stands inside one tile: at its low edge, and thirteen chunks along — the first
+        // chunk from which the outer window (13) no longer reaches back over the low tile line.
+        let at_low_edge = at_chunk(350.0, (32, 44), (0, 8));
+        let across_the_tile = at_chunk(350.0, (32, 44), (13, 8));
+        // The same tile, both of them, so the coarse key cannot tell them apart…
+        assert_eq!(at_low_edge.focus_tile(), across_the_tile.focus_tile());
+        assert_eq!(at_low_edge.focus_tile(), (32, 44));
+        // …and they are not the same window.
+        assert_ne!(at_low_edge, across_the_tile);
+        // The tile BEHIND is wanted from the low edge and released from across the tile…
+        assert!(at_low_edge.wanted_tiles().contains(&(31, 44)));
+        assert!(!across_the_tile.wanted_tiles().contains(&(31, 44)));
+        // …and the tile AHEAD the other way round. Neither crossing moves the focus tile, so a
+        // skip keyed on the tile never asks for the ground the walk just brought into range.
+        assert!(!at_low_edge.wanted_tiles().contains(&(33, 44)));
+        assert!(across_the_tile.wanted_tiles().contains(&(33, 44)));
+    }
+
     /// The lean tile is the neighbour whose edge is nearest, on the nearer axis alone — never a
     /// diagonal, since a corner tile is `√2` further away than the axis tile beside it.
     #[test]

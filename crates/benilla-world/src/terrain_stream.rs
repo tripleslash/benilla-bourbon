@@ -120,6 +120,25 @@ pub struct TerrainStreamer {
     /// nothing to do and skips the window walk (three window-sized allocations and a scan of
     /// every resident tile, on every still frame — decision 1979's floor).
     settled: bool,
+    /// **The window the settled skip is settled FOR** — the whole [`StreamWindow`], focus chunk
+    /// and radii alike, as of the last frame that actually walked it.
+    ///
+    /// It has to be the window itself and not the focus tile, and the difference is a bug this
+    /// field exists to have fixed. The residency window is centred on the focus **chunk**, so
+    /// [`StreamWindow::wanted_tiles`] grows a tile the moment the viewer walks within `outer`
+    /// chunks of a tile line — which is most of the way across the tile it is standing on. The
+    /// skip's own test compared the focus **tile**, so every one of those frames read as "same
+    /// window", and a settled world stopped asking for the ground ahead of it entirely: the
+    /// neighbouring ADT was never requested until the body crossed onto it, at which point the
+    /// focus tile finally changed, the walk finally ran, and the whole new neighbourhood was
+    /// requested in one frame behind a loading cover. Reported 2026-09-10 as "it doesn't even
+    /// request the ADT until I step on it, then a cascade of fetches at once", which is precisely
+    /// what a stale window looks like from outside.
+    ///
+    /// A still viewer holds its focus chunk, so 1979's floor is untouched — that is the frame it
+    /// was measuring. A running one crosses a chunk line every 33⅓ yd, so the walk it skips is
+    /// paid a few times a second rather than never.
+    window: Option<StreamWindow>,
     /// The focus tile the off-grid tripwire below last reported, so a focus parked outside the
     /// map's WDT grid says so **once** rather than every frame. `None` while the focus is on the
     /// grid (so re-entering the state re-reports).
@@ -840,12 +859,12 @@ fn stream_terrain(
     // and the neighbour it is nearest to is the whole of what the queue needs to order the eight.
     //
     // Published BEFORE the settled skip below, and cheap enough to mean it: a lock read and a
-    // compare, with a write only when the answer moved. (The skip's own precondition is a world
-    // with nothing outstanding, so a stale focus behind it could not order anything — but this is
-    // not the kind of fact to leave correct by coincidence.) Nothing reads it on native: there the
+    // compare, with a write only when the answer moved. Nothing reads it on native: there the
     // chain is a filesystem and there is no queue to put in an order.
     benilla_formats::web::set_terrain_focus(&dir, (cx, cy), window.lean_tile());
-    let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
+    // The whole window, not the focus tile: `desired` below is derived from the focus CHUNK, so
+    // anything coarser here skips a frame that had a tile to ask for (see [`TerrainStreamer::window`]).
+    let same_window = state.window == Some(window);
     // Never while a load is in flight: `paced` is false from a snap until the body settles, and
     // the tail this skip bypasses is where the load is RELEASED — the retained pass's undrawn
     // count that `presentable()` reads, the burst-over `flush_now`, and the settle hold. A
@@ -869,6 +888,7 @@ fn stream_terrain(
         return;
     }
     state.focus = (cx, cy);
+    state.window = Some(window);
     // One line per change of reach — the slider moved, or the first frame — so a run log says
     // what the residency window was when a tile count or a frame cost was read off it.
     if state.reach != Some((window.inner, window.outer)) {
@@ -1409,6 +1429,12 @@ fn drop_streamed_world(
     if std::mem::take(&mut state.global_wmo) {
         release_placement(commands, placements, GLOBAL_WMO_UID, activity);
     }
+    // The settled skip's state describes the world just dropped — same staleness argument as the
+    // accumulators below, and the same trigger. A window that happened to match across the swap
+    // (an instance portal keeps the position, and tile numbers are not unique across maps) must
+    // not let a frame that has a whole map to request decide it has nothing to do.
+    state.window = None;
+    state.settled = false;
     placements.materials.clear();
     // The weld accumulators describe the world just dropped. Cleared HERE and not left to the
     // flush system's dead-key discard, because tile keys are not unique across maps: the new
