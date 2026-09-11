@@ -125,6 +125,17 @@ pub(crate) struct Model {
     /// the same kind of thing — VM-global registries the loader fills.
     pub(crate) framexml_templates:
         std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
+    /// **`FrameXML_Debug`'s flag** — the loader's own trace-severity switch (decision 2160).
+    ///
+    /// `0x488440` is a get-or-set over the single global `[0xceea30]`, which boots at 0 and is
+    /// read at six sites image-wide: the binding itself and five inside the XML loader, each
+    /// gating a severity-0 trace line behind `flag > 0` (`0x6ee298 jle` — **greater than**, not
+    /// non-zero, which is why this is signed). The one site walked to the bytes is
+    /// `Instantiate 0x6ee280`, whose gated line is `0x871154 "-- Creating %s named %s"`.
+    ///
+    /// Here rather than on `UiScript` for `framexml_templates`' reason: the loader runs from a
+    /// bare `&Lua`, and so does the binding that writes this.
+    pub(crate) framexml_debug: std::cell::Cell<i32>,
     /// The FrameXML **font-element registry** (a separate namespace — a font inherits a font,
     /// never a frame template), persisted for the same cross-file reason.
     pub(crate) framexml_fonts:
@@ -132,7 +143,7 @@ pub(crate) struct Model {
     /// The frame arena (create/destroy + show/hide/strata/level/scale/alpha propagation).
     pub(crate) arena: WidgetArena,
     /// Per-frame layout input (anchors/size/scale). Every live frame has one (created at
-    /// `CreateFrame`); `SetPoint`/`SetSize`/… mutate it; `resolve` runs the graph over them.
+    /// `CreateFrame`); `SetPoint`/`SetWidth`/… mutate it; `resolve` runs the graph over them.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
     /// The last [`UiScript::resolve`] result: each resolvable frame's rect. Empty until `resolve`.
     pub(crate) resolved: HashMap<FrameHandle, Rect>,
@@ -374,6 +385,20 @@ pub(crate) struct Model {
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
     /// `frame → its registered events` (for UnregisterEvent / cleanup).
     pub(crate) frame_events: HashMap<FrameHandle, HashSet<String>>,
+    /// The frames registered for **every** event (`RegisterAllEvents`), in registration order —
+    /// the same ordered-Vec-never-a-set discipline as [`Self::event_to_frames`], and dispatched
+    /// after it for the same reason: a frame that asks for all events asks *after* the frames
+    /// already listening for a given one, so it takes the tail of that event's list.
+    ///
+    /// **A flag rather than an expansion.** 1.12's event ids run to `0x225` = 549
+    /// (`FrameScript_InitEvents`), so writing the frame into every per-event list on registration
+    /// would mean 549 vector pushes per call and 549 scans per `UnregisterAllEvents` — and would
+    /// also invent a name list this engine has no business owning (ours registers by string, and
+    /// an event the server sends that no name list knows about would be silently excluded).
+    /// `UnregisterAllEvents` empties this alongside the per-event registrations, which is the half
+    /// AceEvent-2.0 depends on: it calls `frame:UnregisterAllEvents()` and then re-registers each
+    /// individual event it still wants.
+    pub(crate) all_event_frames: Vec<FrameHandle>,
 
     /// The EditBox that currently owns keyboard focus — the engine's twin of the client's
     /// class-owned focus global `DAT_00cf4dc8` (`CSimpleEditBox* E`, 0 = none; RF-0082 §1). A focused
@@ -604,6 +629,23 @@ pub(crate) struct Model {
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     /// Channel verbs since the last [`super::UiScript::take_channel_commands`] drain.
     pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
+    /// **The guild-recruitment auto-join latch** — the reference's int global `[0x843608]`, which
+    /// `GetGuildRecruitmentMode` returns and `SetGuildRecruitmentMode` writes (decision 2115).
+    ///
+    /// `0` = STANDARD, `1` = AUTO, and those two words are literally what the per-character chat
+    /// cache stores it as (`OPTION_GUILD_RECRUITMENT_CHANNEL STANDARD|AUTO`; wow-re
+    /// `system/ui/scratch/chat-cache-grammar.md` — the reader maps `STANDARD` to 0 and anything
+    /// else, `AUTO` included, to 1). It boots at **1**: every one of the 33 `chat-cache.txt` files
+    /// the reference client itself wrote in this repo's install says `AUTO`, on characters that
+    /// never opened the option.
+    pub(crate) guild_recruitment_mode: u8,
+    /// A `SetGuildRecruitmentMode(1)` since the last drain — `0x49ea70`'s tail-jump into the
+    /// cascade `0x49ea90`, which the app runs (decision 2144). Keyed on the *new value alone*, not
+    /// on a change: the reference's store is unconditional and the jump reads only `ecx == 1`.
+    pub(crate) guild_recruitment_cascade: bool,
+    /// Whether Lua has moved [`Self::guild_recruitment_mode`] since the last drain — the chat
+    /// cache's dirty signal, the peer of `chat_window_changes`.
+    pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls since the last drain.
     pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
     /// `RandomRoll` calls since the last drain.
@@ -1594,6 +1636,11 @@ pub(crate) struct Model {
     /// The world-map seam ([`worldmap`](super::worldmap)): the pushed catalog/feed + the
     /// engine-owned selection.
     pub(crate) worldmap: super::worldmap::WorldMapState,
+    /// The V-key nameplate pool — engine-owned `Button` widgets under the `WorldFrame`, grown on
+    /// demand and never shrunk, in creation order (decision 2148). Lives here rather than on
+    /// [`super::UiScript`] because it IS model state: the plates are arena frames, and an addon
+    /// walking `WorldFrame:GetChildren()` reaches them like any other.
+    pub(crate) nameplates: super::nameplate::NamePlates,
     /// The always-up world-state readout's rows ([`worldstate`](super::worldstate)), already
     /// gated and resolved app-side.
     pub(crate) worldstate: super::worldstate::WorldStateUiState,
@@ -1731,6 +1778,35 @@ impl Model {
         self.errors.push(msg);
     }
 
+    /// **Record one non-fatal warning — the channel's one door** (decision 2135). Both halves:
+    /// the host's per-frame `warnings` drain (a `warn!` line in the terminal, for whoever is
+    /// running the client), and the retained diagnostic log, which is the only copy a player or an
+    /// instrument can read after the frame that produced it.
+    ///
+    /// Before this there was only the first half, and it was a dead end: `take_warnings` empties
+    /// every frame, so a warning existed for the length of one terminal line and then nowhere at
+    /// all. The messages it carries are the failures that never announce themselves — a dropped
+    /// `inherits=`, an unresolved anchor, an unregistered CVar — which is precisely the class the
+    /// diagnostic log was built for.
+    ///
+    /// Its sibling is [`Self::warn_host_only`], for the one message already retained under a
+    /// truer kind.
+    pub(crate) fn record_warning(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.diagnostics
+            .record(super::diagnostics::DiagnosticKind::Warning, &msg);
+        self.warnings.push(msg);
+    }
+
+    /// The host channel **alone** — for a message that is already retained under a kind that says
+    /// more than `Warning` does. Exactly one caller: `LoadAddOn`'s failure line, which
+    /// `record_load_failure` has already filed as a [`Load`](super::diagnostics::DiagnosticKind)
+    /// row ("the addon isn't running", which is the fact worth keeping) and which still wants its
+    /// terminal line. Retaining it twice would put the same sentence in the log under two kinds.
+    pub(crate) fn warn_host_only(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
@@ -1751,6 +1827,7 @@ impl Model {
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),
+            framexml_debug: Default::default(),
             framexml_fonts: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
@@ -1792,6 +1869,7 @@ impl Model {
             dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
+            all_event_frames: Vec::new(),
             focused_editbox: None,
             mouseover: None,
             hover_repick: false,
@@ -1844,6 +1922,9 @@ impl Model {
             known_languages: Vec::new(),
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
+            guild_recruitment_mode: 1,
+            guild_recruitment_cascade: false,
+            guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),
             uninvite_requests: Vec::new(),
@@ -2081,6 +2162,7 @@ impl Model {
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
+            nameplates: super::nameplate::NamePlates::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),

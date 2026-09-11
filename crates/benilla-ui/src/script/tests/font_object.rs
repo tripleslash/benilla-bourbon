@@ -951,11 +951,7 @@ fn the_font_block_reaches_both_message_frame_tables() {
             .unwrap();
         assert_eq!(height, 16.0, "{obj}:GetFont reads back what SetFont wrote");
         // The four-value getters the carve pins at 4 for every one of the six tables.
-        assert_eq!(
-            s.eval::<i64>(&format!("return select('#', {obj}:GetShadowColor())"))
-                .unwrap(),
-            4
-        );
+        assert_eq!(s.arity(&format!("{obj}:GetShadowColor()")).unwrap(), 4);
     }
 
     // Styling the frame must not move its text: the lines still run flush LEFT.
@@ -1080,4 +1076,97 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         "the refused face must not replace the one that loaded"
     );
     assert_eq!(height, 18.0, "…while the height, which never fails, is set");
+}
+
+/// **Mik's Scrolling Battle Text, end to end** — the exact sequence the addon runs per event,
+/// pinned because it is the shape a whole class of "the addon's font did not take" reports wears
+/// (decisions 2103, 2112).
+///
+/// MSBT's twenty scroll-area FontStrings are declared `inherits="MasterFont"` — the reference's
+/// root font object, which carries a `<Shadow>` and **nothing else**: no face, no height, no
+/// outline. Each animation then does, in this order, on the string it recycles:
+/// `ClearAllPoints · SetFont(<its own TTF>, 18, "OUTLINE") · SetTextColor · SetText · SetAlpha ·
+/// SetPoint`. Every one of those five paint axes has to reach the extracted quad *unmodified* by
+/// the object the string inherits — the addon's face over the object's absent one, the addon's
+/// height over the renderer default, the addon's outline over the object's `NONE` (which is
+/// indistinguishable from "unset", see [`Outline`]), its colour over the object's absent one, and
+/// the animation's fade as the quad's own alpha. The `<Shadow>` is the one thing that IS inherited,
+/// and it must still be there.
+#[test]
+fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inherits() {
+    let mut s = script();
+    s.set_screen_size(1600.0, 900.0);
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="MasterFont" virtual="true">
+               <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
+             </Font>
+             <Frame name="MSBTFrameIncoming" parent="UIParent">
+               <Size><AbsDimension x="24" y="24"/></Size>
+               <Anchors><Anchor point="BOTTOM" relativePoint="CENTER" relativeTo="UIParent"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentText1" inherits="MasterFont">
+                   <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.run(
+        r#"
+        local fs = getglobal("MSBTFrameIncomingText1")
+        fs:ClearAllPoints()
+        fs:SetFont("Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf", 18, "OUTLINE")
+        fs:SetTextColor(1, 1, 1)
+        fs:SetText("-64")
+        fs:SetAlpha(0.5)
+        fs:SetPoint("BOTTOMRIGHT", 0, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let q = s
+        .extract()
+        .into_iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "-64"))
+        .expect("MSBT's text quad");
+    assert_eq!(
+        q.alpha, 0.5,
+        "the scroll animation's fade is the quad's alpha"
+    );
+    match q.content {
+        QuadContent::Text {
+            ref font,
+            font_height,
+            outline,
+            color,
+            shadow,
+            ..
+        } => {
+            assert_eq!(
+                font.as_deref(),
+                Some("Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf"),
+                "the addon's own face, not the fallback"
+            );
+            assert_eq!(font_height, Some(18.0), "the profile's master size");
+            assert_eq!(outline, Outline::Normal, "its OUTLINE flag");
+            assert_eq!(color, Some([1.0, 1.0, 1.0, 1.0]));
+            assert!(
+                shadow.is_some(),
+                "MasterFont's <Shadow> is the one axis the string never set, so it inherits"
+            );
+        }
+        ref other => panic!("expected a Text quad, got {other:?}"),
+    }
+    // The Lua-visible echo agrees with the quad — the readback an addon branches on.
+    assert_eq!(
+        s.eval::<(String, f32, String)>("return MSBTFrameIncomingText1:GetFont()")
+            .unwrap(),
+        (
+            "Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf".to_string(),
+            18.0,
+            "OUTLINE".to_string()
+        )
+    );
 }

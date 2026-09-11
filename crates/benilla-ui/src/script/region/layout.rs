@@ -56,25 +56,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    m.set(
-        "SetSize",
-        lua.create_function(|lua, (this, w, h): (Table, f32, f32)| {
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let d = model.region_data.entry(rh).or_default();
-            let new = Some((w, h));
-            let changed = !size_bits_eq(d.size, new);
-            d.size = new;
-            if changed {
-                // A size write moves no edge and no roster membership (decision 1388) — and on
-                // a FontString the width is the WRAP width, a measure-key input, so it names
-                // itself on the measure ledger too.
-                model.touch_layout_region(rh);
-                model.touch_measure(rh);
-            }
-            Ok(())
-        })?,
-    )?;
+    // **No `SetSize`** — the frame twin's note in `object/layout_methods.rs` applies here
+    // unchanged: an Era verb 1.12's Region map does not carry (decision 2142).
 
     m.set(
         "GetWidth",
@@ -136,10 +119,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            let changed = !d.anchors.is_empty();
+            // Names its node, the frame twin's rule and for the frame twin's reason (decision
+            // 2114): clearing every anchor is a retarget onto an EMPTY target list, so the cached
+            // graph's edges are unlinked rather than the whole graph re-derived.
+            let old: Option<Vec<u32>> =
+                (!d.anchors.is_empty()).then(|| d.anchors.iter().map(|a| a.relative_to).collect());
             d.anchors.clear();
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_region(rh, &old, &[]);
             }
             Ok(())
         })?,

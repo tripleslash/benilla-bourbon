@@ -61,6 +61,13 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        // The reference's own Interface Options window, hidden — this kit's source of truth for
+        // `UIOptionsFrameCheckButtons`/`UIOptionsFrameSliders`, which our own file used to
+        // transcribe and 2115 deleted. Its widget kit and the video window's shared helpers come
+        // with it, in the manifest's own order.
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\OptionsFrame.lua",
+        r"Interface\FrameXML\UIOptionsFrame.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
         "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
         "OptionsFrame.xml",
@@ -688,7 +695,7 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
 /// The Audio harness: the real registered CVar set on the table before the XML loads, exactly
 /// the app's boot order (register → seed → load → select).
 fn audio_harness() -> UiScript {
-    let mut s = UiScript::new().unwrap();
+    let s = UiScript::new().unwrap();
     s.register_cvars(crate::cvars::registered_pairs());
     s
 }
@@ -884,6 +891,13 @@ fn actionbars_harness() -> UiScript {
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\StaticPopup.xml",
             "KeyBindingsPage.xml",
+            // The reference's own Interface Options window BEFORE ours, as the manifest has it
+            // (2115) — `UIOptionsFrame_Init` is what assigns `LOCK_ACTIONBAR` and
+            // `ALWAYS_SHOW_MULTIBARS`, and this page's rows capture those at their own OnLoad as
+            // the Defaults value. It is also the home of `UIOptionsFrameCheckButtons`, which
+            // `MultiActionBars.xml` below writes into at its load.
+            r"Interface\FrameXML\OptionsFrame.lua",
+            r"Interface\FrameXML\UIOptionsFrame.xml",
             "OptionsFrame.xml",
             "Interface\\FrameXML\\MultiActionBars.xml",
         ],
@@ -1492,6 +1506,98 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
 /// The Nameplates page (0992 — live at last): the three 1.12 UnitName* checkbox rows read the
 /// table on select and write their flags on the interface panel's own click kit (checked →
 /// CheckBoxOn; these rows carry no soundQuirk).
+/// **A world entry must leave the saved nameplate setting alone** (decision 2132) — the report,
+/// on the real manifest with a real CVar table, which is the one combination no test had.
+///
+/// `UIParent_OnEvent` calls `UpdateNameplates()` twice per entry — `UIParent.lua` l.234
+/// (VARIABLES_LOADED) and l.367 (PLAYER_ENTERING_WORLD) — and it acts on
+/// `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON`. On benilla the four verbs it calls write the CVar pair,
+/// and the CVar pair IS the store, so with the globals left nil every entry wrote `"0"` over the
+/// player's `"1"` and `config.toml` then dropped the line as "at default".
+///
+/// Two mechanisms are needed and this asserts both: the host seeding the globals ahead of
+/// `VARIABLES_LOADED` (the enemy half), and our re-declared `UpdateNameplates` without the stock
+/// `ShowFriendNameplates(); HideFriendNameplates();` typo (the friendly half). Drop either and the
+/// matching row here goes back to `"0"`.
+#[test]
+fn a_world_entry_leaves_the_saved_nameplate_setting_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // A manifest load with no player is a state the client never reaches (1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "loader errors: {failures:?}");
+    let _ = s.errors();
+
+    // The player has both halves on, restored from `config.toml` — a host write, so nothing is
+    // queued and the file is not re-dirtied by having been read.
+    let plates = crate::vplates::VPlateMode {
+        enemies: true,
+        friends: true,
+    };
+    let saved = |s: &mut UiScript| {
+        s.set_cvar_host(crate::vplates::CVAR_ENEMIES, "1");
+        s.set_cvar_host(crate::vplates::CVAR_FRIENDS, "1");
+        assert!(s.take_cvar_changes().is_empty(), "the host write is silent");
+    };
+
+    // ── The bug, kept as the control: with the globals nil the entry erases both halves ────────
+    saved(&mut s);
+    s.fire_event("VARIABLES_LOADED", vec![]);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(
+        (
+            s.cvar(crate::vplates::CVAR_ENEMIES),
+            s.cvar(crate::vplates::CVAR_FRIENDS)
+        ),
+        (Some("0".into()), Some("0".into())),
+        "nil globals ⇒ the replay writes the store off — this is what the report saw"
+    );
+    let _ = s.take_cvar_changes();
+
+    // ── The fix: the host seeds the globals, and the entry is a no-op end to end ───────────────
+    saved(&mut s);
+    crate::vplates::push_plate_globals(&s, plates);
+    assert_eq!(
+        s.eval::<i64>("return NAMEPLATES_ON").unwrap(),
+        1,
+        "the reference's own truthiness — the NUMBER 1, never the truthy `0`"
+    );
+    s.fire_event("VARIABLES_LOADED", vec![]);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(
+        (
+            s.cvar(crate::vplates::CVAR_ENEMIES),
+            s.cvar(crate::vplates::CVAR_FRIENDS)
+        ),
+        (Some("1".into()), Some("1".into())),
+        "the player's setting survives the entry"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "and queues nothing, so `config.toml` is never dirtied by a world entry"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The other direction still works: an addon that moves a global and calls the verb.
+    s.run("FRIENDNAMEPLATES_ON = nil UpdateNameplates()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![(crate::vplates::CVAR_FRIENDS.to_string(), "0".to_string())],
+        "UpdateNameplates keeps its contract — it is adapted, not stubbed"
+    );
+}
+
 #[test]
 fn the_nameplates_page_toggles_the_unit_name_cvars() {
     let mut s = harness_on(audio_harness());
@@ -1859,12 +1965,19 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         2,
         "only the default writes queue — never the dead pending: {changes:?}"
     );
+    // **357, not 350, and that is the reference's ladder rather than a rounding slip.** The row
+    // is the reference's own farclip slider — `minValue = OPTIONS_FARCLIP_MIN (177)`,
+    // `maxValue = OPTIONS_FARCLIP_MAX (777)`, `valueStep = (max − min)/10` — so its ten stops are
+    // 177, 237, 297, **357**, …, 777, and `SetValue` snaps onto them (2133). The registered
+    // default is 350 (1804: the reference's own `CVar::Register` value), which is not a stop, so
+    // seeding the slider from it lands on 357. 1.12 does exactly this and nobody can see it,
+    // because its option sliders print no number; ours prints one, so the ladder shows.
     assert_eq!(
         s.eval::<String>(
             "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "350"
+        "357"
     );
     assert_eq!(
         s.eval::<String>(
@@ -3798,7 +3911,7 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
 /// fresh VM has re-run `ChatFrame.xml`'s file-scope `"0"`.
 #[test]
 fn a_saved_hover_delay_is_applied_when_the_variables_land() {
-    let s = chat_harness();
+    let mut s = chat_harness();
     // What the saved-variables chunk does: assign the global, then the window's VARIABLES_LOADED.
     s.run("REMOVE_CHAT_DELAY = \"1\"").unwrap();
     assert_eq!(
@@ -3807,7 +3920,10 @@ fn a_saved_hover_delay_is_applied_when_the_variables_land() {
         (0.2, 0.15),
         "the bare assignment changes nothing on its own — that is why the row has an applyFunc"
     );
-    s.run("OptionsFrame_ApplySavedSettings()").unwrap();
+    // The reference's own VARIABLES_LOADED arm, off the chain since 2115 — this row's apply is
+    // `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)` at `UIOptionsFrame.lua:216`, and the event is
+    // what runs it. (It used to be our own `OptionsFrame_ApplySavedSettings` walk.)
+    s.fire_event("VARIABLES_LOADED", vec![]);
     assert_eq!(
         s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
             .unwrap(),
@@ -4420,27 +4536,53 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 // and the reason is the row's whole point — "no key without a reader" (1134 §4) is why the CVar is
 // absent, and this is where that decision is written down per setting.
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
-    ("autointeract", "click-to-move"),
-    ("assistAttack", "assist-attack"),
-    ("UnitNamePlayerGuild", "guild names over player nameplates"),
+    // **A blocker is now a SPEC, not a label.** Every row below has had its mechanism derived at
+    // the bytes since 2115 wrote this list, so what is missing is the *feature*, never the
+    // knowledge — and saying which is the difference between a row somebody can pick up and a row
+    // that just reads "not done".
+    (
+        "autointeract",
+        "click-to-move — the one row here that is a whole movement mode rather than a knob. \
+         `CanAutoInteract 0x60f900` gates the world-click pick mask's bit 0 and inverts \
+         `0x5ec110`'s interaction-distance refusal, so an out-of-range corpse/GO/NPC/cast click \
+         queues an approach (`0x60fed0`, move kinds 6/7/9/0xa) instead of refusing. The commit \
+         itself puts NOTHING on the wire — it stamps a local goal at `0x611130` — and the packets \
+         are its consequences (a stand, then the original verb on arrival). benilla has only the \
+         keyboard controller and /follow (mode 3). Registered default is \"0\" on every locale but \
+         koKR (`0x603374` selects on the locale index), so stock West ships it OFF",
+    ),
     (
         "UnitNamePlayerPVPTitle",
-        "PvP titles over player nameplates",
+        "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
+         same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
+         one step further back than its guild twin: the rank byte streams, but the key's second \
+         index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
     ),
-    ("cameraTerrainTilt", "camera terrain tilt"),
-    ("cameraBobbing", "camera head bob"),
-    ("cameraWaterCollision", "camera water collision"),
-    ("cameraPivot", "the smart-pivot camera"),
     (
-        "CombatDamage",
-        "the floating-combat-text master gate is `combat_text::law::COMBAT_DAMAGE`, a const bool \
-         — the same shape ChatBubbles had before 1139: a faithful gate with no way to reach it",
+        "cameraWaterCollision",
+        "REVERTED 2026-09-10, and the row is back because the feature is not. Two consumers were \
+         transcribed off `pivot-height-glide.md` §5: (1) the collision sweep's class mask \
+         becomes `0x1f0171` instead of `0x100171` — the `0xf0000` nibble is the ADT liquid \
+         layers — and `0x511ad0`'s bands re-base the pivot floor/cap; (2) a band CROSSING \
+         arms a 5° pitch through the `+0xf4` channel. Built as (1)=the pivot corridor alone, \
+         on the reading that the arm stays liquid-blind. **That corridor is discontinuous**: at \
+         `excess = 2/9` the framing pivot drops 1.04 yd in one frame and pops back 0.29 yd at \
+         `5/9`, so entering or leaving water at head depth slams the camera — which is what \
+         the director saw. Whether the discontinuity is the reference's or a mis-transcription is \
+         a live §5 (2165). Registered \"1\", so benilla is the divergence while this row \
+         stands",
     ),
-    ("CombatLogPeriodicSpells", "a combat log"),
-    (
-        "PetMeleeDamage",
-        "`combat_text::law::PET_MELEE_DAMAGE`, a const bool — see CombatDamage",
-    ),
+    // **The SLIDERS' half is empty, and that is the point.** 2115 extended this census from
+    // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` and it caught exactly one row —
+    // `cameraYawMoveSpeed`, the MOUSE_LOOK_SPEED slider — which was not cosmetic:
+    // `UIOptionsFrame_Load` does `slider:SetValue(GetCVar(value.cvar))`, `Slider:SetValue` is a
+    // shape-A binding (`0x790980`) that RAISES on a nil in the reference too, and that raise is
+    // what stopped the stock window's `_Load()` (and `_SetDefaults`, through `GetCVarDefault`).
+    // It is registered now, so all four slider CVars are backed and the window's `_Load()` runs to
+    // completion. Every row left below is a check button, and a check button's
+    // `GetCVar(x) == "1"` is nil-safe — so nothing on this list can raise any more. A new SLIDER
+    // row arriving here is therefore a live raise, not a missing feature, and should be read that
+    // way by whoever adds it.
 ];
 
 /// **Every CVar the reference's own options table names is registered here, or listed above with
@@ -4454,16 +4596,22 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
 fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker() {
     let s = harness();
     // The table as the file declares it: `name` (the display key) -> its `cvar`, if it has one.
+    // **BOTH of the reference's option tables** (2115). The checkbuttons were the whole census
+    // until the stock window went on the manifest and `UIOptionsFrameSliders` turned out to name a
+    // CVar nothing here registers — a row the check could not see because it only read one table.
     let named: Vec<String> = s
         .eval::<Vec<String>>(
             "local out = {} \
              for key, v in pairs(UIOptionsFrameCheckButtons) do \
                  if v.cvar then table.insert(out, v.cvar) end \
              end \
+             for _, v in ipairs(UIOptionsFrameSliders) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
              table.sort(out) \
              return out",
         )
-        .expect("read UIOptionsFrameCheckButtons");
+        .expect("read UIOptionsFrameCheckButtons and UIOptionsFrameSliders");
     assert!(
         named.len() >= 28,
         "the transcription lost rows: only {} cvar entries",

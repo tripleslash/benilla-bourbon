@@ -134,9 +134,12 @@ impl Addon {
     /// source knows what a resolved path is allowed to reach.
     ///
     /// **The sandbox is the AddOns folder, not one addon's subfolder.** `..` that walks above the
-    /// root survives `join_ref` as a leading `..`, and [`read_under`] refuses it — so an addon can
-    /// reach a sibling library addon (which is how `Bagnon` reaches `BagBrother`, and what 1184's
-    /// per-addon guard wrongly blocked) but cannot reach the machine.
+    /// root survives `join_ref` as a leading `..`, and [`read_under`] refuses it on the filesystem
+    /// leg — so an addon can reach a sibling library addon (which is how `Bagnon` reaches
+    /// `BagBrother`, and what 1184's per-addon guard wrongly blocked) but cannot reach the machine.
+    /// A `Dir` miss then falls through to the player's patch chain under the install's own name
+    /// for it ([`read_addon_file`], decision 2155), which is the single namespace the reference
+    /// opener has — and the reason `Auctioneer`'s reach into `Blizzard_AuctionUI` resolves at all.
     ///
     /// The **builtin alone** keeps a basename fallback: its tree is flat, and a transcription that
     /// writes a Blizzard-style directory path should still find the file. A `Dir` source must not
@@ -154,38 +157,53 @@ impl Addon {
                     .or_else(|| content::read(&base))
                     .map(String::into_bytes)
             }
-            Source::Dir(root) => read_under(root, req),
+            Source::Dir(root) => read_addon_file(root, req),
             Source::Chain => super::reference_ui::read(req),
         }
     }
 
-    /// This addon's own folder in its source's path space — the `base` its manifest entries are
-    /// relative to. `""` for the builtin's flat tree, the addon's folder name for a `Dir`, and
-    /// `""` again for the chain, whose manifest entries are already full internal paths.
-    fn prefix(&self) -> &str {
+    /// This addon's own folder in the install's path space — the `base` its manifest entries are
+    /// relative to. `""` for the builtin's flat tree, `""` for the chain (whose manifest entries
+    /// are already full internal paths), and `Interface/AddOns/<Folder>` for a `Dir`.
+    ///
+    /// **`Interface/AddOns/`, not the bare folder name** (decision 2155). It used to be the folder
+    /// alone, which made the addon's path space the AddOns root rather than the install — a second
+    /// namespace the reference does not have. The visible cost was `<Script file=>`'s chunk NAME:
+    /// the loader names a file chunk after the path it resolved, so an XML-loaded Lua file came out
+    /// `@AtlasLoot\Core\AtlasLoot.lua` while the `.toc`-listed file beside it was
+    /// `@Interface\AddOns\AtlasLoot\…`. Every Ace2/FuBar-era library finds its own addon by
+    /// splitting a `debugstack` frame on `\AddOns\` (`AceDB-2.0.lua:742`,
+    /// `FuBarPlugin-2.0.lua:602`), so for those files the split found nothing and the library
+    /// silently keyed itself on a traceback — or, in `SSHonor_Fu`'s case, called
+    /// `IsAddOnLoadOnDemand(nil)`.
+    fn prefix(&self) -> String {
         match &self.source {
-            Source::Builtin | Source::Chain => "",
-            Source::Dir(_) => &self.name,
+            Source::Builtin | Source::Chain => String::new(),
+            Source::Dir(_) => format!("{ADDONS_PREFIX}{}", self.name),
         }
     }
 
     /// The name Lua gives a chunk from this source — **not cosmetic**, because addons parse it.
     ///
-    /// An addon's file is named the way the client names it, `Interface\AddOns\<Folder>\<File>`
-    /// ([`benilla_ui::script::addon_chunk_name`], whose header carries the FuBar `debugstack`
-    /// story). A **chain** file is named after its own chain path, `@Interface\FrameXML\…`, which
-    /// is both what the real client names it and what keeps FrameXML *out* of the `\AddOns\`
-    /// pattern those addons match against — FrameXML is not an addon.
+    /// `path` is the entry already resolved into the install's path space, which is the only thing
+    /// the client names a file chunk after: `"@%s"` (`0x8716e0`) over the resolved path, built by
+    /// `0x704bc0` for every `.lua` the loader touches (wow-re
+    /// `ui/scratch/include-lua-dispatch.md` §7). So an addon's file is `Interface\AddOns\<Folder>
+    /// \<File>` and a chain file is `Interface\FrameXML\…` — the second being both what the real
+    /// client names it and what keeps FrameXML *out* of the `\AddOns\` pattern the Ace2 family
+    /// matches against, because FrameXML is not an addon.
     ///
-    /// The loader gives an inline `<Script>` and a `<Script file=>` exactly this shape already
-    /// (`loader::Loader::run`), so a chain document's Lua is named identically whether it arrives
-    /// as a manifest entry or through its own `<Script file=>`.
-    fn chunk_name(&self, file: &str) -> String {
+    /// **One rule for both doors, which is the point** (decision 2155). `Loader::run` names a
+    /// `<Script file=>` chunk by exactly this rule over exactly this space, so a manifest entry and
+    /// an XML-referenced file now agree — they did not while a `Dir` addon's space was rooted at
+    /// the AddOns folder, and [`Addon::prefix`] carries what that cost.
+    ///
+    /// The builtin keeps [`benilla_ui::script::addon_chunk_name`]: its tree is flat and internal,
+    /// so there is no resolved install path to name it after.
+    fn chunk_name(&self, file: &str, path: &str) -> String {
         match &self.source {
-            Source::Builtin | Source::Dir(_) => {
-                benilla_ui::script::addon_chunk_name(&self.name, file)
-            }
-            Source::Chain => format!("@{}", file.replace('/', "\\")),
+            Source::Builtin => benilla_ui::script::addon_chunk_name(&self.name, file),
+            Source::Dir(_) | Source::Chain => format!("@{}", path.replace('/', "\\")),
         }
     }
 
@@ -216,7 +234,7 @@ impl Addon {
         for file in files {
             // A manifest entry is relative to the addon's own folder; `read` and the loader both
             // work in the source's path space, so resolve once here and use it for both.
-            let path = benilla_ui::loader::join_ref(self.prefix(), file);
+            let path = benilla_ui::loader::join_ref(&self.prefix(), file);
             let Some(bytes) = self.read(&path) else {
                 let e = format!("{}/{file}: not found", self.name);
                 // Severity follows whose manifest lied. For the builtin that is us — a client
@@ -244,7 +262,7 @@ impl Addon {
                 // The same execution `<Script file=>` gets (`loader::mod.rs`): one chunk, run in
                 // the one global state, in manifest order. The reference does exactly this —
                 // `AddOn_Load 0x51f240` hands each listed file to `0x6edb90` regardless of kind.
-                match script.run_chunk_named(&bytes, &self.chunk_name(file)) {
+                match script.run_chunk_named(&bytes, &self.chunk_name(file, &path)) {
                     Ok(()) => info!("ui_script: {}/{file} ran", self.name),
                     Err(e) => {
                         let e = format!("{}/{file}: {e}", self.name);
@@ -277,8 +295,38 @@ impl Addon {
             // loader takes the path and does that itself, so it can also name the file a raise
             // came from (1217).
             let report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
+            // `FrameXML_Debug`'s trace lines, if the player turned it on (2160). Log-only, and
+            // never retained: the reference files them into the same per-document record as the
+            // errors, but at severity 0 and *where that record surfaces is an open question in
+            // wow-re* (`framexml-debug-trace-flag.md`, and `xml-template-name-lookup.md` §9 for
+            // severity 1). So they go where a trace can go without claiming a surface we have not
+            // derived — and the switch that produces them is off unless an addon asks.
+            for t in &report.traces {
+                info!("ui_script({}/{file}): {t}", self.name);
+            }
             for w in &report.warnings {
                 warn!("ui_script({}/{file}): {w}", self.name);
+                // …and retained where a player can read it (2135). The `warn!` above is the
+                // terminal's copy and it is gone the moment the line scrolls; this is the one
+                // that survives to `/errors`, and the prefix is why it is recorded here rather
+                // than inside the loader — only this caller knows which file the warning is from.
+                script.report_warning(&format!("{}/{file}: {w}", self.name));
+            }
+            // **A file the document named and the provider does not have — the same rule as a
+            // `.toc` line naming no file** (decision 2155, the rule 2107 unified for the walk and
+            // the demand load, at the two doors it did not reach). Severity by whose manifest
+            // lied, retained where a player can read it, and never a script error: the reference
+            // logs `Couldn't open %s` / `Error loading %s` and carries on with nothing raised.
+            // Still a `failures` entry, so our own boot tests fail on a `benilla.toc` document
+            // that names a file the chain does not hold.
+            for m in &report.missing_files {
+                let e = format!("{}/{file}: {m}", self.name);
+                match self.source {
+                    Source::Builtin | Source::Chain => error!("ui_script: {e}"),
+                    Source::Dir(_) => warn!("ui_script: {e}"),
+                }
+                script.report_load_failure(&e);
+                failures.push(e);
             }
             for e in &report.errors {
                 error!("ui_script({}/{file}): {e}", self.name);
@@ -331,6 +379,55 @@ fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
     }
     std::fs::read(root.join(rel)).ok()
 }
+
+/// **THE file namespace — install-relative, one space for every source** (decision 2155).
+///
+/// `req` is a path the loader has already resolved and collapsed
+/// ([`benilla_ui::loader::join_ref`]) in the client's own space: `Interface/AddOns/<Folder>/…` for
+/// an addon's file, `Interface/FrameXML/…` for one that walked out of the AddOns tree. The
+/// reference has exactly one such space — `0x647e60` answers a name from a hash index of the
+/// install tree keyed by **install-root-relative path**, and then, attempt #4, from the MPQ chain
+/// (wow-re `ui/scratch/include-lua-dispatch.md` §4.1, VERIFIED; loose *before* archive, which is
+/// the order below). Two spaces is what this client had, and it cost three separate things:
+///
+/// - `..\Blizzard_AuctionUI\Blizzard_AuctionUITemplates.xml`, a `.toc` line in `Auctioneer` and
+///   in `BeanCounter`, collapses to `Interface/AddOns/Blizzard_AuctionUI/…` — a folder that is a
+///   `.pub` decoy on disk with the real files inside `patch.MPQ`. Only the chain leg has it.
+/// - `..\..\FrameXML\Fonts.xml`, a `.toc` line in `JIM_toolbox` and in `SpecialTalentUI`,
+///   collapses out of the AddOns tree entirely, to `Interface/FrameXML/Fonts.xml`. Same leg.
+///   (wow-re records both by name as **RESOLVING** on the real client —
+///   `ui/scratch/xml-toc-path-resolution.md` §5 cases 1 and 2.)
+/// - and the one that was invisible: with the addon space rooted at the AddOns folder, a
+///   `<Script file=>` chunk was NAMED after that space — `@AtlasLoot\Core\AtlasLoot.lua` — while
+///   a `.toc`-listed one was named `@Interface\AddOns\AtlasLoot\…`. See [`Addon::chunk_name`].
+///
+/// **The sandbox is stricter than it was, not looser.** Only a path under `Interface/AddOns/`
+/// touches the filesystem at all, and [`read_under`] still refuses to escape the root once the
+/// prefix is stripped; everything else can only reach the read-only archive chain, whose names
+/// cannot leave `Interface\`'s own tree. An addon reaches a sibling and the client's own interface
+/// files, and never the machine.
+pub(crate) fn read_addon_file(root: &Path, req: &str) -> Option<Vec<u8>> {
+    under_addons(req)
+        .and_then(|rel| read_under(root, rel))
+        .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
+}
+
+/// `req` with the `Interface/AddOns/` prefix stripped, or `None` if it does not carry one.
+///
+/// Case-insensitively, because the reference is a Windows client: a `.toc` writing
+/// `..\..\Interface\Addons\Foo\bar.lua` names the same file there, and on a case-sensitive
+/// filesystem an exact compare would silently send it to the chain-only leg.
+fn under_addons(req: &str) -> Option<&str> {
+    let rest = req.get(ADDONS_PREFIX.len()..)?;
+    req.get(..ADDONS_PREFIX.len())
+        .filter(|p| p.eq_ignore_ascii_case(ADDONS_PREFIX))
+        .map(|_| rest)
+}
+
+/// Where a `Source::Dir` addon's files live in the install's path space — the base every one of
+/// its manifest entries resolves against, with its folder name appended
+/// ([`Addon::prefix`]). `/`-separated, because that is [`benilla_ui::loader::join_ref`]'s space.
+const ADDONS_PREFIX: &str = "Interface/AddOns/";
 
 /// **The** addon folder — `<benilla-config>/AddOns/` — or `None` when there is none to read.
 ///
@@ -640,11 +737,21 @@ fn disabled_set(identity: Option<&(String, String)>) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Write a character's enable state from the AddOns screen (decision 1197).
+/// Write a character's enable state — the AddOns screen's write (decision 1197) and, since 2139,
+/// the in-world logout write too.
 ///
-/// **Merges rather than replaces**, for the reason [`parse_enable_state`] documents: a name in the
-/// file that is not installed right now belongs to an addon that will be again, and rewriting the
-/// file from the installed list alone would forget the player's choice on every uninstall.
+/// **Merges rather than replaces, because that is what the reference's writer structurally IS.**
+/// `0x51ef20` walks the in-memory enable **hash** and emits one `"%s: %s\r\n"` line per entry
+/// (`0x853968`), and that hash is built by the reader `0x51ebe0` from `AddOns.txt` itself — which
+/// "creates entries for every line, both states", strdup'ing each name as written. So a row for an
+/// addon that is not installed right now was loaded, is never removed, and is written straight back
+/// out; and the spelling that survives is the FILE's, not any folder's, because the folder list
+/// never enters the hash at all (wow-5875-re `system/ui/scratch/addon-enable-store.md` §5/§6).
+///
+/// Both halves matter and both were divergent on the logout path, which used to rebuild the file
+/// from `addon_enable_states()` — the installed-folder registry. One logout erased
+/// `Uninstalled: disabled` outright and rewrote `myaddon:` as `MyAddon:`. The uninstall case is the
+/// one with teeth: a player who removes a folder for a week loses the choice they made about it.
 pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[(String, bool)]) {
     let Some(path) = enable_state_path(identity) else {
         return; // no character picked, or no state folder — nothing to write to
@@ -668,24 +775,21 @@ pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[
     }
 }
 
-/// Write the enable state back — the reference's own last shutdown step (`0x490bd0`'s tail,
-/// after the saved-variables files), so a `DisableAddOn` from Lua survives the session.
+/// Write the enable state back — the reference's own last shutdown step (`0x490c88`, after the
+/// saved-variables files), so a `DisableAddOn` from Lua survives the session.
+///
+/// **The same writer the AddOns screen uses** (2139). This used to render
+/// `addon_enable_states()` — the installed-folder registry — over the whole file, which is not the
+/// shape of `0x51ef20`: the reference emits the enable *hash*, and that hash is the file's own
+/// contents plus this session's toggles. Two things followed from the difference, both reproduced
+/// before the change: a row for an addon not installed this session was dropped, and every name
+/// was rewritten into its folder's case rather than the spelling the file already had.
 pub(super) fn save_enable_state(script: &UiScript, identity: Option<&(String, String)>) {
     let states = script.addon_enable_states();
     if states.is_empty() {
-        return; // nothing was ever registered — a glue-only run or a capture; an empty write is a wipe
+        return; // nothing was ever registered — a glue-only run or a capture; nothing to merge in
     }
-    let Some(path) = enable_state_path(identity) else {
-        return;
-    };
-    match crate::local_state::write_atomic(&path, &render_enable_state(&states)) {
-        Ok(()) => info!(
-            "ui_script: wrote {} ({} addons)",
-            path.display(),
-            states.len()
-        ),
-        Err(e) => warn!("ui_script: cannot write {}: {e}", path.display()),
-    }
+    write_enable_state(identity, &states);
 }
 
 /// Write every loaded addon's declared saved variables — the reference's own shutdown step
@@ -950,7 +1054,7 @@ impl Walk {
         // own files (whose functions a binding body calls), before its saved variables. Read
         // through the addon's own reader, so the AddOns-root sandbox (1186) covers it like every
         // other file it loads; absent is the normal case and silent.
-        let bindings_xml = benilla_ui::loader::join_ref(addon.prefix(), "Bindings.xml");
+        let bindings_xml = benilla_ui::loader::join_ref(&addon.prefix(), "Bindings.xml");
         if let Some(bytes) = addon.read(&bindings_xml) {
             match benilla_ui::bindings_xml::parse(&benilla_ui::source::decode(&bytes)) {
                 Ok(bindings) => script.register_addon_bindings(&addon.name, &bindings),
@@ -1054,7 +1158,8 @@ mod tests {
     }
 
     /// **The sandbox is the AddOns folder** (decision 1186): a sibling addon is reachable, the
-    /// machine is not.
+    /// machine is not — now expressed as *only a path under `Interface/AddOns/` touches the
+    /// filesystem at all* (2155), which is the same rule one level up and strictly tighter.
     ///
     /// 1184 drew the line at each addon's own folder, which reads as the safer choice and breaks
     /// the single most common structure in the ecosystem — a shared library addon exists precisely
@@ -1081,29 +1186,121 @@ mod tests {
             source: Source::Dir(root),
         };
 
+        // **Every path here is install-relative now** (2155) — the base is
+        // `Interface/AddOns/<Folder>`, which is what `prefix()` hands the loader.
+        assert_eq!(addon.prefix(), "Interface/AddOns/Probe");
+        let src = "Interface/AddOns/Probe/src";
+
         // Its own file, and a sibling library addon reached the way a real addon reaches one.
         assert_eq!(
-            addon.read(&join_ref("Probe/src", "own.txt")).as_deref(),
+            addon.read(&join_ref(src, "own.txt")).as_deref(),
             Some(&b"yes"[..])
         );
         assert_eq!(
             addon
-                .read(&join_ref("Probe/src", "..\\..\\ProbeLib\\core\\lib.xml"))
+                .read(&join_ref(src, "..\\..\\ProbeLib\\core\\lib.xml"))
                 .as_deref(),
             Some(&b"sibling"[..]),
             "a shared library addon must be reachable — this is what 1184 wrongly blocked"
         );
 
-        // Above the AddOns root is refused: the escape survives `join_ref` as a leading `..` and
-        // `read_under` will not join it.
+        // Above the AddOns root touches no file at all: the collapsed path leaves
+        // `Interface/AddOns/`, so it never reaches `read_under` and can only ask the archive chain
+        // — which is stricter than the leading-`..` refusal this replaced, because a `..` that
+        // lands back INSIDE the install (`Interface/FrameXML/…`) is now a chain name rather than a
+        // filesystem join. `secret.txt` sits beside the AddOns root and is unreachable either way.
+        assert!(addon.read(&join_ref(src, "../../../secret.txt")).is_none());
         assert!(addon
-            .read(&join_ref("Probe/src", "../../../secret.txt"))
+            .read(&join_ref("Interface/AddOns/Probe", "..\\secret.txt"))
             .is_none());
-        assert!(addon.read(&join_ref("Probe", "..\\secret.txt")).is_none());
-        // A leading `/` is not "the filesystem root" — it re-roots at AddOns, which is the only
-        // root a FrameXML path has. So this looks for `<AddOns>/etc/hosts` and finds nothing.
+        assert!(
+            addon
+                .read(&join_ref(src, "../../../../../../../../etc/passwd"))
+                .is_none(),
+            "over-consuming `..` cannot walk out of the install either"
+        );
+        // A leading `/` is not "the filesystem root" — `join_ref` re-roots it at the base it is
+        // given, and with no base that is a bare relative name, which is not under
+        // `Interface/AddOns/` and so is a chain lookup that misses.
         assert_eq!(join_ref("", "/etc/hosts"), "etc/hosts");
         assert!(addon.read(&join_ref("", "/etc/hosts")).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **A `.toc`-listed `.lua` and an XML-referenced one get the SAME chunk name** — the defect
+    /// decision 2155 found, asserted from the outside because it is only visible from there.
+    ///
+    /// Every Ace2-era library finds the addon it belongs to by splitting a `debugstack` frame on
+    /// `\AddOns\` — `AceDB-2.0.lua:742`'s `".-\n.-\\AddOns\\(.-)\\.*"`,
+    /// `FuBarPlugin-2.0.lua:602`'s `string.find(debugstack(6,1,0), "\\AddOns\\(.*)\\")`. While a
+    /// `Dir` addon's path space was the AddOns folder, a `<Script file=>` chunk was named
+    /// `@AtlasLoot\Core\AtlasLoot.lua` and that split found **nothing**: `SSHonor_Fu` called
+    /// `IsAddOnLoadOnDemand(nil)` and AtlasLoot's AceDB keyed itself on a raw traceback. 80 of the
+    /// 219-addon corpus ship at least one `<Script file=>`.
+    ///
+    /// The reference names both the same way and the note says why: a `.toc` line resolves against
+    /// `Interface\AddOns\<Addon>\` and a bare `<Script file=X>` against `dirname(referrer)` —
+    /// the same directory — and the chunk name is `"@%s"` over the resolved path in both cases
+    /// (wow-re `ui/scratch/xml-toc-path-resolution.md` §1, `include-lua-dispatch.md` §7).
+    #[test]
+    fn an_xml_referenced_lua_is_named_like_a_toc_listed_one() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-addon-chunkname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("AddOns");
+        std::fs::create_dir_all(root.join("Probe/Core")).unwrap();
+        std::fs::write(
+            root.join("Probe/listed.lua"),
+            "LISTED = debugstack(1, 1, 0)",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Probe/Core/viaxml.lua"),
+            "VIAXML = debugstack(1, 1, 0)",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Probe/Core/doc.xml"),
+            r#"<Ui><Script file="viaxml.lua"/></Ui>"#,
+        )
+        .unwrap();
+        let toc = "## Interface: 11200\nlisted.lua\nCore\\doc.xml\n";
+        let addon = Addon {
+            name: "Probe".into(),
+            toc: Toc::parse(toc),
+            source: Source::Dir(root),
+        };
+
+        let script = UiScript::new().unwrap();
+        assert!(addon.load(&script).is_empty());
+
+        // The exact pattern the libraries run, on each file's own traceback.
+        let folder = |global: &str| -> Option<String> {
+            script
+                .eval::<Option<String>>(&format!(
+                    "local _,_,f = string.find({global} or \"\", \"\\\\AddOns\\\\(.-)\\\\\") return f"
+                ))
+                .unwrap()
+        };
+        assert_eq!(
+            folder("LISTED").as_deref(),
+            Some("Probe"),
+            "a manifest-listed file has always been named right"
+        );
+        assert_eq!(
+            folder("VIAXML").as_deref(),
+            Some("Probe"),
+            "and an XML-referenced one must be named the same way — this was nil"
+        );
+        // …and literally, so this cannot pass for some other reason: both chunks carry the
+        // client's own full virtual path, which is the thing `\AddOns\` is being split out of.
+        for g in ["LISTED", "VIAXML"] {
+            let frame = script.eval::<String>(&format!("return {g}")).unwrap();
+            assert!(
+                frame.contains("Interface\\AddOns\\Probe\\"),
+                "{g} is named after the install path, not the AddOns root: {frame}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2346,7 +2543,10 @@ mod tests {
 
     /// The written bytes are the recorded grammar (decision 1128's, itself byte-verified against
     /// `0x7043f0`/`0x704480`): `NAME = value`, bracketed keys, TAB indent, a trailing comma on
-    /// every entry, and the file split by scope.
+    /// every entry, and the file split by scope. `["t"]`'s `[1] = 1,` is the reference's shape for
+    /// a list too — its writer emits a bracketed key for every table shape and never a bare
+    /// positional entry (wow-re `system/ui/scratch/lua-table-storage-and-next-order.md` §Q5) —
+    /// and it reloads in index order because of what 1.12's *parser* does with it (decision 2111).
     ///
     /// Asserted as bytes rather than by re-reading, because "it round-trips through our own
     /// loader" is exactly the check that passes for a private format. The reference's own client
@@ -2437,6 +2637,164 @@ mod tests {
             written.contains("LastDB = \"written at logout\""),
             "the value the PLAYER_LOGOUT handler set must reach the file — if the write ran \
              first this reads 'unset':\n{written}"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **The logout write MERGES, and it keeps the file's own spelling** (decision 2139).
+    ///
+    /// The reference's writer `0x51ef20` emits the in-memory enable hash, and the reader
+    /// `0x51ebe0` builds that hash from `AddOns.txt` — an entry per line, both states, each name
+    /// strdup'd as written. The installed-folder list never enters it. So a row survives an
+    /// uninstall, and the spelling that survives is the file's.
+    ///
+    /// Ours rebuilt the file from `addon_enable_states()` instead, and one logout erased
+    /// `Uninstalled: disabled` and rewrote `myaddon:` as `MyAddon:`.
+    #[test]
+    fn the_logout_write_keeps_rows_it_did_not_put_there() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("logout-merge");
+        write_addon(
+            &home,
+            "MyAddon",
+            "## Interface: 11200\nmain.lua\n",
+            &[("main.lua", "MyAddonRan = true")],
+        );
+        let id = ("Realm".to_string(), "Char".to_string());
+        let p = crate::local_state::addons_state_path("Realm", "Char").unwrap();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "Uninstalled: disabled\nmyaddon: enabled\n").unwrap();
+
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, Some(&id), true);
+        script.eval::<()>("DisableAddOn('MyAddon')").unwrap();
+        save_enable_state(&script, Some(&id));
+
+        let after = std::fs::read_to_string(&p).unwrap();
+        let rows = parse_enable_state(&after);
+        // The uninstalled addon's row is still there, still disabled — the half with teeth.
+        assert_eq!(
+            rows.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("Uninstalled"))
+                .map(|(_, on)| *on),
+            Some(false),
+            "a row for an addon not installed this session must survive the write: {after}"
+        );
+        // The file's own spelling survives; the folder's case does not overwrite it.
+        assert!(
+            after.contains("myaddon:"),
+            "the file's spelling is what the reference writes back: {after}"
+        );
+        // …and this session's toggle still landed on it.
+        assert_eq!(
+            rows.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("MyAddon"))
+                .map(|(_, on)| *on),
+            Some(false),
+            "the DisableAddOn must still be persisted: {after}"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **A LoadOnDemand dependency cycle LOADS BOTH and answers `(1, nil)`** (decision 2139) —
+    /// and before the fix this call took the whole process down with SIGABRT.
+    ///
+    /// `AddOn_Load 0x51f240` has no re-entrancy guard: every live site of the visiting byte
+    /// `[UIADDON+0x2d]` is inside `AddOn_CanLoad 0x51e780`, none in the loader. What bounds the
+    /// recursion is the *loaded* byte, stamped **before** the dependency loops —
+    /// `0x51f313 mov byte [rec+0x18],1`, a flag-neutral store between `0x51f311 test eax,eax` and
+    /// `0x51f317 jbe`, therefore unconditional — so the re-entered frame takes the already-loaded
+    /// early-out at `0x51f2d6`/`0x51f2db` and returns 1. We stamped it after the recursion, so
+    /// nothing terminated: Rust-level recursion, stack overflow, `signal 6`, uncatchable by
+    /// `pcall`.
+    ///
+    /// The three assertions below are the reference's own observable consequences, and the last
+    /// two are the ones that would betray a guard bolted on somewhere else instead:
+    /// **no reason token** (a cycle produces none — the reference has no such token),
+    /// `ADDON_LOADED` fires **B then A**, and `IsAddOnLoaded('Ping')` answers 1 throughout Pong's
+    /// execution, because Ping is flagged loaded before its own files run.
+    #[test]
+    fn a_load_on_demand_dependency_cycle_loads_both_sides() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("lod-cycle");
+        write_addon(
+            &home,
+            "Ping",
+            "## Interface: 11200\n## LoadOnDemand: 1\n## Dependencies: Pong\nping.lua\n",
+            &[(
+                "ping.lua",
+                "PingRan = true Order = (Order or '') .. 'Ping,'",
+            )],
+        );
+        write_addon(
+            &home,
+            "Pong",
+            "## Interface: 11200\n## LoadOnDemand: 1\n## Dependencies: Ping\npong.lua\n",
+            &[(
+                "pong.lua",
+                "PongRan = true Order = (Order or '') .. 'Pong,' \
+                 PingSeenLoaded = IsAddOnLoaded('Ping')",
+            )],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        script
+            .eval::<()>(
+                "AddonOrder = '' \
+             CycleWatch = CreateFrame('Frame') \
+             CycleWatch:RegisterEvent('ADDON_LOADED') \
+             CycleWatch:SetScript('OnEvent', function() \
+                 AddonOrder = AddonOrder .. arg1 .. ',' end)",
+            )
+            .unwrap();
+        let _ = load_third_party(&mut script, None, true);
+
+        // Neither ran at startup — the walk skips LoadOnDemand, which is why a cycle among them
+        // is never observed until something demand-loads one.
+        assert_eq!(
+            script
+                .eval::<bool>("return PingRan == nil and PongRan == nil")
+                .ok(),
+            Some(true)
+        );
+
+        // The call that used to abort the process.
+        assert_eq!(
+            script
+                .eval::<Vec<String>>(
+                    "local loaded, reason = LoadAddOn('Ping') \
+                     return { tostring(loaded), tostring(reason) }"
+                )
+                .ok(),
+            Some(vec!["1".into(), "nil".into()]),
+            "a cycle loads and answers (1, nil) — the reference has no cycle reason token"
+        );
+
+        // Both sides ran, each `.toc` list exactly once.
+        assert_eq!(
+            script.eval::<String>("return Order").ok().as_deref(),
+            Some("Pong,Ping,"),
+            "the dependency's files run first, and neither list runs twice"
+        );
+        // `ADDON_LOADED` fires B then A.
+        assert_eq!(
+            script.eval::<String>("return AddonOrder").ok().as_deref(),
+            Some("Pong,Ping,")
+        );
+        // The stamp is ahead of the files, so the cycle inverts the declared order: Ping reads as
+        // loaded for the whole of Pong's execution. This is the reference's behaviour and it is
+        // the mechanism, not a side effect.
+        assert_eq!(
+            script.eval::<i64>("return PingSeenLoaded").ok(),
+            Some(1),
+            "inside a cycle an addon is flagged loaded before its own files run"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }

@@ -15,7 +15,7 @@ const WOLF_FACTION: u32 = 32;
 /// The `name-water` fixture's unit: the same wolf, re-seated 25 yd along the water scenario's own
 /// look bearing (`WATER_EYE` → `WATER_LOOK`) at the river surface, so its overhead name projects
 /// onto the water *beyond* it.
-const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
+pub(super) const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
 
 /// The lighting matrix's chest (decision 0744): `GameObjectDisplayInfo` 259,
 /// `World\SkillActivated\Containers\TreasureChest01.mdx`. GameObject guids carry the `0xF110` high
@@ -1038,7 +1038,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsAudio => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Audio page (0957): register the real CVar set first — the hermetic capture has
@@ -1052,7 +1052,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsGraphics => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Graphics page (0959), same posture as the Audio fixture: real CVar set, live
@@ -1065,7 +1065,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsChat => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Chat page (1589), the page fixtures' posture: the real CVar set, then the live
@@ -1097,7 +1097,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsDropdownList => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The dropdown list open (0992, re-seated onto Camera Following Style by 1649), same
@@ -1134,7 +1134,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsSearch => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // Mid-search (0984), same posture as the page fixtures: real CVar set, then the
@@ -1356,6 +1356,15 @@ pub(super) fn seed_ui_fixture(
         }
         UiFixture::NameWater => {
             use benilla_protocol::messages::ObjectFields;
+            // The subject is an NPC's overhead name, and `UnitNameNPC` registers "0" (1804's
+            // byte-read default), so without this the shot contains no name at all — which is
+            // exactly what it had contained since 1804 landed. Set through Lua, the way a player
+            // turns it on, so the sync drains it into `NameConfig` like any other CVar write.
+            if let Some(script) = script.as_deref_mut() {
+                if let Err(e) = script.run("SetCVar(\"UnitNameNPC\", \"1\")") {
+                    warn!("capture: name fixture could not enable UnitNameNPC: {e}");
+                }
+            }
             // The synthetic self player at the eye (the reaction lookup reads its store, and the
             // name colour is that verdict).
             const SELF_GUID: u64 = 0x51;

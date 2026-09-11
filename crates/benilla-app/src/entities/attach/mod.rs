@@ -927,6 +927,10 @@ pub(super) fn attach_entity_visuals(
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
                 mounted_delta_local: dm.map(|d| d.mounted_pivot_delta_local).unwrap_or(0.0),
                 seat_z_local: dm.map(|d| d.mount_seat_z_local).unwrap_or(0.0),
+                // …and how far that pivot drops while this body swims — the reference's third
+                // preset `cam+0x124`, stored as the delta it is built from (`0x50ccf6`). `0.0` for
+                // anything with no Swim sequence, so the two presets coincide.
+                swim_drop_local: dm.map(|d| d.swim_pivot_drop_local).unwrap_or(0.0),
             });
             // The overhead-anchor fallback input (combat text over a model with no PlayerName
             // attachment — `0x608640`'s defensive branch).

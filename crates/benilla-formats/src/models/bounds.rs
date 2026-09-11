@@ -106,6 +106,35 @@ pub struct M2Bounds {
     /// flourish lifts it further. The reference has none of those because the preset is computed
     /// when the model event lands and is a constant until the next one.
     pub mount_seat_z: f32,
+    /// How far the camera's framing pivot drops when this body **swims** (model-local yards,
+    /// pre-scale): `StandSeq.bounds.max.z − SwimSeq.bounds.max.z`, floored at zero.
+    ///
+    /// The reference keeps **three** framing-pivot presets side by side (`cam+0x11c`/`+0x120`/
+    /// `+0x124`, rebuilt from the model by `0x50ca90`) and picks one per frame at `0x50f880`. All
+    /// three start from the same base — the `attach17.z + 0.0972222 [0x808ab0]` neck height
+    /// [`M2Bounds::pivot_z`] carries — and only the swim one is then pulled down, by exactly this:
+    /// `0x50ccf6 fsubr [esi+0x124]` subtracts `S · (box0.max.z − box42.max.z)`, where the two boxes
+    /// come from `0x711a20(model, 0)` and `0x711a20(model, 0x2a)` — the same `M2Sequence` `CAaBox`
+    /// query [`stand_box`] reads, on animation id **0** (Stand) and id **42** (Swim). Byte-decoded
+    /// and VERIFIED in wow-re `ui/scratch/water-band-discontinuity.md` §7, which measured
+    /// `+0x11c = +0x120 = 1.9002692` and `+0x124 = 1.5120120` off the shipped `HumanMale.m2` at
+    /// scale 1 — a drop of `0.3882572`, the number the fixture test pins.
+    ///
+    /// It is a **delta**, not a height, because that is the shape of the byte: the base is added to
+    /// all three presets at `0x50cc0c`–`0x50cc2e` and only `+0x124` is decremented, so a consumer
+    /// gets the swim preset as `pivot_height − this`, then the shared `[5/6, 15.0]` clamp
+    /// (`0x50ca90`, `0x50d00d`–`0x50d092`).
+    ///
+    /// **`0.0` when the model has no Swim sequence** — which is every non-character model, and the
+    /// reference's own answer too: `0x50cc67`–`0x50cd02` runs only when `0x711960` reports *both*
+    /// id 0 and id 42 present, so a body that cannot swim keeps the standing preset in every state.
+    ///
+    /// **The zoom pair is NOT built.** `0x50f880`'s other leg picks `+0x11c` (zoomed-in) or
+    /// `+0x120` (zoomed-out) on `cam+0x198 < 1.8315` — and on a scale-1 human the reference computes
+    /// those two *equal*, so nothing here yet says what makes them differ. benilla has one standing
+    /// preset and this drop; the threshold and whatever authors the zoomed pair apart are absent,
+    /// not stubbed.
+    pub swim_pivot_drop: f32,
 }
 
 /// Read an M2's authored bounds + the vertex-derived radius (see [`M2Bounds`]). Uses the same path
@@ -132,20 +161,68 @@ pub fn load_m2_bounds(chain: &mut Chain, raw_path: &str) -> Result<M2Bounds> {
 /// same question, and this is the reference's answer to it.
 pub const DEGENERATE_RING_FOOTPRINT: f32 = 1.2;
 
+/// Resolve an animation **id** to its `M2Sequence` record index — the animation-lookup indirection
+/// every sequence-box read below goes through. The lookup array is at MD20 `0x24`(count)/`0x28`
+/// (offset), one `u16` per animation id; the sequence array it indexes is at `0x1c`/`0x20`. An id
+/// is NOT a record number (a chicken's record 0 is a flap, its Stand sits at index 2), and a model
+/// that simply does not author an animation is the common case, not an error: `None` for a missing
+/// lookup, an id past its end, the `0xffff` "absent" sentinel, or an index past the sequence array.
+///
+/// This is the client's own `0x711960(id)` presence test folded into the `0x711a20(id)` box query —
+/// the pair `0x50ca90` calls on ids 0 and 42 before it will build the swim preset at all.
+fn seq_index(bytes: &[u8], anim_id: usize) -> Option<usize> {
+    let anim_count = bytes.u32_at(0x1c)? as usize;
+    let lookup_count = bytes.u32_at(0x24)? as usize;
+    let lookup_ofs = bytes.u32_at(0x28)? as usize;
+    if anim_count == 0 || anim_id >= lookup_count {
+        return None;
+    }
+    match bytes.u16_at(lookup_ofs.checked_add(anim_id * 2)?) {
+        Some(i) if (i as usize) != 0xffff && (i as usize) < anim_count => Some(i as usize),
+        _ => None,
+    }
+}
+
+/// The byte offset of a resolved sequence record — stride `0x44` from the array at MD20 `0x20`,
+/// with the `CAaBox` at record `+0x24` (min `C3Vector` `+0x24`, max `C3Vector` `+0x30`, so `max.z`
+/// is `+0x38`).
+fn seq_record(bytes: &[u8], idx: usize) -> Option<usize> {
+    let anim_ofs = bytes.u32_at(0x20)? as usize;
+    anim_ofs.checked_add(idx * 0x44)
+}
+
+/// The **Stand** sequence's record — animation id 0 through [`seq_index`], falling back to record 0
+/// for a model whose lookup is absent or points nowhere (the pre-existing behaviour the ring and
+/// the chat bubble are pinned to; every model that has sequences at all has *something* to stand on).
+/// `None` only when the model has no sequences.
+fn stand_record(bytes: &[u8]) -> Option<usize> {
+    if bytes.u32_at(0x1c)? as usize == 0 {
+        return None;
+    }
+    seq_record(bytes, seq_index(bytes, 0).unwrap_or(0))
+}
+
+/// One sequence box's `max.z` — `rec+0x38`, the `out+0x20` field `0x711a20` returns (wow-re
+/// `water-band-discontinuity.md` §7). The camera's swim preset is the difference of two of these.
+fn seq_max_z(bytes: &[u8], anim_id: usize) -> Option<f32> {
+    let rec = seq_record(bytes, seq_index(bytes, anim_id)?)?;
+    bytes.f32_at(rec + 0x38)
+}
+
 /// Read the horizontal (X,Y) extents of the **Stand** animation's bounding box from a raw M2 — the input
 /// the real client's living-unit selection ring is sized from (wow-re selection-ring RE, `0x60aee0`).
 /// The animation `M2Sequence` array is at MD20 `0x1c`(count)/`0x20`(offset), stride `0x44`, with the
 /// sequence's `CAaBox` at record `+0x24` (min C3 `+0x24`, max C3 `+0x30`). Stand is animation **id 0**,
 /// whose *sequence index* is `animationLookup[0]` (array at `0x24`/`0x28`, `u16` each) — NOT necessarily
-/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2). Returns `(dx, dy, dz)`, or
-/// `None` when the model has no sequences / lookup or the indices are out of range (caller falls back
-/// to the header box). VERIFIED: reproduces the reference ring radii to ~1 mm.
+/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2) — resolved by [`seq_index`].
+/// Returns `(dx, dy, dz)`, or `None` when the model has no sequences (caller falls back to the header
+/// box). VERIFIED: reproduces the reference ring radii to ~1 mm.
 ///
 /// The Z extent joins the pair the ring needs because the chat bubble's anchor is the **same box**
 /// read on the other axis (1406) — one parse, one Stand-sequence resolution, two consumers, so the
 /// ring and the bubble can never drift onto different animations.
 fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
-    let rec = sequence_record(bytes, STAND_ANIM, true)?;
+    let rec = stand_record(bytes)?;
     // CAaBox @ rec+0x24: min C3 (+0x24), max C3 (+0x30). Horizontal (X,Y) extents; squared in the ring
     // formula so an unsorted box is harmless.
     let dx = bytes.f32_at(rec + 0x30)? - bytes.f32_at(rec + 0x24)?;
@@ -154,49 +231,47 @@ fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     Some((dx, dy, dz))
 }
 
-/// `AnimationData.dbc` id **0** — Stand, the box every other sequence's box is read against.
-const STAND_ANIM: usize = 0;
 /// `AnimationData.dbc` id **91** — `Mount`, the pose `0x50cbbb` forces on a unit whose
 /// `UNIT_FIELD_MOUNTDISPLAYID` is non-zero (`mov ebx, 0x5b`). Named against the shipped DBC.
 const MOUNT_ANIM: usize = 91;
 
-/// The file offset of one `M2Sequence` record, resolved the way the reference resolves an animation
-/// id: through `animationLookup` (array at MD20 `0x24`/`0x28`, `u16` each), **not** by record order.
-///
-/// `fall_back_to_first` is the difference between the two callers. The ring/bubble ask for Stand,
-/// which every model has, and take record 0 when the lookup cannot answer — the reference's own
-/// static-model leg. The mount correction asks for a sequence most models genuinely lack, and
-/// there "no Mount" must stay `None` rather than silently measuring whatever record 0 is: reading a
-/// chicken's flap as its mount pose would move the camera on a model that can never be ridden.
-fn sequence_record(bytes: &[u8], anim: usize, fall_back_to_first: bool) -> Option<usize> {
-    let anim_count = bytes.u32_at(0x1c)? as usize;
-    let anim_ofs = bytes.u32_at(0x20)? as usize;
-    let lookup_count = bytes.u32_at(0x24)? as usize;
-    let lookup_ofs = bytes.u32_at(0x28)? as usize;
-    if anim_count == 0 {
-        return None;
-    }
-    let looked_up = (anim < lookup_count)
-        .then(|| bytes.u16_at(lookup_ofs + anim * 2))
-        .flatten()
-        .map(usize::from)
-        .filter(|&i| i != 0xffff && i < anim_count);
-    let idx = match looked_up {
-        Some(i) => i,
-        None if fall_back_to_first => 0,
-        None => return None,
-    };
-    anim_ofs.checked_add(idx * 0x44)
-}
-
 /// `Mount.max.z − Stand.max.z` — the reference's mounted pivot correction (see
 /// [`M2Bounds::mounted_pivot_delta`]). `None` for a model with no sequences or no `Mount`.
+///
+/// Mount resolves through [`seq_max_z`], which is [`seq_index`] WITHOUT [`stand_record`]'s
+/// fall-back-to-record-0. The ring asks for a sequence every model has; this asks for one most
+/// models genuinely lack, and there "no Mount" must stay `None` rather than silently measuring
+/// whatever record 0 is — reading a chicken's flap as its mount pose would move the camera on a
+/// model that can never be ridden. Stand resolves through [`stand_record`], so the standing side of
+/// the subtraction is byte-for-byte the box the ring, the bubble and the swim preset already read.
+///
+/// NOT floored at zero, unlike [`swim_pivot_drop`]: this correction is negative on every character
+/// (see [`M2Bounds::mounted_pivot_delta`]), and clamping it away would cost the whole term.
 fn mounted_pivot_delta(bytes: &[u8]) -> Option<f32> {
-    let stand = sequence_record(bytes, STAND_ANIM, true)?;
-    let mount = sequence_record(bytes, MOUNT_ANIM, false)?;
     // `max.z` alone, not the extent: the preset is a height above the model origin, and the
     // reference reads `out+0x20` (the box's max C3's Z) on both sides of its subtraction.
-    Some(bytes.f32_at(mount + 0x38)? - bytes.f32_at(stand + 0x38)?)
+    let stand_z = stand_record(bytes).and_then(|rec| bytes.f32_at(rec + 0x38))?;
+    Some(seq_max_z(bytes, MOUNT_ANIM)? - stand_z)
+}
+
+/// `AnimationData` id **42** — Swim. The second box `0x50ca90` queries (`0x50ccde call 0x711a20`
+/// with `seq=0x2a`) when it builds the camera's swim framing-pivot preset.
+const SWIM_ANIM_ID: usize = 42;
+
+/// The camera's swim pivot drop (see [`M2Bounds::swim_pivot_drop`]): `StandSeq.bounds.max.z −
+/// SwimSeq.bounds.max.z`, floored at zero, and `0.0` for any model missing either sequence — the
+/// reference's own both-present guard (`0x711960` on ids 0 and `0x2a` at `0x50cc43`/`0x50cc4f`).
+///
+/// Stand resolves through [`stand_record`], not [`seq_index`] alone, so the standing side of the
+/// subtraction is byte-for-byte the box the ring and the chat bubble already read.
+fn swim_pivot_drop(bytes: &[u8]) -> f32 {
+    let Some(stand_z) = stand_record(bytes).and_then(|rec| bytes.f32_at(rec + 0x38)) else {
+        return 0.0;
+    };
+    let Some(swim_z) = seq_max_z(bytes, SWIM_ANIM_ID) else {
+        return 0.0;
+    };
+    (stand_z - swim_z).max(0.0)
 }
 
 /// Read an **in-memory** M2's authored bounds + vertex-derived radius (see [`M2Bounds`]). The bytes-in
@@ -240,5 +315,6 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         // (`0x710310`: the AttachLookup, its bounds check and its `0xffff` sentinel) — never a
         // scan of the record table, whose ids are not unique.
         mount_seat_z: model.attachment(0).map_or(0.0, |a| a.position[2]),
+        swim_pivot_drop: swim_pivot_drop(bytes),
     })
 }

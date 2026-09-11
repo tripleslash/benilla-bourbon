@@ -100,6 +100,14 @@ pub struct WorldAssets {
     /// each address-mode pair needs its own GPU image (the sampler is baked into the `Image`).
     /// See [`Self::sprite_texture_wrapped`].
     tiled_sprites: HashMap<(String, bool, bool), Option<Handle<Image>>>,
+    /// Sprites RESAMPLED to an exact physical size, by `(path, w, h)` — the nameplate border's
+    /// 0188 sharpen and nothing else so far. Keyed by size because that is the whole point: the
+    /// art is re-rasterised whenever the plate's pixel size moves, and reused on every frame in
+    /// between (a resize is rare; a plate is drawn 60 times a second).
+    resampled_sprites: HashMap<(String, u32, u32), Option<Handle<Image>>>,
+    /// The decoded source pixels behind [`Self::resampled_sprites`], so a resize re-samples
+    /// instead of re-decoding the BLP.
+    resample_sources: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
     /// Decoded **portrait** sprites — [`Self::sprite_texture`]'s clamp/sRGB sprite with a circular
     /// alpha mask baked in ([`portrait_image`]). Its own cache, like `tiled_sprites`: the mask bakes
     /// into the GPU image, so the same BLP wanted as a plain icon and as a portrait needs two images.
@@ -244,14 +252,15 @@ pub enum SpriteDims {
 /// *before* inserting — so the warning is self-limiting by construction (one line per distinct key
 /// for the process's life), with no separate "already warned" set to keep.
 ///
-/// It exists because the renderer's fallback for an unresolvable path is **silent and looks like
-/// art**: a `Texture` region whose file can't be found still pushes a quad, which `ui_pass` draws
-/// with the shared 1×1 white image tinted white — an opaque WHITE RECTANGLE at the region's exact
-/// rect. That fallback can't itself be made loud (it is what lets flat-shaded quads batch into one
-/// texture run), so a miss has to be reported here instead. Bug B221 — macro-chooser icons
-/// rendering as white squares — was invisible to every layer of the client until this line existed:
-/// `shipped_xml_tests` sweeps only static XML `file=` attributes, never a path that arrives at
-/// runtime from a DBC.
+/// It exists because the renderer's fallback for an unresolvable path is **silent**. It used to be
+/// silent *and* look like art: a `Texture` region whose file could not be found still pushed a
+/// quad, which `ui_pass` drew with the shared 1×1 white image tinted white — an opaque WHITE
+/// RECTANGLE at the region's exact rect, which is how bug B221's macro-chooser icons looked. That
+/// half is gone (`ui_script::extract` now drops the quad outright when the resolve misses), so the
+/// miss draws *nothing* rather than a white square. It is no less silent for that: nothing on
+/// screen and nothing in Lua says why, and `shipped_xml_tests` sweeps only static XML `file=`
+/// attributes, never a path that arrives at runtime from a DBC or from an addon. So the report
+/// still belongs here.
 ///
 /// Walks [`sprite_candidates`] in order and takes the first that both reads and decodes; only when
 /// **all** fail is it a miss. A candidate that reads but won't decode falls through exactly like
@@ -275,22 +284,30 @@ fn decode_sprite(
     // walk — a later candidate may be resident and answer outright — but it does decide the verdict
     // if none is, because "not yet" and "not there" must not produce the same cached answer.
     let mut waiting = false;
+    // Candidates that a store DID answer and the decoder then refused — the difference between
+    // "no such file" and "that file is broken", which the miss warning below reports apart.
+    let mut undecodable: Vec<&str> = Vec::new();
     for candidate in &candidates {
         match mode.read(&chain, candidate) {
             TryRead::Ready(bytes) => {
                 if let Ok(decoded) = decode_sprite_bytes(&bytes) {
                     return SpriteLoad::Ready(decoded);
                 }
+                undecodable.push(candidate);
             }
             TryRead::Pending => waiting = true,
             TryRead::Missing => {}
         }
         if let Some(file) = loose_root.and_then(|root| loose_addon_file(root, candidate)) {
-            if let Ok(decoded) = std::fs::read(&file)
+            match std::fs::read(&file)
                 .map_err(anyhow::Error::from)
                 .and_then(|bytes| decode_sprite_bytes(&bytes))
             {
-                return SpriteLoad::Ready(decoded);
+                Ok(decoded) => return SpriteLoad::Ready(decoded),
+                // Only a read that SUCCEEDED and then failed to decode is the interesting fault;
+                // a missing loose file is the ordinary case for every non-addon path.
+                Err(_) if file.is_file() => undecodable.push(candidate),
+                Err(_) => {}
             }
         }
     }
@@ -298,15 +315,33 @@ fn decode_sprite(
         SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return SpriteLoad::Pending;
     }
-    warn!(
-        "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
-        if loose_root.is_some() {
-            " or the AddOns folder"
-        } else {
-            ""
-        },
-        candidates.join(", ")
-    );
+    // **"Not there" and "there but would not decode" are different faults, and saying only the
+    // first sends the reader hunting a path that is sitting on disk.** Three colour-mapped TGAs in
+    // the addon corpus read fine and failed to decode for years while this line asserted they did
+    // not resolve (decision 2128).
+    //
+    // The walk above already read every candidate, so the undecodable ones are collected THERE
+    // rather than re-read here. Upstream re-reads through `Chain::read_file`, which wants `&mut`;
+    // this deferred lane holds a shared `&Chain` (it reads through [`ReadMode`], so that a browser
+    // miss can answer `Pending`), and on the browser the re-read would be a second trip through the
+    // resident map for bytes already in hand.
+    if undecodable.is_empty() {
+        warn!(
+            "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
+            if loose_root.is_some() {
+                " or the AddOns folder"
+            } else {
+                ""
+            },
+            candidates.join(", ")
+        );
+    } else {
+        warn!(
+            "texture miss: '{path}' RESOLVES but will not decode ({}) — the file is there and the \
+             decoder refused it",
+            undecodable.join(", ")
+        );
+    }
     SpriteLoad::Missing
 }
 
@@ -354,8 +389,8 @@ enum SpriteLoad {
     Ready((u32, u32, Vec<u8>)),
     /// In flight. Do not cache; ask again next frame.
     Pending,
-    /// Nothing in the chain (or the AddOns folder) resolves this path. Cached, and warned about
-    /// once.
+    /// Nothing in the chain (or the AddOns folder) resolves this path, or everything that did
+    /// refused to decode. Cached, and warned about once.
     Missing,
 }
 
@@ -478,6 +513,8 @@ impl WorldAssets {
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
             sprites: HashMap::new(),
+            resampled_sprites: HashMap::new(),
+            resample_sources: HashMap::new(),
             tiled_sprites: HashMap::new(),
             portraits: HashMap::new(),
             masks: HashMap::new(),
@@ -629,6 +666,50 @@ impl WorldAssets {
             // and asks again if it needs to, and there is no cache entry to poison either way.
             SpriteLoad::Pending | SpriteLoad::Missing => None,
         }
+    }
+
+    /// A UI sprite **resampled to an exact pixel size** by the caller's own kernel, cached by that
+    /// size — the nameplate border (decision 0188).
+    ///
+    /// The plate's frame art is a 128 × 32 BLP drawn at whatever size the plate is, which past the
+    /// 1024×768 knee (and always on a retina framebuffer) is a magnification: the GPU's bilinear
+    /// filter smears the 1 px gold bevel across several soft output pixels, which is the director's
+    /// "blurry border". Resampling the SAME pixels to the target size with a sharp kernel keeps the
+    /// art and loses the smear. This lives here rather than in the plate driver because since
+    /// decision 2148 the plate is a widget like any other and its border is an ordinary texture
+    /// region — the substitution has to happen where a texture path becomes an image.
+    pub fn resampled_sprite(
+        &mut self,
+        path: &str,
+        (w, h): (u32, u32),
+        images: &mut Assets<Image>,
+        resample: impl FnOnce(&[u8], u32, u32, u32, u32) -> Vec<u8>,
+    ) -> Option<Handle<Image>> {
+        let key = (path.to_string(), w, h);
+        if let Some(cached) = self.resampled_sprites.get(&key) {
+            return cached.clone();
+        }
+        if !self.resample_sources.contains_key(path) {
+            // `Defer`, and **a `Pending` caches nothing** — not the source and not the resampled
+            // handle. A plate re-asks for its border every frame it is up, so a fetch in flight
+            // costs a frame or two of unbordered plate and then resolves itself; writing either
+            // cache under `Pending` would make that permanent, because the pack lands in the
+            // resident map a moment later and nothing would ever look again. See [`ReadMode`].
+            match decode_sprite(&self.chain, self.loose_root.as_deref(), path, ReadMode::Defer) {
+                SpriteLoad::Ready(decoded) => {
+                    self.resample_sources.insert(path.to_string(), Some(decoded));
+                }
+                SpriteLoad::Pending => return None,
+                SpriteLoad::Missing => {
+                    self.resample_sources.insert(path.to_string(), None);
+                }
+            }
+        }
+        let made = self.resample_sources[path]
+            .as_ref()
+            .map(|(sw, sh, src)| images.add(sprite_image(w, h, resample(src, *sw, *sh, w, h))));
+        self.resampled_sprites.insert(key, made.clone());
+        made
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing on both axes — the frame `Backdrop`

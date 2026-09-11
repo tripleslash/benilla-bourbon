@@ -1,6 +1,6 @@
 //! Frame method-table cluster: anchoring and size — `SetPoint`/`ClearAllPoints`/`GetPoint`/
-//! `SetAllPoints`/`SetWidth`/`SetHeight`/`SetSize`/`GetWidth`/`GetHeight` and the resolved-edge
-//! readers (`GetLeft`/`GetRight`/`GetTop`/`GetBottom`). Split out of [`super`] purely for size — see
+//! `SetAllPoints`/`SetWidth`/`SetHeight`/`GetWidth`/`GetHeight` and the resolved-edge readers
+//! (`GetLeft`/`GetRight`/`GetTop`/`GetBottom`). Split out of [`super`] purely for size — see
 //! its module doc for the shared id/handle plumbing and method-table wiring.
 
 use mlua::{Lua, Table, Value};
@@ -41,7 +41,7 @@ fn prefetch_relative_to(
 
 /// Populate `m`'s layout (anchor/size) methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // Layout: SetPoint / ClearAllPoints / SetSize / SetWidth / SetHeight / GetWidth / GetHeight
+    // Layout: SetPoint / ClearAllPoints / SetWidth / SetHeight / GetWidth / GetHeight
     m.set(
         "SetPoint",
         lua.create_function(
@@ -60,15 +60,24 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
             // pinning the gate open — the same absorption the fingerprint gives, paid once at
             // the write instead of per-frame over the whole model.
-            let changed = match model.layout_inputs.get_mut(&h) {
+            //
+            // **And it NAMES its node** (decision 2114, completing 1625's migration). Dropping
+            // every anchor is a retarget whose NEW target list is empty, and both lists are right
+            // here — so the cached graph's edges get unlinked instead of thrown away. Left on the
+            // conservative touch, this was the one recurring `[layout-derive]` site in a live
+            // hover sweep: `Bagnon_AnchorTooltip` opens with `GameTooltip:ClearAllPoints()` and
+            // then asks `frame:GetLeft()`, so the whole graph was re-derived INSIDE the handler,
+            // once per hovered item, and billed to `[ui-handlers]`' `OnEnter`.
+            let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
                 Some(input) if !input.anchors.is_empty() => {
+                    let old = input.anchors.iter().map(|a| a.relative_to).collect();
                     input.anchors.clear();
-                    true
+                    Some(old)
                 }
-                _ => false,
+                _ => None,
             };
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_frame(h, &old, &[]);
             }
             Ok(())
         })?,
@@ -200,23 +209,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    m.set(
-        "SetSize",
-        lua.create_function(|lua, (this, w, ht): (Table, f32, f32)| {
-            let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let input = model.layout_inputs.entry(h).or_default();
-            let changed =
-                input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-            input.width = w;
-            input.height = ht;
-            if changed {
-                model.touch_layout_frame(h);
-            }
-            model.note_authored_size(h);
-            Ok(())
-        })?,
-    )?;
+    // **No `SetSize`.** It is an Era geometry verb, in neither the Frame nor the Region method
+    // table of 1.12 — and neither the stock chain nor either addon corpus writes it (decision
+    // 2142's census). The two setters above are the era's whole size surface.
     m.set(
         "GetWidth",
         lua.create_function(|lua, this: Table| {
@@ -361,7 +356,7 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
 /// `GetWidth`/`GetHeight`: the resolved rect's span in LOCAL units (screen ÷ effective scale — the
 /// client returns the value as authored, and `SetWidth(w)` on a scaled frame resolves to `w·scale`
 /// screen px) if `resolve` has produced one, else the explicit size the frame was given
-/// (`SetWidth`/`SetHeight`/`SetSize`, already local) — matching the client's "0 = derive".
+/// (`SetWidth`/`SetHeight`, already local) — matching the client's "0 = derive".
 fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
     if let Some(r) = model.resolved.get(&h) {
         let span = if width { r.width() } else { r.height() };
@@ -430,7 +425,7 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
                     .frame(h)
                     .and_then(|f| f.name.clone())
                     .unwrap_or_else(|| "<anonymous>".into());
-                model.warnings.push(format!(
+                model.record_warning(format!(
                     "SetPoint({who}): relativeTo '{}' does not resolve — anchored to the parent",
                     nt.name
                 ));

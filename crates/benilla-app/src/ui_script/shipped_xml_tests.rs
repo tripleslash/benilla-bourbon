@@ -681,7 +681,9 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     // — so XML comment blocks are tracked across lines and Lua `--` lines are dropped.
     fn sink_literals(line: &str) -> Vec<&str> {
         let mut out = Vec::new();
-        for sink in [":SetText(", ":SetFormattedText(", ":SetButtonText("] {
+        // `:SetFormattedText(` used to sit between these two and never could have matched —
+        // it is not a 1.12 verb, so no shipped script writes it (2142 retired ours).
+        for sink in [":SetText(", ":SetButtonText("] {
             let mut rest = line;
             while let Some(at) = rest.find(sink) {
                 rest = &rest[at + sink.len()..];
@@ -1526,5 +1528,364 @@ fn the_shipped_manifest_opens_the_macro_icon_picker() {
         s.eval::<bool>("return MacroPopupFrame:IsShown() and true or false")
             .unwrap(),
         "the picker is up"
+    );
+}
+
+/// **The reference's own Interface Options window is on the manifest, and it stays HIDDEN**
+/// (decision 2115) — the whole shape of that record, asserted in one place.
+///
+/// Four claims, and each one has a way to fail that nothing else here would catch:
+///
+/// 1. **`UIOptionsFrame` is the reference's frame, not an alias onto ours.** The alias
+///    (`UIOptionsFrame = OptionsFrame`) is what this replaces, and under it every one of these
+///    reads would have succeeded while pointing at the window the player opens — pfUI's skin does
+///    `UIOptionsFrame:SetWidth(1024)`. So the test asks for the reference's own CHILDREN, which an
+///    alias could never grow.
+/// 2. **It is never shown.** `hidden="true"` is the stock file's own attribute and nothing of ours
+///    may `Show()` it.
+/// 3. **`UIOptionsFrameCheckButtons` carries the five rows `MultiActionBars.lua:10` writes** —
+///    which IS the load-order proof. That file writes them at its own load, under the reference's
+///    own comment *"Hack to get around load order dependencies"*, so the rows are there only if
+///    the options window's manifest row sits above the bars', as `FrameXML.toc` l.21 vs l.39 has
+///    it. Reorder the manifest and this is what goes red.
+/// 4. **Ours is still the player's.** `GameMenuButtonOptions` opens `OptionsFrame`.
+#[test]
+fn the_stock_interface_options_window_loads_hidden_and_ours_is_still_the_players() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefive".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+
+    // 1 · the reference's own frame, by the children only it declares.
+    for name in [
+        "UIOptionsFrame",
+        "UIOptionsFrameTitle",
+        "UIOptionsFrameTab1",
+        "UIOptionsFrameTab2",
+        "UIOptionsFrameOkay",
+        "UIOptionsFrameCancel",
+        "UIOptionsFrameDefaults",
+        "UIOptionsFrameResetTutorials",
+        "UIOptionsFrameCheckButton1",
+        "UIOptionsFrameCheckButton69",
+        "UIOptionsFrameSlider1",
+        "UIOptionsFrameSlider4",
+        "UIOptionsFrameClickCameraDropDown",
+        "UIOptionsFrameCameraDropDown",
+        "UIOptionsFrameTargetofTargetDropDown",
+        "UIOptionsFrameCombatTextDropDown",
+        "BasicOptions",
+        "BasicOptionsGeneral",
+        "BasicOptionsDisplay",
+        "BasicOptionsCamera",
+        "BasicOptionsHelp",
+        "AdvancedOptions",
+        "AdvancedOptionsActionBars",
+        "AdvancedOptionsChat",
+        "AdvancedOptionsRaid",
+        "AdvancedOptionsCombatText",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return getglobal({name:?}) ~= nil"))
+                .unwrap(),
+            "{name} — pfUI's options-interface skin walks every one of these"
+        );
+    }
+    assert!(
+        s.eval::<bool>("return UIOptionsFrame ~= OptionsFrame")
+            .unwrap(),
+        "the alias is gone: the stock frame is its own frame, not ours under a second name"
+    );
+
+    // 2 · …and hidden, by its own file's attribute.
+    assert!(
+        !s.eval::<bool>("return UIOptionsFrame:IsShown()").unwrap(),
+        "the stock window must never be on screen"
+    );
+
+    // 3 · the order proof.
+    let rows: Vec<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for _, k in ipairs({ \"SHOW_MULTIBAR1_TEXT\", \"SHOW_MULTIBAR2_TEXT\", \
+                 \"SHOW_MULTIBAR3_TEXT\", \"SHOW_MULTIBAR4_TEXT\", \"ALWAYS_SHOW_MULTIBARS_TEXT\" }) do \
+                 local row = UIOptionsFrameCheckButtons[k] \
+                 if row and row.func and row.setFunc then table.insert(out, k) end \
+             end \
+             return out",
+        )
+        .expect("UIOptionsFrameCheckButtons is a table with rows");
+    assert_eq!(
+        rows.len(),
+        5,
+        "MultiActionBars.lua:10 writes five rows into UIOptionsFrameCheckButtons at ITS load, so \
+         the options window's manifest row must sit above the bars' — got {rows:?}"
+    );
+
+    // 4 · ours is still the window the ESC menu opens.
+    assert_eq!(
+        s.eval::<String>(
+            "return GameMenuButtonOptions:GetScript(\"OnClick\") and \"bound\" or \"\""
+        )
+        .unwrap(),
+        "bound"
+    );
+    s.run("GameMenuButtonOptions:Click()").unwrap();
+    assert!(
+        s.eval::<bool>("return OptionsFrame:IsShown()").unwrap(),
+        "the player's Options button opens OUR window"
+    );
+    assert!(
+        !s.eval::<bool>("return UIOptionsFrame:IsShown()").unwrap(),
+        "…and never the stock one"
+    );
+}
+
+/// **The reference's own Sound Options window is on the manifest, HIDDEN, and the alias is gone**
+/// — 2115's argument applied to the window its §9 handed over.
+///
+/// Four claims, each with its own way to fail:
+///
+/// 1. **`SoundOptionsFrame` is the reference's frame, not an alias onto ours.** This one is not
+///    the interface window's story repeated: our `OptionsFrame.xml` loads *after* the stock file,
+///    so `SoundOptionsFrame = OptionsFrame` would not have sat beside the real frame — it would
+///    have **clobbered** it, and pfUI's `options-sound.lua` would then have stripped textures off
+///    and re-anchored the window the player opens. The check is the reference's own CHILDREN,
+///    which an alias could never grow, plus the identity itself.
+/// 2. **It is never shown** — `hidden="true"` at the stock file's own xml l.18.
+/// 3. **`SoundOptionsFrame_Load()` runs clean**, which is the Sound window's counterpart to the
+///    interface window's `cameraYawMoveSpeed` hole: its `_Load` reaches
+///    `slider:SetValue(value.initialValue)` for four sliders, and all four of their CVars are
+///    registered. The three check-button CVars that were missing are built now too, so the walk
+///    has nothing to trip on.
+/// 4. **Ours is still the player's** — the ESC menu's Options button opens `OptionsFrame`, and
+///    neither stock window.
+#[test]
+fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefive".into()),
+            level: 60,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+
+    // 1 · the reference's own frame, by the children only it declares — and this list IS the set
+    // pfUI's `skins/blizzard/options-sound.lua` walks (there is deliberately no CheckButton3 in
+    // the stock file; pfUI's own `if btn then` guard handles the hole).
+    for name in [
+        "SoundOptionsFrame",
+        "SoundOptionsFrameHeader",
+        "SoundOptionsFrameOkay",
+        "SoundOptionsFrameCancel",
+        "SoundOptionsFrameDefaults",
+        "SoundOptionsFrameCheckButton1",
+        "SoundOptionsFrameCheckButton2",
+        "SoundOptionsFrameCheckButton4",
+        "SoundOptionsFrameCheckButton8",
+        "SoundOptionsFrameSlider1",
+        "SoundOptionsFrameSlider4",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return getglobal({name:?}) ~= nil"))
+                .unwrap(),
+            "{name} — pfUI's options-sound skin walks every one of these"
+        );
+    }
+    assert!(
+        s.eval::<bool>("return SoundOptionsFrame ~= OptionsFrame")
+            .unwrap(),
+        "the alias is gone — and because OUR file loads later, an alias would have CLOBBERED the \
+         real frame rather than merely shadowed it"
+    );
+    assert!(
+        s.eval::<bool>("return SoundOptionsFrameCheckButton3 == nil")
+            .unwrap(),
+        "the stock file declares 1,2,4..8 — a CheckButton3 here means this is not that file"
+    );
+
+    // 2 · …and hidden, by its own file's attribute.
+    assert!(
+        !s.eval::<bool>("return SoundOptionsFrame:IsShown()")
+            .unwrap(),
+        "the stock Sound window must never be on screen"
+    );
+
+    // 3 · `_Load` runs clean, and every CVar its two tables name answers.
+    s.run("this = SoundOptionsFrameOkay SoundOptionsFrame_Load()")
+        .expect("_Load runs to completion");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let unbacked: Vec<String> = s
+        .eval(
+            "local out = {} \
+             for _, v in ipairs(SoundOptionsFrameSliders) do \
+                 if GetCVar(v.cvar) == nil then table.insert(out, v.cvar) end \
+             end \
+             for _, v in ipairs(SoundOptionsFrameCheckButtons) do \
+                 if v.cvar and GetCVar(v.cvar) == nil then table.insert(out, v.cvar) end \
+             end \
+             return out",
+        )
+        .expect("read the Sound window's own two tables");
+    assert!(
+        unbacked.is_empty(),
+        "these Sound-window CVars answer nil: {unbacked:?} — a SLIDER among them is a live raise"
+    );
+
+    // 4 · ours is still the window the ESC menu opens.
+    s.run("GameMenuButtonOptions:Click()").unwrap();
+    assert!(
+        s.eval::<bool>("return OptionsFrame:IsShown()").unwrap(),
+        "the player's Options button opens OUR window"
+    );
+    assert!(
+        !s.eval::<bool>("return SoundOptionsFrame:IsShown()")
+            .unwrap(),
+        "…and never the stock Sound one"
+    );
+
+    // The alias's two stock consumers still answer correctly WITHOUT it: both read all three
+    // window names unguarded in one `or` chain, and that chain already contains
+    // `OptionsFrame:IsVisible()` — this frame's own name. Ours is open here, so both say yes.
+    assert!(
+        s.eval::<bool>("return IsOptionFrameOpen() and true or false")
+            .unwrap(),
+        "UIParent.lua:997 must still see an open options window with the alias retired"
+    );
+}
+
+/// **pfUI's `UIOptionsFrame_Save()` path runs clean, and `_Load()` stops at exactly one thing**
+/// (decision 2115).
+///
+/// pfUI's `modules/gui.lua` l.146-148 wraps a GVAR checkbox's write in
+/// `UIOptionsFrame_Load()` … `UIOptionsFrame_Save()`, so both are reached at runtime by a real
+/// addon and both had to be more than nil.
+///
+/// **Both run clean now.** 2115 shipped this test asserting that `_Load` *raised* — pinning the
+/// gap rather than hiding it, and saying in as many words that "the day something registers it,
+/// THIS assertion goes red and gets deleted". That day is this change: `UIOptionsFrameSliders`
+/// row 3 is `cameraYawMoveSpeed`, `_Load` does `slider:SetValue(GetCVar(value.cvar))`, and
+/// `Slider:SetValue` is a shape-A binding (`0x790980`, wow-re `numeric-arg-coercion-law.md`) that
+/// raises on a nil in the reference too. All four slider CVars are registered, so the walk reaches
+/// its end — and `_SetDefaults`, which does the same through `GetCVarDefault`, with it.
+#[test]
+fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefive".into()),
+            level: 60,
+            // **The player has a CLASS, because a real one always does** — and `_Load`'s tail
+            // needs it: `UIOptionsFrame_UpdateDependencies` (lua l.759-763) does
+            // `local temp, class = UnitClass("player"); class = strupper(class)` to decide whether
+            // the combo-point combat-text box applies, and `strupper(nil)` raises. It could not be
+            // reached before, because `_Load` died at slider 3 forty lines earlier — so this is
+            // 2115 §10's lesson a second time, in the same window: a probe VM that runs the stock
+            // interface has to be a VM the stock interface's own assumptions hold in. Warrior
+            // rather than Rogue/Druid so the DISABLE branch runs, which is the one with a call in
+            // it (`OptionsFrame_DisableCheckBox`).
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    assert!(super::load_default_ui(&s).is_empty());
+
+    // The Okay path, whole: 69 check buttons, four sliders, four dropdowns, the multibar toggles
+    // and the combat-text tail. Driven through the reference's OWN caller — `UIOptionsFrameOkay`'s
+    // `<OnClick>` (xml l.1205-1209) — rather than as a bare call, and that is not ceremony: the
+    // `SHOW_PARTY_PETS` arm reaches `RefreshBuffs`, whose first act is `this.hasDispellable = nil`
+    // (`BuffFrame.lua:266`), so the reference's ambient handler global has to be set. It is, at
+    // every real call site: the Okay button here, and pfUI's own checkbox on its GVAR path.
+    // **`_Load` first, because that is the window's own order** — the reference loads on show and
+    // saves on Okay, and driving Okay over a window nothing had loaded is what made an earlier cut
+    // of this test read a slider floor back out of the CVar. It also makes the Okay run below
+    // exercise a *populated* window, which is strictly the better coverage.
+    s.run("this = UIOptionsFrameOkay UIOptionsFrame_Load()")
+        .expect("_Load runs to completion — every slider CVar it reads is registered");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The four slider CVars, by the file's own table rather than by a list retyped here: every one
+    // must answer, because a single nil among them puts the raise back.
+    let unbacked: Vec<String> = s
+        .eval(
+            "local out = {} \
+             for _, v in ipairs(UIOptionsFrameSliders) do \
+                 if GetCVar(v.cvar) == nil then table.insert(out, v.cvar) end \
+             end \
+             return out",
+        )
+        .expect("read UIOptionsFrameSliders");
+    assert!(
+        unbacked.is_empty(),
+        "these slider CVars answer nil, and `_Load` raises on the first of them: {unbacked:?}"
+    );
+
+    // …and the walk really did reach slider 3 rather than stopping short of it: the Mouse Look
+    // Speed slider is sitting on `cameraYawMoveSpeed`'s registered 180. Slider 3 is the one that
+    // matters — it is the row whose nil raised, forty lines into a walk of 69 check buttons.
+    let slider3: f64 = s
+        .eval("return UIOptionsFrameSlider3:GetValue()")
+        .expect("the Mouse Look Speed slider's value");
+    assert!(
+        (slider3 - 180.0).abs() < 0.001,
+        "slider 3 should carry cameraYawMoveSpeed's registered 180, got {slider3}"
+    );
+
+    // `_SetDefaults` is the same walk through `GetCVarDefault`, and it had the same raise.
+    s.run("this = UIOptionsFrameDefaults UIOptionsFrame_SetDefaults()")
+        .expect("_SetDefaults runs to completion too");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The Okay path, over the window `_Load` just populated. Driven through the reference's OWN
+    // caller — `UIOptionsFrameOkay`'s `<OnClick>` (xml l.1205-1209) — rather than as a bare call,
+    // and that is not ceremony: the `SHOW_PARTY_PETS` arm reaches `RefreshBuffs`, whose first act
+    // is `this.hasDispellable = nil` (`BuffFrame.lua:266`), so the reference's ambient handler
+    // global has to be set. It is, at every real call site: the Okay button here, and pfUI's own
+    // checkbox on its GVAR path.
+    s.run("UIOptionsFrameOkay:Click()")
+        .expect("the stock Okay button's own handler");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        !s.eval::<bool>("return UIOptionsFrame:IsShown()").unwrap(),
+        "…and the window it hides on the way out was hidden to begin with"
+    );
+
+    // **`_Save` writes the two move-speed CVars for real now**, which is the other half of the
+    // wiring and was a silent no-op before they were registered: it writes the yaw slider's value
+    // and, beside it, `cameraPitchMoveSpeed = value / 2` (lua l.355-356) — the relation the
+    // reference's own registered defaults confirm, 180 and 90.
+    let (yaw, pitch): (f64, f64) = (
+        s.eval(r#"return tonumber(GetCVar("cameraYawMoveSpeed"))"#)
+            .expect("yaw move speed"),
+        s.eval(r#"return tonumber(GetCVar("cameraPitchMoveSpeed"))"#)
+            .expect("pitch move speed"),
+    );
+    assert!(
+        (yaw - 180.0).abs() < 0.001 && (pitch - 90.0).abs() < 0.001,
+        "_Save should write the slider's 180 and its half; got yaw={yaw} pitch={pitch}"
     );
 }

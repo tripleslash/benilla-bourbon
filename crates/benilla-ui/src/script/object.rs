@@ -262,7 +262,7 @@ fn enum_token(s: &str) -> String {
 /// The reference's strata NAME table (`0x8119f8`) has eight rows, `BACKGROUND`..`TOOLTIP`; stratum
 /// 0 (`WORLD`) has no name and no XML or Lua can put a frame there — the WorldFrame's constructor
 /// is its only writer (decision 1984, wow-re `worldframe-widget.md` §4).
-fn strata_from_str(s: &str) -> Option<Strata> {
+pub(crate) fn strata_from_str(s: &str) -> Option<Strata> {
     Some(match enum_token(s).as_str() {
         "BACKGROUND" => Strata::Background,
         "LOW" => Strata::Low,
@@ -479,8 +479,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The modifier-key mirror ([`UiScript::set_modifiers`], fed by the app's input pass before
     // any mouse event each frame) — the reference handlers fork on these at click time
     // (ContainerFrame.lua's shift-split / ctrl-dressup, ActionBarFrame.xml's shift-pickup,
-    // SpellBookFrame.lua's shift-pickup). Era booleans, not 1.12's 1/nil — the house API target
-    // (decision 0068); every transcribed `if IsShiftKeyDown()` reads both identically.
+    // SpellBookFrame.lua's shift-pickup).
+    //
+    // **1/nil, not a Lua boolean.** These three shipped Era booleans on 0068's reasoning that
+    // "every transcribed `if IsShiftKeyDown()` reads both identically" — true while we wrote every
+    // caller, and false the day real 1.12 addons load (1188/1751). `ColorPickerPlus.lua:121` is
+    // `if IsShiftKeyDown() == 1 then`, and a `true` reads there as "not held" (decision 2118).
     for (name, pick) in [
         ("IsShiftKeyDown", 0usize),
         ("IsControlKeyDown", 1),
@@ -491,7 +495,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, ()| {
                 let model = lua.app_data_ref::<Model>().expect("model");
                 let m = [model.modifiers.0, model.modifiers.1, model.modifiers.2];
-                Ok(m[pick])
+                Ok(crate::script::binding_abi::flag(m[pick]))
             })?,
         )?;
     }
@@ -648,7 +652,7 @@ pub(super) fn create_frame(
     if template.is_none() {
         if let Some(v) = inherits.as_ref().filter(|v| !v.is_nil()) {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.warnings.push(format!(
+            model.record_warning(format!(
                 "CreateFrame: the 4th argument (inherits) must be a template-name string, got {}; \
                  ignored for '{}'",
                 v.type_name(),
@@ -723,7 +727,9 @@ pub(super) fn create_frame(
         let messages = crate::loader::apply_template(lua, &wrapper, &kind, &template);
         if !messages.is_empty() {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.warnings.extend(messages);
+            for m in messages {
+                model.record_warning(m);
+            }
         }
     }
     Ok(wrapper)

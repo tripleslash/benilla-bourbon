@@ -61,7 +61,17 @@ pub(super) fn drive(
                 descent: player.fall_start_y - player.pos.y,
             });
         }
-        cam_pivot_target = pivot_target(pivot, net_entity, player.mount_seat_lift);
+        // The camera's framing-pivot target, taken off the same word the body pitch above reads:
+        // `0x50f880` selects the swim preset on the CAMERA TARGET's own MOVEFLAG_SWIMMING, and the
+        // camera target is this driven body (0041/1277). Reading the flag word rather than the
+        // `swimming` argument keeps the pitch and the pivot on one source, which is what stops them
+        // ever disagreeing about which frame the water started.
+        cam_pivot_target = pivot_target(
+            pivot,
+            net_entity,
+            player.mount_seat_lift,
+            move_flags_now & crate::creature_anim::move_flags::SWIMMING != 0,
+        );
         if let Some(mut motion) = motion {
             // A swimmer's stroke rate takes the flag-scalar directional speed (full rate at
             // any pitch — a vertical climb must not freeze the stroke); the ground gaits
@@ -94,6 +104,12 @@ pub(super) fn drive(
 /// The camera pivot's **target** height for a driven body: its model-local [`CameraPivot`] × the
 /// body's raw `OBJECT_FIELD_SCALE_X`, clamped — or `None` before its model has attached.
 ///
+/// `swimming` is the body's own MOVEFLAG_SWIMMING, and it picks the preset exactly as `0x50f880`
+/// does (`0x50f89e test [[unit+0x118]+0x40],0x200000` → `cam+0x124`): the framing pivot sits lower
+/// on a swimmer by the model's [`CameraPivot::swim_drop_local`]. Nothing here glides — the preset is
+/// a step function of the flag, and [`super::camera::PivotGlide`] is what walks the channel between
+/// two of them, so entering the water reads as one smooth dip for free.
+///
 /// `None` is the load-bearing half. The reference recomputes the pivot preset only on a model event
 /// and *skips the camera update entirely* while the model is unresolved (`0x50e907`), so a
 /// display swap reads as a brief hold and then one glide. Aiming the channel at a placeholder height
@@ -114,16 +130,24 @@ pub(super) fn pivot_target(
     pivot: Option<&CameraPivot>,
     net: Option<&crate::net::NetEntity>,
     mount_seat_lift: Option<f32>,
+    swimming: bool,
 ) -> Option<f32> {
     let scale = net.map_or(1.0, |n| n.scale);
     pivot.map(|p| match mount_seat_lift {
-        None => model_pivot_height(p, scale),
+        None => model_pivot_height(p, scale, swimming),
         // **The clamp is on the TOTAL, not on the model-relative half.** `0x50ca90` adds the
         // saddle into all three presets at `0x50cf77`-`0x50cf9e` and only then runs its per-preset
         // `[5/6, 15]` clamp at `0x50cfa4`. Clamping the halves separately floors the rider's own
         // Mount-pose height — which is BELOW 5/6 on a gnome (0.67) — and then adds the saddle on
         // top of the floored value, riding ~0.17 yd high on exactly the race where the correction
         // matters most.
+        //
+        // **`swimming` does not reach this arm**, and that is the reference's shape rather than a
+        // simplification: `0x50cba8` forces animation 91 on any unit whose
+        // `UNIT_FIELD_MOUNTDISPLAYID` is set, *overriding* the posture the swim preset belongs to,
+        // and [`CameraPivot::swim_drop_local`] is a `Stand`-vs-`Swim` delta that says nothing about
+        // a Mount-pose box. A mounted swimmer is unreachable in 1.12 anyway — deep water dismounts
+        // you — so subtracting a Stand-relative drop here would only mis-measure the impossible.
         Some(seat) => super::camera::clamp_pivot_height(
             (p.height_local + p.mounted_delta_local) * scale + seat,
         ),
