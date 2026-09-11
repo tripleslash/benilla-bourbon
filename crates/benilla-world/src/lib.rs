@@ -171,6 +171,7 @@ pub mod skybox;
 pub mod ssilvb;
 pub mod static_gx;
 pub mod static_merge;
+pub mod straddle;
 pub mod sun;
 pub mod surface;
 pub mod terrain_stream;

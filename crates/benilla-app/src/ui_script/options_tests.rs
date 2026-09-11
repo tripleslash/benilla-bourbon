@@ -110,7 +110,8 @@ fn the_menu_options_button_swaps_the_menu_for_the_options_window() {
 
     s.run("GameMenuButtonOptions:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap(),
+        s.eval::<bool>("return BenillaOptionsFrame:IsVisible()")
+            .unwrap(),
         "the options window opened"
     );
     assert!(
@@ -118,7 +119,7 @@ fn the_menu_options_button_swaps_the_menu_for_the_options_window() {
         "…and the menu went away first"
     );
     assert!(
-        s.eval::<bool>("return GetCenterFrame():GetName() == \"OptionsFrame\"")
+        s.eval::<bool>("return GetCenterFrame():GetName() == \"BenillaOptionsFrame\"")
             .unwrap(),
         "the window holds the native-center slot the menu vacated"
     );
@@ -133,21 +134,21 @@ fn the_menu_options_button_swaps_the_menu_for_the_options_window() {
 #[test]
 fn controls_is_the_default_category_and_the_title_reads_it() {
     let s = harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     assert_eq!(
-        s.eval::<String>("return OptionsFrame.selectedCategory")
+        s.eval::<String>("return BenillaOptionsFrame.selectedCategory")
             .unwrap(),
         "Controls"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Controls"
     );
     // The row labels are the era category tree's.
     assert_eq!(
-        s.eval::<String>("return OptionsFrameCategoryListRowActionBars:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameCategoryListRowActionBars:GetText()")
             .unwrap(),
         "Action Bars"
     );
@@ -159,26 +160,26 @@ fn controls_is_the_default_category_and_the_title_reads_it() {
 #[test]
 fn clicking_a_row_moves_the_selection_and_the_page_title() {
     let s = harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
-        s.eval::<String>("return OptionsFrame.selectedCategory")
+        s.eval::<String>("return BenillaOptionsFrame.selectedCategory")
             .unwrap(),
         "Graphics"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Graphics"
     );
 
     // Close and reopen: still Graphics, not Controls.
-    s.run("HideUIPanel(OptionsFrame)").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Graphics"
     );
@@ -196,10 +197,12 @@ fn clicking_a_row_moves_the_selection_and_the_page_title() {
 fn the_close_button_hides_the_window() {
     let mut s = harness();
 
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     let _ = s.take_sounds();
-    s.run("OptionsFrameCloseButton:Click()").unwrap();
-    assert!(!s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap());
+    s.run("BenillaOptionsFrameCloseButton:Click()").unwrap();
+    assert!(!s
+        .eval::<bool>("return BenillaOptionsFrame:IsVisible()")
+        .unwrap());
     assert!(s
         .take_sounds()
         .contains(&SoundRequest::KitName("igMainMenuClose".into())));
@@ -207,7 +210,7 @@ fn the_close_button_hides_the_window() {
     // No corner X (0989's directed cut — the era HAS one; the red button and ESC are the
     // window's exits).
     assert!(s
-        .eval::<bool>("return OptionsFrameClosePanelButton == nil")
+        .eval::<bool>("return BenillaOptionsFrameClosePanelButton == nil")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -224,17 +227,17 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     // Pin the window at scale 1 so row rects and the pointer share coordinates (the fit
     // clamp stays out of the way at 1024x768: both ratios sit above 1).
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     // The plate seat: the era's 187x21, authored in the row OnLoad now that no
     // SetAtlas(name, true) sizes it.
     assert_eq!(
-        s.eval::<f64>("return OptionsFrameCategoryListRowControlsBg:GetWidth()")
+        s.eval::<f64>("return BenillaOptionsFrameCategoryListRowControlsBg:GetWidth()")
             .unwrap(),
         187.0
     );
     assert_eq!(
-        s.eval::<f64>("return OptionsFrameCategoryListRowControlsBg:GetHeight()")
+        s.eval::<f64>("return BenillaOptionsFrameCategoryListRowControlsBg:GetHeight()")
             .unwrap(),
         21.0
     );
@@ -272,7 +275,8 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     assert!(before[0].2, "the wash draws ADD — 1.14's alphaMode");
     assert!(gold(&before[0].1), "…in the locked gold: {:?}", before[0].1);
 
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     let after = washes(&mut s);
     assert_eq!(after.len(), 1, "the wash moved, not multiplied");
     assert!(gold(&after[0].1), "still the gold tint: {:?}", after[0].1);
@@ -286,16 +290,16 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     // Hover the now-unselected Controls row: its wash lights BLUE beside Audio's gold.
     let (cx, cy) = {
         let l: f32 = s
-            .eval("return OptionsFrameCategoryListRowControls:GetLeft()")
+            .eval("return BenillaOptionsFrameCategoryListRowControls:GetLeft()")
             .unwrap();
         let r: f32 = s
-            .eval("return OptionsFrameCategoryListRowControls:GetRight()")
+            .eval("return BenillaOptionsFrameCategoryListRowControls:GetRight()")
             .unwrap();
         let t: f32 = s
-            .eval("return OptionsFrameCategoryListRowControls:GetTop()")
+            .eval("return BenillaOptionsFrameCategoryListRowControls:GetTop()")
             .unwrap();
         let b: f32 = s
-            .eval("return OptionsFrameCategoryListRowControls:GetBottom()")
+            .eval("return BenillaOptionsFrameCategoryListRowControls:GetBottom()")
             .unwrap();
         ((l + r) * 0.5, (t + b) * 0.5)
     };
@@ -334,23 +338,23 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
 fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
     let mut s = harness();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
 
     let edge = |frame: &str, side: &str| -> f32 {
         s.eval(&format!("return {frame}:Get{side}()")).unwrap()
     };
     let (fl, fr, ft, fb) = (
-        edge("OptionsFrame", "Left"),
-        edge("OptionsFrame", "Right"),
-        edge("OptionsFrame", "Top"),
-        edge("OptionsFrame", "Bottom"),
+        edge("BenillaOptionsFrame", "Left"),
+        edge("BenillaOptionsFrame", "Right"),
+        edge("BenillaOptionsFrame", "Top"),
+        edge("BenillaOptionsFrame", "Bottom"),
     );
     let (dl, dr, dt, db) = (
-        edge("OptionsFrameGroundDim", "Left"),
-        edge("OptionsFrameGroundDim", "Right"),
-        edge("OptionsFrameGroundDim", "Top"),
-        edge("OptionsFrameGroundDim", "Bottom"),
+        edge("BenillaOptionsFrameGroundDim", "Left"),
+        edge("BenillaOptionsFrameGroundDim", "Right"),
+        edge("BenillaOptionsFrameGroundDim", "Top"),
+        edge("BenillaOptionsFrameGroundDim", "Bottom"),
     );
     for (name, inset) in [
         ("left", dl - fl),
@@ -401,39 +405,41 @@ fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
 #[test]
 fn search_reflows_live_rows_and_restores_the_page() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     s.resolve();
     let authored_top: f32 = s
-        .eval("return OptionsFrameContainerBodyAudioRowMaster:GetTop()")
+        .eval("return BenillaOptionsFrameContainerBodyAudioRowMaster:GetTop()")
         .unwrap();
 
-    s.run("OptionsFrameSearchBox:SetText(\"music\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"music\")")
+        .unwrap();
     // The search reflows off the box's `OnTextChanged`, which is deferred to the drain (1831).
     s.tick(0.0);
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Search Results"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerDefaults:IsVisible()")
+        !s.eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsVisible()")
             .unwrap(),
         "Defaults hides while the search holds the page (the era SetShown(not hasText))"
     );
     // One head — Audio's; the matches plus their pulled-in parent; nothing else.
     for (frame, shown) in [
-        ("OptionsFrameContainerBodySearchHeadAudio", true),
-        ("OptionsFrameContainerBodySearchHeadControls", false),
-        ("OptionsFrameContainerBodySearchHeadGraphics", false),
-        ("OptionsFrameContainerBodyAudioRowMusic", true),
-        ("OptionsFrameContainerBodyAudioRowEnableMusic", true),
-        ("OptionsFrameContainerBodyAudioRowMaster", true), // the parent, pulled in unmatched
-        ("OptionsFrameContainerBodyAudioRowSound", false),
-        ("OptionsFrameContainerBodyAudioRowEnableAll", false),
-        ("OptionsFrameContainerBodyControlsRowAutoLoot", false),
-        ("OptionsFrameContainerBodyGraphicsRowUiScale", false),
-        ("OptionsFrameContainerBodyNoResults", false),
+        ("BenillaOptionsFrameContainerBodySearchHeadAudio", true),
+        ("BenillaOptionsFrameContainerBodySearchHeadControls", false),
+        ("BenillaOptionsFrameContainerBodySearchHeadGraphics", false),
+        ("BenillaOptionsFrameContainerBodyAudioRowMusic", true),
+        ("BenillaOptionsFrameContainerBodyAudioRowEnableMusic", true),
+        ("BenillaOptionsFrameContainerBodyAudioRowMaster", true), // the parent, pulled in unmatched
+        ("BenillaOptionsFrameContainerBodyAudioRowSound", false),
+        ("BenillaOptionsFrameContainerBodyAudioRowEnableAll", false),
+        ("BenillaOptionsFrameContainerBodyControlsRowAutoLoot", false),
+        ("BenillaOptionsFrameContainerBodyGraphicsRowUiScale", false),
+        ("BenillaOptionsFrameContainerBodyNoResults", false),
     ] {
         assert_eq!(
             s.eval::<bool>(&format!("return {frame}:IsVisible()"))
@@ -445,10 +451,10 @@ fn search_reflows_live_rows_and_restores_the_page() {
     // The chain reads head → parent → the two matches, downward.
     s.resolve();
     let tops: Vec<f32> = [
-        "OptionsFrameContainerBodySearchHeadAudio",
-        "OptionsFrameContainerBodyAudioRowMaster",
-        "OptionsFrameContainerBodyAudioRowMusic",
-        "OptionsFrameContainerBodyAudioRowEnableMusic",
+        "BenillaOptionsFrameContainerBodySearchHeadAudio",
+        "BenillaOptionsFrameContainerBodyAudioRowMaster",
+        "BenillaOptionsFrameContainerBodyAudioRowMusic",
+        "BenillaOptionsFrameContainerBodyAudioRowEnableMusic",
     ]
     .iter()
     .map(|f| s.eval::<f32>(&format!("return {f}:GetTop()")).unwrap())
@@ -459,7 +465,7 @@ fn search_reflows_live_rows_and_restores_the_page() {
     );
     // The reflowed row is LIVE: moving the music slider writes its CVar mid-search.
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyAudioRowMusicControlSlider:SetValue(0.25)")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowMusicControlSlider:SetValue(0.25)")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -467,19 +473,19 @@ fn search_reflows_live_rows_and_restores_the_page() {
     );
 
     // Clearing restores the page view and the authored chain EXACTLY.
-    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"\")").unwrap();
     s.tick(0.0); // the clear reflows on the drain, like the search itself (1831)
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Audio"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsVisible()")
         .unwrap());
     s.resolve();
     let restored_top: f32 = s
-        .eval("return OptionsFrameContainerBodyAudioRowMaster:GetTop()")
+        .eval("return BenillaOptionsFrameContainerBodyAudioRowMaster:GetTop()")
         .unwrap();
     assert!(
         (restored_top - authored_top).abs() < 0.01,
@@ -494,15 +500,15 @@ fn search_reflows_live_rows_and_restores_the_page() {
 #[test]
 fn the_phrase_match_outranks_its_words() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameSearchBox:SetText(\"master volume\")")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"master volume\")")
         .unwrap();
     s.resolve();
     let tops: Vec<f32> = [
-        "OptionsFrameContainerBodyAudioRowMaster", // phrase hit, score 12
-        "OptionsFrameContainerBodyAudioRowSound",  // "VOLUME" hits, score 5, page order
-        "OptionsFrameContainerBodyAudioRowMusic",
-        "OptionsFrameContainerBodyAudioRowAmbience",
+        "BenillaOptionsFrameContainerBodyAudioRowMaster", // phrase hit, score 12
+        "BenillaOptionsFrameContainerBodyAudioRowSound",  // "VOLUME" hits, score 5, page order
+        "BenillaOptionsFrameContainerBodyAudioRowMusic",
+        "BenillaOptionsFrameContainerBodyAudioRowAmbience",
     ]
     .iter()
     .map(|f| s.eval::<f32>(&format!("return {f}:GetTop()")).unwrap())
@@ -519,54 +525,55 @@ fn the_phrase_match_outranks_its_words() {
 #[test]
 fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
     let mut s = harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    s.run("OptionsFrameSearchBox:SetText(\"volume\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"volume\")")
+        .unwrap();
     s.tick(0.0); // the head being clicked below is built by the search reflow, so drain first (1831)
-    s.run("OptionsFrameContainerBodySearchHeadAudio:Click()")
+    s.run("BenillaOptionsFrameContainerBodySearchHeadAudio:Click()")
         .unwrap();
     // The click clears the box synchronously; restoring the page rides that clear's
     // `OnTextChanged`, which the drain owes (1831).
     s.tick(0.0);
     assert_eq!(
-        s.eval::<String>("return OptionsFrameSearchBox:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameSearchBox:GetText()")
             .unwrap(),
         "",
         "the head click cleared the search (the era SelectCategory law)"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrame.selectedCategory")
+        s.eval::<String>("return BenillaOptionsFrame.selectedCategory")
             .unwrap(),
         "Audio"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerTitle:GetText()")
             .unwrap(),
         "Audio"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
 
-    s.run("OptionsFrameSearchBox:SetText(\"flibbertigibbet\")")
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"flibbertigibbet\")")
         .unwrap();
     s.tick(0.0); // the miss renders on the drain too (1831)
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyNoResults:IsVisible()")
         .unwrap());
     for head in ["Controls", "Audio", "Graphics"] {
         assert!(
             !s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodySearchHead{head}:IsVisible()"
+                "return BenillaOptionsFrameContainerBodySearchHead{head}:IsVisible()"
             ))
             .unwrap(),
             "no head on a miss"
         );
     }
-    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"\")").unwrap();
     s.tick(0.0); // and so does clearing it (1831)
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyNoResults:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -580,20 +587,21 @@ fn a_track_press_seats_the_thumb_and_keeps_dragging() {
     let mut s = harness_on(audio_harness());
     s.set_cvar_host("MasterVolume", "0.1");
     s.run("ERA_WINDOW_SCALE = 1").unwrap(); // pointer and rects share coordinates
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     let _ = s.take_cvar_changes();
 
     // The steppers are gone.
     for btn in ["Back", "Forward"] {
         assert!(s
             .eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyAudioRowMasterControl{btn} == nil"
+                "return BenillaOptionsFrameContainerBodyAudioRowMasterControl{btn} == nil"
             ))
             .unwrap());
     }
 
-    let slider = "OptionsFrameContainerBodyAudioRowMasterControlSlider";
+    let slider = "BenillaOptionsFrameContainerBodyAudioRowMasterControlSlider";
     s.resolve(); // seat the rects before reading them (the wash test's idiom)
     let (l, r, t, b) = (
         s.eval::<f32>(&format!("return {slider}:GetLeft()"))
@@ -653,7 +661,7 @@ fn a_track_press_seats_the_thumb_and_keeps_dragging() {
 #[test]
 fn a_slider_rows_readout_sits_on_its_labels_line() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     for (page, rows) in [
         ("Controls", &["RowMouseSpeed", "RowMaxCameraDistance"][..]),
         (
@@ -662,7 +670,7 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
         ),
         ("Graphics", &["RowUiScale", "RowFarclip"][..]),
     ] {
-        s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
+        s.run(&format!("BenillaOptionsFrameCategoryListRow{page}:Click()"))
             .unwrap();
         s.resolve(); // seat the rects before reading them
         let mid = |frame: &str| -> f32 {
@@ -671,7 +679,7 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
             (top + bottom) * 0.5
         };
         for row in rows {
-            let base = format!("OptionsFrameContainerBody{page}{row}");
+            let base = format!("BenillaOptionsFrameContainerBody{page}{row}");
             // The two strings are the assertion: same font, same row, one line. (Both are
             // regions, so both rects arrive in the same space — the comparison needs no scale.)
             let (label, value) = (
@@ -914,42 +922,48 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
     s.set_cvar_host("MusicVolume", "0.7");
     s.set_cvar_host("EnableMusic", "0");
     let s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
 
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The music slider holds the stored 0.7 (f32 wobble tolerated), readout "70%".
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyAudioRowMusicControlSlider:GetValue() - 0.7) < 0.0001"
+            "return math.abs(BenillaOptionsFrameContainerBodyAudioRowMusicControlSlider:GetValue() - 0.7) < 0.0001"
         )
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyAudioRowMusicControlValue:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyAudioRowMusicControlValue:GetText()"
+        )
+        .unwrap(),
         "70%"
     );
     // Checkboxes: EnableMusic off, the master (default "1") on.
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableMusicCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyAudioRowEnableMusicCheck:GetChecked()"
+        )
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableAllCheck:GetChecked()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyAudioRowEnableAllCheck:GetChecked()")
         .unwrap());
 
     // Off to another page: the Audio body goes away with the selection (the swap is what the
     // page loop does, and it is the reason a stale row can never be read from the wrong page).
-    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
+        .unwrap();
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChat:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyChat:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -960,24 +974,27 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
 #[test]
 fn a_slider_move_snaps_and_writes_the_cvar() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
 
     // An off-grid move (what a drag delivers) snaps to 0.45 and queues exactly that.
-    s.run("OptionsFrameContainerBodyAudioRowMasterControlSlider:SetValue(0.43)")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowMasterControlSlider:SetValue(0.43)")
         .unwrap();
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyAudioRowMasterControlSlider:GetValue() - 0.45) < 0.0001"
+            "return math.abs(BenillaOptionsFrameContainerBodyAudioRowMasterControlSlider:GetValue() - 0.45) < 0.0001"
         )
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyAudioRowMasterControlValue:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyAudioRowMasterControlValue:GetText()"
+        )
+        .unwrap(),
         "45%"
     );
     assert_eq!(
@@ -993,14 +1010,15 @@ fn a_slider_move_snaps_and_writes_the_cvar() {
 #[test]
 fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     let _ = s.take_cvar_changes();
     let _ = s.take_sounds();
 
     // Uncheck the master: flag "0" queued, ambience greyed, music left alive (the 1.12 quirk),
     // and the just-UNchecked box plays the CheckBoxOn kit (SoundOptionsFrame.lua verbatim).
-    s.run("OptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1008,18 +1026,20 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
     );
     assert!(!s
         .eval::<bool>(
-            "return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
+            "return BenillaOptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
         )
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableMusicCheck:IsEnabled() ~= 0")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyAudioRowEnableMusicCheck:IsEnabled() ~= 0"
+        )
         .unwrap());
     assert!(s
         .take_sounds()
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
 
     // Re-check: flag "1", ambience live again.
-    s.run("OptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1027,7 +1047,7 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
     );
     assert!(s
         .eval::<bool>(
-            "return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
+            "return BenillaOptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
         )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1040,18 +1060,19 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
 #[test]
 fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     let _ = s.take_cvar_changes();
 
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:GetChecked()"
+            "return BenillaOptionsFrameContainerBodyAudioRowBackgroundSoundCheck:GetChecked()"
         )
         .unwrap(),
         "the reference goes quiet in the background, so the box ships unticked"
     );
-    s.run("OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowBackgroundSoundCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1063,11 +1084,11 @@ fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
 
     // The master's rule greys Ambience and Error Speech and nothing else — this row stays live,
     // because "should the game be audible at all" is not the question it answers.
-    s.run("OptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
         .unwrap();
     assert!(s
         .eval::<bool>(
-            "return OptionsFrameContainerBodyAudioRowBackgroundSoundCheck:IsEnabled() ~= 0"
+            "return BenillaOptionsFrameContainerBodyAudioRowBackgroundSoundCheck:IsEnabled() ~= 0"
         )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1081,11 +1102,13 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     s.set_cvar_host("MusicVolume", "0.9");
     s.set_cvar_host("EnableMusic", "0");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     let _ = s.take_cvar_changes();
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     let changes = s.take_cvar_changes();
     assert!(
         changes.contains(&("MusicVolume".to_string(), "0.4".to_string())),
@@ -1098,11 +1121,15 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     // Only the MOVED values queue — the rows already at default write nothing.
     assert_eq!(changes.len(), 2, "{changes:?}");
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableMusicCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyAudioRowEnableMusicCheck:GetChecked()"
+        )
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyAudioRowMusicControlValue:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyAudioRowMusicControlValue:GetText()"
+        )
+        .unwrap(),
         "40%"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1118,59 +1145,64 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
     s.set_cvar_host("uiScale", "0.8");
     s.set_cvar_host("farclip", "297");
     let s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
 
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyGraphics:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyGraphics:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:GetValue() - 0.8) < 0.0001"
+            "return math.abs(BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:GetValue() - 0.8) < 0.0001"
         )
         .unwrap());
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
         "80%"
     );
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
+            "return math.abs(BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
         )
         .unwrap());
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
         "297"
     );
     // The labels are the 1.12 GlobalStrings' own.
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowUiScaleLabel:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleLabel:GetText()"
+        )
+        .unwrap(),
         "UI Scale"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowFarclipLabel:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipLabel:GetText()"
+        )
+        .unwrap(),
         "Terrain Distance"
     );
 
     // The swap, the other way: Audio in, Graphics out.
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyGraphics:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyGraphics:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1186,14 +1218,14 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
 /// would make "off" a lie.
 #[test]
 fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
-    const AO: &str = "OptionsFrameContainerBodyGraphicsRowAmbientOcclusion";
-    const GI: &str = "OptionsFrameContainerBodyGraphicsRowIndirectLight";
+    const AO: &str = "BenillaOptionsFrameContainerBodyGraphicsRowAmbientOcclusion";
+    const GI: &str = "BenillaOptionsFrameContainerBodyGraphicsRowIndirectLight";
     let mut s = audio_harness();
     s.set_cvar_host("ssaoStrength", "0.5");
     s.set_cvar_host("ssgiStrength", "0.25");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
 
     for (row, want, text) in [(AO, 0.5, "50%"), (GI, 0.25, "25%")] {
@@ -1247,7 +1279,7 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
         "0%"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
             .unwrap(),
         "a live row stages nothing, so no Apply button"
     );
@@ -1270,12 +1302,12 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
 /// loses the player's click, which is exactly the failure a "restart required" setting invites.
 #[test]
 fn the_updated_character_models_box_writes_its_cvar_on_the_click() {
-    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowHdModels";
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowHdModels";
     let mut s = audio_harness();
     s.set_cvar_host("hdCharacterModels", "0");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
@@ -1320,14 +1352,14 @@ fn the_updated_character_models_box_writes_its_cvar_on_the_click() {
 /// the one graphics row whose default is the *newer* behaviour rather than the reference's.
 #[test]
 fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
-    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowWaterDetail";
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowWaterDetail";
     let mut s = audio_harness();
     // Seed the 1.12.1 tier BEFORE the XML loads, so the capsule has something to read that is not
     // the registered default — a row that showed "Cataclysm" here would pass on a stuck widget.
     s.set_cvar_host("waterDetail", "0");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
@@ -1370,7 +1402,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
             .unwrap(),
@@ -1393,23 +1425,27 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     let mut s = audio_harness();
     s.set_cvar_host("gxVSync", "0");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
 
     // Read from the table, not from a restated default: the harness seeded it off.
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()"
+        )
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncLabel:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncLabel:GetText()"
+        )
+        .unwrap(),
         "Vertical Sync"
     );
     let _ = s.take_cvar_changes();
 
     // A click commits immediately — nothing stages it behind Apply.
-    s.run("OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1419,12 +1455,15 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
 
     // Defaults walks it back to the registered "1" — which `cvars::tests` welds to
     // `VideoConfig::default()`, and `video::tests` welds in turn to the window's boot mode.
-    s.run("OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
         .unwrap();
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()"
+        )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1432,15 +1471,91 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
 /// Environment Detail is the reference's own slider (1649): 0..2 step 1 over `WorldDetail`, with
 /// 0992's Low/Medium/High names kept in the readout seat — a groove whose readout says "1" tells a
 /// player nothing. Dragging writes the CVar; a value from outside the range shows the nearest stop
+/// **The Brightness slider actually writes** (decision 2182, and the bug that shipped with it).
+///
+/// This row is the kit's first slider whose store is an engine PAIR rather than a CVar or a
+/// saved-variable global — 1.12's own arrangement for its slider 6 — and
+/// `OptionsSlider_OnValueChanged` guarded its write on `row.cvar or row.uvar`, two of the kit's
+/// three stores. So dragging it moved the READOUT and wrote nothing: the control looked alive, the
+/// picture never changed, and reopening the window re-read an untouched CVar and snapped back to
+/// the centre. No error anywhere, on any path.
+///
+/// The shipped test missed it by calling `SetGamma` directly and checking the row's *wiring* — the
+/// bounds, the numeric flag, the readout at the default. Everything it asserted was true. What it
+/// never did was move the slider, which is the only thing a player does. So this one drags.
+#[test]
+fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() {
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let s = audio_harness();
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Brightness"
+    );
+    // The registered `gamma = "1.0"` is `GetGamma() == 0`, the centre of the stock slider's
+    // travel — and selecting the page must not write it back.
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "50%"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the pair on select must not write it back"
+    );
+
+    // **A drag to each end WRITES.** The value is the reference's own `1 - slider`, six decimals,
+    // because `SetGamma` owns the formatting — this is the assertion the shipped test lacked.
+    for (slider, cvar, readout) in [
+        (0.5, "0.500000", "100%"),
+        (-0.5, "1.500000", "0%"),
+        (0.2, "0.800000", "70%"),
+    ] {
+        s.run(&format!("{ROW}ControlSlider:SetValue({slider})"))
+            .unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![("gamma".to_string(), cvar.to_string())],
+            "dragging to {slider} must reach the store"
+        );
+        assert_eq!(
+            s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+                .unwrap(),
+            readout
+        );
+    }
+
+    // **And it comes back.** Leaving the page and returning re-reads the pair rather than the
+    // control, which is the half the player sees as "it didn't save": the row was left at 0.2.
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "70%",
+        "the reopened page reads the store, not the registered default"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "…and the refresh itself writes nothing"
+    );
+}
+
 /// and writes nothing back (0959's out-of-range law).
 #[test]
 fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
-    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowWorldDetail";
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowWorldDetail";
     let mut s = audio_harness();
     s.set_cvar_host("WorldDetail", "0");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
@@ -1489,7 +1604,7 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
     // displays the NEAREST stop — 0959's out-of-range law — and writes nothing back.
     s.set_cvar_host("WorldDetail", "-1");
     s.take_cvar_changes();
-    s.run("OptionsFrameCategoryListRowAudio:Click(); OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click(); BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
@@ -1601,14 +1716,14 @@ fn a_world_entry_leaves_the_saved_nameplate_setting_alone() {
 #[test]
 fn the_nameplates_page_toggles_the_unit_name_cvars() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowNameplates:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
         .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyNameplates:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyNameplates:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The plate pair leads the page and rides `VPlateMode::default()`: since 1804 both are OFF,
     // which is the reference's own boot state (its bitmask starts clear and FrameXML's
@@ -1616,7 +1731,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     for row in ["RowEnemyPlates", "RowFriendlyPlates"] {
         assert!(
             !s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
+                "return BenillaOptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
             ))
             .unwrap(),
             "{row} defaults unchecked"
@@ -1626,7 +1741,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     // own "0" (1804 — the last two were director pins from 2026-07-12 until then).
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:GetChecked()"
+            "return BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:GetChecked()"
         )
         .unwrap(),
         "Player Names defaults checked"
@@ -1634,7 +1749,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     for row in ["RowNpcNames", "RowOwnName"] {
         assert!(
             !s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
+                "return BenillaOptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
             ))
             .unwrap(),
             "{row} defaults unchecked"
@@ -1644,13 +1759,13 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
 
     // The friendly plates row writes the bit the V/Shift-V pair writes — the same CVar, so the
     // window and the keys can never disagree about what is on.
-    s.run("OptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![(crate::vplates::CVAR_FRIENDS.to_string(), "1".to_string())]
     );
-    s.run("OptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1661,7 +1776,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     // Checking NPC Names queues the flag on and plays the ON kit; unchecking plays OFF (no quirk
     // here — the 1.12 interface panel's PlayClickSound mapping, not the sound panel's inverted
     // one).
-    s.run("OptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1670,7 +1785,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s
         .take_sounds()
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
-    s.run("OptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowNpcNamesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -1689,26 +1804,26 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
 #[test]
 fn the_ui_scale_slider_defers_to_the_apply_button() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
             .unwrap(),
         "no pending edit, no Apply button"
     );
 
     // Off-grid 0.787 snaps to 0.79 and the readout follows — but NOTHING queues; the Apply
     // button exists now (era shows and enables it together).
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.787)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.787)")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
         "79%"
@@ -1718,38 +1833,38 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
         "a deferred row must not write the CVar on the move"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsEnabled() ~= 0")
         .unwrap());
 
     // A second move re-stages the pending value — still nothing queues (0989: the steppers
     // are gone; a drag's SetValue is the remaining move).
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
         .unwrap();
     assert!(s.take_cvar_changes().is_empty());
 
     // Apply commits the LAST pending value, once, and the button goes away.
-    s.run("OptionsFrameApplyButton:Click()").unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("uiScale".to_string(), "0.8".to_string())]
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
 
     // A move away arms Apply; dragging back onto the committed value disarms it.
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.79)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.79)")
         .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
         .unwrap();
     assert!(!s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(
         s.take_cvar_changes().is_empty(),
@@ -1780,18 +1895,20 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     let mut s = audio_harness();
     s.set_cvar_host("renderScale", "1");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
 
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowRenderScaleLabel:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleLabel:GetText()"
+        )
+        .unwrap(),
         "Render Scale"
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
         )
         .unwrap(),
         "100%",
@@ -1802,7 +1919,7 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     // in front of someone who only wanted their frame rate back.
     assert!(s
         .eval::<bool>(
-            "local lo, hi = OptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:GetMinMaxValues()              return math.abs(lo - 0.5) < 0.0001 and math.abs(hi - 2.0) < 0.0001"
+            "local lo, hi = BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:GetMinMaxValues()              return math.abs(lo - 0.5) < 0.0001 and math.abs(hi - 2.0) < 0.0001"
         )
         .unwrap());
     // Not mute: the row resolves a description, unlike the other benilla-own rows.
@@ -1812,11 +1929,11 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     let _ = s.take_cvar_changes();
 
     // The move stages and shows Apply; it does NOT rebuild the render target.
-    s.run("OptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:SetValue(0.75)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:SetValue(0.75)")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
         )
         .unwrap(),
         "75%"
@@ -1826,17 +1943,17 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
         "a deferred row must not write the CVar on the move"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
 
     // Apply commits once.
-    s.run("OptionsFrameApplyButton:Click()").unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("renderScale".to_string(), "0.75".to_string())]
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1847,43 +1964,44 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
 #[test]
 fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
         .unwrap();
     let _ = s.take_cvar_changes();
 
     // Off to Audio: the Apply button stays (the pending edit is not page-scoped)…
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     // …and back: the slider shows the PENDING value, not the committed one.
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
         "70%"
     );
 
     // Hide discards (the era confirm dialog is cut): the reopened window reads the truth.
-    s.run("HideUIPanel(OptionsFrame)").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
         "90%"
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(
         s.take_cvar_changes().is_empty(),
@@ -1899,24 +2017,24 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
 #[test]
 fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
 
-    s.run("OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:SetValue(300)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlSlider:SetValue(300)")
         .unwrap();
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
+            "return math.abs(BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
         )
         .unwrap());
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
         "297"
@@ -1926,7 +2044,7 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
         vec![("farclip".to_string(), "297".to_string())]
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
             .unwrap(),
         "a live row stages nothing"
     );
@@ -1942,15 +2060,16 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
     s.set_cvar_host("uiScale", "0.8");
     s.set_cvar_host("farclip", "297");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     // Stage a pending edit too — Defaults must kill it, not commit it.
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
         .unwrap();
     let _ = s.take_cvar_changes();
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     let changes = s.take_cvar_changes();
     assert!(
         changes.contains(&("uiScale".to_string(), "0.9".to_string())),
@@ -1974,20 +2093,20 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
     // because its option sliders print no number; ours prints one, so the ladder shows.
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
         "357"
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
         "90%"
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -2001,28 +2120,36 @@ fn the_controls_page_reads_flags_with_the_sticky_inversion() {
     s.set_cvar_host("deselectOnClick", "0");
     s.set_cvar_host("autoLootDefault", "1");
     let s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyControls:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyControls:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()")
-            .unwrap(),
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()"
+        )
+        .unwrap(),
         "deselectOnClick '0' reads as Sticky Targeting CHECKED"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()"
+        )
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyControlsRowInvertMouseCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowInvertMouseCheck:GetChecked()"
+        )
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyControlsRowStickyTargetLabel:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyControlsRowStickyTargetLabel:GetText()"
+        )
+        .unwrap(),
         "Sticky Targeting"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -2034,7 +2161,7 @@ fn the_controls_page_reads_flags_with_the_sticky_inversion() {
 #[test]
 fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on open must not write it back"
@@ -2042,7 +2169,7 @@ fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
     let _ = s.take_sounds();
 
     // Invert Mouse on: flag "1", and the just-CHECKED box plays CheckBoxOn (normal mapping).
-    s.run("OptionsFrameContainerBodyControlsRowInvertMouseCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowInvertMouseCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -2053,7 +2180,7 @@ fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
 
     // Sticky Targeting on: the write INVERTS — checking it writes deselectOnClick "0".
-    s.run("OptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -2061,7 +2188,7 @@ fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
     );
 
     // …and off again: back to "1", the just-UNchecked box on the CheckBoxOff kit.
-    s.run("OptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -2081,10 +2208,11 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     s.set_cvar_host("deselectOnClick", "0");
     s.set_cvar_host("autoLootDefault", "1");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     let _ = s.take_cvar_changes();
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     let changes = s.take_cvar_changes();
     assert!(
         changes.contains(&("deselectOnClick".to_string(), "1".to_string())),
@@ -2097,13 +2225,15 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     assert_eq!(changes.len(), 2, "only the moved values queue: {changes:?}");
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()"
+            "return BenillaOptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()"
         )
         .unwrap(),
         "deselectOnClick back at '1' reads as Sticky Targeting unchecked"
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()"
+        )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -2127,20 +2257,26 @@ fn settle(s: &mut UiScript) {
 #[test]
 fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    // On NAMEPLATES, not the default Controls page: since 2180 seated the four camera toggles and
+    // the two camera-speed sliders, Controls is sixteen rows and overflows its area on its own —
+    // which is the scroll body doing its job, and no longer a control for "nothing overflows".
+    // Nameplates is six rows and fits.
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
     settle(&mut s);
 
     // Control first: a settled page fits, so there is no scroll and no bar at all — and the body
     // sits exactly on the page rect, the seat every page's XML anchors were authored against.
     assert_eq!(
-        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+        s.eval::<f32>("return BenillaOptionsFrameContainerScroll:GetVerticalScrollRange()")
             .unwrap(),
         0.0,
-        "the Controls page fits its area"
+        "the Nameplates page fits its area"
     );
     for f in [
-        "OptionsFrameContainerScrollBar",
-        "OptionsFrameContainerScrollBarTrough",
+        "BenillaOptionsFrameContainerScrollBar",
+        "BenillaOptionsFrameContainerScrollBarTrough",
     ] {
         assert!(
             !s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
@@ -2148,10 +2284,10 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
         );
     }
     let page_h: f32 = s
-        .eval("return OptionsFrameContainerScroll:GetHeight()")
+        .eval("return BenillaOptionsFrameContainerScroll:GetHeight()")
         .unwrap();
     assert!(
-        (s.eval::<f32>("return OptionsFrameContainerBody:GetHeight()")
+        (s.eval::<f32>("return BenillaOptionsFrameContainerBody:GetHeight()")
             .unwrap()
             - page_h)
             .abs()
@@ -2160,18 +2296,19 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     );
 
     // Now the broad search: every category surfaces, and the column outruns the page.
-    s.run("OptionsFrameSearchBox:SetText(\"e\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
+        .unwrap();
     settle(&mut s);
     let range: f32 = s
-        .eval("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+        .eval("return BenillaOptionsFrameContainerScroll:GetVerticalScrollRange()")
         .unwrap();
     assert!(
         range > 100.0,
         "the results outrun the page, so there is something to scroll (range {range})"
     );
     for f in [
-        "OptionsFrameContainerScrollBar",
-        "OptionsFrameContainerScrollBarTrough",
+        "BenillaOptionsFrameContainerScrollBar",
+        "BenillaOptionsFrameContainerScrollBarTrough",
     ] {
         assert!(
             s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
@@ -2217,7 +2354,7 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     // The last result is reachable: scrolling to the end brings it inside the page rect. (Widget
     // coordinates here, not the extract's screen px — the window carries ERA_WINDOW_SCALE.)
     let sf_bottom: f32 = s
-        .eval("return OptionsFrameContainerScroll:GetBottom()")
+        .eval("return BenillaOptionsFrameContainerScroll:GetBottom()")
         .unwrap();
     let tail = |s: &UiScript| -> f32 { s.eval("return OptionsScroll_ContentBottom()").unwrap() };
     assert!(
@@ -2225,8 +2362,10 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
         "the tail starts below the fold ({} vs {sf_bottom})",
         tail(&s)
     );
-    s.run(&format!("OptionsFrameContainerScrollBar:SetValue({range})"))
-        .unwrap();
+    s.run(&format!(
+        "BenillaOptionsFrameContainerScrollBar:SetValue({range})"
+    ))
+    .unwrap();
     settle(&mut s);
     assert!(
         tail(&s) >= sf_bottom - 0.5,
@@ -2235,16 +2374,16 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     );
 
     // Clearing the search puts the page — and the bar with its trough — back.
-    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"\")").unwrap();
     settle(&mut s);
     assert_eq!(
-        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+        s.eval::<f32>("return BenillaOptionsFrameContainerScroll:GetVerticalScrollRange()")
             .unwrap(),
         0.0
     );
     for f in [
-        "OptionsFrameContainerScrollBar",
-        "OptionsFrameContainerScrollBarTrough",
+        "BenillaOptionsFrameContainerScrollBar",
+        "BenillaOptionsFrameContainerScrollBarTrough",
     ] {
         assert!(
             !s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
@@ -2264,12 +2403,13 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
 #[test]
 fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameSearchBox:SetText(\"e\")").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
+        .unwrap();
     settle(&mut s);
 
-    let bar = "OptionsFrameContainerScrollBar";
-    let trough = "OptionsFrameContainerScrollBarTrough";
+    let bar = "BenillaOptionsFrameContainerScrollBar";
+    let trough = "BenillaOptionsFrameContainerScrollBarTrough";
     let g = |f: &str, m: &str| s.eval::<f32>(&format!("return {f}:{m}()")).unwrap();
     assert!(
         (g(trough, "GetWidth") - 31.0).abs() < 0.01,
@@ -2312,7 +2452,7 @@ fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
     // …and on THIS page the whole channel lands on the page rect: the scroll frame is the page
     // area, so the bar takes the 21/20 inset rather than the trough poking out through the header
     // divider above and the container's bottom below.
-    let sf = "OptionsFrameContainerScroll";
+    let sf = "BenillaOptionsFrameContainerScroll";
     assert!((g(trough, "GetTop") - g(sf, "GetTop")).abs() < 0.01);
     assert!((g(trough, "GetBottom") - g(sf, "GetBottom")).abs() < 0.01);
 
@@ -2361,6 +2501,32 @@ fn hover_label(s: &mut UiScript, frame: &str) {
     s.mouse_move(l + 60.0, (t + b) * 0.5);
 }
 
+/// Bring `frame` inside the page's scroll rect, if the page scrolls at all. A page longer than
+/// its area clips everything past the fold (B217), so a row down there cannot be hovered where its
+/// rect says it is — the cursor lands outside the scroll frame and hits nothing. Nine of the
+/// Controls page's sixteen rows and the last of Combat's seventeen live there since 2180.
+fn scroll_into_view(s: &mut UiScript, frame: &str) {
+    s.resolve();
+    s.run(&format!(
+        "local sf = BenillaOptionsFrameContainerScroll \
+         local range = sf:GetVerticalScrollRange() \
+         if range and range > 0 then \
+           local row = getglobal(\"{frame}\") \
+           local want = sf:GetVerticalScroll() \
+           if row:GetBottom() < sf:GetBottom() then \
+             want = want + (sf:GetBottom() - row:GetBottom()) + 2 \
+           elseif row:GetTop() > sf:GetTop() then \
+             want = want - (row:GetTop() - sf:GetTop()) - 2 \
+           end \
+           if want < 0 then want = 0 end \
+           if want > range then want = range end \
+           sf:SetVerticalScroll(want) \
+         end"
+    ))
+    .unwrap();
+    s.resolve();
+}
+
 /// A hovered row raises its 1.12 description, on the era's seat, and drops it on leave — the row
 /// itself, its checkbox, and (B223's report) the label the cursor actually crosses. The string
 /// resolves by KEY at hover, so seeding it AFTER the window loaded still paints: that is the
@@ -2375,9 +2541,9 @@ fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Checking this will prevent the deselection.\"")
         .unwrap();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    let row = "OptionsFrameContainerBodyControlsRowStickyTarget";
+    let row = "BenillaOptionsFrameContainerBodyControlsRowStickyTarget";
     hover_label(&mut s, row);
     s.resolve();
     assert!(
@@ -2447,24 +2613,29 @@ fn a_row_with_no_1_12_string_raises_no_plate() {
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Sticky's own description.\"")
         .unwrap();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    hover_label(&mut s, "OptionsFrameContainerBodyControlsRowAutoLoot");
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    hover_label(
+        &mut s,
+        "BenillaOptionsFrameContainerBodyControlsRowAutoLoot",
+    );
     s.resolve();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "no 1.12 description, no plate"
     );
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootHover:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoLootHover:IsVisible()"
+        )
+        .unwrap(),
         "…but the row still lights: the wash is not gated on the string"
     );
 
     // Sticky's plate up, then straight into the mute row with no OnLeave in between.
-    s.run("OptionsRow_Hover(OptionsFrameContainerBodyControlsRowStickyTarget, 1)")
+    s.run("OptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowStickyTarget, 1)")
         .unwrap();
     assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
-    s.run("OptionsRow_Hover(OptionsFrameContainerBodyControlsRowAutoLoot, 1)")
+    s.run("OptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowAutoLoot, 1)")
         .unwrap();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
@@ -2496,7 +2667,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             "local out = {} \
              for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
                for _, rkey in ipairs(rows) do \
-                 local row = getglobal(\"OptionsFrameContainerBody\" .. page .. rkey) \
+                 local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
                  table.insert(out, page .. rkey .. \"=\" .. (row.tip or \"\")) \
                end \
              end \
@@ -2513,18 +2684,25 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             continue;
         }
         // The deliberate exceptions (1639 Render Scale, Use updated character models, the World
-        // Shadows toggle, the two indirect-lighting sliders, and 1847 Enable Sound in Background).
-        // None has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale
-        // has no era row at all, 1.12 has no optional content and so nothing to describe for the
-        // models row, and it has no background-sound setting either (it mutes on its
-        // window-activation event and offers no way out) — and each is a row a player needs a
-        // description for. Each carries one
-        // under a `BENILLA_` prefix so the reference's namespace stays the reference's, which is
-        // exactly what this guard is here to protect. Everything the guard was built to catch — an
-        // invented or typo'd `OPTION_TOOLTIP_` key that silently resolves to nothing — is
-        // untouched: the pairing below is exact, so a `BENILLA_` key on the wrong row still fails.
+        // Shadows toggle, the two indirect-lighting sliders, the Water Detail dropdown, 1847
+        // Enable Sound in Background, and 2182 Brightness). None has a 1.12 counterpart whose
+        // `OPTION_TOOLTIP_*` could be resolved — Render Scale has no era row at all, 1.12 has no
+        // optional content and so nothing to describe for the models row, it has no
+        // background-sound setting either (it mutes on its window-activation event and offers no
+        // way out), and `OPTION_TOOLTIP_GAMMA` spends its second sentence on "all 21 levels of
+        // gray bars to the right", which is the stock video window's own calibration art and not
+        // something this page has — and each is a row a player needs a description for. Each
+        // carries one under a `BENILLA_` prefix so the reference's namespace stays the
+        // reference's, which is exactly what this guard is here to protect. Everything the guard
+        // was built to catch — an invented or typo'd `OPTION_TOOLTIP_` key that silently resolves
+        // to nothing — is untouched: the pairing below is exact, so a `BENILLA_` key on the wrong
+        // row still fails.
+        //
+        // `BENILLA_TOOLTIP_DISPLAY_MODE` is NOT here because this branch pulled the row
+        // (2026-09-08, the director's call); upstream still ships both.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
+            ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
             ("BENILLA_TOOLTIP_HD_MODELS", "GraphicsRowHdModels"),
             ("BENILLA_TOOLTIP_WORLD_SHADOWS", "GraphicsRowWorldShadows"),
             (
@@ -2537,6 +2715,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
             ),
+            ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2590,7 +2769,19 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // key OPTION_TOOLTIP_SHOW_TUTORIALS is 1.12's own.
     // The 35th and 36th CVar rows are the two text filters (2077): Profanity Filter on the
     // Interface page and Disable Spam Filter on the Chat page, both keys 1.12's own.
-    assert_eq!(checked, 66, "every tipped row carries a live key");
+    // 2180 added fourteen rows, every one of them tipped with the reference's own key: the
+    // four camera toggles and two camera-speed sliders plus Attack on assist, Auto Clear AFK and
+    // Auto Self Cast on Controls, Enhanced Tooltips on Interface, Player Guild Names on
+    // Nameplates, and the damage-number trio on Combat. 62 -> 76.
+    // …and Weather Intensity (2181), on the Graphics page, whose OPTION_TOOLTIP_WEATHER_DETAIL is
+    // 1.12's own and rides its own slider-9 row verbatim. 76 -> 77.
+    // …and Brightness (2182), whose description is benilla's own rather than 1.12 GlobalStrings —
+    // OPTION_TOOLTIP_GAMMA spends its second sentence on the stock window's 21-step grey ramp,
+    // which this page does not have (see the guard above). 77 -> 78.
+    // …less Display Mode, whose row this branch pulled (2026-09-08), and plus this branch's own
+    // five Graphics rows — Use updated character models, Real Character Shadows, the two
+    // indirect-lighting sliders and Water Detail. 78 - 1 + 5 = 82.
+    assert_eq!(checked, 82, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2627,14 +2818,14 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     s.run(
         "for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
            for _, rkey in ipairs(rows) do \
-             local row = getglobal(\"OptionsFrameContainerBody\" .. page .. rkey) \
+             local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
              if row.tip then setglobal(row.tip, \"described: \" .. rkey) end \
            end \
          end",
     )
     .unwrap();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     let mut raised = 0;
     for page in [
@@ -2647,7 +2838,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
         "ActionBars",
         "Chat",
     ] {
-        s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
+        s.run(&format!("BenillaOptionsFrameCategoryListRow{page}:Click()"))
             .unwrap();
         let rows: String = s
             .eval(&format!(
@@ -2655,7 +2846,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             ))
             .unwrap();
         for rkey in rows.split(',') {
-            let row = format!("OptionsFrameContainerBody{page}{rkey}");
+            let row = format!("BenillaOptionsFrameContainerBody{page}{rkey}");
+            scroll_into_view(&mut s, &row);
             hover_label(&mut s, &row);
             s.resolve();
             let tipped: bool = s.eval(&format!("return {row}.tip ~= nil")).unwrap();
@@ -2703,7 +2895,15 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // (1815), the Audio page's fourth checkbox and 1.12's own.
     // …and Show Tutorials (2077), the Interface page's seventh API row.
     // …and the two text-filter rows (2077).
-    assert_eq!(raised, 66, "every row but Auto Loot raises a description");
+    // …and 2180's fourteen: Attack on assist, Auto Clear AFK, Auto Self Cast, Follow Terrain,
+    // Head Bob, Auto-Follow Speed, Water Collision, Smart Pivot and Mouse Look Speed on Controls;
+    // Enhanced Tooltips on Interface; Player Guild Names on Nameplates; Show Target Damage,
+    // Periodic Damage and Pet Damage on Combat. Every one of them tipped with the reference's
+    // own key, which is what makes the count move by exactly the number of rows added.
+    // …and Weather Intensity (2181) and Brightness (2182), the Graphics page's new sliders.
+    // …less Display Mode (pulled on this branch) and plus this branch's own five Graphics rows,
+    // the same arithmetic the guard above states: 82.
+    assert_eq!(raised, 82, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2715,13 +2915,14 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
 #[test]
 fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     let mut s = combat_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyCombat:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyCombat:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
     // Read: each box shows its global, at CombatText.xml's own file-scope value — the whole
@@ -2734,7 +2935,7 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     ] {
         assert_eq!(
             s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyCombat{row}Check:GetChecked() and true or false"
+                "return BenillaOptionsFrameContainerBodyCombat{row}Check:GetChecked() and true or false"
             ))
             .unwrap(),
             checked,
@@ -2744,7 +2945,7 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     // The dropdown capsule reads COMBAT_TEXT_FLOAT_MODE = "1" as its named stop.
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
         )
         .unwrap(),
         "Scroll Up"
@@ -2758,14 +2959,14 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     // `the_combat_master_greys_the_family_and_combo_points_is_class_gated`), and a greyed control
     // eats its click. So the two clicks below only mean anything with this one ahead of them.
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
         "1",
         "the master writes its own global"
     );
-    s.run("OptionsFrameContainerBodyCombatRowDodgeParryMissCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowDodgeParryMissCheck:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
@@ -2785,7 +2986,7 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
 
     // The dropdown writes its global and applies too (the scroll function follows the mode).
     s.run(
-        "OptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
+        "BenillaOptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
          DropDownList1Button2:Click()",
     )
     .unwrap();
@@ -2811,12 +3012,13 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
 #[test]
 fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
     let mut s = combat_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
 
     let enabled = |s: &mut UiScript, row: &str, control: &str| -> bool {
         s.eval::<bool>(&format!(
-            "return OptionsFrameContainerBodyCombat{row}{control}:IsEnabled() ~= 0"
+            "return BenillaOptionsFrameContainerBodyCombat{row}{control}:IsEnabled() ~= 0"
         ))
         .unwrap()
     };
@@ -2829,14 +3031,14 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
 
     // On: the siblings wake. No player class in this VM, so Combo Points stays greyed while they
     // are live — the two gates are independent.
-    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "1");
     assert!(enabled(&mut s, "RowAuras", "Check"));
     assert!(!enabled(&mut s, "RowComboPoints", "Check"));
     assert!(enabled(&mut s, "RowFloatMode", "DropdownButton"));
 
-    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "0");
     assert!(
@@ -2867,16 +3069,17 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
 #[test]
 fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
     let s = combat_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
     // Move FOUR of them off their shipped values, in both directions and both flavors. The master
     // leads because the page ships with it off (1804) and a greyed row eats its click — so it is
     // both the way in and the fourth value Defaults has to walk back.
     s.run(
-        "OptionsFrameContainerBodyCombatRowCombatTextCheck:Click() \
-         OptionsFrameContainerBodyCombatRowAurasCheck:Click() \
-         OptionsFrameContainerBodyCombatRowReputationCheck:Click() \
-         OptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
+        "BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click() \
+         BenillaOptionsFrameContainerBodyCombatRowAurasCheck:Click() \
+         BenillaOptionsFrameContainerBodyCombatRowReputationCheck:Click() \
+         BenillaOptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
          DropDownList1Button3:Click()",
     )
     .unwrap();
@@ -2895,7 +3098,8 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
         "3"
     );
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
         "0",
@@ -2916,7 +3120,7 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
         )
         .unwrap(),
         "Scroll Up",
@@ -2931,14 +3135,15 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
 #[test]
 fn what_the_combat_page_writes_survives_a_restart() {
     let s = combat_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
     // The master first: the page ships with it off (1804) and a greyed row eats its click, so
     // without this the Honor Gained click below would be a silent no-op. Both writes are then
     // held to the same standard — they have to come back after the restart.
-    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
         .unwrap();
-    s.run("OptionsFrameContainerBodyCombatRowHonorGainedCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyCombatRowHonorGainedCheck:Click()")
         .unwrap();
 
     let saved = s.saved_variables_text();
@@ -2977,13 +3182,13 @@ fn what_the_combat_page_writes_survives_a_restart() {
         "…and so does the master the player turned on"
     );
     // And the page paints the restored value the next time it is opened.
-    fresh.run("ShowUIPanel(OptionsFrame)").unwrap();
+    fresh.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     fresh
-        .run("OptionsFrameCategoryListRowCombat:Click()")
+        .run("BenillaOptionsFrameCategoryListRowCombat:Click()")
         .unwrap();
     assert!(!fresh
         .eval::<bool>(
-            "return OptionsFrameContainerBodyCombatRowHonorGainedCheck:GetChecked() and true or false"
+            "return BenillaOptionsFrameContainerBodyCombatRowHonorGainedCheck:GetChecked() and true or false"
         )
         .unwrap());
     assert!(
@@ -3004,15 +3209,15 @@ fn what_the_combat_page_writes_survives_a_restart() {
 #[test]
 fn the_action_bars_page_locks_the_real_bar() {
     let mut s = actionbars_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowActionBars:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowActionBars:Click()")
         .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyActionBars:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyActionBars:IsVisible()")
         .unwrap());
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyActionBarsRowLockActionBarCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyActionBarsRowLockActionBarCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3020,7 +3225,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     );
 
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyActionBarsRowLockActionBarCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyActionBarsRowLockActionBarCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return LOCK_ACTIONBAR").unwrap(), "1");
     assert!(
@@ -3049,7 +3254,8 @@ fn the_action_bars_page_locks_the_real_bar() {
     );
 
     // Defaults walks it back to ActionBar.xml's own assignment, and the bar drags again.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(s.eval::<String>("return LOCK_ACTIONBAR").unwrap(), "0");
     s.run("this = ActionButton1 ActionButton1:GetScript(\"OnDragStart\")()")
         .unwrap();
@@ -3067,14 +3273,14 @@ fn the_action_bars_page_locks_the_real_bar() {
 #[test]
 fn the_interface_page_writes_the_three_stock_globals() {
     let mut s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyInterface:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyInterface:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
     // Read: each box shows its definer's own file-scope value. Two ship on — QuestLogFrame.xml's
@@ -3089,7 +3295,7 @@ fn the_interface_page_writes_the_three_stock_globals() {
     ] {
         assert_eq!(
             s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
+                "return BenillaOptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
             ))
             .unwrap(),
             checked,
@@ -3099,10 +3305,10 @@ fn the_interface_page_writes_the_three_stock_globals() {
 
     // Write: the global moves, and the CVar table is never reached.
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyInterfaceRowNewbieTipsCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowNewbieTipsCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return SHOW_NEWBIE_TIPS").unwrap(), "0");
-    s.run("OptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "0");
     assert!(
@@ -3112,7 +3318,7 @@ fn the_interface_page_writes_the_three_stock_globals() {
 
     // No applyFunc, because the write IS the apply: the questgiver's fade arm reads the global as
     // the panel shows, so turning instant text ON makes the very next show land its text whole.
-    s.run("OptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return QUEST_FADING_DISABLE").unwrap(),
@@ -3120,7 +3326,7 @@ fn the_interface_page_writes_the_three_stock_globals() {
     );
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowInstantQuestText.applyFunc == nil"
+            "return BenillaOptionsFrameContainerBodyInterfaceRowInstantQuestText.applyFunc == nil"
         )
         .unwrap(),
         "these three need no apply hook"
@@ -3140,14 +3346,14 @@ fn the_interface_page_writes_the_three_stock_globals() {
 #[test]
 fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     let mut s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
 
     // Ships off, at "always" — 1.12's own two defaults, read off UnitFrames.xml's file scope.
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3155,14 +3361,14 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
         )
         .unwrap(),
         "Always"
     );
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
              :IsEnabled() ~= 0"
         )
         .unwrap(),
@@ -3171,7 +3377,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
 
     // The switch: the global moves, the CVar table is never reached, and the picker wakes.
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return SHOW_TARGET_OF_TARGET").unwrap(),
@@ -3183,7 +3389,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     );
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
              :IsEnabled() ~= 0"
         )
         .unwrap(),
@@ -3191,9 +3397,9 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     );
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
                  == \"TargetofTarget_Update\" \
-             and OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
+             and BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
                  == \"TargetofTarget_Update\""
         )
         .unwrap(),
@@ -3202,7 +3408,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
 
     // The picker: five entries in the reference's order, the stored value checked, and a pick
     // writes the reference's own value string.
-    s.run("OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
@@ -3222,7 +3428,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
         )
         .unwrap(),
         "Solo"
@@ -3247,15 +3453,15 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
 #[test]
 fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
     let mut s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
 
     // Both ship shown — the model's own default, and the reference's hand-written one.
     for row in ["RowShowHelm", "RowShowCloak"] {
         assert!(
             s.eval::<bool>(&format!(
-                "return OptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
+                "return BenillaOptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
             ))
             .unwrap(),
             "{row} reads the API"
@@ -3264,7 +3470,7 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
 
     let _ = s.take_cvar_changes();
     let _ = s.take_worn_display_toggles();
-    s.run("OptionsFrameContainerBodyInterfaceRowShowHelmCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_worn_display_toggles(),
@@ -3287,12 +3493,13 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
     );
 
     // The read is a re-ask, not a remembered string: leave the page and come back.
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3301,11 +3508,11 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
 
     // The wire is the truth: a descriptor edge that disagrees wins over the optimistic belief.
     s.set_worn_display(true, true);
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3326,12 +3533,12 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
     let mut s = interface_harness();
     // A bank with unacknowledged bits: tutorials are enabled.
     s.set_tutorial_bank(Some(vec![0x00; 32]));
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3343,7 +3550,7 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
     let _ = s.take_tutorial_resets();
 
     // Ticking it off is `ClearTutorials()` — every bit acknowledged.
-    s.run("OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
     assert_eq!(s.take_tutorial_clears(), 1, "off clears the bank");
     assert_eq!(s.take_tutorial_resets(), 0);
@@ -3354,12 +3561,13 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
 
     // The app answers by pushing the cleared bank back; the row now reads off.
     s.set_tutorial_bank(Some(vec![0xFF; 32]));
-    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
@@ -3367,7 +3575,7 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
     );
 
     // Ticking it back on is `ResetTutorials()`.
-    s.run("OptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
     assert_eq!(s.take_tutorial_resets(), 1, "on resets the bank");
     assert_eq!(s.take_tutorial_clears(), 0);
@@ -3382,14 +3590,15 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
 fn a_no_op_write_does_not_re_arm_the_tutorials() {
     let mut s = interface_harness();
     s.set_tutorial_bank(Some(vec![0x00; 32])); // enabled
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     let _ = s.take_tutorial_clears();
     let _ = s.take_tutorial_resets();
 
     // Defaults writes "1" over a row that already reads "1".
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         (s.take_tutorial_resets(), s.take_tutorial_clears()),
         (0, 0),
@@ -3404,17 +3613,18 @@ fn a_no_op_write_does_not_re_arm_the_tutorials() {
 #[test]
 fn defaults_sends_a_flip_only_for_the_row_that_moved() {
     let mut s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    s.run("OptionsFrameContainerBodyInterfaceRowShowCloakCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowCloakCheck:Click()")
         .unwrap();
     let _ = s.take_worn_display_toggles();
     assert!(!s
         .eval::<bool>("return ShowingCloak() and true or false")
         .unwrap());
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.take_worn_display_toggles(),
         vec![WornDisplay::Cloak],
@@ -3442,12 +3652,12 @@ fn defaults_sends_a_flip_only_for_the_row_that_moved() {
 #[test]
 fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
     let s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     s.run(
-        "OptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:Click() \
-         OptionsFrameContainerBodyInterfaceRowNewbieTipsCheck:Click()",
+        "BenillaOptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:Click() \
+         BenillaOptionsFrameContainerBodyInterfaceRowNewbieTipsCheck:Click()",
     )
     .unwrap();
     assert_eq!(
@@ -3456,7 +3666,8 @@ fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
     );
     assert_eq!(s.eval::<String>("return SHOW_NEWBIE_TIPS").unwrap(), "0");
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return QUEST_FADING_DISABLE").unwrap(),
         "0",
@@ -3465,7 +3676,7 @@ fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
     assert_eq!(s.eval::<String>("return SHOW_NEWBIE_TIPS").unwrap(), "1");
     assert!(!s
         .eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowInstantQuestTextCheck:GetChecked() \
              and true or false"
         )
         .unwrap());
@@ -3479,10 +3690,10 @@ fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
 #[test]
 fn what_the_interface_page_writes_survives_a_restart() {
     let s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    s.run("OptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:Click()")
         .unwrap();
 
     let saved = s.saved_variables_text();
@@ -3502,13 +3713,13 @@ fn what_the_interface_page_writes_survives_a_restart() {
         "0",
         "the saved value wins over the file-scope default"
     );
-    fresh.run("ShowUIPanel(OptionsFrame)").unwrap();
+    fresh.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     fresh
-        .run("OptionsFrameCategoryListRowInterface:Click()")
+        .run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(!fresh
         .eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:GetChecked() \
              and true or false"
         )
         .unwrap());
@@ -3586,17 +3797,17 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
         gap(&mut s)
     );
 
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(!s
         .eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:GetChecked() \
              and true or false"
         )
         .unwrap());
 
-    s.run("OptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowBuffDurationsCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return SHOW_BUFF_DURATIONS").unwrap(), "1");
     assert!(
@@ -3644,7 +3855,7 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
 #[test]
 fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     let s = harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     let keys: Vec<String> = s
         .eval::<String>("return table.concat(OPTIONS_CATEGORY_KEYS, \",\")")
@@ -3664,20 +3875,20 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
             has_rows || key == "Keybindings",
             "{key} opens onto nothing — every category leads somewhere since 1139"
         );
-        s.run(&format!("OptionsFrameCategoryListRow{key}:Click()"))
+        s.run(&format!("BenillaOptionsFrameCategoryListRow{key}:Click()"))
             .unwrap();
         assert!(
-            s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+            s.eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
                 .unwrap(),
             "{key}: Defaults is live on a page that has something to reset"
         );
     }
 
     // And the guard itself: a key with no rows behind it leaves Defaults asleep.
-    s.run("OptionsFrame_SelectCategory(\"NotACategory\")")
+    s.run("BenillaOptionsFrame_SelectCategory(\"NotACategory\")")
         .unwrap();
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        !s.eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
             .unwrap(),
         "Defaults is dead when the selected page has no rows"
     );
@@ -3702,8 +3913,9 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
 #[test]
 fn the_disable_spam_filter_row_is_inverted() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
+        .unwrap();
 
     assert_eq!(
         s.cvar("spamFilter").as_deref(),
@@ -3712,14 +3924,14 @@ fn the_disable_spam_filter_row_is_inverted() {
     );
     assert!(
         !s.eval::<bool>(
-            "return OptionsFrameContainerBodyChatRowSpamFilterCheck:GetChecked() and true or false"
+            "return BenillaOptionsFrameContainerBodyChatRowSpamFilterCheck:GetChecked() and true or false"
         )
         .unwrap(),
         "a filter that is ON shows *Disable Spam Filter* unchecked"
     );
 
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -3729,7 +3941,7 @@ fn the_disable_spam_filter_row_is_inverted() {
     assert_eq!(s.cvar("spamFilter").as_deref(), Some("0"));
 
     // And back: the row round-trips rather than latching.
-    s.run("OptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowSpamFilterCheck:Click()")
         .unwrap();
     assert_eq!(s.cvar("spamFilter").as_deref(), Some("1"));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -3742,20 +3954,20 @@ fn the_disable_spam_filter_row_is_inverted() {
 #[test]
 fn the_profanity_filter_row_sits_on_the_interface_page_and_writes_its_cvar() {
     let mut s = interface_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
 
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:GetChecked() \
+            "return BenillaOptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:GetChecked() \
              and true or false"
         )
         .unwrap(),
         "registered \"1\" — a stock client boots with profanity masking on"
     );
     let _ = s.take_cvar_changes();
-    s.run("OptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowProfanityFilterCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -3770,25 +3982,28 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
     // No host override: since 1804 the registered pair IS bubbles-on / party-off, so the page's
     // read below is of the shipped table rather than of a value this test planted.
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
+        .unwrap();
 
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChat:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyChat:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // Read from the table, not from a restated default: bubbles on, party bubbles off.
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()"
+        )
         .unwrap());
     let _ = s.take_sounds();
 
-    s.run("OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowPartyChatBubblesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -3799,25 +4014,30 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
 
     // Turning say/yell bubbles off writes only its own switch — party keeps the value above.
-    s.run("OptionsFrameContainerBodyChatRowChatBubblesCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowChatBubblesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("ChatBubbles".to_string(), "0".to_string())]
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()"
+        )
         .unwrap());
 
     // Defaults walks the page back to the registered pair, which is the binary's own since 1804:
     // `ChatBubbles` "1", `ChatBubblesParty` "0" (the party half was the director's /p ask, 0598).
     // The party row was clicked ON above, so this is a real walk-back, not a no-op.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()"
+        )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -3833,8 +4053,9 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
 #[test]
 fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
     let mut s = chat_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
+        .unwrap();
     let _ = s.take_sounds();
     let _ = s.take_cvar_changes();
 
@@ -3845,10 +4066,12 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
         "ChatFrame.xml's own file-scope value, and the reference's declared default"
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyChatRowRemoveChatDelayCheck:GetChecked()"
+        )
         .unwrap());
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerBodyChatRowLootSpamCheck:GetChecked()")
+        s.eval::<bool>("return BenillaOptionsFrameContainerBodyChatRowLootSpamCheck:GetChecked()")
             .unwrap(),
         "showLootSpam is registered \"1\" — the binary's own default"
     );
@@ -3860,7 +4083,7 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
             .unwrap(),
         (0.2, 0.15)
     );
-    s.run("OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(), "1");
     assert_eq!(
@@ -3875,7 +4098,7 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
     );
 
     // …and back, which is the half a one-way applyFunc would break.
-    s.run("OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
         .unwrap();
     assert_eq!(s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(), "0");
     assert_eq!(
@@ -3885,18 +4108,19 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
     );
 
     // The loot-spam row: a plain CVar write, no applyFunc, nothing else on the page moved.
-    s.run("OptionsFrameContainerBodyChatRowLootSpamCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyChatRowLootSpamCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("showLootSpam".to_string(), "0".to_string())]
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
 
     // Defaults walks the page back across BOTH stores in one click.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("showLootSpam".to_string(), "1".to_string())],
@@ -3960,14 +4184,16 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
         .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
 
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowInterface:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyInterfaceRowStatusTextCheck:GetChecked()")
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyInterfaceRowStatusTextCheck:GetChecked()"
+        )
         .unwrap());
 
-    s.run("OptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -3982,7 +4208,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
     );
 
     // And back off again, the same way.
-    s.run("OptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
         .unwrap();
     s.tick(0.0);
     assert!(!s
@@ -4002,27 +4228,27 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
     let mut s = audio_harness();
     s.set_cvar_host("mousespeed", "1.25");
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowControls:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();
 
     // Read from the table on select, with the era's rounded-percent readout.
     assert!(s
         .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:GetValue() \
+            "return math.abs(BenillaOptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:GetValue() \
              - 1.25) < 0.0001"
         )
         .unwrap());
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
         )
         .unwrap(),
         "125%"
     );
 
     // A user move snaps to 0.05 and writes once.
-    s.run("OptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:SetValue(1.42)")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:SetValue(1.42)")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -4030,14 +4256,15 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
     );
 
     // Defaults walks it back to the neutral notch — the shipped feel, not the slider's floor.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GetCVar(\"mousespeed\")").unwrap(),
         "1"
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
         )
         .unwrap(),
         "100%"
@@ -4057,14 +4284,14 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
 #[test]
 fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowControls:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();
 
     // The shipped ceiling, shown as what it buys.
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
         )
         .unwrap(),
         "15 yd",
@@ -4073,36 +4300,41 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
 
     // A move off the notch: the factor is what persists, the yards are the label — and the two
     // disagree numerically, which is why a mid-range stop is worth a step of its own.
-    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(1.4)")
-        .unwrap();
+    s.run(
+        "BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(1.4)",
+    )
+    .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("cameraDistanceMaxFactor".to_string(), "1.4".to_string())]
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
         )
         .unwrap(),
         "21 yd"
     );
 
     // All the way up — the slider's top, which is where this row's default sat until 1804.
-    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(2.0)")
-        .unwrap();
+    s.run(
+        "BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(2.0)",
+    )
+    .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("cameraDistanceMaxFactor".to_string(), "2".to_string())]
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
         )
         .unwrap(),
         "30 yd"
     );
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
             .unwrap(),
@@ -4110,7 +4342,7 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
         )
         .unwrap(),
         "15 yd",
@@ -4130,27 +4362,27 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
 #[test]
 fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     let mut s = harness_on(audio_harness());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowControls:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();
 
     // The registrar default is the reference's, and it is what the director asked to ship.
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
         )
         .unwrap(),
         "Smart"
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleLabel:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleLabel:GetText()"
         )
         .unwrap(),
         "Camera Following Style"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
             .unwrap(),
         "OPTION_TOOLTIP_CAMERA1"
     );
@@ -4160,7 +4392,7 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     );
 
     // The list is the reference dropdown's, entry for entry and in its order.
-    s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
@@ -4187,20 +4419,20 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
         )
         .unwrap(),
         "Never"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
             .unwrap(),
         "OPTION_TOOLTIP_CAMERA3",
         "the plate follows the selection, like the reference dropdown's own"
     );
 
     // Always is the middle entry and stores "2".
-    s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
+    s.run("BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
         .unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
     assert_eq!(
@@ -4211,11 +4443,11 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     // A config written by a REAL 1.12 client says "3" for Never. It must not display as the
     // numerically nearest stop — which is Always, the opposite of what it means.
     s.set_cvar_host("cameraSmoothStyle", "3");
-    s.run("OptionsFrameCategoryListRowAudio:Click(); OptionsFrameCategoryListRowControls:Click()")
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click(); BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
         )
         .unwrap(),
         "Never",
@@ -4227,7 +4459,8 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     );
 
     // Defaults walks it back to Smart.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>("return GetCVar(\"cameraSmoothStyle\")")
             .unwrap(),
@@ -4235,7 +4468,7 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+            "return BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
         )
         .unwrap(),
         "Smart"
@@ -4258,11 +4491,11 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
 #[test]
 fn the_action_bars_page_toggles_the_real_bars() {
     let mut s = actionbars_harness();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowActionBars:Click()")
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowActionBars:Click()")
         .unwrap();
 
-    let box_of = |row: &str| format!("OptionsFrameContainerBodyActionBars{row}Check");
+    let box_of = |row: &str| format!("BenillaOptionsFrameContainerBodyActionBars{row}Check");
     let checked = |s: &UiScript, row: &str| {
         s.eval::<bool>(&format!(
             "return {}:GetChecked() and true or false",
@@ -4381,7 +4614,8 @@ fn the_action_bars_page_toggles_the_real_bars() {
     );
 
     // Defaults walks the whole page back: every bar down, the grid off, the lock unlocked.
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     for bar in [
         "MultiBarBottomLeft",
         "MultiBarBottomRight",
@@ -4429,7 +4663,7 @@ impl benilla_ui::script::TextMeasure for SteppedFont {
 ///
 /// **The seat is a show and not the era's OnLoad, and that is what the numbers below pin.**
 /// `GetStringWidth` answers in the region's OWN units, so its number depends on the owner's
-/// effective scale — and this window's scale is set by `OptionsFrame_UpdateScale` in the window's
+/// effective scale — and this window's scale is set by `BenillaOptionsFrame_UpdateScale` in the window's
 /// own `<OnShow>`, after every `<OnLoad>` has already run. At OnLoad these tabs measure at scale 1
 /// (64 and 76 here); on the show, behind the window's own OnShow, they measure at the drawn 0.78.
 #[test]
@@ -4437,18 +4671,18 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     let mut s = UiScript::new().unwrap();
     s.set_text_measurer(Box::new(SteppedFont(6.0)));
     let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
 
     let num = |s: &mut UiScript, expr: &str| -> f32 { s.eval(&format!("return {expr}")).unwrap() };
     assert_eq!(
-        num(&mut s, "OptionsFrame:GetScale()"),
+        num(&mut s, "BenillaOptionsFrame:GetScale()"),
         0.78,
         "ERA_WINDOW_SCALE"
     );
 
     // The law, against each tab's own live measure.
-    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+    for tab in ["BenillaOptionsFrameGameTab", "BenillaOptionsFrameAddOnsTab"] {
         let w = num(&mut s, &format!("{tab}:GetWidth()"));
         let l = num(&mut s, &format!("{tab}Text:GetStringWidth()"));
         assert!(
@@ -4462,11 +4696,11 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     // these at 64 and 76, which is 3.3 and 15.5 units off the drawn label.
     let close = |a: f32, b: f32| (a - b).abs() < 0.01;
     assert!(close(
-        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        num(&mut s, "BenillaOptionsFrameGameTab:GetWidth()"),
         65.641_03
     ));
     assert!(close(
-        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        num(&mut s, "BenillaOptionsFrameAddOnsTab:GetWidth()"),
         78.461_54
     ));
 
@@ -4477,21 +4711,21 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
         s.resolve();
     }
     assert!(close(
-        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        num(&mut s, "BenillaOptionsFrameGameTab:GetWidth()"),
         65.641_03
     ));
     assert!(close(
-        num(&mut s, "OptionsFrameAddOnsTab:GetWidth()"),
+        num(&mut s, "BenillaOptionsFrameAddOnsTab:GetWidth()"),
         78.461_54
     ));
 
     // A re-show re-fits rather than latching — the stock template's own behaviour, and what lets
     // a tab follow the window's scale when the screen changes under it.
-    s.run("HideUIPanel(OptionsFrame) ShowUIPanel(OptionsFrame)")
+    s.run("HideUIPanel(BenillaOptionsFrame) ShowUIPanel(BenillaOptionsFrame)")
         .unwrap();
     s.resolve();
     assert!(close(
-        num(&mut s, "OptionsFrameGameTab:GetWidth()"),
+        num(&mut s, "BenillaOptionsFrameGameTab:GetWidth()"),
         65.641_03
     ));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -4505,9 +4739,9 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
 #[test]
 fn without_a_seated_measurer_the_same_fit_reads_zero() {
     let mut s = harness_on(UiScript::new().unwrap());
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
-    for tab in ["OptionsFrameGameTab", "OptionsFrameAddOnsTab"] {
+    for tab in ["BenillaOptionsFrameGameTab", "BenillaOptionsFrameAddOnsTab"] {
         let w: f32 = s.eval(&format!("return {tab}:GetWidth()")).unwrap();
         assert!(
             (w - 40.0).abs() < 0.01,
@@ -4557,20 +4791,6 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
          same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
          one step further back than its guild twin: the rank byte streams, but the key's second \
          index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
-    ),
-    (
-        "cameraWaterCollision",
-        "REVERTED 2026-09-10, and the row is back because the feature is not. Two consumers were \
-         transcribed off `pivot-height-glide.md` §5: (1) the collision sweep's class mask \
-         becomes `0x1f0171` instead of `0x100171` — the `0xf0000` nibble is the ADT liquid \
-         layers — and `0x511ad0`'s bands re-base the pivot floor/cap; (2) a band CROSSING \
-         arms a 5° pitch through the `+0xf4` channel. Built as (1)=the pivot corridor alone, \
-         on the reading that the arm stays liquid-blind. **That corridor is discontinuous**: at \
-         `excess = 2/9` the framing pivot drops 1.04 yd in one frame and pops back 0.29 yd at \
-         `5/9`, so entering or leaving water at head depth slams the camera — which is what \
-         the director saw. Whether the discontinuity is the reference's or a mis-transcription is \
-         a live §5 (2165). Registered \"1\", so benilla is the divergence while this row \
-         stands",
     ),
     // **The SLIDERS' half is empty, and that is the point.** 2115 extended this census from
     // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` and it caught exactly one row —
@@ -4662,4 +4882,326 @@ fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker
         phantom.is_empty(),
         "UNBACKED_REFERENCE_CVARS names CVars the reference's table does not: {phantom:?}"
     );
+}
+
+/// **Nothing the reference lets a player change, and this client backs, is out of reach**
+/// (decision 2180) — the other half of the census above, and the half that was missing.
+///
+/// The test above asks the ENGINE's question: is the CVar registered? It was green the entire time
+/// the four camera toggles had no box on any window a player can open. 2149 built their
+/// mechanisms and dropped them off `UNBACKED_REFERENCE_CVARS`; 2115 loads the stock window that
+/// carries their checkboxes deliberately HIDDEN, so addons find real frames and the player never
+/// sees it; and our own window — the one the ESC menu opens — simply had no rows. Two records were
+/// individually right and the setting was unreachable, because no check compared them.
+///
+/// This asks the UI's question. A CVar that lands on the list below is one the reference lets a
+/// player change and benilla does not, and it costs a stated reason at the row.
+#[test]
+fn every_registered_reference_cvar_has_a_row_on_our_own_window() {
+    let s = harness();
+
+    // Both of the reference's own option tables, exactly as the registration census reads them.
+    let named: Vec<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for key, v in pairs(UIOptionsFrameCheckButtons) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
+             for _, v in ipairs(UIOptionsFrameSliders) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
+             table.sort(out) \
+             return out",
+        )
+        .expect("read the reference's two option tables");
+
+    // What OUR window can actually move. A row's own `cvar`, plus the `partner` a handful of rows
+    // write beside it (`PetSpellDamage`, `cameraPitchMoveSpeed`) — those are moved by a control
+    // the player uses, which is what "reachable" means here, even though neither is table-named.
+    let ours: std::collections::HashSet<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+                 for _, rkey in ipairs(rows) do \
+                     local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
+                     if row.cvar then table.insert(out, row.cvar) end \
+                     if row.partner then table.insert(out, row.partner.cvar) end \
+                 end \
+             end \
+             return out",
+        )
+        .expect("read our own window's rows")
+        .into_iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+
+    let registered: std::collections::HashSet<String> = crate::cvars::registered_pairs()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+    let excused: std::collections::HashSet<String> = UNREACHABLE_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+
+    // Two floors, because the failure this check is worth having is the one where it passes for
+    // the wrong reason: a harness whose stock tables did not load reads no names, and one whose
+    // window did not build reads no rows, and either way `missing` is empty and green.
+    let backed = named
+        .iter()
+        .filter(|c| registered.contains(&c.to_ascii_lowercase()))
+        .count();
+    assert!(
+        backed >= 28,
+        "the reference's tables did not load: only {backed} of their names are registered here"
+    );
+    assert!(
+        ours.len() >= 40,
+        "our own window's rows did not build: only {} carry a cvar",
+        ours.len()
+    );
+
+    let missing: Vec<&str> = named
+        .iter()
+        .filter(|c| {
+            let k = c.to_ascii_lowercase();
+            registered.contains(&k) && !ours.contains(&k) && !excused.contains(&k)
+        })
+        .map(String::as_str)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these are backed and the reference lets a player change them, and our own options \
+         window has no row for them: {missing:?} — seat a row, or add them to \
+         UNREACHABLE_REFERENCE_CVARS with the reason"
+    );
+
+    // The other direction, the one that keeps the list from rotting: an excuse for a row that now
+    // exists is an excuse describing nothing.
+    let stale: Vec<&str> = UNREACHABLE_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| ours.contains(&n.to_ascii_lowercase()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these have a row now — drop them from UNREACHABLE_REFERENCE_CVARS: {stale:?}"
+    );
+}
+
+/// **It is empty, and that is the finding, not an omission.** Every CVar the reference's own two
+/// option tables name is now either unregistered (and on `UNBACKED_REFERENCE_CVARS` above with the
+/// feature it waits on) or reachable from benilla's own options window. `autointeract` and
+/// `UnitNamePlayerPVPTitle`, the last two unbacked rows, will each need a row here the day their
+/// feature lands — which is exactly what the census above will say when it calls them stale.
+///
+/// A name arriving here needs a reason of the same shape as the list above's: what the *player*
+/// cannot do, and why the row is not simply seated.
+const UNREACHABLE_REFERENCE_CVARS: &[(&str, &str)] = &[];
+
+/// The four camera toggles (2149's mechanisms, 2179's water-collision rebuild) on the page a
+/// player can open. Each box opens showing the value the reference registers — two of them "1",
+/// which is the half that makes this more than cosmetic: on `cameraPivot` and
+/// `cameraWaterCollision` a player who wants them OFF had no way to say so at all.
+#[test]
+fn the_four_camera_toggles_read_their_shipped_defaults_and_write_on_the_click() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the four on open must not write them back"
+    );
+
+    let checked = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyControls{row}Check:GetChecked()"
+        ))
+        .unwrap()
+    };
+    // The registrar's own values: pivot and water collision ON, terrain tilt and head bob OFF.
+    assert!(checked(&mut s, "RowSmartPivot"));
+    assert!(checked(&mut s, "RowWaterCollision"));
+    assert!(!checked(&mut s, "RowFollowTerrain"));
+    assert!(!checked(&mut s, "RowHeadBob"));
+
+    // And the click writes — the first flip of each is the one that could not be expressed before.
+    for (row, cvar, want) in [
+        ("RowFollowTerrain", "cameraTerrainTilt", "1"),
+        ("RowHeadBob", "cameraBobbing", "1"),
+        ("RowWaterCollision", "cameraWaterCollision", "0"),
+        ("RowSmartPivot", "cameraPivot", "0"),
+    ] {
+        s.run(&format!(
+            "BenillaOptionsFrameContainerBodyControls{row}Check:Click()"
+        ))
+        .unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![(cvar.to_string(), want.to_string())],
+            "{row} writes {cvar}"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The partner write** (2180): two rows drive a second CVar that appears in neither option
+/// table, because `UIOptionsFrame_Save` keeps a special-case arm for each. Without it the control
+/// is a half-write, and a silent one — `SetCVar` on a name nobody wrote is not an error, it is a
+/// value that stayed where it was, so the box would read "pet damage off" while pet SPELL damage
+/// kept floating.
+#[test]
+fn the_pet_damage_box_and_the_look_slider_each_write_their_unnamed_twin() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+
+    // Pet Damage off: both pet CVars move, the melee one through the row and the spell one
+    // through the partner (UIOptionsFrame_Save l.334-336).
+    s.run("BenillaOptionsFrameContainerBodyCombatRowPetDamageCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![
+            ("PetMeleeDamage".to_string(), "0".to_string()),
+            ("PetSpellDamage".to_string(), "0".to_string()),
+        ],
+        "one box, both pet knobs"
+    );
+
+    // Mouse Look Speed: the pitch twin at half the yaw value (l.355-356) — which is exactly the
+    // 180/90 pair the two are registered at, so the ratio the reference ships is preserved by
+    // dragging rather than broken by it.
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+    s.run("BenillaOptionsFrameContainerBodyControlsRowMouseLookSpeedControlSlider:SetValue(240)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![
+            ("cameraYawMoveSpeed".to_string(), "240".to_string()),
+            ("cameraPitchMoveSpeed".to_string(), "120".to_string()),
+        ]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyControlsRowMouseLookSpeedControlValue:GetText()"
+        )
+        .unwrap(),
+        "240",
+        "a deg/s slider reads out the raw number, not a percent of nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Show Target Damage is a SECOND master on the Combat page, and the floating-text one does not
+/// own it.** The reference keeps the two dependency blocks apart —
+/// `UIOptionsFrame_UpdateDependencies` greys 53…69 from CheckButton52 and greys 9 and 11 from 19,
+/// in two separate `if`s — and collapsing them would tell a player that turning off scrolling
+/// combat text also turns off damage numbers, which is the opposite of what `CombatDamage` does.
+#[test]
+fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_alone() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
+    let enabled = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyCombat{row}Check:IsEnabled() ~= 0"
+        ))
+        .unwrap()
+    };
+
+    // `SHOW_COMBAT_TEXT` ships "0", so the page arrives with the floating-text family greyed —
+    // and the damage trio live beside it, which is the whole point of the split.
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "0");
+    assert!(!enabled(&mut s, "RowAuras"));
+    assert!(enabled(&mut s, "RowShowDamage"));
+    assert!(enabled(&mut s, "RowPeriodicDamage"));
+    assert!(enabled(&mut s, "RowPetDamage"));
+
+    // The other master: Show Target Damage off greys its two children and nothing else.
+    s.run("BenillaOptionsFrameContainerBodyCombatRowShowDamageCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"CombatDamage\")")
+            .unwrap(),
+        "0"
+    );
+    assert!(!enabled(&mut s, "RowPeriodicDamage"));
+    assert!(!enabled(&mut s, "RowPetDamage"));
+    assert!(
+        enabled(&mut s, "RowShowDamage"),
+        "the master is the way back in"
+    );
+
+    // Waking the floating-text family does not wake them: the two gates are independent.
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert!(enabled(&mut s, "RowAuras"));
+    assert!(
+        !enabled(&mut s, "RowPetDamage"),
+        "scrolling combat text does not own the damage numbers"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The two other dependencies 2180 seated, both the reference's own: Player Guild Names is dead
+/// while player names are off (l.702-708 — there is no overhead stack for the guild line to be
+/// the second row of), and Auto-Follow Speed is dead while the following style is Never
+/// (l.715-719 — there is no follow to set a speed for).
+#[test]
+fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+
+    // Nameplates: `UnitNamePlayer` ships "1", so the child arrives live.
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    let guild_on = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyNameplatesRowGuildNamesCheck:IsEnabled() ~= 0",
+        )
+        .unwrap()
+    };
+    assert!(guild_on(&mut s));
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
+        .unwrap();
+    assert!(!guild_on(&mut s), "no names, no guild line to gate");
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
+        .unwrap();
+    assert!(guild_on(&mut s));
+
+    // Controls: the style ships "1" (Smart), so the slider arrives live; "0" is Never.
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    let speed_thumb = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoFollowSpeedControlSliderThumb\
+             :IsShown()",
+        )
+        .unwrap()
+    };
+    assert!(speed_thumb(&mut s));
+    s.run("SetCVar(\"cameraSmoothStyle\", \"0\") OptionsPage_Refresh(\"Controls\")")
+        .unwrap();
+    assert!(
+        !speed_thumb(&mut s),
+        "a Never follow leaves the speed groove thumbless, 1.12's own way of saying dead"
+    );
+    // …and the groove refuses the press as well as looking refused, which the reference never
+    // needed: its slider has no track jump to refuse.
+    assert!(!s
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoFollowSpeedControlSlider\
+             :IsMouseEnabled()"
+        )
+        .unwrap());
+    s.run("SetCVar(\"cameraSmoothStyle\", \"1\") OptionsPage_Refresh(\"Controls\")")
+        .unwrap();
+    assert!(speed_thumb(&mut s));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

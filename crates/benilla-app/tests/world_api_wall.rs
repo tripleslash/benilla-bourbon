@@ -395,21 +395,34 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// "no part is fading" as opaque, which is false of a *pending* unit, and put a full-strength
 /// shadow on the ground under an invisible creature for the length of a load. A caller asking
 /// one question cannot make that mistake; a caller handed the inputs can.
-/// And 178 → 179: `interior::NodeAmbient`, a PUBLISH — one light node's committed
-/// **ambient word alone**, the ramped chase toward `cap96(MOCV)`. `ParticleLight` beside it is
-/// the same words folded into the whole fixed-function term (`ambient + 0.9·diffuse + Σ lamps`),
-/// which is what a lit particle quad receives; this is the read side for a draw whose vertex
-/// format carries **no normal**, so the normal array is disabled outright and its term is the
-/// ambient product and nothing else (the weapon swing trail, decisions 2079/2086). Published
-/// rather than reconstructed for the reason the entry above gives: the caller cannot rebuild it
-/// from `ParticleLight` — the diffuse lobe and the MOLT points are already summed in and cannot
-/// be subtracted back out — and a caller that reached for the *scene* ambient instead, which is
-/// what this replaces, tinted every indoor trail with the sky.
+/// And 178 → 179: `interior::NodeAmbient`, a PUBLISH — one light node's committed **ambient word
+/// alone**, the ramped chase toward `cap96(MOCV)`. `ParticleLight` beside it is the same words
+/// folded into the whole fixed-function term (`ambient + 0.9·diffuse + Σ lamps`), which is what a
+/// lit particle quad receives; this is the read side for a draw whose vertex format carries **no
+/// normal**, so the normal array is disabled outright and its term is the ambient product and
+/// nothing else (the weapon swing trail, decisions 2079/2086). Published rather than reconstructed
+/// for the reason the entry above gives: the caller cannot rebuild it from `ParticleLight` — the
+/// diffuse lobe and the MOLT points are already summed in and cannot be subtracted back out — and
+/// a caller that reached for the *scene* ambient instead, which is what this replaces, tinted
+/// every indoor trail with the sky.
 ///
-/// And 179 → 185: the six doors this fork's own engine work opens. Four are a PUBLISH the
+/// And 179 → 180: `weather::WeatherState`, a PUBLISH — the weather driver's own state, reached by
+/// `crate::cvars` because one byte of it (`weather_density`) is a **player setting** and 2181 gave
+/// it its switch. It is the same shape as `clutter::ClutterConfig` two rows of that table up: a
+/// resource the engine owns and the options window writes exactly one field of, welded to its CVar
+/// by `registered_defaults_mirror_the_code_truths`. Published as the state rather than as a
+/// density-only door for the reason the two entries above give in reverse — there is no
+/// reconstruction to get wrong here, the field is a `u8` the engine reads directly, and a
+/// one-field wrapper would be a second name for the same byte that the weld test would then have
+/// to hold in step with both sides. It was already on the far side of the wall as an INSTRUMENT
+/// item (the `#[cfg(feature = "dev")]` weather panel is its only other namer); what changed is
+/// that a game module names it now, which is exactly the crossing this gate exists to make
+/// visible.
+///
+/// And 180 → 186: the six doors this fork's own engine work opens. Four are a PUBLISH the
 /// options page reaches for by name (`ui_script::options`, `cvars`) rather than a lane
 /// reconstructing engine state app-side; the last two are named below them and were opened
-/// without being written down here, which this merge is where they get their entry:
+/// without being written down here, which an earlier merge is where they got their entry:
 ///
 /// - `liquid::WaterDetail` — the `waterDetail` CVar's knob. WHICH liquid renderer the world
 ///   draws is the engine's own state (it decides which of two materials every surface wears),
@@ -434,10 +447,10 @@ fn is_instrument_consumer(rel: &str) -> bool {
 ///   out is what would make it unshippable — so the scanner counts it as a game file and the
 ///   item lands on this side of the line.
 ///
-/// **The number is the union, not the sum.** Upstream's own surface measures 179 and this
-/// branch's measured 184; the merged tree is 185 because the two sets are not nested —
-/// `interior::NodeAmbient` is upstream's alone and the six above are this fork's alone.
-const CEILING: usize = 185;
+/// **The number is the union, not the sum.** Upstream's own surface measures 180 and this
+/// branch's six are disjoint from it — `interior::NodeAmbient` and `weather::WeatherState` are
+/// upstream's alone, the six above are this fork's alone.
+const CEILING: usize = 186;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

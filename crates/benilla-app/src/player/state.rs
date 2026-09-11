@@ -1032,6 +1032,18 @@ pub(crate) struct Player {
     /// are different answers — `None` means "not mounted", which is what selects the plain
     /// bind-pose pivot over the Mount-pose one.
     pub(crate) mount_seat_lift: Option<f32>,
+    /// **The liquid surface over our feet, as the last movement tick left it** — Bevy-Y, `None`
+    /// when there is no liquid there.
+    ///
+    /// Cached rather than re-queried, because that is what the reference reads. `0x511ad0`'s depth
+    /// comes through `0x670630`, which is a **field accessor** and not a query: `0x670637 test
+    /// byte ptr [ecx+0x90],0x20` gates it and `0x670640 mov eax,[ecx+0x98]` returns whatever the
+    /// movement tick last stored. The camera's water corridor
+    /// ([`super::camera_water::classify`]) therefore reads *this*, one frame behind, which is the
+    /// same lag the reference's own camera runs at — and it is load-bearing, not incidental: a
+    /// depth that is piecewise constant is what keeps `d - target` from grazing a band edge while
+    /// swimming (2173, and `camera-water-corridor-spec.md` §7).
+    pub(crate) liquid_surface: Option<f32>,
     /// The **mover pitch** (radians, +up) — the client's persistent per-unit pitch
     /// (`CMovement+0x20`, the swim §5's TU-B): **held** when unsteered (an idle floater keeps its
     /// pitch — never auto-leveled; the only zeroing writer `0x7c6e80` fires from

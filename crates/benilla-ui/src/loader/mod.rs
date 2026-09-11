@@ -75,10 +75,12 @@ mod widgets;
 pub struct LoadReport {
     /// Tolerable issues: a missing include/script provider, an unsupported-in-v1 attribute or script
     /// handler, an unregistered `inherits=` font object, and the parse/expand warnings folded in from
-    /// the document layer. None of these dropped a frame.
+    /// the document layer. None of these dropped a frame — except one, on purpose: an **unknown
+    /// frame type** drops its own node here rather than in `errors`, because that is the channel
+    /// the reference uses for it at the XML door (`0x6ee356`, logged and non-fatal; decision 2191).
     pub warnings: Vec<String>,
-    /// Things that dropped a frame or a handler: an unknown frame type, a handler that failed to
-    /// compile, a method call that errored, a malformed included document.
+    /// Things that dropped a frame or a handler and that the reference RAISES on: a handler that
+    /// failed to compile, a method call that errored, a malformed included document.
     pub errors: Vec<String>,
     /// **A named file the provider does not have** — an `<Include file=>` or `<Script file=>` whose
     /// resolved path hit nothing (decision 2155).
@@ -767,6 +769,27 @@ impl Loader<'_> {
             .name()
             .map(|raw| framexml::resolve_name(raw, parent_name));
 
+        // 0 · **The type lookup, and its XML miss LOGS and skips the node** (decision 2191).
+        //
+        //     `Instantiate 0x6ee280` looks the element's own tag up first (`0x6ee2e5 mov
+        //     edi,[esi+8]`, before `parent=` is read), and on a miss prints `"Unknown frame type:
+        //     %s"` (`0x871124`) at `0x6ee356` into the document's log and makes no object for that
+        //     node — non-fatal, and the walk goes on to the next sibling (wow-re
+        //     `taxiroute-widget-type.md`, `lootbutton-widget-type.md` §1). Only the Lua door
+        //     raises. We used to reach the registry through the Lua `CreateFrame`, so an XML miss
+        //     became a `report.errors` row — a script error the player sees — for a document the
+        //     client shrugs at. The live case: an addon whose `.toc` lists its own `Bindings.xml`
+        //     (MonkeyDev). The toc line runner hands it to the same file loader as any `.xml`, its
+        //     `<Binding>` children are not `Include`/`Script`/`Font`, so each is a frame element
+        //     whose type does not exist — three log lines in the reference, three red dialogs here
+        //     — while the file's real reading as bindings happens at `0x51f400` regardless.
+        if crate::script::object::registered_frame_kind(self.lua(), &el.tag).is_none() {
+            self.report
+                .warnings
+                .push(format!("Unknown frame type: {}", el.tag));
+            return None;
+        }
+
         // 1a · `parent="SomeFrame"` — the OTHER way an element names its parent, and the one the
         //      reference's own FrameXML uses most, because its files are flat: `<Frame name="X"
         //      parent="UIParent">` at top level rather than nested inside `<Frames>`. We only ever
@@ -811,8 +834,9 @@ impl Loader<'_> {
         let parent_name = attr_parent_name.as_deref().unwrap_or(parent_name);
         let parent = attr_parent.as_ref().or(parent);
 
-        // 1 · CreateFrame(kind = element tag, name, parent). An unknown frame type errors here (the
-        //     factory-table miss, rf24 `0x6ee280`) — record it and skip the whole subtree.
+        // 1 · CreateFrame(kind = element tag, name, parent). The type is already known to resolve
+        //     (step 0), so an error here is something else the call raised — record it and skip
+        //     the whole subtree.
         let create: Function = match self.lua().globals().get("CreateFrame") {
             Ok(f) => f,
             Err(e) => {
@@ -975,10 +999,52 @@ impl Loader<'_> {
     /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
     /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
     /// is none.
-    /// Can a `relativeTo` name resolve right now — a frame in the arena or a named region?
-    pub(super) fn anchor_target_exists(&self, name: &str) -> bool {
-        let model = self.model();
-        model.arena.lookup(name).is_some() || model.region_names.contains_key(name)
+    pub(super) fn apply_anchor(&mut self, d: DeferredAnchor, may_defer: bool) {
+        let rel: Value = match d.args.1.as_deref() {
+            Some(name) => {
+                match crate::script::object::anchor_args::resolve_xml_relative_to(self.lua(), name)
+                {
+                    Some(t) => Value::Table(t),
+                    // Nothing by that name YET — a target declared later in the enclosing frame's
+                    // subtree. Hold it until the subtree is complete (`deferred_anchors`) and try
+                    // once more; a miss THEN is a real miss and takes the reference's leg.
+                    None if may_defer => {
+                        self.deferred_anchors.push(d);
+                        return;
+                    }
+                    None => {
+                        self.report
+                            .warnings
+                            .push(format!("{}: Couldn't find relative frame: {name}", d.dbg));
+                        return;
+                    }
+                }
+            }
+            // No `relativeTo=`: `ebx` still holds `[ebp-0x14]`, the layout parent default that
+            // `0x76785b call [edx+0xc]` (= `0x76c6e0`) seeded before the `<Anchor>` loop. A frame
+            // with no parent gets the screen root there, which is what a Lua `nil` means here.
+            None => match d
+                .wrapper
+                .call_method::<Option<Table>>("GetParent", ())
+                .ok()
+                .flatten()
+            {
+                Some(t) => Value::Table(t),
+                None => Value::Nil,
+            },
+        };
+        let DeferredAnchor {
+            wrapper,
+            region,
+            args: (point, _, rel_point, x, y),
+            dbg,
+        } = d;
+        let args = (point, rel, rel_point, x, y);
+        if region {
+            self.call_region(&wrapper, "SetPoint", args, &dbg);
+        } else {
+            self.call(&wrapper, "SetPoint", args, &dbg);
+        }
     }
 
     /// Apply the anchors deferred since `mark` (the enclosing `decorate`'s entry), in order. A
@@ -986,11 +1052,7 @@ impl Loader<'_> {
     pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
         let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
         for d in pending {
-            if d.region {
-                self.call_region(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            } else {
-                self.call(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            }
+            self.apply_anchor(d, false);
         }
     }
 

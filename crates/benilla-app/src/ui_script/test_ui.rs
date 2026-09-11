@@ -147,6 +147,25 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         s.run(MULTI_ACTION_BAR_STAND_INS)
             .expect("the multibar stand-ins");
     }
+    // **Our options window's Graphics rows read the REFERENCE's slider table, at OnLoad**
+    // (decision 2177): `OptionsFrameSliders[1..3]` are the bounds those three rows are built with,
+    // and they come from `Interface\FrameXML\OptionsFrame.lua` — which the shipped manifest loads
+    // as part of the stock VIDEO window, one seat above ours. A kit that seats our file alone has
+    // to bring it too, and brings the reference's own file rather than a transcription of the
+    // three rows: a stand-in here would be a second copy of numbers whose whole point is that
+    // they are no longer ours. Seated BEFORE the load, for the same reason MultiActionBars is:
+    // the rows index it from inside this very load walk.
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|l| l.eq_ignore_ascii_case("OptionsFrame.xml"))
+        && !super::reference_ui::is_chain_entry(&path)
+    {
+        let bytes = read("Interface/FrameXML/OptionsFrame.lua")
+            .expect("the reference's own OptionsFrame.lua");
+        s.run_chunk_named(&bytes, "@Interface\\FrameXML\\OptionsFrame.lua")
+            .expect("the video window's slider table");
+    }
     let report = benilla_ui::loader::load_in(s, &doc, &path, &provider);
     assert!(
         report.errors.is_empty(),
@@ -272,6 +291,13 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
         local named = {}
         for name, row in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
             if not row.isVar then table.insert(named, name) end
+            -- …and every row's ANCHOR TARGET (`anchorTo`, l.1668), which is a different set: the
+            -- keys are the frames being MOVED, the targets are what they move relative to, and
+            -- several targets (`ActionButton1`, `MainMenuBarArtFrame`) are declared in files a
+            -- one-window kit never loads. An unresolvable name is a RAISE now (decision 2176), so
+            -- a target the kit is missing aborts `UIParent_ManageFramePositions` mid-pass where it
+            -- used to anchor to the parent and carry on.
+            if row.anchorTo then table.insert(named, row.anchorTo) end
         end
         benilla_seat(named)
         for _, name in ipairs({ "SlidingActionBarTexture0", "SlidingActionBarTexture1" }) do
@@ -282,9 +308,12 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
     -- loads no options window raised on the first bag click. In the shipped manifest all four
-    -- names are real — `OptionsFrame` is our window's own, `UIOptionsFrame` and
-    -- `SoundOptionsFrame` are the reference's own files loaded hidden — but a KIT is a prefix of
-    -- the manifest and may load none of them, which is what these stand-ins are for.
+    -- names are real, and since 2177 all three options windows are the REFERENCE's own files,
+    -- loaded hidden — including `OptionsFrame`, the video window, which used to be our own
+    -- window's name. Ours is `BenillaOptionsFrame` now and is not in this list: it is not a name
+    -- the reference indexes, and the wrappers in `GameMenuFrame.xml` are what tell these two
+    -- functions about it. A KIT is a prefix of the manifest and may load none of the four, which
+    -- is what these stand-ins are for.
     local function benilla_seat_options()
         benilla_seat({ "GameMenuFrame", "OptionsFrame", "UIOptionsFrame", "SoundOptionsFrame" })
         if not OptionsFrameCancel then

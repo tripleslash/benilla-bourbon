@@ -64,6 +64,17 @@ pub(crate) struct Model {
     /// Every discovered addon, in load order — the AddOn API's registry, filled by the host at
     /// world entry ([`super::UiScript::register_addons`]). See [`super::addon`].
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
+    /// **The Lua index space** — positions into [`Self::addons`], `## Title`-sorted and
+    /// hidden-filtered (decision 2175). NOT the registry: the reference keeps two structures and
+    /// they are different permutations of different sets (wow-re
+    /// `system/ui/scratch/addon-registry-scan-and-order.md` §7).
+    pub(crate) addon_index: Vec<usize>,
+    /// The lowercased names `SMSG_ADDON_INFO` marked `status = 2`, or **`None` when no reply has
+    /// arrived this session** — and `None` is why [`Self::addon_index`] can be legitimately empty
+    /// (decision 2175). `[0xbe1b90]` is zeroed by the registry reset `0x51fad1` and written
+    /// nowhere but the reply's own rebuild, so `GetNumAddOns()` really is 0 until the server
+    /// answers.
+    pub(crate) addon_info_hidden: Option<Vec<String>>,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for a chain-sourced addon's files (`AddOnInfo::chain`), by
@@ -792,6 +803,29 @@ pub(crate) struct Model {
     /// until the host pushes it — a VM with no device behind it (every extract test) offers no
     /// formats rather than inventing some.
     pub(crate) multisample_formats: Vec<super::cvars::MultisampleFormat>,
+
+    /// The screen resolutions the Video options window's dropdown offers, ascending — pushed by
+    /// the host ([`super::UiScript::set_screen_resolutions`]) from the display this client is on,
+    /// and read by `GetScreenResolutions` / `GetCurrentResolution` / `SetScreenResolution`.
+    ///
+    /// Empty until the host pushes it. A VM with no window behind it (every extract test) offers
+    /// none rather than inventing a ladder, and the reference's own consumer walks it zero times.
+    pub(crate) screen_resolutions: Vec<super::cvars::ScreenResolution>,
+    /// **Where in that list the client actually is** — the index `GetCurrentResolution` answers,
+    /// 0-based here and reported 1-based, which is the form `CT_Viewport.lua:105` indexes the
+    /// `GetScreenResolutions` varargs with (`arg[GetCurrentResolution()]`).
+    ///
+    /// Held as an index rather than a size so the two can never disagree: the host guarantees the
+    /// live size is IN the list when it pushes, which is what makes that addon's read total.
+    /// `None` while the list is empty.
+    pub(crate) current_resolution: Option<usize>,
+    /// What this run's device and presentation path really offer, behind `GetVideoCaps` — pushed
+    /// by the host, which is the only side holding a `RenderAdapter`.
+    pub(crate) video_caps: super::cvars::VideoCaps,
+    /// `RestartGx()` calls queued since the host last drained them — the video window's
+    /// "apply the staged settings now" button, counted like [`Self::screenshot_asks`] because the
+    /// request carries no payload.
+    pub(crate) restart_gx_asks: u32,
 
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
@@ -1818,6 +1852,8 @@ impl Model {
     pub(crate) fn new() -> Model {
         Model {
             addons: Vec::new(),
+            addon_index: Vec::new(),
+            addon_info_hidden: None,
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,
@@ -1955,6 +1991,10 @@ impl Model {
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
             multisample_formats: Vec::new(),
+            screen_resolutions: Vec::new(),
+            current_resolution: None,
+            video_caps: super::cvars::VideoCaps::default(),
+            restart_gx_asks: 0,
             saved_names: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),

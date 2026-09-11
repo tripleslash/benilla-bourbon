@@ -568,7 +568,28 @@ fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, S
 fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(String, String)>) {
     let zoom = world.resource::<crate::minimap::MinimapZoom>();
     script.set_minimap_zoom(zoom.outdoor, zoom.inside);
-    finish_ui_load(script);
+    // **`finish_ui_load_with`, not `finish_ui_load`** (upstream 2125): the chat-cache restore has
+    // to land *between* `VARIABLES_LOADED` and `PLAYER_LOGIN` — it is the sole firer of
+    // `UPDATE_CHAT_WINDOWS`, the only thing that registers a chat frame for any `CHAT_MSG_*`, so
+    // anything before it reaches no window. The plain `finish_ui_load` is `#[cfg(test)]` now.
+    //
+    // The plate pair is read out of the world FIRST: the second closure borrows `world` for the
+    // restore, and a `Copy` of two bools costs nothing next to fighting that borrow. Absent in a
+    // bare test world, where "both off" is also the resource's own default.
+    let plates = world
+        .get_resource::<crate::vplates::VPlateMode>()
+        .copied()
+        .unwrap_or_default();
+    finish_ui_load_with(
+        script,
+        // `NAMEPLATES_ON` / `FRIENDNAMEPLATES_ON` (2132). This seat, and not the `Update` feed
+        // beside it, is what fixes the bug: `UIParent_OnEvent`'s first `UpdateNameplates()` runs
+        // inside the `VARIABLES_LOADED` fired at the end of this very call.
+        |script| crate::vplates::push_plate_globals(script, plates),
+        |script| {
+            crate::ui_chat::restore_chat_looks(world, script);
+        },
+    );
     let failed = script
         .diagnostics()
         .iter()
@@ -643,6 +664,20 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
+    // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
+    // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
+    // populated one. Seated here rather than off a message for exactly that reason: a feed running
+    // a frame later would seat it after every addon had already asked.
+    //
+    // A server that never answered leaves this `None`, and the array then stays empty for the
+    // session — which is the reference's behaviour too, not a fallback we chose.
+    if let Some(reply) = world
+        .get_resource::<crate::net::AddonInfoReply>()
+        .and_then(|r| r.0.clone())
+    {
+        script.note_addon_info_reply(&reply);
+    }
     // **The CVar table goes in BEFORE the UI loads**, for the same reason and with a shipped-file
     // consumer rather than an addon one (decision 2115): the reference's own `UIOptionsFrame.xml`
     // — hidden, on the manifest for the addons that name it — reads `cameraSmoothStyle` and
@@ -934,6 +969,11 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // that lands in an engine-side store that survives), before the VM is replaced. The next
     // VM's registration seeds from what this writes ([`crate::cvars`]'s saved base).
     crate::cvars::fold_dying_vm_cvars(world);
+    // The chat cache, on the same terms and for the same reason (decision NNNN): it composes the
+    // player's file out of the DYING VM, and `/reload` never crosses the `OnExit(InWorld)` edge
+    // its flush used to hang on — so a window moved in the last second before a reload was
+    // written nowhere and re-read stale from disk.
+    crate::ui_chat::settings::fold_dying_vm_chat_cache(world);
     world.insert_resource(AddOnIdentity(None));
 
     // **Everything the host is holding that came OUT of the dying VM goes with it.** A change memo

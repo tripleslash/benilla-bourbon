@@ -26,6 +26,7 @@ use crate::widget::{FrameHandle, FrameKind};
 
 // The frame method-table clusters — split out purely for size (each module's own doc says what
 // lives there); this file keeps the shared id/handle plumbing, `install`, and `CreateFrame`.
+pub(crate) mod anchor_args;
 mod events_regions;
 mod frame_state;
 mod layout_methods;
@@ -308,6 +309,27 @@ pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
     frame_kind_from_str(s)
 }
 
+/// **The type registry lookup both doors share** (`0x6ee280`'s table `[0xcee9d8]`, its only
+/// reader) — the tag's [`FrameKind`] if a factory is registered under it right now, else `None`.
+///
+/// "Right now" is the WorldFrame's one-shot: the reference unlinks and releases that record the
+/// moment the first `<WorldFrame>` is instantiated (`0x6ee439`), so a second one — from any XML, or
+/// `CreateFrame("WorldFrame")` — takes the lookup's miss leg (decision 1984).
+///
+/// One function because the two doors disagree only in what a MISS does, never in what a miss is
+/// (decision 2191): the Lua binding raises ([`create_frame`]), the XML loader logs
+/// `"Unknown frame type: %s"` and skips the node (`crate::loader`), and wow-re's
+/// `taxiroute-widget-type.md`/`lootbutton-widget-type.md` verify both legs off the same `0x6ee280`.
+pub(crate) fn registered_frame_kind(lua: &Lua, kind: &str) -> Option<FrameKind> {
+    let frame_kind = frame_kind_from_str(kind)?;
+    let one_shot_spent = frame_kind == FrameKind::WorldFrame
+        && lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .world_frame_made;
+    (!one_shot_spent).then_some(frame_kind)
+}
+
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
@@ -363,6 +385,17 @@ pub(super) fn as_f32(v: &Value) -> f32 {
     match v {
         Value::Number(n) => *n as f32,
         Value::Integer(i) => *i as f32,
+        _ => 0.0,
+    }
+}
+
+/// [`as_f32`]'s double-width sibling, for the shape-C positions whose store is `f64` — today only
+/// `ColorSelect:SetColorRGB`, whose channels go through a quantizer where a detour via `f32` could
+/// move a value across a rounding boundary (`colorselect`'s module doc).
+pub(super) fn as_f64(v: &Value) -> f64 {
+    match v {
+        Value::Number(n) => *n,
+        Value::Integer(i) => *i as f64,
         _ => 0.0,
     }
 }
@@ -591,22 +624,11 @@ pub(super) fn create_frame(
     lua: &Lua,
     (kind, name, parent, inherits): (String, Option<Value>, Option<Value>, Option<Value>),
 ) -> mlua::Result<Table> {
-    let frame_kind = frame_kind_from_str(&kind)
+    // The Lua door's miss RAISES: `0x7060b0` reaches `"CreateFrame: Unknown frame type '%s'"`
+    // (`0x872fa8`) through `luaL_error 0x6f4940`, which never returns. The XML door's does not —
+    // see [`registered_frame_kind`].
+    let frame_kind = registered_frame_kind(lua, &kind)
         .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
-    // The WorldFrame's registry record is a ONE-SHOT: the reference unlinks and releases it the
-    // moment the first `<WorldFrame>` is instantiated (`0x6ee439`), so a second one — from any
-    // XML, or `CreateFrame("WorldFrame")` — takes the lookup's miss leg, `Unknown frame type`
-    // (decision 1984). The loader reaches this through the same global, so it covers both.
-    if frame_kind == FrameKind::WorldFrame
-        && lua
-            .app_data_ref::<Model>()
-            .expect("model app_data")
-            .world_frame_made
-    {
-        return Err(mlua::Error::runtime(format!(
-            "CreateFrame: unknown frame type '{kind}'"
-        )));
-    }
     // **`name` and `inherits` are `lua_tostring` positions, and a NUMBER is a string to it.**
     // `0x7060b0` reads both through `0x6f3690` with no type guard at all, so `CreateFrame("Frame",
     // 5)` names the frame `"5"` — a `Value::String`-only match drops it (wow-re
@@ -693,6 +715,25 @@ pub(super) fn create_frame(
             )));
         }
     }
+
+    // **A leading `$parent` in the NAME is expanded, here as in XML.** `CreateFrame 0x7060b0`
+    // does not store the name itself: it builds a synthetic node, sets `name=` on it
+    // (`0x706225 push 0x838090 "name"` → `0x70622d` SetAttribute) alongside `parent=` and
+    // `inherits=`, and hands it to the XML frame builder `0x6ee280` with the parent object in
+    // `edx` — so the name reaches `CScriptRegion::SetName 0x76c650` by exactly the route an XML
+    // `name=` does, and `0x76c691` is one of the expander's two call sites (wow-re
+    // `name-string-widget-resolution.md` §5/§6).
+    //
+    // The base is the frame's **parent's** first named ancestor — the same walk `$parent` in a
+    // `relativeTo` takes, one link higher than the anchoring frame's own.
+    //
+    // Not academic: `FonzAppraiser` names every widget it builds this way (`"$parentDropdown"..n`,
+    // `"$parentCloseButton"`, ~30 sites), and until decision 2176 made an unresolvable anchor
+    // raise, the unexpanded name only showed up as a warning nobody read.
+    let name = name.map(|n| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        crate::framexml::resolve_name(&n, &parent_token_base(&model, parent_handle))
+    });
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
     let id = {

@@ -5,6 +5,7 @@
 //! Split by subject; the shared `script()` fixture lives in [`common`].
 
 mod addon_argument_abi;
+mod addon_index_space;
 mod anchors;
 mod backdrop;
 mod button;
@@ -29,6 +30,7 @@ mod modelframe;
 mod movable;
 mod name_targets;
 mod nameplate;
+mod numeric_shape_gate;
 mod object_model;
 mod reference_surface;
 mod region_map;
