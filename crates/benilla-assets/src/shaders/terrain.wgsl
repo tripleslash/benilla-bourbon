@@ -335,8 +335,16 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     var primary = in.primary;
     if (modern) {
         let mview_z = (view.view_from_world * in.world_position).z;
-        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, normalize(in.world_normal), -mview_z);
-        primary = wow_light.light_ambient.rgb + max(in.primary - wow_light.light_ambient.rgb, vec3<f32>(0.0)) * world_shadow;
+        let mn = normalize(in.world_normal);
+        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, mn, -mview_z);
+        // fork: modern lighting (FORK.md, P3) — the sun is evaluated per pixel under the cascades
+        // (Lambert on the MCNR normal) instead of Gouraud per vertex. The primary's point-light share
+        // rides along, recovered as what the vertex sum holds beyond ambient + sun.
+        let ml = -normalize(wow_light.light_sun.xyz);
+        let mndotl = max(dot(mn, ml), 0.0);
+        let sun_estimate = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * mndotl, vec3<f32>(0.0), vec3<f32>(1.0));
+        let points = max(in.primary - sun_estimate, vec3<f32>(0.0));
+        primary = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass

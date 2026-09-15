@@ -414,7 +414,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // GL_COLOR_MATERIAL: MOCV multiplies the lit terms INSIDE the clamp (point term is
         // zero on WMO surfaces, kept in the sum for exact mirroring), emission adds beside.
         let primary = clamp(
-            vc.rgb * (lit_wmo + in.point_lit) + sidn_e,
+            // fork: modern lighting (FORK.md, P3) — exterior WMO drops its baked MOCV light in a modern frame.
+            select(vc.rgb, vec3<f32>(1.0), wow_light.point_count.y > 0.5 && !interior) * (lit_wmo + in.point_lit) + sidn_e,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );

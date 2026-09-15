@@ -1236,7 +1236,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // MOCV multiplies the lit terms (GL_COLOR_MATERIAL) but NOT the emission terms — SIDN and
         // the highlight add alongside, exactly the FFP's material-emission placement.
         let primary = clamp(
-            vc * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            // fork: modern lighting (FORK.md, P3) — an exterior WMO surface drops its baked MOCV light in a
+            // modern frame (the cascades and sky shade it); interiors keep MOCV as interim indirect.
+            select(vc, vec3<f32>(1.0), wow_light.point_count.y > 0.5 && !is_interior) * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
