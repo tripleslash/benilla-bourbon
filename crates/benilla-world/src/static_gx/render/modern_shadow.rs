@@ -22,7 +22,8 @@ use bevy::shader::Shader;
 use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
 
 use super::*;
-use crate::modern::shadow::{ModernCascades, MAX_CASCADES};
+use crate::modern::shadow::{ModernCascades, ModernTerrainCasters, MAX_CASCADES};
+use bevy::platform::collections::HashMap as StrideMap;
 
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
@@ -38,6 +39,14 @@ struct GxShadowPipelines {
 
 #[derive(Resource, Default)]
 struct CasterViewBuffer(DynamicUniformBuffer<CasterView>);
+
+/// Terrain caster pipelines, one per vertex stride (position is always attribute 0 at offset 0).
+#[derive(Resource)]
+struct TerrainShadowPipelines {
+    view_layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+    by_stride: StrideMap<u64, CachedRenderPipelineId>,
+}
 
 /// This frame's shadow targets: one depth view per array layer, the caster-view bind group and its
 /// per-cascade offsets. `count == 0` = nothing to draw (classic, or not ready).
@@ -91,6 +100,11 @@ fn init_shadow_pipelines(
         }),
         ..default()
     };
+    commands.insert_resource(TerrainShadowPipelines {
+        view_layout: view_layout.clone(),
+        shader: asset_server.load("embedded://benilla_world/shaders/modern/terrain_shadow.wgsl"),
+        by_stride: StrideMap::default(),
+    });
     commands.insert_resource(GxShadowPipelines {
         opaque: pipeline_cache.queue_render_pipeline(make("modern_shadow_static", false)),
         cutout: pipeline_cache.queue_render_pipeline(make("modern_shadow_static_cutout", true)),
@@ -163,6 +177,60 @@ fn prepare_modern_shadow(
     frame.count = cascades.count;
 }
 
+/// Queue a terrain caster pipeline for every vertex stride the resident cells use.
+fn queue_terrain_shadow_pipelines(
+    casters: Option<Res<ModernTerrainCasters>>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    pipeline_cache: Res<PipelineCache>,
+    pipes: Option<ResMut<TerrainShadowPipelines>>,
+) {
+    let (Some(casters), Some(mut pipes)) = (casters, pipes) else {
+        return;
+    };
+    for (mesh_id, _, _) in &casters.cells {
+        let Some(mesh) = meshes.get(*mesh_id) else {
+            continue;
+        };
+        let stride = mesh.layout.0.layout().array_stride;
+        if pipes.by_stride.contains_key(&stride) {
+            continue;
+        }
+        let descriptor = RenderPipelineDescriptor {
+            label: Some("modern_shadow_terrain".into()),
+            layout: vec![pipes.view_layout.clone()],
+            vertex: VertexState {
+                shader: pipes.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("vertex".into()),
+                buffers: vec![VertexBufferLayout {
+                    array_stride: stride,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: vec![VertexAttribute {
+                        format: VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            fragment: None,
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::GreaterEqual,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
+            ..default()
+        };
+        let id = pipeline_cache.queue_render_pipeline(descriptor);
+        pipes.by_stride.insert(stride, id);
+    }
+}
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct GxShadowLabel;
 
@@ -231,14 +299,54 @@ impl ViewNode for GxShadowNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let Some((opaque, cutout)) = ready else {
-                continue;
-            };
             if i >= cascades.count as usize {
                 continue; // cleared, unused this tier
             }
             pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
             let clip_from_world = cascades.clip_from_world[i];
+            // Terrain first: hills and cliffs cast onto everything below them.
+            if let (Some(terrain), Some(tp)) = (
+                world.get_resource::<ModernTerrainCasters>(),
+                world.get_resource::<TerrainShadowPipelines>(),
+            ) {
+                for (mesh_id, center, half) in &terrain.cells {
+                    if outside_box(&clip_from_world, *center, *half) {
+                        continue;
+                    }
+                    let Some(mesh) = meshes.get(*mesh_id) else {
+                        continue;
+                    };
+                    let Some(pipeline) = tp
+                        .by_stride
+                        .get(&mesh.layout.0.layout().array_stride)
+                        .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+                    else {
+                        continue;
+                    };
+                    let (Some(vslice), Some(islice)) = (
+                        allocator.mesh_vertex_slice(mesh_id),
+                        allocator.mesh_index_slice(mesh_id),
+                    ) else {
+                        continue;
+                    };
+                    let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
+                        &mesh.buffer_info
+                    else {
+                        continue;
+                    };
+                    pass.set_render_pipeline(pipeline);
+                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+                    pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                    pass.draw_indexed(
+                        islice.range.clone(),
+                        i32::try_from(vslice.range.start).unwrap_or(0),
+                        0..1,
+                    );
+                }
+            }
+            let Some((opaque, cutout)) = ready else {
+                continue;
+            };
             for (gpu, draw) in &casters {
                 if outside_cascade(&clip_from_world, draw) {
                     continue;
@@ -280,8 +388,15 @@ impl ViewNode for GxShadowNode {
 /// between the light and the near plane still casts (the shader pancakes it).
 fn outside_cascade(clip_from_world: &Mat4, draw: &GxCellDraw) -> bool {
     // `aabb` is relative to the bake's recentring origin (`bake.rs`).
-    let center = draw.origin + Vec3::from(draw.aabb.center);
-    let half = Vec3::from(draw.aabb.half_extents);
+    outside_box(
+        clip_from_world,
+        draw.origin + Vec3::from(draw.aabb.center),
+        Vec3::from(draw.aabb.half_extents),
+    )
+}
+
+/// Does a world box miss the cascade's light-space rectangle? (Depth untested, as above.)
+fn outside_box(clip_from_world: &Mat4, center: Vec3, half: Vec3) -> bool {
     let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
     for i in 0..8u8 {
         let sign = Vec3::new(
@@ -307,7 +422,8 @@ pub(super) fn build(render_app: &mut SubApp) {
         )
         .add_systems(
             Render,
-            prepare_modern_shadow.in_set(RenderSystems::PrepareResources),
+            (prepare_modern_shadow, queue_terrain_shadow_pipelines)
+                .in_set(RenderSystems::PrepareResources),
         )
         .add_render_graph_node::<ViewNodeRunner<GxShadowNode>>(Core3d, GxShadowLabel)
         .add_render_graph_edges(

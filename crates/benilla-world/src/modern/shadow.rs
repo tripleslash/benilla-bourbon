@@ -27,7 +27,8 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderStorageBuffer;
 
-use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
+use benilla_assets::materials::{TerrainMaterial, MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
+use bevy::camera::primitives::Aabb;
 
 use super::{ActiveLighting, LightingQuality};
 use crate::lighting::WowLighting;
@@ -68,6 +69,13 @@ pub struct ModernCascades {
     pub depth_bias: [f32; MAX_CASCADES],
 }
 
+/// Every resident terrain cell as a caster: mesh, world-space box centre and half extents.
+/// Collected in `Last`; empty in a classic session.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct ModernTerrainCasters {
+    pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3)>,
+}
+
 impl ModernCascades {
     /// The GPU block, laid out as `benilla_modern::sunshadow::ModernCascades`.
     pub fn std430(&self) -> Vec<u8> {
@@ -91,14 +99,16 @@ impl ModernCascades {
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ModernCascades>()
+        .init_resource::<ModernTerrainCasters>()
         .add_plugins(ExtractResourcePlugin::<ModernCascades>::default())
+        .add_plugins(ExtractResourcePlugin::<ModernTerrainCasters>::default())
         .add_systems(Startup, create_shadow_assets)
         // `Last`, never `PostUpdate`: Bevy's `check_entities_needing_specialization` sits in PostUpdate
         // unordered against benilla's material writers (model_fade, straddle, zfill, lazy spawns…), so
         // ANY added PostUpdate system can reshuffle the executor order, put a writer after the check,
         // and panic the render world at `bevy_pbr` `material.rs:1061` (bisected 2026-09-15: P1a clean,
         // P2a's PostUpdate system broke classic too). `Last` still sees propagated transforms.
-        .add_systems(Last, update_cascades);
+        .add_systems(Last, (update_cascades, collect_terrain_casters));
 }
 
 /// Insert the two constant-handle assets. Always (classic sessions too): the materials bind them
@@ -193,6 +203,25 @@ fn update_cascades(
         near = far * 0.9;
     }
     *out = next;
+}
+
+/// Terrain cells are world-space meshes under an identity transform, so their `Aabb` is the box.
+fn collect_terrain_casters(
+    active: Res<ActiveLighting>,
+    cells: Query<(&Mesh3d, &Aabb, &GlobalTransform), With<MeshMaterial3d<TerrainMaterial>>>,
+    mut out: ResMut<ModernTerrainCasters>,
+) {
+    if !active.is_modern() {
+        if !out.cells.is_empty() {
+            out.cells.clear();
+        }
+        return;
+    }
+    out.cells.clear();
+    for (mesh, aabb, gt) in &cells {
+        let center = gt.transform_point(Vec3::from(aabb.center));
+        out.cells.push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+    }
 }
 
 pub struct CascadeFit {
