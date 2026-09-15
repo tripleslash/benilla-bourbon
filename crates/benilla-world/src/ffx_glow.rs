@@ -462,6 +462,8 @@ struct FfxGlowPipelines {
     wave_view: TextureView,
     wave_sampler: Sampler,
     downsample: CachedRenderPipelineId,
+    /// fork: modern lighting — the unclamped HDR downsample a modern frame reads.
+    downsample_hdr: CachedRenderPipelineId,
     gauss_h: CachedRenderPipelineId,
     gauss_v: CachedRenderPipelineId,
     combine: CachedRenderPipelineId,
@@ -576,6 +578,11 @@ fn init_pipelines(
         &layout_filter,
         "fs_downsample",
     ));
+    let downsample_hdr = pipeline_cache.queue_render_pipeline(pipeline(
+        "ffx_glow_downsample_hdr",
+        &layout_filter,
+        "fs_downsample_hdr",
+    ));
     let gauss_h =
         pipeline_cache.queue_render_pipeline(pipeline("ffx_glow_h", &layout_filter, "fs_gauss_h"));
     let gauss_v =
@@ -597,6 +604,7 @@ fn init_pipelines(
         wave_view,
         wave_sampler,
         downsample,
+        downsample_hdr,
         gauss_h,
         gauss_v,
         combine,
@@ -814,7 +822,11 @@ impl ViewNode for FfxGlowNode {
             wave,
         );
         // fork: modern lighting (FORK.md) — `wave.z`: the scene arrives linear.
-        uniform[6] = if crate::modern::frame_is_modern() { 1.0 } else { 0.0 };
+        let modern = crate::modern::frame_is_modern();
+        if modern {
+            uniform[6] = 1.0;
+            uniform[7] = crate::modern::MODERN_EXPOSURE;
+        }
         // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
         // pipeline, which is the same fork — the first two passes are identical in both lists.
         let combine_id = if wave_armed(glow.state, wave, death) {
@@ -823,7 +835,7 @@ impl ViewNode for FfxGlowNode {
             pipelines.combine
         };
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
-            pipeline_cache.get_render_pipeline(pipelines.downsample),
+            pipeline_cache.get_render_pipeline(if modern { pipelines.downsample_hdr } else { pipelines.downsample }),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
             pipeline_cache.get_render_pipeline(pipelines.gauss_v),
             pipeline_cache.get_render_pipeline(combine_id),

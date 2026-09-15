@@ -322,7 +322,7 @@ pub use benilla_world::build_id::BuildId;
 /// loading overlay's `ready` edge, which the viewer has no glue screen to send.
 pub fn run_worldview(build: BuildId) -> AppExit {
     web_threads::install();
-    const SEEDED: [&str; 3] = ["WOW_WORLDVIEW_AT", "WOW_LIGHTING", "WOW_LIGHTING_QUALITY"];
+    const SEEDED: [&str; 4] = ["WOW_WORLDVIEW_AT", "WOW_LIGHTING", "WOW_LIGHTING_QUALITY", "WOW_CLOCK"];
     benilla_world::launch_env::seed(
         SEEDED
             .iter()

@@ -119,13 +119,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     // fork: modern lighting (FORK.md) — a linear frame keeps Bevy's linear colour
     // (`span.z`, written by `disc_span`); the premultiply below then happens in linear.
     let gamma = select(linear_to_srgb(base.rgb), base.rgb, span.z > 0.5);
+    // fork: modern lighting — the discs are the brightest thing in a linear frame; bloom's source.
+    let hdr = select(1.0, 4.0, span.z > 0.5);
     // (The far depth for BOTH is the vertex stage's — see the header: a sky element survives only
     // on pixels no opaque geometry claimed, the reference's back-slice depth test.)
     if celestial.z >= 0.5 {
         // ADDITIVE GLARE: (rgb·a, alpha 0) under (ONE, 1−src_alpha) ⇒ `dst + gamma·a` — the
         // reference's SRC_ALPHA, ONE byte addition, `a` = the lens-flare intensity envelope.
-        return vec4<f32>(gamma * a * celestial.y, 0.0);
+        return vec4<f32>(gamma * a * celestial.y * hdr, 0.0);
     }
     // DISC: premultiplied gamma blend (AlphaMode::Premultiplied).
-    return vec4<f32>(gamma * a * celestial.y, a);
+    return vec4<f32>(gamma * a * celestial.y * hdr, a);
 }

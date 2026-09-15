@@ -33,7 +33,7 @@ struct FfxCombine {
     // z = the drunk/underwater haze mix; w = the deband-dither arm.
     lane: vec4<f32>,
     // xy = the GlowWave phases `(t mod 3174)/3174` and `(t mod 2805)/2805`; z = the fork's modern-lighting
-    // flag (FORK.md); w unused. Written on
+    // flag (FORK.md); w = its exposure. Written on
     // every frame, read only by `fs_combine_wave`.
     wave: vec4<f32>,
 }
@@ -64,6 +64,20 @@ fn fs_downsample(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, -1.5) * texel), one)
         + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, 0.5) * texel), one)
         + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, 0.5) * texel), one))
+        * 0.25;
+}
+
+// fork: modern lighting (FORK.md) — the HDR twin of `fs_downsample`. A modern
+// frame is linear radiance, so the taps keep their energy above 1 (capped only against inf); the
+// modern combine turns that surplus into bloom.
+@fragment
+fn fs_downsample_hdr(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(in_tex));
+    let cap = vec4<f32>(64.0);
+    return (min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, -1.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, -1.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, 0.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, 0.5) * texel), cap))
         * 0.25;
 }
 
@@ -127,6 +141,17 @@ fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
     return (dither - vec3<f32>(0.5)) / 255.0;
 }
 
+// fork: modern lighting — the P1b tonemap: identity below the knee (so ordinary pixels keep their
+// classic value), an exponential shoulder above it that approaches white without clipping.
+const MODERN_BLOOM: f32 = 0.35;
+const MODERN_KNEE: f32 = 0.8;
+fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let k = MODERN_KNEE;
+    let over = max(x - vec3<f32>(k), vec3<f32>(0.0));
+    let rolled = vec3<f32>(k) + (1.0 - k) * (vec3<f32>(1.0) - exp(-over / (1.0 - k)));
+    return select(x, rolled, x > vec3<f32>(k));
+}
+
 // The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
 // rounds in — then the frame's single decode.
 fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
@@ -149,11 +174,20 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     // Clamped to [0, 1] like the downsample's taps: the byte framebuffer this term stands for
     // could never exceed 255, and an unclamped super-white here keeps the whole additive stack
     // hard-white after the min() below — the screen term must saturate BEFORE the glow add.
-    // fork: modern lighting (FORK.md) — the scene and its blur arrive LINEAR in a
-    // modern frame (`wave.z`); the combine's byte math runs on their gamma encode, then decodes as before.
-    let modern = ffx.wave.z;
-    let sg = clamp(colorspace::modern_in(scene.rgb, modern), vec3<f32>(0.0), vec3<f32>(1.0));
-    let bg = max(colorspace::modern_in(max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0)), modern), vec3<f32>(0.0));
+    // fork: modern lighting (FORK.md) — in a modern frame (`wave.z`) the scene
+    // and its blur are linear HDR radiance: expose (`wave.w`), add the energy above white as bloom,
+    // roll the shoulder into [0, 1], then run the combine's byte math on the gamma encode — the
+    // glow, haze and death programs keep their classic behaviour on a tonemapped image.
+    let blur_raw = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
+    var sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    var bg = blur_raw;
+    if (ffx.wave.z > 0.5) {
+        let exposure = ffx.wave.w;
+        let blur_hdr = blur_raw * exposure;
+        let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
+        sg = colorspace::linear_to_srgb(modern_tonemap(max(scene.rgb, vec3<f32>(0.0)) * exposure + bloom));
+        bg = colorspace::linear_to_srgb(modern_tonemap(blur_hdr));
+    }
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear
     // booths hold 1 everywhere — only the transparent-clear create booth reads it, to composite
     // its baked model straight over the UI page.

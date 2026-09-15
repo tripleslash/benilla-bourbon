@@ -215,7 +215,11 @@ fn update_world_shadow(
     mut suns: Query<&mut Transform, With<WorldShadowSun>>,
     cameras_for_position: Query<&GlobalTransform, With<WorldCamera>>,
 ) {
-    let wanted = video.world_shadows && *state.get() == ClientState::InWorld;
+    // fork: modern lighting (FORK.md) — a modern session casts through
+    // `benilla_world::modern::shadow`; the creature-only proxy retires.
+    let wanted = video.world_shadows
+        && *state.get() == ClientState::InWorld
+        && !benilla_world::modern::frame_is_modern();
     if !wanted {
         if let Some(entity) = runtime.dynamic_caster.take() {
             commands.entity(entity).despawn();

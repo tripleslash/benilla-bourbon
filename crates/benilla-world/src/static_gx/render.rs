@@ -1018,6 +1018,8 @@ pub(super) fn build(app: &mut App) {
             Core3d,
             (Node3d::StartMainPass, StaticGxLabel, Node3d::MainOpaquePass),
         );
+    // fork: modern lighting (FORK.md) — static casters for the modern sun.
+    modern_shadow::build(render_app);
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1100,3 +1102,6 @@ mod tests {
         assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
     }
 }
+
+// fork: modern lighting (FORK.md) — see `modern/HOOKS.md`.
+mod modern_shadow;

@@ -166,7 +166,7 @@ impl Default for LightingDebug {
         // matched-hour capture instrument (a headless probe can't reach the panel slider, and a
         // time-of-day A/B against a reference screenshot is meaningless at the wrong hour —
         // bug B33's whole diagnosis hinged on one). Unset = follow the server clock, as before.
-        let clock = std::env::var("WOW_CLOCK")
+        let clock = crate::launch_env::var("WOW_CLOCK").ok_or(()) /* fork: modern lighting — reachable from the browser (?clock=) */
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .map(|m| m % 1440);

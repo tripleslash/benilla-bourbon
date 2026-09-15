@@ -15,6 +15,12 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use crate::view::WorldCamera;
 
+pub mod shadow;
+pub mod sun_arc;
+
+/// P1b's fixed exposure (the FFXGlow combine's `wave.w`); auto-exposure lands in P7.
+pub const MODERN_EXPOSURE: f32 = 1.0;
+
 /// Which lighting model the world renders with. CVar `lightingModel`: `0` classic, `1` modern.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LightingModel {
@@ -173,7 +179,8 @@ impl Plugin for ModernLightingPlugin {
         app.init_resource::<LightingSettings>()
             .init_resource::<ActiveLighting>()
             .add_plugins(ExtractResourcePlugin::<ActiveLighting>::default())
-            .add_systems(PreUpdate, latch_on_world_entry);
+            .add_systems(PreUpdate, latch_on_world_entry)
+            .add_plugins((sun_arc::plugin, shadow::plugin));
     }
 }
 
