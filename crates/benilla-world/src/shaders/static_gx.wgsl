@@ -544,5 +544,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     }
     // Raw gamma out (0161's lane); alpha pinned 1.0 — opaque-intent by admission.
     // fork: modern lighting (FORK.md) — the frame is linear.
+    if (wow_light.point_count.y > 0.5 && modern_cascades.params.w > 0.5) {
+        rgb = vec3<f32>(world_shadow); // modern shadow debug view
+    }
     return vec4<f32>(colorspace::modern_out(rgb, wow_light.point_count.y), 1.0);
 }

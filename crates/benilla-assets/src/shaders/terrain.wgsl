@@ -389,5 +389,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // gamma exactly like the reference's byte framebuffer; the frame's ONE decode lives in the
     // FFXGlow combine (the last node). Output raw.
     // fork: modern lighting (FORK.md) — the frame is linear.
+    if (modern && modern_cascades.params.w > 0.5) {
+        tuned = vec3<f32>(world_shadow); // modern shadow debug view
+    }
     return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
 }

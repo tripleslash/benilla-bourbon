@@ -1391,6 +1391,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         }
         out_rgb = lin;
     }
+    if (modern_frame && modern_cascades.params.w > 0.5) {
+        out_rgb = vec3<f32>(player_shadow); // modern shadow debug view
+    }
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;
 }

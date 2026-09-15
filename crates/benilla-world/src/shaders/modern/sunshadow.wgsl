@@ -18,7 +18,7 @@ struct ModernCascades {
     // Constant depth bias per cascade, in that cascade's depth units.
     depth_bias: vec4<f32>,
     // x = cascade count (0 = no modern shadow this frame), y = 1 / map size, z = normal offset in
-    // texels, w unused.
+    // texels, w = debug view (receivers output raw visibility).
     params: vec4<f32>,
 }
 

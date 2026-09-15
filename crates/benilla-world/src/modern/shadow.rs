@@ -67,6 +67,8 @@ pub struct ModernCascades {
     pub splits: [f32; MAX_CASCADES],
     pub texel_world: [f32; MAX_CASCADES],
     pub depth_bias: [f32; MAX_CASCADES],
+    /// The debug view: receivers show raw visibility (`params.w`).
+    pub debug: bool,
 }
 
 /// Every resident terrain cell as a caster: mesh, world-space box centre and half extents.
@@ -90,7 +92,7 @@ impl ModernCascades {
             self.count as f32,
             1.0 / SHADOW_MAP_SIZE as f32,
             NORMAL_OFFSET_TEXELS,
-            0.0,
+            if self.debug { 1.0 } else { 0.0 },
         ];
         out.extend_from_slice(bytemuck::cast_slice(&params));
         out
@@ -182,6 +184,7 @@ fn update_cascades(
     let splits = cascade_splits(active.quality);
     let mut next = ModernCascades {
         count: splits.len() as u32,
+        debug: super::shadow_debug_enabled(),
         ..default()
     };
     let mut near = persp.near.max(0.1);
