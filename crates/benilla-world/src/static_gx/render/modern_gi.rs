@@ -106,7 +106,7 @@ enum CasterKey {
 struct GiVoxelState {
     tier: Option<GiTier>,
     /// The base voxel coord each level currently holds.
-    base: [IVec3; gi::MAX_CASCADES],
+    base: [IVec3; gi::MAX_LEVELS],
     /// The static casters the clipmap currently holds.
     casters: GiMap<CasterKey, VoxelCaster>,
     jobs: Vec<VoxelJob>,

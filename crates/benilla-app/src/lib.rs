@@ -322,7 +322,7 @@ pub use benilla_world::build_id::BuildId;
 /// loading overlay's `ready` edge, which the viewer has no glue screen to send.
 pub fn run_worldview(build: BuildId) -> AppExit {
     web_threads::install();
-    const SEEDED: [&str; 11] = [
+    const SEEDED: [&str; 14] = [
         "WOW_MAP",
         "WOW_MODERN_ZONE",
         "WOW_WORLDVIEW_AT",
@@ -332,6 +332,9 @@ pub fn run_worldview(build: BuildId) -> AppExit {
         "WOW_MODERN_SUNARC",
         "WOW_MODERN_CPUHOOKS",
         "WOW_MODERN_SHADOWDEBUG",
+        "WOW_MODERN_GI",
+        "WOW_MODERN_GI_GAIN",
+        "WOW_MODERN_LIGHTS",
         "WOW_WORLDVIEW_FACE",
         "WOW_WORLDVIEW_PITCH",
     ];

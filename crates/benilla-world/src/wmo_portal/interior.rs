@@ -839,6 +839,7 @@ mod tests {
             portal_infos: Vec::new(),
             portal_refs: Vec::new(),
             group_nav: Vec::new(),
+            ambient: [0.0; 3],
             fogs: Vec::new(),
             skybox: None,
             group_collision_tris: Vec::new(),

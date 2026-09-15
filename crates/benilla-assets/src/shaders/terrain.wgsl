@@ -29,6 +29,7 @@
 #import benilla_modern::colorspace
 #import benilla_modern::sunshadow
 #import benilla_modern::probegi
+#import benilla_modern::locallight
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -51,7 +52,7 @@
 // coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
 // that row); `w` is how much of the cell answered, which is 0 wherever the field has nothing to say
 // and the sky-occlusion map stays in charge.
-fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
+fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> vec4<f32> {
     let g = modern_block.gi;
     if (g.params.x < 0.5 || g.params.z <= 0.0) {
         return vec4<f32>(0.0);
@@ -61,7 +62,7 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
     var left = 1.0;
     let count = u32(g.dims.w);
     for (var c = 0u; c < count; c = c + 1u) {
-        let pk = probegi::pick(g, c, p, nrm);
+        let pk = probegi::pick(g, c, p, nrm, recv_interior);
         if (pk.inside <= 0.0) {
             continue;
         }
@@ -129,6 +130,43 @@ struct WowLight {
     points: array<vec4<f32>, 512>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
+
+// fork: modern lighting (FORK.md, P6) — the local lights that reach this
+// fragment, read out of the world grid the binning pass fills: the WoW falloff per light, under its
+// cube shadow when it holds an atlas slot. The walk lives here rather than in
+// `benilla_modern::locallight` for the same reason `modern_gi_ambient` does — the light table is
+// this lane's own binding, which a WGSL module cannot reach.
+fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
+    let g = modern_block.lights;
+    let found = locallight::cell_at(g, p);
+    if (found.y < 1u) {
+        return vec3<f32>(0.0);
+    }
+    let cell = modern_block.light_cells[found.x];
+    let count = locallight::cell_count(cell);
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let id = locallight::cell_light(cell, i);
+        let pos_range = wow_light.points[2u * id];
+        let to_light = pos_range.xyz - p;
+        let d = length(to_light);
+        let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
+        if (nl <= 0.0) {
+            continue;
+        }
+        let vis = locallight::local_visibility(
+            modern_shadow_map,
+            modern_shadow_samp,
+            g,
+            locallight::cell_slot(cell, i),
+            pos_range.xyz,
+            p,
+            nrm,
+        );
+        sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
+    }
+    return sum;
+}
 
 // Custom vertex→fragment payload: the standard fields the splat fragment needs, PLUS `specular` — the
 // per-vertex-clamped sun glint that must be Gouraud-interpolated (Q14). Same struct on both stages, so
@@ -435,12 +473,19 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // rides along, recovered as what the vertex sum holds beyond ambient + sun.
         let ml = -normalize(wow_light.light_sun.xyz);
         let mndotl = max(dot(mn, ml), 0.0);
-        let points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
+        // fork: modern lighting (FORK.md, P6) — the binned local-light grid
+        // replaces the reference's three-nearest selection wherever it is live; Low has no grid and
+        // keeps P3's per-pixel evaluation of that selection.
+        var points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
+        if (locallight::grid_live(modern_block.lights)) {
+            points = modern_local_lights(in.world_position.xyz, mn);
+        }
         // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         // fork: modern lighting (FORK.md, P5) — the probe field replaces the ambient
         // row wherever it has an answer; the sky map is what is left where it does not.
-        let gi = modern_gi_ambient(in.world_position.xyz, mn);
+        // Terrain is never an interior receiver: an ADT chunk is the open world by construction.
+        let gi = modern_gi_ambient(in.world_position.xyz, mn, 0.0);
         let ambient = mix(wow_light.light_ambient.rgb * sky, gi.rgb, gi.w);
         primary = ambient + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
@@ -498,8 +543,11 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // fork: modern lighting (FORK.md) — the frame is linear.
     if (modern && modern_block.cascades.params.w > 0.5) {
         let dbg = modern_block.cascades.params.w;
-        if (dbg > 2.5) {
-            let gdbg = modern_gi_ambient(in.world_position.xyz, normalize(in.world_normal)); // modern GI debug view
+        if (dbg > 4.5) {
+            // fork: modern lighting (P6) — mode 5: what the local-light grid put here.
+            tuned = modern_local_lights(in.world_position.xyz, normalize(in.world_normal));
+        } else if (dbg > 2.5) {
+            let gdbg = modern_gi_ambient(in.world_position.xyz, normalize(in.world_normal), 0.0); // modern GI debug view
             tuned = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
         } else {
             tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view

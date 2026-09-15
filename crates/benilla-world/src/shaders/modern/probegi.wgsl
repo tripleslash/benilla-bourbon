@@ -17,7 +17,9 @@ struct GiParams {
     // w = normal bias in probe spacings.
     params: vec4<f32>,
     // Per cascade: xyz = the base probe coord (world coord / spacing, integral), w = spacing (yd).
-    grid: array<vec4<f32>, 4>,
+    // Cascade 0 is the P6 interior sub-grid when `interior.w` says so — a finer grid that exists
+    // only while the camera stands in a WMO, with the exterior ladder shifted up behind it.
+    grid: array<vec4<f32>, 5>,
     // xyz = probes per axis, w = cascade count.
     dims: vec4<f32>,
     // rgb = the sky's reference radiance (the shared light's ambient row), w = the open-field mean
@@ -27,8 +29,20 @@ struct GiParams {
     ground: vec4<f32>,
     // x = rays per probe, y = update period (frames), z = frame index, w = debug view.
     misc: vec4<f32>,
-    // Room for P6/P7 (interior classes, grading) — also the padding that aligns the probe array.
-    spare: array<vec4<f32>, 4>,
+    // P6: rgb = the interior ambient (the camera's WMO `MOHD.ambColor`, decoded) — what an interior
+    // probe's escaped rays see instead of the sky. w = flags: 1 = cascade 0 is the interior
+    // sub-grid, 2 = Chebyshev probe visibility (High and above).
+    interior: vec4<f32>,
+    // Room for P7's grading — also the padding that aligns the light grid behind this block.
+    spare: array<vec4<f32>, 2>,
+}
+
+fn interior_grid(g: GiParams) -> bool {
+    return (u32(g.interior.w) & 1u) != 0u;
+}
+
+fn chebyshev_on(g: GiParams) -> bool {
+    return (u32(g.interior.w) & 2u) != 0u;
 }
 
 // One probe: irradiance over pi as an order-1 SH lobe, plus the bookkeeping the toroidal grid needs.
@@ -43,6 +57,11 @@ struct GiProbe {
     sh_y: vec4<f32>,
     // rgb = the lobe's z term, w = the world-grid key's high half (y).
     sh_z: vec4<f32>,
+    // P6: x = the mean ray hit distance (yd), y = its mean square — the two moments a Chebyshev
+    // visibility test needs; z = the probe's interior class (1 = nothing overhead reaches the sky),
+    // which is what keeps a room's probes out of the street and the street's out of the room;
+    // w spare.
+    depth: vec4<f32>,
 }
 
 // The toroidal grid's identity for a probe coord: which world probe this texel currently holds. A
@@ -80,9 +99,11 @@ struct GiPick {
     cascade: u32,
     inside: f32,
     spacing: f32,
+    // P6: the RECEIVER's interior class (1 = an interior WMO surface or an interior prop).
+    recv: f32,
 }
 
-fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>) -> GiPick {
+fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> GiPick {
     let spacing = g.grid[c].w;
     let n = g.dims.xyz;
     // Sampled a little along the normal, so a surface never interpolates the probe behind it.
@@ -95,6 +116,7 @@ fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>) -> GiPick {
     var out: GiPick;
     out.cascade = c;
     out.spacing = spacing;
+    out.recv = clamp(recv_interior, 0.0, 1.0);
     out.base = vec3<i32>(clamp(lo, vec3<f32>(0.0), n - vec3<f32>(2.0))) + vec3<i32>(g.grid[c].xyz);
     out.frac = clamp(f - lo, vec3<f32>(0.0), vec3<f32>(1.0));
     out.inside = clamp(edge - 0.5, 0.0, 1.0);
@@ -137,6 +159,26 @@ fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f3
     let to_probe = probe_pos(g, pk.cascade, coord) - p;
     let facing = dot(normalize(to_probe + nrm * 1e-3), nrm) * 0.5 + 0.5;
     w = w * (facing * facing + 0.2);
+    // P6 class match — deliberately ASYMMETRIC. An interior receiver rejects a probe that sees the
+    // sky: that is the doorway leak the plan names, and the receiver's own class is authored (the
+    // lane's interior flag) rather than inferred, so the rejection is safe. An exterior receiver
+    // only mildly prefers exterior probes, because the probe's side of the test IS inferred and a
+    // probe deep under a canopy is legitimately dark and legitimately outdoors — a symmetric test
+    // would throw P5's canopy bounce away along with the room's.
+    let leak = pk.recv * (1.0 - probe.depth.z);
+    let spill = (1.0 - pk.recv) * probe.depth.z;
+    w = w * clamp(1.0 - leak * 0.92 - spill * 0.35, 0.05, 1.0);
+    // P6 (High and above) Chebyshev visibility: a probe whose rays typically stop nearer than the
+    // receiver is behind something, and its weight decays with how much nearer.
+    if (chebyshev_on(g)) {
+        let reach = length(to_probe);
+        let mean = probe.depth.x;
+        if (mean > 0.0 && reach > mean) {
+            let variance = max(probe.depth.y - mean * mean, 1e-3);
+            let over = reach - mean;
+            w = w * clamp(variance / (variance + over * over), 0.0, 1.0);
+        }
+    }
     let e = max(probe.dc.rgb + probe.sh_x.rgb * nrm.x + probe.sh_y.rgb * nrm.y + probe.sh_z.rgb * nrm.z, vec3<f32>(0.0));
     return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w);
 }
@@ -347,4 +389,12 @@ fn march(
 fn sky_radiance(g: GiParams, dir: vec3<f32>) -> vec3<f32> {
     let k = 1.0 - g.ground.w * (2.0 / 3.0) + g.ground.w * clamp(dir.y, 0.0, 1.0);
     return g.sky.rgb * k;
+}
+
+// P6: what a ray that reached nothing sees, given how enclosed its probe is. An open-field probe
+// still reads the classic ambient exactly (`interior_class` is 0 there); a probe under a roof reads
+// the building's own `MOHD.ambColor` instead, so a ray that escapes through an unvoxelized wall
+// cannot flood the room with daylight.
+fn miss_radiance(g: GiParams, dir: vec3<f32>, interior_class: f32) -> vec3<f32> {
+    return mix(sky_radiance(g, dir), g.interior.rgb, clamp(interior_class, 0.0, 1.0));
 }

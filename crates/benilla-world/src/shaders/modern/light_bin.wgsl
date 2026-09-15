@@ -1,0 +1,120 @@
+// Modern lighting (FORK.md, P6): the local-light binning pass — one invocation
+// per world cell, writing the cell's light list straight into the light-grid region of the shared
+// modern storage block (`sunshadow::ModernBlock.lights`), which is what every lane reads.
+//
+// The candidate set is the shared light table the reference itself commits (already room-gated and
+// capped at 256 by `lighting::global_light`), so a modern frame lights from exactly the lights a
+// classic frame would — it just stops being limited to the three nearest the receiving unit.
+#import benilla_modern::locallight
+
+// The shared light buffer, as far as this pass reads it: the header rows (row 20 `.x` is the live
+// light count) and the point table behind them.
+struct LightTable {
+    rows: array<vec4<f32>, 21>,
+    points: array<vec4<f32>, 512>,
+}
+
+// The light-grid region of the shared modern storage block, bound alone and read-write. Same bytes
+// as `sunshadow::ModernBlock`'s `lights` + `light_spare` + `light_cells`.
+struct LightBlock {
+    params: locallight::LightGrid,
+    spare: array<vec4<f32>, 22>,
+    cells: array<vec4<u32>, 55296>,
+}
+
+@group(0) @binding(0) var<storage, read> light: LightTable;
+@group(0) @binding(1) var<storage, read_write> grid: LightBlock;
+
+// Which atlas slot a light holds, or `MAX_SHADOWED` when it holds none. Matched on position rather
+// than on table order: the shadowed set is chosen on the CPU a frame's worth of systems before the
+// table is packed, and nothing keeps the two orders in step.
+fn shadow_slot(pos: vec3<f32>) -> u32 {
+    let p = grid.params;
+    let n = u32(p.misc.y);
+    for (var s = 0u; s < n; s = s + 1u) {
+        let d = p.shadow[s].xyz - pos;
+        if (dot(d, d) < 1e-4) {
+            return s;
+        }
+    }
+    return 6u;
+}
+
+@compute @workgroup_size(64)
+fn bin_lights(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p = grid.params;
+    let total = u32(p.misc.x);
+    let cell = id.x;
+    if (cell >= total) {
+        return;
+    }
+    let n = vec3<u32>(p.dims.xyz);
+    let c = vec3<i32>(
+        i32(cell % n.x),
+        i32((cell / n.x) % n.y),
+        i32(cell / (n.x * n.y)),
+    );
+    let size = p.dims.w;
+    let lo = (vec3<f32>(p.base.xyz) + vec3<f32>(c)) * size;
+    let hi = lo + vec3<f32>(size);
+    let mid = 0.5 * (lo + hi);
+
+    var best = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    var score = array<f32, 8>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var held = 0u;
+    var seen = 0u;
+    let count = min(u32(light.rows[20].x), 256u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = light.points[2u * i];
+        // The cell's nearest point to the light: a light reaches the cell iff that point is inside
+        // its range, which is the test a per-pixel lookup would make anywhere in the cell.
+        let near = clamp(pos_range.xyz, lo, hi);
+        let dv = near - pos_range.xyz;
+        if (dot(dv, dv) > pos_range.w * pos_range.w) {
+            continue;
+        }
+        seen = seen + 1u;
+        // Ranked by what the cell's centre would actually receive, so an overflowing cell drops the
+        // lights that were about to contribute least.
+        let rgb = light.points[2u * i + 1u].rgb;
+        let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let w = lum * locallight::falloff(length(mid - pos_range.xyz), pos_range.w);
+        // Insertion into a descending list of eight.
+        var slot = held;
+        for (var k = 0u; k < held; k = k + 1u) {
+            if (w > score[k]) {
+                slot = k;
+                break;
+            }
+        }
+        if (slot >= 8u) {
+            continue;
+        }
+        var k = min(held, 7u);
+        while (k > slot) {
+            score[k] = score[k - 1u];
+            best[k] = best[k - 1u];
+            k = k - 1u;
+        }
+        score[slot] = w;
+        best[slot] = i;
+        held = min(held + 1u, 8u);
+    }
+
+    var words = vec4<u32>(0u);
+    words.x = held | (min(seen, 255u) << 8u);
+    for (var k = 0u; k < held; k = k + 1u) {
+        let i = best[k];
+        let byte = (i & 0xffu) << ((k & 3u) * 8u);
+        if (k < 4u) {
+            words.y = words.y | byte;
+        } else {
+            words.z = words.z | byte;
+        }
+        let slot = shadow_slot(light.points[2u * i].xyz);
+        if (slot < 6u) {
+            words.w = words.w | ((slot + 1u) << (k * 4u));
+        }
+    }
+    grid.cells[cell] = words;
+}

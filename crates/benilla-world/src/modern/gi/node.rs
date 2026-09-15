@@ -26,8 +26,10 @@ use crate::modern::volumetrics::BLOCK_TAIL_BYTES;
 use crate::modern::ActiveLighting;
 
 /// Where the probe array starts inside the modern storage block. 256-aligned by construction (the
-/// `GiParams` block is sized for it), which is what lets the blend pass bind the probes alone.
-pub const PROBE_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES + GI_PARAMS_BYTES) as u64;
+/// `GiParams` block and the P6 light grid in front of it are both sized for it), which is what lets
+/// the blend pass bind the probes alone.
+pub const PROBE_OFFSET: u64 =
+    crate::modern::lights::node::LIGHT_OFFSET + crate::modern::lights::BLOCK_LIGHT_BYTES as u64;
 /// Where the block's `GiParams` sit.
 const PARAMS_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES) as u64;
 

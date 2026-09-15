@@ -69,5 +69,13 @@ fn blend_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     out.sh_y = vec4<f32>(mix(fresh.sh_y.xyz, old.sh_y.xyz, history), probegi::key_lo(w));
     out.sh_z = vec4<f32>(mix(fresh.sh_z.xyz, old.sh_z.xyz, history), probegi::key_hi(w));
+    // P6: the distance moments ease like the lobe; the class does not — a door opening should change
+    // which receivers may read this probe at once, not over a second.
+    out.depth = vec4<f32>(
+        mix(fresh.depth.x, old.depth.x, history),
+        mix(fresh.depth.y, old.depth.y, history),
+        fresh.depth.z,
+        0.0,
+    );
     probes[idx] = out;
 }

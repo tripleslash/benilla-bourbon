@@ -39,24 +39,34 @@ use crate::view::WorldCamera;
 
 pub mod node;
 
-/// Probe cascades, and clipmap levels — both capped by `probegi.wgsl`'s fixed arrays.
-pub const MAX_CASCADES: usize = 4;
-/// Size of [`GiParams::std430`] — `probegi.wgsl`'s `GiParams`. Chosen so that the probe array starts
-/// at a 256-byte offset inside the block (`PROBE_OFFSET`), which is what lets the blend pass bind it.
+/// Probe cascades — capped by `probegi.wgsl`'s fixed arrays. The fifth is P6's interior sub-grid,
+/// which the exterior ladder makes room for while the camera stands in a WMO.
+pub const MAX_CASCADES: usize = 5;
+/// Clipmap levels — `probegi.wgsl`'s `GiClip` arrays. Unrelated to the cascade count since P6.
+pub const MAX_LEVELS: usize = 4;
+/// Size of [`GiParams::std430`] — `probegi.wgsl`'s `GiParams`. Chosen so that the light grid behind
+/// it starts at a 256-byte offset inside the block, which is what lets the binning pass bind it (and
+/// the probe array behind THAT stays 256-aligned for the blend pass).
 pub const GI_PARAMS_BYTES: usize = 13 * 16;
 /// Size of one `probegi::GiProbe`.
-pub const PROBE_BYTES: usize = 64;
+pub const PROBE_BYTES: usize = 96;
 
-/// Probes allocated in the block, whatever the session's tier: the largest any tier on this platform
-/// uses. Held at one size so a quality change never re-creates the buffer every material binds.
+/// P6's interior probe spacing (yd) — the plan's 1.5 yd sub-grid.
+pub const INTERIOR_SPACING: f32 = 1.5;
+
+/// Probes allocated in the block, whatever the session's tier: the largest tier this platform is
+/// expected to run, interior sub-grid included — High in the browser, Ultra natively. (Forcing Ultra
+/// on the web overflows this and the field simply stops being written, with a warning, exactly as it
+/// did before P6.) Held at one size so a quality change never re-creates the buffer every material
+/// binds.
 pub const PROBE_ALLOC: usize = if cfg!(target_arch = "wasm32") {
-    3 * 32 * 16 * 32
-} else {
     4 * 32 * 16 * 32
+} else {
+    5 * 32 * 16 * 32
 };
 
-/// Everything P5 adds to the modern storage block.
-pub const BLOCK_GI_BYTES: usize = GI_PARAMS_BYTES + PROBE_ALLOC * PROBE_BYTES;
+/// The probe field's own bytes in the modern storage block — its last, runtime-sized member.
+pub const BLOCK_PROBE_BYTES: usize = PROBE_ALLOC * PROBE_BYTES;
 
 /// What a quality tier traces — the plan's tier table, with the voxel clipmap in place of its proxy
 /// pool and probe atlas.
@@ -73,12 +83,16 @@ pub struct GiTier {
     pub period: u32,
     pub levels: usize,
     /// Voxel size (yd) per clipmap level.
-    pub voxel: [f32; MAX_CASCADES],
+    pub voxel: [f32; MAX_LEVELS],
     /// Voxels per side in every level.
     pub voxels: u32,
     /// How far a probe ray reaches (yd), and how many DDA steps it may spend.
     pub reach: f32,
     pub steps: u32,
+    /// P6: cascade 0 is the 1.5 yd interior sub-grid (the camera stands in a WMO).
+    pub interior: bool,
+    /// P6: Chebyshev probe visibility (High and above).
+    pub chebyshev: bool,
 }
 
 impl GiTier {
@@ -90,11 +104,29 @@ impl GiTier {
         rays: 1,
         period: 1,
         levels: 1,
-        voxel: [1.0; MAX_CASCADES],
+        voxel: [1.0; MAX_LEVELS],
         voxels: 1,
         reach: 1.0,
         steps: 1,
+        interior: false,
+        chebyshev: false,
     };
+
+    /// P6: the same tier with the interior sub-grid pushed in front of the exterior ladder. Every
+    /// consumer downstream — the parameters, the trace, the sampling — then reads one uniform
+    /// cascade list and never learns that one of them is special.
+    pub fn with_interior(mut self) -> Self {
+        if self.interior || !self.on || self.cascades + 1 > MAX_CASCADES {
+            return self;
+        }
+        let mut spacing = [0.0; MAX_CASCADES];
+        spacing[0] = INTERIOR_SPACING;
+        spacing[1..=self.cascades].copy_from_slice(&self.spacing[..self.cascades]);
+        self.spacing = spacing;
+        self.cascades += 1;
+        self.interior = true;
+        self
+    }
 
     pub fn probes(&self) -> usize {
         (self.dims.x * self.dims.y * self.dims.z) as usize * self.cascades
@@ -114,7 +146,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             on: true,
             dims: UVec3::new(24, 12, 24),
             cascades: 3,
-            spacing: [4.0, 12.0, 36.0, 0.0],
+            spacing: [4.0, 12.0, 36.0, 0.0, 0.0],
             rays: 24,
             period: 12,
             levels: 3,
@@ -122,12 +154,14 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             voxels: 64,
             reach: 220.0,
             steps: 96,
+            interior: false,
+            chebyshev: false,
         },
         LightingQuality::High => GiTier {
             on: true,
             dims: UVec3::new(32, 16, 32),
             cascades: 3,
-            spacing: [3.0, 9.0, 27.0, 0.0],
+            spacing: [3.0, 9.0, 27.0, 0.0, 0.0],
             rays: 32,
             period: 8,
             levels: 4,
@@ -135,12 +169,14 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             voxels: 96,
             reach: 300.0,
             steps: 128,
+            interior: false,
+            chebyshev: true,
         },
         LightingQuality::Ultra => GiTier {
             on: true,
             dims: UVec3::new(32, 16, 32),
             cascades: 4,
-            spacing: [2.0, 6.0, 18.0, 54.0],
+            spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
             rays: 48,
             period: 6,
             levels: 4,
@@ -148,6 +184,8 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             voxels: 96,
             reach: 380.0,
             steps: 160,
+            interior: false,
+            chebyshev: true,
         },
     }
 }
@@ -200,6 +238,9 @@ pub struct ModernGi {
     pub open_mean: f32,
     /// This frame's ray rotation.
     pub rot: Mat3,
+    /// P6: the claiming building's `MOHD.ambColor`, decoded, scaled into the shared light's units —
+    /// what an interior probe's escaped rays see instead of the sky.
+    pub interior_ambient: Vec3,
 }
 
 impl Default for ModernGi {
@@ -214,6 +255,7 @@ impl Default for ModernGi {
             gain: 1.0,
             open_mean: 0.0,
             rot: Mat3::IDENTITY,
+            interior_ambient: Vec3::ZERO,
         }
     }
 }
@@ -227,6 +269,7 @@ pub struct GiParams {
     pub sky: Vec4,
     pub ground: Vec4,
     pub misc: Vec4,
+    pub interior: Vec4,
 }
 
 impl GiParams {
@@ -240,8 +283,9 @@ impl GiParams {
         row(self.sky);
         row(self.ground);
         row(self.misc);
-        // `spare`: P6's interior classes and P7's grading.
-        for _ in 0..4 {
+        row(self.interior);
+        // `spare`: P7's grading, and the padding that aligns the light grid behind this block.
+        for _ in 0..2 {
             row(Vec4::ZERO);
         }
     }
@@ -251,7 +295,7 @@ impl GiParams {
 /// the compute passes address them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GiClip {
-    pub level: [Vec4; MAX_CASCADES],
+    pub level: [Vec4; MAX_LEVELS],
     pub info: Vec4,
     pub hf_row_x: Vec4,
     pub hf_row_y: Vec4,
@@ -305,14 +349,41 @@ pub(super) fn plugin(app: &mut App) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_gi(
     active: Res<ActiveLighting>,
     lighting: Res<WowLighting>,
     cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    // fork: modern lighting (P6) — the camera's room, and the building it belongs to.
+    claim: Option<Res<crate::wmo_portal::CameraInteriorClaim>>,
+    instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    wmos: Res<Assets<benilla_assets::WmoModel>>,
     mut out: ResMut<ModernGi>,
     mut hist: Local<GiHistory>,
 ) {
-    let tier = gi_tier(active.quality);
+    let base_tier = gi_tier(active.quality);
+    // P6: the 1.5 yd interior sub-grid exists only while the camera stands in a WMO — a grid that
+    // fine covers 36 yd, which is a room and not a zone, so it is the room's presence that pays for
+    // it. The exterior ladder behind it is untouched, so stepping outside is a cascade dropping off
+    // the front rather than a whole field being re-fitted.
+    let inside = claim.as_ref().and_then(|c| c.0).map(|c| c.room.instance);
+    let tier = if inside.is_some() {
+        base_tier.with_interior()
+    } else {
+        base_tier
+    };
+    // The building's own `MOHD.ambColor`, in the shared light's units: the classic interior lanes
+    // never read it (their MOCV bake IS the room's light), and P6 retires that bake, so this is what
+    // a ray leaving the room through an unvoxelized wall is allowed to see.
+    let interior_ambient = inside
+        .and_then(|e| instances.get(e).ok())
+        .and_then(|inst| wmos.get(&inst.handle))
+        .map(|model| {
+            let [r, g, b] = model.ambient;
+            let d = crate::modern::srgb_to_linear;
+            Vec3::new(d(r), d(g), d(b))
+        })
+        .unwrap_or(Vec3::ZERO);
     if !active.is_modern() || !tier.on || !gi_enabled() {
         if out.on {
             *out = ModernGi::default();
@@ -354,6 +425,7 @@ fn update_gi(
         gain: gi_gain(),
         open_mean,
         rot,
+        interior_ambient,
     };
 }
 
@@ -390,6 +462,10 @@ pub fn params(gi: &ModernGi, camera: Vec3, sky: Vec3, debug: f32) -> GiParams {
             gi.frame as f32,
             debug,
         ),
+        // fork: modern lighting (P6) — the interior sub-grid's ambient and the two sampling bits.
+        interior: gi.interior_ambient.extend(f32::from(
+            u8::from(tier.interior) | (u8::from(tier.chebyshev) << 1),
+        )),
     }
 }
 
@@ -405,7 +481,8 @@ pub fn trace_bytes(gi: &ModernGi, params: &GiParams, clip: &GiClip) -> Vec<u8> {
     row(gi.rot.row(1).extend(0.0));
     row(gi.rot.row(2).extend(0.0));
     // The sun bias is a voxel of the finest level; the ray's own start offset keeps a probe sitting
-    // on a surface from hitting it at zero distance.
+    // on a surface from hitting it at zero distance. The interior sub-grid's probes sit closer
+    // together than a voxel, so the offset never grows with them.
     let bias = gi.tier.voxel[0];
     row(Vec4::new(BACKFACE_LIMIT, bias, bias * 0.5, 1.0));
     out
@@ -420,12 +497,15 @@ mod tests {
         let mut bytes = Vec::new();
         GiParams::default().std430(&mut bytes);
         assert_eq!(bytes.len(), GI_PARAMS_BYTES);
-        // The probe array has to start 256-aligned: the blend pass binds that region alone.
-        let offset = crate::modern::shadow::CASCADES_BYTES
+        // The light grid has to start 256-aligned (the binning pass binds that region alone), and
+        // so does the probe array behind it (the blend pass binds that one).
+        let lights = crate::modern::shadow::CASCADES_BYTES
             + crate::modern::volumetrics::BLOCK_TAIL_BYTES
             + GI_PARAMS_BYTES;
-        assert_eq!(offset % 256, 0, "probe offset {offset}");
-        assert_eq!(offset, 5120);
+        assert_eq!(lights % 256, 0, "light offset {lights}");
+        assert_eq!(lights, 5120);
+        let probes = lights + crate::modern::lights::BLOCK_LIGHT_BYTES;
+        assert_eq!(probes % 256, 0, "probe offset {probes}");
         let mut clip = Vec::new();
         GiClip::default().std430(&mut clip);
         assert_eq!(clip.len(), 9 * 16);
@@ -446,8 +526,18 @@ mod tests {
         ] {
             let t = gi_tier(q);
             assert!(t.cascades <= MAX_CASCADES, "{q:?}");
-            assert!(t.levels <= MAX_CASCADES, "{q:?}");
+            assert!(t.levels <= MAX_LEVELS, "{q:?}");
             assert!(t.probes() <= PROBE_ALLOC, "{q:?}: {}", t.probes());
+            // P6: the interior sub-grid has to fit too — it appears the moment the camera steps
+            // through a door, and a field that did not fit would simply stop being written.
+            let inside = t.with_interior();
+            assert!(inside.cascades <= MAX_CASCADES, "{q:?}");
+            assert!(inside.probes() <= PROBE_ALLOC, "{q:?}: {}", inside.probes());
+            if t.on {
+                assert!(inside.interior && inside.spacing[0] == INTERIOR_SPACING, "{q:?}");
+                // The exterior ladder is intact behind it.
+                assert_eq!(inside.spacing[1..=t.cascades], t.spacing[..t.cascades], "{q:?}");
+            }
             if t.on {
                 // Every cascade reaches past the one inside it, and the coarsest clipmap level
                 // covers the coarsest cascade's own probes.

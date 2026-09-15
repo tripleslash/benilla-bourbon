@@ -8,10 +8,14 @@
 // row exactly where the lanes read it.
 #import benilla_modern::probegi
 #import benilla_modern::sunshadow
+#import benilla_modern::locallight
 
-// The shared light buffer's header rows (`lighting::global_light`): 0 ambient, 1 diffuse, 2 sun.
+// The shared light buffer as this pass reads it (`lighting::global_light`): header rows 0 ambient,
+// 1 diffuse, 2 sun, 20 `.x` the live point count — then the point table, which P6's bounce needs so
+// that a lamp-lit room bounces its lamps and not only the sun it cannot see.
 struct LightRows {
     rows: array<vec4<f32>, 21>,
+    points: array<vec4<f32>, 512>,
 }
 
 struct GiTrace {
@@ -39,6 +43,64 @@ struct GiTrace {
 @group(0) @binding(6) var hf_map: texture_depth_2d;
 @group(0) @binding(7) var<uniform> trace: GiTrace;
 @group(0) @binding(8) var<storage, read_write> scratch: array<probegi::GiProbe>;
+
+// P6: the local lights near a probe, picked once and then evaluated at every ray's hit — walking the
+// whole table per hit would be 24 rays x 256 lights a probe.
+const NEAR_LIGHTS: u32 = 4u;
+var<private> near_light: array<u32, 4>;
+var<private> near_count: u32;
+
+fn pick_near_lights(p: vec3<f32>) {
+    near_count = 0u;
+    var far = array<f32, 4>(1e30, 1e30, 1e30, 1e30);
+    let count = min(u32(light.rows[20].x), 256u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = light.points[2u * i];
+        let dv = pos_range.xyz - p;
+        let d2 = dot(dv, dv);
+        // A probe gathers from a light whose reach covers it with a little slack, so a lamp just
+        // outside the probe still lights the wall the probe is measuring.
+        let reach = pos_range.w + 8.0;
+        if (d2 > reach * reach) {
+            continue;
+        }
+        var slot = near_count;
+        for (var k = 0u; k < near_count; k = k + 1u) {
+            if (d2 < far[k]) {
+                slot = k;
+                break;
+            }
+        }
+        if (slot >= NEAR_LIGHTS) {
+            continue;
+        }
+        var k = min(near_count, NEAR_LIGHTS - 1u);
+        while (k > slot) {
+            far[k] = far[k - 1u];
+            near_light[k] = near_light[k - 1u];
+            k = k - 1u;
+        }
+        far[slot] = d2;
+        near_light[slot] = i;
+        near_count = min(near_count + 1u, NEAR_LIGHTS);
+    }
+}
+
+// What the probe's nearby lights put on a surface. Unshadowed on purpose: the cube atlas is a
+// High-and-above luxury and the bounce it feeds is a soft term, so paying for it here would cost the
+// trace six lookups a hit to move a second-order quantity.
+fn local_light_at(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var k = 0u; k < near_count; k = k + 1u) {
+        let i = near_light[k];
+        let pos_range = light.points[2u * i];
+        let to_light = pos_range.xyz - p;
+        let d = length(to_light);
+        let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
+        sum = sum + light.points[2u * i + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl);
+    }
+    return sum;
+}
 
 // The golden-angle sphere: `n` rays as evenly spread as a closed form gets them.
 fn fib_dir(i: u32, n: f32) -> vec3<f32> {
@@ -114,6 +176,23 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.y < probegi::terrain_height(hf_map, trace.clip, p) - 0.25) {
         valid = 0.0;
     }
+    // P6: how enclosed this probe is. It decides two things — what a ray that reaches nothing sees
+    // (the room's own ambient, not the sky), and which receivers may read this probe at all
+    // (`probegi::accum`'s class match).
+    //
+    // TWO signals, because the top-down map alone is not enough: a forest canopy shades it as hard
+    // as a roof does, so the map by itself would classify a wood as indoors and the class match
+    // would then throw P5's canopy bounce away. What separates them is sideways: a probe under
+    // leaves still gets rays out to the sky, a probe in a room does not, and the probe's own last
+    // sky share is exactly that number. A probe with no history — cold, or just scrolled in —
+    // counts as outdoors, which is the direction that self-corrects invisibly: a room reads one
+    // update period too bright on entry, where the other way round a moving dark patch would follow
+    // the camera through a wood.
+    let sky_here = sunshadow::sky_visibility(shadow_map, shadow_samp, modern_block.cascades, p);
+    let seen_before = select(previous.sh_x.w, 1.0, cold || scrolled || reset);
+    let interior_class = (1.0 - smoothstep(0.0, 0.25, sky_here))
+        * (1.0 - smoothstep(0.02, 0.20, seen_before));
+    pick_near_lights(p);
 
     let to_sun = -normalize(light.rows[2].xyz);
     let key = light.rows[1].xyz * light.rows[2].w;
@@ -125,6 +204,8 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     var sh_z = vec3<f32>(0.0);
     var sky_seen = 0.0;
     var backfaces = 0.0;
+    var hit_dist = 0.0;
+    var hit_dist_sq = 0.0;
 
     for (var i = 0u; i < rays; i = i + 1u) {
         let dir = rotate(fib_dir(i, f32(rays)));
@@ -139,8 +220,10 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
                 dir,
                 start_level,
             );
+            hit_dist = hit_dist + hit.dist;
+            hit_dist_sq = hit_dist_sq + hit.dist * hit.dist;
             if (hit.kind < 0.5) {
-                radiance = probegi::sky_radiance(g, dir);
+                radiance = probegi::miss_radiance(g, dir, interior_class);
                 sky_seen = sky_seen + 1.0;
             } else {
                 let albedo = select(hit.albedo, g.ground.xyz, hit.kind > 1.5);
@@ -162,7 +245,8 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
                     depth,
                 );
                 let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
-                radiance = albedo * (direct + bounce_at(g, lift, nrm));
+                // P6: the local lights too, so a room whose only light is a hearth still bounces.
+                radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));
             }
         }
         dc = dc + radiance;
@@ -181,5 +265,7 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     out.sh_x = vec4<f32>(sh_x * (2.0 * inv_rays), sky_seen * inv_rays);
     out.sh_y = vec4<f32>(sh_y * (2.0 * inv_rays), select(1.0, 2.0, scrolled || cold || reset));
     out.sh_z = vec4<f32>(sh_z * (2.0 * inv_rays), 0.0);
+    // P6: the two distance moments the Chebyshev test reads, and the class the receivers match on.
+    out.depth = vec4<f32>(hit_dist * inv_rays, hit_dist_sq * inv_rays, interior_class, 0.0);
     scratch[idx] = out;
 }

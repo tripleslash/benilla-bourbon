@@ -96,6 +96,22 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `froxel_scatter.wgsl` | `#import benilla_modern::probegi`; the ambient in-scatter's sky term follows the nearest probe against the open-field reference | P5 |
 | `benilla-world/src/modern/shadow.rs` | the storage block is sized with `gi::BLOCK_GI_BYTES` behind the froxel tail | P5 |
 
+| `benilla-formats/src/models/wmo/root.rs`, `lib.rs` | `wmo_root_ambient` (`MOHD.ambColor` @ `0x1c`) + its re-export | P6 |
+| `benilla-assets/src/wmo.rs` | `WmoModel.ambient`; the loader's root closure returns it beside `wmo_id` | P6 |
+| `benilla-world/src/wmo_portal/{mod,interior,audit/mod}.rs` | the new field at each `WmoModel` literal (test scaffolds + the audit build) | P6 |
+| `benilla-world/src/shaders.rs` | `load_shader_library!` for `shaders/modern/locallight.wgsl`; `embedded_asset!` for `light_bin` | P6 |
+| `benilla-world/src/lighting/mod.rs` | `ordering_tests::ALLOWED` gains `modern/gi/mod.rs` (a `Last` reader, like `modern/volumetrics`) | P6 |
+| `benilla-app/src/lib.rs` | `run_worldview`'s `SEEDED` gains `WOW_MODERN_GI`, `WOW_MODERN_GI_GAIN`, `WOW_MODERN_LIGHTS` | P6 |
+| `sunshadow.wgsl` | `#import benilla_modern::locallight`; `ModernBlock` gains `lights: locallight::LightGrid` **between** `gi` and the runtime-sized `probes` (the order is what puts both writable sub-ranges on 256-byte offsets) | P6 |
+| `probegi.wgsl` | `GiParams.grid` is 5 cascades (the interior sub-grid) + an `interior` row; `GiProbe` gains a `depth` row (distance moments + the interior class); `pick` takes the receiver's class; `accum` weights by an asymmetric class match and by Chebyshev visibility; `miss_radiance` | P6 |
+| `gi_trace.wgsl` | the light table's `points` are bound too; a probe's class is the P3 sky map times its own last sky share; ray misses go through `miss_radiance`; hits take the nearby local lights; the distance moments are accumulated | P6 |
+| `gi_blend.wgsl` | the `depth` row blends (the moments ease, the class does not) | P6 |
+| `benilla-world/src/static_gx/render/modern_shadow.rs` | the cascade loop stops at `SKY_LAYER`; `local_offsets` (six cube-face caster views per shadowed light) and `draw_local_atlas` write the atlas layer behind it, keyed so a settled room redraws nothing | P6 |
+| `benilla-world/src/modern/shadow.rs` | `LOCAL_SHADOW_LAYERS` / `LOCAL_LAYER` (native only); the block is sized `GI_PARAMS + BLOCK_LIGHT + BLOCK_PROBE` | P6 |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `#import benilla_modern::locallight`; a fork-owned `modern_local_lights` helper beside `modern_gi_ambient` (the light table is the lane's own binding); the modern point term reads the binned grid where it is live; `modern_gi_ambient` takes the receiver's interior class; debug mode 5 | P6 |
+| `wow_model.wgsl`, `static_gx.wgsl` | modern interiors (`gi.params.x > 0.5`, so Low keeps the bake): `lit_modern_room` from the interior probe cascade over the building's MOHD ambient; every WMO batch class takes it; MOCV rgb is dropped as lighting and MOCV.a becomes an unclamped emission on the INT class; SIDN is an emitter on every class with a daylight floor; the INT `tex·MOCV·(1+4a)` override is classic-only; an interior MODD prop reads the room instead of its `prop_probes` slot | P6 |
+| `wow_model.wgsl` | `is_rig` hoisted beside `is_wmo`/`is_interior` (the modern interior light has to exclude a booth) | P6 |
+
 ## Planned hooks (not yet landed)
 
 - `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl`: the lighting and fog spans (P1–P4)

@@ -41,9 +41,17 @@ use crate::view::WorldCamera;
 
 /// Layers in the shadow array. A tier uses its first `n` ([`cascade_splits`]).
 pub const MAX_CASCADES: usize = 4;
-/// The sky-occlusion map rides the last array layer: a vertical light over the static world.
+/// The sky-occlusion map rides the array layer after the cascades: a vertical light over the static
+/// world.
 pub const SKY_LAYER: usize = MAX_CASCADES;
-pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1;
+/// fork: modern lighting (P6) — the shadowed local lights' cube atlas rides one more layer, a 6×6
+/// tile grid of six faces for each of six lights. It costs a whole 2048² depth layer, so the web
+/// build does without it: the browser's default tier is Medium, whose tier row shadows no local
+/// light at all (`modern::lights::light_tier`).
+pub const LOCAL_SHADOW_LAYERS: usize = if cfg!(target_arch = "wasm32") { 0 } else { 1 };
+/// The atlas layer's index (equal to [`SHADOW_LAYERS`] when there is none, which reads as "off").
+pub const LOCAL_LAYER: usize = MAX_CASCADES + 1;
+pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1 + LOCAL_SHADOW_LAYERS;
 /// Half the sky map's footprint (yd): 1024 yd across at 0.5 yd a texel.
 pub const SKY_HALF_EXTENT: f32 = 512.0;
 /// The sky map re-centres on this grid, so it (and its static cache) holds while the camera moves.
@@ -196,8 +204,14 @@ fn create_shadow_assets(
     // (`sunshadow::ModernBlock`).
     // P5: the GI parameters and the probe field ride behind the froxel block (`gi::BLOCK_GI_BYTES`),
     // at a size no quality tier changes — a re-created buffer would re-prepare every material.
+    // P6: the local-light grid sits between them (`lights::BLOCK_LIGHT_BYTES`), which is what puts
+    // both writable sub-ranges — the grid's cells and the probe field — on 256-byte offsets.
     let mut block = ShaderStorageBuffer::with_size(
-        CASCADES_BYTES + super::volumetrics::BLOCK_TAIL_BYTES + super::gi::BLOCK_GI_BYTES,
+        CASCADES_BYTES
+            + super::volumetrics::BLOCK_TAIL_BYTES
+            + super::gi::GI_PARAMS_BYTES
+            + super::lights::BLOCK_LIGHT_BYTES
+            + super::gi::BLOCK_PROBE_BYTES,
         RenderAssetUsages::RENDER_WORLD,
     );
     block.buffer_description.usage |= BufferUsages::COPY_DST;

@@ -47,6 +47,7 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
 #import benilla_modern::probegi
+#import benilla_modern::locallight
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -116,6 +117,16 @@ struct ModelParams {
 // one value a model reads slightly lighter than the ground under it, which is the intended
 // reading. 0.70, raised from the 0.45 this first shipped at (a near-black silhouette).
 const SHADOW_SUN_FLOOR: f32 = 0.70;
+
+// fork: modern lighting (FORK.md, P6) — the interior look's four numbers.
+// MOCV.a stops being a multiplier on a bake and becomes what it was authored as, an emissive mask;
+// SIDN stops being a night decal and becomes a real emitter, still ramped by the night fraction but
+// never off, because a lit pane reads as a light source from a dark room at noon; and a room whose
+// probes have not answered yet falls back on its own MOHD ambient rather than going black.
+const MODERN_MOCV_EMISSIVE: f32 = 2.0;
+const MODERN_SIDN_GAIN: f32 = 2.5;
+const MODERN_SIDN_DAY: f32 = 0.35;
+const MODERN_ROOM_FLOOR: f32 = 0.30;
 
 // The shared global light (lighting::global_light): ONE storage buffer every material reads, updated
 // once/frame in place — replaces the per-material light/fog uniforms the old apply_wow_lighting re-pushed
@@ -221,7 +232,7 @@ struct WowLight {
 // coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
 // that row); `w` is how much of the cell answered, which is 0 wherever the field has nothing to say
 // and the sky-occlusion map stays in charge.
-fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
+fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> vec4<f32> {
     let g = modern_block.gi;
     if (g.params.x < 0.5 || g.params.z <= 0.0) {
         return vec4<f32>(0.0);
@@ -231,7 +242,7 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
     var left = 1.0;
     let count = u32(g.dims.w);
     for (var c = 0u; c < count; c = c + 1u) {
-        let pk = probegi::pick(g, c, p, nrm);
+        let pk = probegi::pick(g, c, p, nrm, recv_interior);
         if (pk.inside <= 0.0) {
             continue;
         }
@@ -252,6 +263,43 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     return vec4<f32>(sum * (g.params.z / answered), clamp(answered, 0.0, 1.0));
+}
+
+// fork: modern lighting (FORK.md, P6) — the local lights that reach this
+// fragment, read out of the world grid the binning pass fills: the WoW falloff per light, under its
+// cube shadow when it holds an atlas slot. The walk lives here rather than in
+// `benilla_modern::locallight` for the same reason `modern_gi_ambient` does — the light table is
+// this lane's own binding, which a WGSL module cannot reach.
+fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
+    let g = modern_block.lights;
+    let found = locallight::cell_at(g, p);
+    if (found.y < 1u) {
+        return vec3<f32>(0.0);
+    }
+    let cell = modern_block.light_cells[found.x];
+    let count = locallight::cell_count(cell);
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let id = locallight::cell_light(cell, i);
+        let pos_range = wow_light.points[2u * id];
+        let to_light = pos_range.xyz - p;
+        let d = length(to_light);
+        let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
+        if (nl <= 0.0) {
+            continue;
+        }
+        let vis = locallight::local_visibility(
+            modern_shadow_map,
+            modern_shadow_samp,
+            g,
+            locallight::cell_slot(cell, i),
+            pos_range.xyz,
+            p,
+            nrm,
+        );
+        sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
+    }
+    return sum;
 }
 
 // Vanilla M2 cutout alpha-test reference (224/255 on ≤ WotLK) — kept in sync with
@@ -1133,6 +1181,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // clutter uses its own ground-normal matte. `light_sun.w` is the directional-enable flag (on outdoors).
     let is_wmo = m.model_flags.x > 0.5;
     let is_interior = m.model_flags.z > 0.5;
+    // fork: modern lighting (FORK.md, P6) — the AUTHORED-RIG lane's flag, hoisted
+    // from its own lane below (documented there) because the modern interior light has to exclude a
+    // booth: a glue scene's light is entirely its authored rig and there is no room around it.
+    let is_rig = m.sun_scale.x >= 1.5;
     let use_doodad_shade = (wow_light.light_sun.w > 0.5) && !is_clutter && !is_wmo;
     let lit_exterior = select(lit_nl, lit_doodad, use_doodad_shade);
     // WMO INTERIOR surfaces (model_flags.z; groupFlags & 0x48 == 0) — by BATCH CLASS (tint.w; wow-re
@@ -1162,8 +1214,29 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         vec3<f32>(1.0),
     );
     let lit_int_base = select(lit_nl, lit_window, m.sidn.w > 0.5);
+    // fork: modern lighting (FORK.md, P6) — interiors light like everything else
+    // in a modern frame: the probe field's 1.5 yd interior sub-grid for the indirect, the binned
+    // local lights for the fixtures, and the authored MOCV kept only as the emissive mask it is.
+    // The gate is the probe field itself (`gi.params.x`), which is exactly the tier split the plan
+    // asked for: Low traces no probes, so Low keeps the bake and its `prop_probes`.
+    let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5;
+    var lit_modern_room = vec3<f32>(0.0);
+    if (modern_interior && is_interior && !is_rig) {
+        let rn = wow_normalize(in.world_normal);
+        let room_gi = modern_gi_ambient(in.world_position.xyz, rn, 1.0);
+        // The building's own `MOHD.ambColor` is the floor: where the field has nothing to say yet
+        // (a probe slice not traced this frame, a cupboard no probe sits in) the room still reads as
+        // the room and not as a hole.
+        let room = max(modern_block.gi.interior.rgb, wow_light.light_ambient.rgb * MODERN_ROOM_FLOOR);
+        lit_modern_room = mix(room, room_gi.rgb, room_gi.w);
+    }
     var lit_wmo_interior = vec3<f32>(1.0);
-    if (m.tint.w > 1.5) {
+    if (modern_interior) {
+        // Every batch class takes the same light now: INT is no longer "unlit, the bake IS the
+        // light", TRANS has no bake left to lerp toward, and the WINDOW lane's brighter GL_LIGHT0
+        // swap is replaced by the pane's own SIDN emission below.
+        lit_wmo_interior = lit_modern_room;
+    } else if (m.tint.w > 1.5) {
         lit_wmo_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
     } else if (m.tint.w < 0.5) {
         lit_wmo_interior = lit_int_base;
@@ -1200,7 +1273,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-    let lit_interior = select(lit_m2_interior, lit_wmo_interior, is_wmo);
+    // fork: modern lighting (FORK.md, P6) — an interior MODD prop reads the room
+    // the same way its walls do; its folded `prop_probes` slot survives on Low alone (and on the
+    // booth lane below, whose light is entirely its authored rig).
+    let lit_m2_room = select(lit_m2_interior, lit_modern_room, modern_interior);
+    let lit_interior = select(lit_m2_room, lit_wmo_interior, is_wmo);
     // AUTHORED-RIG lane (`ShadeSel::Rig`, sun_scale.x = 2.0 — the glue create booth, decision
     // 0429): the lit value is the probe-slot SH eval — the scene M2's ambient + directional
     // lights, folded into slot 0 of the material's OWN buffer (booth instances carry tag 0, so
@@ -1208,7 +1285,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // no day/night — a glue scene's light is entirely its authored rig. Rig materials are neither
     // WMO nor interior, so the per-vertex point term (the rig's authored point lights) flows in
     // through `point_diffuse` below like any exterior entity.
-    let is_rig = m.sun_scale.x >= 1.5;
     let lit = select(select(lit_exterior, lit_interior, is_interior), lit_m2_interior, is_rig);
     var player_shadow = 1.0;
     if (lights.n_directional_lights > 0u) {
@@ -1301,7 +1377,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
-        let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal));
+        let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0);
         let amb_gi = mix(amb * sky, gi.rgb, gi.w);
         lit_with_shadow_sky = clamp(amb_gi + max(lit - amb, vec3<f32>(0.0)) * player_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
@@ -1329,7 +1405,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             sidn_w = 0.0; // INT: lighting off — the emissive write is dead, like the FFP
         }
     }
-    let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
+    var sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
+    // fork: modern lighting (FORK.md, P6) — a modern window is an emitter: the
+    // authored colour at an HDR gain, on every batch class (the FFP's dead emissive write on the
+    // unlit INT lane was a consequence of lighting being off there, and lighting is on now), and
+    // with a daylight floor so a pane still glows seen from inside.
+    if (modern_interior && is_wmo && is_interior) {
+        sidn_e = m.sidn.rgb * (MODERN_SIDN_GAIN * mix(MODERN_SIDN_DAY, 1.0, wow_light.grade.x));
+    }
     // WoW dynamic point lights (decisions 0016/0273/0278, selection 0285) — exterior doodads,
     // entities, clutter, and terrain receive their unit's committed lights: the ≤3 NEAREST to the
     // receiving unit's own position, never the whole scene (`point_light_sum`). WMO surfaces take
@@ -1338,11 +1421,18 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // arrives GOURAUD-INTERPOLATED — per-vertex like the reference FFP, whose tessellation-scale
     // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
     // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
-    let point_diffuse = select(
+    var point_diffuse = select(
         in.point_lit,
         point_light_eval(in.point_sel, in.world_position.xyz, wow_normalize(in.world_normal)),
         wow_light.point_count.y > 0.5,
     );
+    // fork: modern lighting (FORK.md, P6) — the binned grid replaces the
+    // reference's three-nearest selection where it is live, and it reaches the lanes the reference
+    // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
+    // in a modern frame, because the bake that used to stand in for them is gone.
+    if (locallight::grid_live(modern_block.lights) && !is_rig) {
+        point_diffuse = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal));
+    }
 
     // Hover/target model brighten (tag bit 31): the client's per-model highlight emissive —
     // `glMaterialfv(GL_EMISSION, +64/255)` per channel (shipped config default 0xff404040), verified
@@ -1364,18 +1454,39 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #ifdef VERTEX_COLORS
     if (is_wmo) {
         let vc = in.color.rgb;
+        // fork: modern lighting (FORK.md, P3/P6) — a modern WMO surface drops its
+        // baked MOCV light: an exterior one since P3 (the cascades and the sky map shade it), an
+        // interior one since P6 (the probe field and the binned fixtures light it). What survives
+        // indoors is MOCV's ALPHA, the artists' emissive mask, promoted from a multiplier on the
+        // bake to an emission term of its own — and left UNCLAMPED, so a hearth carries real energy
+        // into the bloom instead of saturating at white like the byte framebuffer it was authored
+        // for.
+        let drop_mocv = wow_light.point_count.y > 0.5 && (!is_interior || modern_interior);
         // MOCV multiplies the lit terms (GL_COLOR_MATERIAL) but NOT the emission terms — SIDN and
-        // the highlight add alongside, exactly the FFP's material-emission placement.
-        let primary = clamp(
-            // fork: modern lighting (FORK.md, P3) — an exterior WMO surface drops its baked MOCV light in a
-            // modern frame (the cascades and sky shade it); interiors keep MOCV as interim indirect.
-            select(vc, vec3<f32>(1.0), wow_light.point_count.y > 0.5 && !is_interior) * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
+        // the highlight add alongside, exactly the FFP's material-emission placement. This sum is
+        // left EXACTLY as upstream wrote it, term for term: float addition does not associate, and a
+        // regrouping here would move the classic frame by an ulp and break its identity gate. The
+        // modern interior is a separate statement below for the same reason.
+        var primary = clamp(
+            select(vc, vec3<f32>(1.0), drop_mocv) * (lit_with_shadow + point_diffuse) + sidn_e + vec3<f32>(highlight),
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
+        if (modern_interior && is_interior) {
+            // Emission OUTSIDE the clamp: a hearth or a pane carries real energy into the bloom
+            // instead of saturating at white like the byte framebuffer it was authored for. The
+            // MOCV-alpha term rides the INT class alone, the one class whose alpha is an emissive
+            // mask rather than the lit-pass weight.
+            var emissive = sidn_e + vec3<f32>(highlight);
+            if (m.tint.w > 0.5 && m.tint.w < 1.5) {
+                emissive = emissive + vec3<f32>(MODERN_MOCV_EMISSIVE * trans_a);
+            }
+            let lit_sum = select(vc, vec3<f32>(1.0), drop_mocv) * (lit_with_shadow + point_diffuse);
+            primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
+        }
         let tex_rgb = base.rgb / max(vc, vec3<f32>(1.0 / 255.0));
         lit_rgb = tex_rgb * m.tint.rgb * primary;
-        if (is_interior && m.tint.w > 0.5 && m.tint.w < 1.5) {
+        if (is_interior && m.tint.w > 0.5 && m.tint.w < 1.5 && !modern_interior) {
             // INT: the MOCV-ALPHA SELF-ILLUMINATION term. The reference's interior pixel shader is
             // `tex·MOCV.rgb·(1 + 4·MOCV.a)` with only the framebuffer's final [0,1] clamp — read
             // off the client's own D3D pixel shader in the Goldshire-inn trace (literal 4.0 in the
@@ -1544,8 +1655,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     }
     if (modern_frame && modern_block.cascades.params.w > 0.5) {
         let dbg = modern_block.cascades.params.w;
-        if (dbg > 2.5) {
-            let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal)); // modern GI debug view
+        if (dbg > 4.5) {
+            // fork: modern lighting (P6) — mode 5: what the local-light grid put here.
+            out_rgb = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal));
+        } else if (dbg > 2.5) {
+            let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0); // modern GI debug view
             out_rgb = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
         } else {
             out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view

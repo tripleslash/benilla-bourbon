@@ -16,6 +16,7 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use crate::view::WorldCamera;
 
 pub mod gi;
+pub mod lights;
 pub mod look;
 pub mod shadow;
 mod sky;
@@ -169,7 +170,8 @@ pub fn sun_arc_enabled() -> bool {
 
 /// The shadow debug view (`$WOW_MODERN_SHADOWDEBUG`, browser `?modern_shadowdebug=`): `1` = the modern
 /// receivers output raw sun visibility as grey, `2` = sky visibility, `3` = the probe field's
-/// irradiance (P5), `4` = how much of it the fragment's probe cell answered. `0` (default) = off.
+/// irradiance (P5), `4` = how much of it the fragment's probe cell answered, `5` = what the local
+/// light grid put on the fragment, cube shadows included (P6). `0` (default) = off.
 pub fn shadow_debug_mode() -> u8 {
     static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| {
@@ -229,6 +231,7 @@ impl Plugin for ModernLightingPlugin {
                 sky::plugin,
                 volumetrics::plugin,
                 gi::plugin,
+                lights::plugin,
             ));
     }
 }

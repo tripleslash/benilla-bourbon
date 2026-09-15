@@ -71,6 +71,12 @@ pub struct WmoModel {
     pub portal_refs: Vec<WmoPortalRef>,
     /// Per-group nav (flags + bbox + portal-ref slice), indexed by absolute group index.
     pub group_nav: Vec<WmoGroupNav>,
+    /// fork: modern lighting (`FORK.md`, P6) — the root's `MOHD.ambColor`, the
+    /// building's authored interior ambient (file RGB `0..1`). The classic lanes never read it (a
+    /// 1.12.1 interior is lit by its MOCV bake); the modern model uses it as what an interior
+    /// probe's escaped rays see instead of the sky, so a room keeps its authored cast once the
+    /// bake is gone. `[0,0,0]` on a root without the field.
+    pub ambient: [f32; 3],
     /// The root's MFOG fog records — record 0 is the WMO default (the interior-fog selector's
     /// seed); a group's [`WmoGroupNav::fog_indices`] point here. Consumed by the camera-in-interior
     /// fog resolve (`crate::wmo_portal` in the app), per wow-re `rf-weather-emission-timeline`
@@ -517,11 +523,14 @@ impl AssetLoader for WmoModelLoader {
         // lines further down, which would have meant keeping the whole root buffer alive on this
         // side to re-borrow it. Both are small and neither depends on anything the group loop
         // learns, so they come back with the root instead.
-        let (root, wmo_id, lights) =
+        let (root, wmo_id, lights, ambient) =
             crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
                 let id = benilla_formats::wmo_root_id(&bytes);
                 let lights = parse_wmo_lights(&bytes);
-                (parse_wmo_root(&bytes), id, lights)
+                // fork: modern lighting (P6) — MOHD's authored interior ambient, read in the same
+                // pass as the id for the same reason (`bytes` moves into this closure).
+                let ambient = benilla_formats::wmo_root_ambient(&bytes);
+                (parse_wmo_root(&bytes), id, lights, ambient)
             })
             .await;
         // **`Arc`, so a group's geometry parse can take the root with it.** `wmo_group_submeshes`
@@ -775,6 +784,7 @@ impl AssetLoader for WmoModelLoader {
             portal_infos: portals.infos.clone(),
             portal_refs: portals.refs.clone(),
             group_nav,
+            ambient,
             fogs: root.fogs().to_vec(),
             skybox: root.skybox().map(str::to_owned),
             group_collision_tris,

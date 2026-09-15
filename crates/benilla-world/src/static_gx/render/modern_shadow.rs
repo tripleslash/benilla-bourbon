@@ -24,8 +24,10 @@ use bevy::shader::Shader;
 use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
 
 use super::*;
+use crate::modern::lights::{ModernLights, ATLAS_TILES};
 use crate::modern::shadow::{
-    ModernCascades, ModernEntityCasters, ModernTerrainCasters, SHADOW_LAYERS, SKY_LAYER,
+    ModernCascades, ModernEntityCasters, ModernTerrainCasters, LOCAL_LAYER, LOCAL_SHADOW_LAYERS,
+    SHADOW_LAYERS, SHADOW_MAP_SIZE, SKY_LAYER,
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::binding_types::{storage_buffer_read_only_sized, texture_2d};
@@ -106,6 +108,10 @@ struct ModernShadowFrame {
     /// Per cascade: the key its cache layer was last written under (0 = invalid).
     cache_keys: [std::sync::atomic::AtomicU64; SHADOW_LAYERS],
     offsets: Vec<u32>,
+    /// fork: modern lighting (P6) — one caster view per cube face of every shadowed local light,
+    /// and the key the atlas layer currently holds (0 = redraw).
+    local_offsets: Vec<u32>,
+    local_key: std::sync::atomic::AtomicU64,
     bind: Option<BindGroup>,
     count: u32,
 }
@@ -198,6 +204,7 @@ fn prepare_modern_shadow(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     cascades: Option<Res<ModernCascades>>,
+    lights: Option<Res<ModernLights>>,
     images: Res<RenderAssets<GpuImage>>,
     buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
     pipes: Option<Res<GxShadowPipelines>>,
@@ -263,6 +270,22 @@ fn prepare_modern_shadow(
         };
         let offset = uniforms.0.push(&CasterView { clip_from_world });
         frame.offsets.push(offset);
+    }
+    // fork: modern lighting (FORK.md, P6) — the shadowed local lights' cube
+    // faces. Six 90° reverse-Z perspectives per light, whose convention `locallight::cube_face`
+    // mirrors analytically (`modern::lights::cube_face_clip`).
+    frame.local_offsets.clear();
+    if LOCAL_SHADOW_LAYERS > 0 {
+        if let Some(lights) = lights.as_deref() {
+            for light in &lights.shadowed {
+                for face in 0..6 {
+                    let clip_from_world = crate::modern::lights::cube_face_clip(light.pos, face);
+                    frame
+                        .local_offsets
+                        .push(uniforms.0.push(&CasterView { clip_from_world }));
+                }
+            }
+        }
     }
     uniforms.0.write_buffer(&device, &queue);
     let Some(binding) = uniforms.0.binding() else {
@@ -571,7 +594,9 @@ impl ViewNode for GxShadowNode {
             return Ok(());
         };
 
-        for i in 0..frame.layers.len() {
+        // The local-light atlas is the layer after the sky map and is drawn below, not here: it is
+        // not a cascade, it is not cleared every frame, and no entity is drawn into it.
+        for i in 0..frame.layers.len().min(SKY_LAYER + 1) {
             let layer = &frame.layers[i];
             // The last layer is the sky-occlusion map: static casters only, from straight above.
             let is_sky = i == SKY_LAYER;
@@ -767,8 +792,141 @@ impl ViewNode for GxShadowNode {
                 }
             }
         }
+
+        // fork: modern lighting (FORK.md, P6) — the shadowed local lights' cube
+        // atlas. Every face is static content lit by a light that does not move, so the whole layer
+        // is redrawn only when the chosen set or the static world changes; a settled room pays
+        // nothing at all after the first frame.
+        self.draw_local_atlas(render_context, world, frame, &casters, static_hash, ready, meshes, allocator);
         Ok(())
     }
+}
+
+impl GxShadowNode {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_local_atlas(
+        &self,
+        render_context: &mut RenderContext<'_>,
+        world: &World,
+        frame: &ModernShadowFrame,
+        casters: &[(&GxCellGpu, &GxCellDraw)],
+        static_hash: u64,
+        ready: Option<(&RenderPipeline, &RenderPipeline)>,
+        meshes: &RenderAssets<RenderMesh>,
+        allocator: &MeshAllocator,
+    ) {
+        if LOCAL_SHADOW_LAYERS == 0 {
+            return;
+        }
+        let (Some(lights), Some(view_bind)) = (world.get_resource::<ModernLights>(), frame.bind.as_ref())
+        else {
+            return;
+        };
+        let Some((opaque, cutout)) = ready else {
+            return;
+        };
+        if lights.shadowed.is_empty() || frame.local_offsets.len() < lights.shadowed.len() * 6 {
+            return;
+        }
+        let Some(layer) = frame.layers.get(LOCAL_LAYER) else {
+            return;
+        };
+        let key = local_atlas_key(&lights.shadowed, static_hash);
+        if frame.local_key.load(std::sync::atomic::Ordering::Relaxed) == key {
+            return;
+        }
+        let tile = SHADOW_MAP_SIZE / ATLAS_TILES;
+        let mut complete = true;
+        {
+            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("modern_local_shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: layer,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(0.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            for (slot, light) in lights.shadowed.iter().enumerate() {
+                // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner
+                // test the cascades use flips sign behind the light. A torch reaches a handful of
+                // cells, so the six faces share one cheap list.
+                let reach = light.range;
+                for face in 0..6usize {
+                    let t = slot * 6 + face;
+                    let (tx, ty) = (t as u32 % ATLAS_TILES, t as u32 / ATLAS_TILES);
+                    pass.set_viewport(
+                        (tx * tile) as f32,
+                        (ty * tile) as f32,
+                        tile as f32,
+                        tile as f32,
+                        0.0,
+                        1.0,
+                    );
+                    pass.set_scissor_rect(tx * tile, ty * tile, tile, tile);
+                    pass.set_bind_group(0, view_bind, &[frame.local_offsets[t]]);
+                    for (gpu, draw) in casters {
+                        let center = draw.origin + Vec3::from(draw.aabb.center);
+                        let radius = Vec3::from(draw.aabb.half_extents).length();
+                        if center.distance(light.pos) > reach + radius {
+                            continue;
+                        }
+                        let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                            complete = false;
+                            continue;
+                        };
+                        let (Some(vslice), Some(islice)) = (
+                            allocator.mesh_vertex_slice(&draw.mesh.id()),
+                            allocator.mesh_index_slice(&draw.mesh.id()),
+                        ) else {
+                            complete = false;
+                            continue;
+                        };
+                        let index_format = match &mesh.buffer_info {
+                            bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                                *index_format
+                            }
+                            bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+                        };
+                        pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+                        pass.set_index_buffer(islice.buffer.slice(..), index_format);
+                        for run in &gpu.runs {
+                            pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
+                            pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                            pass.draw_indexed(
+                                (islice.range.start + run.index_range.start)
+                                    ..(islice.range.start + run.index_range.end),
+                                i32::try_from(vslice.range.start).unwrap_or(0),
+                                0..1,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        frame.local_key.store(
+            if complete { key } else { 0 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// The atlas layer's key: the shadowed lights as chosen plus the static caster fingerprint. Never 0,
+/// which is the "redraw me" value.
+fn local_atlas_key(shadowed: &[crate::modern::lights::ShadowLight], static_hash: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for light in shadowed {
+        light.pos.to_array().map(f32::to_bits).hash(&mut h);
+        light.range.to_bits().hash(&mut h);
+    }
+    static_hash.hash(&mut h);
+    h.finish().max(1)
 }
 
 /// The cache key of one cascade: its light clip and the static caster fingerprint (never 0).

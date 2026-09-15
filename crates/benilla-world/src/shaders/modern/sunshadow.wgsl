@@ -9,6 +9,7 @@
 
 #import benilla_modern::froxelfog
 #import benilla_modern::probegi
+#import benilla_modern::locallight
 
 // P4: the whole storage block every modern lane binds — the cascades, then the froxel fog parameters
 // (`volumetrics::ModernVolume::std430`), then the cloud-shadow grid. Pass `.cascades` or `.fog` to the
@@ -18,9 +19,17 @@ struct ModernBlock {
     fog: froxelfog::FroxelFog,
     // Sun visibility under the clouds per grid cell (1 = clear); `fog.cloud` places the grid.
     cloud: array<f32, 1024>,
-    // P5: the probe field's parameters, then the field itself. `GiParams` is sized so the array
-    // starts 256-aligned, which is what lets the GI blend pass bind that region alone as writable.
+    // P5: the probe field's parameters. `GiParams` is sized so the light grid behind it starts
+    // 256-aligned, which is what lets the binning pass bind that region alone as writable.
     gi: probegi::GiParams,
+    // P6: the local-light grid — parameters, the padding that keeps the probe array behind it
+    // 256-aligned (the GI blend pass binds that one), then one cell per world bin. The cells are a
+    // member of the BLOCK and not of `LightGrid`: a lane copies the parameters by value and must
+    // never copy 864 KB of cells with them.
+    lights: locallight::LightGrid,
+    light_spare: array<vec4<f32>, 22>,
+    light_cells: array<vec4<u32>, 55296>,
+    // P5: the probe field itself, last because it is the block's only runtime-sized member.
     probes: array<probegi::GiProbe>,
 }
 
