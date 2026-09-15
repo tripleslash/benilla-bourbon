@@ -470,7 +470,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // a MODD prop never reaches (§8b); then the recorded `min(I,1)` cap (unfaithful,
         // kept in exact sync — 0803 §3; today it makes Matte and Lit read identically, and
         // the distinct bit exists so lifting the cap cannot silently split this lane).
-        let shade_t = select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u);
+        // fork: modern lighting (FORK.md, P3) — the baked MCSH doodad shade retires in a modern frame.
+        let shade_t = select(select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u), 0.0, wow_light.point_count.y > 0.5);
         let intensity = min(
             select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),
             1.0,

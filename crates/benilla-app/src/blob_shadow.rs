@@ -253,7 +253,8 @@ fn update_shadows(
     // by `sync_shadows` as usual) and `hide` drops each cache key, so flipping the cvar back
     // rebuilds every projection on the next frame. With the cvar off — the shipped default —
     // this gate is a single false branch and the lane below is the untouched reference path.
-    if video.world_shadows {
+    // fork: modern lighting (FORK.md, P3) — a modern session's cascades own unit shadows too.
+    if video.world_shadows || benilla_world::modern::frame_is_modern() {
         for (_, mut key, mut verts) in &mut shadows {
             if key.shown || !verts.0.is_empty() {
                 hide(&mut key, &mut verts);

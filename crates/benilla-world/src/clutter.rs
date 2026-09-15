@@ -363,7 +363,12 @@ pub(crate) fn scatter_tile_clutter(
     for chunk in chunks {
         let mut by_model: HashMap<String, Vec<ShadedPlacement>> = HashMap::new();
         for placement in scatter_ground_doodads(chunk, catalog, tile_x, tile_y, density) {
-            let tint = mcsh_tint_at(chunk, placement.position);
+            // fork: modern lighting (FORK.md, P3) — clutter drops the baked MCSH tint.
+            let tint = if crate::modern::frame_is_modern() {
+                MCSH_LIT
+            } else {
+                mcsh_tint_at(chunk, placement.position)
+            };
             let ground_normal =
                 wow_to_bevy(terrain_normal_at(chunk, placement.position)).to_array();
             by_model

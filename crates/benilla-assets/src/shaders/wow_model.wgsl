@@ -1004,7 +1004,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // motivated it is real, but it is a lifecycle state we do not model.)
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
-    let shade_t = max(mat_shade, inst_shade);
+    // fork: modern lighting (FORK.md, P3) — the baked MCSH doodad shade retires; the modern cascades darken instead.
+    let shade_t = select(max(mat_shade, inst_shade), 0.0, wow_light.point_count.y > 0.5);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
     let intensity = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
     // The lobe. Same closed form the interior-prop lane below runs and the same one
