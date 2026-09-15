@@ -89,6 +89,8 @@
 // a WMO interior group's own pool fogs with the interior block, everything else with the scene block
 // (see `apply_fog`). Light, fog and both water swatches all come off the ONE shared global-light buffer.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -132,6 +134,7 @@ struct WowLight {
     _grade: vec4<f32>,             // 17
     wmo_fog_color: vec4<f32>,      // 18 rgb = INTERIOR fog (block 2); w = enable
     wmo_fog_params: vec4<f32>,     // 19 x = start yd; y = end yd
+    point_count: vec4<f32>,        // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
@@ -347,8 +350,7 @@ fn swatch_at(shallow: vec4<f32>, deep: vec4<f32>, v: f32, ocean: bool) -> vec4<f
     );
 }
 
-@fragment
-fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
+fn fragment_classic(in: LiquidVsOut) -> vec4<f32> {
     // HARD FAR-CLIP WALL (same as terrain/models, see terrain.wgsl): discard water beyond the
     // projection far plane so lakes/rivers don't render past the wall. `fog_params.w` = farclip
     // (0 ⇒ disabled).
@@ -529,4 +531,12 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // GAMMA LANE (0161): raw gamma out; alpha blends in gamma like the reference's bytes.
     return vec4<f32>(rgb, alpha);
+}
+
+// fork: modern lighting (FORK.md) — the entry point wraps the classic body and
+// decodes its output when the frame is linear; every return path above stays untouched.
+@fragment
+fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
+    let c = fragment_classic(in);
+    return vec4<f32>(colorspace::modern_out(c.rgb, wow_light.point_count.y), c.a);
 }

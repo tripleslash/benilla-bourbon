@@ -20,6 +20,8 @@
 //   blob shadow's modulate-with-fade (and ModelBlend::Mod at α = 1).
 // - BLEND_MOD2X:    (rgb, 1) under (Dst, Src) = `2·src·dst` — rain's state; reads no alpha.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_render::view::View
 
 // The shared global light/fog buffer (`lighting::global_light`) — the SAME layout every world
@@ -41,6 +43,8 @@ struct WowLight {
     sh_c16: vec4<f32>,
     _water: array<vec4<f32>, 4>,
     grade: vec4<f32>,
+    _wmo_fog: array<vec4<f32>, 2>, // 18-19
+    point_count: vec4<f32>,        // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -230,6 +234,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let denom = max(wow_params.fog.w - wow_params.fog.z, 0.001);
         let factor = clamp((wow_params.fog.w - in.view_z) / denom, 0.0, 1.0);
         rgb = mix(RAIN_FOG_GREY, rgb, factor);
+    }
+    // fork: modern lighting (FORK.md) — decode before the premultiply; Mod2x keeps
+    // its 0.5-grey identity neutral in linear (see wow_model.wgsl).
+    if (wow_light.point_count.y > 0.5) {
+        rgb = colorspace::srgb_to_linear(rgb);
+#ifdef BLEND_MOD2X
+        rgb = rgb * 2.295;
+#endif
     }
 #ifdef BLEND_ADD
     // GAMMA LANE (0161): gamma-premultiplied, raw out — N stacked faint quads SUM in gamma

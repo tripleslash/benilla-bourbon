@@ -8,6 +8,8 @@
 //! P0 scope: the settings, their per-world latch, and the shared WGSL libraries
 //! (`benilla_modern::{color, frame}`). Nothing here draws yet.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
@@ -132,6 +134,36 @@ impl ActiveLighting {
     }
 }
 
+/// The latched model as a process-wide bit, for the Rust-side hooks inside upstream-owned systems
+/// (sky colours, celestial and cloud materials, the FFXGlow combine) whose signatures stay as
+/// upstream wrote them. Written only by [`latch_on_world_entry`].
+static MODERN_FRAME: AtomicBool = AtomicBool::new(false);
+
+/// Is the world frame linear (a modern session)?
+pub fn frame_is_modern() -> bool {
+    MODERN_FRAME.load(Ordering::Relaxed)
+}
+
+/// The exact sRGB transfer, CPU side — the twin of `benilla_modern::color::srgb_to_linear_channel`.
+pub fn srgb_to_linear(c: f32) -> f32 {
+    let x = c.max(0.0);
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// An authored gamma colour as the current frame wants it: untouched in a classic frame, decoded
+/// (rgb only; `w` rides through) in a modern one.
+pub fn decode_if_modern(v: Vec4) -> Vec4 {
+    if frame_is_modern() {
+        Vec4::new(srgb_to_linear(v.x), srgb_to_linear(v.y), srgb_to_linear(v.z), v.w)
+    } else {
+        v
+    }
+}
+
 /// Registers the settings, the latch, and the shared WGSL libraries.
 pub struct ModernLightingPlugin;
 
@@ -161,6 +193,7 @@ fn latch_on_world_entry(
         info!("lighting latched: {:?} / {:?}", next.model, next.quality);
         *active = next;
     }
+    MODERN_FRAME.store(active.is_modern(), Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -175,6 +208,15 @@ mod tests {
         assert_eq!(LightingModel::parse(" Modern "), Some(LightingModel::Modern));
         assert_eq!(LightingModel::parse("classic"), Some(LightingModel::Classic));
         assert_eq!(LightingModel::parse("2x"), None);
+    }
+
+    #[test]
+    fn srgb_decode_matches_the_curve() {
+        assert_eq!(srgb_to_linear(0.0), 0.0);
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
+        assert!((srgb_to_linear(0.5) - 0.214_041).abs() < 1e-5);
+        // Mod2x's neutral grey stays neutral after the shader's 2.295 source scale.
+        assert!((2.0 * srgb_to_linear(0.5) * 2.295 - 0.982).abs() < 0.01);
     }
 
     #[test]

@@ -19,6 +19,8 @@
 // downsample full→¼, Gauss4 at ±0.5/±2.5 texels, texel-centre base UVs with zero half-texel
 // residual — offsets transcribe as exact source-texel counts.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 @group(0) @binding(0) var in_tex: texture_2d<f32>;
@@ -30,7 +32,8 @@ struct FfxCombine {
     // primary.w); y = the FFXDeath gate (1 while ghost, else 0 — byte-verified instant, no ramp);
     // z = the drunk/underwater haze mix; w = the deband-dither arm.
     lane: vec4<f32>,
-    // xy = the GlowWave phases `(t mod 3174)/3174` and `(t mod 2805)/2805`; zw unused. Written on
+    // xy = the GlowWave phases `(t mod 3174)/3174` and `(t mod 2805)/2805`; z = the fork's modern-lighting
+    // flag (FORK.md); w unused. Written on
     // every frame, read only by `fs_combine_wave`.
     wave: vec4<f32>,
 }
@@ -146,8 +149,11 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     // Clamped to [0, 1] like the downsample's taps: the byte framebuffer this term stands for
     // could never exceed 255, and an unclamped super-white here keeps the whole additive stack
     // hard-white after the min() below — the screen term must saturate BEFORE the glow add.
-    let sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    let bg = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
+    // fork: modern lighting (FORK.md) — the scene and its blur arrive LINEAR in a
+    // modern frame (`wave.z`); the combine's byte math runs on their gamma encode, then decodes as before.
+    let modern = ffx.wave.z;
+    let sg = clamp(colorspace::modern_in(scene.rgb, modern), vec3<f32>(0.0), vec3<f32>(1.0));
+    let bg = max(colorspace::modern_in(max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0)), modern), vec3<f32>(0.0));
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear
     // booths hold 1 everywhere — only the transparent-clear create booth reads it, to composite
     // its baked model straight over the UI page.

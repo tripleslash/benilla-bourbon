@@ -806,13 +806,15 @@ impl ViewNode for FfxGlowNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let death = world.resource::<FfxDeathFade>().0;
         let wave = *world.resource::<FfxWave>();
-        let uniform = combine_uniform(
+        let mut uniform = combine_uniform(
             world.resource::<FfxGlowGain>().0,
             FfxPassState::world(death, world.resource::<FfxHazeMix>().0),
             FfxPassState::glue(world.resource::<GlueFfx>().death()),
             glow,
             wave,
         );
+        // fork: modern lighting (FORK.md) — `wave.z`: the scene arrives linear.
+        uniform[6] = if crate::modern::frame_is_modern() { 1.0 } else { 0.0 };
         // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
         // pipeline, which is the same fork — the first two passes are identical in both lists.
         let combine_id = if wave_armed(glow.state, wave, death) {

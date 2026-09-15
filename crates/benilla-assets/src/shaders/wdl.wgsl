@@ -52,6 +52,8 @@
 // (`sky_order.rs`, "The depth law"). Order of the three backdrop tiers, all decided by depth and nothing
 // else: sky (0.0) → WDL band → detailed world.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -81,6 +83,8 @@ struct WowLight {
     _light_spec: vec4<f32>,    // 3
     fog_color: vec4<f32>,      // 4 rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
     fog_params: vec4<f32>,     // 5 x/y = the SCENE fog start/end yd (unread here — the hull has its own pair); z unused; w = farclip wall (0 ⇒ off)
+    _rows_6_19: array<vec4<f32>, 14>,
+    point_count: vec4<f32>,    // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> w: WowLight;
 
@@ -128,7 +132,7 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
 
     var out: WdlFsOut;
     // GAMMA LANE (0161): raw gamma out; the frame decodes once in the FFXGlow combine.
-    out.color = vec4<f32>(rgb, 1.0);
+    out.color = vec4<f32>(colorspace::modern_out(rgb, w.point_count.y), 1.0); // fork: modern lighting (FORK.md)
     // The depth push (the reference's compressed far-band depth range). `view_z_to_depth_ndc` takes a
     // view-space z — negative in front of the camera — so the wall is at `-farclip`.
     var depth = in.clip_position.z;

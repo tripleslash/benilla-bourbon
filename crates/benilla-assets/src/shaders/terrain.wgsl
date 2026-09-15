@@ -25,6 +25,8 @@
 // layer indices in `color` (vertex COLOR) and its alpha-layer index in `uv_b.x` (UV1) — constant across
 // the chunk, so interpolation lands back on the integer index.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -373,5 +375,6 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // GAMMA LANE (decision 0161): the framebuffer HOLDS gamma bytes — all blending happens in
     // gamma exactly like the reference's byte framebuffer; the frame's ONE decode lives in the
     // FFXGlow combine (the last node). Output raw.
-    return vec4<f32>(tuned, 1.0);
+    // fork: modern lighting (FORK.md) — the frame is linear.
+    return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
 }

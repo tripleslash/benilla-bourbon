@@ -72,6 +72,8 @@
 // gamma, and the output is raw. The reference's water math is gamma-space too, so nothing here has
 // to be un-done — a refraction is a copy of neighbouring pixels, and copying is transfer-agnostic.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -156,6 +158,7 @@ struct WowLight {
     _grade: vec4<f32>,
     wmo_fog_color: vec4<f32>,
     wmo_fog_params: vec4<f32>,
+    point_count: vec4<f32>,        // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
@@ -522,8 +525,7 @@ fn magma(in: VsOut) -> vec4<f32> {
     return vec4<f32>(apply_fog(rgb, in.world_position.xyz), 1.0);
 }
 
-@fragment
-fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+fn fragment_classic(in: VsOut) -> vec4<f32> {
     // HARD FAR-CLIP WALL — the same one terrain, the models and `liquid.wgsl` take.
     let frag_view_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
     if (wow_light.fog_params.w > 0.0 && frag_view_z > wow_light.fog_params.w) {
@@ -602,7 +604,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     if (scene_depth_at(refract_uv) < frag_view_z) {
         refract_uv = uv;
     }
-    var refracted = textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb;
+    var refracted = colorspace::modern_in(textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb, wow_light.point_count.y);
     // Tint what shows through by the swatch's own opacity — this is where the water gets its
     // "you can see the bottom near the shore" behaviour, and it is why the surface can output
     // alpha 1.0 and still read as transparent.
@@ -722,7 +724,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let skyward = clamp(0.75 - r.y * r.y, 0.0, 1.0);
         let validity = clamp(skyward * edge * 1.33333, 0.0, 1.0);
         let refl_uv = (ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
-        let hit = textureSampleLevel(scene_blur, scene_samp, refl_uv, 0.0).rgb;
+        let hit = colorspace::modern_in(textureSampleLevel(scene_blur, scene_samp, refl_uv, 0.0).rgb, wow_light.point_count.y);
         // **The mirror's own lookup — a SECOND ray, and a much shorter one.** The program does not
         // read `samp1` at the fragment's own screen position, which is what a textbook planar
         // reflection would do; it projects a point 20 yards along
@@ -788,7 +790,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // guess — it is the other shipped program.
         var base = wow_light.fog_color.rgb;
         if (w.path.z > 0.5) {
-            let mirror = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
+            let mirror = colorspace::modern_in(textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb, wow_light.point_count.y);
             base = mix(base, mirror, mirror_valid);
         }
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
@@ -828,4 +830,12 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // through the refraction read, tinted by the swatch. It still draws in the transparent pass, on
     // the water rung, so the sort order the rest of the frame depends on is unchanged.
     return vec4<f32>(rgb, 1.0);
+}
+
+// fork: modern lighting (FORK.md) — the entry point wraps the classic body and
+// decodes its output when the frame is linear; every return path above stays untouched.
+@fragment
+fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+    let c = fragment_classic(in);
+    return vec4<f32>(colorspace::modern_out(c.rgb, wow_light.point_count.y), c.a);
 }

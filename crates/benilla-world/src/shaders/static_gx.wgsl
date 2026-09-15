@@ -27,6 +27,8 @@
 // `Matte`). Output alpha is pinned 1.0 — every draw here is opaque-intent by admission
 // (wow_model.wgsl's bit-3 armor, as a constant).
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -531,5 +533,6 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         rgb = mix(fog_color.xyz, rgb, factor);
     }
     // Raw gamma out (0161's lane); alpha pinned 1.0 — opaque-intent by admission.
-    return vec4<f32>(rgb, 1.0);
+    // fork: modern lighting (FORK.md) — the frame is linear.
+    return vec4<f32>(colorspace::modern_out(rgb, wow_light.point_count.y), 1.0);
 }

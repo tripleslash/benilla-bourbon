@@ -116,7 +116,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     // GAMMA output — see the header. `base.rgb` is linear (Bevy); recover the gamma colour,
     // premultiply by `a` in gamma space, emit raw onto the gamma buffer (0161). `celestial.y` =
     // brightness (1.0 everywhere; multiplies the RGB only, so the blend's dst term is unaffected).
-    let gamma = linear_to_srgb(base.rgb);
+    // fork: modern lighting (FORK.md) — a linear frame keeps Bevy's linear colour
+    // (`span.z`, written by `disc_span`); the premultiply below then happens in linear.
+    let gamma = select(linear_to_srgb(base.rgb), base.rgb, span.z > 0.5);
     // (The far depth for BOTH is the vertex stage's — see the header: a sky element survives only
     // on pixels no opaque geometry claimed, the reference's back-slice depth test.)
     if celestial.z >= 0.5 {

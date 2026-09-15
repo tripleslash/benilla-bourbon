@@ -508,18 +508,25 @@ pub(super) fn update_time_lighting(
 pub(super) fn apply_sky_backdrop(
     lighting: Option<Res<WowLighting>>,
     mut clear: ResMut<ClearColor>,
-    mut last: Local<Option<[f32; 3]>>,
+    active: Option<Res<crate::modern::ActiveLighting>>,
+    mut last: Local<Option<([f32; 3], bool)>>,
 ) {
     let Some(l) = lighting else {
         return;
     };
-    if *last == Some(l.fog_color) {
+    let modern = active.is_some_and(|a| a.is_modern());
+    if *last == Some((l.fog_color, modern)) {
         return;
     }
-    *last = Some(l.fog_color);
+    *last = Some((l.fog_color, modern));
     // GAMMA LANE (0161): the buffer holds gamma bytes — the clear writes the authored DBC
     // value RAW (`linear_rgb` = no conversion); the frame's one decode is the FFXGlow combine.
-    clear.0 = Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2]);
+    // fork: modern lighting — a modern frame is linear, so the clear takes the decoded colour.
+    clear.0 = if modern {
+        Color::srgb(l.fog_color[0], l.fog_color[1], l.fog_color[2])
+    } else {
+        Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2])
+    };
 }
 
 #[cfg(test)]

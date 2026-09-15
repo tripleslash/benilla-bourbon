@@ -42,6 +42,8 @@
 // The clutter distance-fade alpha ramp (~52.5→70 yd) still applies on top — that's a draw-distance
 // concern, not a lighting one (ground-effects.md Q4/Q10).
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -1359,6 +1361,24 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // GAMMA LANE (0161): raw gamma out — blending (alpha AND additive) happens in gamma like
     // the reference's byte framebuffer; the frame decodes once in the FFXGlow combine. (The old
     // `lin` A/B emitted linear for the sRGB encode — subsumed by the lane.)
+    // fork: modern lighting (FORK.md) — the frame is linear, so decode BEFORE the
+    // premultiply (additive) and the identity mix (Mod/Mod2x). Mod stays exact in linear
+    // ((ab)^γ = a^γ·b^γ); Mod2x's (Dst, Src) doubling becomes 2·a·b in linear, so the source is
+    // scaled by 2.295 (= 0.5 / srgb_to_linear(0.5) / 2 · 2) to keep its 0.5-grey identity neutral.
+    if (wow_light.point_count.y > 0.5) {
+        var lin = colorspace::srgb_to_linear(rgb);
+        if (is_additive) {
+            lin = lin * faded_alpha;
+        }
+        if (is_mod || is_mod2x) {
+            let identity = select(vec3<f32>(1.0), vec3<f32>(0.5), is_mod2x);
+            lin = colorspace::srgb_to_linear(mix(identity, rgb, obj_fade));
+            if (is_mod2x) {
+                lin = lin * 2.295;
+            }
+        }
+        out_rgb = lin;
+    }
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;
 }

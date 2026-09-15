@@ -302,11 +302,11 @@ fn update_sky_colors(
     let sky: Vec<Vec4> = light
         .sky
         .iter()
-        .map(|c| col(benilla_assets::quant255(*c)))
+        .map(|c| crate::modern::decode_if_modern(col(benilla_assets::quant255(*c)))) // fork: modern lighting
         .collect();
     let f = benilla_assets::quant255(light.fog_color);
     // `fog.w` unused by the shader (the old raw-vs-linearised A/B is gone — GAMMA LANE, 0161).
-    let fog = Vec4::new(f[0], f[1], f[2], 0.0);
+    let fog = crate::modern::decode_if_modern(Vec4::new(f[0], f[1], f[2], 0.0)); // fork: modern lighting
     // Dawn/dusk warp: strength S + the sun's compass azimuth (Bevy world `atan2(z, x)` of the
     // camera→sun direction). The warp's glow table is symmetric about this bearing, so the sun-facing
     // dome quarter warms and the opposite side desaturates. S=0 (all midday / highlightSky=0 zones) →

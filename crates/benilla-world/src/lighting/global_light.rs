@@ -298,6 +298,8 @@ fn build_light_data(
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
     time: Res<Time>,
+    // fork: modern lighting — row 20 `.y` tells every world shader the frame is linear.
+    active: Option<Res<crate::modern::ActiveLighting>>,
     mut last_dump: Local<f64>,
     mut last_rows_dump: Local<f64>,
 ) {
@@ -371,7 +373,8 @@ fn build_light_data(
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     pts.truncate(MAX_POINT_LIGHTS);
-    fresh.rows[20] = [pts.len() as f32, 0.0, 0.0, 0.0];
+    let modern = if active.is_some_and(|a| a.is_modern()) { 1.0 } else { 0.0 };
+    fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
     for (i, (_, p, range, rgb)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
         fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];

@@ -118,7 +118,9 @@ fn flare_slew(current: f32, target: f32, rise: f32, fall: f32, dt: f32) -> f32 {
 pub(super) fn disc_span(dir_y: f32, size: f32) -> Vec4 {
     let elev = dir_y.clamp(-1.0, 1.0).asin();
     let half = (0.5 * size).atan();
-    Vec4::new((elev - half).sin(), (elev + half).sin(), 0.0, 0.0)
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (celestial.wgsl).
+    let modern = if crate::modern::frame_is_modern() { 1.0 } else { 0.0 };
+    Vec4::new((elev - half).sin(), (elev + half).sin(), modern, 0.0)
 }
 
 /// [`benilla_assets::quantize`] a [`disc_span`] to 1/4096 sin-elevation steps — the write gate's

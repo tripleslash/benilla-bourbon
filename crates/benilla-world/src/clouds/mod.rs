@@ -167,6 +167,16 @@ fn tick_clouds(
     if changed {
         if let Some(layer) = clock.as_ref() {
             if let Some(image) = images.get_mut(&layer.image) {
+                // fork: modern lighting (FORK.md) — the kernel writes gamma bytes;
+                // a linear frame samples them through an sRGB view so cloud.wgsl emits linear.
+                let format = if crate::modern::frame_is_modern() {
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    bevy::render::render_resource::TextureFormat::Rgba8Unorm
+                };
+                if image.texture_descriptor.format != format {
+                    image.texture_descriptor.format = format;
+                }
                 image
                     .data
                     .as_mut()
