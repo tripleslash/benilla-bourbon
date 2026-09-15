@@ -51,6 +51,10 @@ const DEPTH_BIAS_YD: f32 = 0.15;
 const NORMAL_OFFSET_TEXELS: f32 = 1.5;
 /// Re-aim only after the key light has turned this far (radians).
 const SUN_SNAP_RADIANS: f32 = 1.5e-3;
+/// A cascade's sphere is fitted this much larger than its frustum slice and re-centred only when the
+/// slice leaves it, so a moving camera keeps most cascades' matrices — and their static cache — for
+/// many frames.
+const CASCADE_MARGIN: f32 = 1.25;
 /// Size of [`ModernCascades::std430`] — `sunshadow.wgsl`'s `ModernCascades`.
 pub const CASCADES_BYTES: usize = 4 * 64 + 4 * 16;
 
@@ -155,8 +159,11 @@ fn create_shadow_assets(
         TextureFormat::Depth32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+    // COPY_SRC/COPY_DST: the static cache copies layers in and out (`modern_shadow`).
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+        | TextureUsages::RENDER_ATTACHMENT
+        | TextureUsages::COPY_SRC
+        | TextureUsages::COPY_DST;
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         label: Some("modern_shadow_map"),
         dimension: Some(TextureViewDimension::D2Array),
@@ -185,6 +192,8 @@ fn update_cascades(
     cameras: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     mut out: ResMut<ModernCascades>,
     mut aimed: Local<Option<Vec3>>,
+    mut spheres: Local<[Option<(Vec3, f32)>; MAX_CASCADES]>,
+    mut sphere_dir: Local<Option<Vec3>>,
 ) {
     if !active.is_modern() {
         if out.count != 0 {
@@ -206,6 +215,11 @@ fn update_cascades(
             dir
         }
     };
+    // A new sun direction re-fits every cascade.
+    if *sphere_dir != Some(dir) {
+        *spheres = [None; MAX_CASCADES];
+        *sphere_dir = Some(dir);
+    }
     let world_from_view = camera.to_matrix();
     let splits = cascade_splits(active.quality);
     let mut next = ModernCascades {
@@ -215,15 +229,16 @@ fn update_cascades(
     };
     let mut near = persp.near.max(0.1);
     for (i, &far) in splits.iter().enumerate() {
-        let fit = fit_cascade(
-            world_from_view,
-            persp.fov,
-            persp.aspect_ratio,
-            near,
-            far,
-            dir,
-            SHADOW_MAP_SIZE,
-        );
+        let (c, r) = slice_sphere(world_from_view, persp.fov, persp.aspect_ratio, near, far);
+        let (center, radius) = match spheres[i] {
+            Some((sc, sr)) if sc.distance(c) + r <= sr => (sc, sr),
+            _ => {
+                let fresh = (c, (r * CASCADE_MARGIN).ceil());
+                spheres[i] = Some(fresh);
+                fresh
+            }
+        };
+        let fit = cascade_from_sphere(center, radius, dir, SHADOW_MAP_SIZE);
         next.clip_from_world[i] = fit.clip_from_world;
         next.splits[i] = far;
         next.texel_world[i] = fit.texel_world;
@@ -332,6 +347,12 @@ pub fn fit_cascade(
     dir: Vec3,
     size: u32,
 ) -> CascadeFit {
+    let (center, radius) = slice_sphere(world_from_view, fov_y, aspect, near, far);
+    cascade_from_sphere(center, radius, dir, size)
+}
+
+/// The bounding sphere of the view-frustum slice `[near, far]` (radius rounded up to whole yards).
+pub fn slice_sphere(world_from_view: Mat4, fov_y: f32, aspect: f32, near: f32, far: f32) -> (Vec3, f32) {
     let tan = (fov_y * 0.5).tan();
     let mut corners = [Vec3::ZERO; 8];
     let mut k = 0;
@@ -349,7 +370,11 @@ pub fn fit_cascade(
         .fold(0.0f32, f32::max)
         .ceil()
         .max(1.0);
+    (center, radius)
+}
 
+/// The texel-snapped reverse-Z orthographic light clip around a sphere.
+pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> CascadeFit {
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
     let light_rot = Mat4::look_to_rh(Vec3::ZERO, dir, up);
     let texel = 2.0 * radius / size as f32;

@@ -9,7 +9,9 @@
 //! 3. draws every cached cell, WMO and prop whose world bounds overlap each active cascade,
 //!    depth-only — opaque, or alpha-keyed for cutout runs, two-sided.
 //!
-//! Terrain and entity casters, and static caching, follow in later P2 steps.
+//! Static casters (terrain, static_gx) are cached per cascade in a second depth array and copied
+//! back while the cascade's matrix and the static caster set are unchanged; entity parts are drawn
+//! on top every frame.
 
 use bevy::app::SubApp;
 use bevy::pbr::graph::NodePbr;
@@ -96,6 +98,11 @@ struct TerrainShadowPipelines {
 #[derive(Resource, Default)]
 struct ModernShadowFrame {
     layers: Vec<TextureView>,
+    /// The working array (the constant-handle image's texture) and the static-only cache.
+    texture: Option<Texture>,
+    cache: Option<Texture>,
+    /// Per cascade: the key its cache layer was last written under (0 = invalid).
+    cache_keys: [std::sync::atomic::AtomicU64; MAX_CASCADES],
     offsets: Vec<u32>,
     bind: Option<BindGroup>,
     count: u32,
@@ -212,6 +219,23 @@ fn prepare_modern_shadow(
     let Some(image) = images.get(MODERN_SHADOW_MAP.id()) else {
         return;
     };
+    frame.texture = Some(image.texture.clone());
+    if frame.cache.is_none() {
+        frame.cache = Some(device.create_texture(&TextureDescriptor {
+            label: Some("modern_shadow_static_cache"),
+            size: Extent3d {
+                width: image.texture.width(),
+                height: image.texture.height(),
+                depth_or_array_layers: image.texture.depth_or_array_layers(),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::COPY_SRC | TextureUsages::COPY_DST,
+            view_formats: &[],
+        }));
+    }
     if frame.layers.is_empty() {
         frame.layers = (0..MAX_CASCADES as u32)
             .map(|layer| {
@@ -509,93 +533,105 @@ impl ViewNode for GxShadowNode {
             }
         }
 
-        for (i, layer) in frame.layers.iter().enumerate() {
-            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some("modern_shadow_static"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: layer,
-                    depth_ops: Some(Operations {
-                        load: LoadOp::Clear(0.0),
-                        store: StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if i >= cascades.count as usize {
-                continue; // cleared, unused this tier
+        let terrain = world.get_resource::<ModernTerrainCasters>();
+        let terrain_pipes = world.get_resource::<TerrainShadowPipelines>();
+        // Order-independent fingerprint of the static caster set: cached layers are reused only
+        // while it (and the cascade's matrix) is unchanged.
+        let static_hash = {
+            use std::hash::{Hash, Hasher};
+            let item = |f: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                f(&mut h);
+                h.finish()
+            };
+            let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
+            for (gpu, draw) in &casters {
+                acc = acc.wrapping_add(item(&|h| {
+                    gpu.mesh.hash(h);
+                    gpu.killed_applied.hash(h);
+                    gpu.runs.len().hash(h);
+                    draw.origin.to_array().map(f32::to_bits).hash(h);
+                }));
             }
-            pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
-            let clip_from_world = cascades.clip_from_world[i];
-            // Terrain first: hills and cliffs cast onto everything below them.
-            if let (Some(terrain), Some(tp)) = (
-                world.get_resource::<ModernTerrainCasters>(),
-                world.get_resource::<TerrainShadowPipelines>(),
-            ) {
-                for (mesh_id, center, half) in &terrain.cells {
-                    if outside_box(&clip_from_world, *center, *half) {
-                        continue;
-                    }
-                    let Some(mesh) = meshes.get(*mesh_id) else {
-                        continue;
-                    };
-                    let Some(pipeline) = tp
-                        .by_stride
-                        .get(&mesh.layout.0.layout().array_stride)
-                        .and_then(|id| pipeline_cache.get_render_pipeline(*id))
-                    else {
-                        continue;
-                    };
-                    let (Some(vslice), Some(islice)) = (
-                        allocator.mesh_vertex_slice(mesh_id),
-                        allocator.mesh_index_slice(mesh_id),
-                    ) else {
-                        continue;
-                    };
-                    let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
-                        &mesh.buffer_info
-                    else {
-                        continue;
-                    };
-                    pass.set_render_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                    pass.draw_indexed(
-                        islice.range.clone(),
-                        i32::try_from(vslice.range.start).unwrap_or(0),
-                        0..1,
-                    );
+            if let Some(t) = terrain {
+                for (mesh_id, center, _) in &t.cells {
+                    acc = acc.wrapping_add(item(&|h| {
+                        mesh_id.hash(h);
+                        center.to_array().map(f32::to_bits).hash(h);
+                    }));
                 }
             }
-            // Entity-lane parts: doodads that fade or animate, game objects, creatures, characters.
-            if let Some(entities) = world.get_resource::<EntityShadowFrame>() {
-                if let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) {
-                    for cmd in &entities.draws {
-                        if outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
-                            continue;
-                        }
-                        let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
-                            continue;
-                        };
-                        let Some(mesh) = meshes.get(cmd.mesh) else {
-                            continue;
-                        };
-                        let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
-                            continue;
-                        };
-                        pass.set_render_pipeline(pipeline);
-                        pass.set_bind_group(1, if cmd.skinned { skin_bind } else { draw_bind }, &[cmd.offset]);
-                        if let Some(cut) = &cmd.cutout {
-                            pass.set_bind_group(2, cut, &[]);
-                        }
-                        pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                        match &mesh.buffer_info {
-                            bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                                let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
+            acc
+        };
+        let (Some(working), Some(static_cache)) = (frame.texture.as_ref(), frame.cache.as_ref()) else {
+            return Ok(());
+        };
+
+        for i in 0..frame.layers.len() {
+            let layer = &frame.layers[i];
+            let active = i < cascades.count as usize;
+            let clip_from_world = cascades.clip_from_world[i];
+            let key = if active {
+                cascade_key(&clip_from_world, static_hash)
+            } else {
+                0
+            };
+            let slot = &frame.cache_keys[i];
+            let cached = active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
+
+            if cached {
+                copy_layer(render_context.command_encoder(), static_cache, working, i as u32);
+            } else {
+                // Static pass: clear, then terrain and the static world.
+                let mut complete = ready.is_some();
+                {
+                    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                        label: Some("modern_shadow_static"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                            view: layer,
+                            depth_ops: Some(Operations {
+                                load: LoadOp::Clear(0.0),
+                                store: StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    if active {
+                        pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
+                        if let (Some(t), Some(tp)) = (terrain, terrain_pipes) {
+                            for (mesh_id, center, half) in &t.cells {
+                                if outside_box(&clip_from_world, *center, *half) {
+                                    continue;
+                                }
+                                let Some(mesh) = meshes.get(*mesh_id) else {
+                                    complete = false;
                                     continue;
                                 };
+                                let Some(pipeline) = tp
+                                    .by_stride
+                                    .get(&mesh.layout.0.layout().array_stride)
+                                    .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+                                else {
+                                    complete = false;
+                                    continue;
+                                };
+                                let (Some(vslice), Some(islice)) = (
+                                    allocator.mesh_vertex_slice(mesh_id),
+                                    allocator.mesh_index_slice(mesh_id),
+                                ) else {
+                                    complete = false;
+                                    continue;
+                                };
+                                let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
+                                    &mesh.buffer_info
+                                else {
+                                    continue;
+                                };
+                                pass.set_render_pipeline(pipeline);
+                                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
                                 pass.set_index_buffer(islice.buffer.slice(..), *index_format);
                                 pass.draw_indexed(
                                     islice.range.clone(),
@@ -603,51 +639,155 @@ impl ViewNode for GxShadowNode {
                                     0..1,
                                 );
                             }
-                            bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                                pass.draw(vslice.range.clone(), 0..1);
+                        } else {
+                            complete = false;
+                        }
+                        if let Some((opaque, cutout)) = ready {
+                            for (gpu, draw) in &casters {
+                                if outside_cascade(&clip_from_world, draw) {
+                                    continue;
+                                }
+                                let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                                    complete = false;
+                                    continue;
+                                };
+                                let (Some(vslice), Some(islice)) = (
+                                    allocator.mesh_vertex_slice(&draw.mesh.id()),
+                                    allocator.mesh_index_slice(&draw.mesh.id()),
+                                ) else {
+                                    complete = false;
+                                    continue;
+                                };
+                                let index_format = match &mesh.buffer_info {
+                                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                                        *index_format
+                                    }
+                                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+                                };
+                                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+                                pass.set_index_buffer(islice.buffer.slice(..), index_format);
+                                for run in &gpu.runs {
+                                    pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
+                                    pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                                    pass.draw_indexed(
+                                        (islice.range.start + run.index_range.start)
+                                            ..(islice.range.start + run.index_range.end),
+                                        i32::try_from(vslice.range.start).unwrap_or(0),
+                                        0..1,
+                                    );
+                                }
                             }
                         }
                     }
                 }
+                if active && complete {
+                    copy_layer(render_context.command_encoder(), working, static_cache, i as u32);
+                    slot.store(key, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    slot.store(0, std::sync::atomic::Ordering::Relaxed);
+                }
             }
-            let Some((opaque, cutout)) = ready else {
+
+            // Dynamic pass, every frame: entity parts on top of the (cached or fresh) static layer.
+            if !active {
+                continue;
+            }
+            let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
                 continue;
             };
-            for (gpu, draw) in &casters {
-                if outside_cascade(&clip_from_world, draw) {
+            let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
+                continue;
+            };
+            if entities.draws.is_empty() {
+                continue;
+            }
+            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("modern_shadow_dynamic"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: layer,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
+            for cmd in &entities.draws {
+                if outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
                 }
-                let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
                     continue;
                 };
-                let (Some(vslice), Some(islice)) = (
-                    allocator.mesh_vertex_slice(&draw.mesh.id()),
-                    allocator.mesh_index_slice(&draw.mesh.id()),
-                ) else {
+                let Some(mesh) = meshes.get(cmd.mesh) else {
                     continue;
                 };
-                let index_format = match &mesh.buffer_info {
-                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                        *index_format
-                    }
-                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+                let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
+                    continue;
                 };
+                pass.set_render_pipeline(pipeline);
+                pass.set_bind_group(1, if cmd.skinned { skin_bind } else { draw_bind }, &[cmd.offset]);
+                if let Some(cut) = &cmd.cutout {
+                    pass.set_bind_group(2, cut, &[]);
+                }
                 pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                pass.set_index_buffer(islice.buffer.slice(..), index_format);
-                for run in &gpu.runs {
-                    pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
-                    pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-                    pass.draw_indexed(
-                        (islice.range.start + run.index_range.start)
-                            ..(islice.range.start + run.index_range.end),
-                        i32::try_from(vslice.range.start).unwrap_or(0),
-                        0..1,
-                    );
+                match &mesh.buffer_info {
+                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                        let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
+                            continue;
+                        };
+                        pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                        pass.draw_indexed(
+                            islice.range.clone(),
+                            i32::try_from(vslice.range.start).unwrap_or(0),
+                            0..1,
+                        );
+                    }
+                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
+                        pass.draw(vslice.range.clone(), 0..1);
+                    }
                 }
             }
         }
         Ok(())
     }
+}
+
+/// The cache key of one cascade: its light clip and the static caster fingerprint (never 0).
+fn cascade_key(clip_from_world: &Mat4, static_hash: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clip_from_world.to_cols_array().map(f32::to_bits).hash(&mut h);
+    static_hash.hash(&mut h);
+    h.finish().max(1)
+}
+
+/// Copy one whole array layer between two same-sized `Depth32Float` arrays.
+fn copy_layer(encoder: &mut CommandEncoder, src: &Texture, dst: &Texture, layer: u32) {
+    let size = Extent3d {
+        width: src.width(),
+        height: src.height(),
+        depth_or_array_layers: 1,
+    };
+    encoder.copy_texture_to_texture(
+        TexelCopyTextureInfo {
+            texture: src,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: layer },
+            aspect: TextureAspect::All,
+        },
+        TexelCopyTextureInfo {
+            texture: dst,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: layer },
+            aspect: TextureAspect::All,
+        },
+        size,
+    );
 }
 
 /// Does a cell's world box miss the cascade's light-space rectangle? Depth is not tested: a caster
