@@ -55,7 +55,7 @@ const VIEW_START_HEIGHT: f32 = 60.0;
 /// pose ([`start_pose`]): the enforcer's own anchor, which must stay the default (the two binaries
 /// stream the same tiles, and a difference between them is a difference in the engine).
 fn view_start() -> Option<[f32; 3]> {
-    let v = std::env::var("WOW_WORLDVIEW_AT").ok()?;
+    let v = crate::launch_env::var("WOW_WORLDVIEW_AT")?;
     let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
     match c.len() {
         2 => Some([c[0], c[1], VIEW_OPEN_Z]),

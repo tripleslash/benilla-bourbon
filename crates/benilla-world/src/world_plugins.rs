@@ -218,6 +218,9 @@ impl PluginGroup for WorldPlugins {
             // full-screen pass, and the one before FFXGlow in the graph. Its two strengths are
             // player sliders and both halves are exact no-ops at zero.
             .add(crate::ssilvb::SsilvbPlugin)
+            // The fork's parallel lighting model (FORK.md). Classic by default,
+            // and a classic session never reads anything it registers.
+            .add(crate::modern::ModernLightingPlugin)
             .add(crate::ribbons::RibbonPlugin)
             // Stuck-modifier reconciliation: macOS system shortcuts (⇧⌘5) swallow modifier
             // releases without a focus loss, wedging every bare-key binding (decision 0606).

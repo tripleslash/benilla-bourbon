@@ -315,7 +315,27 @@ use world_backdrop::WorldBackdropPlugin;
 pub use benilla_world::build_id::BuildId;
 /// The world viewer's entry point — the engine with no game attached (decision 1160).
 /// Its shim (`benilla-worldview`) is this library's second caller; see [`worldview`].
-pub use benilla_world::worldview::run as run_worldview;
+/// The world viewer — `benilla-worldview`'s engine-only run, reachable from the browser too
+/// (`?worldview=1`, fork-owned). The native shim calls `benilla_world::worldview::run` directly;
+/// this wrapper adds what only the client crate can supply on the web: the worker pool, the query
+/// string (copied into `benilla_world::launch_env` for the keys the engine reads), and the
+/// loading overlay's `ready` edge, which the viewer has no glue screen to send.
+pub fn run_worldview(build: BuildId) -> AppExit {
+    web_threads::install();
+    const SEEDED: [&str; 3] = ["WOW_WORLDVIEW_AT", "WOW_LIGHTING", "WOW_LIGHTING_QUALITY"];
+    benilla_world::launch_env::seed(
+        SEEDED
+            .iter()
+            .filter_map(|k| webenv::var(k).map(|v| ((*k).to_string(), v))),
+    );
+    webprogress::signal_ready_once();
+    benilla_world::worldview::run(build)
+}
+
+/// Did the page ask for the world viewer instead of the client (`?worldview=1`)?
+pub fn wants_worldview() -> bool {
+    webenv::var("WOW_WORLDVIEW").as_deref() == Some("1")
+}
 pub use bevy::app::AppExit;
 
 /// Take `LogPlugin` off the **web** build — always in a shipped one, and in a debug one while the

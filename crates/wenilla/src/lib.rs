@@ -41,10 +41,17 @@ pub fn start() {
     // did the run exit with?" — that hasn't been decided yet. The native shims' `fn main() ->
     // AppExit` (where the return value IS the process exit code) has no wasm32 equivalent: a
     // browser tab has no exit code for a page to report.
-    benilla_app::run(BuildId {
+    let build = BuildId {
         sha: env!("BENILLA_GIT_SHA"),
         short: env!("BENILLA_GIT_SHORT"),
         date: env!("BENILLA_GIT_DATE"),
         profile: env!("BENILLA_PROFILE"),
-    });
+    };
+    // `?worldview=1` — the engine with no game attached, over the same packs (fork-owned; the
+    // browser twin of `benilla-worldview`, used to look at the lighting work without a login).
+    if benilla_app::wants_worldview() {
+        benilla_app::run_worldview(build);
+        return;
+    }
+    benilla_app::run(build);
 }

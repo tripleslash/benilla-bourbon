@@ -62,6 +62,7 @@ use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
 use benilla_world::liquid::WaterDetail;
 use benilla_world::ssilvb::{IndirectLighting, SSILVB_RANGE};
+use benilla_world::modern::{LightingModel, LightingQuality, LightingSettings};
 use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
 
 /// One host-backed CVar: its registered name, benilla's shipped default, and — the column that
@@ -1162,6 +1163,21 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
          split across two rows only so a player can move them apart",
     ),
+    // ── fork-owned block: modern lighting (FORK.md) ──
+    // `lightingModel` — 0 classic (upstream's 1.12.1 reproduction, the default), 1 modern.
+    // `lightingQuality` — the modern tier, 0 low … 3 ultra; Medium in the browser, High natively.
+    // Both latch at world entry. `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` override session-only.
+    ours(
+        "lightingModel",
+        "0",
+        "the fork's own — the reference has one lighting model; this selects the parallel one",
+    ),
+    ours(
+        "lightingQuality",
+        if cfg!(target_arch = "wasm32") { "1" } else { "2" },
+        "the fork's own — the modern model's quality tier",
+    ),
+    // ── end fork-owned block ──
     // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
     //
     // The name and the value space are the REFERENCE's, taken from a later client rather than
@@ -1402,6 +1418,7 @@ pub(crate) struct KnobParams<'w> {
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
     indirect: ResMut<'w, IndirectLighting>,
+    lighting: ResMut<'w, LightingSettings>,
     water_detail: ResMut<'w, WaterDetail>,
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
@@ -1449,6 +1466,7 @@ impl KnobParams<'_> {
             video: &mut self.video,
             render_scale: &mut self.render_scale,
             indirect: &mut self.indirect,
+            lighting: &mut self.lighting,
             water_detail: &mut self.water_detail,
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
@@ -1497,6 +1515,8 @@ struct Knobs<'a> {
     render_scale: &'a mut RenderScale,
     /// The two screen-space indirect-lighting strengths (`ssaoStrength` / `ssgiStrength`).
     indirect: &'a mut IndirectLighting,
+    /// The fork's lighting model and tier (`lightingModel` / `lightingQuality`).
+    lighting: &'a mut LightingSettings,
     /// Which liquid renderer is running (`waterDetail`).
     water_detail: &'a mut WaterDetail,
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
@@ -1778,6 +1798,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "ssgistrength" => {
             knobs.indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
         }
+        // The fork's modern lighting (FORK.md). Both latch at the next world
+        // entry (`benilla_world::modern::ActiveLighting`), so a write here moves no frame now.
+        "lightingmodel" => knobs.lighting.model = LightingModel::from_cvar(v),
+        "lightingquality" => knobs.lighting.quality = LightingQuality::from_cvar(v),
         // The liquid renderer. Not clamped into a range like the numeric rows above — the value
         // space is a set of TIERS with a hole at 1, so `WaterDetail::from_cvar` maps rather than
         // clamps, and anything unrecognised reads as cata (the default, and the one that cannot
@@ -1955,6 +1979,14 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     }
     if std::env::var_os("WOW_SSGI").is_some() {
         persist.session_owned.insert("ssgistrength".into());
+    }
+    // `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` are the modern-lighting A/B levers, session-only
+    // on the same law. `LightingSettings::default()` has already taken them.
+    if std::env::var_os("WOW_LIGHTING").is_some() {
+        persist.session_owned.insert("lightingmodel".into());
+    }
+    if std::env::var_os("WOW_LIGHTING_QUALITY").is_some() {
+        persist.session_owned.insert("lightingquality".into());
     }
     // `$WOW_WATER_DETAIL` is the liquid-renderer A/B lever, session-only on the same law: every
     // side-by-side of the two water paths sets it, and a value that stuck in the file would leave
@@ -2223,6 +2255,7 @@ fn sync_cvars(
             video,
             render_scale,
             indirect,
+            lighting,
             water_detail,
             pane_rate,
             guild_notify,
@@ -2296,7 +2329,7 @@ fn sync_cvars(
             hardware_cursor: true,
         });
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 91] = [
+        let session: [(&str, String); 93] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -2427,6 +2460,8 @@ fn sync_cvars(
             ("waterDetail", water_detail.0.to_string()),
             ("ssaoStrength", indirect.ao.to_string()),
             ("ssgiStrength", indirect.gi.to_string()),
+            ("lightingModel", lighting.model.as_cvar().to_string()),
+            ("lightingQuality", lighting.quality.as_cvar().to_string()),
             ("gxMultisample", msaa.samples.to_string()),
             ("trilinear", flag(tex_filter.trilinear)),
             ("anisotropic", tex_filter.aniso.to_string()),
@@ -3052,6 +3087,11 @@ mod tests {
         let mut text_filter = crate::text_filter::TextFilterSwitches::default();
         let mut game_tip = crate::game_tip::GameTipSetting::default();
         let mut camera_opts = crate::player::camera_dynamics::CameraOptions::default();
+        // Literal: LightingSettings::default() reads $WOW_LIGHTING / $WOW_LIGHTING_QUALITY.
+        let mut lighting = LightingSettings {
+            model: LightingModel::Classic,
+            quality: LightingQuality::PLATFORM_DEFAULT,
+        };
         let mut knobs = Knobs {
             camera_opts: &mut camera_opts,
             sound: &mut sound,
@@ -3075,6 +3115,7 @@ mod tests {
             video: &mut video,
             render_scale: &mut render_scale,
             indirect: &mut indirect,
+            lighting: &mut lighting,
             water_detail: &mut water_detail,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
@@ -3691,6 +3732,10 @@ mod tests {
             // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
             .insert_resource(RenderScale(1.0))
             // Literal for the same reason: IndirectLighting::default() reads $WOW_SSAO/$WOW_SSGI.
+            .insert_resource(LightingSettings {
+                model: LightingModel::Classic,
+                quality: LightingQuality::PLATFORM_DEFAULT,
+            })
             .insert_resource(IndirectLighting {
                 ao: AO_DEFAULT,
                 gi: GI_DEFAULT,

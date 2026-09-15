@@ -144,6 +144,7 @@ pub mod ground_fx;
 pub mod instance_tint;
 pub mod interact;
 pub mod interior;
+pub mod launch_env;
 pub mod lighting;
 pub mod liquid;
 
@@ -156,6 +157,7 @@ pub mod mesh_tag;
 pub mod model_fade;
 pub mod model_forms;
 pub mod model_render;
+pub mod modern;
 pub mod modkeys;
 pub mod particles;
 pub mod ribbons;
