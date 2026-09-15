@@ -87,6 +87,15 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/world_map.rs` | `map_id_from_env` reads `WOW_MAP` through `launch_env` (browser `?map=`) | P4 |
 | `benilla-app/src/lib.rs` | `run_worldview` seeds `WOW_MAP` and `WOW_MODERN_ZONE` | P4 |
 
+| `benilla-world/src/shaders.rs` | `load_shader_library!` for `shaders/modern/probegi.wgsl`; `embedded_asset!` for `static_gx_voxel`, `gi_voxel_clear`, `gi_trace`, `gi_blend` | P5 |
+| `benilla-world/src/static_gx/render.rs` | `mod modern_gi;` + `pub(crate) use modern_gi::GxVoxelLabel;` at EOF; `modern_gi::build(render_app)` at the end of `build` | P5 |
+| `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::GxVoxelLabel` (the probe trace orders after the voxel pass) | P5 |
+| `benilla-world/src/modern/volumetrics/mod.rs` | `pub(crate) use node::FroxelLabel` (the probe trace orders before the froxels) | P5 |
+| `sunshadow.wgsl` | `#import benilla_modern::probegi`; `ModernBlock` gains `gi: GiParams` + the runtime-sized `probes` array | P5 |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `#import benilla_modern::probegi`; a fork-owned `modern_gi_ambient` helper beside the modern bindings (the eight probe reads a WGSL module cannot do for the caller); modern exterior ambient = `mix(ambient x sky map, probes, confidence)` — terrain's `primary`, wow_model's `lit_with_shadow_sky`, static_gx's `lit_nl_shadowed` and `lit_doodad`; debug modes 3 and 4 | P5 |
+| `froxel_scatter.wgsl` | `#import benilla_modern::probegi`; the ambient in-scatter's sky term follows the nearest probe against the open-field reference | P5 |
+| `benilla-world/src/modern/shadow.rs` | the storage block is sized with `gi::BLOCK_GI_BYTES` behind the froxel tail | P5 |
+
 ## Planned hooks (not yet landed)
 
 - `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl`: the lighting and fog spans (P1–P4)

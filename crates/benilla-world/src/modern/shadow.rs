@@ -194,8 +194,10 @@ fn create_shadow_assets(
 
     // P4: the froxel fog parameters and the cloud-shadow grid ride behind the cascades
     // (`sunshadow::ModernBlock`).
+    // P5: the GI parameters and the probe field ride behind the froxel block (`gi::BLOCK_GI_BYTES`),
+    // at a size no quality tier changes — a re-created buffer would re-prepare every material.
     let mut block = ShaderStorageBuffer::with_size(
-        CASCADES_BYTES + super::volumetrics::BLOCK_TAIL_BYTES,
+        CASCADES_BYTES + super::volumetrics::BLOCK_TAIL_BYTES + super::gi::BLOCK_GI_BYTES,
         RenderAssetUsages::RENDER_WORLD,
     );
     block.buffer_description.usage |= BufferUsages::COPY_DST;

@@ -7,6 +7,7 @@
 // (sigma_s * L, sigma_t) for `froxel_integrate.wgsl` to accumulate front to back.
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
+#import benilla_modern::probegi
 
 // The shared light buffer's prefix (`lighting::global_light`): the header rows and the point table,
 // packed nearest-to-camera first.
@@ -66,7 +67,23 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let sun_vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p, d) * cloud;
     let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p);
-    var lum = f.ambient.rgb * mix(SKY_FLOOR, 1.0, sky) + f.sun.rgb * (froxelfog::dual_phase(f, mu) * sun_vis);
+    // fork: modern lighting (FORK.md, P5) — where the probe field reaches this
+    // froxel, its mean radiance against an open-field probe's is what shades the ambient in-scatter:
+    // the haze goes dark under a canopy and keeps the zone's own colour in the open. One tap, because
+    // the volume's own blur and its history are a better filter than eight reads would be.
+    var sky_term = mix(SKY_FLOOR, 1.0, sky);
+    let g = modern_block.gi;
+    if (g.params.x > 0.5 && g.sky.w > 1e-4) {
+        let found = probegi::nearest_index(g, p);
+        if (found.y > 0.5) {
+            let probe = modern_block.probes[u32(found.x)];
+            if (probe.dc.w > 0.0) {
+                let mean = dot(probe.dc.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+                sky_term = clamp(mean / g.sky.w, SKY_FLOOR, 1.25);
+            }
+        }
+    }
+    var lum = f.ambient.rgb * sky_term + f.sun.rgb * (froxelfog::dual_phase(f, mu) * sun_vis);
 
     // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
     let count = min(u32(f.screen.w), u32(light_table.rows[20].x));

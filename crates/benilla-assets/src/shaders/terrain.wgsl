@@ -28,6 +28,7 @@
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
 #import benilla_modern::sunshadow
+#import benilla_modern::probegi
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -44,6 +45,44 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
 @group(#{MATERIAL_BIND_GROUP}) @binding(122) var modern_shadow_samp: sampler_comparison;
 @group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
+
+// fork: modern lighting (FORK.md, P5) — the probe field's irradiance at this
+// fragment: the eight probes around it in the finest cascade that owns the point, and whatever a
+// coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
+// that row); `w` is how much of the cell answered, which is 0 wherever the field has nothing to say
+// and the sky-occlusion map stays in charge.
+fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
+    let g = modern_block.gi;
+    if (g.params.x < 0.5 || g.params.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var sum = vec3<f32>(0.0);
+    var answered = 0.0;
+    var left = 1.0;
+    let count = u32(g.dims.w);
+    for (var c = 0u; c < count; c = c + 1u) {
+        let pk = probegi::pick(g, c, p, nrm);
+        if (pk.inside <= 0.0) {
+            continue;
+        }
+        var acc = probegi::start();
+        for (var k = 0u; k < 8u; k = k + 1u) {
+            acc = probegi::accum(acc, g, pk, k, modern_block.probes[probegi::tap_index(g, pk, k)], p, nrm);
+        }
+        let cell_gi = probegi::finish(acc);
+        let share = left * pk.inside;
+        sum = sum + cell_gi.rgb * (cell_gi.w * share);
+        answered = answered + cell_gi.w * share;
+        left = left - share;
+        if (left <= 0.001) {
+            break;
+        }
+    }
+    if (answered <= 0.001) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sum * (g.params.z / answered), clamp(answered, 0.0, 1.0));
+}
 
 // **How dark a fully covered character shadow gets.** One number, carried by value in all three
 // receivers — `wow_model.wgsl` beside this file, and `benilla-world`'s `static_gx.wgsl`. Move the
@@ -399,7 +438,11 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
         // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
-        primary = wow_light.light_ambient.rgb * sky + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
+        // fork: modern lighting (FORK.md, P5) — the probe field replaces the ambient
+        // row wherever it has an answer; the sky map is what is left where it does not.
+        let gi = modern_gi_ambient(in.world_position.xyz, mn);
+        let ambient = mix(wow_light.light_ambient.rgb * sky, gi.rgb, gi.w);
+        primary = ambient + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass
@@ -454,7 +497,13 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // FFXGlow combine (the last node). Output raw.
     // fork: modern lighting (FORK.md) — the frame is linear.
     if (modern && modern_block.cascades.params.w > 0.5) {
-        tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), modern_block.cascades.params.w > 1.5)); // modern shadow debug view
+        let dbg = modern_block.cascades.params.w;
+        if (dbg > 2.5) {
+            let gdbg = modern_gi_ambient(in.world_position.xyz, normalize(in.world_normal)); // modern GI debug view
+            tuned = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
+        } else {
+            tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view
+        }
     }
     return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
 }

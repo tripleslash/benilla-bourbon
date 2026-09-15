@@ -30,6 +30,7 @@
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
 #import benilla_modern::sunshadow
+#import benilla_modern::probegi
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -77,6 +78,44 @@ struct WowLight {
 @group(2) @binding(1) var modern_shadow_map: texture_depth_2d_array;
 @group(2) @binding(2) var modern_shadow_samp: sampler_comparison;
 @group(2) @binding(3) var<storage, read> modern_block: sunshadow::ModernBlock;
+
+// fork: modern lighting (FORK.md, P5) — the probe field's irradiance at this
+// fragment: the eight probes around it in the finest cascade that owns the point, and whatever a
+// coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
+// that row); `w` is how much of the cell answered, which is 0 wherever the field has nothing to say
+// and the sky-occlusion map stays in charge.
+fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>) -> vec4<f32> {
+    let g = modern_block.gi;
+    if (g.params.x < 0.5 || g.params.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var sum = vec3<f32>(0.0);
+    var answered = 0.0;
+    var left = 1.0;
+    let count = u32(g.dims.w);
+    for (var c = 0u; c < count; c = c + 1u) {
+        let pk = probegi::pick(g, c, p, nrm);
+        if (pk.inside <= 0.0) {
+            continue;
+        }
+        var acc = probegi::start();
+        for (var k = 0u; k < 8u; k = k + 1u) {
+            acc = probegi::accum(acc, g, pk, k, modern_block.probes[probegi::tap_index(g, pk, k)], p, nrm);
+        }
+        let cell_gi = probegi::finish(acc);
+        let share = left * pk.inside;
+        sum = sum + cell_gi.rgb * (cell_gi.w * share);
+        answered = answered + cell_gi.w * share;
+        left = left - share;
+        if (left <= 0.001) {
+            break;
+        }
+    }
+    if (answered <= 0.001) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sum * (g.params.z / answered), clamp(answered, 0.0, 1.0));
+}
 
 // Per-cell state (static_gx/render.rs `cell_layout`).
 struct GxCell {
@@ -410,7 +449,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     if (wow_light.point_count.y > 0.5 && (in.word & WORD_INTERIOR) == 0u) {
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         let amb = wow_light.light_ambient.rgb;
-        lit_nl_shadowed = clamp(amb * sky + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+        // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
+        let gi = modern_gi_ambient(in.world_position.xyz, n_lit);
+        lit_nl_shadowed = clamp(mix(amb * sky, gi.rgb, gi.w) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     // The order-2 SH basis products over the fragment normal — shared by the exterior
     // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
@@ -582,7 +623,11 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         var lit_doodad = lit_doodad_classic;
         if (wow_light.point_count.y > 0.5) {
             let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
-            lit_doodad = clamp(sun_ambient * sky + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+            // fork: modern lighting (FORK.md, P5) — the doodad lobe's own ambient
+            // share comes from the probes, scaled to keep the lobe's authored colour balance.
+            let gi = modern_gi_ambient(in.world_position.xyz, n_lit);
+            let amb_gi = mix(sun_ambient * sky, gi.rgb, gi.w);
+            lit_doodad = clamp(amb_gi + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
         }
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
         var lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
@@ -635,7 +680,13 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Raw gamma out (0161's lane); alpha pinned 1.0 — opaque-intent by admission.
     // fork: modern lighting (FORK.md) — the frame is linear.
     if (wow_light.point_count.y > 0.5 && modern_block.cascades.params.w > 0.5) {
-        rgb = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), modern_block.cascades.params.w > 1.5)); // modern shadow debug view
+        let dbg = modern_block.cascades.params.w;
+        if (dbg > 2.5) {
+            let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal)); // modern GI debug view
+            rgb = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
+        } else {
+            rgb = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view
+        }
     }
     return vec4<f32>(colorspace::modern_out(rgb, wow_light.point_count.y), 1.0);
 }

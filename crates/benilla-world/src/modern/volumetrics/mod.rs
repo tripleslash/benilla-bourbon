@@ -36,6 +36,9 @@ use crate::view::WorldCamera;
 pub mod media;
 mod node;
 
+// fork: modern lighting (FORK.md, P5) — the probe trace orders before this pass.
+pub(crate) use node::FroxelLabel;
+
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
 pub const FOG_BYTES: usize = 3 * 64 + 14 * 16;
 /// The cloud-shadow grid's cells per side.

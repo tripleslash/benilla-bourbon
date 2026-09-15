@@ -1,0 +1,350 @@
+// Modern lighting (FORK.md, P5): the runtime probe GI — the probe field's layout
+// and sampling, and the ray march through the voxel clipmap and the terrain heightfield.
+//
+// Imported as `benilla_modern::probegi` — a module name no hooked shader uses as an identifier
+// (naga_oil substitutes a module alias for every bare identifier of that name), and with no
+// identifier in it ending in a digit (a composable module may not carry those).
+//
+// No bindings are declared here. The probe field rides the shared modern storage block
+// (`sunshadow::ModernBlock`), so every lane that already binds the block can read it; the march's
+// textures are function parameters, like `sunshadow`'s shadow map.
+#define_import_path benilla_modern::probegi
+
+// Mirrors `benilla_world::modern::gi::GiParams::std430` (a layout test pins the size at 208 B, which
+// is what puts the probe array at a 256-aligned offset inside the block).
+struct GiParams {
+    // x = mode (0 off, 1 probes), y = probes per cascade, z = GI gain (0 = the sky map alone),
+    // w = normal bias in probe spacings.
+    params: vec4<f32>,
+    // Per cascade: xyz = the base probe coord (world coord / spacing, integral), w = spacing (yd).
+    grid: array<vec4<f32>, 4>,
+    // xyz = probes per axis, w = cascade count.
+    dims: vec4<f32>,
+    // rgb = the sky's reference radiance (the shared light's ambient row), w = the open-field mean
+    // radiance's luminance — what a probe under nothing reads, the froxels' reference.
+    sky: vec4<f32>,
+    // rgb = ground albedo (the heightfield's surface), w = the sky gradient's horizon-to-zenith span.
+    ground: vec4<f32>,
+    // x = rays per probe, y = update period (frames), z = frame index, w = debug view.
+    misc: vec4<f32>,
+    // Room for P6/P7 (interior classes, grading) — also the padding that aligns the probe array.
+    spare: array<vec4<f32>, 4>,
+}
+
+// One probe: irradiance over pi as an order-1 SH lobe, plus the bookkeeping the toroidal grid needs.
+// `E(n) / pi = dc.rgb + sh_x.rgb * n.x + sh_y.rgb * n.y + sh_z.rgb * n.z`, which is exactly the units
+// the shared light's ambient row is in, so a probe substitutes for it directly.
+struct GiProbe {
+    // rgb = the lobe's DC term, w = validity (0 = never traced, or traced from inside geometry).
+    dc: vec4<f32>,
+    // rgb = the lobe's x term, w = sky visibility (the share of rays that reached the sky).
+    sh_x: vec4<f32>,
+    // rgb = the lobe's y term, w = the world-grid key's low half (x and z).
+    sh_y: vec4<f32>,
+    // rgb = the lobe's z term, w = the world-grid key's high half (y).
+    sh_z: vec4<f32>,
+}
+
+// The toroidal grid's identity for a probe coord: which world probe this texel currently holds. A
+// scrolled-in probe reads a key that is not its own and is re-traced whole instead of blended.
+fn key_lo(w: vec3<i32>) -> f32 {
+    return f32((w.x & 4095) + (w.z & 4095) * 4096);
+}
+
+fn key_hi(w: vec3<i32>) -> f32 {
+    return f32(w.y & 4095);
+}
+
+// Positive modulo — a probe coord's slot in its cascade's toroidal grid.
+fn wrap(v: i32, n: i32) -> i32 {
+    return ((v % n) + n) % n;
+}
+
+fn probe_index(g: GiParams, c: u32, w: vec3<i32>) -> u32 {
+    let n = vec3<i32>(g.dims.xyz);
+    let t = vec3<i32>(wrap(w.x, n.x), wrap(w.y, n.y), wrap(w.z, n.z));
+    let inside = (t.z * n.y + t.y) * n.x + t.x;
+    return u32(inside) + c * u32(g.params.y);
+}
+
+fn probe_pos(g: GiParams, c: u32, w: vec3<i32>) -> vec3<f32> {
+    return vec3<f32>(w) * g.grid[c].w;
+}
+
+// Where a world point falls in one cascade: the low corner of its probe cell, the trilinear
+// fractions, and how strongly this cascade owns the point (1 inside, fading to 0 at its edge, so a
+// coarser cascade takes over without a seam).
+struct GiPick {
+    base: vec3<i32>,
+    frac: vec3<f32>,
+    cascade: u32,
+    inside: f32,
+    spacing: f32,
+}
+
+fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>) -> GiPick {
+    let spacing = g.grid[c].w;
+    let n = g.dims.xyz;
+    // Sampled a little along the normal, so a surface never interpolates the probe behind it.
+    let biased = p + nrm * (spacing * g.params.w);
+    let f = biased / spacing - g.grid[c].xyz;
+    let lo = floor(f);
+    // One cell of margin on each side keeps the trilinear footprint inside the cascade, and the
+    // outermost cell fades so the next cascade can take the remainder.
+    let edge = min(min(f.x, f.y), min(f.z, min(min(n.x - 1.0 - f.x, n.y - 1.0 - f.y), n.z - 1.0 - f.z)));
+    var out: GiPick;
+    out.cascade = c;
+    out.spacing = spacing;
+    out.base = vec3<i32>(clamp(lo, vec3<f32>(0.0), n - vec3<f32>(2.0))) + vec3<i32>(g.grid[c].xyz);
+    out.frac = clamp(f - lo, vec3<f32>(0.0), vec3<f32>(1.0));
+    out.inside = clamp(edge - 0.5, 0.0, 1.0);
+    return out;
+}
+
+fn tap_coord(pk: GiPick, k: u32) -> vec3<i32> {
+    return pk.base + vec3<i32>(i32(k & 1u), i32((k >> 1u) & 1u), i32((k >> 2u) & 1u));
+}
+
+fn tap_index(g: GiParams, pk: GiPick, k: u32) -> u32 {
+    return probe_index(g, pk.cascade, tap_coord(pk, k));
+}
+
+// The running sum over a cell's eight probes.
+struct GiAccum {
+    sum: vec3<f32>,
+    weight: f32,
+    sky: f32,
+}
+
+fn start() -> GiAccum {
+    return GiAccum(vec3<f32>(0.0), 0.0, 0.0);
+}
+
+fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f32>, nrm: vec3<f32>) -> GiAccum {
+    let coord = tap_coord(pk, k);
+    // A probe whose slot holds another world probe (the grid scrolled) or that sits inside geometry
+    // contributes nothing.
+    var w = probe.dc.w;
+    if (probe.sh_y.w != key_lo(coord) || probe.sh_z.w != key_hi(coord)) {
+        w = 0.0;
+    }
+    if (w <= 0.0) {
+        return a;
+    }
+    let trilinear = mix(1.0 - pk.frac, pk.frac, vec3<f32>(f32(k & 1u), f32((k >> 1u) & 1u), f32((k >> 2u) & 1u)));
+    w = w * max(trilinear.x * trilinear.y * trilinear.z, 1e-4);
+    // Backface weight: a probe on the far side of the surface is nearly ignored.
+    let to_probe = probe_pos(g, pk.cascade, coord) - p;
+    let facing = dot(normalize(to_probe + nrm * 1e-3), nrm) * 0.5 + 0.5;
+    w = w * (facing * facing + 0.2);
+    let e = max(probe.dc.rgb + probe.sh_x.rgb * nrm.x + probe.sh_y.rgb * nrm.y + probe.sh_z.rgb * nrm.z, vec3<f32>(0.0));
+    return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w);
+}
+
+// rgb = the irradiance over pi the ambient row is replaced by; w = how much of the cell answered.
+fn finish(a: GiAccum) -> vec4<f32> {
+    if (a.weight <= 1e-5) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(a.sum / a.weight, clamp(a.weight * 3.0, 0.0, 1.0));
+}
+
+// The nearest probe's slot — the froxels' one-tap lookup.
+fn nearest_index(g: GiParams, p: vec3<f32>) -> vec2<f32> {
+    let n = g.dims.xyz;
+    let count = u32(g.dims.w);
+    for (var c = 0u; c < count; c = c + 1u) {
+        let f = p / g.grid[c].w - g.grid[c].xyz;
+        if (all(f >= vec3<f32>(0.0)) && all(f <= n - vec3<f32>(1.0))) {
+            let w = vec3<i32>(round(f)) + vec3<i32>(g.grid[c].xyz);
+            return vec2<f32>(f32(probe_index(g, c, w)), 1.0);
+        }
+    }
+    return vec2<f32>(0.0, 0.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The scene the probes trace against: a toroidal voxel clipmap of the retained static world, and a
+// top-down terrain heightfield. Both are traced by the GI compute passes, which own the textures.
+
+// Mirrors `benilla_world::modern::gi::GiClip`.
+struct GiClip {
+    // Per level: xyz = the base voxel coord, w = voxel size (yd).
+    level: array<vec4<f32>, 4>,
+    // x = level count, y = voxels per side, z = step budget, w = the march's reach (yd).
+    info: vec4<f32>,
+    // The heightfield's world-to-clip, packed as rows so the struct stays a plain vec4 block.
+    hf_row_x: vec4<f32>,
+    hf_row_y: vec4<f32>,
+    hf_row_z: vec4<f32>,
+    // x = enabled, y = the lowest height the map can hold, z = its span (yd), w = its texel count.
+    hf: vec4<f32>,
+}
+
+// The terrain's height under a world point, or far below everything when the map does not reach it.
+fn terrain_height(hf_map: texture_depth_2d, clip: GiClip, p: vec3<f32>) -> f32 {
+    if (clip.hf.x < 0.5) {
+        return -1e9;
+    }
+    let q = vec4<f32>(p.x, p.y, p.z, 1.0);
+    let uv = vec2<f32>(dot(clip.hf_row_x, q), dot(clip.hf_row_y, q));
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return -1e9;
+    }
+    let n = clip.hf.w;
+    let texel = vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0)));
+    let d = textureLoad(hf_map, texel, 0);
+    if (d <= 0.0) {
+        return -1e9;
+    }
+    return clip.hf.y + d * clip.hf.z;
+}
+
+// What a ray found.
+struct GiHit {
+    // 0 = the ray reached the sky, 1 = it hit the static world, 2 = it hit terrain.
+    kind: f32,
+    dist: f32,
+    pos: vec3<f32>,
+    albedo: vec3<f32>,
+    nrm: vec3<f32>,
+    // 1 when the surface is two-sided (foliage): it is lit through, never back-faced.
+    two_sided: f32,
+}
+
+// The terrain's normal from its heightfield, by central difference.
+fn terrain_normal(hf_map: texture_depth_2d, clip: GiClip, p: vec3<f32>) -> vec3<f32> {
+    let e = max(2.0 * clip.hf.z / max(clip.hf.w, 1.0), 1.0);
+    let hx = terrain_height(hf_map, clip, p + vec3<f32>(e, 0.0, 0.0))
+        - terrain_height(hf_map, clip, p - vec3<f32>(e, 0.0, 0.0));
+    let hz = terrain_height(hf_map, clip, p + vec3<f32>(0.0, 0.0, e))
+        - terrain_height(hf_map, clip, p - vec3<f32>(0.0, 0.0, e));
+    if (abs(hx) > 1e6 || abs(hz) > 1e6) {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+    return normalize(vec3<f32>(-hx, 2.0 * e, -hz));
+}
+
+fn voxel_texel(clip: GiClip, lvl: u32, w: vec3<i32>) -> vec3<i32> {
+    let n = i32(clip.info.y);
+    return vec3<i32>(wrap(w.x, n), wrap(w.y, n), wrap(w.z, n) + i32(lvl) * n);
+}
+
+fn miss(dist: f32) -> GiHit {
+    return GiHit(0.0, dist, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
+}
+
+// The ray march: voxel DDA inside each clipmap level, coarsening as the ray leaves one, with the
+// terrain heightfield tested along the way and taking over past the coarsest level.
+fn march(
+    vox_albedo: texture_3d<f32>,
+    vox_normal: texture_3d<f32>,
+    hf_map: texture_depth_2d,
+    clip: GiClip,
+    origin: vec3<f32>,
+    dir: vec3<f32>,
+    start_level: u32,
+) -> GiHit {
+    let reach = clip.info.w;
+    let levels = u32(clip.info.x);
+    let n = clip.info.y;
+    var budget = i32(clip.info.z);
+    var t = 0.0;
+    var lvl = start_level;
+    // A zero component would make the slab distances infinite; nudge it instead of branching.
+    let d = select(dir, vec3<f32>(1e-6), abs(dir) < vec3<f32>(1e-6));
+    let stepv = sign(d);
+
+    while (lvl < levels && t < reach && budget > 0) {
+        let vs = clip.level[lvl].w;
+        let base = clip.level[lvl].xyz;
+        var p = origin + dir * t;
+        var w = floor(p / vs);
+        if (any(w < base) || any(w >= base + n)) {
+            // Outside this level: take the next one, which covers it.
+            lvl = lvl + 1u;
+            continue;
+        }
+        let tdelta = abs(vec3<f32>(vs) / d);
+        var tmax = ((w + max(stepv, vec3<f32>(0.0))) * vs - p) / d;
+        while (budget > 0) {
+            budget = budget - 1;
+            let texel = voxel_texel(clip, lvl, vec3<i32>(w));
+            let a = textureLoad(vox_albedo, texel, 0);
+            if (a.a > 0.5) {
+                let packed = textureLoad(vox_normal, texel, 0);
+                var face = packed.xyz * 2.0 - vec3<f32>(1.0);
+                if (dot(face, face) < 0.2) {
+                    face = -dir;
+                }
+                let hit_pos = origin + dir * t;
+                return GiHit(1.0, t, hit_pos, a.rgb, normalize(face), 1.0 - packed.w);
+            }
+            // The terrain under this voxel, sampled at the segment's midpoint.
+            let seg = min(min(tmax.x, tmax.y), tmax.z);
+            let mid = origin + dir * (t + seg * 0.5);
+            let h = terrain_height(hf_map, clip, mid);
+            if (mid.y < h) {
+                // Bisect the last segment so the hit lands on the surface rather than a step edge.
+                var lo = t;
+                var hi = t + seg;
+                for (var i = 0u; i < 4u; i = i + 1u) {
+                    let m = 0.5 * (lo + hi);
+                    let q = origin + dir * m;
+                    if (q.y < terrain_height(hf_map, clip, q)) {
+                        hi = m;
+                    } else {
+                        lo = m;
+                    }
+                }
+                let hit_pos = origin + dir * hi;
+                return GiHit(2.0, hi, hit_pos, vec3<f32>(0.0), terrain_normal(hf_map, clip, hit_pos), 0.0);
+            }
+            // Advance one voxel along the axis whose slab boundary is nearest.
+            t = t + seg;
+            if (t >= reach) {
+                return miss(reach);
+            }
+            if (tmax.x <= tmax.y && tmax.x <= tmax.z) {
+                w.x = w.x + stepv.x;
+                tmax.x = tmax.x + tdelta.x;
+            } else if (tmax.y <= tmax.z) {
+                w.y = w.y + stepv.y;
+                tmax.y = tmax.y + tdelta.y;
+            } else {
+                w.z = w.z + stepv.z;
+                tmax.z = tmax.z + tdelta.z;
+            }
+            tmax = tmax - vec3<f32>(seg);
+            if (any(w < base) || any(w >= base + n)) {
+                lvl = lvl + 1u;
+                break;
+            }
+        }
+    }
+
+    // Past the clipmap the terrain map is all that is left; walk it in coarse steps.
+    if (clip.hf.x > 0.5) {
+        var t_far = t;
+        let step = max(clip.level[levels - 1u].w, 4.0);
+        while (t_far < reach && budget > 0) {
+            budget = budget - 1;
+            let q = origin + dir * (t_far + step * 0.5);
+            let h = terrain_height(hf_map, clip, q);
+            if (q.y < h) {
+                let hit_pos = origin + dir * t_far;
+                return GiHit(2.0, t_far, hit_pos, vec3<f32>(0.0), terrain_normal(hf_map, clip, hit_pos), 0.0);
+            }
+            t_far = t_far + step;
+        }
+    }
+    return miss(reach);
+}
+
+// The sky's radiance in a direction, in the shared light's own units: the ambient row shaped by a
+// gentle zenith gradient whose cosine-weighted mean over the hemisphere is exactly the row, so an
+// open-field probe reproduces the classic ambient.
+fn sky_radiance(g: GiParams, dir: vec3<f32>) -> vec3<f32> {
+    let k = 1.0 - g.ground.w * (2.0 / 3.0) + g.ground.w * clamp(dir.y, 0.0, 1.0);
+    return g.sky.rgb * k;
+}

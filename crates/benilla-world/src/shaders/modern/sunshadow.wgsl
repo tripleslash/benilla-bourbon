@@ -8,6 +8,7 @@
 #define_import_path benilla_modern::sunshadow
 
 #import benilla_modern::froxelfog
+#import benilla_modern::probegi
 
 // P4: the whole storage block every modern lane binds — the cascades, then the froxel fog parameters
 // (`volumetrics::ModernVolume::std430`), then the cloud-shadow grid. Pass `.cascades` or `.fog` to the
@@ -17,6 +18,10 @@ struct ModernBlock {
     fog: froxelfog::FroxelFog,
     // Sun visibility under the clouds per grid cell (1 = clear); `fog.cloud` places the grid.
     cloud: array<f32, 1024>,
+    // P5: the probe field's parameters, then the field itself. `GiParams` is sized so the array
+    // starts 256-aligned, which is what lets the GI blend pass bind that region alone as writable.
+    gi: probegi::GiParams,
+    probes: array<probegi::GiProbe>,
 }
 
 // Mirrors `benilla_world::modern::shadow::ModernCascades::std430` (a layout test pins the size).

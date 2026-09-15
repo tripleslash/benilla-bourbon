@@ -1048,6 +1048,8 @@ pub(super) fn build(app: &mut App) {
         );
     // fork: modern lighting (FORK.md) — static casters for the modern sun.
     modern_shadow::build(render_app);
+    // fork: modern lighting (FORK.md, P5) — the same casters voxelized for the probe GI.
+    modern_gi::build(render_app);
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1134,3 +1136,5 @@ mod tests {
 // fork: modern lighting (FORK.md) — see `modern/HOOKS.md`.
 mod modern_shadow;
 pub(crate) use modern_shadow::GxShadowLabel;
+mod modern_gi;
+pub(crate) use modern_gi::GxVoxelLabel;

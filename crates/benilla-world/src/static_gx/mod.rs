@@ -142,6 +142,8 @@ mod render;
 pub(crate) use render::StaticGxLabel;
 // fork: modern lighting (FORK.md, P4) — the froxel pass reads the cascades this node draws.
 pub(crate) use render::GxShadowLabel;
+// fork: modern lighting (FORK.md, P5) — the probe trace marches the voxels this node writes.
+pub(crate) use render::GxVoxelLabel;
 
 /// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
 /// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the
