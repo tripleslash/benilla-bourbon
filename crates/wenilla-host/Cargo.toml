@@ -33,6 +33,8 @@ tower-http = { version = "0.7", features = ["fs", "compression-br", "compression
 tower = "0.5"
 percent-encoding = "2.3"
 serde_json = "1"
+# `--packs-remote` only: relays `/data*` to a hosted static tree. rustls, so no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 

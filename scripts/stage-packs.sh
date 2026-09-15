@@ -81,7 +81,8 @@ echo "staging from ${DIST}"
 for js in "${DIST}"/*.js; do
   [ -f "${js}" ] || continue
   if grep -q 'wasi_snapshot_preview1' "${js}" 2>/dev/null; then
-    sed -i -e 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g'            -e "s|from 'wasi_snapshot_preview1'|from './wasi_stubs.js'|g" "${js}"
+    # perl, not `sed -i`: BSD sed (macOS) reads `-i -e` as a backup suffix and fails.
+    perl -pi -e 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g; s|from '"'"'wasi_snapshot_preview1'"'"'|from '"'"'./wasi_stubs.js'"'"'|g' "${js}"
     echo "  rewrote the wasi_snapshot_preview1 specifier in $(basename "${js}") (workers have no import map)"
   fi
 done
@@ -117,8 +118,12 @@ if [ -f "${SITE}/wenilla_bg.wasm" ]; then
   # extension and compresses on the fly BY TYPE, so a part named `.part00` would be
   # `application/octet-stream` and could ship uncompressed — 77 MB on the wire against the ~15 MB
   # the module costs today. Named `*.wasm` it is the same kind of object the whole file is.
-  split -b "${WASM_PART_MAX}" -d --additional-suffix=.wasm \
-    "${SITE}/wenilla_bg.wasm" "${SITE}/wenilla_bg.part"
+  # perl, not `split -d --additional-suffix`: those are GNU-only and BSD split (macOS) refuses them.
+  # Same names GNU split produced: wenilla_bg.part00.wasm, part01, ...
+  perl -e 'my ($f, $n) = @ARGV; open my $in, "<:raw", $f or die "$f: $!"; my $i = 0;
+    while (read($in, my $buf, $n)) { my $o = sprintf("%s.part%02d.wasm", substr($f, 0, -5), $i++);
+      open my $out, ">:raw", $o or die "$o: $!"; print $out $buf; close $out or die }' \
+    "${SITE}/wenilla_bg.wasm" "${WASM_PART_MAX}"
   # The hardlink, not the build: removing a link never touches the inode `web/dist` still names.
   rm "${SITE}/wenilla_bg.wasm"
   # Unconditional, even if the module ever fits: one layout per directory is one code path in

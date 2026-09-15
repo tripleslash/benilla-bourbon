@@ -247,6 +247,8 @@ struct WowVsOut {
     // the VERTEX, like the reference FFP — the tessellation-scale smoothing IS the authored look
     // (wide floor pools, dim hoods). The fragment folds in the live gain and the saturating clamp.
     @location(8) point_lit: vec3<f32>,
+    // fork: modern lighting (FORK.md, P3) — the vertex's point-light selection (flat).
+    @location(11) @interpolate(flat) point_sel: vec3<u32>,
 #ifdef WOW_MERGED_FADE
     // The merged fader blob's per-placement fade alpha (decision 1418), computed in the vertex
     // stage from the baked fade sphere. Constant across a placement's vertices, so plain
@@ -328,6 +330,54 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
         let atten = 1.0 / (0.7 * d + 0.03 * d * d);
         let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
         sum += wow_light.points[2u * sel[s] + 1u].rgb * (atten * nl);
+    }
+    return sum;
+}
+
+// fork: modern lighting (FORK.md, P3) — the same ≤3-nearest selection as `point_light_sum`,
+// returned as table indices + 1 (0 = empty) so the fragment can light per pixel.
+fn point_light_select(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = vec3<u32>(0u);
+    var sd = vec3<f32>(1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (d2 > pos_range.w * pos_range.w) {
+            continue;
+        }
+        if (d2 < sd.x) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = sd.x; sel.y = sel.x;
+            sd.x = d2; sel.x = i + 1u;
+        } else if (d2 < sd.y) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = d2; sel.y = i + 1u;
+        } else if (d2 < sd.z) {
+            sd.z = d2; sel.z = i + 1u;
+        }
+    }
+    return sel;
+}
+
+// fork: modern lighting (FORK.md, P3) — the selected lights evaluated per pixel: the WoW falloff
+// `1/(0.7d + 0.03d²)` × N·L × a smooth window that reaches zero at the light's range.
+fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        let id = sel[s];
+        if (id == 0u) {
+            continue;
+        }
+        let pos_range = wow_light.points[2u * (id - 1u)];
+        let to_light = pos_range.xyz - P;
+        let d = length(to_light);
+        let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+        let q = d / max(pos_range.w, 1e-3);
+        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+        let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
+        sum = sum + wow_light.points[2u * (id - 1u) + 1u].rgb * (atten * nl * window * window);
     }
     return sum;
 }
@@ -624,6 +674,7 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
             anchor = mcnk_cell_anchor(out.world_position.xyz);
         }
         out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
+        out.point_sel = point_light_select(anchor);
     }
     return out;
 }
@@ -1237,7 +1288,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // group-MOLR lobes into the SH probe instead — both zeroed in the VERTEX stage. The term
     // arrives GOURAUD-INTERPOLATED — per-vertex like the reference FFP, whose tessellation-scale
     // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
-    let point_diffuse = in.point_lit;
+    // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
+    let point_diffuse = select(
+        in.point_lit,
+        point_light_eval(in.point_sel, in.world_position.xyz, wow_normalize(in.world_normal)),
+        wow_light.point_count.y > 0.5,
+    );
 
     // Hover/target model brighten (tag bit 31): the client's per-model highlight emissive —
     // `glMaterialfv(GL_EMISSION, +64/255)` per channel (shipped config default 0xff404040), verified

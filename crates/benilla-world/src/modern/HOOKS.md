@@ -69,6 +69,7 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `static_gx.wgsl`, `static_gx/render.rs` | doodad lane `lit` is `var` + foliage transmission under `GX_TWO_SIDED`/`GX_CUTOUT`; `GX_TWO_SIDED` def pushed for two-sided pipelines | P3 |
 | `benilla-world/src/worldview.rs` | `WOW_WORLDVIEW_FACE`/`_PITCH` via `launch_env` (browser `?worldview_face=`) | P3 |
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | modern: ambient × `sunshadow::sky_ambient` (the top-down sky-occlusion map, shadow array layer 4); static_gx splits `lit_nl_shadowed` / `lit_doodad` into `_classic` + modern override; debug mode 2 shows sky visibility | P3 |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `point_light_select` / `point_light_eval` after `point_light_sum`; a flat `point_sel` varying (terrain @8, wow_model @11, static_gx @6) set beside `point_lit`; modern fragments light points per pixel (terrain's recovered share, wow_model `point_diffuse`, static_gx `point_lit_px`) | P3 |
 
 ## Planned hooks (not yet landed)
 

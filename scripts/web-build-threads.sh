@@ -169,7 +169,7 @@ if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
   fi
   "${WBG}" --target web --out-dir web/dist --out-name wenilla --no-demangle "${ARTIFACT}"
   # Same rewrite `stage-packs.sh` does, for the same reason — workers have no import map.
-  sed -i 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wenilla.js
+  perl -pi -e 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wenilla.js
   echo "   web/dist now carries the NAMED module ($(du -h web/dist/wenilla_bg.wasm | cut -f1)); web/site still has the optimized one."
 fi
 

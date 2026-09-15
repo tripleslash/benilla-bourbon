@@ -162,6 +162,54 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
+// fork: modern lighting (FORK.md, P3) — the same ≤3-nearest selection as `point_light_sum`,
+// returned as table indices + 1 (0 = empty) so the fragment can light per pixel.
+fn point_light_select(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = vec3<u32>(0u);
+    var sd = vec3<f32>(1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (d2 > pos_range.w * pos_range.w) {
+            continue;
+        }
+        if (d2 < sd.x) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = sd.x; sel.y = sel.x;
+            sd.x = d2; sel.x = i + 1u;
+        } else if (d2 < sd.y) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = d2; sel.y = i + 1u;
+        } else if (d2 < sd.z) {
+            sd.z = d2; sel.z = i + 1u;
+        }
+    }
+    return sel;
+}
+
+// fork: modern lighting (FORK.md, P3) — the selected lights evaluated per pixel: the WoW falloff
+// `1/(0.7d + 0.03d²)` × N·L × a smooth window that reaches zero at the light's range.
+fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        let id = sel[s];
+        if (id == 0u) {
+            continue;
+        }
+        let pos_range = wow_light.points[2u * (id - 1u)];
+        let to_light = pos_range.xyz - P;
+        let d = length(to_light);
+        let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+        let q = d / max(pos_range.w, 1e-3);
+        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+        let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
+        sum = sum + wow_light.points[2u * (id - 1u) + 1u].rgb * (atten * nl * window * window);
+    }
+    return sum;
+}
+
 // ---- the pass ----
 
 struct GxVertex {
@@ -183,6 +231,8 @@ struct GxVsOut {
     @location(3) @interpolate(flat) word: u32,
     @location(4) point_lit: vec3<f32>,
     @location(5) color: vec4<f32>,
+    // fork: modern lighting (FORK.md, P3) — the vertex's point-light selection (flat).
+    @location(6) @interpolate(flat) point_sel: vec3<u32>,
 }
 
 @vertex
@@ -232,6 +282,7 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.point_lit = vec3<f32>(0.0);
     } else {
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
+        out.point_sel = point_light_select(v.anchor);
     }
     return out;
 }
@@ -299,6 +350,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // entity path removes (the first capture A/B lit every back-facing canopy card from the
     // wrong side — the felwood heatmap's bright clusters).
     let n_lit = wow_normalize(in.world_normal);
+    // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
+    let point_lit_px = select(
+        in.point_lit,
+        point_light_eval(in.point_sel, in.world_position.xyz, n_lit),
+        wow_light.point_count.y > 0.5,
+    );
     let L = -normalize(wow_light.light_sun.xyz);
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(
@@ -423,7 +480,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // zero on WMO surfaces, kept in the sum for exact mirroring), emission adds beside.
         let primary = clamp(
             // fork: modern lighting (FORK.md, P3) — exterior WMO drops its baked MOCV light in a modern frame.
-            select(vc.rgb, vec3<f32>(1.0), wow_light.point_count.y > 0.5 && !interior) * (lit_wmo + in.point_lit) + sidn_e,
+            select(vc.rgb, vec3<f32>(1.0), wow_light.point_count.y > 0.5 && !interior) * (lit_wmo + point_lit_px) + sidn_e,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
@@ -469,7 +526,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
-        let primary = clamp(lit_prop + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
+        let primary = clamp(lit_prop + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
         rgb = folded * primary;
     } else {
         // ---- the exterior ADT-doodad lane (slice 1) + the exterior MODD-prop family (B4) --
@@ -542,7 +599,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         }
 #endif
 #endif
-        let primary = clamp(lit + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
+        let primary = clamp(lit + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
         rgb = folded * primary;
     }
     // Unlit fullbright (M2 UNLIT 0x01 / WMO UNLIT on an exterior-group batch): the albedo —

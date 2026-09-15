@@ -60,6 +60,10 @@ struct Cli {
     /// never requests this tree, which is exactly what serving it here lets you verify.
     #[arg(long, requires = "packs")]
     packs_hd: Option<PathBuf>,
+    /// Forward `/data/*` and `/data-hd/*` to a hosted static tree (e.g. `https://wow.example.com`)
+    /// instead of serving a local container — for working on the client with no game data here.
+    #[arg(long, conflicts_with_all = ["data", "packs"])]
+    packs_remote: Option<String>,
     /// Record every chain name the client reads into `<file>`, in `web/boot-manifest.json`'s own
     /// shape — the server-side capture of a read set, and the input to `benilla-pack sidecars`.
     ///
@@ -169,10 +173,16 @@ async fn main() -> Result<()> {
         }
         // Neither: a gateway. Not an error — it is the *hosted* shape, where the container is
         // static objects on a static host and this process exists only for the two sockets.
-        (None, None) => {
-            tracing::info!("no --data/--packs: serving no game data");
-            axum::Router::new()
-        }
+        (None, None) => match &cli.packs_remote {
+            Some(base) => {
+                tracing::info!(remote = %base, "forwarding /data and /data-hd to a remote site");
+                wenilla_host::remote::router(base)
+            }
+            None => {
+                tracing::info!("no --data/--packs: serving no game data");
+                axum::Router::new()
+            }
+        },
         // Unreachable: clap's `conflicts_with` refuses both before this runs.
         (Some(_), Some(_)) => anyhow::bail!("--data and --packs are mutually exclusive"),
     };

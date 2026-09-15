@@ -5,6 +5,7 @@
 
 pub mod data;
 pub mod packs;
+pub mod remote;
 pub mod static_site;
 pub mod ws;
 

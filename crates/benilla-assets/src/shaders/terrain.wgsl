@@ -113,6 +113,8 @@ struct TerrainVsOut {
     // The receiver normal is carried so the real cascaded shadow lookup can apply a slope-aware
     // bias. This is forward-pass data only; the terrain shadow caster is a stock Bevy proxy.
     @location(7) world_normal: vec3<f32>,
+    // fork: modern lighting (FORK.md, P3) — the vertex's point-light selection (flat).
+    @location(8) @interpolate(flat) point_sel: vec3<u32>,
 }
 
 // Terrain's point-light **candidacy half-width** (yd): the reference's guaranteed covered box is
@@ -187,6 +189,54 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
+// fork: modern lighting (FORK.md, P3) — the same ≤3-nearest selection as `point_light_sum`,
+// returned as table indices + 1 (0 = empty) so the fragment can light per pixel.
+fn point_light_select(anchor: vec3<f32>) -> vec3<u32> {
+    let count = u32(wow_light.point_count.x);
+    var sel = vec3<u32>(0u);
+    var sd = vec3<f32>(1e30);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = wow_light.points[2u * i];
+        let dv = pos_range.xyz - anchor;
+        let d2 = dot(dv, dv);
+        if (max(abs(dv.x), abs(dv.z)) > TERRAIN_REACH) {
+            continue;
+        }
+        if (d2 < sd.x) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = sd.x; sel.y = sel.x;
+            sd.x = d2; sel.x = i + 1u;
+        } else if (d2 < sd.y) {
+            sd.z = sd.y; sel.z = sel.y;
+            sd.y = d2; sel.y = i + 1u;
+        } else if (d2 < sd.z) {
+            sd.z = d2; sel.z = i + 1u;
+        }
+    }
+    return sel;
+}
+
+// fork: modern lighting (FORK.md, P3) — the selected lights evaluated per pixel: the WoW falloff
+// `1/(0.7d + 0.03d²)` × N·L × a smooth window that reaches zero at the light's range.
+fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        let id = sel[s];
+        if (id == 0u) {
+            continue;
+        }
+        let pos_range = wow_light.points[2u * (id - 1u)];
+        let to_light = pos_range.xyz - P;
+        let d = length(to_light);
+        let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+        let q = d / max(pos_range.w, 1e-3);
+        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+        let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
+        sum = sum + wow_light.points[2u * (id - 1u) + 1u].rgb * (atten * nl * window * window);
+    }
+    return sum;
+}
+
 // The MCNK chunk cell center under a world point — terrain's light-selection anchor (the terrain
 // draw unit; the grid is fixed world-wide, chunk = 533.3333/16 yd, half-extent 32 tiles). WoW x/y
 // are Bevy −z/−x and the grid is symmetric, so snapping Bevy x/z directly lands on the same cells.
@@ -241,6 +291,7 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // byte-verified `1/(0.7d + 0.03d²)`, raw over-gamut colours in.
     let ndotl = max(dot(n, l), 0.0);
     let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));
+    out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
     let sun_lighting = wow_light.light_diffuse.rgb * ndotl;
     out.primary = clamp(
         wow_light.light_ambient.rgb + sun_lighting + points,
@@ -342,8 +393,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // rides along, recovered as what the vertex sum holds beyond ambient + sun.
         let ml = -normalize(wow_light.light_sun.xyz);
         let mndotl = max(dot(mn, ml), 0.0);
-        let sun_estimate = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * mndotl, vec3<f32>(0.0), vec3<f32>(1.0));
-        let points = max(in.primary - sun_estimate, vec3<f32>(0.0));
+        let points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
         // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
         primary = wow_light.light_ambient.rgb * sky + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
