@@ -52,6 +52,7 @@ pub(crate) fn modern_libraries(app: &mut App) {
     bevy::shader::load_shader_library!(app, "shaders/modern/sunshadow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_shadow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/terrain_shadow.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/entity_shadow.wgsl");
 }
 
 #[cfg(test)]

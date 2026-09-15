@@ -27,11 +27,16 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderStorageBuffer;
 
-use benilla_assets::materials::{TerrainMaterial, MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
+use benilla_assets::materials::{
+    TerrainMaterial, WowModelMaterial, MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP,
+};
+use benilla_formats::ModelBlend;
 use bevy::camera::primitives::Aabb;
 
 use super::{ActiveLighting, LightingQuality};
 use crate::lighting::WowLighting;
+use crate::model_render::{ModelPart, ShadowOccluder};
+use crate::rig_palette::{RigPart, RigSkin};
 use crate::view::WorldCamera;
 
 /// Layers in the shadow array. A tier uses its first `n` ([`cascade_splits`]).
@@ -78,6 +83,25 @@ pub struct ModernTerrainCasters {
     pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3)>,
 }
 
+/// One entity-lane model part that casts: mesh, world matrix (ignored when skinned — the palette
+/// replaces it), a bounding sphere for the cascade cull, the rig slot if skinned, and the base
+/// texture if its blend is alpha-tested.
+#[derive(Clone)]
+pub struct EntityCaster {
+    pub mesh: AssetId<Mesh>,
+    pub world_from_local: Mat4,
+    pub center: Vec3,
+    pub radius: f32,
+    pub rig_slot: Option<u32>,
+    pub cutout: Option<AssetId<Image>>,
+}
+
+/// Every casting entity-lane part this frame. Collected in `Last`; empty in a classic session.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct ModernEntityCasters {
+    pub parts: Vec<EntityCaster>,
+}
+
 impl ModernCascades {
     /// The GPU block, laid out as `benilla_modern::sunshadow::ModernCascades`.
     pub fn std430(&self) -> Vec<u8> {
@@ -102,6 +126,8 @@ impl ModernCascades {
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ModernCascades>()
         .init_resource::<ModernTerrainCasters>()
+        .init_resource::<ModernEntityCasters>()
+        .add_plugins(ExtractResourcePlugin::<ModernEntityCasters>::default())
         .add_plugins(ExtractResourcePlugin::<ModernCascades>::default())
         .add_plugins(ExtractResourcePlugin::<ModernTerrainCasters>::default())
         .add_systems(Startup, create_shadow_assets)
@@ -110,7 +136,7 @@ pub(super) fn plugin(app: &mut App) {
         // ANY added PostUpdate system can reshuffle the executor order, put a writer after the check,
         // and panic the render world at `bevy_pbr` `material.rs:1061` (bisected 2026-09-15: P1a clean,
         // P2a's PostUpdate system broke classic too). `Last` still sees propagated transforms.
-        .add_systems(Last, (update_cascades, collect_terrain_casters));
+        .add_systems(Last, (update_cascades, collect_terrain_casters, collect_entity_casters));
 }
 
 /// Insert the two constant-handle assets. Always (classic sessions too): the materials bind them
@@ -224,6 +250,69 @@ fn collect_terrain_casters(
     for (mesh, aabb, gt) in &cells {
         let center = gt.transform_point(Vec3::from(aabb.center));
         out.cells.push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+    }
+}
+
+/// Opaque and alpha-tested parts whose `ShadowOccluder` says they exist as world content (the
+/// camera-independent verdict). Ground clutter stays out at this stage (the plan casts it on High+).
+#[allow(clippy::type_complexity)]
+fn collect_entity_casters(
+    active: Res<ActiveLighting>,
+    parts: Query<(
+        &Mesh3d,
+        &MeshMaterial3d<WowModelMaterial>,
+        &GlobalTransform,
+        &ModelPart,
+        &ShadowOccluder,
+        Option<&Aabb>,
+        Option<&RigPart>,
+    )>,
+    rigs: Query<&RigSkin>,
+    materials: Res<Assets<WowModelMaterial>>,
+    mut out: ResMut<ModernEntityCasters>,
+) {
+    if !active.is_modern() {
+        if !out.parts.is_empty() {
+            out.parts.clear();
+        }
+        return;
+    }
+    out.parts.clear();
+    for (mesh, material, gt, part, occluder, aabb, rig) in &parts {
+        if !occluder.0 || !matches!(part.blend, ModelBlend::Opaque | ModelBlend::AlphaTest) {
+            continue;
+        }
+        let Some(m) = materials.get(&material.0) else {
+            continue;
+        };
+        if m.extension.clutter_fade.w > 0.5 {
+            continue;
+        }
+        let cutout = if matches!(part.blend, ModelBlend::AlphaTest) {
+            m.base.base_color_texture.as_ref().map(|h| h.id())
+        } else {
+            None
+        };
+        let rig_slot = rig
+            .and_then(|r| rigs.get(r.0).ok())
+            .map(|skin| u32::from(skin.slot));
+        let (scale, _, translation) = gt.to_scale_rotation_translation();
+        let (center, radius) = match (aabb, rig_slot) {
+            (Some(b), None) => (
+                gt.transform_point(Vec3::from(b.center)),
+                Vec3::from(b.half_extents).length() * scale.max_element(),
+            ),
+            // A posed body strays from its bind-pose box; a generous sphere round the root.
+            _ => (translation, 4.0),
+        };
+        out.parts.push(EntityCaster {
+            mesh: mesh.id(),
+            world_from_local: gt.to_matrix(),
+            center,
+            radius,
+            rig_slot,
+            cutout,
+        });
     }
 }
 
