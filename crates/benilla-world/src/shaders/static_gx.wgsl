@@ -335,7 +335,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // `world_shadow < 0.999` arm keeps `worldShadows 0` (no shadow-mapped light) and a fully
     // sunlit fragment byte-identical: `ambient + (lit − ambient) × 1.0` is not guaranteed to
     // round back to `lit`.
-    let lit_nl_shadowed = select(
+    let lit_nl_shadowed_classic = select(
         lit_nl,
         clamp(
             wow_light.light_ambient.rgb + (lit_nl - wow_light.light_ambient.rgb) * shadow_term,
@@ -344,6 +344,14 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         ),
         world_shadow < 0.999,
     );
+    // fork: modern lighting (FORK.md, P3) — modern exterior: sun share under the cascades, ambient
+    // under the sky-occlusion map.
+    var lit_nl_shadowed = lit_nl_shadowed_classic;
+    if (wow_light.point_count.y > 0.5 && (in.word & WORD_INTERIOR) == 0u) {
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        let amb = wow_light.light_ambient.rgb;
+        lit_nl_shadowed = clamp(amb * sky + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     // The order-2 SH basis products over the fragment normal — shared by the exterior
     // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
@@ -501,7 +509,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             wow_light.sh_c10_b.w,
         );
         let lit_doodad_plain = clamp(sun_lobe, vec3<f32>(0.0), vec3<f32>(1.0));
-        let lit_doodad = select(
+        let lit_doodad_classic = select(
             lit_doodad_plain,
             clamp(
                 sun_ambient + (sun_lobe - sun_ambient) * shadow_term,
@@ -510,6 +518,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             ),
             world_shadow < 0.999,
         );
+        // fork: modern lighting (FORK.md, P3) — modern: the lobe's ambient under the sky map.
+        var lit_doodad = lit_doodad_classic;
+        if (wow_light.point_count.y > 0.5) {
+            let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+            lit_doodad = clamp(sun_ambient * sky + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+        }
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
         var lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
         // FFP combine: the light sum saturates FIRST, the texture (× the baked constant
@@ -560,7 +574,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Raw gamma out (0161's lane); alpha pinned 1.0 — opaque-intent by admission.
     // fork: modern lighting (FORK.md) — the frame is linear.
     if (wow_light.point_count.y > 0.5 && modern_cascades.params.w > 0.5) {
-        rgb = vec3<f32>(world_shadow); // modern shadow debug view
+        rgb = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
     }
     return vec4<f32>(colorspace::modern_out(rgb, wow_light.point_count.y), 1.0);
 }

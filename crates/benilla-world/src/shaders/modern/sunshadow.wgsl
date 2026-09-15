@@ -18,8 +18,12 @@ struct ModernCascades {
     // Constant depth bias per cascade, in that cascade's depth units.
     depth_bias: vec4<f32>,
     // x = cascade count (0 = no modern shadow this frame), y = 1 / map size, z = normal offset in
-    // texels, w = debug view (receivers output raw visibility).
+    // texels, w = debug view (1 sun visibility, 2 sky visibility).
     params: vec4<f32>,
+    // The sky-occlusion map (P3): the static world from straight above, in array layer 4.
+    sky_clip: mat4x4<f32>,
+    // x = enabled, y = texel world size, z = depth bias, w unused.
+    sky_params: vec4<f32>,
 }
 
 fn cascade_visibility(
@@ -76,4 +80,45 @@ fn sun_visibility(
         }
     }
     return 1.0;
+}
+
+// P3: the open-sky fraction above a point (1 = nothing overhead), from the top-down static map in
+// array layer 4. A wide 3x3 compare, so a canopy dims the ground softly rather than as a stencil.
+fn sky_visibility(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+) -> f32 {
+    if (c.sky_params.x < 0.5) {
+        return 1.0;
+    }
+    // Lifted a little, so the receiver's own surface never counts as its roof.
+    let clip = c.sky_clip * vec4<f32>(world_pos + vec3<f32>(0.0, 0.75, 0.0), 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return 1.0;
+    }
+    let depth = ndc.z + c.sky_params.z;
+    var open = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let o = vec2<f32>(f32(x), f32(y)) * (4.0 * c.params.y);
+            open = open + textureSampleCompareLevel(map, samp, uv + o, 4, depth);
+        }
+    }
+    return open / 9.0;
+}
+
+// Ambient light's share under cover never drops below this.
+const SKY_AMBIENT_FLOOR: f32 = 0.35;
+
+fn sky_ambient(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+) -> f32 {
+    return mix(SKY_AMBIENT_FLOOR, 1.0, sky_visibility(map, samp, c, world_pos));
 }

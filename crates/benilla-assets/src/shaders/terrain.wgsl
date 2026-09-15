@@ -344,7 +344,9 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let mndotl = max(dot(mn, ml), 0.0);
         let sun_estimate = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * mndotl, vec3<f32>(0.0), vec3<f32>(1.0));
         let points = max(in.primary - sun_estimate, vec3<f32>(0.0));
-        primary = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
+        // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        primary = wow_light.light_ambient.rgb * sky + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass
@@ -398,7 +400,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // FFXGlow combine (the last node). Output raw.
     // fork: modern lighting (FORK.md) — the frame is linear.
     if (modern && modern_cascades.params.w > 0.5) {
-        tuned = vec3<f32>(world_shadow); // modern shadow debug view
+        tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
     }
     return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
 }

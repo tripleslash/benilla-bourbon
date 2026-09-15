@@ -41,6 +41,13 @@ use crate::view::WorldCamera;
 
 /// Layers in the shadow array. A tier uses its first `n` ([`cascade_splits`]).
 pub const MAX_CASCADES: usize = 4;
+/// The sky-occlusion map rides the last array layer: a vertical light over the static world.
+pub const SKY_LAYER: usize = MAX_CASCADES;
+pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1;
+/// Half the sky map's footprint (yd): 1024 yd across at 0.5 yd a texel.
+pub const SKY_HALF_EXTENT: f32 = 512.0;
+/// The sky map re-centres on this grid, so it (and its static cache) holds while the camera moves.
+const SKY_SNAP: f32 = 32.0;
 /// Edge of every cascade, in texels.
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// How far toward the sun (yd) beyond a cascade's sphere casters are still captured.
@@ -56,7 +63,7 @@ const SUN_SNAP_RADIANS: f32 = 1.5e-3;
 /// many frames.
 const CASCADE_MARGIN: f32 = 1.25;
 /// Size of [`ModernCascades::std430`] — `sunshadow.wgsl`'s `ModernCascades`.
-pub const CASCADES_BYTES: usize = 4 * 64 + 4 * 16;
+pub const CASCADES_BYTES: usize = 5 * 64 + 5 * 16;
 
 /// Where each cascade ends (view distance, yd), per tier — the plan's tier table.
 pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
@@ -76,8 +83,11 @@ pub struct ModernCascades {
     pub splits: [f32; MAX_CASCADES],
     pub texel_world: [f32; MAX_CASCADES],
     pub depth_bias: [f32; MAX_CASCADES],
-    /// The debug view: receivers show raw visibility (`params.w`).
-    pub debug: bool,
+    /// The debug view mode (`params.w`): 1 = sun visibility, 2 = sky visibility.
+    pub debug: u8,
+    /// The sky-occlusion map's light clip (straight down) and `[enabled, texel yd, depth bias, 0]`.
+    pub sky_clip: Mat4,
+    pub sky_params: [f32; 4],
 }
 
 /// Every resident terrain cell as a caster: mesh, world-space box centre and half extents.
@@ -120,9 +130,11 @@ impl ModernCascades {
             self.count as f32,
             1.0 / SHADOW_MAP_SIZE as f32,
             NORMAL_OFFSET_TEXELS,
-            if self.debug { 1.0 } else { 0.0 },
+            f32::from(self.debug),
         ];
         out.extend_from_slice(bytemuck::cast_slice(&params));
+        out.extend_from_slice(bytemuck::cast_slice(&self.sky_clip.to_cols_array()));
+        out.extend_from_slice(bytemuck::cast_slice(&self.sky_params));
         out
     }
 }
@@ -153,7 +165,7 @@ fn create_shadow_assets(
         Extent3d {
             width: SHADOW_MAP_SIZE,
             height: SHADOW_MAP_SIZE,
-            depth_or_array_layers: MAX_CASCADES as u32,
+            depth_or_array_layers: SHADOW_LAYERS as u32,
         },
         TextureDimension::D2,
         TextureFormat::Depth32Float,
@@ -224,7 +236,7 @@ fn update_cascades(
     let splits = cascade_splits(active.quality);
     let mut next = ModernCascades {
         count: splits.len() as u32,
-        debug: super::shadow_debug_enabled(),
+        debug: super::shadow_debug_mode(),
         ..default()
     };
     let mut near = persp.near.max(0.1);
@@ -246,6 +258,13 @@ fn update_cascades(
         // Cascades overlap a little so the PCF footprint never falls off an edge.
         near = far * 0.9;
     }
+    // fork: modern lighting (FORK.md, P3) — the sky-occlusion map: the static world seen from straight
+    // above, re-centred on a 32 yd grid.
+    let cam = camera.translation();
+    let sky_center = (cam / SKY_SNAP).round() * SKY_SNAP;
+    let sky = cascade_from_sphere(sky_center, SKY_HALF_EXTENT, Vec3::NEG_Y, SHADOW_MAP_SIZE);
+    next.sky_clip = sky.clip_from_world;
+    next.sky_params = [1.0, sky.texel_world, sky.depth_bias * 4.0, 0.0];
     *out = next;
 }
 
@@ -398,7 +417,7 @@ mod tests {
     #[test]
     fn the_block_matches_the_wgsl_layout() {
         assert_eq!(ModernCascades::default().std430().len(), CASCADES_BYTES);
-        assert_eq!(CASCADES_BYTES, 320);
+        assert_eq!(CASCADES_BYTES, 400);
     }
 
     #[test]

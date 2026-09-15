@@ -163,11 +163,15 @@ pub fn sun_arc_enabled() -> bool {
     switch_on(&CELL, "WOW_MODERN_SUNARC")
 }
 
-/// The shadow debug view (`$WOW_MODERN_SHADOWDEBUG=1`, browser `?modern_shadowdebug=1`): the modern
-/// receivers output raw sun visibility as grey. Off unless asked for.
-pub fn shadow_debug_enabled() -> bool {
-    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_SHADOWDEBUG").as_deref() == Some("1"))
+/// The shadow debug view (`$WOW_MODERN_SHADOWDEBUG`, browser `?modern_shadowdebug=`): `1` = the modern
+/// receivers output raw sun visibility as grey, `2` = sky visibility. `0` (default) = off.
+pub fn shadow_debug_mode() -> u8 {
+    static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        crate::launch_env::var("WOW_MODERN_SHADOWDEBUG")
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .unwrap_or(0)
+    })
 }
 
 /// The CPU-side modern hooks: sky stop decode, the cloud texture's sRGB view, the disc `span.z` flag.

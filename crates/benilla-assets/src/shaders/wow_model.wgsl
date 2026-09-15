@@ -1198,7 +1198,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let back = pow(max(dot(to_eye, -to_sun), 0.0), 6.0);
         foliage_light = wow_light.light_diffuse.rgb * player_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
     }
-    let lit_with_shadow = lit_with_shadow_base + foliage_light;
+    // fork: modern lighting (FORK.md, P3) — modern exterior: ambient under the sky-occlusion map.
+    var lit_with_shadow_sky = lit_with_shadow_base;
+    if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig) {
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        let amb = wow_light.light_ambient.rgb;
+        lit_with_shadow_sky = clamp(amb * sky + max(lit - amb, vec3<f32>(0.0)) * player_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    let lit_with_shadow = lit_with_shadow_sky + foliage_light;
     // Gamma-space albedo — the lane (0161): the buffer holds bytes, lighting math runs on the
     // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
     // `m.tint` is the animated M2Color RGB (identity 1 for static batches) — the same per-batch
@@ -1414,7 +1421,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         out_rgb = lin;
     }
     if (modern_frame && modern_cascades.params.w > 0.5) {
-        out_rgb = vec3<f32>(player_shadow); // modern shadow debug view
+        out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
     }
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;

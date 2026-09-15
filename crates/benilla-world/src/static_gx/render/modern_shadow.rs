@@ -24,7 +24,9 @@ use bevy::shader::Shader;
 use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
 
 use super::*;
-use crate::modern::shadow::{ModernCascades, ModernEntityCasters, ModernTerrainCasters, MAX_CASCADES};
+use crate::modern::shadow::{
+    ModernCascades, ModernEntityCasters, ModernTerrainCasters, SHADOW_LAYERS, SKY_LAYER,
+};
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::binding_types::{storage_buffer_read_only_sized, texture_2d};
 use bevy::platform::collections::HashMap as StrideMap;
@@ -102,7 +104,7 @@ struct ModernShadowFrame {
     texture: Option<Texture>,
     cache: Option<Texture>,
     /// Per cascade: the key its cache layer was last written under (0 = invalid).
-    cache_keys: [std::sync::atomic::AtomicU64; MAX_CASCADES],
+    cache_keys: [std::sync::atomic::AtomicU64; SHADOW_LAYERS],
     offsets: Vec<u32>,
     bind: Option<BindGroup>,
     count: u32,
@@ -237,7 +239,7 @@ fn prepare_modern_shadow(
         }));
     }
     if frame.layers.is_empty() {
-        frame.layers = (0..MAX_CASCADES as u32)
+        frame.layers = (0..SHADOW_LAYERS as u32)
             .map(|layer| {
                 image.texture.create_view(&TextureViewDescriptor {
                     label: Some("modern_shadow_layer"),
@@ -251,8 +253,10 @@ fn prepare_modern_shadow(
     }
     uniforms.0.clear();
     frame.offsets.clear();
-    for i in 0..MAX_CASCADES {
-        let clip_from_world = if i < cascades.count as usize {
+    for i in 0..SHADOW_LAYERS {
+        let clip_from_world = if i == SKY_LAYER {
+            cascades.sky_clip
+        } else if i < cascades.count as usize {
             cascades.clip_from_world[i]
         } else {
             Mat4::IDENTITY
@@ -569,8 +573,18 @@ impl ViewNode for GxShadowNode {
 
         for i in 0..frame.layers.len() {
             let layer = &frame.layers[i];
-            let active = i < cascades.count as usize;
-            let clip_from_world = cascades.clip_from_world[i];
+            // The last layer is the sky-occlusion map: static casters only, from straight above.
+            let is_sky = i == SKY_LAYER;
+            let active = if is_sky {
+                cascades.count > 0
+            } else {
+                i < cascades.count as usize
+            };
+            let clip_from_world = if is_sky {
+                cascades.sky_clip
+            } else {
+                cascades.clip_from_world[i]
+            };
             let key = if active {
                 cascade_key(&clip_from_world, static_hash)
             } else {
@@ -689,7 +703,7 @@ impl ViewNode for GxShadowNode {
             }
 
             // Dynamic pass, every frame: entity parts on top of the (cached or fresh) static layer.
-            if !active {
+            if !active || is_sky {
                 continue;
             }
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
