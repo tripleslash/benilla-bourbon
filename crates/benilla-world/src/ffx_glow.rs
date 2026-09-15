@@ -825,7 +825,7 @@ impl ViewNode for FfxGlowNode {
         let modern = crate::modern::frame_is_modern();
         if modern {
             uniform[6] = 1.0;
-            uniform[7] = crate::modern::MODERN_EXPOSURE;
+            uniform[7] = crate::modern::look::exposure(); // fork: modern lighting (P4) — the zone look's exposure
         }
         // THE PASS-LIST SWAP (`0x6cc630`). The reference forks the whole list here; we fork one
         // pipeline, which is the same fork — the first two passes are identical in both lists.

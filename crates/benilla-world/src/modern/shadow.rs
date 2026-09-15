@@ -192,8 +192,12 @@ fn create_shadow_assets(
     });
     let _ = images.insert(MODERN_SHADOW_MAP.id(), image);
 
-    let mut block =
-        ShaderStorageBuffer::with_size(CASCADES_BYTES, RenderAssetUsages::RENDER_WORLD);
+    // P4: the froxel fog parameters and the cloud-shadow grid ride behind the cascades
+    // (`sunshadow::ModernBlock`).
+    let mut block = ShaderStorageBuffer::with_size(
+        CASCADES_BYTES + super::volumetrics::BLOCK_TAIL_BYTES,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     block.buffer_description.usage |= BufferUsages::COPY_DST;
     let _ = buffers.insert(MODERN_SHADOW_CASCADES.id(), block);
 }

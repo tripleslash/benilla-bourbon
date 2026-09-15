@@ -70,6 +70,22 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/worldview.rs` | `WOW_WORLDVIEW_FACE`/`_PITCH` via `launch_env` (browser `?worldview_face=`) | P3 |
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | modern: ambient × `sunshadow::sky_ambient` (the top-down sky-occlusion map, shadow array layer 4); static_gx splits `lit_nl_shadowed` / `lit_doodad` into `_classic` + modern override; debug mode 2 shows sky visibility | P3 |
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `point_light_select` / `point_light_eval` after `point_light_sum`; a flat `point_sel` varying (terrain @8, wow_model @11, static_gx @6) set beside `point_lit`; modern fragments light points per pixel (terrain's recovered share, wow_model `point_diffuse`, static_gx `point_lit_px`) | P3 |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | binding 123 / group 2 binding 3 is `modern_block: sunshadow::ModernBlock` (was `modern_cascades: ModernCascades`); every helper call passes `modern_block.cascades` | P4 |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | modern: the sun visibility × `sunshadow::cloud_mix` (the cloud-shadow grid); the classic fog `if` gains a not-modern term (the composite fogs the frame) | P4 |
+| `wow_model.wgsl` | `#import benilla_modern::froxelfog`; bindings 124/125; the modern output branch fogs non-opaque-intent batches with `froxelfog::fog_at` by fog policy | P4 |
+| `liquid.wgsl`, `liquid_cata.wgsl` | `sunshadow`/`froxelfog` imports; bindings 123-125; `apply_fog` returns early in a modern frame; the `fragment` wrapper applies `fog_at` to transparent kinds | P4 |
+| `wow_effect.wgsl`, `particles/render.rs` | image layout bindings 4-6 (block, volume, sampler; vertex); `VertexOutput.fog` from `fog_at` per vertex; the modern decode block applies it by fog policy and the classic scene fog is gated off; the bind cache also invalidates on the volume's view id | P4 |
+| `wdl.wgsl` | `WDL_ALBEDO`; modern: the band is lit with a facet normal instead of the flat fog hull | P4 |
+| `sky.rs`, `sky.wgsl` | `SkyExt.modern` / `.glow` (+ `setup_sky` zeros); modern: Mie halo + analytic disk core | P4 |
+| `clouds/layer.rs`, `cloud.wgsl` | `CloudExt.modern` / `.light` at uniform 102 (+ construction zeros); modern: key-elevation brightness + silver lining | P4 |
+| `benilla-assets/src/materials.rs` | `MODERN_FOG_VOLUME`; `WowModelExt.modern_fog` (124/125); `LiquidExt` / `LiquidCataExt` gain `modern_cascades` (123) + `modern_fog` (124/125) | P4 |
+| `world_assets/mod.rs`, `model_render.rs` (×2), `liquid/surface.rs` (×2) | the new fields at each construction site | P4 |
+| `lighting/global_light.rs` | `build_light_data`: ambient × fill and diffuse × key from `modern::look::key_fill()` in a modern frame | P4 |
+| `ffx_glow.rs` | `uniform[7]` = `modern::look::exposure()` | P4 |
+| `static_gx/render.rs`, `static_gx/mod.rs` | `pub(crate) use … GxShadowLabel` (the froxel pass orders after the shadow pass) | P4 |
+| `liquid/mod.rs` | `pub(crate) use reflect::LiquidReflectionCamera` and `screen::LiquidScreenLabel` (the composite runs on the mirror, before the scene copy) | P4 |
+| `benilla-world/src/world_map.rs` | `map_id_from_env` reads `WOW_MAP` through `launch_env` (browser `?map=`) | P4 |
+| `benilla-app/src/lib.rs` | `run_worldview` seeds `WOW_MAP` and `WOW_MODERN_ZONE` | P4 |
 
 ## Planned hooks (not yet landed)
 

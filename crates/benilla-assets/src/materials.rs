@@ -45,6 +45,10 @@ pub const MODERN_SHADOW_MAP: Handle<Image> =
     bevy::asset::uuid_handle!("6d2f1e4a-3b7c-4e0a-9a51-0c7e8f2d9b31");
 pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderStorageBuffer> =
     bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
+// fork: modern lighting (FORK.md, P4) — the integrated froxel fog volume
+// (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
+pub const MODERN_FOG_VOLUME: Handle<Image> =
+    bevy::asset::uuid_handle!("e8a1c6d2-4f37-4b9e-a0c5-93d17b2f6e48");
 
 /// Compile the five WGSL files into the binary and register them under
 /// `embedded://benilla_assets/shaders/…`. Call **after** Bevy's `AssetPlugin` (it fills the
@@ -239,6 +243,10 @@ pub struct WowModelExt {
     pub modern_shadow: Handle<Image>,
     #[storage(123, read_only, visibility(fragment))]
     pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    // fork: modern lighting (FORK.md, P4) — blended batches fog themselves from the froxel volume.
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    #[sampler(125, visibility(fragment))]
+    pub modern_fog: Handle<Image>,
 }
 
 impl MaterialExtension for WowModelExt {
@@ -580,6 +588,13 @@ pub struct LiquidExt {
     /// creation, never mutated.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P4) — water draws after the fog composite and fogs
+    // itself from the froxel volume (the block carries its parameters).
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    #[sampler(125, visibility(fragment))]
+    pub modern_fog: Handle<Image>,
 }
 
 /// **The Cataclysm liquid renderer** (`waterDetail 2`) — the second of benilla's two liquid paths.
@@ -759,6 +774,13 @@ pub struct LiquidCataExt {
     /// through rows that mean something else.
     #[storage(91, read_only, buffer, visibility(fragment))]
     pub ripple_buf: Buffer,
+    // fork: modern lighting (FORK.md, P4) — as `LiquidExt::modern_fog`, but with no
+    // sampler of its own: this layout already sits at the 16-sampler stage limit, so the volume is read
+    // through `scene_samp` (106, linear clamp).
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    pub modern_fog: Handle<Image>,
 }
 
 impl MaterialExtension for LiquidCataExt {

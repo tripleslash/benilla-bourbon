@@ -337,7 +337,13 @@ fn build_light_data(
     rows[19] = [l.wmo_fog_start, l.wmo_fog_end, 0.0, 0.0];
     // Rows 0-2, the SH block 6-12.xyz, and the sun DC (17.yzw) — the shared model-light core
     // (also the portrait booth's packer). Row 20 (point_count) is the point-table pack's below.
-    pack_model_core_rows(rows, l.ambient, l.diffuse, l.sun_dir);
+    // fork: modern lighting (FORK.md, P4) — the zone look's key and fill gains (A3).
+    let (key, fill) = if active.as_ref().is_some_and(|a| a.is_modern()) {
+        crate::modern::look::key_fill()
+    } else {
+        (1.0, 1.0)
+    };
+    pack_model_core_rows(rows, l.ambient.map(|c| c * fill), l.diffuse.map(|c| c * key), l.sun_dir);
     // The dynamic point-light table (decision 0278): every spawned point light within
     // [`POINT_PACK_RADIUS`] of the camera, nearest-first when over capacity — the VERTEX stages of
     // `terrain.wgsl`/`wow_model.wgsl` walk it for the Gouraud point term (bevy's clusterable buffer

@@ -91,6 +91,8 @@
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
+#import benilla_modern::sunshadow
+#import benilla_modern::froxelfog
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -137,6 +139,10 @@ struct WowLight {
     point_count: vec4<f32>,        // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
+// fork: modern lighting (FORK.md, P4) — water fogs itself from the froxel volume.
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
+@group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(125) var modern_fog_samp: sampler;
 
 struct LiquidVsOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -257,7 +263,8 @@ fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>, room_fog: u32) -> vec3<f32> {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }
-    if (fog_color.w <= 0.5) {
+    // fork: modern lighting (FORK.md, P4) — a modern frame fogs from the volume (`fragment`).
+    if (fog_color.w <= 0.5 || wow_light.point_count.y > 0.5) {
         return rgb;
     }
     let eye_z = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
@@ -538,5 +545,12 @@ fn fragment_classic(in: LiquidVsOut) -> vec4<f32> {
 @fragment
 fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     let c = fragment_classic(in);
-    return vec4<f32>(colorspace::modern_out(c.rgb, wow_light.point_count.y), c.a);
+    var rgb = colorspace::modern_out(c.rgb, wow_light.point_count.y);
+    // P4: transparent water draws after the fog composite, so it fogs itself; opaque magma and slime
+    // (`kind.x`) draw before it and are fogged there.
+    if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
+        let fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
+        rgb = rgb * fog.a + fog.rgb;
+    }
+    return vec4<f32>(rgb, c.a);
 }

@@ -26,9 +26,10 @@ pub(crate) const DEFAULT_MAP_ID: u32 = 0;
 /// time to chase one. An instrument that answers the wrong question quietly is worse than one that
 /// refuses.
 fn map_id_from_env() -> u32 {
-    match std::env::var("WOW_MAP") {
-        Err(_) => DEFAULT_MAP_ID,
-        Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+    // fork: modern lighting (FORK.md, P4) — through `launch_env`, so the browser worldview can pick Kalimdor (`?map=1`).
+    match crate::launch_env::var("WOW_MAP") {
+        None => DEFAULT_MAP_ID,
+        Some(v) => v.trim().parse().unwrap_or_else(|_| {
             panic!("WOW_MAP={v:?} is not a Map.dbc id — it takes a NUMBER (0 = Azeroth, 1 = Kalimdor), not a name")
         }),
     }

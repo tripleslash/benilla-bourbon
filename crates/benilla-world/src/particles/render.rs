@@ -46,7 +46,7 @@ use bevy::render::render_phase::{
     RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer,
+    sampler, storage_buffer_read_only_sized, texture_2d, texture_3d, uniform_buffer,
 };
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
@@ -60,6 +60,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
+use bevy::render::storage::GpuShaderStorageBuffer; // fork: modern lighting (FORK.md, P4)
 use bevy::render::view::{
     ExtractedView, Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
@@ -225,6 +226,8 @@ pub struct EffectBindGroups {
     /// The params buffer the cached groups were built against — see
     /// [`prepare_effect_bind_groups`].
     params_buffer: Option<BufferId>,
+    /// fork: modern lighting (FORK.md, P4) — the fog volume's view the cached groups bind.
+    fog_volume: Option<bevy::render::render_resource::TextureViewId>,
 }
 
 /// The lane's pipeline: layouts + shader, specialized per (blend, raster bias, msaa, hdr).
@@ -255,6 +258,11 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
                 storage_buffer_read_only_sized(false, None),
                 // The per-draw fog-params `vec4`, dynamic-offset into the canonical rows.
                 uniform_buffer::<EffectParams>(true),
+                // fork: modern lighting (FORK.md, P4) — the froxel fog, sampled per
+                // vertex: the modern block (its parameters), the integrated volume, its sampler.
+                storage_buffer_read_only_sized(false, None).visibility(ShaderStages::VERTEX),
+                texture_3d(TextureSampleType::Float { filterable: true }).visibility(ShaderStages::VERTEX),
+                sampler(SamplerBindingType::Filtering).visibility(ShaderStages::VERTEX),
             ),
         ),
     );
@@ -768,6 +776,7 @@ fn prepare_effect_bind_groups(
     pipeline: Res<EffectPipeline>,
     view_uniforms: Res<ViewUniforms>,
     gpu_images: Res<RenderAssets<GpuImage>>,
+    storage: Res<RenderAssets<GpuShaderStorageBuffer>>,
     light: Option<Res<SharedLightBuffer>>,
     mut meta: ResMut<EffectMeta>,
     mut bind_groups: ResMut<EffectBindGroups>,
@@ -790,6 +799,19 @@ fn prepare_effect_bind_groups(
     if bind_groups.params_buffer != meta.params_buffer {
         bind_groups.images.clear();
         bind_groups.params_buffer = meta.params_buffer;
+    }
+    // fork: modern lighting (FORK.md, P4) — every group binds the fog volume and the
+    // modern block; a re-allocated volume (a modern world entry) invalidates the cache like a new params
+    // buffer does.
+    let (Some(fog_volume), Some(fog_block)) = (
+        gpu_images.get(benilla_assets::materials::MODERN_FOG_VOLUME.id()),
+        storage.get(benilla_assets::materials::MODERN_SHADOW_CASCADES.id()),
+    ) else {
+        return;
+    };
+    if bind_groups.fog_volume != Some(fog_volume.texture_view.id()) {
+        bind_groups.images.clear();
+        bind_groups.fog_volume = Some(fog_volume.texture_view.id());
     }
     for draw in &meta.draws {
         let key = (draw.texture, draw.light.as_ref().map(|b| b.id()));
@@ -818,6 +840,9 @@ fn prepare_effect_bind_groups(
                     &image.sampler,
                     light_buf.as_entire_binding(),
                     params_binding.clone(),
+                    fog_block.buffer.as_entire_binding(),
+                    &fog_volume.texture_view,
+                    &fog_volume.sampler,
                 )),
             ),
         );

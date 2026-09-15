@@ -460,6 +460,13 @@ mod ordering_tests {
                 "the celestial follows: PostUpdate, BillboardPlace",
             ),
             ("weather/precip/mod.rs", "push_precip: PostUpdate"),
+            // fork: modern lighting (FORK.md)
+            ("modern/shadow.rs", "update_cascades: Last"),
+            (
+                "modern/sun_arc.rs",
+                "apply_sun_arc WRITES WowLighting, .after(LightingResolveSet); the Res< is GameClock's",
+            ),
+            ("modern/volumetrics/mod.rs", "update_volume: Last"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();

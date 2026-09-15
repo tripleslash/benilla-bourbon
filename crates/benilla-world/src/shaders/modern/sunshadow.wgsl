@@ -7,6 +7,18 @@
 // static_gx in its light group, so each receiver passes its own texture, sampler and cascade block.
 #define_import_path benilla_modern::sunshadow
 
+#import benilla_modern::froxelfog
+
+// P4: the whole storage block every modern lane binds — the cascades, then the froxel fog parameters
+// (`volumetrics::ModernVolume::std430`), then the cloud-shadow grid. Pass `.cascades` or `.fog` to the
+// helpers, never the block: a by-value copy of the grid per call would be 4 KB.
+struct ModernBlock {
+    cascades: ModernCascades,
+    fog: froxelfog::FroxelFog,
+    // Sun visibility under the clouds per grid cell (1 = clear); `fog.cloud` places the grid.
+    cloud: array<f32, 1024>,
+}
+
 // Mirrors `benilla_world::modern::shadow::ModernCascades::std430` (a layout test pins the size).
 struct ModernCascades {
     // Reverse-Z orthographic light clip per cascade.
@@ -109,6 +121,74 @@ fn sky_visibility(
         }
     }
     return open / 9.0;
+}
+
+// P4: one hardware-compare tap per cascade — the froxels' visibility, where the volume's own blur
+// replaces PCF.
+fn sun_visibility_fast(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+    view_distance: f32,
+) -> f32 {
+    let count = u32(c.params.x);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if (view_distance < c.splits[i]) {
+            let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+            let ndc = clip.xyz / clip.w;
+            let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+                return 1.0;
+            }
+            return textureSampleCompareLevel(map, samp, uv, i32(i), ndc.z + c.depth_bias[i] * 2.0);
+        }
+    }
+    return 1.0;
+}
+
+// P4: `sky_visibility` in one tap.
+fn sky_visibility_fast(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+) -> f32 {
+    if (c.sky_params.x < 0.5) {
+        return 1.0;
+    }
+    let clip = c.sky_clip * vec4<f32>(world_pos + vec3<f32>(0.0, 0.75, 0.0), 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return 1.0;
+    }
+    return textureSampleCompareLevel(map, samp, uv, 4, ndc.z + c.sky_params.z);
+}
+
+// P4: the cloud-shadow grid's bilinear footprint around a world point — the four cell indices (00, 10,
+// 01, 11) and the weights. The caller reads the four cells from its own block and hands them to
+// `cloud_mix`; `grid` is `ModernBlock.fog.cloud`.
+struct CloudTaps {
+    idx: vec4<u32>,
+    w: vec2<f32>,
+}
+
+fn cloud_taps(grid: vec4<f32>, world_pos: vec3<f32>) -> CloudTaps {
+    let n = clamp(grid.w, 1.0, 32.0);
+    let g = (world_pos.xz - grid.xy) / max(grid.z, 1e-3) - vec2<f32>(0.5);
+    let lo = clamp(floor(g), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+    let hi = min(lo + vec2<f32>(1.0), vec2<f32>(n - 1.0));
+    let row = u32(n);
+    let xa = u32(lo.x);
+    let xb = u32(hi.x);
+    let ya = u32(lo.y) * row;
+    let yb = u32(hi.y) * row;
+    return CloudTaps(vec4<u32>(ya + xa, ya + xb, yb + xa, yb + xb), clamp(g - lo, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
+fn cloud_mix(t: CloudTaps, ca: f32, cb: f32, cc: f32, cd: f32) -> f32 {
+    return mix(mix(ca, cb, t.w.x), mix(cc, cd, t.w.x), t.w.y);
 }
 
 // Ambient light's share under cover never drops below this.

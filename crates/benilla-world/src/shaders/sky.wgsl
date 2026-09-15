@@ -25,6 +25,10 @@ struct SkyColors {
     sky4: vec4<f32>, // 1.8°
     fog: vec4<f32>,  // horizon (0°) and below — LightIntBand row 7
     warp: vec4<f32>, // x = dawn/dusk warp strength S (0 = off), y = sun azimuth (rad), zw reserved
+    // fork: modern lighting (FORK.md, P4) — xyz = camera→sun, w = modern flag.
+    modern: vec4<f32>,
+    // fork: modern lighting (P4) — rgb = the sun glow's linear radiance, w = its Mie g.
+    glow: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sky: SkyColors;
 
@@ -118,6 +122,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Raw gamma out (GAMMA LANE, 0161): the reference draws the sky with GL_FRAMEBUFFER_SRGB OFF
     // (CSky::Render @0x6d4940) — raw DBC bytes — which is now the whole pipeline's convention.
+    // fork: modern lighting (FORK.md, P4) — the HDR sky: a Mie halo around the sun
+    // that hugs the horizon, and an analytic disk core for the bloom (the textured disc draws over it).
+    if (sky.modern.w > 0.5) {
+        let mu = dot(dir, normalize(sky.modern.xyz));
+        let g = sky.glow.w;
+        let denom = max(1.0 + g * g - 2.0 * g * mu, 1e-4);
+        let mie = (1.0 - g * g) / (denom * sqrt(denom));
+        let horizon = 1.0 - 0.6 * smoothstep(0.0, 0.5, dir.y);
+        let disk = smoothstep(0.9999, 0.99996, mu);
+        col = col + sky.glow.rgb * (0.02 * mie * horizon + 24.0 * disk);
+    }
     let rgb = col;
     return vec4<f32>(rgb, 1.0);
 }

@@ -140,6 +140,8 @@ mod render;
 /// it reads. An ordering edge is the only thing outside this module that has any business naming
 /// the node, so the module itself stays private and only the label comes out.
 pub(crate) use render::StaticGxLabel;
+// fork: modern lighting (FORK.md, P4) — the froxel pass reads the cascades this node draws.
+pub(crate) use render::GxShadowLabel;
 
 /// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
 /// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the

@@ -1099,6 +1099,7 @@ impl WorldAssets {
             extension: WowModelExt {
                 modern_shadow: crate::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
                 modern_cascades: crate::materials::MODERN_SHADOW_CASCADES,
+                modern_fog: crate::materials::MODERN_FOG_VOLUME, // fork: modern lighting (FORK.md, P4)
                 clutter_fade,
                 // x = WMO (FFP N·L × MOCV, not SH); y = distance-fade blend variant (depth-write-on
                 // via `specialize` — see WowModelKey; no live caller passes it here).

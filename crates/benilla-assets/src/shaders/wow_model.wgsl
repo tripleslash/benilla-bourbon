@@ -45,6 +45,7 @@
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
 #import benilla_modern::sunshadow
+#import benilla_modern::froxelfog
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -209,7 +210,10 @@ struct WowLight {
 // fork: modern lighting (FORK.md, P2)
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
 @group(#{MATERIAL_BIND_GROUP}) @binding(122) var modern_shadow_samp: sampler_comparison;
-@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_cascades: sunshadow::ModernCascades;
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
+// fork: modern lighting (FORK.md, P4) — the integrated froxel fog volume.
+@group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(125) var modern_fog_samp: sampler;
 
 // Vanilla M2 cutout alpha-test reference (224/255 on ≤ WotLK) — kept in sync with
 // `debug_panel::VANILLA_ALPHA_KEY_REF`. Used to re-apply the hard cutout on the distance-fade blend
@@ -1219,7 +1223,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let modern_frame = wow_light.point_count.y > 0.5;
     if (modern_frame) {
         let mview_z = (view.view_from_world * in.world_position).z;
-        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z);
+        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z);
+        // fork: modern lighting (FORK.md, P4) — cloud shadows.
+        let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
+        player_shadow = player_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
     }
     let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, player_shadow), player_shadow, modern_frame);
     let lit_with_shadow_base = select(
@@ -1252,7 +1259,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // fork: modern lighting (FORK.md, P3) — modern exterior: ambient under the sky-occlusion map.
     var lit_with_shadow_sky = lit_with_shadow_base;
     if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig) {
-        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         let amb = wow_light.light_ambient.rgb;
         lit_with_shadow_sky = clamp(amb * sky + max(lit - amb, vec3<f32>(0.0)) * player_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
@@ -1399,7 +1406,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         fog_span = wow_light.wmo_fog_params.xy;
     }
     let fog_policy = (u32(m.clutter_fade.z) >> 4u) & 7u;
-    if (fog_color.w > 0.5 && fog_policy != 4u) {
+    // fork: modern lighting (FORK.md, P4) — a modern frame fogs from the froxel volume (below).
+    if (fog_color.w > 0.5 && fog_policy != 4u && wow_light.point_count.y < 0.5) {
         let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
         let denom = max(fog_span.y - fog_span.x, 0.001);
         let factor = clamp((fog_span.y - eye_z) / denom, 0.0, 1.0);
@@ -1474,10 +1482,26 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                 lin = lin * 2.295;
             }
         }
+        // fork: modern lighting (FORK.md, P4) — an opaque-intent batch is fogged by the
+        // composite; a blended one draws after it, so it fogs itself from the froxel volume under the
+        // classic per-blend policy: scene fog for alpha, fade to black for additive, the blend identity
+        // for Mod (1) and Mod2x (0.5, after its 2.295 source scale).
+        if (!opaque_intent && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
+            let fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
+            if (is_additive || fog_policy == 1u) {
+                lin = lin * fog.a;
+            } else if (is_mod || fog_policy == 2u) {
+                lin = mix(vec3<f32>(1.0), lin, fog.a);
+            } else if (is_mod2x || fog_policy == 3u) {
+                lin = mix(vec3<f32>(0.5), lin, fog.a);
+            } else {
+                lin = lin * fog.a + fog.rgb;
+            }
+        }
         out_rgb = lin;
     }
-    if (modern_frame && modern_cascades.params.w > 0.5) {
-        out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
+    if (modern_frame && modern_block.cascades.params.w > 0.5) {
+        out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), modern_block.cascades.params.w > 1.5)); // modern shadow debug view
     }
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;

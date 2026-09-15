@@ -79,6 +79,13 @@ pub struct SkyExt {
     /// 0 = no warp / midday), `y` = sun azimuth `atan2(sun.z, sun.x)` rad (Bevy world), `zw` reserved.
     #[uniform(100)]
     pub(crate) warp: Vec4,
+    /// fork: modern lighting (FORK.md, P4) — `xyz` = camera→sun, `w` = the modern flag
+    /// (`modern::sky` writes it; zero keeps the classic dome).
+    #[uniform(100)]
+    pub(crate) modern: Vec4,
+    /// fork: modern lighting (P4) — `rgb` = the sun glow's linear radiance, `w` = its Mie g.
+    #[uniform(100)]
+    pub(crate) glow: Vec4,
 }
 
 impl MaterialExtension for SkyExt {
@@ -220,6 +227,8 @@ fn setup_sky(
             sky4: col([0.78, 0.86, 0.95]),
             fog: col([0.55, 0.72, 0.92]),
             warp: Vec4::ZERO, // update_sky_colors fills S + sun azimuth each frame
+            modern: Vec4::ZERO, // fork: modern lighting (FORK.md, P4)
+            glow: Vec4::ZERO,
         },
     });
     commands.spawn((

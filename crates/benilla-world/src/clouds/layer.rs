@@ -55,6 +55,13 @@ pub struct CloudExt {
     #[texture(100)]
     #[sampler(101)]
     pub(crate) texels: Handle<Image>,
+    /// fork: modern lighting (FORK.md, P4) — `xyz` = toward the key light, `w` = the
+    /// modern flag (`modern::sky` writes it; zero keeps the classic layer).
+    #[uniform(102)]
+    pub(crate) modern: bevy::math::Vec4,
+    /// fork: modern lighting (P4) — `x` = elevation brightness, `y` = silver lining, `z` = its g.
+    #[uniform(102)]
+    pub(crate) light: bevy::math::Vec4,
 }
 
 impl MaterialExtension for CloudExt {
@@ -185,6 +192,8 @@ pub(super) fn setup_cloud_layer(
         },
         extension: CloudExt {
             texels: image.clone(),
+            modern: bevy::math::Vec4::ZERO, // fork: modern lighting (FORK.md, P4)
+            light: bevy::math::Vec4::ZERO,
         },
     });
     commands.spawn((

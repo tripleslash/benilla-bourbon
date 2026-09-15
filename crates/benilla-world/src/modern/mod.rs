@@ -15,9 +15,12 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use crate::view::WorldCamera;
 
+pub mod look;
 pub mod shadow;
+mod sky;
 pub mod sun_arc;
 mod tick_heal;
+pub mod volumetrics;
 
 /// P1b's fixed exposure (the FFXGlow combine's `wave.w`); auto-exposure lands in P7.
 pub const MODERN_EXPOSURE: f32 = 1.0;
@@ -190,6 +193,12 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// Hermite smoothstep, as WGSL defines it.
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// An authored gamma colour as the current frame wants it: untouched in a classic frame, decoded
 /// (rgb only; `w` rides through) in a modern one.
 pub fn decode_if_modern(v: Vec4) -> Vec4 {
@@ -210,7 +219,14 @@ impl Plugin for ModernLightingPlugin {
             .init_resource::<ActiveLighting>()
             .add_plugins(ExtractResourcePlugin::<ActiveLighting>::default())
             .add_systems(PreUpdate, latch_on_world_entry)
-            .add_plugins((sun_arc::plugin, shadow::plugin, tick_heal::plugin));
+            .add_plugins((
+                sun_arc::plugin,
+                shadow::plugin,
+                tick_heal::plugin,
+                look::plugin,
+                sky::plugin,
+                volumetrics::plugin,
+            ));
     }
 }
 

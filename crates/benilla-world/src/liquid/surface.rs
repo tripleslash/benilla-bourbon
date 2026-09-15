@@ -703,6 +703,8 @@ pub(super) fn setup_liquid(
                         },
                     ),
                     light_buf: world_assets.shared_light.clone(),
+                    modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
+                    modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
                 },
             });
             // The same surface on the Cataclysm renderer. Everything that is a *property of the
@@ -759,6 +761,8 @@ pub(super) fn setup_liquid(
                     magma_params: cata_magma_params(kind),
                     magma_color: cata_magma_color(kind),
                     light_buf: world_assets.shared_light.clone(),
+                    modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
+                    modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
                     ripple_buf: ripple_buf.0.clone(),
                 },
             });

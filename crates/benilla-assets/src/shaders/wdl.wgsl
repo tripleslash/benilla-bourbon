@@ -71,6 +71,10 @@ const WDL_OVERLAP: f32 = 33.0;
 /// then be draw order). Multiplicative so it can never cross zero into the sky.
 const WDL_DEPTH_PUSH: f32 = 0.999;
 
+// fork: modern lighting (FORK.md, P4) — the lit band's albedo (gamma), a dull
+// grass-and-rock average.
+const WDL_ALBEDO: vec3<f32> = vec3<f32>(0.36, 0.38, 0.30);
+
 // The shared global light (`lighting::global_light`) — the same buffer terrain, the models and liquid
 // bind, mirrored here as the row prefix WDL needs. Rows 4/5 are the SCENE fog (block 1) plus the
 // farclip wall, and that is the right block by construction: the band IS the horizon, so it is never
@@ -128,6 +132,14 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
     var rgb = vec3<f32>(1.0);
     if (w.fog_color.w > 0.5) {
         rgb = w.fog_color.xyz;
+    }
+    // fork: modern lighting (FORK.md, P4) — a modern frame lights the horizon band as
+    // dull terrain (flat, facet normals) and leaves its haze to the fog composite.
+    let wdl_n = normalize(cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz)));
+    if (w.point_count.y > 0.5) {
+        let up_n = select(-wdl_n, wdl_n, wdl_n.y >= 0.0);
+        let nl = max(dot(up_n, -normalize(w._light_sun.xyz)), 0.0);
+        rgb = clamp(WDL_ALBEDO * (w._light_ambient.rgb + w._light_diffuse.rgb * nl), vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     var out: WdlFsOut;

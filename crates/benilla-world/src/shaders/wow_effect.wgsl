@@ -22,6 +22,8 @@
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
+#import benilla_modern::sunshadow
+#import benilla_modern::froxelfog
 #import bevy_render::view::View
 
 // The shared global light/fog buffer (`lighting::global_light`) — the SAME layout every world
@@ -70,6 +72,10 @@ struct EffectParams {
     clip: vec4<f32>,
 };
 @group(1) @binding(3) var<uniform> wow_params: EffectParams;
+// fork: modern lighting (FORK.md, P4) — the froxel fog, sampled in the vertex stage.
+@group(1) @binding(4) var<storage, read> modern_block: sunshadow::ModernBlock;
+@group(1) @binding(5) var modern_fog_volume: texture_3d<f32>;
+@group(1) @binding(6) var modern_fog_samp: sampler;
 
 // The rain pass's forced fog colour: 0x80808080 → grey (render-state 0x0d).
 const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
@@ -93,6 +99,8 @@ struct VertexOutput {
     // View-space depth (+ in front of the camera) — the fog/farclip planar eye-Z (exact on
     // the cam-relative path, where the view transform is pure rotation).
     @location(2) view_z: f32,
+    // fork: modern lighting (FORK.md, P4) — rgb = in-scatter, a = transmittance (1 in a classic frame).
+    @location(3) fog: vec4<f32>,
 };
 
 @vertex
@@ -121,6 +129,14 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
     out.view_z = -view_pos.z;
 #endif
+    // fork: modern lighting (FORK.md, P4) — the froxel fog per vertex, like the
+    // reference's fog on this path (an off block returns no fog).
+#ifdef DECAL_WORLD_CLIP
+    let fog_world = v.position;
+#else
+    let fog_world = view.world_position.xyz + v.position;
+#endif
+    out.fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, fog_world);
     out.uv = v.uv;
     out.color = v.color;
     return out;
@@ -217,7 +233,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // geometry — same start/end, same day-night colour, applied in gamma space BEFORE blend,
     // with NO additive special-case. The blend equation then does the whole night split by
     // itself. Missing fog was the "night smoke glows" bug. (Planar eye-Z, like terrain fog.)
-    if (wow_light.fog_color.w > 0.5 && wow_params.fog.x > 0.5) {
+    // fork: modern lighting (FORK.md, P4) — a modern frame takes the froxel fog below.
+    if (wow_light.fog_color.w > 0.5 && wow_params.fog.x > 0.5 && wow_light.point_count.y < 0.5) {
         let denom = max(wow_light.fog_params.y - wow_light.fog_params.x, 0.001);
         let factor = clamp((wow_light.fog_params.y - in.view_z) / denom, 0.0, 1.0);
         // The fog COLOUR follows the policy in wow_params.fog.x (see its declaration).
@@ -242,6 +259,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef BLEND_MOD2X
         rgb = rgb * 2.295;
 #endif
+        // P4: the per-vertex froxel fog, by the draw's fog policy — scene, black (fade out), white and the
+        // rain grey (the Mod/Mod2x identities).
+        if (wow_light.fog_color.w > 0.5 && wow_params.fog.x > 0.5) {
+            if (wow_params.fog.x > 1.5 && wow_params.fog.x < 2.5) {
+                rgb = rgb * in.fog.a;
+            } else if (wow_params.fog.x > 2.5 && wow_params.fog.x < 3.5) {
+                rgb = mix(vec3<f32>(1.0), rgb, in.fog.a);
+            } else if (wow_params.fog.x > 3.5) {
+                rgb = mix(vec3<f32>(0.5), rgb, in.fog.a);
+            } else {
+                rgb = rgb * in.fog.a + in.fog.rgb;
+            }
+        }
     }
 #ifdef BLEND_ADD
     // GAMMA LANE (0161): gamma-premultiplied, raw out — N stacked faint quads SUM in gamma

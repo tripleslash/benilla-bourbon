@@ -1,0 +1,106 @@
+// Modern lighting (FORK.md, P4): froxel scattering — the Hillaire 2015 V-buffer and
+// in-scatter in one compute pass, blended with last frame's reprojected result.
+//
+// Per froxel, jittered in depth: extinction from the fog media (height falloff, near-clear, drifting
+// noise) plus the constant shaft haze; in-scatter from the key light (dual-lobe HG x cascade visibility
+// x cloud shadow), the sky (ambient x sky visibility) and the nearest point lights. Written as
+// (sigma_s * L, sigma_t) for `froxel_integrate.wgsl` to accumulate front to back.
+#import benilla_modern::sunshadow
+#import benilla_modern::froxelfog
+
+// The shared light buffer's prefix (`lighting::global_light`): the header rows and the point table,
+// packed nearest-to-camera first.
+struct LightTable {
+    rows: array<vec4<f32>, 21>,
+    points: array<vec4<f32>, 512>,
+}
+
+@group(0) @binding(0) var<storage, read> modern_block: sunshadow::ModernBlock;
+@group(0) @binding(1) var shadow_map: texture_depth_2d_array;
+@group(0) @binding(2) var shadow_samp: sampler_comparison;
+@group(0) @binding(3) var<storage, read> light_table: LightTable;
+@group(0) @binding(4) var noise_tex: texture_3d<f32>;
+@group(0) @binding(5) var repeat_samp: sampler;
+@group(0) @binding(6) var history_tex: texture_3d<f32>;
+@group(0) @binding(7) var scatter_out: texture_storage_3d<rgba16float, write>;
+
+// Under full cover the ambient in-scatter keeps this share: skylight still arrives sideways.
+const SKY_FLOOR: f32 = 0.25;
+// The noise's feature size (yd).
+const NOISE_SCALE: f32 = 48.0;
+
+@compute @workgroup_size(4, 4, 4)
+fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
+    let f = modern_block.fog;
+    if (any(id >= vec3<u32>(f.grid.xyz))) {
+        return;
+    }
+    let n = f.grid.xyz;
+    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / n.xy;
+    let s = (f32(id.z) + f.phase.z) / n.z;
+    let d = max(froxelfog::depth_of_slice(f, s), f.proj.x);
+    // Reverse-Z, infinite perspective: planar depth `d` sits at ndc z = near / d.
+    let h = f.world_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, f.proj.x / d, 1.0);
+    let p = h.xyz / h.w;
+
+    // Extinction. The fog clears inside the near-clear distance like the classic linear fog's start;
+    // the shaft haze (amendment A1) never does, so shafts can begin at the camera.
+    var clear = 1.0;
+    if (f.media.w > 1.0) {
+        clear = clamp((d - 0.6 * f.media.w) / (0.4 * f.media.w), 0.0, 1.0);
+    }
+    let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
+    let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
+    let sigma = (f.media.x * clear * wisps + f.medium.x) * froxelfog::height_density(f, p.y);
+
+    // In-scatter.
+    let ray = p - f.camera.xyz;
+    let mu = dot(ray / max(length(ray), 1e-3), f.sun_dir.xyz);
+    let ct = sunshadow::cloud_taps(f.cloud, p);
+    let cloud = sunshadow::cloud_mix(
+        ct,
+        modern_block.cloud[ct.idx.x],
+        modern_block.cloud[ct.idx.y],
+        modern_block.cloud[ct.idx.z],
+        modern_block.cloud[ct.idx.w],
+    );
+    let sun_vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p, d) * cloud;
+    let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p);
+    var lum = f.ambient.rgb * mix(SKY_FLOOR, 1.0, sky) + f.sun.rgb * (froxelfog::dual_phase(f, mu) * sun_vis);
+
+    // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
+    let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pos_range = light_table.points[2u * i];
+        let dl = length(pos_range.xyz - p);
+        if (dl >= pos_range.w) {
+            continue;
+        }
+        let q = dl / max(pos_range.w, 1e-3);
+        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+        // +0.5 keeps a froxel inside the flame finite.
+        let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
+        lum = lum + light_table.points[2u * i + 1u].rgb * (atten * window * window * f.wind.w);
+    }
+
+    var cur = vec4<f32>(lum * sigma, sigma);
+
+    // History: this froxel's world point in last frame's grid. Clip w is the planar depth.
+    if (f.medium.w > 0.0) {
+        let prev = f.prev_clip_from_world * vec4<f32>(p, 1.0);
+        if (prev.w > f.proj.x && prev.w < f.grid.w) {
+            let pn = prev.xy / prev.w;
+            let puv = vec2<f32>(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+            if (all(puv > vec2<f32>(0.0)) && all(puv < vec2<f32>(1.0))) {
+                let half_texel = vec3<f32>(0.5) / n;
+                let uvw = clamp(
+                    vec3<f32>(puv, froxelfog::slice_of_depth(f, prev.w)),
+                    half_texel,
+                    vec3<f32>(1.0) - half_texel,
+                );
+                cur = mix(cur, textureSampleLevel(history_tex, repeat_samp, uvw, 0.0), f.medium.w);
+            }
+        }
+    }
+    textureStore(scatter_out, id, cur);
+}

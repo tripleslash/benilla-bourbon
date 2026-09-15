@@ -76,7 +76,7 @@ struct WowLight {
 // fork: modern lighting (FORK.md, P2)
 @group(2) @binding(1) var modern_shadow_map: texture_depth_2d_array;
 @group(2) @binding(2) var modern_shadow_samp: sampler_comparison;
-@group(2) @binding(3) var<storage, read> modern_cascades: sunshadow::ModernCascades;
+@group(2) @binding(3) var<storage, read> modern_block: sunshadow::ModernBlock;
 
 // Per-cell state (static_gx/render.rs `cell_layout`).
 struct GxCell {
@@ -384,7 +384,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades.
     if (wow_light.point_count.y > 0.5 && (in.word & WORD_INTERIOR) == 0u) {
         let mview_z = (view.view_from_world * in.world_position).z;
-        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, n_lit, -mview_z);
+        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z);
+        // fork: modern lighting (FORK.md, P4) — cloud shadows.
+        let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
+        world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
     }
     let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, world_shadow), world_shadow, wow_light.point_count.y > 0.5);
     // Keep ambient energy when the realtime map blocks the sun. The retained pass also carries
@@ -405,7 +408,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // under the sky-occlusion map.
     var lit_nl_shadowed = lit_nl_shadowed_classic;
     if (wow_light.point_count.y > 0.5 && (in.word & WORD_INTERIOR) == 0u) {
-        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         let amb = wow_light.light_ambient.rgb;
         lit_nl_shadowed = clamp(amb * sky + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
@@ -578,7 +581,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // fork: modern lighting (FORK.md, P3) — modern: the lobe's ambient under the sky map.
         var lit_doodad = lit_doodad_classic;
         if (wow_light.point_count.y > 0.5) {
-            let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+            let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
             lit_doodad = clamp(sun_ambient * sky + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
         }
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
@@ -623,15 +626,16 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }
-    if (fog_color.w > 0.5 && (in.word & WORD_FOG_OFF) == 0u) {
+    // fork: modern lighting (FORK.md, P4) — a modern frame is fogged by the composite.
+    if (fog_color.w > 0.5 && (in.word & WORD_FOG_OFF) == 0u && wow_light.point_count.y < 0.5) {
         let denom = max(fog_span.y - fog_span.x, 0.001);
         let factor = clamp((fog_span.y - eye_z) / denom, 0.0, 1.0);
         rgb = mix(fog_color.xyz, rgb, factor);
     }
     // Raw gamma out (0161's lane); alpha pinned 1.0 — opaque-intent by admission.
     // fork: modern lighting (FORK.md) — the frame is linear.
-    if (wow_light.point_count.y > 0.5 && modern_cascades.params.w > 0.5) {
-        rgb = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
+    if (wow_light.point_count.y > 0.5 && modern_block.cascades.params.w > 0.5) {
+        rgb = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), modern_block.cascades.params.w > 1.5)); // modern shadow debug view
     }
     return vec4<f32>(colorspace::modern_out(rgb, wow_light.point_count.y), 1.0);
 }

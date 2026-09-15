@@ -43,7 +43,7 @@
 // fork: modern lighting (FORK.md, P2)
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
 @group(#{MATERIAL_BIND_GROUP}) @binding(122) var modern_shadow_samp: sampler_comparison;
-@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_cascades: sunshadow::ModernCascades;
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
 
 // **How dark a fully covered character shadow gets.** One number, carried by value in all three
 // receivers — `wow_model.wgsl` beside this file, and `benilla-world`'s `static_gx.wgsl`. Move the
@@ -387,7 +387,10 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     if (modern) {
         let mview_z = (view.view_from_world * in.world_position).z;
         let mn = normalize(in.world_normal);
-        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, mn, -mview_z);
+        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z);
+        // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
+        let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
+        world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
         // fork: modern lighting (FORK.md, P3) — the sun is evaluated per pixel under the cascades
         // (Lambert on the MCNR normal) instead of Gouraud per vertex. The primary's point-light share
         // rides along, recovered as what the vertex sum holds beyond ambient + sun.
@@ -395,7 +398,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let mndotl = max(dot(mn, ml), 0.0);
         let points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
         // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
-        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz);
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         primary = wow_light.light_ambient.rgb * sky + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
 
@@ -438,7 +441,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // Duskwood, +0.26–0.32 fog factor at the corners). The per-vertex T&L original and this
     // per-pixel form land on the same byte under LINEAR fog (the factor interpolates exactly), and
     // the per-pixel form is what survives Bevy's mesh interpolators without a custom slot.
-    if (wow_light.fog_color.w > 0.5) {
+    // fork: modern lighting (FORK.md, P4) — a modern frame is fogged by the composite.
+    if (wow_light.fog_color.w > 0.5 && !modern) {
         let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
         let denom = max(wow_light.fog_params.y - wow_light.fog_params.x, 0.001);
         let factor = clamp((wow_light.fog_params.y - eye_z) / denom, 0.0, 1.0);
@@ -449,8 +453,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // gamma exactly like the reference's byte framebuffer; the frame's ONE decode lives in the
     // FFXGlow combine (the last node). Output raw.
     // fork: modern lighting (FORK.md) — the frame is linear.
-    if (modern && modern_cascades.params.w > 0.5) {
-        tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz), modern_cascades.params.w > 1.5)); // modern shadow debug view
+    if (modern && modern_block.cascades.params.w > 0.5) {
+        tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), modern_block.cascades.params.w > 1.5)); // modern shadow debug view
     }
     return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
 }

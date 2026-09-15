@@ -1133,3 +1133,4 @@ mod tests {
 
 // fork: modern lighting (FORK.md) — see `modern/HOOKS.md`.
 mod modern_shadow;
+pub(crate) use modern_shadow::GxShadowLabel;
