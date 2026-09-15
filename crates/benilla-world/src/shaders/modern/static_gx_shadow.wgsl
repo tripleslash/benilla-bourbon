@@ -1,9 +1,11 @@
 // Modern lighting (FORK.md, P2a): the retained static world — ADT doodad cells,
 // WMO groups, interior props — drawn depth-only into the modern sun's cascade shadow views.
 // Group 1 is static_gx's own cell layout, bound unchanged; see `static_gx.wgsl` for its contract.
-#import bevy_render::view::View
-
-@group(0) @binding(0) var<uniform> view: View;
+// Group 0: this cascade's light clip (`static_gx::render::modern_shadow::CasterView`).
+struct CasterView {
+    clip_from_world: mat4x4<f32>,
+}
+@group(0) @binding(0) var<uniform> caster: CasterView;
 
 struct GxCell {
     origin: vec4<f32>, // xyz = the bake's recentring origin: world = vertex + origin
@@ -40,7 +42,7 @@ fn vertex(v: GxVertex) -> ShadowVsOut {
         return out;
     }
     let world = v.position + cell.origin.xyz;
-    out.position = view.clip_from_world * vec4<f32>(world, 1.0);
+    out.position = caster.clip_from_world * vec4<f32>(world, 1.0);
     // Pancake casters that sit between the light and the cascade's near plane onto it, so they
     // still cast (Bevy's UNCLIPPED_DEPTH_ORTHO_EMULATION, vertex half).
     out.position.z = min(out.position.z, 1.0);

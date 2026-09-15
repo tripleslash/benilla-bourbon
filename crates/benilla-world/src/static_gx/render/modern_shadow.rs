@@ -1,28 +1,52 @@
-//! **The retained static world as shadow casters** (fork-owned; `FORK.md` P2a).
+//! **The modern sun's shadow pass** (fork-owned; `FORK.md` P2).
 //!
 //! A child of `static_gx::render` so it can reuse that module's GPU state as-is: the baked cell and
 //! WMO vertex buffers, the per-cell bind groups (texture array, record table with kill bits) and the
-//! draw runs. For every cascade view of the modern sun (`modern::shadow`) it draws every cached
-//! cell, WMO and prop whose world bounds overlap the cascade, depth-only, after Bevy's own shadow
-//! pass and into the same depth attachment — which the existing receivers already sample.
+//! draw runs. Each frame, for the primary world view, it:
 //!
-//! Deliberately P2a-simple: every cascade is re-drawn each frame, and a cell casts only once it
-//! has been visible and cached. P2b replaces this with cached static cascades.
+//! 1. uploads the cascade block (`modern::shadow::ModernCascades`) to its constant-handle buffer;
+//! 2. clears every layer of the constant-handle shadow array (reverse-Z: to 0);
+//! 3. draws every cached cell, WMO and prop whose world bounds overlap each active cascade,
+//!    depth-only — opaque, or alpha-keyed for cutout runs, two-sided.
+//!
+//! Terrain and entity casters, and static caching, follow in later P2 steps.
 
 use bevy::app::SubApp;
 use bevy::pbr::graph::NodePbr;
-use bevy::pbr::{LightEntity, ShadowView, ViewLightEntities};
 use bevy::render::render_resource::binding_types::uniform_buffer;
-use bevy::render::view::{ViewUniform, ViewUniforms};
+use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::storage::GpuShaderStorageBuffer;
+use bevy::render::texture::GpuImage;
 use bevy::shader::Shader;
 
+use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
+
 use super::*;
+use crate::modern::shadow::{ModernCascades, MAX_CASCADES};
+
+#[derive(Clone, Copy, ShaderType)]
+struct CasterView {
+    clip_from_world: Mat4,
+}
 
 #[derive(Resource)]
 struct GxShadowPipelines {
     view_layout: BindGroupLayoutDescriptor,
     opaque: CachedRenderPipelineId,
     cutout: CachedRenderPipelineId,
+}
+
+#[derive(Resource, Default)]
+struct CasterViewBuffer(DynamicUniformBuffer<CasterView>);
+
+/// This frame's shadow targets: one depth view per array layer, the caster-view bind group and its
+/// per-cascade offsets. `count == 0` = nothing to draw (classic, or not ready).
+#[derive(Resource, Default)]
+struct ModernShadowFrame {
+    layers: Vec<TextureView>,
+    offsets: Vec<u32>,
+    bind: Option<BindGroup>,
+    count: u32,
 }
 
 fn init_shadow_pipelines(
@@ -34,11 +58,8 @@ fn init_shadow_pipelines(
     let shader: Handle<Shader> =
         asset_server.load("embedded://benilla_world/shaders/modern/static_gx_shadow.wgsl");
     let view_layout = BindGroupLayoutDescriptor::new(
-        "static_gx_shadow_view",
-        &BindGroupLayoutEntries::single(
-            ShaderStages::VERTEX_FRAGMENT,
-            uniform_buffer::<ViewUniform>(true),
-        ),
+        "modern_shadow_caster_view",
+        &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<CasterView>(true)),
     );
     let make = |label: &'static str, cutout: bool| RenderPipelineDescriptor {
         label: Some(label.into()),
@@ -71,10 +92,75 @@ fn init_shadow_pipelines(
         ..default()
     };
     commands.insert_resource(GxShadowPipelines {
-        opaque: pipeline_cache.queue_render_pipeline(make("static_gx_shadow", false)),
-        cutout: pipeline_cache.queue_render_pipeline(make("static_gx_shadow_cutout", true)),
+        opaque: pipeline_cache.queue_render_pipeline(make("modern_shadow_static", false)),
+        cutout: pipeline_cache.queue_render_pipeline(make("modern_shadow_static_cutout", true)),
         view_layout,
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_modern_shadow(
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    cascades: Option<Res<ModernCascades>>,
+    images: Res<RenderAssets<GpuImage>>,
+    buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    pipes: Option<Res<GxShadowPipelines>>,
+    pipeline_cache: Res<PipelineCache>,
+    mut uniforms: ResMut<CasterViewBuffer>,
+    mut frame: ResMut<ModernShadowFrame>,
+) {
+    frame.count = 0;
+    frame.bind = None;
+    let (Some(cascades), Some(pipes)) = (cascades, pipes) else {
+        return;
+    };
+    let Some(block) = buffers.get(MODERN_SHADOW_CASCADES.id()) else {
+        return;
+    };
+    // Always uploaded, so receivers see `count == 0` in a classic frame.
+    queue.write_buffer(&block.buffer, 0, &cascades.std430());
+    if cascades.count == 0 {
+        return;
+    }
+    let Some(image) = images.get(MODERN_SHADOW_MAP.id()) else {
+        return;
+    };
+    if frame.layers.is_empty() {
+        frame.layers = (0..MAX_CASCADES as u32)
+            .map(|layer| {
+                image.texture.create_view(&TextureViewDescriptor {
+                    label: Some("modern_shadow_layer"),
+                    dimension: Some(TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..default()
+                })
+            })
+            .collect();
+    }
+    uniforms.0.clear();
+    frame.offsets.clear();
+    for i in 0..MAX_CASCADES {
+        let clip_from_world = if i < cascades.count as usize {
+            cascades.clip_from_world[i]
+        } else {
+            Mat4::IDENTITY
+        };
+        let offset = uniforms.0.push(&CasterView { clip_from_world });
+        frame.offsets.push(offset);
+    }
+    uniforms.0.write_buffer(&device, &queue);
+    let Some(binding) = uniforms.0.binding() else {
+        return;
+    };
+    let layout = pipeline_cache.get_bind_group_layout(&pipes.view_layout);
+    frame.bind = Some(device.create_bind_group(
+        "modern_shadow_caster_view",
+        &layout,
+        &BindGroupEntries::single(binding),
+    ));
+    frame.count = cascades.count;
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -84,37 +170,30 @@ pub(crate) struct GxShadowLabel;
 struct GxShadowNode;
 
 impl ViewNode for GxShadowNode {
-    type ViewQuery = (&'static ViewLightEntities, &'static StaticGxView);
+    type ViewQuery = &'static StaticGxView;
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (lights, gx_view): QueryItem<'w, '_, Self::ViewQuery>,
+        gx_view: QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        if !gx_view.primary || !crate::modern::frame_is_modern() || lights.lights.is_empty() {
+        if !gx_view.primary {
             return Ok(());
         }
-        let Some(pipes) = world.get_resource::<GxShadowPipelines>() else {
+        let frame = world.resource::<ModernShadowFrame>();
+        let Some(view_bind) = frame.bind.as_ref() else {
             return Ok(());
         };
+        let cascades = world.resource::<ModernCascades>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let (Some(opaque), Some(cutout)) = (
-            pipeline_cache.get_render_pipeline(pipes.opaque),
-            pipeline_cache.get_render_pipeline(pipes.cutout),
-        ) else {
-            return Ok(());
-        };
-        let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
-            return Ok(());
-        };
-        let layout = pipeline_cache.get_bind_group_layout(&pipes.view_layout);
-        let view_bind = render_context.render_device().create_bind_group(
-            "static_gx_shadow_view",
-            &layout,
-            &BindGroupEntries::single(view_binding),
-        );
+        let ready = world.get_resource::<GxShadowPipelines>().and_then(|pipes| {
+            Some((
+                pipeline_cache.get_render_pipeline(pipes.opaque)?,
+                pipeline_cache.get_render_pipeline(pipes.cutout)?,
+            ))
+        });
 
         let gx = world.resource::<GxWorld>();
         let cache = world.resource::<GxGpuCache>();
@@ -136,40 +215,30 @@ impl ViewNode for GxShadowNode {
                 casters.push((gpu, draw));
             }
         }
-        if casters.is_empty() {
-            return Ok(());
-        }
 
-        for &light_view in &lights.lights {
-            let Ok(entity) = world.get_entity(light_view) else {
-                continue;
-            };
-            if !matches!(
-                entity.get::<LightEntity>(),
-                Some(LightEntity::Directional { .. })
-            ) {
-                continue;
-            }
-            let (Some(shadow_view), Some(offset), Some(extracted)) = (
-                entity.get::<ShadowView>(),
-                entity.get::<ViewUniformOffset>(),
-                entity.get::<ExtractedView>(),
-            ) else {
-                continue;
-            };
-            let clip_from_world = extracted.clip_from_world.unwrap_or_else(|| {
-                extracted.clip_from_view * extracted.world_from_view.to_matrix().inverse()
-            });
+        for (i, layer) in frame.layers.iter().enumerate() {
             let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some("static_gx_shadow"),
+                label: Some("modern_shadow_static"),
                 color_attachments: &[],
-                depth_stencil_attachment: Some(
-                    shadow_view.depth_attachment.get_attachment(StoreOp::Store),
-                ),
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: layer,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(0.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, &view_bind, &[offset.offset]);
+            let Some((opaque, cutout)) = ready else {
+                continue;
+            };
+            if i >= cascades.count as usize {
+                continue; // cleared, unused this tier
+            }
+            pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
+            let clip_from_world = cascades.clip_from_world[i];
             for (gpu, draw) in &casters {
                 if outside_cascade(&clip_from_world, draw) {
                     continue;
@@ -227,12 +296,18 @@ fn outside_cascade(clip_from_world: &Mat4, draw: &GxCellDraw) -> bool {
     hi.x < -1.0 || lo.x > 1.0 || hi.y < -1.0 || lo.y > 1.0
 }
 
-/// Wire the node after Bevy's shadow passes (called from `render::build`).
+/// Wire the pass before the main pass (called from `render::build`).
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
+        .init_resource::<CasterViewBuffer>()
+        .init_resource::<ModernShadowFrame>()
         .add_systems(
             bevy::render::RenderStartup,
             init_shadow_pipelines.after(init_pipelines),
+        )
+        .add_systems(
+            Render,
+            prepare_modern_shadow.in_set(RenderSystems::PrepareResources),
         )
         .add_render_graph_node::<ViewNodeRunner<GxShadowNode>>(Core3d, GxShadowLabel)
         .add_render_graph_edges(

@@ -288,7 +288,17 @@ fn init_pipelines(
         "static_gx_light_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
-            (storage_buffer_read_only_sized(false, None),),
+            (
+                storage_buffer_read_only_sized(false, None),
+                // fork: modern lighting (P2) — the modern sun's shadow array, compare sampler, cascades.
+                BindingType::Texture {
+                    sample_type: TextureSampleType::Depth,
+                    view_dimension: TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                sampler(SamplerBindingType::Comparison),
+                storage_buffer_read_only_sized(false, None),
+            ),
         ),
     );
     let cell_layout = BindGroupLayoutDescriptor::new(
@@ -793,15 +803,29 @@ fn prepare_view_bind(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     light: Option<Res<crate::lighting::SharedLightBuffer>>,
+    images: Res<RenderAssets<bevy::render::texture::GpuImage>>,
+    storage: Res<RenderAssets<bevy::render::storage::GpuShaderStorageBuffer>>,
 ) {
     let Some(light) = light else {
+        return;
+    };
+    // fork: modern lighting (P2) — the constant-handle shadow assets exist from Startup on.
+    let (Some(shadow), Some(cascades)) = (
+        images.get(benilla_assets::materials::MODERN_SHADOW_MAP.id()),
+        storage.get(benilla_assets::materials::MODERN_SHADOW_CASCADES.id()),
+    ) else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&pipes.light_layout);
     commands.insert_resource(GxLightBind(render_device.create_bind_group(
         "static_gx_light",
         &layout,
-        &BindGroupEntries::sequential((light.0.as_entire_binding(),)),
+        &BindGroupEntries::sequential((
+            light.0.as_entire_binding(),
+            &shadow.texture_view,
+            &shadow.sampler,
+            cascades.buffer.as_entire_binding(),
+        )),
     )));
 }
 

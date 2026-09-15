@@ -1070,6 +1070,8 @@ fn stream_terrain(
         let material = materials.add(ExtendedMaterial {
             base: terrain_base_material(),
             extension: TerrainExtension {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
                 layer_array: adt.layer_array.clone(),
                 alpha_array: adt.alpha_array.clone(),
                 shadow_array: adt.shadow_array.clone(),

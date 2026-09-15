@@ -17,6 +17,7 @@ use crate::view::WorldCamera;
 
 pub mod shadow;
 pub mod sun_arc;
+mod tick_heal;
 
 /// P1b's fixed exposure (the FFXGlow combine's `wave.w`); auto-exposure lands in P7.
 pub const MODERN_EXPOSURE: f32 = 1.0;
@@ -150,6 +151,24 @@ pub fn frame_is_modern() -> bool {
     MODERN_FRAME.load(Ordering::Relaxed)
 }
 
+/// Bisect switches (`$WOW_MODERN_SUNARC=0`, `$WOW_MODERN_CPUHOOKS=0`; browser `?modern_sunarc=0`,
+/// `?modern_cpuhooks=0`): turn one modern main-world behaviour off without a rebuild. Read once.
+fn switch_on(cell: &'static std::sync::OnceLock<bool>, key: &str) -> bool {
+    *cell.get_or_init(|| crate::launch_env::var(key).as_deref() != Some("0"))
+}
+
+/// The sun arc's direction overrides (`sun_arc`).
+pub fn sun_arc_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch_on(&CELL, "WOW_MODERN_SUNARC")
+}
+
+/// The CPU-side modern hooks: sky stop decode, the cloud texture's sRGB view, the disc `span.z` flag.
+pub fn cpu_hooks_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch_on(&CELL, "WOW_MODERN_CPUHOOKS")
+}
+
 /// The exact sRGB transfer, CPU side — the twin of `benilla_modern::color::srgb_to_linear_channel`.
 pub fn srgb_to_linear(c: f32) -> f32 {
     let x = c.max(0.0);
@@ -163,7 +182,7 @@ pub fn srgb_to_linear(c: f32) -> f32 {
 /// An authored gamma colour as the current frame wants it: untouched in a classic frame, decoded
 /// (rgb only; `w` rides through) in a modern one.
 pub fn decode_if_modern(v: Vec4) -> Vec4 {
-    if frame_is_modern() {
+    if frame_is_modern() && cpu_hooks_enabled() {
         Vec4::new(srgb_to_linear(v.x), srgb_to_linear(v.y), srgb_to_linear(v.z), v.w)
     } else {
         v
@@ -180,7 +199,7 @@ impl Plugin for ModernLightingPlugin {
             .init_resource::<ActiveLighting>()
             .add_plugins(ExtractResourcePlugin::<ActiveLighting>::default())
             .add_systems(PreUpdate, latch_on_world_entry)
-            .add_plugins((sun_arc::plugin, shadow::plugin));
+            .add_plugins((sun_arc::plugin, shadow::plugin, tick_heal::plugin));
     }
 }
 

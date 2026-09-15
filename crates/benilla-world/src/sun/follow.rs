@@ -119,7 +119,7 @@ pub(super) fn disc_span(dir_y: f32, size: f32) -> Vec4 {
     let elev = dir_y.clamp(-1.0, 1.0).asin();
     let half = (0.5 * size).atan();
     // fork: modern lighting (FORK.md) — `.z` = the frame is linear (celestial.wgsl).
-    let modern = if crate::modern::frame_is_modern() { 1.0 } else { 0.0 };
+    let modern = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() { 1.0 } else { 0.0 };
     Vec4::new((elev - half).sin(), (elev + half).sin(), modern, 0.0)
 }
 

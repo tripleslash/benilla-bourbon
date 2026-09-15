@@ -52,7 +52,7 @@ pub fn night_phase(minute: f32) -> f32 {
 }
 
 fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
-    if !super::frame_is_modern() {
+    if !super::frame_is_modern() || !super::sun_arc_enabled() {
         return;
     }
     let Some(clock) = clock else {

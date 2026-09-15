@@ -1097,6 +1097,8 @@ impl WorldAssets {
         let handle = materials.add(WowModelMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: crate::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: crate::materials::MODERN_SHADOW_CASCADES,
                 clutter_fade,
                 // x = WMO (FFP N·L × MOCV, not SH); y = distance-fade blend variant (depth-write-on
                 // via `specialize` — see WowModelKey; no live caller passes it here).

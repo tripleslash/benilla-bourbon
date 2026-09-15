@@ -16,6 +16,14 @@ Every edit it needs inside a file that upstream benilla also edits is listed her
 #endif
 ```
 
+## Scheduling rule: add no systems to `PostUpdate`
+
+Bevy 0.18 schedules `check_entities_needing_specialization::<M>` in `PostUpdate`, unordered against upstream's material writers (`model_fade`, `straddle`, `zfill`, `model_render` lazy spawns, `static_gx` cull…). Adding any system there reshuffles the single-threaded executor's order. A writer can then land after the check, and the render world panics at `bevy_pbr` `material.rs:1061` in classic and modern alike (bisected 2026-09-15).
+
+Fork systems go in `PreUpdate`, `Update` or `Last`.
+
+The race also fires from data alone: the sun arc moving the sky was enough. So `modern::tick_heal` (always registered, classic too) inserts the missing tick just before `specialize_material_meshes`, and warns the first time it does.
+
 ## Live hooks
 
 | File | Hook | Since |
@@ -42,7 +50,12 @@ Every edit it needs inside a file that upstream benilla also edits is listed her
 | `celestial.wgsl` | keeps Bevy's linear colour when `span.z > 0.5`; discs ×4 (HDR) in a modern frame | P1 |
 | `ffx_glow.wgsl` | `fs_downsample_hdr` entry; combine exposes (`wave.w`), adds bloom above white, `modern_tonemap` shoulder, before the classic byte math | P1b |
 | `ffx_glow.rs` | `FfxGlowPipelines::downsample_hdr` (+ queue + construction); node picks it and writes `uniform[7]` exposure when modern | P1b |
-| `benilla-world/src/static_gx/render.rs` | `mod modern_shadow;` at EOF; `modern_shadow::build(render_app)` at the end of `build` | P2a |
+| `benilla-world/src/static_gx/render.rs` | `mod modern_shadow;` at EOF; `modern_shadow::build(render_app)` at the end of `build`; the light group layout gains the shadow array, compare sampler and cascade block (bindings 1-3) and `prepare_view_bind` binds the constant-handle assets | P2 |
+| `benilla-assets/src/materials.rs` | `MODERN_SHADOW_MAP` / `MODERN_SHADOW_CASCADES` constant handles; `WowModelExt` and `TerrainExtension` gain `modern_shadow` (121/122) and `modern_cascades` (123) | P2 |
+| `world_assets/mod.rs`, `model_render.rs` (×2), `terrain_stream.rs` | the two new fields at each material construction site | P2 |
+| `terrain.wgsl` | `#import benilla_modern::sunshadow`; bindings 121-123; modern: sun visibility scales the primary's sun share, MCSH and the classic character term retire | P2 |
+| `wow_model.wgsl` | same import and bindings; modern: `player_shadow` from the modern cascades, full occlusion (`shadow_term = visibility`) | P2 |
+| `static_gx.wgsl` | same import; group 2 bindings 1-3; modern: `world_shadow` from the modern cascades (exterior), full occlusion | P2 |
 | `benilla-app/src/player_shadow.rs` | `wanted &= !frame_is_modern()` — the creature proxy retires in a modern session | P2a |
 | `benilla-world/src/shaders.rs` | `embedded_asset!` for `shaders/modern/static_gx_shadow.wgsl` | P2a |
 | `benilla-world/src/dev_state.rs` | `WOW_CLOCK` read through `crate::launch_env::var` (browser `?clock=`); `benilla-app` seeds it for the worldview | P2a |

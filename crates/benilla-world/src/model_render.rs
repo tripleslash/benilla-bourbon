@@ -369,6 +369,8 @@ pub fn model_material(
         ExtendedMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
                 // `clutter_fade.z` is unread by the shader, so it carries the per-batch pipeline markers
                 // `specialize` keys on: bit0 = no-depth-write (M2 0x10), bit1 = no-depth-test (0x08),
                 // bit2 = additive blend. (`x`/`y`/`w` stay the ground-clutter distance fade — `0` here.)
@@ -648,6 +650,8 @@ pub fn zfill_material(
         ExtendedMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
                 // Bit 10 (the twin-cutout marker) drives the shader's hard 224/255 cutout — set
                 // exactly when the colour pass discards, so depth and colour coverage agree.
                 clutter_fade: Vec4::new(

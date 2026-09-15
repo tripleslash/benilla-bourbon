@@ -29,6 +29,7 @@
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
+#import benilla_modern::sunshadow
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -72,6 +73,10 @@ struct WowLight {
     prop_probes: array<vec4<f32>, 57344>,
 }
 @group(2) @binding(0) var<storage, read> wow_light: WowLight;
+// fork: modern lighting (FORK.md, P2)
+@group(2) @binding(1) var modern_shadow_map: texture_depth_2d_array;
+@group(2) @binding(2) var modern_shadow_samp: sampler_comparison;
+@group(2) @binding(3) var<storage, read> modern_cascades: sunshadow::ModernCascades;
 
 // Per-cell state (static_gx/render.rs `cell_layout`).
 struct GxCell {
@@ -319,7 +324,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             }
         }
     }
-    let shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
+    // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades.
+    if (wow_light.point_count.y > 0.5 && (in.word & WORD_INTERIOR) == 0u) {
+        let mview_z = (view.view_from_world * in.world_position).z;
+        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, n_lit, -mview_z);
+    }
+    let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, world_shadow), world_shadow, wow_light.point_count.y > 0.5);
     // Keep ambient energy when the realtime map blocks the sun. The retained pass also carries
     // authored fixture/probe lighting, which must not be darkened by a directional shadow. The
     // `world_shadow < 0.999` arm keeps `worldShadows 0` (no shadow-mapped light) and a fully

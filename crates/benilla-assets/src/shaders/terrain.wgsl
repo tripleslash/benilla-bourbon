@@ -27,6 +27,7 @@
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
+#import benilla_modern::sunshadow
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -39,6 +40,10 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var alpha_array: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var splat_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var shadow_array: texture_2d_array<f32>;
+// fork: modern lighting (FORK.md, P2)
+@group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
+@group(#{MATERIAL_BIND_GROUP}) @binding(122) var modern_shadow_samp: sampler_comparison;
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_cascades: sunshadow::ModernCascades;
 
 // **How dark a fully covered character shadow gets.** One number, carried by value in all three
 // receivers — `wow_model.wgsl` beside this file, and `benilla-world`'s `static_gx.wgsl`. Move the
@@ -324,7 +329,15 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
             }
         }
     }
-    let primary = in.primary;
+    // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades replace
+    // the realtime fetch; shadow removes the sun's share of the Gouraud primary, never the ambient.
+    let modern = wow_light.point_count.y > 0.5;
+    var primary = in.primary;
+    if (modern) {
+        let mview_z = (view.view_from_world * in.world_position).z;
+        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, normalize(in.world_normal), -mview_z);
+        primary = wow_light.light_ambient.rgb + max(in.primary - wow_light.light_ambient.rgb, vec3<f32>(0.0)) * world_shadow;
+    }
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass
     // through `terrainp_s.bls`, which carries the MCSH bit in the blend texture's alpha (1.0 lit / 0.0
@@ -343,9 +356,9 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // MCSH always remains the authored base. Realtime character coverage applies a neutral
     // attenuation and closes the sheen gate. This makes the result monotonic and hue-preserving:
     // a character can only darken the terrain already underneath it.
-    let shadow_lit_eff = shadow_lit;
-    let spec_gate = min(shadow_lit, world_shadow);
-    let character_shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
+    let shadow_lit_eff = select(shadow_lit, 1.0, modern); // modern: MCSH retires
+    let spec_gate = select(min(shadow_lit, world_shadow), world_shadow, modern);
+    let character_shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, world_shadow), 1.0, modern);
 
     // The faithful `terrainp_s` combine (Q15):
     //   diffuse  = tex · primary · (0.3·shadow + 0.7)   → a flat −30% in shadow, NO colour tint

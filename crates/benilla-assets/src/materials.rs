@@ -38,6 +38,14 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
+// fork: modern lighting (FORK.md, P2) — the modern sun's cascade shadow map
+// (`benilla_world::modern::shadow`) and its cascade block, as constant handles so every material can
+// name them at construction whatever order the assets are created in.
+pub const MODERN_SHADOW_MAP: Handle<Image> =
+    bevy::asset::uuid_handle!("6d2f1e4a-3b7c-4e0a-9a51-0c7e8f2d9b31");
+pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderStorageBuffer> =
+    bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
+
 /// Compile the five WGSL files into the binary and register them under
 /// `embedded://benilla_assets/shaders/…`. Call **after** Bevy's `AssetPlugin` (it fills the
 /// registry that plugin creates); [`crate::register_asset_loaders`] already does.
@@ -225,6 +233,12 @@ pub struct WowModelExt {
     /// Set once, never mutated.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
+    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[sampler(122, sampler_type = "comparison", visibility(fragment))]
+    pub modern_shadow: Handle<Image>,
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
 }
 
 impl MaterialExtension for WowModelExt {
@@ -833,6 +847,12 @@ pub struct TerrainExtension {
     /// `terrain.wgsl` reads it as `var<storage, read> wow_light` (rows 0-5: light + fog + farclip).
     #[storage(90, read_only, buffer)]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
+    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[sampler(122, sampler_type = "comparison", visibility(fragment))]
+    pub modern_shadow: Handle<Image>,
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
 }
 
 impl MaterialExtension for TerrainExtension {

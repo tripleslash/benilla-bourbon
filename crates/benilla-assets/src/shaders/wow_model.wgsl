@@ -44,6 +44,7 @@
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
+#import benilla_modern::sunshadow
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -205,6 +206,10 @@ struct WowLight {
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
+// fork: modern lighting (FORK.md, P2)
+@group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
+@group(#{MATERIAL_BIND_GROUP}) @binding(122) var modern_shadow_samp: sampler_comparison;
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_cascades: sunshadow::ModernCascades;
 
 // Vanilla M2 cutout alpha-test reference (224/255 on ≤ WotLK) — kept in sync with
 // `debug_panel::VANILLA_ALPHA_KEY_REF`. Used to re-apply the hard cutout on the distance-fade blend
@@ -1157,7 +1162,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // and receive through the WOW_RIG_SKIN ground sample above. The `player_shadow < 0.999`
     // arm keeps `worldShadows 0` (and a fully sunlit fragment) byte-identical: `ambient +
     // (lit − ambient) × 1.0` is not guaranteed to round back to `lit`.
-    let shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, player_shadow);
+    // fork: modern lighting (FORK.md, P2) — per-fragment modern cascades for
+    // every lane (units included); a shadowed fragment keeps only its ambient.
+    let modern_frame = wow_light.point_count.y > 0.5;
+    if (modern_frame) {
+        let mview_z = (view.view_from_world * in.world_position).z;
+        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z);
+    }
+    let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, player_shadow), player_shadow, modern_frame);
     let lit_with_shadow = select(
         lit,
         clamp(
