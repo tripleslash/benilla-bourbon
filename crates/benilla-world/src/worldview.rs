@@ -418,8 +418,8 @@ fn start_pose() -> (Vec3, f32, f32) {
         );
     };
     let deg = |k: &str| {
-        std::env::var(k)
-            .ok()
+        // fork: modern lighting — reachable from the browser (?worldview_face= / ?worldview_pitch=).
+        crate::launch_env::var(k)
             .and_then(|v| v.trim().parse::<f32>().ok())
             .unwrap_or(0.0)
             .to_radians()

@@ -1171,7 +1171,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z);
     }
     let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, player_shadow), player_shadow, modern_frame);
-    let lit_with_shadow = select(
+    let lit_with_shadow_base = select(
         lit,
         clamp(
             wow_light.light_ambient.rgb + (lit - wow_light.light_ambient.rgb) * shadow_term,
@@ -1180,6 +1180,25 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         ),
         !is_interior && !is_rig && player_shadow < 0.999,
     );
+    // fork: modern lighting (FORK.md, P3) — foliage (a two-sided, alpha-masked material) lets
+    // the sun through: wrap diffuse past the terminator plus back-lit transmission toward the eye,
+    // both under the cascades' visibility. Bits: STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT (1<<4),
+    // ALPHA_MODE_RESERVED_BITS (7<<29) == ALPHA_MODE_MASK (1<<29).
+    let foliage_flags = pbr_input.material.flags;
+    let is_foliage = wow_light.point_count.y > 0.5 && !is_interior && !is_rig
+        && (foliage_flags & (1u << 4u)) != 0u
+        && (foliage_flags & (7u << 29u)) == (1u << 29u);
+    var foliage_light = vec3<f32>(0.0);
+    if (is_foliage) {
+        let fn_ = wow_normalize(in.world_normal);
+        let to_sun = -normalize(wow_light.light_sun.xyz);
+        let to_eye = normalize(view.world_position.xyz - in.world_position.xyz);
+        let nl = dot(fn_, to_sun);
+        let wrap = max((nl + 0.5) / 1.5, 0.0) - max(nl, 0.0);
+        let back = pow(max(dot(to_eye, -to_sun), 0.0), 6.0);
+        foliage_light = wow_light.light_diffuse.rgb * player_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
+    }
+    let lit_with_shadow = lit_with_shadow_base + foliage_light;
     // Gamma-space albedo — the lane (0161): the buffer holds bytes, lighting math runs on the
     // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
     // `m.tint` is the animated M2Color RGB (identity 1 for static batches) — the same per-batch

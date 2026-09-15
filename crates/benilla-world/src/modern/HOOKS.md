@@ -59,6 +59,15 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-app/src/player_shadow.rs` | `wanted &= !frame_is_modern()` — the creature proxy retires in a modern session | P2a |
 | `benilla-world/src/shaders.rs` | `embedded_asset!` for `shaders/modern/static_gx_shadow.wgsl` | P2a |
 | `benilla-world/src/dev_state.rs` | `WOW_CLOCK` read through `crate::launch_env::var` (browser `?clock=`); `benilla-app` seeds it for the worldview | P2a |
+| `benilla-world/src/entity_shade.rs` | the ground-shade chain `.run_if(!frame_is_modern())` | P3 |
+| `benilla-world/src/clutter.rs` | `MCSH_LIT` instead of `mcsh_tint_at` in a modern session | P3 |
+| `benilla-app/src/blob_shadow.rs` | the decal hides when `frame_is_modern()` | P3 |
+| `wow_model.wgsl`, `static_gx.wgsl` | `shade_t = 0` in a modern frame (baked doodad shade retires) | P3 |
+| `terrain.wgsl` | modern: per-pixel Lambert sun under the cascades, point share recovered from the Gouraud primary | P3 |
+| `wow_model.wgsl`, `static_gx.wgsl` | modern: exterior WMO drops its MOCV light multiplier | P3 |
+| `wow_model.wgsl` | `lit_with_shadow` → `lit_with_shadow_base` + foliage transmission (double-sided + alpha-mask flags) | P3 |
+| `static_gx.wgsl`, `static_gx/render.rs` | doodad lane `lit` is `var` + foliage transmission under `GX_TWO_SIDED`/`GX_CUTOUT`; `GX_TWO_SIDED` def pushed for two-sided pipelines | P3 |
+| `benilla-world/src/worldview.rs` | `WOW_WORLDVIEW_FACE`/`_PITCH` via `launch_env` (browser `?worldview_face=`) | P3 |
 
 ## Planned hooks (not yet landed)
 

@@ -511,10 +511,23 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             world_shadow < 0.999,
         );
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
-        let lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
+        var lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
         // FFP combine: the light sum saturates FIRST, the texture (× the baked constant
         // tint, when authored) modulates the clamped result. Statics: inst_tint identity,
         // no highlight, no SIDN.
+#ifdef GX_TWO_SIDED
+#ifdef GX_CUTOUT
+        // fork: modern lighting (FORK.md, P3) — foliage: wrap diffuse + back-lit
+        // transmission under the cascades (see wow_model.wgsl).
+        if (wow_light.point_count.y > 0.5) {
+            let to_eye = normalize(view.world_position.xyz - in.world_position.xyz);
+            let nl = dot(n_lit, L);
+            let wrap = max((nl + 0.5) / 1.5, 0.0) - max(nl, 0.0);
+            let back = pow(max(dot(to_eye, -L), 0.0), 6.0);
+            lit = lit + wow_light.light_diffuse.rgb * world_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
+        }
+#endif
+#endif
         let primary = clamp(lit + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
         rgb = folded * primary;
     }

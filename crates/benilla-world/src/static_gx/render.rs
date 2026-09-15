@@ -452,6 +452,10 @@ fn prepare_static_gx(
                 if cutout {
                     defs.push(ShaderDefVal::from("GX_CUTOUT"));
                 }
+                // fork: modern lighting (P3) — foliage transmission rides the two-sided key.
+                if two_sided {
+                    defs.push(ShaderDefVal::from("GX_TWO_SIDED"));
+                }
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(
                         format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),
