@@ -25,7 +25,7 @@ struct FroxelFog {
     grid: vec4<f32>,
     // xyz = the integrated volume texture's allocated size; w = mode (0 off, 1 analytic, 2 froxels).
     alloc: vec4<f32>,
-    // x = fog extinction (1/yd); y = 1 / height falloff (yd); z = reference height; w = near-clear distance.
+    // x = fog end (planar yd); y = 1 / height falloff (yd); z = reference height; w = fog start (planar yd).
     media: vec4<f32>,
     // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = storm blend;
     // w = scatter history weight (0 on a cut).
@@ -82,6 +82,33 @@ fn height_average(f: FroxelFog, y_from: f32, y_to: f32) -> f32 {
     return clamp((exp(a) - exp(b)) / (dy * k), 0.0, 3.0);
 }
 
+// The classic linear fog as a medium (`volumetrics::media`): extinction per yard of PLANAR depth is
+// `1 / (end + wall - d)` from the fog's start to its end, so transmittance falls along the GL fog's
+// straight ramp, and `1 / wall` beyond, where the scene is already gone. Mirrors `media::FOG_WALL_SHARE`.
+const FOG_WALL_SHARE: f32 = 0.05;
+
+fn fog_wall(f: FroxelFog) -> f32 {
+    return max(FOG_WALL_SHARE * (f.media.x - f.media.w), 1.0);
+}
+
+// Fog extinction at planar depth `d`, per yard of planar depth.
+fn fog_sigma(f: FroxelFog, d: f32) -> f32 {
+    if (d <= f.media.w) {
+        return 0.0;
+    }
+    let wall = fog_wall(f);
+    return 1.0 / max(f.media.x + wall - d, wall);
+}
+
+// Fog optical depth from the camera to planar depth `d` (the integral of `fog_sigma`).
+fn fog_depth(f: FroxelFog, d: f32) -> f32 {
+    let wall = fog_wall(f);
+    let start = f.media.w;
+    let full = f.media.x;
+    let ramp = log((full + wall - start) / (full + wall - clamp(d, start, full)));
+    return ramp + max(d - full, 0.0) / wall;
+}
+
 // Henyey-Greenstein, normalized so that its average over the sphere is 1.
 fn hg(g: f32, mu: f32) -> f32 {
     let g2 = g * g;
@@ -115,9 +142,12 @@ fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32)
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     let start = len * t;
-    let fog_len = max(len - max(f.media.w, start), 0.0);
+    // Planar depth grows linearly along the ray, so the fog's optical depth is its integral between the
+    // two planar depths, whatever the ray's angle.
+    let d = view_depth(f, p);
+    let fog_tau = fog_depth(f, d) - fog_depth(f, d * t);
     let h = height_average(f, f.camera.y + ray.y * t, p.y);
-    let tau = (f.media.x * fog_len + f.medium.x * (len - start)) * h;
+    let tau = (fog_tau + f.medium.x * (len - start)) * h;
     let tr = exp(-tau);
     let lum = f.ambient.rgb + f.sun.rgb * (dual_phase(f, dot(ray / len, f.sun_dir.xyz)) * key_share);
     return vec4<f32>(lum * (1.0 - tr), tr);

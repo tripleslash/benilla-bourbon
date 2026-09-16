@@ -439,7 +439,7 @@ fn update_volume(
         view_row: view_from_world.row(2),
         grid: grid.as_vec3().extend(tier.range),
         alloc: VOLUME_ALLOC.as_vec3().extend(tier.mode.as_f32()),
-        media: Vec4::new(media.sigma, media.inv_height, reference_height, media.near_clear),
+        media: Vec4::new(media.fog_end, media.inv_height, reference_height, media.near_clear),
         medium: Vec4::new(
             media.haze,
             media.noise,

@@ -63,16 +63,16 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let h = f.world_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, f.proj.x / d, 1.0);
     let p = h.xyz / h.w;
 
-    // Extinction. The fog clears inside the near-clear distance like the classic linear fog's start;
-    // the shaft haze (amendment A1) never does, so shafts can begin at the camera.
-    var clear = 1.0;
-    if (f.media.w > 1.0) {
-        clear = clamp((d - 0.6 * f.media.w) / (0.4 * f.media.w), 0.0, 1.0);
-    }
+    // Extinction. The fog follows the classic linear ramp in planar depth (clear before its start); the
+    // shaft haze (amendment A1) never clears, so shafts can begin at the camera. The volume integrates
+    // along the view ray, so the fog's per-planar-yard density is spread over the ray's longer path.
+    let vx = (uv.x * 2.0 - 1.0) * f.proj.y;
+    let vy = (1.0 - uv.y * 2.0) * f.proj.z;
+    let stretch = sqrt(1.0 + vx * vx + vy * vy);
     let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
     let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
     let density = froxelfog::height_density(f, p.y);
-    let sigma_fog = f.media.x * clear * wisps * density;
+    let sigma_fog = froxelfog::fog_sigma(f, d) / stretch * wisps * density;
     let sigma_haze = f.medium.x * density;
     let sigma = sigma_fog + sigma_haze;
 
