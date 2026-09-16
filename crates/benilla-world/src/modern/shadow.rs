@@ -75,11 +75,15 @@ pub const CASCADES_BYTES: usize = 5 * 64 + 5 * 16;
 
 /// Where each cascade ends (view distance, yd), per tier — the plan's tier table.
 pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
+    // The last cascade reaches most of the view distance: static casters are cached per cascade, so a
+    // far cascade costs a redraw only when it re-centres, and without it the sun's shadows (and so
+    // the scene's contrast) ended in a band that walked ahead of the camera. Past it the sky map
+    // (`sunshadow::far_sun_visibility`) takes over.
     match quality {
         LightingQuality::Low => &[15.0, 60.0],
-        LightingQuality::Medium => &[16.0, 60.0, 240.0],
-        LightingQuality::High => &[16.0, 55.0, 160.0, 320.0],
-        LightingQuality::Ultra => &[20.0, 70.0, 200.0, 450.0],
+        LightingQuality::Medium => &[16.0, 60.0, 200.0, 500.0],
+        LightingQuality::High => &[16.0, 55.0, 200.0, 600.0],
+        LightingQuality::Ultra => &[20.0, 70.0, 250.0, 800.0],
     }
 }
 

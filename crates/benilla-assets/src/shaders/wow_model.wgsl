@@ -1021,6 +1021,21 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if ((u32(m.clutter_fade.z) & 1024u) != 0u && base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
+    // fork: the alpha-mask cutout, spelled out in the entry point as well as in bevy's
+    // `alpha_discard` below. Past a certain fragment size (the modern lighting stack) Chrome/Metal
+    // stopped honouring the discard inside that helper, and alpha-tested WMO canopies and tree cards
+    // drew as solid polygons. Bits: ALPHA_MODE_RESERVED_BITS (7 << 29), MASK (1 << 29).
+    if ((pbr_input.material.flags & (7u << 29u)) == (1u << 29u)
+        && base_color.a < pbr_input.material.alpha_cutoff) {
+        discard;
+    }
+    // fork: the depth-prime twin stops here, and the colour lane below is not COMPILED into it at
+    // all (a preprocessor cut, not an early return, so no dead tail reaches naga's MSL writer). On
+    // Chrome/Metal a colour-masked twin carrying the whole lighting stack lost its cutout: it wrote
+    // depth over the entire card, and a fading tree's holes blocked the sky behind them (black).
+#ifdef WOW_ZFILL
+    out.color = vec4<f32>(0.0);
+#else
     // DEPTH-PRIME TWIN (the zfill pipeline variant — terrain.rs `specialize`, the reference's
     // M2UseZFill clone command, wow-re m2-blend-promotion-zfill.md §4): colour writes are masked
     // off at the pipeline, so on that variant only the discards above (farclip wall, the
@@ -1693,5 +1708,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     }
 #endif
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
+#endif
     return out;
 }

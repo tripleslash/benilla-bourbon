@@ -83,9 +83,9 @@ impl ZoneLook {
 /// The look table, by `AreaTable.dbc` zone id.
 const ZONES: &[(u32, ZoneLook)] = &[
     // Teldrassil: dense purple canopy haze, a strong forward glow through the openings.
-    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.15, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::NEUTRAL }),
+    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.08, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::NEUTRAL }),
     // Darnassus: Teldrassil's light, a little clearer.
-    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.12, haze: 0.0026, forward: 0.75, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
+    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
     // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
     (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
     // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.

@@ -562,7 +562,15 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // fork: modern lighting — a modern frame adds a wind-driven swell under the authored bump.
     let modern = wow_light.point_count.y > 0.5;
     if (modern) {
-        swell = swell + sunshadow::wind_swell(in.world_position.xz, globals.time, length(in.view_vec));
+        // Two slow drifting taps of the noise volume: one warps the wave phases, one is the gust
+        // field, so no two stretches of water repeat the same pattern.
+        let wn = in.world_position.xz;
+        let wt = globals.time;
+        let warp_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(wn * 0.011 + vec2<f32>(wt * 0.004, 0.0), fract(wt * 0.003)), 0.0).rgb;
+        let gust_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(wn * 0.0045 - sunshadow::wind_dir() * wt * 0.0012, fract(wt * 0.002 + 0.5)), 0.0).r;
+        let warp = warp_n.rg * 2.0 - vec2<f32>(1.0);
+        let gust = smoothstep(0.25, 0.75, gust_n);
+        swell = swell + sunshadow::wind_swell(wn, wt, length(in.view_vec), warp, gust);
     }
     let grad = normalize(vec3<f32>(
         swell + ripple_slope(in.world_position.xz, swell),

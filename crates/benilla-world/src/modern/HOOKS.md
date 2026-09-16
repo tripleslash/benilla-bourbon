@@ -124,6 +124,8 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `wow_model.wgsl` | every modern block (room light, cascades, foliage, sky/GI ambient, window emitter, per-pixel points, linear decode + froxel fog, debug views, the vertex `point_sel`) sits under `#ifdef WOW_MODERN` with a classic `#else` value: a classic pipeline compiling that code dead drew Chrome/Metal leaf-card holes black (bisected to P3 step 4's `wow_model` hunk) | P6 fix |
 | `liquid_cata.wgsl` | binding 121 `modern_shadow_map`; `modern_glint` private; modern: `sunshadow::wind_swell` on the bump slope, sun visibility (`sun_visibility_load` × cloud) on the body light, glare and specular, an HDR glitter lobe added by the linear wrapper | P6 fix |
 | `benilla-world/src/liquid/surface.rs` | `modern_shadow: MODERN_SHADOW_MAP` at the cata construction site | P6 fix |
+| `wow_model.wgsl` | an explicit alpha-mask discard (`material.flags` MASK, `alpha_cutoff`) in the entry point before `alpha_discard`; `#ifdef WOW_ZFILL` cuts the colour lane out of the depth-prime twin | P6 fix 2 |
+| `benilla-assets/src/materials.rs` | `specialize` pushes `WOW_ZFILL` to the depth-prime twin's fragment | P6 fix 2 |
 | `benilla-world/src/liquid/ripple.rs` | `collect_stamps`: wind cat's-paw stamps (`WIND_*`) before the rain when `frame_is_modern()` | P6 fix |
 
 ## Planned hooks (not yet landed)

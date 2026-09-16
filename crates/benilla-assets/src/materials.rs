@@ -452,6 +452,9 @@ impl MaterialExtension for WowModelExt {
             }
         }
         if key.bind_group_data.zfill {
+            if let Some(frag) = descriptor.fragment.as_mut() {
+                frag.shader_defs.push("WOW_ZFILL".into());
+            }
             // The depth-prime twin (`model_render::zfill_material` — the reference's `M2UseZFill`
             // clone, wow-re `m2-blend-promotion-zfill.md` §4): a translucent model's z-writing
             // batches draw once colour-masked-off, blend-off, z-write ON, sorted before its colour

@@ -258,35 +258,46 @@ fn wind_dir() -> vec2<f32> {
     return normalize(vec2<f32>(0.9, 0.35));
 }
 
-// A wind-driven swell as a surface SLOPE (d height / d xz), for the modern water: five directional
-// deep-water waves spread about the wind, each fading out before it would alias at its distance, with
-// slow gusts rolling across them so the surface has patches of chop and calm.
-fn wind_swell(xz: vec2<f32>, time: f32, dist: f32) -> vec2<f32> {
+// A wind-driven sea as a surface SLOPE (d height / d xz), for the modern water. Nine directional
+// deep-water trains from long swell to short chop, their directions spread irregularly about the wind
+// (not a fan), their phases pushed around by a caller-supplied noise `warp` so crests never line up
+// into a visible lattice, and their energy gathered into gust patches by `gust` (0..1, also noise).
+// Each train fades out before it would alias at this distance.
+fn wind_swell(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32) -> vec2<f32> {
     let wd = wind_dir();
     let across = vec2<f32>(-wd.y, wd.x);
-    // Gusts: a large, slowly advected pattern (cat's paws), 0.35..1.
-    let g = xz * 0.021 - wd * time * 0.09;
-    let gust = 0.675 + 0.325 * sin(g.x * 1.7 + sin(g.y * 1.3 + time * 0.05) * 2.0) * cos(g.y * 1.1 - g.x * 0.4);
-    var slope = vec2<f32>(0.0);
     // wavelength (yd), direction offset across the wind, steepness
-    let waves = array<vec3<f32>, 5>(
-        vec3<f32>(11.0, 0.0, 0.10),
-        vec3<f32>(6.3, 0.45, 0.09),
-        vec3<f32>(3.7, -0.35, 0.08),
-        vec3<f32>(2.1, 0.8, 0.07),
-        vec3<f32>(1.3, -0.65, 0.06),
+    let waves = array<vec3<f32>, 9>(
+        vec3<f32>(17.3, 0.07, 0.055),
+        vec3<f32>(11.1, -0.31, 0.06),
+        vec3<f32>(7.9, 0.46, 0.058),
+        vec3<f32>(5.3, -0.12, 0.055),
+        vec3<f32>(3.7, 0.83, 0.05),
+        vec3<f32>(2.6, -0.58, 0.046),
+        vec3<f32>(1.9, 0.24, 0.042),
+        vec3<f32>(1.3, -0.97, 0.036),
+        vec3<f32>(0.9, 0.62, 0.03),
     );
-    for (var k = 0u; k < 5u; k = k + 1u) {
+    // Chop (short trains) follows the gusts; swell (long trains) barely does.
+    var slope = vec2<f32>(0.0);
+    for (var k = 0u; k < 9u; k = k + 1u) {
         let wl = waves[k].x;
         let dir = normalize(wd + across * waves[k].y);
         let kw = 6.2831853 / wl;
         // Deep water: omega = sqrt(g k), g = 9.8 m/s^2 in yards.
         let omega = sqrt(10.7 * kw);
-        let phase = dot(dir, xz) * kw - omega * time + f32(k) * 1.7;
+        let fk = f32(k);
+        // The warp displaces each train by a different share of its own wavelength.
+        let shift = dot(warp, vec2<f32>(cos(fk * 2.4), sin(fk * 2.4))) * wl * 0.6;
+        let phase = (dot(dir, xz) + shift) * kw - omega * time + fk * 1.37;
         let fade = 1.0 - smoothstep(wl * 18.0, wl * 45.0, dist);
-        slope = slope + dir * (cos(phase) * waves[k].z * fade);
+        let chop = mix(0.85, 0.25 + 1.1 * gust, clamp(1.0 - wl / 8.0, 0.0, 1.0));
+        // A sharpened crest: slope of a trochoid-like profile, steeper just before the crest.
+        let c = cos(phase);
+        let crest = c * (1.0 + 0.35 * sin(phase));
+        slope = slope + dir * (crest * waves[k].z * fade * chop);
     }
-    return slope * gust;
+    return slope;
 }
 
 // P4: `sky_visibility` in one tap.
