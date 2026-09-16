@@ -99,6 +99,15 @@ fn dual_phase(f: FroxelFog, mu: f32) -> f32 {
 // itself: rgb = in-scattered radiance, a = transmittance. The fog starts at the near-clear distance;
 // the shaft haze does not.
 fn analytic_path(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
+    return analytic_path_keyed(f, p, t_start, 1.0);
+}
+
+// Past the froxel grid nothing knows where the key light is shadowed, so the tail keeps only this
+// share of its key in-scatter: a long view ray past a ridge or a canopy otherwise lit up the whole
+// distance behind it as if the sun reached every yard of it.
+const TAIL_KEY_SHARE: f32 = 0.35;
+
+fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32) -> vec4<f32> {
     let ray = p - f.camera.xyz;
     let len = length(ray);
     let t = max(t_start, 0.0);
@@ -110,7 +119,7 @@ fn analytic_path(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     let h = height_average(f, f.camera.y + ray.y * t, p.y);
     let tau = (f.media.x * fog_len + f.medium.x * (len - start)) * h;
     let tr = exp(-tau);
-    let lum = f.ambient.rgb + f.sun.rgb * dual_phase(f, dot(ray / len, f.sun_dir.xyz));
+    let lum = f.ambient.rgb + f.sun.rgb * (dual_phase(f, dot(ray / len, f.sun_dir.xyz)) * key_share);
     return vec4<f32>(lum * (1.0 - tr), tr);
 }
 
@@ -158,6 +167,6 @@ fn fog_at(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, p: vec3<f32>) -> ve
     if (d <= f.grid.w) {
         return near;
     }
-    let tail = analytic_path(f, p, f.grid.w / d);
+    let tail = analytic_path_keyed(f, p, f.grid.w / d, TAIL_KEY_SHARE);
     return vec4<f32>(near.rgb + near.a * tail.rgb, near.a * tail.a);
 }

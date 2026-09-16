@@ -239,14 +239,27 @@ impl Plugin for ModernLightingPlugin {
 fn latch_on_world_entry(
     settings: Res<LightingSettings>,
     mut active: ResMut<ActiveLighting>,
-    entered: Query<(), Added<WorldCamera>>,
+    cameras: Query<&Camera, With<WorldCamera>>,
+    mut in_world: Local<bool>,
 ) {
-    if entered.is_empty() {
+    // The client spawns its world camera at startup and only switches it on for the world (and its
+    // loading cover), so "in the world" is an ACTIVE world camera. Out of the world — login,
+    // character select and creation — everything renders classic.
+    let now = cameras.iter().any(|c| c.is_active);
+    if now == *in_world {
         return;
     }
-    let next = ActiveLighting {
-        model: settings.model,
-        quality: settings.quality,
+    *in_world = now;
+    let next = if now {
+        ActiveLighting {
+            model: settings.model,
+            quality: settings.quality,
+        }
+    } else {
+        ActiveLighting {
+            model: LightingModel::Classic,
+            quality: settings.quality,
+        }
     };
     if *active != next {
         info!("lighting latched: {:?} / {:?}", next.model, next.quality);

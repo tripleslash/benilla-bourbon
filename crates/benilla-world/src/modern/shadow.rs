@@ -59,7 +59,9 @@ const SKY_SNAP: f32 = 32.0;
 /// Edge of every cascade, in texels.
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// How far toward the sun (yd) beyond a cascade's sphere casters are still captured.
-pub const CASTER_REACH: f32 = 300.0;
+/// (Was 300: at a low sun a ridge further than that toward the light cast nothing into a far
+/// cascade, and the haze and ground behind it lit up.)
+pub const CASTER_REACH: f32 = 1200.0;
 /// Constant depth bias, in yards along the light.
 const DEPTH_BIAS_YD: f32 = 0.15;
 /// Normal offset, in texels.

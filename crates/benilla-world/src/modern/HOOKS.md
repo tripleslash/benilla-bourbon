@@ -126,6 +126,7 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/liquid/surface.rs` | `modern_shadow: MODERN_SHADOW_MAP` at the cata construction site | P6 fix |
 | `wow_model.wgsl` | an explicit alpha-mask discard (`material.flags` MASK, `alpha_cutoff`) in the entry point before `alpha_discard`; `#ifdef WOW_ZFILL` cuts the colour lane out of the depth-prime twin | P6 fix 2 |
 | `benilla-assets/src/materials.rs` | `specialize` pushes `WOW_ZFILL` to the depth-prime twin's fragment | P6 fix 2 |
+| `benilla-world/src/ffx_glow.rs` | the modern decode / HDR downsample only for the `FfxState::Player` view (`FfxGlow::WORLD`); booths, UI panes and the glue scene stay classic | P6 fix 3 |
 | `benilla-world/src/liquid/ripple.rs` | `collect_stamps`: wind cat's-paw stamps (`WIND_*`) before the rain when `frame_is_modern()` | P6 fix |
 
 ## Planned hooks (not yet landed)

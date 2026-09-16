@@ -822,7 +822,10 @@ impl ViewNode for FfxGlowNode {
             wave,
         );
         // fork: modern lighting (FORK.md) — `wave.z`: the scene arrives linear.
-        let modern = crate::modern::frame_is_modern();
+        // Only the world view: portrait booths, UI model panes and the glue scene render classic
+        // content (their own light blobs carry no modern flag), so decoding them as linear HDR would
+        // tint and tonemap a classic picture. `WORLD` is the one view in the player state.
+        let modern = crate::modern::frame_is_modern() && glow.state == FfxState::Player;
         if modern {
             uniform[6] = 1.0;
             uniform[7] = crate::modern::look::exposure(); // fork: modern lighting (P4) — the zone look's exposure
