@@ -25,6 +25,25 @@ pub const MIN_KEY_ELEVATION: f32 = 4.0 * PI / 180.0;
 /// Below this elevation the sun hands the key to the moon.
 const HANDOFF_ELEVATION: f32 = -2.0 * PI / 180.0;
 
+/// The key light's strength against its body's TRUE elevation (the key's direction is floored at
+/// [`MIN_KEY_ELEVATION`], its energy is not): full from 8° up, nothing once the body is below the
+/// horizon. Without it a moon that had already set still lit the night almost horizontally —
+/// through mountain ranges no cascade holds, and as a dawn-like glow in the haze.
+const KEY_FULL_ELEVATION: f32 = 8.0 * PI / 180.0;
+const KEY_ZERO_ELEVATION: f32 = -1.0 * PI / 180.0;
+
+static KEY_HORIZON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// The key light's horizon factor (1 in a classic frame, or with the arc switched off).
+pub fn key_horizon() -> f32 {
+    f32::from_bits(KEY_HORIZON.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn horizon_factor(elevation: f32) -> f32 {
+    let t = ((elevation - KEY_ZERO_ELEVATION) / (KEY_FULL_ELEVATION - KEY_ZERO_ELEVATION)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(Update, apply_sun_arc.after(LightingResolveSet));
 }
@@ -53,6 +72,7 @@ pub fn night_phase(minute: f32) -> f32 {
 
 fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
     if !super::frame_is_modern() || !super::sun_arc_enabled() {
+        KEY_HORIZON.store(1.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let Some(clock) = clock else {
@@ -67,11 +87,12 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
     lighting.celestial_dir = sun;
     lighting.moon_dir_white = moon;
 
-    let to_key = if sun_elev > HANDOFF_ELEVATION {
-        arc_to_body(day_phase(minute), sun_elev.max(MIN_KEY_ELEVATION))
+    let (to_key, key_elev) = if sun_elev > HANDOFF_ELEVATION {
+        (arc_to_body(day_phase(minute), sun_elev.max(MIN_KEY_ELEVATION)), sun_elev)
     } else {
-        arc_to_body(night_phase(minute), moon_elev.max(MIN_KEY_ELEVATION))
+        (arc_to_body(night_phase(minute), moon_elev.max(MIN_KEY_ELEVATION)), moon_elev)
     };
+    KEY_HORIZON.store(horizon_factor(key_elev).to_bits(), std::sync::atomic::Ordering::Relaxed);
     // `sun_dir` is the direction light TRAVELS.
     lighting.sun_dir = -to_key;
 }
@@ -94,6 +115,14 @@ mod tests {
             assert!((v.y - e.sin()).abs() < 1e-4);
             assert!((v.length() - 1.0).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn a_set_body_lights_nothing() {
+        assert_eq!(horizon_factor(-5f32.to_radians()), 0.0);
+        assert_eq!(horizon_factor(20f32.to_radians()), 1.0);
+        let low = horizon_factor(3f32.to_radians());
+        assert!(low > 0.1 && low < 0.9, "{low}");
     }
 
     #[test]

@@ -43,8 +43,8 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/clouds/mod.rs` | cloud image re-upload: `Rgba8UnormSrgb` when modern | P1 |
 | `benilla-world/src/ffx_glow.rs` | render-world `combine_uniform` call: `uniform[6]` (`wave.z`) = modern flag | P1 |
 | `terrain.wgsl`, `static_gx.wgsl`, `wdl.wgsl` | `#import benilla_modern::color`; output through `color::modern_out(…, point_count.y)`; wdl's struct padded to row 20 | P1 |
-| `wow_model.wgsl` | `#import`; decode block before `out.color` (additive premultiply, Mod/Mod2x identity, Mod2x ×2.295) | P1 |
-| `wow_effect.wgsl` | `#import`; struct padded to row 20; decode before the blend `#ifdef` ladder | P1 |
+| `wow_model.wgsl` | `#import`; decode block before `out.color` (additive premultiplied in gamma, then decoded; Mod/Mod2x identity, Mod2x ×2.295) | P1 |
+| `wow_effect.wgsl` | `#import`; struct padded to row 20; decode before the blend `#ifdef` ladder (`BLEND_ADD` folds α in gamma first; `add_alpha` in its return) | P1 |
 | `liquid.wgsl`, `liquid_cata.wgsl` | `#import`; struct row 20; `fragment` renamed `fragment_classic` + wrapper entry at EOF; cata re-encodes its scene-copy/blur/mirror reads via `color::modern_in` | P1 |
 | `ffx_glow.wgsl` | `#import`; combine reads scene + blur through `color::modern_in(…, ffx.wave.z)` | P1 |
 | `celestial.wgsl` | keeps Bevy's linear colour when `span.z > 0.5`; discs ×4 (HDR) in a modern frame | P1 |

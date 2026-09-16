@@ -252,10 +252,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let factor = clamp((wow_params.fog.w - in.view_z) / denom, 0.0, 1.0);
         rgb = mix(RAIN_FOG_GREY, rgb, factor);
     }
-    // fork: modern lighting (FORK.md) — decode before the premultiply; Mod2x keeps
+    // fork: modern lighting (FORK.md) — decode after the additive premultiply (in
+    // gamma, like the classic fold: decoding first inflates a soft halo by α^(1/2.2)); Mod2x keeps
     // its 0.5-grey identity neutral in linear (see wow_model.wgsl).
+    var add_alpha = c.a;
     if (wow_light.point_count.y > 0.5) {
+#ifdef BLEND_ADD
+        rgb = colorspace::srgb_to_linear(rgb * c.a);
+        add_alpha = 1.0;
+#else
         rgb = colorspace::srgb_to_linear(rgb);
+#endif
 #ifdef BLEND_MOD2X
         rgb = rgb * 2.295;
 #endif
@@ -276,7 +283,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef BLEND_ADD
     // GAMMA LANE (0161): gamma-premultiplied, raw out — N stacked faint quads SUM in gamma
     // like the reference's bytes. α = 0 turns (One, 1−srcα) into pure addition.
-    return vec4<f32>(rgb * c.a, 0.0);
+    return vec4<f32>(rgb * add_alpha, 0.0);
 #else
 #ifdef BLEND_OPAQUE
     return vec4<f32>(rgb, 1.0);

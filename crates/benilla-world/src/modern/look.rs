@@ -139,7 +139,8 @@ static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
 /// The key and fill gains for the shared light's rows (1, 1 in a classic session).
 pub fn key_fill() -> (f32, f32) {
     (
-        f32::from_bits(KEY.load(Ordering::Relaxed)),
+        // The key also fades with its body's elevation (`sun_arc::key_horizon`, 1 in classic).
+        f32::from_bits(KEY.load(Ordering::Relaxed)) * super::sun_arc::key_horizon(),
         f32::from_bits(FILL.load(Ordering::Relaxed)),
     )
 }

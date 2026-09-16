@@ -385,7 +385,8 @@ fn update_volume(
         fog_start: l.wmo_fog_start,
         fog_end: l.wmo_fog_end,
         ambient: l.ambient,
-        diffuse: l.diffuse,
+        // The key's horizon fade (a set moon scatters nothing into the haze).
+        diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
         storm: l.storm_bcc,
         underwater: underwater.is_some_and(|u| u.0.any()),
         interior: crossfade.map_or(0.0, |c| c.t()),

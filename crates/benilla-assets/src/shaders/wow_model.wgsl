@@ -1659,15 +1659,18 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // GAMMA LANE (0161): raw gamma out — blending (alpha AND additive) happens in gamma like
     // the reference's byte framebuffer; the frame decodes once in the FFXGlow combine. (The old
     // `lin` A/B emitted linear for the sRGB encode — subsumed by the lane.)
-    // fork: modern lighting (FORK.md) — the frame is linear, so decode BEFORE the
+    // fork: modern lighting (FORK.md) — the frame is linear, so decode AFTER the
     // premultiply (additive) and the identity mix (Mod/Mod2x). Mod stays exact in linear
     // ((ab)^γ = a^γ·b^γ); Mod2x's (Dst, Src) doubling becomes 2·a·b in linear, so the source is
     // scaled by 2.295 (= 0.5 / srgb_to_linear(0.5) / 2 · 2) to keep its 0.5-grey identity neutral.
 #ifdef WOW_MODERN
     if (wow_light.point_count.y > 0.5) {
         var lin = colorspace::srgb_to_linear(rgb);
+        // Additive: the alpha weight folds in BEFORE the decode, like the classic lane's gamma fold.
+        // Weighting after it is the α^(1/2.2) inflation 0160 removed — a 30% halo edge reads ~58%,
+        // so every soft glow card around a lamp swells into a bright disc.
         if (is_additive) {
-            lin = lin * faded_alpha;
+            lin = colorspace::srgb_to_linear(rgb * faded_alpha);
         }
         if (is_mod || is_mod2x) {
             let identity = select(vec3<f32>(1.0), vec3<f32>(0.5), is_mod2x);
