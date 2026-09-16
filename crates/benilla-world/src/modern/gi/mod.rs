@@ -336,7 +336,17 @@ struct GiHistory {
     frame: u32,
     camera: Option<Vec3>,
     tier: Option<GiTier>,
+    /// The debounced interior verdict: the building the sub-grid is live for, and how long the raw
+    /// claim has disagreed with it (s).
+    room: Option<Entity>,
+    disagree: f32,
 }
+
+/// How long the camera's interior claim must hold before the 1.5 yd sub-grid appears (s)…
+const INTERIOR_ENTER_SECS: f32 = 0.25;
+/// …and how long it must stay gone before the sub-grid is dropped again. A doorway, or a claim that
+/// flickers at a portal, must not toggle the grid every few frames.
+const INTERIOR_LEAVE_SECS: f32 = 1.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ModernGi>()
@@ -358,6 +368,7 @@ fn update_gi(
     claim: Option<Res<crate::wmo_portal::CameraInteriorClaim>>,
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
     wmos: Res<Assets<benilla_assets::WmoModel>>,
+    time: Res<Time>,
     mut out: ResMut<ModernGi>,
     mut hist: Local<GiHistory>,
 ) {
@@ -366,7 +377,20 @@ fn update_gi(
     // fine covers 36 yd, which is a room and not a zone, so it is the room's presence that pays for
     // it. The exterior ladder behind it is untouched, so stepping outside is a cascade dropping off
     // the front rather than a whole field being re-fitted.
-    let inside = claim.as_ref().and_then(|c| c.0).map(|c| c.room.instance);
+    let raw = claim.as_ref().and_then(|c| c.0).map(|c| c.room.instance);
+    if raw.is_some() != hist.room.is_some() {
+        hist.disagree += time.delta_secs();
+        let limit = if raw.is_some() { INTERIOR_ENTER_SECS } else { INTERIOR_LEAVE_SECS };
+        if hist.disagree >= limit {
+            hist.room = raw;
+            hist.disagree = 0.0;
+        }
+    } else {
+        // Same verdict; walking from one building straight into another just follows it.
+        hist.room = raw;
+        hist.disagree = 0.0;
+    }
+    let inside = hist.room;
     let tier = if inside.is_some() {
         base_tier.with_interior()
     } else {
@@ -395,9 +419,11 @@ fn update_gi(
         return;
     };
     let cam = camera.translation();
-    let cut = hist.camera.is_none_or(|p| p.distance(cam) > 60.0) || hist.tier != Some(tier);
+    // The interior sub-grid coming or going is not a cut: it is stored behind the exterior ladder
+    // (`probegi::storage_cascade`), so every exterior probe keeps its slot and its history.
+    let cut = hist.camera.is_none_or(|p| p.distance(cam) > 60.0) || hist.tier != Some(base_tier);
     hist.camera = Some(cam);
-    hist.tier = Some(tier);
+    hist.tier = Some(base_tier);
     hist.frame = hist.frame.wrapping_add(1);
 
     // The ray set turns a little every frame, so the estimate's own bias averages out over the

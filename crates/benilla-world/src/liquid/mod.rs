@@ -149,6 +149,11 @@ pub struct WaterDetail(pub u8);
 
 /// The 1.12.1 renderer.
 pub const WATER_DETAIL_LEGACY: u8 = 0;
+/// fork: the Cataclysm renderer WITHOUT its planar mirror — the screen-space trace alone over the
+/// horizon colour (what perm 4 runs). Skips the second, mirrored scene render (and every modern
+/// lighting pass that render drags along) for about half the water's cost. It sits in the
+/// reference's medium-tier slot, which benilla never implemented.
+pub const WATER_DETAIL_SSR: u8 = 1;
 /// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
 pub const WATER_DETAIL_CATA: u8 = 2;
 
@@ -165,16 +170,23 @@ impl WaterDetail {
     pub fn from_cvar(v: f32) -> Self {
         if v <= 0.0 {
             WaterDetail(WATER_DETAIL_LEGACY)
+        } else if v < 1.5 {
+            WaterDetail(WATER_DETAIL_SSR)
         } else {
             WaterDetail(WATER_DETAIL_CATA)
         }
+    }
+
+    /// Does the cata water get its planar mirror render? Only the full tier does; the SSR tier
+    /// reflects through the screen-space trace alone.
+    pub fn has_planar_reflection(self) -> bool {
+        self.0 >= WATER_DETAIL_CATA
     }
 }
 
 impl Default for WaterDetail {
     fn default() -> Self {
-        match std::env::var("WOW_WATER_DETAIL")
-            .ok()
+        match crate::launch_env::var("WOW_WATER_DETAIL")
             .and_then(|v| v.parse::<f32>().ok())
         {
             Some(v) => Self::from_cvar(v),

@@ -60,7 +60,7 @@ struct GiProbe {
     // P6: x = the mean ray hit distance (yd), y = its mean square — the two moments a Chebyshev
     // visibility test needs; z = the probe's interior class (1 = nothing overhead reaches the sky),
     // which is what keeps a room's probes out of the street and the street's out of the room;
-    // w spare.
+    // w = 1 once the slot has been traced (validity cannot say so: an invalid probe is traced too).
     depth: vec4<f32>,
 }
 
@@ -79,11 +79,30 @@ fn wrap(v: i32, n: i32) -> i32 {
     return ((v % n) + n) % n;
 }
 
+// Where cascade `c`'s probes live in the block. The interior sub-grid is cascade 0 for every reader
+// (finest first) but is STORED behind the exterior ladder, so stepping into or out of a WMO leaves
+// every exterior probe in the slot it already had, with its history. Before this, the whole ladder
+// shifted one slot and the field re-seeded from single noisy traces: rooms and canopies blinked.
+fn storage_cascade(g: GiParams, c: u32) -> u32 {
+    if (!interior_grid(g)) {
+        return c;
+    }
+    return select(c - 1u, u32(g.dims.w) - 1u, c == 0u);
+}
+
+// The inverse: which cascade a storage block holds.
+fn logical_cascade(g: GiParams, s: u32) -> u32 {
+    if (!interior_grid(g)) {
+        return s;
+    }
+    return select(s + 1u, 0u, s == u32(g.dims.w) - 1u);
+}
+
 fn probe_index(g: GiParams, c: u32, w: vec3<i32>) -> u32 {
     let n = vec3<i32>(g.dims.xyz);
     let t = vec3<i32>(wrap(w.x, n.x), wrap(w.y, n.y), wrap(w.z, n.z));
     let inside = (t.z * n.y + t.y) * n.x + t.x;
-    return u32(inside) + c * u32(g.params.y);
+    return u32(inside) + storage_cascade(g, c) * u32(g.params.y);
 }
 
 fn probe_pos(g: GiParams, c: u32, w: vec3<i32>) -> vec3<f32> {

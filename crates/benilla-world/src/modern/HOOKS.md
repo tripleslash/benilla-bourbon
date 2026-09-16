@@ -112,6 +112,20 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `wow_model.wgsl`, `static_gx.wgsl` | modern interiors (`gi.params.x > 0.5`, so Low keeps the bake): `lit_modern_room` from the interior probe cascade over the building's MOHD ambient; every WMO batch class takes it; MOCV rgb is dropped as lighting and MOCV.a becomes an unclamped emission on the INT class; SIDN is an emitter on every class with a daylight floor; the INT `tex·MOCV·(1+4a)` override is classic-only; an interior MODD prop reads the room instead of its `prop_probes` slot | P6 |
 | `wow_model.wgsl` | `is_rig` hoisted beside `is_wmo`/`is_interior` (the modern interior light has to exclude a booth) | P6 |
 
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | the modern exterior ambient (sky map / probe mix) goes through `sunshadow::shade_floor(…, ambient row)` — terrain's `ambient`, wow_model's `amb_gi`, static_gx's `lit_nl_shadowed` and `lit_doodad` | P6 fix |
+| `benilla-world/src/liquid/mod.rs` | `WATER_DETAIL_SSR` (= 1, the reference's medium slot); `from_cvar` maps (0, 1.5) to it; `WaterDetail::has_planar_reflection`; `WOW_WATER_DETAIL` read through `launch_env` | P6 fix |
+| `benilla-world/src/liquid/reflect.rs` | `sync_reflection_camera`: the mirror runs only when `has_planar_reflection()` | P6 fix |
+| `benilla-app/assets/ui/OptionsFrame.xml` | Water Detail dropdown gains "Modern (SSR)" = `1`; the tooltip names it | P6 fix |
+| `benilla-app/src/cvars.rs`, `ui_script/options_tests.rs` | the `waterDetail 1` assertions (SSR tier, no mirror; three dropdown entries) | P6 fix |
+| `benilla-app/src/lib.rs` | `seed_launch_env()` (the old `run_worldview` key list, plus `WOW_WATER_DETAIL`) is called from `run` as well as `run_worldview`, so `?lighting=modern` reaches the client | P6 fix |
+| `benilla-app/src/cvars.rs` | the `WOW_LIGHTING*` / `WOW_WATER_DETAIL` session-owned checks read `benilla_world::launch_env::var` (the browser's query) instead of `std::env` | P6 fix |
+| `benilla-app/assets/ui/OptionsFrame.xml`, `ui_script/options_tests.rs` | Graphics page `RowLightingModel` (`lightingModel`, Classic/Modern) and `RowLightingQuality` (`lightingQuality`, Low…Ultra) dropdowns between Water Detail and Render Scale, their `BENILLA_TOOLTIP_LIGHTING_*` strings, and the tooltip census (82 → 84) | P6 fix |
+| `benilla-assets/src/materials.rs` | `WowModelKey.modern` from `MODERN_MODEL_PIPELINES`; `specialize` pushes `WOW_MODERN` to both stages; `LiquidCataExt.modern_shadow` at 121 (texture only, no sampler) | P6 fix |
+| `wow_model.wgsl` | every modern block (room light, cascades, foliage, sky/GI ambient, window emitter, per-pixel points, linear decode + froxel fog, debug views, the vertex `point_sel`) sits under `#ifdef WOW_MODERN` with a classic `#else` value: a classic pipeline compiling that code dead drew Chrome/Metal leaf-card holes black (bisected to P3 step 4's `wow_model` hunk) | P6 fix |
+| `liquid_cata.wgsl` | binding 121 `modern_shadow_map`; `modern_glint` private; modern: `sunshadow::wind_swell` on the bump slope, sun visibility (`sun_visibility_load` × cloud) on the body light, glare and specular, an HDR glitter lobe added by the linear wrapper | P6 fix |
+| `benilla-world/src/liquid/surface.rs` | `modern_shadow: MODERN_SHADOW_MAP` at the cata construction site | P6 fix |
+| `benilla-world/src/liquid/ripple.rs` | `collect_stamps`: wind cat's-paw stamps (`WIND_*`) before the rain when `frame_is_modern()` | P6 fix |
+
 ## Planned hooks (not yet landed)
 
 - `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl`: the lighting and fog spans (P1–P4)

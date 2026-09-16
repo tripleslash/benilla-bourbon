@@ -228,6 +228,16 @@ fn prepare_modern_shadow(
     let Some(image) = images.get(MODERN_SHADOW_MAP.id()) else {
         return;
     };
+    // The array is re-created when the lighting latch re-sizes it (`modern::shadow::fit_shadow_map`):
+    // every view, the static cache and every cached layer key belong to the old texture.
+    if frame.texture.as_ref().is_some_and(|t| t.id() != image.texture.id()) {
+        frame.layers.clear();
+        frame.cache = None;
+        for key in &frame.cache_keys {
+            key.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        frame.local_key.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     frame.texture = Some(image.texture.clone());
     if frame.cache.is_none() {
         frame.cache = Some(device.create_texture(&TextureDescriptor {

@@ -77,7 +77,7 @@ pub const CASCADES_BYTES: usize = 5 * 64 + 5 * 16;
 pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
     match quality {
         LightingQuality::Low => &[15.0, 60.0],
-        LightingQuality::Medium => &[16.0, 55.0, 180.0],
+        LightingQuality::Medium => &[16.0, 60.0, 240.0],
         LightingQuality::High => &[16.0, 55.0, 160.0, 320.0],
         LightingQuality::Ultra => &[20.0, 70.0, 200.0, 450.0],
     }
@@ -160,19 +160,23 @@ pub(super) fn plugin(app: &mut App) {
         // ANY added PostUpdate system can reshuffle the executor order, put a writer after the check,
         // and panic the render world at `bevy_pbr` `material.rs:1061` (bisected 2026-09-15: P1a clean,
         // P2a's PostUpdate system broke classic too). `Last` still sees propagated transforms.
-        .add_systems(Last, (update_cascades, collect_terrain_casters, collect_entity_casters));
+        .add_systems(
+            Last,
+            (fit_shadow_map, update_cascades, collect_terrain_casters, collect_entity_casters),
+        );
 }
 
-/// Insert the two constant-handle assets. Always (classic sessions too): the materials bind them
-/// either way, and a missing binding would stall their bind groups.
-fn create_shadow_assets(
-    mut images: ResMut<Assets<Image>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
+/// The shadow array as a classic session needs it: one texel per layer. The full array is 2048² ×
+/// every layer of Depth32Float (84 MB, plus the render world's equally large static cache), and a
+/// classic frame never reads a texel of it — but it paid for it from Startup on. Grown and shrunk at
+/// the lighting latch by [`fit_shadow_map`].
+const CLASSIC_SHADOW_MAP_SIZE: u32 = 1;
+
+fn shadow_map_image(size: u32) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
-            width: SHADOW_MAP_SIZE,
-            height: SHADOW_MAP_SIZE,
+            width: size,
+            height: size,
             depth_or_array_layers: SHADOW_LAYERS as u32,
         },
         TextureDimension::D2,
@@ -198,6 +202,39 @@ fn create_shadow_assets(
         compare: Some(ImageCompareFunction::GreaterEqual),
         ..default()
     });
+    image
+}
+
+/// Re-size the constant-handle shadow array whenever the latched model changes: full size for a
+/// modern session, one texel for a classic one. A write only on the edge, since it re-prepares every
+/// material that binds the handle.
+fn fit_shadow_map(
+    active: Res<ActiveLighting>,
+    mut images: ResMut<Assets<Image>>,
+    mut fitted: Local<Option<bool>>,
+) {
+    let modern = active.is_modern();
+    if *fitted == Some(modern) {
+        return;
+    }
+    *fitted = Some(modern);
+    let size = if modern { SHADOW_MAP_SIZE } else { CLASSIC_SHADOW_MAP_SIZE };
+    let current = images
+        .get(MODERN_SHADOW_MAP.id())
+        .map(|i| i.texture_descriptor.size.width);
+    if current != Some(size) {
+        let _ = images.insert(MODERN_SHADOW_MAP.id(), shadow_map_image(size));
+    }
+}
+
+/// Insert the two constant-handle assets. Always (classic sessions too): the materials bind them
+/// either way, and a missing binding would stall their bind groups.
+fn create_shadow_assets(
+    mut images: ResMut<Assets<Image>>,
+    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
+) {
+    // Classic-sized until the lighting latches (`fit_shadow_map`).
+    let image = shadow_map_image(CLASSIC_SHADOW_MAP_SIZE);
     let _ = images.insert(MODERN_SHADOW_MAP.id(), image);
 
     // P4: the froxel fog parameters and the cloud-shadow grid ride behind the cascades

@@ -512,7 +512,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         let gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0);
-        lit_nl_shadowed = clamp(mix(amb * sky, gi.rgb, gi.w) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+        lit_nl_shadowed = clamp(sunshadow::shade_floor(mix(amb * sky, gi.rgb, gi.w), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     // The order-2 SH basis products over the fragment normal — shared by the exterior
     // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
@@ -714,7 +714,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             // fork: modern lighting (FORK.md, P5) — the doodad lobe's own ambient
             // share comes from the probes, scaled to keep the lobe's authored colour balance.
             let gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0);
-            let amb_gi = mix(sun_ambient * sky, gi.rgb, gi.w);
+            let amb_gi = sunshadow::shade_floor(mix(sun_ambient * sky, gi.rgb, gi.w), sun_ambient);
             lit_doodad = clamp(amb_gi + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
         }
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.

@@ -765,7 +765,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
             anchor = mcnk_cell_anchor(out.world_position.xyz);
         }
         out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
+#ifdef WOW_MODERN
         out.point_sel = point_light_select(anchor);
+#endif
     }
     return out;
 }
@@ -1219,6 +1221,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // local lights for the fixtures, and the authored MOCV kept only as the emissive mask it is.
     // The gate is the probe field itself (`gi.params.x`), which is exactly the tier split the plan
     // asked for: Low traces no probes, so Low keeps the bake and its `prop_probes`.
+#ifdef WOW_MODERN
     let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5;
     var lit_modern_room = vec3<f32>(0.0);
     if (modern_interior && is_interior && !is_rig) {
@@ -1230,6 +1233,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let room = max(modern_block.gi.interior.rgb, wow_light.light_ambient.rgb * MODERN_ROOM_FLOOR);
         lit_modern_room = mix(room, room_gi.rgb, room_gi.w);
     }
+#else
+    let modern_interior = false;
+    let lit_modern_room = vec3<f32>(0.0);
+#endif
     var lit_wmo_interior = vec3<f32>(1.0);
     if (modern_interior) {
         // Every batch class takes the same light now: INT is no longer "unlit, the bake IS the
@@ -1335,6 +1342,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // (lit − ambient) × 1.0` is not guaranteed to round back to `lit`.
     // fork: modern lighting (FORK.md, P2) — per-fragment modern cascades for
     // every lane (units included); a shadowed fragment keeps only its ambient.
+#ifdef WOW_MODERN
     let modern_frame = wow_light.point_count.y > 0.5;
     if (modern_frame) {
         let mview_z = (view.view_from_world * in.world_position).z;
@@ -1343,6 +1351,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
         player_shadow = player_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
     }
+#else
+    let modern_frame = false;
+#endif
     let shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, player_shadow), player_shadow, modern_frame);
     let lit_with_shadow_base = select(
         lit,
@@ -1357,6 +1368,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // the sun through: wrap diffuse past the terminator plus back-lit transmission toward the eye,
     // both under the cascades' visibility. Bits: STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT (1<<4),
     // ALPHA_MODE_RESERVED_BITS (7<<29) == ALPHA_MODE_MASK (1<<29).
+#ifdef WOW_MODERN
     let foliage_flags = pbr_input.material.flags;
     let is_foliage = wow_light.point_count.y > 0.5 && !is_interior && !is_rig
         && (foliage_flags & (1u << 4u)) != 0u
@@ -1371,16 +1383,23 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let back = pow(max(dot(to_eye, -to_sun), 0.0), 6.0);
         foliage_light = wow_light.light_diffuse.rgb * player_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
     }
+#else
+    let foliage_light = vec3<f32>(0.0);
+#endif
     // fork: modern lighting (FORK.md, P3) — modern exterior: ambient under the sky-occlusion map.
+#ifdef WOW_MODERN
     var lit_with_shadow_sky = lit_with_shadow_base;
     if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig) {
         let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0);
-        let amb_gi = mix(amb * sky, gi.rgb, gi.w);
+        let amb_gi = sunshadow::shade_floor(mix(amb * sky, gi.rgb, gi.w), amb);
         lit_with_shadow_sky = clamp(amb_gi + max(lit - amb, vec3<f32>(0.0)) * player_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
+#else
+    let lit_with_shadow_sky = lit_with_shadow_base;
+#endif
     let lit_with_shadow = lit_with_shadow_sky + foliage_light;
     // Gamma-space albedo — the lane (0161): the buffer holds bytes, lighting math runs on the
     // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
@@ -1410,9 +1429,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // authored colour at an HDR gain, on every batch class (the FFP's dead emissive write on the
     // unlit INT lane was a consequence of lighting being off there, and lighting is on now), and
     // with a daylight floor so a pane still glows seen from inside.
+#ifdef WOW_MODERN
     if (modern_interior && is_wmo && is_interior) {
         sidn_e = m.sidn.rgb * (MODERN_SIDN_GAIN * mix(MODERN_SIDN_DAY, 1.0, wow_light.grade.x));
     }
+#endif
     // WoW dynamic point lights (decisions 0016/0273/0278, selection 0285) — exterior doodads,
     // entities, clutter, and terrain receive their unit's committed lights: the ≤3 NEAREST to the
     // receiving unit's own position, never the whole scene (`point_light_sum`). WMO surfaces take
@@ -1421,6 +1442,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // arrives GOURAUD-INTERPOLATED — per-vertex like the reference FFP, whose tessellation-scale
     // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
     // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
+#ifdef WOW_MODERN
     var point_diffuse = select(
         in.point_lit,
         point_light_eval(in.point_sel, in.world_position.xyz, wow_normalize(in.world_normal)),
@@ -1434,6 +1456,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         point_diffuse = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal));
     }
 
+#else
+    let point_diffuse = in.point_lit;
+#endif
     // Hover/target model brighten (tag bit 31): the client's per-model highlight emissive —
     // `glMaterialfv(GL_EMISSION, +64/255)` per channel (shipped config default 0xff404040), verified
     // wow-re selection-circle PART 2. GL_EMISSION adds INSIDE the lighting sum, which is clamped [0,1]
@@ -1623,6 +1648,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // premultiply (additive) and the identity mix (Mod/Mod2x). Mod stays exact in linear
     // ((ab)^γ = a^γ·b^γ); Mod2x's (Dst, Src) doubling becomes 2·a·b in linear, so the source is
     // scaled by 2.295 (= 0.5 / srgb_to_linear(0.5) / 2 · 2) to keep its 0.5-grey identity neutral.
+#ifdef WOW_MODERN
     if (wow_light.point_count.y > 0.5) {
         var lin = colorspace::srgb_to_linear(rgb);
         if (is_additive) {
@@ -1665,6 +1691,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view
         }
     }
+#endif
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;
 }

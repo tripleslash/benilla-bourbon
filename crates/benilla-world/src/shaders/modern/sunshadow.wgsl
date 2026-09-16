@@ -84,8 +84,39 @@ fn cascade_visibility(
     return lit / 5.0;
 }
 
-// Sun visibility (1 = lit) at a world position seen `view_distance` yd in front of the camera.
+// Past the last cascade the sun is not simply "lit": the top-down sky-occlusion map (layer 4, ±512 yd)
+// still knows where a canopy or a roof stands, so a forest keeps its shade to the horizon instead of
+// lighting up in a band that walks ahead of the camera. Soft — leaves let some sun through.
+const FAR_SUN_UNDER_COVER: f32 = 0.3;
+
+fn far_sun_visibility(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+) -> f32 {
+    return mix(FAR_SUN_UNDER_COVER, 1.0, sky_visibility_fast(map, samp, c, world_pos));
+}
+
+// A surface in full shade still keeps this share of the key: leaves and edges scatter sunlight
+// around, and a zero floor made a canopy floor read as night next to classic's 0.7 (which keeps
+// nearly all of it). The froxels do NOT take it — the contrast between lit and shadowed air is the
+// shafts.
+const SUN_SHADE_FLOOR: f32 = 0.35;
+
 fn sun_visibility(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    view_distance: f32,
+) -> f32 {
+    return mix(SUN_SHADE_FLOOR, 1.0, sun_visibility_raw(map, samp, c, world_pos, normal, view_distance));
+}
+
+// Sun visibility (1 = lit) at a world position seen `view_distance` yd in front of the camera.
+fn sun_visibility_raw(
     map: texture_depth_2d_array,
     samp: sampler_comparison,
     c: ModernCascades,
@@ -98,14 +129,20 @@ fn sun_visibility(
         if (view_distance < c.splits[i]) {
             let v = cascade_visibility(map, samp, c, i, world_pos, normal);
             if (i + 1u == count) {
-                // The last cascade fades to lit instead of ending on a hard line.
-                let fade = smoothstep(c.splits[i] * 0.85, c.splits[i], view_distance);
-                return mix(v, 1.0, fade);
+                // The last cascade fades into the far field instead of ending on a hard line.
+                let fade = smoothstep(c.splits[i] * 0.7, c.splits[i], view_distance);
+                if (fade <= 0.0) {
+                    return v;
+                }
+                return mix(v, far_sun_visibility(map, samp, c, world_pos), fade);
             }
             return v;
         }
     }
-    return 1.0;
+    if (count == 0u) {
+        return 1.0;
+    }
+    return far_sun_visibility(map, samp, c, world_pos);
 }
 
 // P3: the open-sky fraction above a point (1 = nothing overhead), from the top-down static map in
@@ -158,7 +195,98 @@ fn sun_visibility_fast(
             return textureSampleCompareLevel(map, samp, uv, i32(i), ndc.z + c.depth_bias[i] * 2.0);
         }
     }
+    if (count == 0u) {
+        return 1.0;
+    }
+    return far_sun_visibility(map, samp, c, world_pos);
+}
+
+// Sun visibility with no comparison sampler: a manual bilinear compare over `textureLoad`, four
+// offset footprints. For a layout that is already at the stage's sampler limit — the cata water.
+fn load_compare(map: texture_depth_2d_array, layer: i32, uv: vec2<f32>, depth: f32) -> f32 {
+    let size = vec2<f32>(textureDimensions(map));
+    let st = uv * size - vec2<f32>(0.5);
+    let base = floor(st);
+    let fr = st - base;
+    let lo = vec2<i32>(base);
+    let hi = vec2<i32>(size) - vec2<i32>(1);
+    let ta = clamp(lo, vec2<i32>(0), hi);
+    let tb = clamp(lo + vec2<i32>(1, 0), vec2<i32>(0), hi);
+    let tc = clamp(lo + vec2<i32>(0, 1), vec2<i32>(0), hi);
+    let td = clamp(lo + vec2<i32>(1, 1), vec2<i32>(0), hi);
+    // Reverse-Z: lit when the receiver is at least as near the light as the caster.
+    let la = select(0.0, 1.0, depth >= textureLoad(map, ta, layer, 0));
+    let lb = select(0.0, 1.0, depth >= textureLoad(map, tb, layer, 0));
+    let lc = select(0.0, 1.0, depth >= textureLoad(map, tc, layer, 0));
+    let ld = select(0.0, 1.0, depth >= textureLoad(map, td, layer, 0));
+    return mix(mix(la, lb, fr.x), mix(lc, ld, fr.x), fr.y);
+}
+
+fn sun_visibility_load(
+    map: texture_depth_2d_array,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+    view_distance: f32,
+) -> f32 {
+    let count = u32(c.params.x);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if (view_distance < c.splits[i]) {
+            let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+            let ndc = clip.xyz / clip.w;
+            let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+                return 1.0;
+            }
+            let depth = ndc.z + c.depth_bias[i] * 2.0;
+            let o = c.params.y * 1.25;
+            var v = load_compare(map, i32(i), uv + vec2<f32>(o, o * 0.3), depth);
+            v = v + load_compare(map, i32(i), uv + vec2<f32>(-o * 0.3, o), depth);
+            v = v + load_compare(map, i32(i), uv + vec2<f32>(-o, -o * 0.3), depth);
+            v = v + load_compare(map, i32(i), uv + vec2<f32>(o * 0.3, -o), depth);
+            v = v * 0.25;
+            if (i + 1u == count) {
+                return mix(v, 1.0, smoothstep(c.splits[i] * 0.85, c.splits[i], view_distance));
+            }
+            return v;
+        }
+    }
     return 1.0;
+}
+
+// The wind over open water: the direction the froxel haze drifts (`volumetrics::update`'s wind).
+fn wind_dir() -> vec2<f32> {
+    return normalize(vec2<f32>(0.9, 0.35));
+}
+
+// A wind-driven swell as a surface SLOPE (d height / d xz), for the modern water: five directional
+// deep-water waves spread about the wind, each fading out before it would alias at its distance, with
+// slow gusts rolling across them so the surface has patches of chop and calm.
+fn wind_swell(xz: vec2<f32>, time: f32, dist: f32) -> vec2<f32> {
+    let wd = wind_dir();
+    let across = vec2<f32>(-wd.y, wd.x);
+    // Gusts: a large, slowly advected pattern (cat's paws), 0.35..1.
+    let g = xz * 0.021 - wd * time * 0.09;
+    let gust = 0.675 + 0.325 * sin(g.x * 1.7 + sin(g.y * 1.3 + time * 0.05) * 2.0) * cos(g.y * 1.1 - g.x * 0.4);
+    var slope = vec2<f32>(0.0);
+    // wavelength (yd), direction offset across the wind, steepness
+    let waves = array<vec3<f32>, 5>(
+        vec3<f32>(11.0, 0.0, 0.10),
+        vec3<f32>(6.3, 0.45, 0.09),
+        vec3<f32>(3.7, -0.35, 0.08),
+        vec3<f32>(2.1, 0.8, 0.07),
+        vec3<f32>(1.3, -0.65, 0.06),
+    );
+    for (var k = 0u; k < 5u; k = k + 1u) {
+        let wl = waves[k].x;
+        let dir = normalize(wd + across * waves[k].y);
+        let kw = 6.2831853 / wl;
+        // Deep water: omega = sqrt(g k), g = 9.8 m/s^2 in yards.
+        let omega = sqrt(10.7 * kw);
+        let phase = dot(dir, xz) * kw - omega * time + f32(k) * 1.7;
+        let fade = 1.0 - smoothstep(wl * 18.0, wl * 45.0, dist);
+        slope = slope + dir * (cos(phase) * waves[k].z * fade);
+    }
+    return slope * gust;
 }
 
 // P4: `sky_visibility` in one tap.
@@ -205,8 +333,18 @@ fn cloud_mix(t: CloudTaps, ca: f32, cb: f32, cc: f32, cd: f32) -> f32 {
     return mix(mix(ca, cb, t.w.x), mix(cc, cd, t.w.x), t.w.y);
 }
 
-// Ambient light's share under cover never drops below this.
-const SKY_AMBIENT_FLOOR: f32 = 0.35;
+// Ambient light's share under cover never drops below this. The lanes sum in gamma and the frame
+// decodes, so a share `s` here is roughly `s^2.2` of the open ambient on screen: 0.35 put the ground
+// under a single tree at ~10 % — pitch black next to a sunlit patch.
+const SKY_AMBIENT_FLOOR: f32 = 0.8;
+// The same floor for the exterior ambient after the probe field has replaced the sky map: probes
+// under a canopy legitimately read dark, but skylight still arrives sideways and off the ground.
+const SHADE_FLOOR: f32 = 0.8;
+
+// The exterior ambient (sky map or probe field) held above the open-sky row's floor.
+fn shade_floor(ambient: vec3<f32>, open_sky: vec3<f32>) -> vec3<f32> {
+    return max(ambient, open_sky * SHADE_FLOOR);
+}
 
 fn sky_ambient(
     map: texture_depth_2d_array,

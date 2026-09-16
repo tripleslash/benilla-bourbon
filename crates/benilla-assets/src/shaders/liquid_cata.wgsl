@@ -166,6 +166,11 @@ struct WowLight {
 // fork: modern lighting (FORK.md, P4) — water fogs itself from the froxel volume.
 @group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
+// fork: modern lighting — the sun cascades, read without a sampler (the layout has none left).
+@group(#{MATERIAL_BIND_GROUP}) @binding(121) var modern_shadow_map: texture_depth_2d_array;
+// fork: modern lighting — the HDR sun glitter `fragment_classic` leaves for the linear wrapper, which
+// adds it after the decode so it can carry energy above white into the bloom.
+var<private> modern_glint: vec3<f32>;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(113) var ripple_map: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(114) var ripple_samp: sampler;
@@ -553,7 +558,12 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
 
     // The swell, plus whatever a body wading nearby has pushed into the water. The two are summed
     // as SLOPES and normalised once — see `bump_gradient`.
-    let swell = bump_gradient(in);
+    var swell = bump_gradient(in);
+    // fork: modern lighting — a modern frame adds a wind-driven swell under the authored bump.
+    let modern = wow_light.point_count.y > 0.5;
+    if (modern) {
+        swell = swell + sunshadow::wind_swell(in.world_position.xz, globals.time, length(in.view_vec));
+    }
     let grad = normalize(vec3<f32>(
         swell + ripple_slope(in.world_position.xz, swell),
         1.0,
@@ -587,7 +597,20 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // `abs(bump.xy · 0.1)` — absolute, so the nudge only ever reads DEEPER, never back past the
     // shore into colours the surface does not have.
     let ramp = swatch(in.depth_v + abs(grad.y) * 0.1);
-    let body = ramp.rgb * in.lit_color;
+    // fork: modern lighting — the sun's share of the surface's light falls under the cascades and
+    // the cloud shadow, so water in a tree's or a cliff's shade reads shaded.
+    var water_sun = 1.0;
+    var water_lit = in.lit_color;
+    if (modern) {
+        let wp = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
+        water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp, frag_view_z);
+        let wct = sunshadow::cloud_taps(modern_block.fog.cloud, wp);
+        water_sun = water_sun * sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
+        // The shade keeps some of the light: skylight still reaches open water from every side.
+        let shade = max(min(in.lit_color, wow_light.light_ambient.rgb), in.lit_color * 0.6);
+        water_lit = mix(shade, in.lit_color, water_sun);
+    }
+    let body = ramp.rgb * water_lit;
 
     let uv = screen_uv(in.clip_position);
 
@@ -818,14 +841,27 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // with the Blinn exponent in `.w`. Running both terms off the specular row made the broad sun
     // track on the water take a colour the sun itself never has at that hour.
     let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
-    rgb += glare * wow_light.light_diffuse.rgb * body;
+    rgb += glare * wow_light.light_diffuse.rgb * body * water_sun;
     // Below the surface the specular is weighted by the Fresnel square TWICE and by the swatch's
     // opacity — `ProcWaterBelow` spends `MULR R1.xyz, R1, R3.w` (fres²·ramp.a) and then
     // `MULR R1.xyz, R1, R2.w` (fres² again) where `ProcWaterAbove` spends one `MULR R1.xyz, R1,
     // R1.w`. From underneath the sheen is the sun read back down through the water, so it dims with
     // how much water is in the way and survives only at the shallowest grazing angle.
     let spec_weight = select(fres2, fres2 * fres2 * ramp.a, below);
-    rgb += w.shade_params.z * spec_color * spec_weight;
+    rgb += w.shade_params.z * spec_color * spec_weight * water_sun;
+    // fork: modern lighting — the sun's glitter path: a tight HDR lobe on the reflected ray over a
+    // broad sheen, only where the sun reaches the surface. Added in linear by the wrapper.
+    if (modern && !below && to_light.y > -0.05) {
+        let rv = reflect(v, n);
+        let sd = clamp(dot(rv, to_light), 0.0, 1.0);
+        // Warmed by the zone's scatter colour (the froxel key in-scatter, normalised), so a dawn
+        // glitter path takes the haze's salmon instead of the key row's white.
+        let scatter = modern_block.fog.sun.rgb;
+        let warm = scatter / max(max(scatter.r, max(scatter.g, scatter.b)), 1e-4);
+        let key = pow(wow_light.light_diffuse.rgb, vec3<f32>(2.2)) * mix(vec3<f32>(1.0), warm, 0.6);
+        let horizon = smoothstep(-0.05, 0.08, to_light.y);
+        modern_glint = key * ((pow(sd, 900.0) * 9.0 + pow(sd, 160.0) * 0.8 + pow(sd, 24.0) * 0.12) * water_sun * horizon * (0.35 + 0.65 * fres));
+    }
     // Foam last, and additively: it sits ON the water rather than being tinted by it, and it is
     // the one term that should survive a dark shoreline at dusk.
     rgb += foam;
@@ -842,8 +878,9 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
 // decodes its output when the frame is linear; every return path above stays untouched.
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+    modern_glint = vec3<f32>(0.0);
     let c = fragment_classic(in);
-    var rgb = colorspace::modern_out(c.rgb, wow_light.point_count.y);
+    var rgb = colorspace::modern_out(c.rgb, wow_light.point_count.y) + modern_glint;
     // P4: transparent water draws after the fog composite, so it fogs itself; opaque magma and slime
     // (`kind.x`) draw before it and are fogged there.
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {

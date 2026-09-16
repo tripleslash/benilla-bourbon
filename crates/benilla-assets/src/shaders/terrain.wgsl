@@ -486,7 +486,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // row wherever it has an answer; the sky map is what is left where it does not.
         // Terrain is never an interior receiver: an ADT chunk is the open world by construction.
         let gi = modern_gi_ambient(in.world_position.xyz, mn, 0.0);
-        let ambient = mix(wow_light.light_ambient.rgb * sky, gi.rgb, gi.w);
+        let ambient = sunshadow::shade_floor(mix(wow_light.light_ambient.rgb * sky, gi.rgb, gi.w), wow_light.light_ambient.rgb);
         primary = ambient + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
 

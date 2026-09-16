@@ -8,7 +8,10 @@
 //! - `exposure` — the post's exposure (the FFXGlow combine's `wave.w`);
 //! - `haze` — the shaft haze extinction, never near-cleared, so shafts start at the camera (A1);
 //! - `forward` — the dual-lobe phase's forward share: warm toward the sun, the zone's hue away (A2);
-//! - `key_scatter` — how strongly the key light scatters into the fog.
+//! - `key_scatter` — how strongly the key light scatters into the fog;
+//! - `glow` — the colour of the light scattered toward the sun (the froxel key in-scatter and the sky's
+//!   Mie halo), and `haze_tint` — the colour of the ambient haze away from it. Classic Light.dbc fog
+//!   is often grey where the reference grade is warm: Darkshore's salmon dawn is these two rows.
 //!
 //! Zones are `AreaTable.dbc` top-level rows; a subzone resolves through its parents. The area comes
 //! from the character's [`CurrentArea`], or — with no avatar (the engine-only world view) — from the
@@ -34,6 +37,8 @@ pub struct ZoneLook {
     pub haze: f32,
     pub forward: f32,
     pub key_scatter: f32,
+    pub glow: [f32; 3],
+    pub haze_tint: [f32; 3],
 }
 
 impl ZoneLook {
@@ -42,9 +47,11 @@ impl ZoneLook {
         key: 1.0,
         fill: 1.0,
         exposure: 1.0,
-        haze: 0.0012,
+        haze: 0.0018,
         forward: 0.7,
         key_scatter: 0.6,
+        glow: [1.0, 1.0, 1.0],
+        haze_tint: [1.0, 1.0, 1.0],
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -56,6 +63,8 @@ impl ZoneLook {
             haze: m(self.haze, to.haze),
             forward: m(self.forward, to.forward),
             key_scatter: m(self.key_scatter, to.key_scatter),
+            glow: [0, 1, 2].map(|i| m(self.glow[i], to.glow[i])),
+            haze_tint: [0, 1, 2].map(|i| m(self.haze_tint[i], to.haze_tint[i])),
         }
     }
 
@@ -67,28 +76,38 @@ impl ZoneLook {
             && d(self.haze, other.haze)
             && d(self.forward, other.forward)
             && d(self.key_scatter, other.key_scatter)
+            && (0..3).all(|i| d(self.glow[i], other.glow[i]) && d(self.haze_tint[i], other.haze_tint[i]))
     }
 }
 
 /// The look table, by `AreaTable.dbc` zone id.
 const ZONES: &[(u32, ZoneLook)] = &[
     // Teldrassil: dense purple canopy haze, a strong forward glow through the openings.
-    (141, ZoneLook { key: 1.1, fill: 0.86, exposure: 1.05, haze: 0.0030, forward: 0.78, key_scatter: 0.85 }),
+    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.15, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::NEUTRAL }),
     // Darnassus: Teldrassil's light, a little clearer.
-    (1657, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.05, haze: 0.0022, forward: 0.75, key_scatter: 0.75 }),
+    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.12, haze: 0.0026, forward: 0.75, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
     // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
-    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0026, forward: 0.68, key_scatter: 0.75 }),
+    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
     // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.
-    (148, ZoneLook { key: 1.05, fill: 0.95, exposure: 1.0, haze: 0.0024, forward: 0.82, key_scatter: 0.95 }),
+    (148, ZoneLook {
+        key: 1.05,
+        fill: 0.95,
+        exposure: 1.0,
+        haze: 0.0028,
+        forward: 0.82,
+        key_scatter: 0.95,
+        glow: [1.0, 0.56, 0.42],
+        haze_tint: [0.92, 0.74, 0.74],
+    }),
     // Elwynn Forest: treeline shafts at dusk.
-    (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0016, forward: 0.72, key_scatter: 0.7 }),
+    (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0024, forward: 0.72, key_scatter: 0.7, ..ZoneLook::NEUTRAL }),
     // Duskwood: gloom — a weak key, a darker exposure.
-    (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0020, forward: 0.6, key_scatter: 0.45 }),
+    (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0030, forward: 0.6, key_scatter: 0.45, ..ZoneLook::NEUTRAL }),
     // Felwood: a sickly canopy.
-    (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0024, forward: 0.65, key_scatter: 0.6 }),
+    (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0036, forward: 0.65, key_scatter: 0.6, ..ZoneLook::NEUTRAL }),
     // Stormwind City, Ironforge: cities keep the haze thin.
-    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0008, forward: 0.7, key_scatter: 0.5 }),
-    (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0006, forward: 0.6, key_scatter: 0.4 }),
+    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0012, forward: 0.7, key_scatter: 0.5, ..ZoneLook::NEUTRAL }),
+    (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0009, forward: 0.6, key_scatter: 0.4, ..ZoneLook::NEUTRAL }),
 ];
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {

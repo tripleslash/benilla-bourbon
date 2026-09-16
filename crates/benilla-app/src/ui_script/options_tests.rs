@@ -1376,12 +1376,12 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
         "reading the table on select must not write it back"
     );
 
-    // Two entries, and only two: the medium tier is a hole in the value space, not a row.
+    // Three entries: the medium tier is the fork's SSR-only modern water (no planar mirror).
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
     assert_eq!(
         s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
-        2.0
+        3.0
     );
 
     // Picking Modern writes "2" — the reference's tier number, not a boolean.
@@ -1398,9 +1398,17 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     );
     assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
 
-    // Defaults comes back to Modern, this row's default being the newer behaviour.
+    // Picking Modern (SSR) writes the medium tier's "1".
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("waterDetail".to_string(), "1".to_string())]
+    );
+
+    // Defaults comes back to Modern, this row's default being the newer behaviour.
+    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
+    s.run("DropDownList1Button3:Click()").unwrap();
     let _ = s.take_cvar_changes();
     s.run("BenillaOptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(
@@ -2711,6 +2719,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ),
             ("BENILLA_TOOLTIP_INDIRECT_LIGHT", "GraphicsRowIndirectLight"),
             ("BENILLA_TOOLTIP_WATER_DETAIL", "GraphicsRowWaterDetail"),
+            ("BENILLA_TOOLTIP_LIGHTING_MODEL", "GraphicsRowLightingModel"),
+            ("BENILLA_TOOLTIP_LIGHTING_QUALITY", "GraphicsRowLightingQuality"),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
@@ -2781,7 +2791,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // …less Display Mode, whose row this branch pulled (2026-09-08), and plus this branch's own
     // five Graphics rows — Use updated character models, Real Character Shadows, the two
     // indirect-lighting sliders and Water Detail. 78 - 1 + 5 = 82.
-    assert_eq!(checked, 82, "every tipped row carries a live key");
+    // …and the fork's Lighting and Lighting Quality dropdowns (FORK.md). 84.
+    assert_eq!(checked, 84, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2902,8 +2913,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // own key, which is what makes the count move by exactly the number of rows added.
     // …and Weather Intensity (2181) and Brightness (2182), the Graphics page's new sliders.
     // …less Display Mode (pulled on this branch) and plus this branch's own five Graphics rows,
-    // the same arithmetic the guard above states: 82.
-    assert_eq!(raised, 82, "every row but Auto Loot raises a description");
+    // the same arithmetic the guard above states: 82, plus the two lighting dropdowns: 84.
+    assert_eq!(raised, 84, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

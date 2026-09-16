@@ -134,6 +134,11 @@ pub struct WowModelKey {
     /// is a SORT rung (`sky_order::WMO_SKYBOX_BIAS`, ~−6e4), and the pinned depth is a constant
     /// the rasterizer must not be perturbing behind the shader's back.
     sky_depth: bool,
+    /// fork: modern lighting — the latched lighting model ([`MODERN_MODEL_PIPELINES`]). A classic
+    /// pipeline does not compile the modern code at all (`WOW_MODERN`): carrying it dead behind the
+    /// runtime flag is what turned Chrome/Metal's leaf-card holes black in classic frames (bisected
+    /// to the P3 sky-map hunk, 2026-09-16).
+    modern: bool,
     // NB: the WMO authored batch order is deliberately NOT a key axis. It used to be (a
     // per-batch-index `DepthBiasState` constant), which made every batch index its own pipeline —
     // the city first-sight compile stall (decision 0837). The coplanar-layering nudge now rides
@@ -155,9 +160,16 @@ impl From<&WowModelExt> for WowModelKey {
             zfill: markers & 0x200 != 0,
             far_side: markers & 0x800 != 0,
             sky_depth: markers & 0x2000 != 0,
+            modern: MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
+
+/// fork: modern lighting — whether model pipelines compile the modern lighting code
+/// (`wow_model.wgsl`'s `WOW_MODERN`). Set by `benilla_world::modern` at the lighting latch, which
+/// then re-prepares every model material so the new key reaches the pipelines.
+pub static MODERN_MODEL_PIPELINES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The WoW light, shared by every model material. **All Vec4 uniforms merge onto one binding
 /// (100)** — `AsBindGroup` packs multiple `#[uniform(N)]` fields at the same `N` into a single
@@ -366,6 +378,12 @@ impl MaterialExtension for WowModelExt {
         // like the far-side twin above — keep its big negative rung sort-only. The rung
         // (`sky_order::WMO_SKYBOX_BIAS`) exists to sink a camera-anchored backdrop under every
         // world transparent; as a rasterizer constant it would be perturbing the pinned depth.
+        if key.bind_group_data.modern {
+            descriptor.vertex.shader_defs.push("WOW_MODERN".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_MODERN".into());
+            }
+        }
         if key.bind_group_data.sky_depth {
             descriptor.vertex.shader_defs.push("WOW_SKY_DEPTH".into());
             if let Some(fragment) = descriptor.fragment.as_mut() {
@@ -781,6 +799,11 @@ pub struct LiquidCataExt {
     pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
     #[texture(124, dimension = "3d", visibility(fragment))]
     pub modern_fog: Handle<Image>,
+    // fork: modern lighting — the sun cascades, so water in shade loses its sun glare and highlight.
+    // Texture only, compared by hand with `textureLoad` (`sunshadow::sun_visibility_load`): the
+    // layout has no sampler slot left.
+    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    pub modern_shadow: Handle<Image>,
 }
 
 impl MaterialExtension for LiquidCataExt {

@@ -139,6 +139,13 @@ const RAIN_AMPLITUDE: (f32, f32) = (-0.4, -0.2);
 ///
 /// The spread is `((rand%1000)/500 − 1) · 50` in each axis — ±50 yards, inside the map's ±51.2.
 const RAIN_DROPS: usize = 30;
+
+/// fork: modern lighting — wind stamps per step, their spread, radius and amplitude. Wider and far
+/// weaker than a raindrop: a breeze roughens the surface, it does not ring it.
+const WIND_GUSTS: usize = 10;
+const WIND_SPREAD: f32 = 45.0;
+const WIND_RADIUS: f32 = 0.8;
+const WIND_AMPLITUDE: f32 = 0.09;
 const RAIN_SPREAD: f32 = 50.0;
 
 /// The intensity below which rain makes no ripples — the reference's `> 0.2` gate.
@@ -486,6 +493,30 @@ pub(super) fn collect_stamps(
         field.stamps.push(perturbation(pos.x, pos.z, WADE_RADIUS, amp));
         if field.stamps.len() >= MAX_STAMPS {
             return;
+        }
+    }
+
+    // ---- Wind (fork: modern lighting) ------------------------------------------------------
+    //
+    // A modern frame breezes over the water: a few soft cat's-paw stamps a step, scattered around
+    // the camera and trailing downwind, so the near surface carries fine interfering ripples on top
+    // of the shader's wind swell (`sunshadow::wind_swell`). Same seed and budget as the rain.
+    if crate::modern::frame_is_modern() {
+        if let Ok(cam) = camera.single() {
+            let budget = MAX_STAMPS.saturating_sub(field.stamps.len()).min(WIND_GUSTS);
+            for _ in 0..budget {
+                let mut next = || {
+                    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (*seed >> 8) as f32 / (1u32 << 24) as f32
+                };
+                let (x, z, a) = (next(), next(), next());
+                field.stamps.push(perturbation(
+                    cam.translation.x + (x * 2.0 - 1.0) * WIND_SPREAD,
+                    cam.translation.z + (z * 2.0 - 1.0) * WIND_SPREAD,
+                    WIND_RADIUS,
+                    (a * 2.0 - 1.0) * WIND_AMPLITUDE,
+                ));
+            }
         }
     }
 

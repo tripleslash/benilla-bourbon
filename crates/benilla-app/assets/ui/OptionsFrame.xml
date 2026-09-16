@@ -824,7 +824,22 @@
             "Which water the world is drawn with.\n\n"
             .. "Modern adds surface waves, a reflection of the sky and shoreline, and lets you "
             .. "see through the surface to the bottom. Classic is the original flat, tinted water.\n\n"
+            .. "Modern (SSR) skips the second, mirrored render of the world and reflects only what "
+            .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
             .. "Modern water costs additional GPU time."
+
+        -- fork: the modern lighting model (FORK.md). Both CVars latch when the
+        -- world is entered, so a change shows the next time the world loads.
+        BENILLA_TOOLTIP_LIGHTING_MODEL =
+            "How the world is lit.\n\n"
+            .. "Modern adds real-time sun shadows from every object, light shafts through fog and "
+            .. "foliage, bounced light and HDR bloom. Classic is the original baked lighting.\n\n"
+            .. "Takes effect the next time the world loads. Modern costs additional GPU time."
+
+        BENILLA_TOOLTIP_LIGHTING_QUALITY =
+            "The detail of Modern lighting: shadow range and resolution, light shaft resolution and "
+            .. "bounced light.\n\n"
+            .. "Has no effect on Classic lighting. Takes effect the next time the world loads."
 
         -- Brightness (2182). 1.12's own OPTION_TOOLTIP_GAMMA cannot ride this row: its whole
         -- second sentence is "Increase brightness until you can clearly see all 21 levels of gray
@@ -890,6 +905,8 @@
                 -- everything above it is what the world IS, Render Scale is how big it gets
                 -- drawn, and Render Scale keeps the last seat its own note below claims.
                 "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
+                -- fork: the modern lighting model and its tier (FORK.md).
+                "RowLightingModel", "RowLightingQuality",
                 "RowRenderScale",
             },
             -- Player Guild Names (2180) rides as a CHILD of Player Names, which is the
@@ -3213,16 +3230,53 @@
                                                 -- machine would rather not pay for the screen-space passes.
                                                 OptionsRow_OnLoad(self, "waterDetail", "Water Detail",
                                                     "BENILLA_TOOLTIP_WATER_DETAIL")
+                                                -- "Modern (SSR)" is tier 1: the same modern water
+                                                -- without its planar mirror render, reflecting
+                                                -- through the screen-space trace alone.
                                                 OptionsDropdownRow_Setup(self, {
                                                     { text = "Modern", value = "2" },
+                                                    { text = "Modern (SSR)", value = "1" },
                                                     { text = "Classic", value = "0" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLightingModel" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Lighting -- `lightingModel`, 0 classic / 1 modern.
+                                                -- Written like every row (SetCVar), so config.toml keeps it.
+                                                OptionsRow_OnLoad(self, "lightingModel", "Lighting",
+                                                    "BENILLA_TOOLTIP_LIGHTING_MODEL")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Classic", value = "0" },
+                                                    { text = "Modern", value = "1" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLightingQuality" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLightingModel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingModel" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Lighting Quality -- `lightingQuality`, the modern tier.
+                                                OptionsRow_OnLoad(self, "lightingQuality", "Lighting Quality",
+                                                    "BENILLA_TOOLTIP_LIGHTING_QUALITY")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Low", value = "0" },
+                                                    { text = "Medium", value = "1" },
+                                                    { text = "High", value = "2" },
+                                                    { text = "Ultra", value = "3" },
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Render Scale (decision 1639) -- benilla's own

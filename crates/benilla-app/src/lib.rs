@@ -313,17 +313,13 @@ use world_backdrop::WorldBackdropPlugin;
 // build id at compile time and hands it into [`run`]. Re-exported so the shim needs no bevy
 // dep of its own.
 pub use benilla_world::build_id::BuildId;
-/// The world viewer's entry point — the engine with no game attached (decision 1160).
-/// Its shim (`benilla-worldview`) is this library's second caller; see [`worldview`].
-/// The world viewer — `benilla-worldview`'s engine-only run, reachable from the browser too
-/// (`?worldview=1`, fork-owned). The native shim calls `benilla_world::worldview::run` directly;
-/// this wrapper adds what only the client crate can supply on the web: the worker pool, the query
-/// string (copied into `benilla_world::launch_env` for the keys the engine reads), and the
-/// loading overlay's `ready` edge, which the viewer has no glue screen to send.
-pub fn run_worldview(build: BuildId) -> AppExit {
-    web_threads::install();
-    const SEEDED: [&str; 14] = [
+/// fork: copy the page's engine-side query keys (`?lighting=modern`, `?water_detail=1`, …) into
+/// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
+/// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
+fn seed_launch_env() {
+    const SEEDED: [&str; 15] = [
         "WOW_MAP",
+        "WOW_WATER_DETAIL",
         "WOW_MODERN_ZONE",
         "WOW_WORLDVIEW_AT",
         "WOW_LIGHTING",
@@ -343,6 +339,18 @@ pub fn run_worldview(build: BuildId) -> AppExit {
             .iter()
             .filter_map(|k| webenv::var(k).map(|v| ((*k).to_string(), v))),
     );
+}
+
+/// The world viewer's entry point — the engine with no game attached (decision 1160).
+/// Its shim (`benilla-worldview`) is this library's second caller; see [`worldview`].
+/// The world viewer — `benilla-worldview`'s engine-only run, reachable from the browser too
+/// (`?worldview=1`, fork-owned). The native shim calls `benilla_world::worldview::run` directly;
+/// this wrapper adds what only the client crate can supply on the web: the worker pool, the query
+/// string (copied into `benilla_world::launch_env` for the keys the engine reads), and the
+/// loading overlay's `ready` edge, which the viewer has no glue screen to send.
+pub fn run_worldview(build: BuildId) -> AppExit {
+    web_threads::install();
+    seed_launch_env();
     webprogress::signal_ready_once();
     benilla_world::worldview::run(build)
 }
@@ -405,6 +413,8 @@ pub fn run(build: BuildId) -> AppExit {
     // `Plugin::build`, so the spawner and the thread count have to be in place ahead of
     // `add_plugins`, not merely early. Compiles to nothing off a shared-memory browser build.
     web_threads::install();
+    // Before any resource reads `launch_env` (`LightingSettings`, `WaterDetail`, …).
+    seed_launch_env();
 
     // The offload lever, read once and applied before the first asset can be asked for.
     // `?offload=0` puts every `spawn_pooled` caller back on the frame thread under the asset

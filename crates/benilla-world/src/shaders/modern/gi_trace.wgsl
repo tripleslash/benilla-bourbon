@@ -47,6 +47,8 @@ struct GiTrace {
 // P6: the local lights near a probe, picked once and then evaluated at every ray's hit — walking the
 // whole table per hit would be 24 rays x 256 lights a probe.
 const NEAR_LIGHTS: u32 = 4u;
+// The share of a ray that passes a foliage voxel (two-sided, alpha-tested) to whatever lies beyond.
+const FOLIAGE_GAP: f32 = 0.45;
 var<private> near_light: array<u32, 4>;
 var<private> near_count: u32;
 
@@ -145,7 +147,7 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     if (idx >= total) {
         return;
     }
-    let cascade = idx / per_cascade;
+    let cascade = probegi::logical_cascade(g, idx / per_cascade);
     let slot = i32(idx % per_cascade);
     let n = vec3<i32>(g.dims.xyz);
     let texel = vec3<i32>(slot % n.x, (slot / n.x) % n.y, slot / (n.x * n.y));
@@ -159,7 +161,10 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let previous = modern_block.probes[idx];
     let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
-    let cold = previous.dc.w <= 0.0;
+    // Never traced — not "invalid": an invalid probe used to count as cold, so it was re-traced
+    // every frame under a new ray rotation, flipping between valid and invalid (and between classes)
+    // frame to frame. That flip was the blinking on trunks, canopies and interior walls.
+    let cold = previous.depth.w < 0.5;
     let reset = trace.cam.w > 0.5;
     let period = max(u32(g.misc.y), 1u);
     let scheduled = ((idx * 7u + u32(g.misc.z)) % period) == 0u;
@@ -229,9 +234,14 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
                 let albedo = select(hit.albedo, g.ground.xyz, hit.kind > 1.5);
                 var nrm = hit.nrm;
                 let facing = dot(nrm, -dir);
+                var gap = 0.0;
                 if (hit.two_sided > 0.5) {
                     // Foliage is lit through: its shading normal turns to meet the ray.
                     nrm = select(nrm, -nrm, facing < 0.0);
+                    // A leaf voxel is not a solid wall: a share of the ray slips between the
+                    // leaves to the sky. Without it a canopy reads as a roof and the ground
+                    // under a tree goes black.
+                    gap = FOLIAGE_GAP;
                 } else if (facing < 0.0) {
                     backfaces = backfaces + 1.0;
                 }
@@ -247,6 +257,8 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
                 let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
                 // P6: the local lights too, so a room whose only light is a hearth still bounces.
                 radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));
+                radiance = mix(radiance, probegi::miss_radiance(g, dir, interior_class), gap);
+                sky_seen = sky_seen + gap;
             }
         }
         dc = dc + radiance;
@@ -255,10 +267,11 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
         sh_z = sh_z + radiance * dir.z;
     }
 
-    // A probe most of whose rays leave a surface by its back is inside geometry.
-    if (backfaces * inv_rays > trace.tune.x) {
-        valid = 0.0;
-    }
+    // A probe most of whose rays leave a surface by its back is inside geometry. Soft around the
+    // limit: with 24 rotating rays the share jitters, and a hard cut turned that jitter into a probe
+    // popping in and out of the field.
+    let back_share = backfaces * inv_rays;
+    valid = valid * (1.0 - smoothstep(trace.tune.x * 0.7, trace.tune.x * 1.3, back_share));
     var out: probegi::GiProbe;
     // E(n) / pi = dc + sh . n, from a uniform-sphere estimate of the radiance field.
     out.dc = vec4<f32>(dc * inv_rays, valid);
@@ -266,6 +279,6 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     out.sh_y = vec4<f32>(sh_y * (2.0 * inv_rays), select(1.0, 2.0, scrolled || cold || reset));
     out.sh_z = vec4<f32>(sh_z * (2.0 * inv_rays), 0.0);
     // P6: the two distance moments the Chebyshev test reads, and the class the receivers match on.
-    out.depth = vec4<f32>(hit_dist * inv_rays, hit_dist_sq * inv_rays, interior_class, 0.0);
+    out.depth = vec4<f32>(hit_dist * inv_rays, hit_dist_sq * inv_rays, interior_class, 1.0);
     scratch[idx] = out;
 }

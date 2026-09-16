@@ -222,7 +222,7 @@ impl Plugin for ModernLightingPlugin {
         app.init_resource::<LightingSettings>()
             .init_resource::<ActiveLighting>()
             .add_plugins(ExtractResourcePlugin::<ActiveLighting>::default())
-            .add_systems(PreUpdate, latch_on_world_entry)
+            .add_systems(PreUpdate, (latch_on_world_entry, sync_model_pipelines).chain())
             .add_plugins((
                 sun_arc::plugin,
                 shadow::plugin,
@@ -253,6 +253,31 @@ fn latch_on_world_entry(
         *active = next;
     }
     MODERN_FRAME.store(active.is_modern(), Ordering::Relaxed);
+}
+
+/// Model pipelines compile the modern code only in a modern session
+/// (`benilla_assets::materials::MODERN_MODEL_PIPELINES`). On a latch edge every model material is
+/// touched, so it re-prepares under the new pipeline key; the runtime flag in the shader stays, so
+/// a material not yet re-prepared still renders the right model.
+fn sync_model_pipelines(
+    active: Res<ActiveLighting>,
+    mut materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
+    mut last: Local<Option<bool>>,
+) {
+    let modern = active.is_modern();
+    if *last == Some(modern) {
+        return;
+    }
+    let first = last.is_none();
+    *last = Some(modern);
+    benilla_assets::materials::MODERN_MODEL_PIPELINES.store(modern, Ordering::Relaxed);
+    if first && !modern {
+        return;
+    }
+    let ids: Vec<_> = materials.ids().collect();
+    for id in ids {
+        let _ = materials.get_mut(id);
+    }
 }
 
 #[cfg(test)]

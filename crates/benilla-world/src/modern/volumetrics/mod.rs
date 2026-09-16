@@ -103,7 +103,7 @@ pub struct FroxelTier {
 
 pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     let (mode, grid, range, point_lights, cloud_shadow, shafts) = match quality {
-        LightingQuality::Low => (FogMode::Analytic, UVec3::ONE, 200.0, 0, 0.0, 0.6),
+        LightingQuality::Low => (FogMode::Analytic, UVec3::ONE, 200.0, 0, 0.0, 0.9),
         LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 200.0, 8, 0.45, 0.0),
         LightingQuality::High => (FogMode::Froxel, UVec3::new(160, 90, 64), 300.0, 16, 0.5, 0.0),
         LightingQuality::Ultra => (FogMode::Froxel, UVec3::new(192, 108, 96), 400.0, 32, 0.55, 0.0),
@@ -446,8 +446,9 @@ fn update_volume(
             l.storm_bcc,
             if cut { 0.0 } else { HISTORY_WEIGHT },
         ),
-        ambient: Vec3::from(media.ambient_in).extend(media::SKY_AERIAL),
-        sun: Vec3::from(media.key_in).extend(media.forward_share),
+        // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
+        ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(media::SKY_AERIAL),
+        sun: (Vec3::from(media.key_in) * Vec3::from(look.0.glow)).extend(media.forward_share),
         sun_dir: to_light.extend(media.g_forward),
         phase: Vec4::new(
             media.g_backward,

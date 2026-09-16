@@ -40,6 +40,7 @@ fn update_modern_sky(
     mut skies: ResMut<Assets<SkyMaterial>>,
     layers: Query<&MeshMaterial3d<CloudMaterial>>,
     mut clouds: ResMut<Assets<CloudMaterial>>,
+    look: Res<super::look::ActiveLook>,
 ) {
     let on = active.is_modern() && frame_is_modern() && super::cpu_hooks_enabled();
     let flag = if on { 1.0 } else { 0.0 };
@@ -49,7 +50,7 @@ fn update_modern_sky(
     let tint = Vec3::from(light.celestial_tint.map(srgb_to_linear));
     let sky_modern = quantized(sun.extend(flag));
     let glow = if on {
-        quantized((tint * (SUN_GLOW * above)).extend(MIE_G))
+        quantized((tint * Vec3::from(look.0.glow) * (SUN_GLOW * above)).extend(MIE_G))
     } else {
         Vec4::ZERO
     };
@@ -70,7 +71,9 @@ fn update_modern_sky(
     let lit = smoothstep(-0.1, 0.45, key.y);
     let cloud_modern = quantized(key.extend(flag));
     let cloud_light = if on {
-        quantized(Vec4::new(0.55 + 0.5 * lit, CLOUD_SILVER * lit, CLOUD_G, 0.0))
+        // A low sun lights the cloud deck from below rather than leaving it a grey slab: the floor
+        // is high enough that a dawn sky reads as lit haze.
+        quantized(Vec4::new(0.8 + 0.3 * lit, CLOUD_SILVER * lit, CLOUD_G, 0.0))
     } else {
         Vec4::ZERO
     };

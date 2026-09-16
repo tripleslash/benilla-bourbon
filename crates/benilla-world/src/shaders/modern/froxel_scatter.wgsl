@@ -25,10 +25,29 @@ struct LightTable {
 @group(0) @binding(6) var history_tex: texture_3d<f32>;
 @group(0) @binding(7) var scatter_out: texture_storage_3d<rgba16float, write>;
 
-// Under full cover the ambient in-scatter keeps this share: skylight still arrives sideways.
-const SKY_FLOOR: f32 = 0.25;
+// Under full cover the ambient in-scatter keeps this share: skylight still arrives sideways. It
+// matches the surfaces' linear shade floor (`sunshadow::SHADE_FLOOR` 0.72 in gamma ≈ 0.49 on
+// screen); at 0.25 the haze under a canopy went darker than the ground it hangs over, and a dense
+// zone fog (Teldrassil) turned the whole forest murky.
+const SKY_FLOOR: f32 = 0.65;
 // The noise's feature size (yd).
 const NOISE_SCALE: f32 = 48.0;
+// The shaft haze scatters the key this much harder than the fog medium does, and the sky this much
+// less: light cones read from the CONTRAST between sunlit and shadowed air, and an ambient-heavy
+// haze fills the shadowed air in until the cones vanish. A calibration, not a physical albedo.
+const SHAFT_KEY_GAIN: f32 = 1.4;
+const SHAFT_SKY_SHARE: f32 = 0.55;
+// The haze's phase is half isotropic, so a cone seen side-on under a canopy still reads; the fog's
+// dual lobe alone passes ~0.4 at 90 degrees from the sun.
+const SHAFT_ISOTROPIC: f32 = 0.5;
+
+// A per-froxel, per-frame offset in [-0.5, 0.5]: the one-tap shadow lookup then covers the froxel's
+// footprint over the history instead of its centre alone, so a shaft's edge is not a froxel staircase.
+fn froxel_jitter(id: vec3<u32>, frame: f32) -> vec2<f32> {
+    let h = fract(sin(dot(vec3<f32>(id), vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+    let r = fract(vec2<f32>(h + frame * 0.618034, h * 1.7 + frame * 0.754878));
+    return r - vec2<f32>(0.5);
+}
 
 @compute @workgroup_size(4, 4, 4)
 fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -37,7 +56,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let n = f.grid.xyz;
-    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / n.xy;
+    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5) + froxel_jitter(id, f.phase.w) * 0.8) / n.xy;
     let s = (f32(id.z) + f.phase.z) / n.z;
     let d = max(froxelfog::depth_of_slice(f, s), f.proj.x);
     // Reverse-Z, infinite perspective: planar depth `d` sits at ndc z = near / d.
@@ -52,7 +71,10 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
     let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
-    let sigma = (f.media.x * clear * wisps + f.medium.x) * froxelfog::height_density(f, p.y);
+    let density = froxelfog::height_density(f, p.y);
+    let sigma_fog = f.media.x * clear * wisps * density;
+    let sigma_haze = f.medium.x * density;
+    let sigma = sigma_fog + sigma_haze;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -83,7 +105,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    var lum = f.ambient.rgb * sky_term + f.sun.rgb * (froxelfog::dual_phase(f, mu) * sun_vis);
+    let phase = froxelfog::dual_phase(f, mu);
+    let lum_fog = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
+    let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
+        + f.sun.rgb * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN);
+    var points = vec3<f32>(0.0);
 
     // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
     let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
@@ -97,10 +123,10 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
         // +0.5 keeps a froxel inside the flame finite.
         let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
-        lum = lum + light_table.points[2u * i + 1u].rgb * (atten * window * window * f.wind.w);
+        points = points + light_table.points[2u * i + 1u].rgb * (atten * window * window * f.wind.w);
     }
 
-    var cur = vec4<f32>(lum * sigma, sigma);
+    var cur = vec4<f32>((lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze, sigma);
 
     // History: this froxel's world point in last frame's grid. Clip w is the planar depth.
     if (f.medium.w > 0.0) {

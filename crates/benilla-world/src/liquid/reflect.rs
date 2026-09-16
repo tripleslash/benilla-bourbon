@@ -324,7 +324,9 @@ fn sync_reflection_camera(
         None => *held,
     };
 
-    let wanted = detail.is_cata() && !underwater.0.any() && eye.y - plane > MIN_EYE_HEIGHT;
+    // fork: `waterDetail 1` (SSR only) never renders the mirror; the shader's flag stays clear and
+    // it reflects through the screen-space trace over the horizon colour.
+    let wanted = detail.has_planar_reflection() && !underwater.0.any() && eye.y - plane > MIN_EYE_HEIGHT;
     if camera.is_active != wanted {
         camera.is_active = wanted;
     }

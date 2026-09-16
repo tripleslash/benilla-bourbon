@@ -1982,17 +1982,17 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     }
     // `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` are the modern-lighting A/B levers, session-only
     // on the same law. `LightingSettings::default()` has already taken them.
-    if std::env::var_os("WOW_LIGHTING").is_some() {
+    if benilla_world::launch_env::var("WOW_LIGHTING").is_some() {
         persist.session_owned.insert("lightingmodel".into());
     }
-    if std::env::var_os("WOW_LIGHTING_QUALITY").is_some() {
+    if benilla_world::launch_env::var("WOW_LIGHTING_QUALITY").is_some() {
         persist.session_owned.insert("lightingquality".into());
     }
     // `$WOW_WATER_DETAIL` is the liquid-renderer A/B lever, session-only on the same law: every
     // side-by-side of the two water paths sets it, and a value that stuck in the file would leave
     // the player's client on whichever side the last comparison happened to want.
     // `WaterDetail::default()` has already taken it; this keeps it off disk.
-    if std::env::var_os("WOW_WATER_DETAIL").is_some() {
+    if benilla_world::launch_env::var("WOW_WATER_DETAIL").is_some() {
         persist.session_owned.insert("waterdetail".into());
     }
     // `$WOW_HD_MODELS` is the content-layer A/B lever, session-only on `$WOW_WATER_DETAIL`'s law
@@ -3225,9 +3225,8 @@ mod tests {
         assert!(apply_to_knobs("ssaostrength", "-1", &mut knobs));
         assert_eq!(knobs.indirect.ao, *SSILVB_RANGE.start());
         // `waterDetail` MAPS rather than clamps: the value space is a set of tiers, and everything
-        // that is not the 1.12.1 renderer resolves to cata. `1` — the reference's medium tier,
-        // which benilla does not implement — is the interesting case: it must land on a renderer
-        // that exists, not on a hole.
+        // that is not the 1.12.1 renderer resolves to cata. `1` — the reference's medium tier —
+        // is the fork's SSR-only cata tier: the same renderer without the planar mirror render.
         assert!(apply_to_knobs("waterDetail", "0", &mut knobs));
         assert!(!knobs.water_detail.is_cata());
         assert!(apply_to_knobs("waterdetail", "2", &mut knobs));
@@ -3235,8 +3234,11 @@ mod tests {
         assert!(apply_to_knobs("waterDetail", "1", &mut knobs));
         assert!(
             knobs.water_detail.is_cata(),
-            "the unimplemented medium tier must resolve to a renderer that exists"
+            "the medium tier must resolve to a renderer that exists"
         );
+        assert!(!knobs.water_detail.has_planar_reflection());
+        assert!(apply_to_knobs("waterDetail", "2", &mut knobs));
+        assert!(knobs.water_detail.has_planar_reflection());
         assert!(apply_to_knobs("waterDetail", "-3", &mut knobs));
         assert!(!knobs.water_detail.is_cata());
         // The FPS journal switch (2008): a flag, case-insensitive, off as shipped.

@@ -763,6 +763,7 @@ pub(super) fn setup_liquid(
                     light_buf: world_assets.shared_light.clone(),
                     modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
                     modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
+                    modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP,
                     ripple_buf: ripple_buf.0.clone(),
                 },
             });
