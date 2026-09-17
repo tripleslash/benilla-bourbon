@@ -52,6 +52,8 @@ pub struct ZoneLook {
     /// The fog is clear at least this far out (planar yd): the scene around the camera stays crisp
     /// while the long range still fades into the ground fog.
     pub fog_clear: f32,
+    /// Gain on the key light scattered by the shaft haze — how hard light cones read.
+    pub shafts: f32,
 }
 
 impl ZoneLook {
@@ -71,6 +73,7 @@ impl ZoneLook {
         sky_tint: [1.0, 1.0, 1.0],
         silhouette: 0.7,
         fog_clear: 0.0,
+        shafts: 1.0,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -90,6 +93,7 @@ impl ZoneLook {
             sky_tint: [0, 1, 2].map(|i| m(self.sky_tint[i], to.sky_tint[i])),
             silhouette: m(self.silhouette, to.silhouette),
             fog_clear: m(self.fog_clear, to.fog_clear),
+            shafts: m(self.shafts, to.shafts),
         }
     }
 
@@ -105,6 +109,7 @@ impl ZoneLook {
             && d(self.fog_falloff, other.fog_falloff)
             && d(self.silhouette, other.silhouette)
             && d(self.fog_clear, other.fog_clear)
+            && d(self.shafts, other.shafts)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -121,7 +126,7 @@ const ZONES: &[(u32, ZoneLook)] = &[
     // Darnassus: Teldrassil's light, a little clearer.
     (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
     // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
-    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
+    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, shafts: 1.5, ..ZoneLook::NEUTRAL }),
     // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.
     (148, ZoneLook {
         key: 1.05,
@@ -146,6 +151,7 @@ const ZONES: &[(u32, ZoneLook)] = &[
         sky_tint: [1.05, 1.15, 0.75],
         silhouette: 0.55,
         fog_clear: 450.0,
+        shafts: 0.3,
         ..ZoneLook::NEUTRAL
     }),
     // Elwynn Forest: treeline shafts at dusk.
@@ -262,7 +268,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
-/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear`. An empty or unparsable entry keeps the zone's value.
+/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -292,6 +298,7 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.fog_falloff, 16);
     set(&mut look.silhouette, 20);
     set(&mut look.fog_clear, 21);
+    set(&mut look.shafts, 22);
     look
 }
 

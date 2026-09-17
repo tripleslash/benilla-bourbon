@@ -498,6 +498,12 @@ fn prepare_entity_shadows(
             radius: part.radius,
         });
     }
+    // Drop the bind groups of cutout textures no caster uses any more: each holds its texture alive.
+    if cut_binds.0.len() > 256 {
+        let live: std::collections::HashSet<AssetId<Image>> =
+            casters.parts.iter().filter_map(|p| p.cutout).collect();
+        cut_binds.0.retain(|id, _| live.contains(id));
+    }
     buffer.0.write_buffer(&device, &queue);
     let Some(binding) = buffer.0.binding() else {
         frame.draws.clear();

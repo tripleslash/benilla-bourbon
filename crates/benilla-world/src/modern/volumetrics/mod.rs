@@ -469,7 +469,10 @@ fn update_volume(
         medium: Vec4::new(
             media.haze,
             media.noise,
-            l.storm_bcc,
+            // The shaft haze scatters the key light's own radiance, not the fog-colour-normalized
+            // in-scatter the fog medium carries (a fraction of it at dusk): this lane scales one into
+            // the other, times the zone's shaft gain.
+            look.0.shafts * shaft_key_scale(&media, l.diffuse, look.0.key_scatter),
             if cut { 0.0 } else { HISTORY_WEIGHT },
         ),
         // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
@@ -502,6 +505,18 @@ fn update_volume(
     out.block.clear();
     fog.std430(&mut out.block);
     out.block.extend_from_slice(bytemuck::cast_slice(&cloud));
+}
+
+/// How much brighter the key light's own radiance (decoded, horizon-faded) is than the medium's key
+/// in-scatter, by luminance — the factor the shaft haze multiplies `FroxelFog::sun` by.
+fn shaft_key_scale(media: &media::Media, diffuse: [f32; 3], key_scatter: f32) -> f32 {
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let key = diffuse.map(|c| super::srgb_to_linear(c) * super::sun_arc::key_horizon() * key_scatter.max(0.0));
+    let scattered = lum(media.key_in);
+    if scattered < 1e-5 {
+        return 0.0;
+    }
+    (lum(key) / scattered).clamp(0.0, 64.0)
 }
 
 /// Spacing (yd) of the regional ground samples around the camera.

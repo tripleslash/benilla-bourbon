@@ -389,6 +389,8 @@ fn collect_entity_casters(
     )>,
     rigs: Query<&RigSkin>,
     materials: Res<Assets<WowModelMaterial>>,
+    lighting: Res<WowLighting>,
+    cameras: Query<&GlobalTransform, With<WorldCamera>>,
     mut out: ResMut<ModernEntityCasters>,
 ) {
     if !active.is_modern() {
@@ -398,6 +400,20 @@ fn collect_entity_casters(
         return;
     }
     out.parts.clear();
+    // Only parts that can reach a cascade: within the last cascade's sphere of the camera, or along the
+    // ray toward the key light that far out. Model art stays resident kilometres away (the art scope),
+    // and packing, uploading and cascade-testing every one of those parts each frame made the frame
+    // slower and slower the further a flight went.
+    let Some(cam) = cameras.iter().next().map(GlobalTransform::translation) else {
+        return;
+    };
+    let reach_radius = cascade_splits(active.quality).last().copied().unwrap_or(0.0) * CASCADE_MARGIN * 1.2;
+    let to_light = (-lighting.sun_dir).normalize_or(Vec3::Y);
+    let ray_len = caster_reach();
+    let near_cascades = |center: Vec3, radius: f32| {
+        let t = (center - cam).dot(to_light).clamp(0.0, ray_len);
+        center.distance(cam + to_light * t) <= reach_radius + radius
+    };
     for (mesh, material, gt, part, occluder, aabb, rig) in &parts {
         if !occluder.0 || !matches!(part.blend, ModelBlend::Opaque | ModelBlend::AlphaTest) {
             continue;
@@ -435,6 +451,9 @@ fn collect_entity_casters(
             // No box at all: a generous sphere round the root.
             (None, _) => (translation, 4.0),
         };
+        if !near_cascades(center, radius) {
+            continue;
+        }
         out.parts.push(EntityCaster {
             mesh: mesh.id(),
             world_from_local: gt.to_matrix(),

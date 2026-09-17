@@ -28,7 +28,7 @@ struct FroxelFog {
     // x = fog extinction at the reference height (1/yd); y = 1 / height falloff (yd); z = reference
     // height (the regional ground); w = fog start (planar yd).
     media: vec4<f32>,
-    // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = storm blend;
+    // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = shaft key gain;
     // w = scatter history weight (0 on a cut).
     medium: vec4<f32>,
     // rgb = ambient in-scatter radiance (albedo x ambient); w = a sky pixel's share of optical depth.

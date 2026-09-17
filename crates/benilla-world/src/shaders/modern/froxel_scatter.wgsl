@@ -41,6 +41,24 @@ const SHAFT_SKY_SHARE: f32 = 0.55;
 // dual lobe alone passes ~0.4 at 90 degrees from the sun.
 const SHAFT_ISOTROPIC: f32 = 0.5;
 
+// Under full cover the shaft haze is this much denser, and scatters the key this much harder on top.
+const CANOPY_HAZE: f32 = 3.0;
+const CANOPY_SHAFT: f32 = 3.0;
+// How far around a froxel the canopy cover is gathered (yd).
+const CANOPY_REACH: f32 = 7.0;
+
+// The share of the sky hidden around `p` (0 open, 1 under a closed canopy): four sky-map taps a few
+// yards out, lifted a little so the ground itself never counts.
+fn canopy_cover(p: vec3<f32>) -> f32 {
+    let c = modern_block.cascades;
+    var open = 0.0;
+    open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(CANOPY_REACH, 0.0, 0.0));
+    open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(-CANOPY_REACH, 0.0, 0.0));
+    open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(0.0, 0.0, CANOPY_REACH));
+    open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(0.0, 0.0, -CANOPY_REACH));
+    return 1.0 - open * 0.25;
+}
+
 // A per-froxel, per-frame offset in [-0.5, 0.5]: the one-tap shadow lookup then covers the froxel's
 // footprint over the history instead of its centre alone, so a shaft's edge is not a froxel staircase.
 fn froxel_jitter(id: vec3<u32>, frame: f32) -> vec2<f32> {
@@ -69,7 +87,12 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
     let density = froxelfog::height_density(f, p.y);
     let sigma_fog = f.media.x * froxelfog::fog_clear(f, d) * wisps * density;
-    let sigma_haze = f.medium.x * density;
+    // Under a canopy the air is thick with dust and damp: the haze gets denser and scatters the key
+    // much harder there, so the light through a gap in the leaves reads as a beam. The cover is the
+    // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
+    // beam has open sky straight above it by definition.
+    let cover = canopy_cover(p);
+    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover);
     let sigma = sigma_fog + sigma_haze;
 
     // In-scatter.
@@ -104,7 +127,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let phase = froxelfog::dual_phase(f, mu);
     let lum_fog = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
-        + f.sun.rgb * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN);
+        + f.sun.rgb * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * f.medium.z * (1.0 + CANOPY_SHAFT * cover));
     var points = vec3<f32>(0.0);
 
     // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
