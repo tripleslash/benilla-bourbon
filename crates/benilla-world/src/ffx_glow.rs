@@ -503,7 +503,7 @@ fn init_pipelines(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(48).unwrap())),
                 // The wave LUT + its REPEAT sampler ride EVERY combine's layout, dry included, so
                 // the two entry points stay interchangeable behind one bind group. Binding a
                 // texture the dry shader never samples costs the frame nothing.
@@ -687,7 +687,7 @@ fn prepare_textures(
         );
         let gain_buf = render_device.create_buffer(&BufferDescriptor {
             label: Some("ffx_glow_gain"),
-            size: 32,
+            size: 48, // fork: modern lighting — + the grade row
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -846,10 +846,16 @@ impl ViewNode for FfxGlowNode {
             return Ok(()); // pipelines still compiling — draw the frame un-glowed
         };
         let render_device = render_context.render_device().clone();
+        // fork: modern lighting — the zone look's cinematic grade rides a third row (zeros = off).
+        let mut full = [0.0f32; 12];
+        full[..8].copy_from_slice(&uniform);
+        if modern {
+            full[8..].copy_from_slice(&crate::modern::look::grade());
+        }
         world.resource::<RenderQueue>().write_buffer(
             &textures.gain_buf,
             0,
-            bytemuck::cast_slice(&uniform),
+            bytemuck::cast_slice(&full),
         );
         let post = view_target.post_process_write();
         let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);

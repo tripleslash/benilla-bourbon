@@ -36,6 +36,9 @@ struct FfxCombine {
     // flag (FORK.md); w = its exposure. Written on
     // every frame, read only by `fs_combine_wave`.
     wave: vec4<f32>,
+    // fork: modern lighting — the zone look's cinematic grade: x = contrast, y = saturation,
+    // z = vignette, w = toe (gamma on the encoded picture; > 1 deepens the shadows). All 0 = off.
+    grade: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> ffx: FfxCombine;
 // The 128×128 wave LUT and its own REPEAT sampler — bound on EVERY combine, sampled only by the
@@ -152,6 +155,17 @@ fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
     return select(x, rolled, x > vec3<f32>(k));
 }
 
+// fork: modern lighting — the cinematic grade on the encoded, tonemapped picture: saturation about
+// the luma, contrast about mid grey, a toe that deepens the shadows, and a soft vignette.
+fn cinematic_grade(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let luma = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
+    var c = mix(vec3<f32>(luma), g, ffx.grade.y);
+    c = clamp((c - vec3<f32>(0.5)) * ffx.grade.x + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    c = pow(c, vec3<f32>(max(ffx.grade.w, 0.01)));
+    let edge = length((uv - vec2<f32>(0.5)) * vec2<f32>(1.25, 1.0)) * 1.3;
+    return c * (1.0 - ffx.grade.z * smoothstep(0.35, 1.0, edge));
+}
+
 // The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
 // rounds in — then the frame's single decode.
 fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
@@ -186,6 +200,9 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
         let blur_hdr = blur_raw * exposure;
         let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
         sg = colorspace::linear_to_srgb(modern_tonemap(max(scene.rgb, vec3<f32>(0.0)) * exposure + bloom));
+        if (ffx.grade.x > 0.0) {
+            sg = cinematic_grade(sg, uv);
+        }
         bg = colorspace::linear_to_srgb(modern_tonemap(blur_hdr));
     }
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear

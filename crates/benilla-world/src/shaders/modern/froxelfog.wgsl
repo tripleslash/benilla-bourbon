@@ -110,6 +110,25 @@ fn analytic_path(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     return analytic_path_keyed(f, p, t_start, 1.0);
 }
 
+// Distance fog on top of the height fog: the long range fades out completely before the distant
+// (WDL) ring ends, so far terrain never appears at an edge. Counted only through the lower
+// atmosphere — a ray climbing out of it stops accruing — so the sky overhead stays clear.
+const FAR_FOG_START: f32 = 2200.0;
+const FAR_FOG_END: f32 = 6000.0;
+const FAR_FOG_TAU: f32 = 4.5;
+const FAR_FOG_CEILING: f32 = 900.0;
+
+// Optical depth of the distance fog over the first `len` yards of a ray with vertical direction `dy`.
+fn distance_fog(f: FroxelFog, len: f32, dy: f32) -> f32 {
+    var reach = len;
+    if (dy > 1e-4) {
+        let climb = max(f.media.z + FAR_FOG_CEILING - f.camera.y, 0.0);
+        reach = min(len, climb / dy);
+    }
+    let t = clamp((reach - FAR_FOG_START) / (FAR_FOG_END - FAR_FOG_START), 0.0, 1.0);
+    return FAR_FOG_TAU * t * t;
+}
+
 // Past the froxel grid nothing knows where the key light is shadowed, so the tail keeps only this
 // share of its key in-scatter: a long view ray past a ridge or a canopy otherwise lit up the whole
 // distance behind it as if the sun reached every yard of it.
@@ -127,7 +146,8 @@ fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32)
     let t_fog = max(t, clamp(0.9 * f.media.w / d, 0.0, 1.0));
     let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y);
     let haze_tau = f.medium.x * len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
-    let tr = exp(-(fog_tau + haze_tau));
+    let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
+    let tr = exp(-(fog_tau + haze_tau + far_tau));
     let lum = f.ambient.rgb + f.sun.rgb * (dual_phase(f, dot(ray / len, f.sun_dir.xyz)) * key_share);
     return vec4<f32>(lum * (1.0 - tr), tr);
 }

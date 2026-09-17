@@ -54,6 +54,12 @@ pub struct ZoneLook {
     pub fog_clear: f32,
     /// Gain on the key light scattered by the shaft haze — how hard light cones read.
     pub shafts: f32,
+    /// The post's cinematic grade: contrast, saturation, vignette strength, and toe (gamma > 1 deepens
+    /// the shadows).
+    pub contrast: f32,
+    pub saturation: f32,
+    pub vignette: f32,
+    pub toe: f32,
 }
 
 impl ZoneLook {
@@ -74,6 +80,12 @@ impl ZoneLook {
         silhouette: 0.7,
         fog_clear: 0.0,
         shafts: 0.5,
+        // A light cinematic grade everywhere: a little contrast and shadow depth, slightly muted
+        // colour, a soft vignette.
+        contrast: 1.08,
+        saturation: 0.9,
+        vignette: 0.28,
+        toe: 1.08,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -94,6 +106,10 @@ impl ZoneLook {
             silhouette: m(self.silhouette, to.silhouette),
             fog_clear: m(self.fog_clear, to.fog_clear),
             shafts: m(self.shafts, to.shafts),
+            contrast: m(self.contrast, to.contrast),
+            saturation: m(self.saturation, to.saturation),
+            vignette: m(self.vignette, to.vignette),
+            toe: m(self.toe, to.toe),
         }
     }
 
@@ -110,6 +126,10 @@ impl ZoneLook {
             && d(self.silhouette, other.silhouette)
             && d(self.fog_clear, other.fog_clear)
             && d(self.shafts, other.shafts)
+            && d(self.contrast, other.contrast)
+            && d(self.saturation, other.saturation)
+            && d(self.vignette, other.vignette)
+            && d(self.toe, other.toe)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -143,15 +163,21 @@ const ZONES: &[(u32, ZoneLook)] = &[
     // fog rises between the distant ranges, which stand as crisp silhouette layers above it (checked
     // against the modern client's gate shot, `worldview_at=930,-4440,85`, face −5, 17:30).
     (14, ZoneLook {
-        exposure: 1.12,
+        exposure: 0.95,
         haze: 0.0002,
-        fog_reach: 0.9,
-        fog_tint: [1.7, 2.7, 1.8],
-        fog_falloff: 150.0,
-        sky_tint: [1.05, 1.15, 0.75],
+        fog_reach: 0.5,
+        fog_tint: [1.7, 2.6, 1.8],
+        fog_falloff: 70.0,
+        sky_tint: [1.05, 1.15, 0.8],
         silhouette: 0.55,
         fog_clear: 450.0,
         shafts: 0.3,
+        // Darker and more contrasted than the neutral grade, colour pulled back: the reference is
+        // cinematic, not saturated orange.
+        contrast: 1.2,
+        saturation: 0.82,
+        vignette: 0.4,
+        toe: 1.2,
         ..ZoneLook::NEUTRAL
     }),
     // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the
@@ -212,6 +238,12 @@ static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SKY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SILHOUETTE: AtomicU32 = AtomicU32::new(0x3f33_3333); // 0.7
+static GRADE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
+
+/// The zone look's cinematic grade for the post: `[contrast, saturation, vignette, toe]`.
+pub fn grade() -> [f32; 4] {
+    [0, 1, 2, 3].map(|i| f32::from_bits(GRADE[i].load(Ordering::Relaxed)))
+}
 
 /// The zone look's distant-silhouette shade (the WDL band, a modern frame only).
 pub fn silhouette() -> f32 {
@@ -247,6 +279,9 @@ fn publish(look: ZoneLook) {
     FILL.store(look.fill.to_bits(), Ordering::Relaxed);
     EXPOSURE.store((super::MODERN_EXPOSURE * look.exposure).to_bits(), Ordering::Relaxed);
     SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
+    for (i, v) in [look.contrast, look.saturation, look.vignette, look.toe].into_iter().enumerate() {
+        GRADE[i].store(v.to_bits(), Ordering::Relaxed);
+    }
     for i in 0..3 {
         FOG_TINT[i].store(look.fog_tint[i].to_bits(), Ordering::Relaxed);
         SKY_TINT[i].store(look.sky_tint[i].to_bits(), Ordering::Relaxed);
@@ -287,7 +322,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
-/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts`. An empty or unparsable entry keeps the zone's value.
+/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -318,6 +353,10 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.silhouette, 20);
     set(&mut look.fog_clear, 21);
     set(&mut look.shafts, 22);
+    set(&mut look.contrast, 23);
+    set(&mut look.saturation, 24);
+    set(&mut look.vignette, 25);
+    set(&mut look.toe, 26);
     look
 }
 
