@@ -232,8 +232,13 @@ struct WowLight {
 // coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
 // that row); `w` is how much of the cell answered, which is 0 wherever the field has nothing to say
 // and the sky-occlusion map stays in charge.
-fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> vec4<f32> {
-    let g = modern_block.gi;
+// `lite` (the water mirror, `sunshadow::mirror_view`): the finest cascade that owns the point answers
+// alone, without the Chebyshev visibility.
+fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: bool) -> vec4<f32> {
+    var g = modern_block.gi;
+    if (lite) {
+        g.interior.w = f32(u32(g.interior.w) & ~2u);
+    }
     if (g.params.x < 0.5 || g.params.z <= 0.0) {
         return vec4<f32>(0.0);
     }
@@ -251,7 +256,7 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> vec4<f
             acc = probegi::accum(acc, g, pk, k, modern_block.probes[probegi::tap_index(g, pk, k)], p, nrm);
         }
         let cell_gi = probegi::finish(acc);
-        let share = left * pk.inside;
+        let share = select(left * pk.inside, 1.0, lite);
         sum = sum + cell_gi.rgb * (cell_gi.w * share);
         answered = answered + cell_gi.w * share;
         left = left - share;
@@ -269,8 +274,9 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> vec4<f
 // fragment, read out of the world grid the binning pass fills: the WoW falloff per light, under its
 // cube shadow when it holds an atlas slot. The walk lives here rather than in
 // `benilla_modern::locallight` for the same reason `modern_gi_ambient` does — the light table is
-// this lane's own binding, which a WGSL module cannot reach.
-fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
+// this lane's own binding, which a WGSL module cannot reach. `lite` (the water mirror) skips the cube
+// shadows.
+fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
     let g = modern_block.lights;
     let found = locallight::cell_at(g, p);
     if (found.y < 1u) {
@@ -288,15 +294,18 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
         if (nl <= 0.0) {
             continue;
         }
-        let vis = locallight::local_visibility(
-            modern_shadow_map,
-            modern_shadow_samp,
-            g,
-            locallight::cell_slot(cell, i),
-            pos_range.xyz,
-            p,
-            nrm,
-        );
+        var vis = 1.0;
+        if (!lite) {
+            vis = locallight::local_visibility(
+                modern_shadow_map,
+                modern_shadow_samp,
+                g,
+                locallight::cell_slot(cell, i),
+                pos_range.xyz,
+                p,
+                nrm,
+            );
+        }
         sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
     }
     return sum;
@@ -1237,11 +1246,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The gate is the probe field itself (`gi.params.x`), which is exactly the tier split the plan
     // asked for: Low traces no probes, so Low keeps the bake and its `prop_probes`.
 #ifdef WOW_MODERN
+    // The water mirror shades its cheaper tier (`sunshadow::mirror_view`).
+    let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
     let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5;
     var lit_modern_room = vec3<f32>(0.0);
     if (modern_interior && is_interior && !is_rig) {
         let rn = wow_normalize(in.world_normal);
-        let room_gi = modern_gi_ambient(in.world_position.xyz, rn, 1.0);
+        let room_gi = modern_gi_ambient(in.world_position.xyz, rn, 1.0, modern_lite);
         // The building's own `MOHD.ambColor` is the floor: where the field has nothing to say yet
         // (a probe slice not traced this frame, a cupboard no probe sits in) the room still reads as
         // the room and not as a hole.
@@ -1361,7 +1372,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let modern_frame = wow_light.point_count.y > 0.5;
     if (modern_frame) {
         let mview_z = (view.view_from_world * in.world_position).z;
-        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z);
+        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z, modern_lite);
         // fork: modern lighting (FORK.md, P4) — cloud shadows.
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
         player_shadow = player_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
@@ -1405,10 +1416,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #ifdef WOW_MODERN
     var lit_with_shadow_sky = lit_with_shadow_base;
     if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig) {
-        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz);
+        let sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
-        let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0);
+        let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, modern_lite);
         let amb_gi = sunshadow::shade_floor(mix(amb * sky, gi.rgb, gi.w), amb);
         lit_with_shadow_sky = clamp(amb_gi + max(lit - amb, vec3<f32>(0.0)) * player_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
@@ -1468,7 +1479,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
     // in a modern frame, because the bake that used to stand in for them is gone.
     if (locallight::grid_live(modern_block.lights) && !is_rig) {
-        point_diffuse = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal));
+        point_diffuse = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal), modern_lite);
     }
 
 #else
@@ -1701,9 +1712,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let dbg = modern_block.cascades.params.w;
         if (dbg > 4.5) {
             // fork: modern lighting (P6) — mode 5: what the local-light grid put here.
-            out_rgb = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal));
+            out_rgb = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal), false);
         } else if (dbg > 2.5) {
-            let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0); // modern GI debug view
+            let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, false); // modern GI debug view
             out_rgb = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
         } else {
             out_rgb = vec3<f32>(select(player_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view

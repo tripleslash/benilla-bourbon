@@ -128,6 +128,12 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-assets/src/materials.rs` | `specialize` pushes `WOW_ZFILL` to the depth-prime twin's fragment | P6 fix 2 |
 | `benilla-world/src/ffx_glow.rs` | the modern decode / HDR downsample only for the `FfxState::Player` view (`FfxGlow::WORLD`); booths, UI panes and the glue scene stay classic | P6 fix 3 |
 | `benilla-world/src/liquid/ripple.rs` | `collect_stamps`: wind cat's-paw stamps (`WIND_*`) before the rain when `frame_is_modern()` | P6 fix |
+| `sunshadow.wgsl` | `ModernCascades.sky_params.w` = the water mirror's plane while it renders (`NO_MIRROR_PLANE` otherwise); `mirror_view(c, eye)`; `sun_visibility` / `cascade_visibility` / `sky_ambient` take `lite` (1 shadow tap, 1 sky tap) | P7 perf |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `modern_gi_ambient` / `modern_local_lights` take `lite` (one probe cascade without Chebyshev; no cube shadows); every call passes `sunshadow::mirror_view(modern_block.cascades, view.world_position)` (debug views pass `false`); static_gx reads the sky map and probes ONCE for `lit_nl_shadowed` and `lit_doodad` (`modern_sky` / `modern_gi`) | P7 perf |
+| `fog_composite.wgsl` | the Low tier's screen shafts skip the mirror view | P7 perf |
+| `benilla-world/src/liquid/{mod,reflect}.rs` | `ReflectionPlane` re-exported; `ReflectionPlane::live_plane` | P7 perf |
+| `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_MODERN_MIRRORTIER` (dev A/B: every view shades the mirror tier) and `WOW_MODERN_CASTERREACH` (dev A/B: cascade caster reach, yd) | P7 perf |
+| `benilla-world/src/liquid/ripple.rs` | fix (not modern-only): catch-up steps bind `RipplePipeline::settled` (prev = placement), so a two-step frame no longer reprojects the field twice and drags ripples with the camera | P7 perf |
 
 ## Planned hooks (not yet landed)
 

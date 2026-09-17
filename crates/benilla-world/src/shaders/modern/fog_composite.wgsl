@@ -47,7 +47,10 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // Low tier: the analytic in-scatter assumes an unoccluded key light. Re-weight its key share by how
     // much open sky lies between this pixel and the light on screen — radial shafts out of the gaps.
-    if (f.alloc.w < froxelfog::MODE_FROXEL - 0.5 && f.proj.w > 0.0 && f.screen.z > 0.0) {
+    // Not in the water mirror: the light's screen position is the main view's, so the taps would march
+    // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
+    let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
+    if (f.alloc.w < froxelfog::MODE_FROXEL - 0.5 && f.proj.w > 0.0 && f.screen.z > 0.0 && !mirror) {
         let to_light = f.screen.xy - in.uv;
         var open = 0.0;
         var total = 0.0;

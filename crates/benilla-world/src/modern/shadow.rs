@@ -62,6 +62,18 @@ pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// (Was 300: at a low sun a ridge further than that toward the light cast nothing into a far
 /// cascade, and the haze and ground behind it lit up.)
 pub const CASTER_REACH: f32 = 1200.0;
+/// [`CASTER_REACH`], or the dev A/B override `$WOW_MODERN_CASTERREACH` (yd).
+fn caster_reach() -> f32 {
+    static CELL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        crate::launch_env::var("WOW_MODERN_CASTERREACH")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|r| *r > 0.0)
+            .unwrap_or(CASTER_REACH)
+    })
+}
+/// `sky_params.w` while no water mirror renders: below any eye, so no view takes the mirror's tier.
+pub const NO_MIRROR_PLANE: f32 = -1.0e9;
 /// Constant depth bias, in yards along the light.
 const DEPTH_BIAS_YD: f32 = 0.15;
 /// Normal offset, in texels.
@@ -99,7 +111,9 @@ pub struct ModernCascades {
     pub depth_bias: [f32; MAX_CASCADES],
     /// The debug view mode (`params.w`): 1 = sun visibility, 2 = sky visibility.
     pub debug: u8,
-    /// The sky-occlusion map's light clip (straight down) and `[enabled, texel yd, depth bias, 0]`.
+    /// The sky-occlusion map's light clip (straight down) and `[enabled, texel yd, depth bias,
+    /// mirror plane]` — the last is the water mirror's plane while it renders, else
+    /// [`NO_MIRROR_PLANE`] (`sunshadow::mirror_view`).
     pub sky_clip: Mat4,
     pub sky_params: [f32; 4],
 }
@@ -265,6 +279,7 @@ fn update_cascades(
     active: Res<ActiveLighting>,
     lighting: Res<WowLighting>,
     cameras: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
+    mirror: Option<Res<crate::liquid::ReflectionPlane>>,
     mut out: ResMut<ModernCascades>,
     mut aimed: Local<Option<Vec3>>,
     mut spheres: Local<[Option<(Vec3, f32)>; MAX_CASCADES]>,
@@ -327,7 +342,13 @@ fn update_cascades(
     let sky_center = (cam / SKY_SNAP).round() * SKY_SNAP;
     let sky = cascade_from_sphere(sky_center, SKY_HALF_EXTENT, Vec3::NEG_Y, SHADOW_MAP_SIZE);
     next.sky_clip = sky.clip_from_world;
-    next.sky_params = [1.0, sky.texel_world, sky.depth_bias * 4.0, 0.0];
+    // The mirror's plane rides the spare lane: the lanes shade their reflection tier below it.
+    let mirror_plane = if super::mirror_tier_everywhere() {
+        -NO_MIRROR_PLANE
+    } else {
+        mirror.and_then(|m| m.live_plane()).unwrap_or(NO_MIRROR_PLANE)
+    };
+    next.sky_params = [1.0, sky.texel_world, sky.depth_bias * 4.0, mirror_plane];
     *out = next;
 }
 
@@ -465,11 +486,12 @@ pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> C
     let light_view = Mat4::from_translation(-snapped) * light_rot;
     // Reverse-Z: the plane `CASTER_REACH` beyond the sphere toward the sun maps to 1, the sphere's
     // far side to 0.
-    let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, radius, -(radius + CASTER_REACH));
+    let reach = caster_reach();
+    let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, radius, -(radius + reach));
     CascadeFit {
         clip_from_world: proj * light_view,
         texel_world: texel,
-        depth_bias: DEPTH_BIAS_YD / (2.0 * radius + CASTER_REACH),
+        depth_bias: DEPTH_BIAS_YD / (2.0 * radius + reach),
     }
 }
 

@@ -48,8 +48,22 @@ struct ModernCascades {
     params: vec4<f32>,
     // The sky-occlusion map (P3): the static world from straight above, in array layer 4.
     sky_clip: mat4x4<f32>,
-    // x = enabled, y = texel world size, z = depth bias, w unused.
+    // x = enabled, y = texel world size, z = depth bias, w = the water mirror's plane (world Y) while
+    // the mirror renders, and `NO_MIRROR_PLANE` otherwise — see `mirror_view`.
     sky_params: vec4<f32>,
+}
+
+// **Is this fragment being drawn for the water mirror** (`liquid::reflect`)? The mirror renders the
+// whole scene a second time, into a downscaled buffer the waves then bend and blur, so it takes the
+// helpers' reflection tier: one shadow tap for five, one sky tap for nine, one probe cascade without
+// visibility, local lights without their cube shadows.
+//
+// No view flag reaches a material, so the eye's HEIGHT answers: the mirror camera always hangs at
+// least `MIN_EYE_HEIGHT` (0.5 yd) under the plane it mirrors about, and runs only while the world
+// camera is at least that far above it. The quarter yard of margin covers a frame's drift between the
+// plane's verdict and the eye. Booths and UI panes never reach here: their light rows are classic.
+fn mirror_view(c: ModernCascades, eye: vec3<f32>) -> bool {
+    return eye.y < c.sky_params.w - 0.25;
 }
 
 fn cascade_visibility(
@@ -59,6 +73,7 @@ fn cascade_visibility(
     i: u32,
     world_pos: vec3<f32>,
     normal: vec3<f32>,
+    lite: bool,
 ) -> f32 {
     let offset_pos = world_pos + normal * (c.texel_world[i] * c.params.z);
     let clip = c.clip_from_world[i] * vec4<f32>(offset_pos, 1.0);
@@ -69,6 +84,10 @@ fn cascade_visibility(
     }
     // Reverse-Z: a receiver is lit when it is at least as close to the light as the stored caster.
     let depth = ndc.z + c.depth_bias[i];
+    if (lite) {
+        // The mirror's tier: the hardware 2x2 compare alone.
+        return textureSampleCompareLevel(map, samp, uv, i32(i), depth);
+    }
     // 5-tap rotated cross over the hardware 2x2 compare — soft edges at a web-friendly cost.
     var taps = array<vec2<f32>, 5>(
         vec2<f32>(0.0, 0.0),
@@ -111,8 +130,9 @@ fn sun_visibility(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
     view_distance: f32,
+    lite: bool,
 ) -> f32 {
-    return mix(SUN_SHADE_FLOOR, 1.0, sun_visibility_raw(map, samp, c, world_pos, normal, view_distance));
+    return mix(SUN_SHADE_FLOOR, 1.0, sun_visibility_raw(map, samp, c, world_pos, normal, view_distance, lite));
 }
 
 // Sun visibility (1 = lit) at a world position seen `view_distance` yd in front of the camera.
@@ -123,11 +143,12 @@ fn sun_visibility_raw(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
     view_distance: f32,
+    lite: bool,
 ) -> f32 {
     let count = u32(c.params.x);
     for (var i = 0u; i < count; i = i + 1u) {
         if (view_distance < c.splits[i]) {
-            let v = cascade_visibility(map, samp, c, i, world_pos, normal);
+            let v = cascade_visibility(map, samp, c, i, world_pos, normal, lite);
             if (i + 1u == count) {
                 // The last cascade fades into the far field instead of ending on a hard line.
                 let fade = smoothstep(c.splits[i] * 0.7, c.splits[i], view_distance);
@@ -362,6 +383,10 @@ fn sky_ambient(
     samp: sampler_comparison,
     c: ModernCascades,
     world_pos: vec3<f32>,
+    lite: bool,
 ) -> f32 {
+    if (lite) {
+        return mix(SKY_AMBIENT_FLOOR, 1.0, sky_visibility_fast(map, samp, c, world_pos));
+    }
     return mix(SKY_AMBIENT_FLOOR, 1.0, sky_visibility(map, samp, c, world_pos));
 }

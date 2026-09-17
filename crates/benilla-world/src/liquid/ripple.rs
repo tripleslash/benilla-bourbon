@@ -560,6 +560,14 @@ struct RippleLabel;
 struct RipplePipeline {
     layout: BindGroupLayoutDescriptor,
     propagate: CachedRenderPipelineId,
+    /// The blob the CATCH-UP steps read: this frame's, with `prev` set to `placement`.
+    ///
+    /// The reprojection moves the field from last step's square to this one, which is a thing that
+    /// happens ONCE per frame. A second step in the same frame reads a map that is already over this
+    /// frame's square, so reprojecting it again shifts every wave by the camera's movement a second
+    /// time — below 20 fps (or on any hitch) the ripples dragged along with a turning camera instead
+    /// of staying where they were made. The first step binds the shared buffer; the rest bind this.
+    settled: Buffer,
 }
 
 fn init_pipeline(
@@ -567,6 +575,7 @@ fn init_pipeline(
     fullscreen_shader: Res<FullscreenShader>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    device: Res<RenderDevice>,
 ) {
     let shader: Handle<Shader> =
         asset_server.load("embedded://benilla_world/shaders/liquid_ripple.wgsl");
@@ -608,6 +617,12 @@ fn init_pipeline(
             ..default()
         }),
         layout,
+        settled: device.create_buffer(&BufferDescriptor {
+            label: Some("wow_liquid_ripple_settled"),
+            size: std::mem::size_of::<RippleStd430>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
     });
 }
 
@@ -616,11 +631,21 @@ fn upload_ripple(
     queue: Res<RenderQueue>,
     buffer: Option<Res<RippleBuffer>>,
     data: Option<Res<RippleData>>,
+    field: Option<Res<RippleField>>,
+    pipelines: Option<Res<RipplePipeline>>,
 ) {
     let (Some(buffer), Some(data)) = (buffer, data) else {
         return;
     };
     queue.write_buffer(&buffer.0, 0, bytemuck::bytes_of(&data.0));
+    // Only a catch-up frame reads the settled copy.
+    if let (Some(field), Some(pipelines)) = (field, pipelines) {
+        if field.steps > 1 {
+            let mut settled = data.0;
+            settled.prev = settled.placement;
+            queue.write_buffer(&pipelines.settled, 0, bytemuck::bytes_of(&settled));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -660,19 +685,31 @@ impl ViewNode for RippleNode {
         };
 
         let device = render_context.render_device().clone();
+        let layout = cache.get_bind_group_layout(&pipelines.layout);
         let bind = device.create_bind_group(
             "liquid_ripple_bind",
-            &cache.get_bind_group_layout(&pipelines.layout),
+            &layout,
             &BindGroupEntries::with_indices((
                 (0, buffer.0.as_entire_binding()),
                 (1, &map.texture_view),
                 (2, &map.sampler),
             )),
         );
+        let settled = (field.steps > 1).then(|| {
+            device.create_bind_group(
+                "liquid_ripple_bind_settled",
+                &layout,
+                &BindGroupEntries::with_indices((
+                    (0, pipelines.settled.as_entire_binding()),
+                    (1, &map.texture_view),
+                    (2, &map.sampler),
+                )),
+            )
+        });
         // `steps` integrations, each one map -> scratch -> map. The reference catches up the same
         // way and with the same cap; the stamps are applied on every one of them, which is right,
         // because a catch-up step stands for a slice of time the disturbance was also present for.
-        for _ in 0..field.steps {
+        for step in 0..field.steps {
             {
                 let mut pass =
                     render_context
@@ -690,7 +727,8 @@ impl ViewNode for RippleNode {
                             occlusion_query_set: None,
                         });
                 pass.set_pipeline(propagate);
-                pass.set_bind_group(0, &bind, &[]);
+                // Reproject on the first step only — see `RipplePipeline::settled`.
+                pass.set_bind_group(0, settled.as_ref().filter(|_| step > 0).unwrap_or(&bind), &[]);
                 pass.draw(0..3, 0..1);
             }
             // Back into the texture the materials bind. See the module header: a GPU copy is

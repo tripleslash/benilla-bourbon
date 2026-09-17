@@ -156,6 +156,14 @@ pub(crate) struct ReflectionPlane {
     live: bool,
 }
 
+impl ReflectionPlane {
+    /// The plane (world Y) while the mirror renders this frame — what the modern lanes compare the
+    /// eye against to know they are drawing for the mirror (`sunshadow::mirror_view`).
+    pub(crate) fn live_plane(&self) -> Option<f32> {
+        self.live.then_some(self.plane)
+    }
+}
+
 /// **The layer for things the world draws and the mirror must not** — the one render layer whose
 /// meaning is a negation.
 ///
