@@ -154,6 +154,7 @@ pub(super) fn setup_lighting(
         fog_color: atmo.fog_color,
         fog_start,
         fog_end,
+        zone_fog_end: atmo.fog_end, // fork: modern lighting (FORK.md)
         // Interior fog seeds equal to the scene (camera starts outdoors, ramp t = 0).
         wmo_fog_color: atmo.fog_color,
         wmo_fog_start: fog_start,
@@ -360,6 +361,7 @@ pub(super) fn update_time_lighting(
         fog_color: atmo.fog_color,
         fog_start,
         fog_end,
+        zone_fog_end: atmo.fog_end, // fork: modern lighting (FORK.md)
         wmo_fog_color,
         wmo_fog_start,
         wmo_fog_end,

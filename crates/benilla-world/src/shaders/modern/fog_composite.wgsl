@@ -21,6 +21,8 @@
 @group(0) @binding(4) var<storage, read> modern_block: sunshadow::ModernBlock;
 
 const SHAFT_TAPS: u32 = 16u;
+// How far a sky pixel's ray is fogged (yd).
+const SKY_FOG_DISTANCE: f32 = 16000.0;
 
 fn depth_at(px: vec2<i32>) -> f32 {
     return textureLoad(depth_tex, px, 0);
@@ -42,7 +44,12 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let near = view.clip_from_view[3][2];
     let ndc_z = select(depth, near / max(f.grid.w, 1.0), sky);
     let h = view.world_from_clip * vec4<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0, ndc_z, 1.0);
-    let p = h.xyz / h.w;
+    var p = h.xyz / h.w;
+    if (sky) {
+        // The sky is fogged along its whole ray: the height fog saturates toward the horizon, where the
+        // silhouettes' feet meet it, and thins overhead on its own.
+        p = view.world_position + normalize(p - view.world_position) * SKY_FOG_DISTANCE;
+    }
     var fog = froxelfog::fog_at(fog_volume, fog_samp, f, p);
 
     // Low tier: the analytic in-scatter assumes an unoccluded key light. Re-weight its key share by how

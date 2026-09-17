@@ -24,3 +24,21 @@ pub fn var(name: &str) -> Option<String> {
         .and_then(|m| m.get(name).cloned())
         .or_else(|| std::env::var(name).ok())
 }
+
+/// fork: modern lighting — a dev reader the shim may install for values that can change while the
+/// app runs (the browser's live query string, rewritten with `history.replaceState`). Tuning knobs
+/// read through [`live_var`] then follow the page without a reload.
+static LIVE: OnceLock<fn(&str) -> Option<String>> = OnceLock::new();
+
+/// Install the live reader. The first call wins.
+pub fn set_live_reader(reader: fn(&str) -> Option<String>) {
+    let _ = LIVE.set(reader);
+}
+
+/// The live value if a reader is installed, else [`var`].
+pub fn live_var(name: &str) -> Option<String> {
+    match LIVE.get() {
+        Some(read) => read(name),
+        None => var(name),
+    }
+}

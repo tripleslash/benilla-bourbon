@@ -39,6 +39,19 @@ pub struct ZoneLook {
     pub key_scatter: f32,
     pub glow: [f32; 3],
     pub haze_tint: [f32; 3],
+    /// How far the long-range height fog reaches against the zone's authored fog end (>1 = clearer).
+    pub fog_reach: f32,
+    /// A gamma multiplier on the authored fog colour the medium is solved toward.
+    pub fog_tint: [f32; 3],
+    /// Yards over which the fog's density falls by `e` above the regional ground.
+    pub fog_falloff: f32,
+    /// A gamma multiplier on the sky dome's five authored stops.
+    pub sky_tint: [f32; 3],
+    /// The distant (WDL) silhouette's shade against the fog colour.
+    pub silhouette: f32,
+    /// The fog is clear at least this far out (planar yd): the scene around the camera stays crisp
+    /// while the long range still fades into the ground fog.
+    pub fog_clear: f32,
 }
 
 impl ZoneLook {
@@ -52,6 +65,12 @@ impl ZoneLook {
         key_scatter: 0.6,
         glow: [1.0, 1.0, 1.0],
         haze_tint: [1.0, 1.0, 1.0],
+        fog_reach: 1.0,
+        fog_tint: [1.0, 1.0, 1.0],
+        fog_falloff: super::volumetrics::media::HEIGHT_FALLOFF,
+        sky_tint: [1.0, 1.0, 1.0],
+        silhouette: 0.7,
+        fog_clear: 0.0,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -65,6 +84,12 @@ impl ZoneLook {
             key_scatter: m(self.key_scatter, to.key_scatter),
             glow: [0, 1, 2].map(|i| m(self.glow[i], to.glow[i])),
             haze_tint: [0, 1, 2].map(|i| m(self.haze_tint[i], to.haze_tint[i])),
+            fog_reach: m(self.fog_reach, to.fog_reach),
+            fog_tint: [0, 1, 2].map(|i| m(self.fog_tint[i], to.fog_tint[i])),
+            fog_falloff: m(self.fog_falloff, to.fog_falloff),
+            sky_tint: [0, 1, 2].map(|i| m(self.sky_tint[i], to.sky_tint[i])),
+            silhouette: m(self.silhouette, to.silhouette),
+            fog_clear: m(self.fog_clear, to.fog_clear),
         }
     }
 
@@ -76,7 +101,16 @@ impl ZoneLook {
             && d(self.haze, other.haze)
             && d(self.forward, other.forward)
             && d(self.key_scatter, other.key_scatter)
-            && (0..3).all(|i| d(self.glow[i], other.glow[i]) && d(self.haze_tint[i], other.haze_tint[i]))
+            && d(self.fog_reach, other.fog_reach)
+            && d(self.fog_falloff, other.fog_falloff)
+            && d(self.silhouette, other.silhouette)
+            && d(self.fog_clear, other.fog_clear)
+            && (0..3).all(|i| {
+                d(self.glow[i], other.glow[i])
+                    && d(self.haze_tint[i], other.haze_tint[i])
+                    && d(self.fog_tint[i], other.fog_tint[i])
+                    && d(self.sky_tint[i], other.sky_tint[i])
+            })
     }
 }
 
@@ -98,6 +132,21 @@ const ZONES: &[(u32, ZoneLook)] = &[
         key_scatter: 0.95,
         glow: [1.0, 0.56, 0.42],
         haze_tint: [0.92, 0.74, 0.74],
+        ..ZoneLook::NEUTRAL
+    }),
+    // Durotar: an amber haze. The ground stays crisp out to Orgrimmar's gate; beyond, a dense ground
+    // fog rises between the distant ranges, which stand as crisp silhouette layers above it (checked
+    // against the modern client's gate shot, `worldview_at=930,-4440,85`, face −5, 17:30).
+    (14, ZoneLook {
+        exposure: 1.12,
+        haze: 0.0002,
+        fog_reach: 0.9,
+        fog_tint: [1.7, 2.7, 1.8],
+        fog_falloff: 150.0,
+        sky_tint: [1.05, 1.15, 0.75],
+        silhouette: 0.55,
+        fog_clear: 450.0,
+        ..ZoneLook::NEUTRAL
     }),
     // Elwynn Forest: treeline shafts at dusk.
     (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0024, forward: 0.72, key_scatter: 0.7, ..ZoneLook::NEUTRAL }),
@@ -135,6 +184,24 @@ const ONE_BITS: u32 = 0x3f80_0000;
 static KEY: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FILL: AtomicU32 = AtomicU32::new(ONE_BITS);
 static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
+static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
+static SKY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
+static SILHOUETTE: AtomicU32 = AtomicU32::new(0x3f33_3333); // 0.7
+
+/// The zone look's distant-silhouette shade (the WDL band, a modern frame only).
+pub fn silhouette() -> f32 {
+    f32::from_bits(SILHOUETTE.load(Ordering::Relaxed))
+}
+
+/// The zone look's gamma multiplier on the authored fog colour (1 in classic).
+pub fn fog_tint() -> [f32; 3] {
+    [0, 1, 2].map(|i| f32::from_bits(FOG_TINT[i].load(Ordering::Relaxed)))
+}
+
+/// The zone look's gamma multiplier on the sky dome's stops (1 in classic).
+pub fn sky_tint() -> [f32; 3] {
+    [0, 1, 2].map(|i| f32::from_bits(SKY_TINT[i].load(Ordering::Relaxed)))
+}
 
 /// The key and fill gains for the shared light's rows (1, 1 in a classic session).
 pub fn key_fill() -> (f32, f32) {
@@ -154,6 +221,11 @@ fn publish(look: ZoneLook) {
     KEY.store(look.key.to_bits(), Ordering::Relaxed);
     FILL.store(look.fill.to_bits(), Ordering::Relaxed);
     EXPOSURE.store((super::MODERN_EXPOSURE * look.exposure).to_bits(), Ordering::Relaxed);
+    SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
+    for i in 0..3 {
+        FOG_TINT[i].store(look.fog_tint[i].to_bits(), Ordering::Relaxed);
+        SKY_TINT[i].store(look.sky_tint[i].to_bits(), Ordering::Relaxed);
+    }
 }
 
 pub(super) fn plugin(app: &mut App) {
@@ -186,6 +258,41 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
         }
     }
     id
+}
+
+/// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
+/// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
+/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear`. An empty or unparsable entry keeps the zone's value.
+fn look_override() -> Vec<Option<f32>> {
+    crate::launch_env::live_var("WOW_MODERN_LOOK")
+        .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
+        .unwrap_or_default()
+}
+
+fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
+    let get = |i: usize| o.get(i).copied().flatten();
+    let set = |v: &mut f32, i: usize| {
+        if let Some(x) = get(i) {
+            *v = x;
+        }
+    };
+    set(&mut look.key, 0);
+    set(&mut look.fill, 1);
+    set(&mut look.exposure, 2);
+    set(&mut look.haze, 3);
+    set(&mut look.forward, 4);
+    set(&mut look.key_scatter, 5);
+    for c in 0..3 {
+        set(&mut look.glow[c], 6 + c);
+        set(&mut look.haze_tint[c], 9 + c);
+        set(&mut look.fog_tint[c], 13 + c);
+        set(&mut look.sky_tint[c], 17 + c);
+    }
+    set(&mut look.fog_reach, 12);
+    set(&mut look.fog_falloff, 16);
+    set(&mut look.silhouette, 20);
+    set(&mut look.fog_clear, 21);
+    look
 }
 
 fn pinned_zone() -> Option<u32> {
@@ -232,7 +339,7 @@ fn update_look(
         (id, None) => id,
         (None, _) => None,
     };
-    let target = zone.map_or(ZoneLook::NEUTRAL, look_for_zone);
+    let target = apply_override(zone.map_or(ZoneLook::NEUTRAL, look_for_zone), &look_override());
     let next = look.0.lerp(target, (time.delta_secs() / 2.0).min(1.0));
     let next = if next.close_to(target) { target } else { next };
     if next != look.0 {

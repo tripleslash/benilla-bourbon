@@ -328,7 +328,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // result: at `useUiScale = 1` both clients scale the bag frames and the dropdown list by
     // `GetCVar("uiscale")`, and both read 0.9 there on every window we ship against.
     same("useUiScale", "0"),
-    same("farclip", "350"),
+    // fork: modern lighting (FORK.md) — the reference registers 350. The modern
+    // look's long-range height fog shows the world past it (Orgrimmar's gate from the Durotar road
+    // sits ~450 yd out), so the default view reaches the slider's maximum; the slider still lowers it.
+    ours(
+        "farclip",
+        "777",
+        "the modern look's horizon: detailed terrain out to the slider's max (reference registers 350)",
+    ),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
     // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re
@@ -2842,8 +2849,8 @@ mod tests {
         assert!(!sound.reverb, "zone reverb ships off (decision 1153)");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
-        // env-less 350 literal (view.rs doc: "Default 350" — the reference's own, 1624).
-        assert_eq!(d["farclip"], 350.0);
+        // env-less 777 literal (view.rs; the reference's own is 350, 1624).
+        assert_eq!(d["farclip"], 777.0);
         // `nearclip` welds to the const the off-world spawners use, so the viewer, the depth probe
         // and the player's camera cannot open on three different near planes again (2163).
         assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);

@@ -313,10 +313,16 @@ fn build_light_data(
     // clones this 8.5 KB blob every frame it reads as changed, and a parked frame changes nothing.
     let mut fresh = data.0;
     fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
+    // fork: modern lighting (FORK.md) — the zone look's fog tint (1 in classic).
+    let (fog_tint, silhouette) = if active.as_ref().is_some_and(|a| a.is_modern()) {
+        (crate::modern::look::fog_tint(), crate::modern::look::silhouette())
+    } else {
+        ([1.0; 3], 0.0)
+    };
     let rows = &mut fresh.rows;
     rows[3] = [l.spec[0], l.spec[1], l.spec[2], 20.0]; // 3 light_spec (w=terrain shininess 20)
-    rows[4] = [l.fog_color[0], l.fog_color[1], l.fog_color[2], fog_enable]; // 4 fog_color (w=enable)
-    rows[5] = [l.fog_start, l.fog_end, 0.0, farclip]; // 5 fog_params (z unused; w=farclip)
+    rows[4] = [l.fog_color[0] * fog_tint[0], l.fog_color[1] * fog_tint[1], l.fog_color[2] * fog_tint[2], fog_enable]; // 4 fog_color (w=enable)
+    rows[5] = [l.fog_start, l.fog_end, silhouette, farclip]; // 5 fog_params (z = modern WDL silhouette; w=farclip)
     rows[13] = [rs[0], rs[1], rs[2], rsa]; // 13 water river shallow (w=alpha)
     rows[14] = [rd[0], rd[1], rd[2], rda]; // 14 water river deep
     rows[15] = [os[0], os[1], os[2], osa]; // 15 water ocean shallow

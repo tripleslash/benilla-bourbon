@@ -230,6 +230,63 @@ impl WdlFile {
         Some(WdlTileMesh { positions, indices })
     }
 
+    /// A **coarser** mesh of tile `(tile_x, tile_y)` for the far horizon: the outer lattice sampled
+    /// every `step` corners (1, 2, 4, 8 or 16), two triangles per cell, no centre fan. `None` if the
+    /// tile is absent or `step` does not divide the 16-cell edge.
+    ///
+    /// At `step == 1` the border vertices and edges are exactly [`Self::tile_mesh`]'s, so the two LODs
+    /// meet without a crack. A coarser step leaves T-junctions against a finer neighbour, so it hangs a
+    /// `skirt`-yard curtain straight down from every border edge to cover them.
+    pub fn tile_mesh_coarse(&self, tile_x: u32, tile_y: u32, step: usize, skirt: f32) -> Option<WdlTileMesh> {
+        if tile_x >= 64 || tile_y >= 64 || step == 0 || INNER_EDGE % step != 0 {
+            return None;
+        }
+        let tile = self.tiles[tile_index(tile_x, tile_y)].as_ref()?;
+        let cs = CHUNK_SIZE as f64;
+        let lat = |global: f64| (MAP_OFFSET - global * cs) as f32;
+        let edge = INNER_EDGE / step + 1;
+        let mut positions = Vec::with_capacity(edge * edge + 4 * edge * 2);
+        for r in 0..edge {
+            for c in 0..edge {
+                let (or, oc) = (r * step, c * step);
+                positions.push([
+                    lat((tile_y as usize * 16 + or) as f64),
+                    lat((tile_x as usize * 16 + oc) as f64),
+                    f32::from(tile.outer[or * OUTER_EDGE + oc]),
+                ]);
+            }
+        }
+        let e = edge as u32;
+        let mut indices = Vec::with_capacity((edge - 1) * (edge - 1) * 6 + 4 * (edge - 1) * 6);
+        for r in 0..e - 1 {
+            for c in 0..e - 1 {
+                let tl = r * e + c;
+                let (tr, bl) = (tl + 1, tl + e);
+                let br = bl + 1;
+                // The centre fan's winding with the centre moved onto a corner.
+                indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+            }
+        }
+        if step > 1 && skirt > 0.0 {
+            let border: Vec<u32> = (0..e)
+                .map(|c| c)
+                .chain((1..e).map(|r| r * e + e - 1))
+                .chain((0..e - 1).rev().map(|c| (e - 1) * e + c))
+                .chain((1..e - 1).rev().map(|r| r * e))
+                .collect();
+            for (k, &top) in border.iter().enumerate() {
+                let next = border[(k + 1) % border.len()];
+                let [x, y, z] = positions[top as usize];
+                let base = positions.len() as u32;
+                positions.push([x, y, z - skirt]);
+                let [nx, ny, nz] = positions[next as usize];
+                positions.push([nx, ny, nz - skirt]);
+                indices.extend_from_slice(&[top, base, base + 1, top, base + 1, next]);
+            }
+        }
+        Some(WdlTileMesh { positions, indices })
+    }
+
     /// The drawn WDL surface height (absolute WoW `z`) under world `(x, y)` — interpolated over the
     /// SAME 4-triangle center-fan [`Self::tile_mesh`] builds, so a query agrees exactly with the
     /// rendered horizon silhouette (`height_at` at a mesh vertex's `x, y` returns that vertex's

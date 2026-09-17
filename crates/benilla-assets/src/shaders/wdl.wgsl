@@ -71,10 +71,6 @@ const WDL_OVERLAP: f32 = 33.0;
 /// then be draw order). Multiplicative so it can never cross zero into the sky.
 const WDL_DEPTH_PUSH: f32 = 0.999;
 
-// fork: modern lighting (FORK.md, P4) — the lit band's albedo (gamma), a dull
-// grass-and-rock average.
-const WDL_ALBEDO: vec3<f32> = vec3<f32>(0.36, 0.38, 0.30);
-
 // The shared global light (`lighting::global_light`) — the same buffer terrain, the models and liquid
 // bind, mirrored here as the row prefix WDL needs. Rows 4/5 are the SCENE fog (block 1) plus the
 // farclip wall, and that is the right block by construction: the band IS the horizon, so it is never
@@ -86,7 +82,7 @@ struct WowLight {
     _light_sun: vec4<f32>,     // 2
     _light_spec: vec4<f32>,    // 3
     fog_color: vec4<f32>,      // 4 rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
-    fog_params: vec4<f32>,     // 5 x/y = the SCENE fog start/end yd (unread here — the hull has its own pair); z unused; w = farclip wall (0 ⇒ off)
+    fog_params: vec4<f32>,     // 5 x/y = the SCENE fog start/end yd (unread here — the hull has its own pair); z = a modern frame's silhouette shade (`modern::look`); w = farclip wall (0 ⇒ off)
     _rows_6_19: array<vec4<f32>, 14>,
     point_count: vec4<f32>,    // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
@@ -133,13 +129,12 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
     if (w.fog_color.w > 0.5) {
         rgb = w.fog_color.xyz;
     }
-    // fork: modern lighting (FORK.md, P4) — a modern frame lights the horizon band as
-    // dull terrain (flat, facet normals) and leaves its haze to the fog composite.
-    let wdl_n = normalize(cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz)));
-    if (w.point_count.y > 0.5) {
-        let up_n = select(-wdl_n, wdl_n, wdl_n.y >= 0.0);
-        let nl = max(dot(up_n, -normalize(w._light_sun.xyz)), 0.0);
-        rgb = clamp(WDL_ALBEDO * (w._light_ambient.rgb + w._light_diffuse.rgb * nl), vec3<f32>(0.0), vec3<f32>(1.0));
+    // fork: modern lighting (FORK.md) — a modern frame draws the horizon band as an
+    // unlit SILHOUETTE: a darker body of the fog's own colour, with no key light and no facets. The fog composite lays the height fog over it from its true distance,
+    // so the far ranges' feet vanish into the haze and their crests rise above it.
+    let modern = w.point_count.y > 0.5;
+    if (modern) {
+        rgb = clamp(w.fog_color.xyz * w.fog_params.z, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     var out: WdlFsOut;
@@ -150,6 +145,13 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
     var depth = in.clip_position.z;
     if (farclip > 0.0) {
         depth = min(depth, view_z_to_depth_ndc(-farclip) * WDL_DEPTH_PUSH);
+        // fork: modern lighting (FORK.md) — a modern frame keeps the band's own
+        // distance, pushed back by the overlap so it still lies behind everything the detailed world
+        // draws (its near plane is `farclip − 33`, so the push lands at `farclip + 1` or beyond): the
+        // fog composite reads this depth, and a band clamped to the wall was fogged as if it stood there.
+        if (modern) {
+            depth = min(in.clip_position.z, view_z_to_depth_ndc(-(eye_z + WDL_OVERLAP + 1.0)));
+        }
     }
     out.depth = depth;
     return out;

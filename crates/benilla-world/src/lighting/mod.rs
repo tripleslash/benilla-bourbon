@@ -52,6 +52,10 @@ pub struct WowLighting {
     /// reference's constant ~33% near veil in rain (wow-re `rf-weather-fog-veil.md`).
     pub(crate) fog_start: f32,
     pub(crate) fog_end: f32,
+    /// fork: modern lighting (FORK.md) — the zone's fog end BEFORE the farclip
+    /// clamp (yd). The modern medium calibrates its long-range height fog on it, so the horizon is
+    /// not a wall at the view distance.
+    pub(crate) zone_fog_end: f32,
     /// The **interior** fog triple (DNState+0x80/84/88): `lerp(scene fog → the claimed WMO's MFOG
     /// fog, t)` on the 4 s camera-in-WMO ramp ([`WmoCrossfade`]) — equal to the scene triple while
     /// the camera is outside. Consumed ONLY by the interior lanes (round-6 Q-I consumer map): the

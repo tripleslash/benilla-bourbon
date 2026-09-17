@@ -98,7 +98,8 @@ impl Viewer {
 /// View distance in yards. `farclip` = WoW's `farclip` CVar — the ONE view distance: the far plane of
 /// the detailed world (geometry beyond it is clipped per-pixel, the wall, and the WDL horizon fills
 /// in beyond) **and** the reach of terrain residency (`terrain_stream::window`, decision 1513).
-/// Default **350** — the reference client's own registered default (decision 1624, superseding
+/// Default **777** (fork: modern lighting — the long-range fog shows the world past 350; was **350**,
+/// the reference client's own registered default (decision 1624, superseding
 /// 0954's divergence to the clamp's max 777). 777 shipped as "the `Config.wtf` most players ran",
 /// but it is the *maximum*, and it is what every player gets before they touch anything: at 777 the
 /// residency window is 24 chunks per axis against 350's 11 ([`terrain_stream::window::inner_radius`]),
@@ -402,7 +403,7 @@ impl Plugin for MsaaSupportPlugin {
 /// on purpose so the coarse WDL ring draws behind the wall (decision 0684; the reference's own
 /// `horizonfarclip` is a second plane floored at `farclip + 528`, default 2112). One number, not a
 /// function of anything: the detailed world ends at `farclip` by the wall, never by this plane.
-pub const CAM_FAR: f32 = 3000.0;
+pub const CAM_FAR: f32 = 10_000.0;
 
 impl ViewDistance {
     /// Set the near plane from a `nearclip` write, under the reference's own bounds.
@@ -425,10 +426,10 @@ impl Default for ViewDistance {
     /// at 777 and glaring at 320), so reproducing one must not need a human. Read once at startup, like
     /// the other capture-side knobs.
     fn default() -> Self {
-        let farclip = std::env::var("WOW_FARCLIP")
-            .ok()
+        // fork: modern lighting — `launch_env`, so the browser world view reaches it (`?farclip=`).
+        let farclip = crate::launch_env::var("WOW_FARCLIP")
             .and_then(|v| v.parse::<f32>().ok())
-            .map_or(350.0, |v| {
+            .map_or(777.0, |v| {
                 v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
             });
         Self {

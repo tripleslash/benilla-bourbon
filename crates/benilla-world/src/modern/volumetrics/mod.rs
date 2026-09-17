@@ -352,6 +352,7 @@ fn update_volume(
     crossfade: Option<Res<crate::lighting::WmoCrossfade>>,
     clouds: Option<Res<crate::clouds::CloudCoverage>>,
     debug: Option<Res<crate::dev_state::DebugState>>,
+    wdl: Option<Res<crate::wdl::WdlStreamer>>,
     mut out: ResMut<ModernVolume>,
     mut hist: Local<VolumeHistory>,
 ) {
@@ -384,6 +385,7 @@ fn update_volume(
         fog_color: l.wmo_fog_color,
         fog_start: l.wmo_fog_start,
         fog_end: l.wmo_fog_end,
+        zone_fog_end: l.zone_fog_end,
         ambient: l.ambient,
         // The key's horizon fade (a set moon scatters nothing into the haze).
         diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
@@ -393,14 +395,23 @@ fn update_volume(
         haze: look.0.haze,
         forward: look.0.forward,
         key_scatter: look.0.key_scatter,
+        fog_reach: look.0.fog_reach,
+        fog_tint: look.0.fog_tint,
+        fog_falloff: look.0.fog_falloff,
+        fog_clear: look.0.fog_clear,
     });
 
-    // The height falloff's reference trails the camera over ~2 s, so walking up a hill thins the fog
-    // around you only gradually; a teleport snaps it.
+    // The height falloff's reference is the regional ground — the coarse WDL heights around the
+    // camera, never above the camera itself — eased over ~2 s, so the fog lies in the valleys and a
+    // flying or climbing camera does not drag the layer up with it; a teleport snaps it.
     let dt = time.delta_secs();
+    let ground = wdl
+        .as_deref()
+        .and_then(|w| regional_ground(|p| w.height_under(p), cam))
+        .map_or(cam.y, |g| g.min(cam.y));
     let reference_height = match hist.reference_height {
-        Some(y) if (y - cam.y).abs() < 80.0 => y + (cam.y - y) * (dt / 2.0).min(1.0),
-        _ => cam.y,
+        Some(y) if (y - ground).abs() < 400.0 => y + (ground - y) * (dt / 2.0).min(1.0),
+        _ => ground,
     };
     hist.reference_height = Some(reference_height);
 
@@ -440,7 +451,7 @@ fn update_volume(
         view_row: view_from_world.row(2),
         grid: grid.as_vec3().extend(tier.range),
         alloc: VOLUME_ALLOC.as_vec3().extend(tier.mode.as_f32()),
-        media: Vec4::new(media.fog_end, media.inv_height, reference_height, media.near_clear),
+        media: Vec4::new(media.density, media.inv_height, reference_height, media.near_clear),
         medium: Vec4::new(
             media.haze,
             media.noise,
@@ -477,6 +488,31 @@ fn update_volume(
     out.block.clear();
     fog.std430(&mut out.block);
     out.block.extend_from_slice(bytemuck::cast_slice(&cloud));
+}
+
+/// Spacing (yd) of the regional ground samples around the camera.
+const GROUND_SAMPLE_YD: f32 = 300.0;
+
+/// The regional ground height (Bevy y) around `cam`: the mean of the lower two thirds of a 5×5 grid of
+/// WDL heights, so a ridge beside the camera does not lift the fog layer out of the valley it fills.
+/// Open ocean (no WDL tile) counts as sea level. `None` when no sample is authored at all.
+fn regional_ground(height: impl Fn(Vec3) -> Option<f32>, cam: Vec3) -> Option<f32> {
+    let mut samples = Vec::with_capacity(25);
+    let mut any = false;
+    for j in -2..=2 {
+        for i in -2..=2 {
+            let p = cam + Vec3::new(i as f32, 0.0, j as f32) * GROUND_SAMPLE_YD;
+            let h = height(p);
+            any |= h.is_some();
+            samples.push(h.unwrap_or(0.0));
+        }
+    }
+    if !any {
+        return None;
+    }
+    samples.sort_by(f32::total_cmp);
+    let low = &samples[..samples.len() * 2 / 3];
+    Some(low.iter().sum::<f32>() / low.len() as f32)
 }
 
 /// Fill the cloud-shadow grid: for each cell's ground point, the cloud cover where the key light's

@@ -76,6 +76,8 @@ fn caster_reach() -> f32 {
 pub const NO_MIRROR_PLANE: f32 = -1.0e9;
 /// Constant depth bias, in yards along the light.
 const DEPTH_BIAS_YD: f32 = 0.15;
+/// Yards a rigged caster's box is widened by for the cascade cull (a pose strays from its bind box).
+const RIG_CULL_MARGIN: f32 = 2.0;
 /// Normal offset, in texels.
 const NORMAL_OFFSET_TEXELS: f32 = 1.5;
 /// Re-aim only after the key light has turned this far (radians).
@@ -415,13 +417,23 @@ fn collect_entity_casters(
             .and_then(|r| rigs.get(r.0).ok())
             .map(|skin| u32::from(skin.slot));
         let (scale, _, translation) = gt.to_scale_rotation_translation();
+        // The cascade cull's sphere. A rigged part bounds by its box too: an animated doodad's is the
+        // authored all-animation box (`terrain_stream::spawn::assemble`), and a posed body strays
+        // only a little from its bind pose. A sphere round the ROOT alone culled a swaying tree's
+        // canopy out of the small near cascade whenever its trunk stood outside that cascade's box,
+        // so the ground just ahead of the camera lit up under the leaves and the shade came back on
+        // a line at the next cascade — a line that walked with the camera.
         let (center, radius) = match (aabb, rig_slot) {
             (Some(b), None) => (
                 gt.transform_point(Vec3::from(b.center)),
                 Vec3::from(b.half_extents).length() * scale.max_element(),
             ),
-            // A posed body strays from its bind-pose box; a generous sphere round the root.
-            _ => (translation, 4.0),
+            (Some(b), Some(_)) => (
+                gt.transform_point(Vec3::from(b.center)),
+                Vec3::from(b.half_extents).length() * scale.max_element() + RIG_CULL_MARGIN,
+            ),
+            // No box at all: a generous sphere round the root.
+            (None, _) => (translation, 4.0),
         };
         out.parts.push(EntityCaster {
             mesh: mesh.id(),

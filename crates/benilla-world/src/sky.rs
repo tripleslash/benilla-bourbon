@@ -308,12 +308,19 @@ fn update_sky_colors(
     // Byte-quantized (`quant255` — Light.dbc stops are byte colors) and write-gated: the stops
     // drift continuously with time-of-day, but an `Assets::get_mut` alone re-uploads the material
     // every frame; gated, the dome only pays when a display-visible band actually moves.
+    // fork: modern lighting (FORK.md) — the zone look's sky and fog tints (1 in classic).
+    let (sky_tint, fog_tint) = if crate::modern::frame_is_modern() {
+        (crate::modern::look::sky_tint(), crate::modern::look::fog_tint())
+    } else {
+        ([1.0; 3], [1.0; 3])
+    };
+    let tint = |c: [f32; 3], t: [f32; 3]| [c[0] * t[0], c[1] * t[1], c[2] * t[2]];
     let sky: Vec<Vec4> = light
         .sky
         .iter()
-        .map(|c| crate::modern::decode_if_modern(col(benilla_assets::quant255(*c)))) // fork: modern lighting
+        .map(|c| crate::modern::decode_if_modern(col(benilla_assets::quant255(tint(*c, sky_tint))))) // fork: modern lighting
         .collect();
-    let f = benilla_assets::quant255(light.fog_color);
+    let f = benilla_assets::quant255(tint(light.fog_color, fog_tint));
     // `fog.w` unused by the shader (the old raw-vs-linearised A/B is gone — GAMMA LANE, 0161).
     let fog = crate::modern::decode_if_modern(Vec4::new(f[0], f[1], f[2], 0.0)); // fork: modern lighting
     // Dawn/dusk warp: strength S + the sun's compass azimuth (Bevy world `atan2(z, x)` of the

@@ -317,8 +317,10 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 17] = [
+    const SEEDED: [&str; 19] = [
         "WOW_MAP",
+        "WOW_MODERN_LOOK",
+        "WOW_FARCLIP",
         "WOW_WATER_DETAIL",
         "WOW_MODERN_ZONE",
         "WOW_WORLDVIEW_AT",
@@ -353,6 +355,8 @@ fn seed_launch_env() {
 pub fn run_worldview(build: BuildId) -> AppExit {
     web_threads::install();
     seed_launch_env();
+    // fork: modern lighting — dev tuning knobs follow the live query string.
+    benilla_world::launch_env::set_live_reader(webenv::var);
     webprogress::signal_ready_once();
     benilla_world::worldview::run(build)
 }

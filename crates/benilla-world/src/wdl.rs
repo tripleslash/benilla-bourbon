@@ -33,6 +33,24 @@ use benilla_formats::WdlFile;
 /// world leaves empty and can never overlap it. (The reference's own far walk is a ±3-tile window.)
 const WDL_RADIUS: u32 = 5;
 
+/// fork: modern lighting (FORK.md) — the ring a modern frame streams. Its height fog
+/// lets the far ranges rise above the haze kilometres out (Hyjal behind Orgrimmar), so the band reaches
+/// ~6.4 km, on coarser meshes the further out a tile lies ([`modern_lod`]).
+const WDL_RADIUS_MODERN: u32 = 12;
+
+/// The mesh a modern ring tile `ring` tiles (Chebyshev) from the view's own takes: 0 = the full centre
+/// fan, otherwise the outer lattice every `n` corners (`WdlFile::tile_mesh_coarse`).
+fn modern_lod(ring: u32) -> usize {
+    match ring {
+        0..=2 => 0,
+        3..=5 => 1,
+        _ => 2,
+    }
+}
+
+/// The curtain (yd) a coarse ring tile hangs from its border over the T-junctions against a finer one.
+const WDL_SKIRT: f32 = 60.0;
+
 /// New WDL tiles built per frame — coarse meshes are cheap (545 verts), but a whole ring at once
 /// would hitch on zone load, so spread it.
 const WDL_LOADS_PER_FRAME: usize = 8;
@@ -67,7 +85,8 @@ pub(crate) struct WdlStreamer {
     /// `mapId` the loaded `wdl` is for; a cross-map teleport (≠ [`CurrentMap`]) reloads it.
     map_id: u32,
     material: Handle<WdlMaterial>,
-    loaded: HashMap<(u32, u32), Entity>,
+    /// Spawned ring tiles and the LOD each was built at (always 0 in a classic frame).
+    loaded: HashMap<(u32, u32), (Entity, usize)>,
 }
 
 impl WdlStreamer {
@@ -209,7 +228,7 @@ fn stream_wdl(
         if let Some(dir) = map_catalog.0.directory(map_id) {
             match WdlFile::load(&mut assets.chain.lock_recover(), dir) {
                 Ok(wdl) => {
-                    for (_, e) in streamer.loaded.drain() {
+                    for (_, (e, _)) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
                     streamer.wdl = wdl;
@@ -217,7 +236,7 @@ fn stream_wdl(
                 }
                 // No `.wdl` for this map (instances often lack one) → just clear the ring.
                 Err(_) => {
-                    for (_, e) in streamer.loaded.drain() {
+                    for (_, (e, _)) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
                     streamer.map_id = map_id;
@@ -233,29 +252,46 @@ fn stream_wdl(
     // lowered view distance the own tile *is* the near horizon, and dropping it leaves a gap the sky
     // pours through). What bounds the band on the near side is the shader's near plane, never the
     // streamed set, so this cannot toggle against the detailed streaming radius — a constant backdrop.
-    let desired = streamer.wdl.tiles_in_ring(center[0], center[1], WDL_RADIUS);
+    let modern = crate::modern::frame_is_modern();
+    let radius = if modern { WDL_RADIUS_MODERN } else { WDL_RADIUS };
+    let (ctx, cty) = benilla_formats::world_to_tile(center[0], center[1]);
+    let lod_of = |c: (u32, u32)| {
+        if modern {
+            modern_lod((c.0 as i32 - ctx as i32).unsigned_abs().max((c.1 as i32 - cty as i32).unsigned_abs()))
+        } else {
+            0
+        }
+    };
+    let desired = streamer.wdl.tiles_in_ring(center[0], center[1], radius);
 
-    // Unload ring tiles no longer wanted.
+    // Unload ring tiles no longer wanted, or wanted at another LOD.
     let stale: Vec<(u32, u32)> = streamer
         .loaded
-        .keys()
-        .filter(|c| !desired.contains(c))
-        .copied()
+        .iter()
+        .filter(|(c, (_, lod))| !desired.contains(c) || *lod != lod_of(**c))
+        .map(|(c, _)| *c)
         .collect();
     for coords in stale {
-        if let Some(e) = streamer.loaded.remove(&coords) {
+        if let Some((e, _)) = streamer.loaded.remove(&coords) {
             commands.entity(e).despawn();
         }
     }
 
-    // Load a few missing tiles this frame.
-    let missing: Vec<(u32, u32)> = desired
+    // Load a few missing tiles this frame, nearest first.
+    let mut missing: Vec<(u32, u32)> = desired
         .into_iter()
         .filter(|c| !streamer.loaded.contains_key(c))
-        .take(WDL_LOADS_PER_FRAME)
         .collect();
+    missing.sort_by_key(|c| (c.0 as i32 - ctx as i32).abs().max((c.1 as i32 - cty as i32).abs()));
+    missing.truncate(WDL_LOADS_PER_FRAME);
     for coords in missing {
-        let Some(tile) = streamer.wdl.tile_mesh(coords.0, coords.1) else {
+        let lod = lod_of(coords);
+        let tile = if lod == 0 {
+            streamer.wdl.tile_mesh(coords.0, coords.1)
+        } else {
+            streamer.wdl.tile_mesh_coarse(coords.0, coords.1, lod, WDL_SKIRT)
+        };
+        let Some(tile) = tile else {
             continue;
         };
         let positions: Vec<[f32; 3]> = tile
@@ -288,7 +324,7 @@ fn stream_wdl(
                 crate::exterior_cull::ExteriorScene,
             ))
             .id();
-        streamer.loaded.insert(coords, e);
+        streamer.loaded.insert(coords, (e, lod));
     }
 }
 
@@ -297,7 +333,7 @@ fn stream_wdl(
 /// the sun's flare-occlusion march; what costs per frame is the spawned mesh set, and that goes.
 fn release_wdl_ring(mut commands: Commands, streamer: Option<ResMut<WdlStreamer>>) {
     let Some(mut streamer) = streamer else { return };
-    for (_, e) in streamer.loaded.drain() {
+    for (_, (e, _)) in streamer.loaded.drain() {
         commands.entity(e).despawn();
     }
 }
