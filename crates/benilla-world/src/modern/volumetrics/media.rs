@@ -32,7 +32,7 @@ pub const WALL_TAU: f32 = 3.0;
 /// sun over a dark ambient row) fog in the key's shadow kept a fifth of the authored colour or less.
 pub const SHADED_SHARE: f32 = 0.7;
 /// Density drops by `e` every this many yards above the reference height.
-pub const HEIGHT_FALLOFF: f32 = 170.0;
+pub const HEIGHT_FALLOFF: f32 = 70.0;
 /// The phase value the albedo solve assumes for the key light — roughly what a horizontal view ray
 /// sees with the dual lobe below. Toward the sun the fog reads warmer and brighter, away from it closer
 /// to the zone's own hue (amendment A2).

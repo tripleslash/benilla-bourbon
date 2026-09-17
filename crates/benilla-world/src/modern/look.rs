@@ -67,25 +67,27 @@ impl ZoneLook {
     pub const NEUTRAL: Self = Self {
         key: 1.0,
         fill: 1.0,
-        exposure: 1.0,
-        haze: 0.0018,
+        // The Durotar calibration (the modern client's gate shot) is the default everywhere: a crisp
+        // scene out to 450 yd, a dense ground fog that hugs the terrain (so distant ranges stand as
+        // silhouette layers over bright haze at their feet), and a darker cinematic grade. Zone rows
+        // override the colour.
+        exposure: 0.95,
+        haze: 0.0002,
         forward: 0.7,
         key_scatter: 0.6,
         glow: [1.0, 1.0, 1.0],
         haze_tint: [1.0, 1.0, 1.0],
-        fog_reach: 1.0,
+        fog_reach: 0.5,
         fog_tint: [1.0, 1.0, 1.0],
-        fog_falloff: super::volumetrics::media::HEIGHT_FALLOFF,
+        fog_falloff: 70.0,
         sky_tint: [1.0, 1.0, 1.0],
-        silhouette: 0.7,
-        fog_clear: 0.0,
-        shafts: 0.5,
-        // A light cinematic grade everywhere: a little contrast and shadow depth, slightly muted
-        // colour, a soft vignette.
-        contrast: 1.08,
-        saturation: 0.9,
-        vignette: 0.28,
-        toe: 1.08,
+        silhouette: 0.55,
+        fog_clear: 450.0,
+        shafts: 0.3,
+        contrast: 1.2,
+        saturation: 0.82,
+        vignette: 0.4,
+        toe: 1.2,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -159,25 +161,11 @@ const ZONES: &[(u32, ZoneLook)] = &[
         haze_tint: [0.92, 0.74, 0.74],
         ..ZoneLook::NEUTRAL
     }),
-    // Durotar: an amber haze. The ground stays crisp out to Orgrimmar's gate; beyond, a dense ground
-    // fog rises between the distant ranges, which stand as crisp silhouette layers above it (checked
-    // against the modern client's gate shot, `worldview_at=930,-4440,85`, face −5, 17:30).
+    // Durotar: the calibration zone for the defaults above (the gate shot, `worldview_pose=930,-4440,85,
+    // -5,9` at 17:30); only its amber colour is its own.
     (14, ZoneLook {
-        exposure: 0.95,
-        haze: 0.0002,
-        fog_reach: 0.5,
         fog_tint: [1.7, 2.6, 1.8],
-        fog_falloff: 70.0,
         sky_tint: [1.05, 1.15, 0.8],
-        silhouette: 0.55,
-        fog_clear: 450.0,
-        shafts: 0.3,
-        // Darker and more contrasted than the neutral grade, colour pulled back: the reference is
-        // cinematic, not saturated orange.
-        contrast: 1.2,
-        saturation: 0.82,
-        vignette: 0.4,
-        toe: 1.2,
         ..ZoneLook::NEUTRAL
     }),
     // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the
