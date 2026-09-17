@@ -61,10 +61,8 @@ pub const VOLUME_ALLOC: UVec3 = if cfg!(target_arch = "wasm32") {
 const CLOUD_CELL_YD: f32 = 24.0;
 /// The cloud layer's height above the camera (yd), for projecting cloud cover down the key light.
 const CLOUD_HEIGHT: f32 = 350.0;
-/// Scatter history weight on a steady frame (the plan's 0.9).
-const HISTORY_WEIGHT: f32 = 0.9;
-/// Point lights' in-scatter against their surface lighting.
-const POINT_GAIN: f32 = 0.35;
+/// Scatter history weight on a steady frame (was the plan's 0.9: beams shimmered with the jitter).
+const HISTORY_WEIGHT: f32 = 0.95;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FogMode {
@@ -429,6 +427,7 @@ fn update_volume(
         }
     }
 
+    let shaft_key = shaft_key(l.diffuse, &look.0);
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
@@ -469,14 +468,11 @@ fn update_volume(
         medium: Vec4::new(
             media.haze,
             media.noise,
-            // The shaft haze scatters the key light's own radiance, not the fog-colour-normalized
-            // in-scatter the fog medium carries (a fraction of it at dusk): this lane scales one into
-            // the other, times the zone's shaft gain.
-            look.0.shafts * shaft_key_scale(&media, l.diffuse, look.0.key_scatter),
+            shaft_key.x,
             if cut { 0.0 } else { HISTORY_WEIGHT },
         ),
         // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
-        ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(media::SKY_AERIAL),
+        ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(shaft_key.y),
         sun: (Vec3::from(media.key_in) * Vec3::from(look.0.glow)).extend(media.forward_share),
         sun_dir: to_light.extend(media.g_forward),
         phase: Vec4::new(
@@ -493,7 +489,7 @@ fn update_volume(
             tier.shafts,
         ),
         screen: Vec4::new(light_uv.x, light_uv.y, on_screen, tier.point_lights as f32),
-        wind: wind.extend(POINT_GAIN),
+        wind: wind.extend(shaft_key.z),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -507,16 +503,13 @@ fn update_volume(
     out.block.extend_from_slice(bytemuck::cast_slice(&cloud));
 }
 
-/// How much brighter the key light's own radiance (decoded, horizon-faded) is than the medium's key
-/// in-scatter, by luminance — the factor the shaft haze multiplies `FroxelFog::sun` by.
-fn shaft_key_scale(media: &media::Media, diffuse: [f32; 3], key_scatter: f32) -> f32 {
-    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    let key = diffuse.map(|c| super::srgb_to_linear(c) * super::sun_arc::key_horizon() * key_scatter.max(0.0));
-    let scattered = lum(media.key_in);
-    if scattered < 1e-5 {
-        return 0.0;
-    }
-    (lum(key) / scattered).clamp(0.0, 64.0)
+/// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded) times the zone's
+/// key scattering, glow and shaft gain — not the medium's key term, which is normalized to the fog
+/// colour and would tint every beam with the zone's fog hue.
+fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
+    let horizon = super::sun_arc::key_horizon();
+    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * horizon;
+    Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
 }
 
 /// Spacing (yd) of the regional ground samples around the camera.

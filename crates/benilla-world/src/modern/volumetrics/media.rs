@@ -40,10 +40,6 @@ pub const REFERENCE_PHASE: f32 = 0.5;
 /// The dual-lobe Henyey-Greenstein pair.
 pub const FORWARD_G: f32 = 0.75;
 pub const BACKWARD_G: f32 = -0.2;
-/// A sky pixel keeps this share of the volume's optical depth. The medium is a height fog now, so a
-/// sky ray toward the zenith leaves the layer quickly on its own; the horizon takes the full haze and
-/// meets the silhouettes at their feet.
-pub const SKY_AERIAL: f32 = 1.0;
 /// The shortest fog span the solve accepts (yd); a degenerate DBC pair must not read as a wall.
 const MIN_SPAN: f32 = 8.0;
 /// The near-clear range never reaches past this share of the span, however far the zone's start is.

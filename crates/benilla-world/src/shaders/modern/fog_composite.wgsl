@@ -74,11 +74,5 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         fog = vec4<f32>(max(fog.rgb + key * (shaft * f.proj.w * f.screen.z), vec3<f32>(0.0)), fog.a);
     }
 
-    // The dome already paints the horizon haze, so the sky keeps only a share of the optical depth —
-    // aerial perspective and shafts in front of it, not a second horizon.
-    if (sky) {
-        let tr = pow(max(fog.a, 1e-4), f.ambient.w);
-        fog = vec4<f32>(fog.rgb * ((1.0 - tr) / max(1.0 - fog.a, 1e-4)), tr);
-    }
     return fog;
 }

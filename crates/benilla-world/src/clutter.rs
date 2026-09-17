@@ -155,7 +155,10 @@ pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 /// The client's detail-doodad draw distance — a **hardcoded 70 yd** (RE'd `_DAT_00867958`); clutter
 /// fades out over the last quarter (full to 52.5 yd = 0.75×, gone by 70 yd). This is why the real
 /// client's clutter "appears as you walk into it" rather than being drawn to the horizon.
-pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
+///
+/// fork: modern lighting — doubled to 140 yd (the director's call, 2026-09-17): with the long-range
+/// fog the ground past 70 yd reads bare.
+pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 140.0;
 
 /// Ground-clutter tunables (read at tile scatter; a `density` change re-scatters LOADED tiles too —
 /// `terrain_stream::rescatter_clutter`, the 1.12 setter's own chunk-rebuild law, 0992):

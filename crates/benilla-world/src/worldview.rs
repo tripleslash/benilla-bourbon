@@ -470,7 +470,28 @@ fn live_pose(
     mut cam: Query<(&mut Transform, &mut ViewCam)>,
     mut last: Local<Option<(String, bool)>>,
     debug: Option<ResMut<crate::dev_state::DebugState>>,
+    time: Res<Time>,
+    mut reported: Local<(f32, Vec3, f32, f32)>,
 ) {
+    // Report where the viewer stands when it has settled somewhere new, in `?worldview_pose=` form.
+    if let Ok((xf, view)) = cam.single() {
+        reported.0 += time.delta_secs();
+        let moved = xf.translation.distance(reported.1) > 1.0
+            || (view.yaw - reported.2).abs() > 0.02
+            || (view.pitch - reported.3).abs() > 0.02;
+        if moved && reported.0 > 2.0 {
+            reported.0 = 0.0;
+            reported.1 = xf.translation;
+            reported.2 = view.yaw;
+            reported.3 = view.pitch;
+            let w = benilla_assets::coords::bevy_to_wow(xf.translation);
+            info!(
+                "worldview pose: {:.1},{:.1},{:.1},{:.1},{:.1}",
+                w[0], w[1], w[2], view.yaw.to_degrees(), view.pitch.to_degrees()
+            );
+        }
+    }
+
     // The clock follows the page too (`?clock=`).
     if let (Some(mut d), Some(m)) = (
         debug,

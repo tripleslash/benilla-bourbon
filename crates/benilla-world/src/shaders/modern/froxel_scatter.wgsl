@@ -42,8 +42,17 @@ const SHAFT_SKY_SHARE: f32 = 0.55;
 const SHAFT_ISOTROPIC: f32 = 0.5;
 
 // Under full cover the shaft haze is this much denser, and scatters the key this much harder on top.
-const CANOPY_HAZE: f32 = 3.0;
-const CANOPY_SHAFT: f32 = 3.0;
+const CANOPY_HAZE: f32 = 1.5;
+const CANOPY_SHAFT: f32 = 1.0;
+// Point lights' in-scatter against their surface lighting.
+const POINT_GAIN: f32 = 0.35;
+
+// The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
+// medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
+fn shaft_key(f: froxelfog::FroxelFog) -> vec3<f32> {
+    return vec3<f32>(f.medium.z, f.ambient.w, f.wind.w);
+}
+
 // How far around a froxel the canopy cover is gathered (yd).
 const CANOPY_REACH: f32 = 7.0;
 
@@ -74,7 +83,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let n = f.grid.xyz;
-    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5) + froxel_jitter(id, f.phase.w) * 0.8) / n.xy;
+    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5) + froxel_jitter(id, f.phase.w) * 0.5) / n.xy;
     let s = (f32(id.z) + f.phase.z) / n.z;
     let d = max(froxelfog::depth_of_slice(f, s), f.proj.x);
     // Reverse-Z, infinite perspective: planar depth `d` sits at ndc z = near / d.
@@ -106,7 +115,14 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         modern_block.cloud[ct.idx.z],
         modern_block.cloud[ct.idx.w],
     );
-    let sun_vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p, d) * cloud;
+    // Two taps a quarter froxel apart along the view ray: a beam's edge crossing a froxel then reads as
+    // a partial value instead of flipping on and off with the per-frame jitter.
+    // Slices are quadratic in depth (d = far * s^2), so a slice is 2 * sqrt(far * d) / n deep.
+    let along = normalize(p - f.camera.xyz) * max(0.5 * sqrt(f.grid.w * d) / n.z, 0.1);
+    let sun_vis = 0.5 * cloud * (
+        sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d)
+            + sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d)
+    );
     let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p);
     // fork: modern lighting (FORK.md, P5) — where the probe field reaches this
     // froxel, its mean radiance against an open-field probe's is what shades the ambient in-scatter:
@@ -127,7 +143,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let phase = froxelfog::dual_phase(f, mu);
     let lum_fog = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
-        + f.sun.rgb * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * f.medium.z * (1.0 + CANOPY_SHAFT * cover));
+        + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
     var points = vec3<f32>(0.0);
 
     // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
@@ -142,7 +158,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
         // +0.5 keeps a froxel inside the flame finite.
         let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
-        points = points + light_table.points[2u * i + 1u].rgb * (atten * window * window * f.wind.w);
+        points = points + light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN);
     }
 
     var cur = vec4<f32>((lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze, sigma);

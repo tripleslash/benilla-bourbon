@@ -28,10 +28,10 @@ struct FroxelFog {
     // x = fog extinction at the reference height (1/yd); y = 1 / height falloff (yd); z = reference
     // height (the regional ground); w = fog start (planar yd).
     media: vec4<f32>,
-    // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = shaft key gain;
+    // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = shaft key radiance (r);
     // w = scatter history weight (0 on a cut).
     medium: vec4<f32>,
-    // rgb = ambient in-scatter radiance (albedo x ambient); w = a sky pixel's share of optical depth.
+    // rgb = ambient in-scatter radiance (albedo x ambient); w = shaft key radiance (g).
     ambient: vec4<f32>,
     // rgb = key-light in-scatter radiance (albedo x key); w = the forward lobe's share.
     sun: vec4<f32>,
@@ -45,7 +45,7 @@ struct FroxelFog {
     proj: vec4<f32>,
     // xy = the key light's uv in the main view; z = its on-screen weight; w = froxel point-light count.
     screen: vec4<f32>,
-    // xyz = noise scroll (yd); w = point-light in-scatter gain.
+    // xyz = noise scroll (yd); w = shaft key radiance (b).
     wind: vec4<f32>,
 }
 

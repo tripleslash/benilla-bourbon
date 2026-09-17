@@ -330,11 +330,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("useUiScale", "0"),
     // fork: modern lighting (FORK.md) — the reference registers 350. The modern
     // look's long-range height fog shows the world past it (Orgrimmar's gate from the Durotar road
-    // sits ~450 yd out), so the default view reaches the slider's maximum; the slider still lowers it.
+    // sits ~450 yd out), so the default view reaches 1000 yd; the slider still lowers it.
     ours(
         "farclip",
-        "777",
-        "the modern look's horizon: detailed terrain out to the slider's max (reference registers 350)",
+        "1000",
+        "the modern look's horizon: detailed terrain to 1000 yd (reference registers 350, clamps at 777)",
     ),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
@@ -2849,8 +2849,8 @@ mod tests {
         assert!(!sound.reverb, "zone reverb ships off (decision 1153)");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
-        // env-less 777 literal (view.rs; the reference's own is 350, 1624).
-        assert_eq!(d["farclip"], 777.0);
+        // env-less 1000 literal (view.rs; the reference's own is 350, 1624).
+        assert_eq!(d["farclip"], 1000.0);
         // `nearclip` welds to the const the off-world spawners use, so the viewer, the depth probe
         // and the player's camera cannot open on three different near planes again (2163).
         assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);
@@ -3050,7 +3050,7 @@ mod tests {
             density: 3.0,
             scale: 1.0,
             alpha_ref: 0.5,
-            fade_far: 70.0,
+            fade_far: 140.0,
         };
         let mut weather = benilla_world::weather::WeatherState::default();
         let mut display_gamma = crate::ui_gamma::DisplayGamma::default();

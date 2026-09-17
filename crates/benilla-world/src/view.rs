@@ -98,7 +98,7 @@ impl Viewer {
 /// View distance in yards. `farclip` = WoW's `farclip` CVar — the ONE view distance: the far plane of
 /// the detailed world (geometry beyond it is clipped per-pixel, the wall, and the WDL horizon fills
 /// in beyond) **and** the reach of terrain residency (`terrain_stream::window`, decision 1513).
-/// Default **777** (fork: modern lighting — the long-range fog shows the world past 350; was **350**,
+/// Default **1000** (fork: modern lighting — the long-range fog shows the world past 350; was **350**,
 /// the reference client's own registered default (decision 1624, superseding
 /// 0954's divergence to the clamp's max 777). 777 shipped as "the `Config.wtf` most players ran",
 /// but it is the *maximum*, and it is what every player gets before they touch anything: at 777 the
@@ -134,7 +134,9 @@ pub struct ViewDistance {
 /// apply, the options row and the `$WOW_FARCLIP` env knob so none can drift. It used to run to 1200
 /// as an A/B lever against the pre-wall "draw everything in the tile window" look; that look is
 /// gone and the window now follows this number, so the headroom went with it (1513).
-pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
+/// fork: modern lighting — the top raised to 1500 (the vanilla clamp is 777): the long-range fog
+/// shows the world past it.
+pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=1500.0;
 
 /// The settable range of [`ViewDistance::nearclip`] — the vanilla `nearclip` CVar clamp, read off
 /// its own change callback `0x688d90` the way [`FARCLIP_RANGE`] is read off `0x688d40`: the two
@@ -429,7 +431,7 @@ impl Default for ViewDistance {
         // fork: modern lighting — `launch_env`, so the browser world view reaches it (`?farclip=`).
         let farclip = crate::launch_env::var("WOW_FARCLIP")
             .and_then(|v| v.parse::<f32>().ok())
-            .map_or(777.0, |v| {
+            .map_or(1000.0, |v| {
                 v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
             });
         Self {

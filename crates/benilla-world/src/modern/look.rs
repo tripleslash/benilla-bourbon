@@ -73,7 +73,7 @@ impl ZoneLook {
         sky_tint: [1.0, 1.0, 1.0],
         silhouette: 0.7,
         fog_clear: 0.0,
-        shafts: 1.0,
+        shafts: 0.5,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -151,6 +151,23 @@ const ZONES: &[(u32, ZoneLook)] = &[
         sky_tint: [1.05, 1.15, 0.75],
         silhouette: 0.55,
         fog_clear: 450.0,
+        shafts: 0.3,
+        ..ZoneLook::NEUTRAL
+    }),
+    // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the
+    // bluffs crisp out to their far rises (checked against the modern client's Thunder Bluff sunset,
+    // `worldview_pose=-1635,75,198,13,-3`, 19:00).
+    (215, ZoneLook {
+        exposure: 1.05,
+        haze: 0.0004,
+        glow: [1.4, 0.85, 0.6],
+        haze_tint: [1.1, 0.85, 0.8],
+        fog_reach: 1.0,
+        fog_tint: [2.3, 1.25, 0.85],
+        fog_falloff: 70.0,
+        sky_tint: [0.85, 1.0, 1.25],
+        silhouette: 0.75,
+        fog_clear: 400.0,
         shafts: 0.3,
         ..ZoneLook::NEUTRAL
     }),
