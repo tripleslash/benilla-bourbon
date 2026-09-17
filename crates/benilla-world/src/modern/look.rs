@@ -69,9 +69,10 @@ impl ZoneLook {
         fill: 1.0,
         // The Durotar calibration (the modern client's gate shot) is the default everywhere: a crisp
         // scene out to 450 yd, a dense ground fog that hugs the terrain (so distant ranges stand as
-        // silhouette layers over bright haze at their feet), and a darker cinematic grade. Zone rows
+        // silhouette layers over bright haze at their feet), and a cinematic grade (eased off the gate
+        // shot's darker one for everyday play). Zone rows
         // override the colour.
-        exposure: 0.95,
+        exposure: 1.1,
         haze: 0.0002,
         forward: 0.7,
         key_scatter: 0.6,
@@ -84,10 +85,10 @@ impl ZoneLook {
         silhouette: 0.55,
         fog_clear: 450.0,
         shafts: 0.3,
-        contrast: 1.2,
-        saturation: 0.82,
-        vignette: 0.4,
-        toe: 1.2,
+        contrast: 1.12,
+        saturation: 0.86,
+        vignette: 0.3,
+        toe: 1.03,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
