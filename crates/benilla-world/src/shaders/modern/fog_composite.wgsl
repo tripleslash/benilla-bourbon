@@ -21,6 +21,8 @@
 @group(0) @binding(4) var<storage, read> modern_block: sunshadow::ModernBlock;
 
 const SHAFT_TAPS: u32 = 16u;
+// Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
+const SEAM_FROM: f32 = 0.7;
 // How far a sky pixel's ray is fogged (yd).
 const SKY_FOG_DISTANCE: f32 = 16000.0;
 
@@ -57,6 +59,25 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Not in the water mirror: the light's screen position is the main view's, so the taps would march
     // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
+
+    // The seam: over the last stretch before the view distance the detailed world dissolves into the
+    // distant band's own silhouette colour, so where the detailed terrain ends and the WDL band begins
+    // there is no line. (The band itself is drawn behind the wall — its depth sits past `farclip`.)
+    let farclip = f.phase.y;
+    if (!sky && farclip > 0.0 && !mirror) {
+        let d = froxelfog::view_depth(f, p);
+        if (d <= farclip) {
+            let k = smoothstep(SEAM_FROM * farclip, farclip, d);
+            if (k > 0.0) {
+                let fog_lin = f.ambient.rgb + f.sun.rgb * 0.5;
+                let silhouette = fog_lin * pow(max(f.sun_dir.w, 0.0), 2.2);
+                // Composite as `rgb + dst * a`: the pixel keeps (1 − k) of itself and gains k of the
+                // silhouette, both seen through this pixel's own fog.
+                fog = vec4<f32>(fog.rgb + silhouette * (k * fog.a), fog.a * (1.0 - k));
+            }
+        }
+    }
+
     if (f.alloc.w < froxelfog::MODE_FROXEL - 0.5 && f.proj.w > 0.0 && f.screen.z > 0.0 && !mirror) {
         let to_light = f.screen.xy - in.uv;
         var open = 0.0;

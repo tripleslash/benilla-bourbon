@@ -163,10 +163,16 @@ const ZONES: &[(u32, ZoneLook)] = &[
         ..ZoneLook::NEUTRAL
     }),
     // Durotar: the calibration zone for the defaults above (the gate shot, `worldview_pose=930,-4440,85,
-    // -5,9` at 17:30); only its amber colour is its own.
+    // -5,9` at 17:30); its amber colour and darker grade are its own.
     (14, ZoneLook {
         fog_tint: [1.7, 2.6, 1.8],
         sky_tint: [1.05, 1.15, 0.8],
+        // The gate shot's own darker grade (the defaults ease it for everyday play).
+        exposure: 0.95,
+        contrast: 1.2,
+        saturation: 0.82,
+        vignette: 0.4,
+        toe: 1.2,
         ..ZoneLook::NEUTRAL
     }),
     // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the

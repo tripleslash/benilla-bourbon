@@ -87,7 +87,10 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 /// The row's own geometry is unchanged: the slider is 0—100%, and the shader gain (`AO_GAIN` /
 /// `GI_GAIN` in `shaders/ssilvb.wgsl`) still puts the intended look at 0.5, so a player who drags to
 /// the middle gets exactly what this used to ship. Raise the look in the gain, never here.
-pub const AO_DEFAULT: f32 = 0.0;
+///
+/// fork: **0.4 since 2026-09-17** (the director's call) — the modern look wants the contact darkening on
+/// by default.
+pub const AO_DEFAULT: f32 = 0.4;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
 pub const GI_DEFAULT: f32 = 0.0;

@@ -35,9 +35,9 @@ struct FroxelFog {
     ambient: vec4<f32>,
     // rgb = key-light in-scatter radiance (albedo x key); w = the forward lobe's share.
     sun: vec4<f32>,
-    // xyz = unit direction TOWARD the key light; w = the forward lobe's g.
+    // xyz = unit direction TOWARD the key light; w = the distant silhouette's shade (the WDL band's).
     sun_dir: vec4<f32>,
-    // x = the backward lobe's g; y = cloud shadow on; z = this frame's slice jitter [0, 1); w = frame index.
+    // x = the backward lobe's g; y = the view distance (farclip, yd); z = this frame's slice jitter [0, 1); w = frame index.
     phase: vec4<f32>,
     // xy = the cloud-shadow grid's origin (world x, z); z = cell size (yd); w = cells per side.
     cloud: vec4<f32>,
@@ -90,6 +90,9 @@ fn fog_clear(f: FroxelFog, d: f32) -> f32 {
     return smoothstep(0.8 * f.media.w, f.media.w, d);
 }
 
+// The forward lobe's g (mirrors `media::FORWARD_G`).
+const FORWARD_G: f32 = 0.75;
+
 // Henyey-Greenstein, normalized so that its average over the sphere is 1.
 fn hg(g: f32, mu: f32) -> f32 {
     let g2 = g * g;
@@ -100,7 +103,7 @@ fn hg(g: f32, mu: f32) -> f32 {
 // Amendment A2: a forward lobe (warm toward the sun) blended with a backward one (the zone's hue away
 // from it). `mu` = cos of the angle between the view ray and the direction toward the light.
 fn dual_phase(f: FroxelFog, mu: f32) -> f32 {
-    return mix(hg(f.phase.x, mu), hg(f.sun_dir.w, mu), f.sun.w);
+    return mix(hg(f.phase.x, mu), hg(FORWARD_G, mu), f.sun.w);
 }
 
 // Analytic height fog along the main camera's ray to `p`, from fraction `t_start` of the way there to `p`
@@ -120,13 +123,18 @@ const FAR_FOG_CEILING: f32 = 900.0;
 
 // Optical depth of the distance fog over the first `len` yards of a ray with vertical direction `dy`.
 fn distance_fog(f: FroxelFog, len: f32, dy: f32) -> f32 {
-    var reach = len;
-    if (dy > 1e-4) {
-        let climb = max(f.media.z + FAR_FOG_CEILING - f.camera.y, 0.0);
-        reach = min(len, climb / dy);
-    }
+    let reach = low_reach(f, len, dy);
     let t = clamp((reach - FAR_FOG_START) / (FAR_FOG_END - FAR_FOG_START), 0.0, 1.0);
     return FAR_FOG_TAU * t * t;
+}
+
+// The ray length (yd) through the lower atmosphere for a ray of vertical direction `dy`.
+fn low_reach(f: FroxelFog, len: f32, dy: f32) -> f32 {
+    if (dy > 1e-4) {
+        let climb = max(f.media.z + FAR_FOG_CEILING - f.camera.y, 0.0);
+        return min(len, climb / dy);
+    }
+    return len;
 }
 
 // Past the froxel grid nothing knows where the key light is shadowed, so the tail keeps only this

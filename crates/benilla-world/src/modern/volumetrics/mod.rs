@@ -354,6 +354,7 @@ fn update_volume(
     clouds: Option<Res<crate::clouds::CloudCoverage>>,
     debug: Option<Res<crate::dev_state::DebugState>>,
     wdl: Option<Res<crate::wdl::WdlStreamer>>,
+    view_distance: Option<Res<crate::view::ViewDistance>>,
     mut out: ResMut<ModernVolume>,
     mut hist: Local<VolumeHistory>,
 ) {
@@ -476,10 +477,11 @@ fn update_volume(
         // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
         ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(shaft_key.y),
         sun: (Vec3::from(media.key_in) * Vec3::from(look.0.glow)).extend(media.forward_share),
-        sun_dir: to_light.extend(media.g_forward),
+        sun_dir: to_light.extend(look.0.silhouette),
         phase: Vec4::new(
             media.g_backward,
-            if tier.cloud_shadow > 0.0 { 1.0 } else { 0.0 },
+            // The view distance: where the detailed world ends and the distant (WDL) band begins.
+            view_distance.map_or(0.0, |v| v.farclip),
             jitter,
             hist.frame as f32,
         ),
