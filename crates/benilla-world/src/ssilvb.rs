@@ -671,7 +671,7 @@ mod tests {
     fn the_shipped_defaults_are_the_ones_the_cvars_register() {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
-        assert_eq!(AO_DEFAULT, 0.0);
+        assert_eq!(AO_DEFAULT, 0.4); // fork: 0.4 since 2026-09-17
         assert_eq!(GI_DEFAULT, 0.0);
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
