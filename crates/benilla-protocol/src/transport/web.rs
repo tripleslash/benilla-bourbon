@@ -126,51 +126,28 @@ pub struct ConnWriter {
 
 impl Conn {
     /// Open the proxied connection and wait for the socket to come up.
+    ///
+    /// **The inbound handlers go on before the `open` await, not after it** — a frame that lands
+    /// while this future is still parked is otherwise dropped by the browser, and this protocol has
+    /// a peer that speaks first. A WebSocket with no `onmessage` does not buffer: the event fires,
+    /// finds no listener, and the bytes are gone. Between the browser firing `open` and this
+    /// `async fn` being polled again there is at least one task hop, and the world server sends
+    /// `SMSG_AUTH_CHALLENGE` the instant it accepts — so the challenge landed inside that gap
+    /// roughly half the time, the client sat waiting for a packet it had already been sent, and the
+    /// handshake read timed out into a generic "Unable to connect" (decision 0065's bound doing its
+    /// job on a self-inflicted silence). Logon never showed it: on 3724 the client speaks first, so
+    /// nothing can arrive before we are listening.
+    ///
+    /// Installing them early costs the open-wait its easy rejection path — `onerror`/`onclose`
+    /// cannot be the promise's `reject` when they are already the stream's own handlers — so the
+    /// real closures take the `reject` half and call it themselves while a dial is still pending.
+    /// After `open` it is dropped and they go back to being nothing but end-of-stream.
     pub async fn connect(host: &str, port: u16) -> io::Result<Conn> {
         let url = connect_url(host, port)?;
         let ws = WebSocket::new(&url).map_err(js_err)?;
         // Frames arrive as ArrayBuffers rather than Blobs, so `onmessage` can read the bytes
         // synchronously instead of awaiting a Blob reader mid-stream.
         ws.set_binary_type(BinaryType::Arraybuffer);
-
-        // Wait for `open`, failing on an `error`/`close` that beats it (a refused proxy, a
-        // disallowed port). The promise's own resolve/reject *are* the handlers — no hand-rolled
-        // future needed, and they are cleared again below before the streaming handlers go on.
-        {
-            let socket = ws.clone();
-            let promise = js_sys::Promise::new(&mut |resolve, reject| {
-                socket.set_onopen(Some(&resolve));
-                socket.set_onerror(Some(&reject));
-                socket.set_onclose(Some(&reject));
-            });
-            let opened = JsFuture::from(promise).await;
-            ws.set_onopen(None);
-            ws.set_onerror(None);
-            ws.set_onclose(None);
-            opened.map_err(|e| {
-                // **Say WHY.** The rejection value is the `close`/`error` event that beat `open`,
-                // and a `CloseEvent` carries the code and reason the other end gave — which is the
-                // difference between "cannot open <url>" (true of every failure, and actionable
-                // for none) and "the gateway accepted the upgrade and then hung up 1011". A dial
-                // that fails after a successful 101 looks identical to one that never connected
-                // unless this is reported, and telling those apart by hand costs a packet capture.
-                let detail = e
-                    .dyn_ref::<web_sys::CloseEvent>()
-                    .map(|c| {
-                        let reason = c.reason();
-                        if reason.is_empty() {
-                            format!("closed with code {}", c.code())
-                        } else {
-                            format!("closed with code {} ({reason})", c.code())
-                        }
-                    })
-                    .unwrap_or_else(|| "socket error before open".to_string());
-                io::Error::new(
-                    ErrorKind::ConnectionRefused,
-                    format!("cannot open {url}: {detail}"),
-                )
-            })?;
-        }
 
         let inbox = Rc::new(RefCell::new(Inbox::default()));
 
@@ -188,23 +165,87 @@ impl Conn {
         });
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
+        // The open promise's `reject`, held only while the dial is pending — `None` the moment the
+        // socket is up, which is what turns the two closures below back into plain end-of-stream
+        // handlers. Rejecting an already-resolved promise is a no-op, so a close that arrives after
+        // `open` but before this future resumes ends the stream and lets the dial succeed; the
+        // first read then reports the `UnexpectedEof` honestly instead of waiting out the timeout.
+        let opening: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
+
         // A close and an error both end the stream: the reader turns the flag into `UnexpectedEof`,
         // which the app already reads as a lost session.
         let queue = Rc::clone(&inbox);
-        let on_close = Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |_: web_sys::CloseEvent| {
-            let mut queue = queue.borrow_mut();
-            queue.closed = true;
-            queue.wake();
+        let pending = Rc::clone(&opening);
+        let on_close = Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |e: web_sys::CloseEvent| {
+            {
+                let mut queue = queue.borrow_mut();
+                queue.closed = true;
+                queue.wake();
+            }
+            if let Some(reject) = pending.borrow_mut().take() {
+                let _ = reject.call1(&JsValue::NULL, &e);
+            }
         });
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
         let queue = Rc::clone(&inbox);
-        let on_error = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
-            let mut queue = queue.borrow_mut();
-            queue.closed = true;
-            queue.wake();
+        let pending = Rc::clone(&opening);
+        let on_error = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            {
+                let mut queue = queue.borrow_mut();
+                queue.closed = true;
+                queue.wake();
+            }
+            if let Some(reject) = pending.borrow_mut().take() {
+                let _ = reject.call1(&JsValue::NULL, &e);
+            }
         });
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+        // Wait for `open`, failing on an `error`/`close` that beats it (a refused proxy, a
+        // disallowed port) through the `reject` the handlers above are holding.
+        {
+            let socket = ws.clone();
+            let pending = Rc::clone(&opening);
+            let promise = js_sys::Promise::new(&mut |resolve, reject| {
+                *pending.borrow_mut() = Some(reject);
+                socket.set_onopen(Some(&resolve));
+            });
+            let opened = JsFuture::from(promise).await;
+            ws.set_onopen(None);
+            // The dial is over either way: the handlers stop speaking for it.
+            opening.borrow_mut().take();
+            if let Err(e) = opened {
+                // **Say WHY.** The rejection value is the `close`/`error` event that beat `open`,
+                // and a `CloseEvent` carries the code and reason the other end gave — which is the
+                // difference between "cannot open <url>" (true of every failure, and actionable
+                // for none) and "the gateway accepted the upgrade and then hung up 1011". A dial
+                // that fails after a successful 101 looks identical to one that never connected
+                // unless this is reported, and telling those apart by hand costs a packet capture.
+                let detail = e
+                    .dyn_ref::<web_sys::CloseEvent>()
+                    .map(|c| {
+                        let reason = c.reason();
+                        if reason.is_empty() {
+                            format!("closed with code {}", c.code())
+                        } else {
+                            format!("closed with code {} ({reason})", c.code())
+                        }
+                    })
+                    .unwrap_or_else(|| "socket error before open".to_string());
+                // The closures die with this scope, and a `Closure` that has been dropped throws
+                // when invoked rather than being ignored — so take them off the socket first, the
+                // same order `Socket::drop` uses.
+                ws.set_onmessage(None);
+                ws.set_onclose(None);
+                ws.set_onerror(None);
+                let _ = ws.close();
+                return Err(io::Error::new(
+                    ErrorKind::ConnectionRefused,
+                    format!("cannot open {url}: {detail}"),
+                ));
+            }
+        }
 
         Ok(Conn {
             sock: SendWrapper::new(Rc::new(Socket {
