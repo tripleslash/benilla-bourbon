@@ -162,7 +162,9 @@ const ZONES: &[(u32, ZoneLook)] = &[
         haze: 0.0004,
         glow: [1.4, 0.85, 0.6],
         haze_tint: [1.1, 0.85, 0.8],
-        fog_reach: 1.0,
+        // Mulgore's authored daytime fog end is short (~890 yd): at reach 1 the plains past the clear
+        // range went milky by noon.
+        fog_reach: 1.6,
         fog_tint: [2.3, 1.25, 0.85],
         fog_falloff: 70.0,
         sky_tint: [0.85, 1.0, 1.25],

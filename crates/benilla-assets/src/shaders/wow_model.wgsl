@@ -316,6 +316,10 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
 // twin so its silhouette matches the steady cutout exactly.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
 
+// fork: modern lighting — how far toward the key light a skinned body's shadow lookup starts (yd):
+// clear of its own limbs (the body is at most ~1 yd thick along any sun ray), well under a canopy.
+const RIG_SHADOW_LIFT: f32 = 1.5;
+
 // The detail-doodad (ground clutter) texture LOD bias — the reference sets
 // `D3DSAMP_MIPMAPLODBIAS = +0.25` on stage 0 for its detail-doodad pass alone (`0x6813f4`,
 // capture-confirmed on all 29 doodad batches). It is what makes the distance cut resolve per pixel
@@ -1372,7 +1376,16 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let modern_frame = wow_light.point_count.y > 0.5;
     if (modern_frame) {
         let mview_z = (view.view_from_world * in.world_position).z;
-        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, wow_normalize(in.world_normal), -mview_z, modern_lite);
+        var shadow_p = in.world_position.xyz;
+#ifdef WOW_RIG_SKIN
+        // A skinned body is its own caster in the cascades (the entity lane draws the posed rig), so a
+        // body fragment looked up where it stands reads its own arms, head and cloak as occluders and
+        // stays shaded wherever it walks. Look it up from a point a little way toward the key light
+        // instead: past its own limbs, but still under any canopy, roof or cliff — so a patch of sun
+        // lights the part of the body that stands in it, per fragment.
+        shadow_p = shadow_p - normalize(wow_light.light_sun.xyz) * RIG_SHADOW_LIFT;
+#endif
+        player_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, shadow_p, wow_normalize(in.world_normal), -mview_z, modern_lite);
         // fork: modern lighting (FORK.md, P4) — cloud shadows.
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
         player_shadow = player_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);

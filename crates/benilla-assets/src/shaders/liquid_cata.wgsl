@@ -164,6 +164,12 @@ struct WowLight {
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 // fork: modern lighting (FORK.md, P4) — water fogs itself from the froxel volume.
+// fork: modern lighting — the sun shadow on water: how far (yd per unit of slope) the lookup rides the
+// waves, how much of the lit colour the shade keeps, and how much of the glint survives it.
+const WATER_SHADOW_WOBBLE: f32 = 1.2;
+const WATER_SHADE_KEEP: f32 = 0.8;
+const WATER_GLINT_SHADE: f32 = 0.3;
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
 // fork: modern lighting — the sun cascades, read without a sampler (the layout has none left).
@@ -610,13 +616,18 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     var water_sun = 1.0;
     var water_lit = in.lit_color;
     if (modern) {
-        let wp = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
+        // The lookup rides the waves: shifted by the surface slope, so a shadow edge on the water
+        // wobbles with the swell instead of lying on it like a decal.
+        let wp = in.world_position.xyz + vec3<f32>(grad.x * WATER_SHADOW_WOBBLE, 0.05, grad.y * WATER_SHADOW_WOBBLE);
         water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp, frag_view_z);
         let wct = sunshadow::cloud_taps(modern_block.fog.cloud, wp);
         water_sun = water_sun * sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
         // The shade keeps some of the light: skylight still reaches open water from every side.
-        let shade = max(min(in.lit_color, wow_light.light_ambient.rgb), in.lit_color * 0.6);
+        // Water is not a solid receiver: light scatters in the body under the shadow too, so the shade
+        // keeps most of the lit colour, and the glints only dim under it.
+        let shade = max(min(in.lit_color, wow_light.light_ambient.rgb), in.lit_color * WATER_SHADE_KEEP);
         water_lit = mix(shade, in.lit_color, water_sun);
+        water_sun = mix(WATER_GLINT_SHADE, 1.0, water_sun);
     }
     let body = ramp.rgb * water_lit;
 

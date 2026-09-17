@@ -17,6 +17,9 @@ struct GiBlend {
     tune: vec4<f32>,
 }
 
+// A reseeded probe's validity share on its first trace.
+const RESEED_VALIDITY: f32 = 0.2;
+
 @group(0) @binding(0) var<uniform> blend: GiBlend;
 @group(0) @binding(1) var<storage, read> scratch: array<probegi::GiProbe>;
 @group(0) @binding(2) var<storage, read_write> probes: array<probegi::GiProbe>;
@@ -72,7 +75,12 @@ fn blend_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     // a canopy fades in and out of its neighbours' answers instead of popping.
     let soft = select(max(history, 0.5), 0.0, reseed);
     var out: probegi::GiProbe;
-    out.dc = vec4<f32>(mix(fresh.dc.xyz, old.dc.xyz, history), mix(fresh.dc.w, old.dc.w, soft));
+    // A reseeded probe (scrolled in, cold, or a cut) holds one noisy 24-ray trace: it enters at a
+    // fraction of its validity and earns the rest over the next updates, while the neighbours and the
+    // coarser cascade keep answering. Taking it at full weight at once made each newly scrolled cell
+    // snap to that first estimate and then drift — patches of ground blinking as the player walked.
+    let validity = select(mix(fresh.dc.w, old.dc.w, soft), fresh.dc.w * RESEED_VALIDITY, reseed);
+    out.dc = vec4<f32>(mix(fresh.dc.xyz, old.dc.xyz, history), validity);
     out.sh_x = vec4<f32>(
         mix(fresh.sh_x.xyz, old.sh_x.xyz, history),
         mix(fresh.sh_x.w, old.sh_x.w, history),
