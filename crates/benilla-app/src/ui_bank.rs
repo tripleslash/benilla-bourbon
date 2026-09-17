@@ -25,7 +25,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{BankState, UiScript};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 /// The client-side `BankBagSlotPrices.dbc` table (decision 0604: the purchase ladder is client
@@ -95,7 +95,7 @@ impl Plugin for UiBankPlugin {
                     // Range-close before the feed so the clear turns into BANKFRAME_CLOSED the
                     // same frame; push before the input pass; drain after it (the merchant shape).
                     close_npc_session_out_of_range::<BankOpen>.before(feed_bank),
-                    feed_bank.before(UiInput),
+                    feed_bank.in_set(UiFeed),
                     drain_bank.after(UiInput),
                 ),
             );
@@ -127,7 +127,6 @@ fn bank_slot_error_key(result: u32) -> Option<&'static str> {
 /// window with `UnitName("npc")`, off the interaction token [`crate::ui_session`] already points
 /// at the banker. Firing an argument the reference does not fire is a divergence an addon can
 /// see, and it bought nothing once the reference's file was the one reading the event.
-#[allow(clippy::too_many_arguments)]
 fn feed_bank(
     script: Option<NonSendMut<UiScript>>,
     open: Res<BankOpen>,

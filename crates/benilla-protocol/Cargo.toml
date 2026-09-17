@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "WoW 1.12.1 auth (SRP6) + world wire protocol and the benilla-auth CLI"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -14,6 +17,9 @@ flate2 = "1.0"
 # native sequencer drives the very same futures to completion with `block_on` on its own thread.
 futures-lite = "2.6.1"
 sha1.workspace = true
+# `SessionEventKind` — the fieldless twin of `SessionEvent`, the key the app's packet-handler
+# table dispatches on (decision 2305). A derive, so the two can never drift apart.
+strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
 # The SRP probes re-derive the handshake by hand (to vary what `benilla-srp` fixes) — examples only.

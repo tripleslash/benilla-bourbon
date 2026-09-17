@@ -112,7 +112,6 @@ pub(super) fn cinematic_triggered(
 
 /// We are in the world (the IO thread's first in-world event): record our guid, flip the status,
 /// and seed the name cache with our own name.
-#[allow(clippy::too_many_arguments)] // the login's whole hand-off
 pub(super) fn connected(
     guid: u64,
     name: String,
@@ -129,6 +128,13 @@ pub(super) fn connected(
     status.connected = true;
     status.last_reason = None;
     info!("net: in world as {name} (guid {guid})");
+    // **The reference's world-session wipe, first** (`0x555740`'s `0x5557ad` arm): the player-name
+    // and pet-name stores are cleared at every world entry, because a guid names one character and
+    // a pet number one spawn, and nothing on the wire says either has been handed to somebody else
+    // since we last looked (decision 2223 — a wiped server's new character wearing a deleted one's
+    // name, B386). Creature templates are keyed by an entry that means the same thing forever and
+    // survive this, exactly as they survive the process.
+    names.clear_world_session();
     // Our own name came with the login — seed the cache so "player" never queries.
     names.insert_player(guid, name, None);
     // Seated before the world-entry UI load reads it (2175), and overwritten every login so a
@@ -163,7 +169,6 @@ pub(super) fn logged_out(
 
 /// The session ended (socket closed / handshake failure): tear down the streamed world and clear
 /// every session-scoped cache.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn disconnected(
     reason: String,
     end: benilla_protocol::SessionEnd,
@@ -189,7 +194,6 @@ pub(super) fn disconnected(
     mail: &mut MailOpen,
     mail_pending: &mut crate::ui_mail::MailPending,
     trade: &mut crate::ui_trade::TradeSession,
-    auction: &mut crate::ui_auction::AuctionOpen,
     bank: &mut crate::ui_bank::BankOpen,
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
@@ -258,10 +262,6 @@ pub(super) fn disconnected(
     // The arrival countdown is login-scoped (decision 0544 P3): a fresh login re-queries
     // `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing carries over across a reconnect.
     *mail_pending = crate::ui_mail::MailPending::default();
-    // An open auction house dies with the socket (decision 1511): every auction command
-    // re-validates the auctioneer server-side, so a session that survived a reconnect would be a
-    // window whose every button silently failed.
-    auction.clear_session();
     // An open trade dies with the socket too (decision 0592) — the reconnect starts with no trade.
     trade.clear_session();
     // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.
@@ -378,7 +378,6 @@ pub(super) fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
 /// the seam (the `CurrentMap` flip itself flips which legs render), keeping the ride attachment
 /// and the deck collider valid the whole way; the server's post-ack re-create then refreshes its
 /// anchor in place. Boats whose paths never reach the new map despawn like everything else.
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full context, like `disconnected`
 pub(super) fn worldport(
     map_id: u32,
     position: [f32; 3],
@@ -479,7 +478,9 @@ pub(super) fn reputation_delta(
 ) {
     use benilla_formats::faction_flags as flag;
     for (list_id, standing) in standings {
-        let i = list_id as usize;
+        let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_STANDING") else {
+            continue;
+        };
         if reputations.0.len() <= i {
             reputations.0.resize(i + 1, (0, 0));
         }
@@ -501,11 +502,30 @@ pub(super) fn reputation_delta(
 /// silent failure it exists to prevent: the pane keys row membership off this bit, so a faction met
 /// mid-session would keep accruing reputation the player could never see.
 pub(super) fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
-    let i = list_id as usize;
+    let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_VISIBLE") else {
+        return;
+    };
     if reputations.0.len() <= i {
         reputations.0.resize(i + 1, (0, 0));
     }
     reputations.0[i].0 |= benilla_formats::faction_flags::VISIBLE;
+}
+
+/// A wire `repListId` as a store index, or `None` (logged) when it is not one. The list is
+/// positional in a `FACTION_LIST_LEN`-entry array (vmangos `MAX_FACTION_COUNT` 64), so a slot
+/// past it is not a faction — and resizing the store to it was the one wire value that could
+/// abort the process instead of dropping a packet (`0xFFFF_FFFF` → a 34 GB resize; decision
+/// 2265 §B1).
+fn reputation_slot(list_id: u32, opcode: &str) -> Option<usize> {
+    let i = usize::try_from(list_id).ok()?;
+    if i >= benilla_protocol::messages::FACTION_LIST_LEN {
+        warn!(
+            "net: {opcode} names reputation slot {list_id}, past the {}-entry faction list — dropped",
+            benilla_protocol::messages::FACTION_LIST_LEN
+        );
+        return None;
+    }
+    Some(i)
 }
 
 /// The dropped-packet tally (the wire-coverage instrument): count it, and announce each opcode's

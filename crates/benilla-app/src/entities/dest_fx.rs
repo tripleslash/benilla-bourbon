@@ -42,7 +42,7 @@ use crate::creature_anim::{SpellKitSound, SpellVisuals};
 use crate::net::{NetEntity, ObjectStore};
 use benilla_protocol::EntityKind;
 
-use super::spell_fx::{attach_effect_visuals, ensure_model, SpellFx};
+use super::spell_fx::{attach_effect_visuals, ensure_model, FxMaterials, SpellFx};
 
 /// The client's hardcoded shard-model table (`0x870e24`, 7 entries — wow-re
 /// `dynobject-visual-machine.md` Q-A1). `CharParamZero`'s decoded small int indexes it.
@@ -267,7 +267,6 @@ pub(super) fn tick_shard_emitters(
 /// Attach model parts to pending instances whose M2 finished building (the missile pattern —
 /// free world models, ground-anchored so authored flat quads decal to the terrain), start the
 /// one-shot clocks, and run both reapers (one-shot expiry; the loop-repeat override).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn attach_ground_fx_models(
     mut commands: Commands,
     time: Res<Time>,
@@ -276,6 +275,8 @@ pub(super) fn attach_ground_fx_models(
     asset_server: Res<AssetServer>,
     mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
@@ -299,8 +300,12 @@ pub(super) fn attach_ground_fx_models(
                 // The dest one-shot is not a `CEffect` on a unit: it plants at the packet's point and
                 // runs its own span clock, so it keeps the plain single-clip arm.
                 None,
-                &mut wow_materials,
-                &mut tint_reg,
+                &mut FxMaterials {
+                    store: &mut wow_materials,
+                    tint: &mut tint_reg,
+                    uv: &mut uv_reg,
+                    table: &mut anim_table,
+                },
                 &ibps,
                 &mut palettes,
                 None,

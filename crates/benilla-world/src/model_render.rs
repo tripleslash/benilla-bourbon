@@ -17,7 +17,7 @@ pub mod lazy;
 pub mod park;
 mod visibility;
 
-pub use batch::{BatchVariants, M2BatchMaterials, ModelMaterials, SkyboxBatch};
+pub use batch::{BatchVariants, EntityUvLane, M2BatchMaterials, ModelMaterials, SkyboxBatch};
 
 /// Yards of transparent-pass sort bias per authored batch-order step (`MatKey::batch_order` ×
 /// this, on `StandardMaterial::depth_bias` — bevy adds that field to the phase item's sort
@@ -50,6 +50,13 @@ pub(crate) const BATCH_ORDER_SORT_CAP: f32 = 0.9;
 pub(crate) fn alphatest_disabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_NO_ALPHATEST").is_some())
+}
+
+/// `WOW_WMO_BIAS=0` — the WMO batch's clip-z nudge off (a bisect lever; see its use site). Read
+/// once: the use site runs per WMO batch on stream-in, thousands of times through a city's load.
+fn wmo_bias_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")))
 }
 
 /// Material-dedup key: same texture + blend + sidedness + kind + fade-variant → one shared material.
@@ -213,7 +220,6 @@ pub type MaterialCache = benilla_assets::SpatialCache<MatKey, Handle<WowModelMat
 /// test at all. The source blend is what sets [`TWIN_CUTOUT_MARKER`] right (decision 0842: a twin
 /// built as `Blend` cut every texel under 224/255 out of a stealthed Opaque batch, which erased
 /// Gressil's blade body and left only its high-alpha rune pattern).
-#[allow(clippy::too_many_arguments)]
 pub fn model_material(
     cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
@@ -462,12 +468,11 @@ pub fn model_material(
                     // The clip-z nudge stays WMO-only: M2 coplanar layers pass GreaterEqual at exactly
                     // equal depth (same mesh, same transform, same vertex path), and their ORDER is
                     // the sort bias above — nudging their depth would be an unverified extra.
-                    let order =
-                        if !is_wmo || matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
-                            0.0
-                        } else {
-                            f32::from(batch_order)
-                        };
+                    let order = if !is_wmo || wmo_bias_off() {
+                        0.0
+                    } else {
+                        f32::from(batch_order)
+                    };
                     Vec4::new(shade.selector(), order, uv0[0], uv0[1])
                 },
                 // The animated M2Color tint's first key (identity white for static batches — their
@@ -830,7 +835,7 @@ pub struct FarSideOfWater;
 /// walking regime's continuous despawn stream costs ~0.5 full walks/s instead of 12–22.
 const GC_DEADLINE_SECS: f32 = 2.0;
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn classify_water_side(
     interleave: crate::particles::WaterInterleave,
     mut twins: ResMut<FarSideTwins>,

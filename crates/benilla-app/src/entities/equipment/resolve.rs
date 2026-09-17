@@ -172,7 +172,7 @@ pub(crate) struct DressKey {
 /// descriptor changed, its key changed, or a global input moved — the [`Items`] epochs (an
 /// object ingest covers the quiver bag walk, a landed template answers every pending ask) and
 /// the two client-data load edges. The idle crowd costs one tick check and one small compare.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(in crate::entities) fn resolve_equipment(
     mut commands: Commands,
     units: Query<(
@@ -192,7 +192,7 @@ pub(in crate::entities) fn resolve_equipment(
         Has<crate::net::SelfPlayer>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
-    mut templates: ResMut<Items>,
+    templates: Res<Items>,
     net: Res<NetCommands>,
     asset_server: Res<AssetServer>,
     // The creature display cache — a character-model NPC's helm/shoulder ids + race/sex live on its
@@ -638,7 +638,7 @@ pub(in crate::entities) fn resolve_equipment(
             EntityKind::Player if char_component => {
                 let race = s.unit_race().unwrap_or(1);
                 let sex = s.unit_gender().unwrap_or(0).min(1);
-                let mut resolve = |slot: u8| {
+                let resolve = |slot: u8| {
                     s.player_visible_item_entry(slot)
                         .filter(|e| *e != 0)
                         .and_then(|entry| templates.held(entry, &net))

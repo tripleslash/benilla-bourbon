@@ -338,11 +338,23 @@ impl Plugin for CursorPlugin {
         app.init_resource::<DisplayedCursor>();
         #[cfg(target_os = "macos")]
         app.add_systems(Startup, macos::setup.after(AssetSet::Open))
-            .add_systems(Update, (drive_displayed_cursor, macos::drive).chain());
+            .add_systems(
+                Update,
+                (drive_displayed_cursor, macos::drive)
+                    .chain()
+                    // After the tick: a FrameXML `SetCursor` made this frame is read here.
+                    .after(crate::ui_script::UiInput),
+            );
         #[cfg(not(target_os = "macos"))]
         app.init_resource::<other::PayloadCursorImages>()
             .add_systems(Startup, other::setup.after(AssetSet::Open))
-            .add_systems(Update, (drive_displayed_cursor, other::drive).chain());
+            .add_systems(
+                Update,
+                (drive_displayed_cursor, other::drive)
+                    .chain()
+                    // After the tick: a FrameXML `SetCursor` made this frame is read here.
+                    .after(crate::ui_script::UiInput),
+            );
     }
 }
 
@@ -390,7 +402,6 @@ mod other {
     /// Each frame: while a cursor payload with a resolved icon is held, show ITS 32×32 hardware
     /// cursor (decoded/downsampled on first use, then cached by path); otherwise swap to the
     /// classified mode (base-stem fallback, then Point, then OS) — unchanged from before 0216 §5.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn drive(
         mut commands: Commands,
         cursor: Res<super::DisplayedCursor>,
@@ -545,7 +556,6 @@ mod macos {
     /// §5, decoded/downsampled to 32×32 on first use and cached by path) if one is held and
     /// resolved, else the classified mode (base-stem fallback, then Point); on entering/leaving
     /// mouselook, hide/show it via the app-global hide counter.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn drive(
         cursors: Option<NonSend<NativeCursors>>,
         mut payload_cursors: NonSendMut<PayloadCursors>,

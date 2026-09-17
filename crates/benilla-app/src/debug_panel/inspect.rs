@@ -155,8 +155,17 @@ pub(super) struct InspectStores<'w, 's> {
     /// on the category gate or on something else.
     plate_mode: Res<'w, crate::vplates::VPlateMode>,
     /// The ask-once GO template cache — the readable head a TEXT object's line reports
-    /// (decision 1105).
+    /// (decision 1105), and the highlight column + name the tooltip ladder reports (2246).
     go_templates: Res<'w, crate::go_templates::GameObjectTemplates>,
+    /// `[0xb72038]` — the meeting-stone queue, the other half of MEETINGSTONE(23)'s own
+    /// highlightable term (decision 2283), so the card's `interact` verdict reads the same
+    /// predicate the cursor and the click do.
+    stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+    /// **The published GameObject mouseover** — the one the tooltip actually reads
+    /// ([`crate::target::HoveredObject`]). The card's own pick is a dev pick and does not go
+    /// through the publish, so without this the card can show an object the game is not hovering
+    /// at all and give no sign of the difference (2246).
+    hovered_go: Res<'w, crate::target::HoveredObject>,
     /// The GameObject **animation** readout (decision 1151) — what the §243 arm is playing right
     /// now, for the card's `anim` line. Its own query rather than a `collision` member because it
     /// needs the model components: they sit on the same entity as [`crate::go_anim::GoAnim`], but
@@ -187,7 +196,6 @@ pub(super) struct InspectStores<'w, 's> {
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn inspect_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,
@@ -201,7 +209,7 @@ pub(super) fn inspect_ui(
     drivers: Query<&crate::creature_anim::AnimDriver>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     net_commands: Res<crate::net::NetCommands>,
     // Bundled into one param (Bevy's system-function arity ceiling): the copy-click button, and
     // the flag it must yield to — a left press this frame the UI already consumed as a
@@ -257,6 +265,8 @@ pub(super) fn inspect_ui(
     let (reputations, plates, plate_mode) =
         (&*stores.reputations, &stores.plates.0, &*stores.plate_mode);
     let go_templates = &*stores.go_templates;
+    let queued_area = stores.stone.as_deref().map_or(0, |s| s.area);
+    let hovered_go = &*stores.hovered_go;
     // The picked submesh's shading payload — off the hit entity itself (see the field's doc).
     let tag_line = mouseover
         .entity
@@ -411,7 +421,8 @@ pub(super) fn inspect_ui(
                     self_store, go_guid,
                 ),
                 meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    go_guid.and_then(|g| go_templates.get(g)?.meeting_stone_area),
+                    go_guid.and_then(|g| Some(go_templates.get(g)?.meeting_stone?.area)),
+                    queued_area,
                 ),
             };
             let interact = if crate::target::cursor_mode::go_highlightable(s, reaction, overrides) {
@@ -419,6 +430,44 @@ pub(super) fn inspect_ui(
             } else {
                 "interact ✗"
             };
+            // **The TOOLTIP's own ladder** (decision 2246), which `interact` above is not and is
+            // routinely mistaken for. "No tooltip on this" has three possible stages and the card
+            // could name none of them, so every report of it cost a session of code reading:
+            //
+            //  · `hover ✗` — the **mouseover-eligibility** slot `+0x54`
+            //    ([`crate::target::cursor_mode::mouseover_eligible`]) said no, so the reference
+            //    publishes the NULL mouseover and there is no tooltip *by design*. For a
+            //    GENERIC(5) signpost this is the template's `data[1]` highlight column, which is
+            //    why the `tmpl` field sits beside it.
+            //  · `hover ✓` but `shown ✗` — eligible, and the publish still did not take it: the
+            //    pick lost to the occlusion verdict, to a nearer unit, or to the pointer being
+            //    over UI. The fault is in the pick, not the gate.
+            //  · `shown ✓` and still no plate on screen — the fault is downstream in
+            //    [`crate::ui_tooltip`], and `tmpl` says whether the name it needs has arrived.
+            //
+            // `tmpl —` is the one that looks like a bug and is not: the template query is
+            // ask-once and answers a frame or two later, and until it does the tooltip has no
+            // name to draw.
+            let tmpl = go_guid.and_then(|g| go_templates.get(g));
+            let hover_gate = crate::target::cursor_mode::mouseover_eligible(
+                s.0.gameobject_type_id(),
+                flags,
+                s.0.gameobject_dynamic_flags(),
+                tmpl.map(|t| t.highlight_column),
+                reaction,
+                overrides,
+            );
+            let published = go_guid.is_some_and(|g| hovered_go.guid == Some(g));
+            let tooltip_line = format!(
+                " · hover {} · shown {} · tmpl {}",
+                if hover_gate { "✓" } else { "✗" },
+                if published { "✓" } else { "✗" },
+                match tmpl {
+                    None => "—".to_string(),
+                    Some(t) if t.name.is_empty() => "(unnamed)".to_string(),
+                    Some(t) => format!("{:?}", t.name),
+                }
+            );
             // TEXT (type 9) only: the **readable head** (decision 1105). A book that opens no
             // window is either "no page in the template" or a fault downstream, and only this
             // line tells the two apart — the symptom is identical from the chair, and the first
@@ -454,7 +503,7 @@ pub(super) fn inspect_ui(
                 .map(|deg| format!(" · tilt {deg:.0}°"))
                 .unwrap_or_default();
             format!(
-                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}{page_text}{tilt}",
+                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}{tooltip_line}{page_text}{tilt}",
                 s.0.gameobject_type_id()
             )
         });

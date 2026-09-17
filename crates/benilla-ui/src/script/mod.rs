@@ -201,7 +201,7 @@ pub use cursor::{
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::{
-    MultisampleFormat, ScreenResolution, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
+    MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
     CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS, CVAR_WORLD_DETAIL, VIDEO_DEFAULT_CVARS,
     WORLD_DETAIL_STOPS,
 };
@@ -279,7 +279,8 @@ pub use types::{
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{
-    grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
+    grey_band, level_reads_unknown, power_token, unit_is_grey, PlayerRecord, SelectionRequest,
+    UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
@@ -720,11 +721,25 @@ impl UiScript {
 
     /// **Which VM this is** — a fresh number for every [`UiScript::new`], never reused.
     ///
-    /// The client destroys its Lua state at logout and builds another at the next world entry
-    /// (the reference's own `0x490bd0` ↔ `0x48fbf0` pair), so a host that remembers *what it last
-    /// pushed into the VM* is remembering something that may no longer exist. Anything the host
-    /// seeded — a registry, a catalog, a change-detection memo — is only valid for the session it
-    /// was seeded into, and this number is what says so.
+    /// The client destroys its Lua state and builds another several times over a login cycle, so a
+    /// host that remembers *what it last pushed into the VM* is remembering something that may no
+    /// longer exist. Anything the host seeded — a registry, a catalog, a change-detection memo — is
+    /// only valid for the session it was seeded into, and this number is what says so.
+    ///
+    /// **The addresses, corrected** (2226; this doc carried `0x490bd0` ↔ `0x48fbf0` from 1290 and
+    /// that pair is wrong). `ds:0xceef74` is a single global *slot* holding successive instances,
+    /// written at exactly two sites image-wide: `0x7039ed` opens, `0x703bab` closes. The reset
+    /// choke point `0x703b80` closes-if-present and then **tail-jmps** into the open — which is why
+    /// a `call`-only census of it reads "one state per process" and is wrong. Its three callers are
+    /// `0x48fe97` (inside `UI_Init 0x48fbf0`, unconditional), `0x491231` (`ShutdownGame`,
+    /// unconditional) and `0x46a87b` (the glue builder, gated on its arg). `0x490bd0` destroys the
+    /// frame-script *owner object* (`0x490c97`, vtable `0x81c380` slot+4 = `0x764360`) and nils the
+    /// 216 bindings; it never touches `ds:0xceef74`.
+    ///
+    /// So the boundary is `0x48fe97` ↔ `0x491231`/`0x46a87b`: **the rebuild replaces the state, the
+    /// teardown does not** — and the rebuild lives *inside* the function that loads FrameXML, which
+    /// is why benilla's world entry mints its VM at the top of its own load (2226) rather than
+    /// adopting the character screen's. GlueXML and FrameXML never share an instance.
     ///
     /// A host keying its memory on this cannot go stale by omission: a new VM simply does not
     /// match, so the seed happens again. That is the property, and it is why this is a VM-side fact
@@ -831,17 +846,8 @@ impl UiScript {
     /// a click handler's modifier fork (the reference's shift-split / ctrl-dressup /
     /// shift-pickup) reads the state as of the click.
     pub fn set_modifiers(&mut self, shift: bool, ctrl: bool, alt: bool) {
-        let shift_was = {
-            let mut model = self.model_mut();
-            let was = model.modifiers.0;
-            model.modifiers = (shift, ctrl, alt);
-            was
-        };
-        // The shift EDGE drives the shopping-compare tooltips (0274 P4): press over a live
-        // equippable item hover fires SHOW_COMPARE_TOOLTIP, release hides the pair.
-        if shift_was != shift {
-            tooltip_item::on_shift_edge(&self.lua, shift);
-        }
+        let mut model = self.model_mut();
+        model.modifiers = (shift, ctrl, alt);
     }
 
     /// Push the player's WMO-containment state onto every Minimap widget (the client's `0xceaa60`).

@@ -38,7 +38,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 use crate::ui_spellbook::SkillLines;
 
@@ -67,10 +67,10 @@ pub(crate) struct TrainerOpen {
     /// The trainer's greeting line (`SMSG_TRAINER_LIST`'s trailing string).
     pub(crate) greeting: String,
     /// A `SMSG_TRAINER_LIST` that **begins a window session** has landed and the feed has not yet
-    /// handed it to the engine. Drives the engine's filter/collapse reset
-    /// ([`UiScript::reset_trainer_filter`]) — the reference's builder rewrites both masks on every
-    /// list packet (decision 1128). It is not the same edge as a snapshot change: those re-push the
-    /// same list.
+    /// handed it to the engine. Drives the engine's filter/collapse/**selection** reset
+    /// ([`UiScript::reset_trainer_list_state`]) — the reference's builder rewrites all three on every
+    /// list packet (decision 1128; 2231 for the selection, `0x4d7b42`). It is not the same edge as a
+    /// snapshot change: those re-push the same list.
     ///
     /// "Begins a session", not "a packet arrived", because the two are the same thing in the
     /// reference and are **not** in benilla (B253/B256's arc): the reference gets a list packet only
@@ -82,7 +82,9 @@ pub(crate) struct TrainerOpen {
     pub(crate) fresh_list: bool,
     /// The post-buy re-list **we asked for** ([`crate::net::apply`]'s `trainer_buy_succeeded`) is in
     /// flight: the answering packet repaints the open window rather than opening one, so it must not
-    /// reset the filter/collapse masks. Cleared by the packet it belongs to, and by any close.
+    /// reset the filter/collapse masks — nor the selection, which is what leaves the learned spell
+    /// selected-but-hidden and so takes the detail pane down with it, the reference's own
+    /// post-purchase behaviour (2231). Cleared by the packet it belongs to, and by any close.
     pub(crate) refresh_pending: bool,
 }
 
@@ -141,7 +143,7 @@ impl Plugin for UiTrainerPlugin {
                     // push before the input pass so an open/close is on screen the same frame; drain
                     // after it (mirrors ui_merchant/ui_gossip).
                     close_npc_session_out_of_range::<TrainerOpen>.before(feed_trainer),
-                    feed_trainer.before(UiInput),
+                    feed_trainer.in_set(UiFeed),
                     drain_trainer.after(UiInput),
                 ),
             );
@@ -184,7 +186,6 @@ fn train_error_log_line(code: u32) -> &'static str {
 /// the ability-req names + rank from the same spell catalog, the state/cost/gates straight off the
 /// wire. `known` is the player's known-spell set ([`PlayerActions::spells`]) — each prerequisite
 /// ability is coloured by whether the player already knows that specific spell (see below).
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn resolve_service(
     wire: &TrainerSpell,
     trainer_type: u32,
@@ -192,7 +193,7 @@ fn resolve_service(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     // The VM's own `GlobalStrings.lua`, for [`service_group`]'s three header labels.
     get: &dyn Fn(&str) -> Option<String>,
@@ -233,20 +234,17 @@ fn resolve_service(
     // and INDEPENDENT of the service's overall category — so a spell gated only by LEVEL still shows
     // its already-learned prev-rank prerequisite WHITE, not red. The req id is a real ability id (not
     // a learn wrapper — verified there too), so there's no hop: look it up directly. The name carries
-    // its rank exactly as the client does — `"Name (Rank)"` when the spell has a rank subtext, else
-    // the bare name (the client's `"%s (%s)"`). The client also ORs `KnownHigherRank`; benilla has no
-    // rank chain, and sequential trainer ranks never reach that clause, so the direct known-check
-    // covers every real case.
+    // its rank exactly as the client does — `SpellDisplay::ranked_name`, the shared composer for the
+    // client's `"%s (%s)"` literal (decision 2243). The client also ORs `KnownHigherRank`; benilla
+    // has no rank chain, and sequential trainer ranks never reach that clause, so the direct
+    // known-check covers every real case.
     let ability_reqs = wire
         .req_spells
         .iter()
         .filter(|&&s| s != 0)
         .map(|&s| {
             let name = match spells.get(s) {
-                Some(d) => match d.rank.as_deref() {
-                    Some(rank) if !rank.is_empty() => format!("{} ({})", d.name, rank),
-                    _ => d.name.clone(),
-                },
+                Some(d) => d.ranked_name(),
                 None => format!("Spell {s}"),
             };
             TrainerAbilityReq {
@@ -306,14 +304,13 @@ fn resolve_service(
 
 /// Build the Lua-facing snapshot from [`TrainerOpen`] + the spell/skill catalogs — `None` when no
 /// trainer is open.
-#[allow(clippy::too_many_arguments)] // the catalogs, the player's state, and the string table
 fn snapshot(
     open: &TrainerOpen,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<TrainerState> {
@@ -348,7 +345,6 @@ fn snapshot(
 /// content change). Diffed against a `Local` memory, exactly like the gossip/merchant feeds. A
 /// different trainer while the window is already open is a real close+open (the client's `ShowUIPanel`
 /// early-returns when visible, so the open sound only re-plays after a hide — decision 0096).
-#[allow(clippy::too_many_arguments)]
 fn feed_trainer(
     script: Option<NonSendMut<UiScript>>,
     // ResMut only to consume the fresh-packet latch below — the feed never authors trainer content.
@@ -359,10 +355,10 @@ fn feed_trainer(
     // A tradeskill trainer's rows front the CREATED ITEM's icon, so the feed needs the ask-once
     // template cache + `ItemDisplayInfo.dbc` — the tradeskill window's own pair ([`service_icon`]).
     icons: Option<Res<ItemDisplays>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TrainerState>>>,
     mut last_trainer: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
@@ -395,7 +391,7 @@ fn feed_trainer(
     // reference's builder does (decision 1128) — before the snapshot goes in, so `TRAINER_SHOW`
     // finds the reset mask and the window's own show handler pushes the SAVED filter back over it.
     if open.fresh_list {
-        script.reset_trainer_filter(open.trainer_type);
+        script.reset_trainer_list_state(open.trainer_type);
         open.fresh_list = false;
     }
     let fresh = snapshot(
@@ -404,7 +400,7 @@ fn feed_trainer(
         Some(&skill_lines.catalog),
         &actions.spells,
         icons.as_deref(),
-        &mut items,
+        &items,
         &commands,
         &|key: &str| {
             script

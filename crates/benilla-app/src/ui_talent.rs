@@ -66,7 +66,7 @@ impl Plugin for UiTalentPlugin {
                 (
                     // Feed before UiInput (an N-key open this frame sees a populated window);
                     // the learn drain after (a click's wire goes out the same frame).
-                    feed_talents.in_set(UnitFeed).before(UiInput),
+                    feed_talents.in_set(UnitFeed),
                     drain_talent_learns.after(UiInput),
                 ),
             );
@@ -97,7 +97,6 @@ struct FeedMemory {
     points: Option<(u32, u32)>,
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn feed_talents(
     script: Option<NonSendMut<UiScript>>,
     talents: Option<Res<Talents>>,
@@ -222,7 +221,6 @@ fn rank_of(t: &Talent, known: &BTreeSet<u32>) -> u32 {
 }
 
 /// Build the pushed snapshot — the app's whole resolve (module doc).
-#[allow(clippy::too_many_arguments)] // the catalogs, the player's state, and the string table
 pub(crate) fn build_pages(
     catalog: &TalentCatalog,
     known: &BTreeSet<u32>,

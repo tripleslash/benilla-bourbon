@@ -15,8 +15,10 @@
 //! ordering exactly where 0025 already reserved it ("where player-UI arbitration will live later") —
 //! **dev overlays stay on top of the player UI, which stays on top of the world.** The camera renders
 //! nothing from the 3D world (its own [`RenderLayers`] layer, disjoint from the world camera's default
-//! layer 0) and composites over whatever the world camera already painted (`CameraOutputMode::Write`
-//! with alpha blending, no clear — same pattern as the egui overlay camera).
+//! layer 0); the world reaches it as the first DRAW of its main pass — the FFXGlow combine,
+//! `benilla_world::ffx_glow::FfxBackdrop` ([`crate::world_backdrop`], decision 2234) — and its
+//! finished frame reaches the swapchain through [`crate::ui_gamma`]'s decode directly — output
+//! mode `Skip`, no blit (decision 2206).
 //!
 //! ## Colour space: the UI gamma composite lane (decision 0254)
 //! The reference draws its whole UI through the fixed-function device into an 8-bit backbuffer, so
@@ -67,7 +69,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::CameraOutputMode;
 use bevy::image::Image;
 use bevy::math::Rect;
-use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
+use bevy::mesh::{Indices, Mesh, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
@@ -296,17 +298,6 @@ impl Default for UiQuad {
 ///   whole UI re-batched every frame (the 0365 live-city churn).
 #[derive(Resource, Default)]
 pub(crate) struct UiQuads {
-    /// The **world backdrop** ([`crate::world_backdrop`]): the frame the world camera rendered,
-    /// drawn before every other quad so the UI blends over it in the same gamma bytes it blends
-    /// over itself in. Not part of either lane and not sorted with them — it is not content
-    /// competing for a `z_key`, it is the ground. `None` whenever there is no world to paint (the
-    /// glue screens, the loading screen, a gated camera).
-    ///
-    /// It changes no batching decision beyond being first, and it flags [`Self::dirty`] only when
-    /// the QUAD changes — arrival, departure, a resize. Its image's contents change every frame and
-    /// deliberately do not flag anything: the batch holds the handle and the material samples
-    /// whatever the world camera just rendered into it.
-    pub backdrop: Option<UiQuad>,
     pub quads: Vec<UiQuad>,
     /// The append lane — see the struct doc. Compared by the rebuild, never flagged.
     pub overlays: Vec<UiQuad>,
@@ -362,7 +353,7 @@ fn clear_ui_overlays(mut quads: ResMut<UiQuads>) {
 /// doesn't need a mesh-visible layer at all).
 const UI_RENDER_LAYER: usize = 1;
 
-fn ui_render_layers() -> RenderLayers {
+pub(crate) fn ui_render_layers() -> RenderLayers {
     RenderLayers::layer(UI_RENDER_LAYER)
 }
 
@@ -370,9 +361,10 @@ fn ui_render_layers() -> RenderLayers {
 /// camera (bumped to order 2 in `debug_panel::spawn_egui_camera`). See the module doc's arbitration note.
 const UI_CAMERA_ORDER: isize = 1;
 
-/// Marker on the player-UI camera.
+/// Marker on the player-UI camera. `pub(crate)` for one writer: [`crate::world_backdrop`], which
+/// points the camera's ground pass at the world camera drawing this frame.
 #[derive(Component)]
-struct PlayerUiCamera;
+pub(crate) struct PlayerUiCamera;
 
 /// Marker on each rebuilt batch mesh entity, so [`rebuild_ui_mesh`] can despawn last frame's batches
 /// before spawning the new ones. `pub(crate)` for one reader: `FPS_PROBE`'s `ui_batches=`, the
@@ -388,7 +380,10 @@ struct UiWhiteTexture(Handle<Image>);
 
 /// The quad material: a texture + the blend-mode flag, drawn through one PREMULTIPLIED-alpha
 /// pipeline (`ui_quad.wgsl`) so straight-alpha and WoW-ADD quads share the pipeline and differ
-/// only per-material. Vertex colors carry the per-quad tint.
+/// only per-material. Vertex colors carry the per-quad tint, and a run with ONE colour carries it
+/// on the batch entity's [`MeshTag`] instead (see [`tint_tag`]) — so **nothing about a colour is
+/// in here**, and a material is its identity key alone: the same texture and flags are the same
+/// asset for as long as the image lives, and a steady frame re-prepares none.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub(crate) struct UiQuadMaterial {
     #[uniform(0)]
@@ -426,14 +421,34 @@ pub(crate) struct UiQuadMaterial {
     /// **per axis**, with `min > max` on an axis disabling that axis. See [`UiQuad::uv_clamp`].
     #[uniform(11)]
     uv_clamp: Vec4,
-    /// A whole-run colour multiplier, `ONE` for a pooled material. A run of ONE quad with one
-    /// colour carries that colour here and draws white vertices (decision 1979): the stock
-    /// PlayerFrame status glow pulses its colour every frame, and as a vertex colour that was
-    /// one `Assets<Mesh>` write a frame — which arms bevy's asset-changed probes over every
-    /// `Mesh3d` row in the scene (~44 k at the Stormwind pin, six material families' worth).
-    /// A material write arms only the 2D quad family's probe (~110 rows).
-    #[uniform(12)]
-    tint: Vec4,
+}
+
+/// **A run's one colour, packed for the batch entity's [`MeshTag`]** — the per-instance `u32`
+/// bevy's Mesh2d uniform carries and re-uploads with the transform every frame, which
+/// `ui_quad.wgsl`'s vertex stage unpacks into the run's tint. A run whose quads all share one
+/// colour stores WHITE vertices and puts the colour here, so a colour pulse (the stock
+/// PlayerFrame status glow, every frame at rest) is one component write on one entity: not an
+/// `Assets<Mesh>` write, which arms bevy's asset-changed probes over every `Mesh3d` row in the
+/// scene (1982), and not a material write, which re-creates the material's bind group and
+/// uniform buffers on the render thread — 2–3 of them a frame at a parked pin priced at ~9 ms
+/// on Intel's DX12 driver (2236).
+///
+/// One BYTE per channel, `×255 + 0.5`: exactly how the reference packs a vertex colour
+/// (`CImVector`; `SetVertexColor` at `0x79abd0`, the frame-alpha fold at `0x77fac0` in bytes —
+/// wow-re `system/ui/scratch/texture-color-composition.md`), so this is the precision the real
+/// client draws with, not a step down from it. Stored COMPLEMENTED: an entity with no `MeshTag`
+/// reads 0 in bevy's extract, and the complement makes 0 unpack to opaque white — untinted —
+/// so a Mesh2d that draws with this material and never asked for a tint (the minimap's
+/// interior tiles) is right without knowing this exists.
+fn tint_tag(color: [f32; 4]) -> u32 {
+    let byte = |v: f32| {
+        // Round half up on a clamped value — `0x40a2b0`'s `×255.0 + 0.5` then truncate; the
+        // clamp is the binding's own `[0, 1]` marshal. The cast cannot overflow after it.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let b = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        b
+    };
+    !(byte(color[0]) | byte(color[1]) << 8 | byte(color[2]) << 16 | byte(color[3]) << 24)
 }
 
 impl UiQuadMaterial {
@@ -460,13 +475,33 @@ impl UiQuadMaterial {
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
             mask: None,
             // A tile samples its whole image; there is no cell to stay inside of.
-            tint: Vec4::ONE,
             uv_clamp: UV_CLAMP_OFF,
         }
     }
 }
 
+/// The mesh every `UiQuadMaterial` quad that is **not** part of the HUD batch stream draws with:
+/// a 1×1 rectangle at the origin, scaled and placed by its own Transform (decision 1466 — a
+/// panning composite never rewrites a vertex buffer).
+///
+/// It has ONE author because a `Material2d` pipeline is keyed on `(view key, MESH LAYOUT)`, and
+/// these two quad families have different layouts: `Rectangle` gives POSITION + NORMAL + UV_0
+/// (`bevy_mesh` `primitives/dim2.rs`), the HUD's batch mesh POSITION + UV_0 + COLOR
+/// ([`rebuild_ui_mesh`]). So `UiQuadMaterial` is **two** pipelines, not one — the claim pipe_warm
+/// carried until decision 2262, which is why the composite's compiled live on the first step into
+/// a WMO interior. `pipe_warm`'s menagerie warms this exact mesh; drifting it here would take the
+/// warm rig with it.
+pub(crate) fn tile_quad_mesh() -> Mesh {
+    Rectangle::new(1.0, 1.0).into()
+}
+
 impl Material2d for UiQuadMaterial {
+    /// Our own vertex stage, in the same file: bevy's carries no per-instance data past the
+    /// transform, and the run's tint rides the instance tag (see [`tint_tag`]).
+    fn vertex_shader() -> ShaderRef {
+        "embedded://benilla_app/shaders/ui_quad.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_app/shaders/ui_quad.wgsl".into()
     }
@@ -577,6 +612,8 @@ impl Plugin for PlayerUiPlugin {
                 Material2dPlugin::<UiQuadMaterial>::default(),
                 // Owned here, not in main.rs: the lane's decode is not optional (see its doc).
                 crate::ui_gamma::UiGammaPlugin,
+                // The 2D opaque pass skipped when empty — which on this camera is always (2225).
+                crate::opaque2d::SkipEmptyOpaque2dPlugin,
             ))
             .add_systems(Startup, (spawn_ui_camera, init_white_texture))
             .configure_sets(
@@ -584,7 +621,8 @@ impl Plugin for PlayerUiPlugin {
                 UiQuadAppend.after(benilla_world::schedule::WorldStage::Input),
             )
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
-            .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend));
+            .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
+            .add_systems(Last, count_material_events);
 
         // Dev-only demo feeder (mirrors the repo's env-var dev-instrument gating — e.g. `$WOW_CAPTURE`,
         // `$WOW_TILE_RADIUS` — since the compile-time `dev` cargo feature decision 0026 sets as the
@@ -621,9 +659,10 @@ fn spawn_ui_camera(mut commands: Commands) {
         // (the portrait booths, the minimap composite); this one simply never did, and paid for it.
         //
         // There is nothing here for multisampling to resolve. The world arrives already resolved —
-        // since decision 1603 the world camera renders offscreen and this pass draws the finished
-        // image as its first quad ([`crate::world_backdrop`]), so this camera's samples only
-        // re-average an image whose own MSAA is long since done. What it draws itself is
+        // since decision 1603 the world camera renders offscreen, and since 2234 this camera's main
+        // pass draws that finished image straight in first ([`crate::world_backdrop`]), so this
+        // camera's samples would only re-average a picture whose own MSAA is long since done. What
+        // it draws itself is
         // axis-aligned rects, and the Bevy UI trees riding this camera (decision 0541) antialias
         // their own edges analytically in-shader. What it *costs* is a full-window 4× sampled
         // colour texture, a full-window 4× multisampled Core2d depth texture (Bevy sizes that one
@@ -634,6 +673,10 @@ fn spawn_ui_camera(mut commands: Commands) {
         // The gamma composite lane's mandatory decode (decision 0254) — without it the UI presents
         // ~2.2× bright, since the quad pass leaves gamma values in the target.
         crate::ui_gamma::UiGammaLane::default(),
+        // The world is the first draw of this camera's main pass (decision 2234): the FFXGlow
+        // combine of the world camera [`crate::world_backdrop`] points it at, rendered into this
+        // target ahead of the quads. `source` is `None` until a world camera draws.
+        benilla_world::ffx_glow::FfxBackdrop::default(),
         // Every Bevy UI tree renders HERE (decision 0541) — the glue screens and the loading screen.
         // Without the marker, Bevy UI picks the highest-order camera targeting the window, which is
         // the egui dev overlay (order 2): the glue screens rode the dev camera, outside the gamma
@@ -643,24 +686,22 @@ fn spawn_ui_camera(mut commands: Commands) {
         ui_render_layers(),
         Camera {
             order: UI_CAMERA_ORDER,
-            output_mode: CameraOutputMode::Write {
-                // **No blend at all** — this camera now carries the world too
-                // ([`crate::world_backdrop`]), so its target is a whole opaque frame and the blit
-                // is a copy. That is the point: the blend that used to happen HERE, against the
-                // sRGB swapchain view, was the frame's one linear composite, and it was the only
-                // one that mixed UI with world. Moving the world into the UI's own byte buffer
-                // moves that blend into `ui_quad.wgsl`'s gamma target, where every other UI blend
-                // already lives.
-                //
-                // It also retires the hazard 0254 patched around here: `ui_quad.wgsl` writes
-                // PREMULTIPLIED colour, so the original `ALPHA_BLENDING`'s `SrcAlpha` factor
-                // weighted it by alpha twice (`rgb·a²`), and a pure-additive quad (a = 0) over the
-                // world was multiplied clean away. `PREMULTIPLIED_ALPHA_BLENDING` fixed the
-                // arithmetic but kept the blend — and kept it in the wrong space. With nothing to
-                // blend against, neither factor can be wrong.
-                blend_state: None,
-                clear_color: ClearColorConfig::None,
-            },
+            // **No output blit at all** (decision 2206, [`benilla_world::final_pass`]): the
+            // lane's final pass — [`crate::ui_gamma`]'s decode — renders straight into the
+            // swapchain, so bevy's `upscaling` copy of the finished frame is skipped.
+            //
+            // It could already have been a plain copy, because this camera carries the world
+            // too ([`crate::world_backdrop`]) and its target is a whole opaque frame. That was
+            // the point of the backdrop: the blend that used to happen HERE, against the sRGB
+            // swapchain view, was the frame's one linear composite, and the only one that mixed
+            // UI with world; moving the world into the UI's own byte buffer moved that blend
+            // into this camera's gamma target, where every other UI blend already lives. It
+            // also retired the hazard 0254 patched around here: `ui_quad.wgsl` writes
+            // PREMULTIPLIED colour, so the original `ALPHA_BLENDING`'s `SrcAlpha` factor
+            // weighted it by alpha twice (`rgb·a²`), and a pure-additive quad (a = 0) over the
+            // world was multiplied clean away. With nothing to blend against, neither factor can
+            // be wrong — and with no blit, there is no pass left to get it wrong in.
+            output_mode: CameraOutputMode::Skip,
             // An overlay must composite ONLY its own pixels. `ClearColorConfig::None` made this
             // camera depend on `MsaaWriteback::Auto`, which (for any non-first camera on a target)
             // COPIES the world camera's already-final output into this camera's MSAA texture and
@@ -825,6 +866,53 @@ impl Run {
     }
 }
 
+/// `WOW_UI_COST=1` also counts the frame's [`UiQuadMaterial`] asset events. bevy re-extracts and
+/// re-prepares a material — one bind group and one uniform buffer, created on the render thread —
+/// for exactly each `Added`/`Modified` event, and nothing else re-prepares one (2236: two or three
+/// such events a frame at a parked pin cost 9.5 traced ms on Intel's DX12 driver, which prices one
+/// re-prepared material in milliseconds there). So this count is the render side's material work
+/// for the frame, read where it is caused — and since a colour left the material for the
+/// instance tag ([`tint_tag`]) it reads ZERO on a parked frame, pulsing glow or not: a line here
+/// after the interface has settled is a material being built or rebuilt for something other than
+/// a new texture, and that is a regression to find, not a cost to price.
+fn count_material_events(
+    mut events: MessageReader<AssetEvent<UiQuadMaterial>>,
+    materials: Res<Assets<UiQuadMaterial>>,
+    server: Res<AssetServer>,
+    mut named: Local<u32>,
+) {
+    if !crate::ui_script::extract::ui_cost_enabled() {
+        events.clear();
+        return;
+    }
+    let (mut added, mut modified, mut unused) = (0usize, 0usize, 0usize);
+    for event in events.read() {
+        match event {
+            AssetEvent::Added { .. } => added += 1,
+            AssetEvent::Modified { id } => {
+                modified += 1;
+                // The first hundred name themselves: the texture the rewritten material binds.
+                if *named < 100 {
+                    *named += 1;
+                    if let Some(m) = materials.get(*id) {
+                        let path = m
+                            .texture
+                            .as_ref()
+                            .and_then(|t| server.get_path(t.id()))
+                            .map(|p| p.to_string());
+                        info!("[ui-mat] modified {id:?} texture={path:?}");
+                    }
+                }
+            }
+            AssetEvent::Removed { .. } | AssetEvent::Unused { .. } => unused += 1,
+            AssetEvent::LoadedWithDependencies { .. } => {}
+        }
+    }
+    if added + modified + unused > 0 {
+        info!("[ui-mat] added={added} modified={modified} unused={unused}");
+    }
+}
+
 /// The rebuild's reused GPU-facing state, kept across frames so a rebuild pays for what CHANGED,
 /// never for existence (the 0353 demand-price law, UI lane): batch entities and their mesh assets
 /// are pools reused by run index (geometry rewritten in place — no allocator or archetype churn),
@@ -832,9 +920,6 @@ impl Run {
 /// material asset forever, so `prepare_assets` re-prepares nothing on a steady frame). Before
 /// this, every rebuild despawned every batch and allocated fresh meshes + materials — ~9 ms/frame
 /// of render-side churn in a live city (0365).
-/// A solo run's material with the key and tint it was built for.
-type SoloMaterial = (Handle<UiQuadMaterial>, MatKey, [f32; 4]);
-
 #[derive(Default)]
 struct BatchPools {
     entities: Vec<Entity>,
@@ -852,14 +937,11 @@ struct BatchPools {
     /// Goldshire pin).
     offsets: Vec<Vec2>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
-    /// Per slot: the solo-run material (key + tint it was built with), `None` while pooled.
-    solo: Vec<Option<SoloMaterial>>,
-    /// Solo materials a slot let go of, by key — taken before a fresh one is built, so a run
-    /// shifting slots (a tooltip opening above it) re-points at a material that exists
-    /// instead of adding one and dropping one per shifted slot per frame (review 2026-09-04).
-    solo_free: std::collections::HashMap<MatKey, Vec<SoloMaterial>>,
     /// Per slot: the material the batch entity currently carries.
     bound: Vec<Option<AssetId<UiQuadMaterial>>>,
+    /// Per slot: the [`MeshTag`] the batch entity currently carries — the run's one colour
+    /// ([`tint_tag`]), rewritten only when it moves.
+    tags: Vec<Option<u32>>,
 }
 
 /// One pooled batch slot's full identity: the mesh bytes plus everything the entity was last
@@ -1038,13 +1120,16 @@ fn rebuild_ui_mesh(
     //
     // A cached material holds a strong `Handle<Image>`, and its PREPARED form holds the whole GPU
     // texture behind a bind group Bevy never re-prepares. So an entry keyed on a retired asset
-    // pins that texture for as long as the cache holds the key — and the world backdrop retires a
-    // full-window `Rgba16Float` image (46 MB at 3200×1800) on every resize and every render-scale
-    // change, which is once a frame while a window is being dragged (decision 1647).
+    // pins that texture for as long as the cache holds the key. The producer that taught this was
+    // the world backdrop — a full-window `Rgba16Float` image (46 MB at 3200×1800) retired on every
+    // resize, once a frame while a window is being dragged (decision 1647); since 2234 no quad
+    // samples the world's target at all, and the hygiene stays for every other image a quad names
+    // and then loses.
     //
     // `Removed` only, not `Unused`: `Unused` fires when the last strong handle drops, and this
-    // cache IS a strong handle, so for a cached texture it can never fire. The producer removes
-    // the asset explicitly (`world_backdrop::track_render_size`) precisely so this can hear it.
+    // cache IS a strong handle, so for a cached texture it can never fire. A producer that retires
+    // an image removes the asset explicitly (`world_backdrop::track_render_size` still does)
+    // precisely so this can hear it.
     let retired: Vec<AssetId<Image>> = stores
         .2
         .read()
@@ -1055,15 +1140,6 @@ fn rebuild_ui_mesh(
         .collect();
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
-        for slot in &mut pools.solo {
-            if slot
-                .as_ref()
-                .is_some_and(|(_, k, _)| retired.contains(&k.0))
-            {
-                *slot = None;
-            }
-        }
-        pools.solo_free.retain(|k, _| !retired.contains(&k.0));
     }
     let (hidden, mesh_cost, cost_wanted) =
         (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
@@ -1086,21 +1162,24 @@ fn rebuild_ui_mesh(
     // TOGGLEUI hides at the *draw*, not at the producers: both lanes keep filling, so the UI comes
     // back exactly as it was (see [`crate::ui_hide::UiHidden`]).
     //
-    // **It hides the two LANES, never the backdrop.** The world reaches the screen as this pass's
-    // own first quad now ([`crate::world_backdrop`]), so the older "retire every batch while
-    // hidden" would black the screen — the exact inverse of a binding whose stated point is to
-    // leave "the world and nothing else". While dark we still swallow each frame's change flag and
-    // keep the append-lane mirror current, so neither lane can hand the rebuild a stale "nothing
-    // changed" the moment the UI returns. The edge is the resource's own change tick (`UiHidden` is
-    // written only by the binding and the world-exit reset), not a `Local` mirror.
+    // **It hides the two LANES, and the world is in neither.** The world reaches the screen as
+    // the first draw of this camera's main pass ([`crate::world_backdrop`], decision 2234), not
+    // as a batch, so
+    // retiring every batch while hidden leaves exactly what the binding's stated point is: "the
+    // world and nothing else". (Between 1603 and 2234 the world was this pass's first QUAD, and
+    // the dark path had to keep one batch alive to keep the screen from going black.) While dark
+    // we still swallow each frame's change flag and keep the append-lane mirror current, so
+    // neither lane can hand the rebuild a stale "nothing changed" the moment the UI returns. The
+    // edge is the resource's own change tick (`UiHidden` is written only by the binding and the
+    // world-exit reset), not a `Local` mirror.
     if hidden.is_changed() {
         q.dirty = true;
     }
     let lanes_hidden = hidden.0;
     if lanes_hidden {
         q.last_overlays.clone_from(&q.overlays);
-        // Nothing either lane produces can move a pixel while dark, so only the toggle edge and
-        // the backdrop's own arrival/departure (which sets `dirty`) reach the rebuild below.
+        // Nothing either lane produces can move a pixel while dark, so only the toggle edge
+        // reaches the rebuild below.
         if !q.dirty {
             return;
         }
@@ -1152,7 +1231,7 @@ fn rebuild_ui_mesh(
         return;
     };
     let lanes_empty = lanes_hidden || (q.quads.is_empty() && q.overlays.is_empty());
-    if q.backdrop.is_none() && lanes_empty {
+    if lanes_empty {
         retire_batches(&mut pools, &mut commands);
         q.dirty = false;
         q.last_overlays.clone_from(&q.overlays);
@@ -1176,13 +1255,6 @@ fn rebuild_ui_mesh(
     sorted.sort_by_key(|q| q.z_key);
     let n_sorted = sorted.len();
     let us_sort = lap();
-    // The backdrop is PREPENDED, not sorted in. Giving it a `z_key` would mean picking a number
-    // below every other producer's and trusting all of them to stay above it — and the append
-    // lane's lowest band is already 0 (`overlay_z::WORLD_TEXT`), so there is no room under it
-    // without renumbering a total order that encodes fidelity facts. Position, not arithmetic.
-    if let Some(backdrop) = q.backdrop.as_ref() {
-        sorted.insert(0, backdrop);
-    }
 
     // Geometry probe (`WOW_UI_PROBE=1`): dump each textured quad's screen rect once — the
     // capture-harness companion for diagnosing extracted-vs-rendered geometry by data instead of
@@ -1287,7 +1359,6 @@ fn rebuild_ui_mesh(
     // on their next miss.
     if pools.materials.len() > 256 {
         pools.materials.clear();
-        pools.solo_free.clear();
     }
     let mut used = 0usize;
     let mut n_rewrites = 0usize;
@@ -1339,12 +1410,17 @@ fn rebuild_ui_mesh(
         // GPU mesh allocator's free+realloc each frame (0.86 ms/frame at the Stormwind pin).
         // Full content compare, not a hash — a stale batch drawn over a collision would be a
         // rendering bug no one could reproduce.
-        // A solo run (one quad, one colour) hands its colour to the material's `tint` and
-        // stores white vertices — so a colour pulse is a material write, never a mesh write.
-        let solo_tint = (run.positions.len() == 4 && run.colors.windows(2).all(|w| w[0] == w[1]))
-            .then(|| run.colors[0]);
-        let colors = match solo_tint {
-            Some(_) => vec![[1.0; 4]; 4],
+        // A run whose quads all share ONE colour stores white vertices and carries the colour on
+        // the batch entity's tag ([`tint_tag`]) — so a colour pulse, or a whole string fading,
+        // is a component write: never a mesh write, never a material write.
+        let one_colour = run
+            .colors
+            .first()
+            .filter(|&&c| run.colors.iter().all(|&o| o == c))
+            .copied();
+        let tag = tint_tag(one_colour.unwrap_or([1.0; 4]));
+        let colors = match one_colour {
+            Some(_) => vec![[1.0; 4]; run.colors.len()],
             None => run.colors,
         };
         let stored = StoredRun {
@@ -1355,92 +1431,33 @@ fn rebuild_ui_mesh(
             z_bits: z.to_bits(),
             key,
         };
-        while pools.solo.len() <= used {
-            pools.solo.push(None);
+        while pools.bound.len() <= used {
             pools.bound.push(None);
+            pools.tags.push(None);
         }
-        let material_handle = match solo_tint {
-            Some(tint) => {
-                let fresh = |materials: &mut Assets<UiQuadMaterial>| {
-                    materials.add(UiQuadMaterial {
-                        additive: u32::from(run.additive),
-                        texture: Some(run.texture.clone()),
-                        circular: u32::from(run.circular),
-                        desaturate: u32::from(run.desaturated),
-                        premultiplied: u32::from(run.premultiplied),
-                        alpha_ref,
-                        gamma_texel: u32::from(run.gamma_texel),
-                        mask_rect,
-                        mask: mask.clone(),
-                        uv_clamp,
-                        tint: Vec4::from_array(tint),
-                    })
-                };
-                let BatchPools {
-                    solo, solo_free, ..
-                } = &mut *pools;
-                match &mut solo[used] {
-                    Some((handle, k, t)) if *k == key => {
-                        if *t != tint {
-                            if let Some(m) = materials.get_mut(&*handle) {
-                                m.tint = Vec4::from_array(tint);
-                            }
-                            *t = tint;
-                        }
-                        handle.clone()
-                    }
-                    slot => {
-                        if let Some(old) = slot.take() {
-                            solo_free.entry(old.1).or_default().push(old);
-                        }
-                        let reused =
-                            solo_free
-                                .get_mut(&key)
-                                .and_then(Vec::pop)
-                                .map(|(handle, k, t)| {
-                                    if t != tint {
-                                        if let Some(m) = materials.get_mut(&handle) {
-                                            m.tint = Vec4::from_array(tint);
-                                        }
-                                    }
-                                    (handle, k, tint)
-                                });
-                        let (handle, k, t) =
-                            reused.unwrap_or_else(|| (fresh(materials), key, tint));
-                        *slot = Some((handle.clone(), k, t));
-                        handle
-                    }
-                }
-            }
-            None => {
-                if let Some(old) = pools.solo[used].take() {
-                    pools.solo_free.entry(old.1).or_default().push(old);
-                }
-                pools
-                    .materials
-                    .entry(key)
-                    .or_insert_with(|| {
-                        materials.add(UiQuadMaterial {
-                            additive: u32::from(run.additive),
-                            texture: Some(run.texture.clone()),
-                            circular: u32::from(run.circular),
-                            desaturate: u32::from(run.desaturated),
-                            premultiplied: u32::from(run.premultiplied),
-                            alpha_ref,
-                            gamma_texel: u32::from(run.gamma_texel),
-                            mask_rect,
-                            mask: mask.clone(),
-                            uv_clamp,
-                            tint: Vec4::ONE,
-                        })
-                    })
-                    .clone()
-            }
-        };
+        let material_handle = pools
+            .materials
+            .entry(key)
+            .or_insert_with(|| {
+                materials.add(UiQuadMaterial {
+                    additive: u32::from(run.additive),
+                    texture: Some(run.texture.clone()),
+                    circular: u32::from(run.circular),
+                    desaturate: u32::from(run.desaturated),
+                    premultiplied: u32::from(run.premultiplied),
+                    alpha_ref,
+                    gamma_texel: u32::from(run.gamma_texel),
+                    mask_rect,
+                    mask: mask.clone(),
+                    uv_clamp,
+                })
+            })
+            .clone();
         // The pan gate (1463): a run that matches its slot's base up to one constant XY delta
         // moves on the batch entity's `Transform` — no mesh write, no `AssetChanged` arming.
         // `Some(ZERO)` is the bit-identical case (1361's old skip gate), where even the
-        // `Transform` write is skipped unless a previous pan is being undone.
+        // `Transform` write is skipped unless a previous pan is being undone. The colour rides
+        // the same way: a moved tag is one component write on the slot's entity.
         let pan = pools
             .stored
             .get(used)
@@ -1452,6 +1469,12 @@ fn rebuild_ui_mesh(
                     commands
                         .entity(entity)
                         .insert(MeshMaterial2d(material_handle.clone()));
+                }
+            }
+            if pools.tags[used] != Some(tag) {
+                pools.tags[used] = Some(tag);
+                if let Some(&entity) = pools.entities.get(used) {
+                    commands.entity(entity).insert(MeshTag(tag));
                 }
             }
             if pools.offsets[used] != d {
@@ -1537,13 +1560,15 @@ fn rebuild_ui_mesh(
             }
         };
         pools.bound[used] = Some(material_handle.id());
+        pools.tags[used] = Some(tag);
         // Reuse the batch entity at this slot — same Mesh2d handle (the pooled asset), a material
-        // handle that only changes when the run's identity does, a fresh z.
+        // handle that only changes when the run's identity does, the run's colour tag, a fresh z.
         match pools.entities.get(used) {
             Some(&entity) => {
                 commands.entity(entity).insert((
                     Mesh2d(mesh_handle),
                     MeshMaterial2d(material_handle),
+                    MeshTag(tag),
                     Transform::from_xyz(0.0, 0.0, z),
                 ));
             }
@@ -1553,6 +1578,7 @@ fn rebuild_ui_mesh(
                         UiQuadBatch,
                         Mesh2d(mesh_handle),
                         MeshMaterial2d(material_handle),
+                        MeshTag(tag),
                         Transform::from_xyz(0.0, 0.0, z),
                         ui_render_layers(),
                     ))
@@ -1766,8 +1792,8 @@ mod tests {
     /// The cache holds a strong `Handle<Image>` per entry and its prepared form holds the whole GPU
     /// texture behind a bind group Bevy never re-prepares — so an entry keyed on an asset that no
     /// longer exists pins that texture indefinitely. Nothing here notices until something retires
-    /// images in bulk, and the world backdrop does exactly that: one full-window `Rgba16Float`
-    /// image per resize, which is once a frame while a window is being dragged.
+    /// images in bulk, and the world backdrop did exactly that while it was a quad (1603–2234):
+    /// one full-window `Rgba16Float` image per resize, once a frame while a window was dragged.
     ///
     /// The removal is seen a few frames late by construction (the loop below names the three
     /// lags). That is fine for memory hygiene and would NOT be fine for correctness — which is
@@ -1841,26 +1867,18 @@ mod tests {
             .any(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == id))
     }
 
-    /// **TOGGLEUI hides the UI, not the world.** Since the world arrives as this pass's own
-    /// backdrop quad ([`crate::world_backdrop`]), the dark path can no longer mean "retire every
-    /// batch" — that would black the screen, which is the exact inverse of what the binding is
-    /// for. One batch survives while dark (the backdrop's), and the lanes come back on top of it.
+    /// **TOGGLEUI hides the UI, not the world — and the world is not a batch.** The world is the
+    /// first draw of the UI camera's main pass (`benilla_world::ffx_glow::FfxBackdrop`, 2234), not a
+    /// quad in either lane, so the dark path is what it was before 1603 put a backdrop quad in
+    /// here: retire every batch. That leaves "the world and nothing else", which is the binding's
+    /// stated point, and the lanes come back on top of it exactly as they were.
     ///
-    /// This is the regression the change itself created: every earlier version of the hidden path
-    /// asserted zero batches, and zero batches is now a black screen.
+    /// (Between 1603 and 2234 this test held ONE batch alive while dark — the backdrop's — because
+    /// zero batches was then a black screen. A future version that keeps a batch alive while dark
+    /// is drawing something the binding says must not be drawn.)
     #[test]
-    fn toggleui_keeps_the_world_backdrop() {
+    fn toggleui_retires_every_batch_and_the_world_is_none_of_them() {
         let mut app = rebuild_app();
-        let backdrop = UiQuad {
-            rect: Rect::from_corners(Vec2::ZERO, Vec2::new(800.0, 600.0)),
-            texture: None,
-            ..UiQuad::default()
-        };
-        {
-            let mut q = app.world_mut().resource_mut::<UiQuads>();
-            q.backdrop = Some(backdrop);
-            q.dirty = true;
-        }
         app.update();
         let lit = batches(&mut app);
         assert!(lit >= 1, "content drawn to begin with");
@@ -1869,8 +1887,8 @@ mod tests {
         app.update();
         assert_eq!(
             batches(&mut app),
-            1,
-            "dark ⇒ the backdrop alone; anything less is a black screen"
+            0,
+            "dark ⇒ nothing drawn: the world is this camera's own pass, not a batch"
         );
 
         set_hidden(&mut app, false);
@@ -1880,19 +1898,6 @@ mod tests {
             lit,
             "the UI comes back over the same world"
         );
-    }
-
-    /// With no world to paint (the glue screens, the loading screen, a gated camera) the dark path
-    /// is the old one: nothing at all. The backdrop earns an exemption because it IS the world,
-    /// not because it is first in the list.
-    #[test]
-    fn toggleui_with_no_backdrop_still_retires_everything() {
-        let mut app = rebuild_app();
-        app.update();
-        assert_eq!(batches(&mut app), 1, "one batch drawn to begin with");
-        set_hidden(&mut app, true);
-        app.update();
-        assert_eq!(batches(&mut app), 0, "no world, no backdrop, nothing drawn");
     }
 
     /// **The desaturation flag reaches the MATERIAL, and splits the run** (decision 1327).
@@ -1933,6 +1938,130 @@ mod tests {
             flags,
             vec![0, 1],
             "one material greys and one does not — the uniform the shader branches on"
+        );
+    }
+
+    /// **The tag is the reference's byte colour, complemented.** `SetVertexColor` quantises
+    /// `×255 + 0.5` into one byte per channel (wow-re `texture-color-composition.md`), and the
+    /// complement is what makes bevy's untagged 0 read as opaque white (the minimap's interior
+    /// tiles never set one).
+    #[test]
+    fn tint_tag_is_the_reference_byte_colour_complemented() {
+        assert_eq!(tint_tag([1.0; 4]), 0, "white is the untagged default");
+        assert_eq!(
+            tint_tag([0.0; 4]),
+            u32::MAX,
+            "transparent black is a real colour, not a missing tag"
+        );
+        // Gold at half alpha: 255, 224 (224.9 truncated), 64 (64.25), 128 (128.0) — the bytes the
+        // reference packs, r in the low byte the way `unpack4x8unorm` reads them back.
+        assert_eq!(
+            tint_tag([1.0, 0.88, 0.25, 0.5]),
+            !(255 | 224 << 8 | 64 << 16 | 128 << 24)
+        );
+        assert_eq!(
+            tint_tag([2.0, -1.0, 0.5, 1.0]),
+            !(255 | 128 << 16 | 255 << 24),
+            "clamped to [0, 1] first, as the Lua binding clamps"
+        );
+    }
+
+    /// **A colour pulse is one component write** — no `Assets<Mesh>` write and no material
+    /// write (decision 2236's gate: the `WOW_UI_COST=1` material-event count must be ZERO on a
+    /// parked frame with a pulsing element, not merely cheaper). The stock PlayerFrame status
+    /// glow pulses its alpha every frame at rest; on Intel's DX12 driver each material it
+    /// re-prepared cost milliseconds, and as a vertex colour it had cost an asset-changed sweep
+    /// over every mesh in the scene. So the colour goes on the batch entity's `MeshTag`, the
+    /// mesh stays white and untouched, and the material — its identity alone — is never
+    /// rewritten.
+    #[test]
+    fn a_colour_pulse_writes_the_tag_and_neither_asset() {
+        let mut app = rebuild_app();
+        // The rebuild's own meter is off unless asked (a player's frame pays one bool for it);
+        // this test reads its `rewrites`, so it asks.
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        assert_eq!(batches(&mut app), 1);
+        // Read through a cursor, not the "current update" buffer: `TimePlugin` only lets the
+        // message buffers swap after a FIXED step (`signal_message_update_system`), and this
+        // harness ticks faster than one, so frame 1's events are still "current" on frame 2.
+        let mut cursor = bevy::ecs::message::MessageCursor::<AssetEvent<UiQuadMaterial>>::default();
+        let mut material_events = |app: &App| {
+            let (mut added, mut modified) = (0, 0);
+            for e in cursor.read(
+                app.world()
+                    .resource::<Messages<AssetEvent<UiQuadMaterial>>>(),
+            ) {
+                match e {
+                    AssetEvent::Added { .. } => added += 1,
+                    AssetEvent::Modified { .. } => modified += 1,
+                    _ => {}
+                }
+            }
+            (added, modified)
+        };
+        assert_eq!(
+            material_events(&app),
+            (1, 0),
+            "the first frame builds the run's one material (and this harness hears it)"
+        );
+        let (batch, tag0) = app
+            .world_mut()
+            .query_filtered::<(Entity, &MeshTag), With<UiQuadBatch>>()
+            .single(app.world())
+            .expect("one batch");
+        assert_eq!(
+            **tag0,
+            tint_tag([1.0; 4]),
+            "a white quad carries the white tag"
+        );
+
+        // The pulse: the same quad, another colour.
+        let gold = [1.0, 0.88, 0.25, 0.5];
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads[0].color = gold;
+            q.dirty = true;
+        }
+        app.update();
+
+        let cost = app.world().resource::<UiMeshCost>();
+        assert!(cost.rebuilt, "the dirty flag ran the rebuild");
+        assert_eq!(
+            cost.rewrites, 0,
+            "no pooled mesh was rewritten for a colour"
+        );
+        assert_eq!(
+            material_events(&app),
+            (0, 0),
+            "no material was built or rebuilt for a colour — the count 2236 gates on"
+        );
+        assert_eq!(
+            app.world().resource::<Assets<UiQuadMaterial>>().len(),
+            1,
+            "still the one material: colour is not part of its identity"
+        );
+        let tag = app
+            .world()
+            .get::<MeshTag>(batch)
+            .expect("the batch keeps its tag");
+        assert_eq!(**tag, tint_tag(gold), "the colour went to the instance tag");
+        let mesh_handle = app.world().get::<Mesh2d>(batch).expect("the batch's mesh");
+        let mesh = app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&mesh_handle.0)
+            .expect("the pooled mesh");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the run's vertex colours are Float32x4");
+        };
+        assert!(
+            colors.iter().all(|c| *c == [1.0; 4]),
+            "the vertices stay white: the colour is the tag's, not the mesh's"
         );
     }
 

@@ -34,6 +34,15 @@ pub(crate) fn print_scenario_names() {
     crate::capture::print_scenario_names();
 }
 
+/// `WOW_PROBE=list` — the probe fleet's environment registry (`capture::probe_env`): every
+/// `WOW_PROBE*` variable, whether it arms the un-occludable window, and `WOW_PROBE`'s own named
+/// values — printed before any window or asset setup. Answers nothing in a player build, which
+/// has no probes.
+pub(crate) fn print_probe_vars() {
+    #[cfg(feature = "dev")]
+    crate::capture::probe_env::print();
+}
+
 /// `WOW_HOVER_LOG_REPORT=<csv>` — re-read a recorded run and print its report, no window, no game.
 /// New analysis lands on runs already captured (see `hover_log`).
 pub(crate) fn report_recorded_hover_log(_path: &str) {
@@ -105,34 +114,26 @@ impl Plugin for DevProbesPlugin {
             // Any scripted probe keeps its window un-occludable: a fully covered macOS window drops to
             // ~1 fps drawables, and every probe schedule is wall-clock — a throttled run doesn't measure
             // slowly, it runs the wrong script (see `capture::ProbeFocusPlugin`, decision 0906).
+            // Which probe variables count is the registry's `wall_clock` column
+            // (`capture::probe_env::PROBE_VARS`), not a list kept here: this list was hand-kept
+            // and had drifted to ten of the twenty-five wall-clock variables when 2265 §A5 read
+            // it against the code, so a mail or auction probe ran covered. The four below are the
+            // non-probe instruments that schedule on the wall clock too.
             // (`WOW_LIVE_FPS` is in the list because an occluded SETTLE phase streams the world at ~1 fps
             // and under-warms the scene before sampling even starts — the assertion has to be live from
             // the first tick, not at the uncap.)
-            if [
-                "WOW_PROBE",
-                "WOW_PROBE_CHAT",
-                "WOW_PROBE_HOVER",
-                "WOW_PROBE_KEY",
-                "WOW_PROBE_LUA",
-                // The swim-pitch aim is a wall-clock timeline like every other probe schedule, and
-                // it is the one script that can be a run's *only* actuator (a drifting swimmer
-                // needs no keys) — so it arms the occlusion defence on its own.
-                "WOW_PROBE_PITCH",
-                "WOW_PROBE_CHEST",
-                "WOW_PROBE_CLAM",
-                "WOW_PROBE_VENDOR_SWAP",
-                "WOW_PROBE_MODEL_CAMERA",
-                "WOW_RIG",
-                "WOW_LIVE_FPS",
-                // A screenshot burst and a pick burst are wall-clock schedules too, and on an
-                // occluded window they capture the same stale drawable over and over: a whole
-                // day of lamppost A/Bs on the Air read identical to the decimal because every
-                // frame in every burst was one frame (the halo record).
-                "WOW_LIVE_SHOT",
-                "WOW_PICK",
-            ]
-            .iter()
-            .any(|k| std::env::var(k).is_ok())
+            if crate::capture::probe_env::wall_clock_vars()
+                .chain([
+                    "WOW_RIG",
+                    "WOW_LIVE_FPS",
+                    // A screenshot burst and a pick burst are wall-clock schedules too, and on an
+                    // occluded window they capture the same stale drawable over and over: a whole
+                    // day of lamppost A/Bs on the Air read identical to the decimal because every
+                    // frame in every burst was one frame (the halo record).
+                    "WOW_LIVE_SHOT",
+                    "WOW_PICK",
+                ])
+                .any(|k| std::env::var(k).is_ok())
             {
                 app.add_plugins(crate::capture::ProbeFocusPlugin);
             }
@@ -311,6 +312,21 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE").as_deref() == Ok("guardpoi") {
                 app.add_plugins(crate::capture::ProbeGuardPoiPlugin);
             }
+            // The battleground-queue live probe: `WOW_PROBE_BGQUEUE=1` levels past the bracket
+            // floor, greets Stormwind's Warsong Gulch battlemaster on the real wire and queues
+            // through the guid his list carried — the fixture that makes "log in while queued"
+            // reproducible (decision 2232's unexercised shape; see `capture::ProbeBgQueuePlugin`).
+            if std::env::var("WOW_PROBE_BGQUEUE").is_ok() {
+                app.add_plugins(crate::capture::ProbeBgQueuePlugin);
+            }
+            // The inside-a-battleground live probe: `WOW_PROBE_BG=wsg|ab|av` walks the whole
+            // player road — level, greet, queue, take the port through the stock
+            // `AcceptBattlefieldPort` — and then censuses the battleground from inside. The
+            // interface arc (1963/1972/1974/1980) built everything up to the port button and
+            // nothing past it; this is the first instrument that looks (see `capture::ProbeBgPlugin`).
+            if std::env::var("WOW_PROBE_BG").is_ok() {
+                app.add_plugins(crate::capture::ProbeBgPlugin);
+            }
             // The mail-arc live probe: `WOW_PROBE_MAIL=1` GM-mails the probe's own character, opens the
             // Goldshire mailbox on the real wire, and drives the inbox/take/send/delete surface through
             // the live Lua VM — decisions 0544/0548's end-to-end instrument (see `capture::ProbeMailPlugin`).
@@ -378,6 +394,13 @@ impl Plugin for DevProbesPlugin {
             // B240's instrument (see `capture::ProbeBookPlugin`).
             if std::env::var("WOW_PROBE_BOOK").is_ok() {
                 app.add_plugins(crate::capture::ProbeBookPlugin);
+            }
+            // The meeting-stone live probe: `WOW_PROBE_STONE=1` parks at a real stone, clicks it
+            // on the click's own route below and inside its level band, and reads the queue back
+            // out of the live VM — decision 2283's instrument, the end-to-end answer to "can a
+            // player get into the LFG queue" (see `capture::ProbeStonePlugin`).
+            if std::env::var("WOW_PROBE_STONE").is_ok() {
+                app.add_plugins(crate::capture::ProbeStonePlugin);
             }
             // The chest live probe: `WOW_PROBE_CHEST=1` parks at a real chest spawn, opens it on the
             // click's own route and reports the self unit's base anim id before/during/after — B84's

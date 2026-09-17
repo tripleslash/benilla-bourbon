@@ -20,7 +20,7 @@ use super::*;
 /// third-person control (WASD walks the avatar; right-drag turns it, left-drag orbits the camera,
 /// wheel zooms) and streams our movement to the server as the confirmed mover. The dev chord + `F`
 /// toggles free-fly (decision 1043).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -186,7 +186,9 @@ pub(super) fn control(
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
-    // works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives; the free-fly
+    // works. The gate is `UiKeyboardCapture::typing`, which the focused chat EditBox drives —
+    // deliberately not its per-key `consumed` twin (2196): that one says a keyboard FRAME ate one
+    // key, whose business is that key's binding, not whether a dev free-cam may read WASD. The free-fly
     // chord below is deliberately outside it, like every dev chord ([`modkeys::dev_chord`]).
     let typing = ui_capture.typing;
     // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the
@@ -1075,7 +1077,7 @@ pub(super) fn control(
         // turn jittery") needs the input cadence and the output cadence on the same timeline: a
         // bursty `dx` under a steady `dt` convicts event delivery; a steady `dx` with an uneven
         // realized pose convicts everything downstream.
-        if std::env::var_os("WOW_CAM_DUMP").is_some() {
+        if crate::player::camera::cam_dump_enabled() {
             eprintln!(
                 "[turn] t={:.6} dt={:.6} dx={:.3} dy={:.3} look={} face={:.6} model={:.6} \
                  pos [{:.4},{:.4},{:.4}] pivot={:.4}->{:.4}",

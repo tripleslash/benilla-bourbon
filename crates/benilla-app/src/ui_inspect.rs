@@ -47,7 +47,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
 use crate::portrait::InspectBooth;
-use crate::ui_script::UiInput;
+use crate::ui_script::UiFeed;
 
 /// Which unit the inspect window is bound to — the ref's `InspectFrame.unit`, mirrored app-side so
 /// the feed knows whether to resolve anything. The **token** is the identity (not the guid): the
@@ -81,7 +81,7 @@ impl Plugin for InspectUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InspectTarget>()
             .init_resource::<InspectFeedState>()
-            .add_systems(Update, feed_inspect.in_set(UiInput));
+            .add_systems(Update, feed_inspect.in_set(UiFeed));
     }
 }
 
@@ -99,7 +99,7 @@ impl Plugin for InspectUiPlugin {
 /// data the reference's own inspect tooltip has.
 fn inspect_slot_view(
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
@@ -155,13 +155,12 @@ fn inspect_slot_view(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_inspect(
     script: Option<NonSendMut<UiScript>>,
     mut target: ResMut<InspectTarget>,
     mut feed: ResMut<InspectFeedState>,
     mut booth: ResMut<InspectBooth>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the inspected item's enchant line (decision 0915) —
     // and `ItemRandomProperties`, the roll behind its "of the Monkey" name (1547).
@@ -234,7 +233,7 @@ fn feed_inspect(
     for slot in 1..=19u8 {
         slots[usize::from(slot)] = inspect_slot_view(
             store,
-            &mut items,
+            &items,
             icons.as_deref(),
             crate::items::RollCatalogs {
                 enchants: catalogs.0.as_deref(),

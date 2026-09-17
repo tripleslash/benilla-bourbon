@@ -58,12 +58,11 @@ pub(super) struct FedPetition {
 }
 
 /// Build the snapshot, push it, drain the queued lines, and fire the four events on their edges.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn feed_petition(
     script: Option<NonSendMut<UiScript>>,
     registrar: Res<GuildRegistrarState>,
     mut petition: ResMut<PetitionState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
     commands: Res<NetCommands>,
@@ -111,7 +110,7 @@ pub(super) fn feed_petition(
         .unwrap_or_default();
 
     let record = open.as_ref().and_then(|o| {
-        let r = petition.records.get(&o.petition_id)?;
+        let r = petition.records.get(o.petition_id)?;
         Some(PetitionRecordView {
             petition_type: if r.is_charter {
                 PETITION_TYPE_CHARTER
@@ -219,12 +218,11 @@ pub(super) fn feed_petition(
 /// flight, a record is cached, and we are **not** its owner. Closing somebody else's charter tells
 /// them so. `CloseGuildRegistrar`, by contrast, really does send nothing — verified by a closure
 /// walk that found no `CDataStore` build on its whole path.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_petition(
     script: Option<NonSendMut<UiScript>>,
     mut registrar: ResMut<GuildRegistrarState>,
     mut petition: ResMut<PetitionState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     items: Res<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,

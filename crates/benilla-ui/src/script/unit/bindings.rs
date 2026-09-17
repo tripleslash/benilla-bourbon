@@ -21,8 +21,35 @@ use super::super::binding_abi::flag;
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    unit_predicate, unknownobject, with_unit, SelectionRequest,
+    unit_predicate, unknownobject, with_unit, PlayerRecord, SelectionRequest,
 };
+
+/// **The `"player"` fast path, shared by the four verbs that take it** (decision 2263).
+///
+/// `Some(x)` = this token is `"player"` and `x` is the record's answer; `None` = it is any other
+/// token and the caller falls through to the unit resolver. That is the reference's own shape —
+/// a full-string, case-insensitive compare of the token against `0x847894` (`b"player\0"`) whose
+/// **match is the fall-through** — and it is one function rather than four copies for the reason
+/// [`super::super::names::gated_rank`](crate)'s sibling comment gives about rank: four readers of
+/// one record, each testing the token itself, is how they drift apart. `UnitName`, `UnitRace`,
+/// `UnitClass` and `UnitSex` are the whole set; `UnitLevel` is **not** one of them.
+///
+/// The compare is a full string, not a prefix: `"playerfoo"` is a recognised-but-unresolvable
+/// token ([`super::token_recognised`]) and goes to the resolver, not here.
+fn player_record_arm<T>(
+    lua: &Lua,
+    token: &Option<String>,
+    f: impl FnOnce(&PlayerRecord) -> T,
+) -> Option<T> {
+    if !token
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case("player"))
+    {
+        return None;
+    }
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    Some(f(&model.player_record))
+}
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
 /// the class byte `[[player+0x110]+0x79]` against. That byte is `UNIT_FIELD_BYTES_0` byte 1, the
@@ -180,8 +207,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             //
             // Value 1 — and the ONLY two nils a recognised token can produce (`0x517020`, wow-re
             // `ui/scratch/binding-shape-arity-law.md` §2.1): the `"player"` fast path reads the
-            // local name buffer and pushes nil when it is empty (`0x517083` → `0x5abdc0`), and a
-            // token that resolves to GUID 0 pushes nil (`0x5170c0`). EVERY other path ends in a
+            // local name buffer and pushes nil when it is empty (`0x51708c` → `0x5abdc0`; the
+            // `0x517083` this used to cite is the token's string *compare*, `call 0x64a4c0` —
+            // corrected 2261), and a token that resolves to GUID 0 pushes nil (`0x5170c0`).
+            // The empty-buffer nil is not an explicit push either: `0x517095` is
+            // `lua_pushstring`, which falls through on NULL at `0x6f3895` into `lua_pushnil`. EVERY other path ends in a
             // string — the cached name, or `FrameScript_GetText("UNKNOWNOBJECT")`: `0x517220` for
             // a GUID with no object and no cache row, `0x609324` inside `CGUnit_C::GetUnitName`
             // for a unit whose name cache has not answered or is stale (a pet's is
@@ -195,17 +225,30 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // named gap), so a not-selectable unit reads its name there with `UnitExists` nil; the
             // name resolver's own nil is GUID 0 and nothing else, and a feed that seats a token
             // has resolved it. Decision 2002.
+            //
+            // **The `"player"` arm is the BUFFER, not the snapshot** (decision 2261). `0x51708c`
+            // reads `0x5abdc0` — the local name buffer at `0xc27d88` — and returns; it never
+            // reaches the resolver, so no object, no descriptor and no name-query answer is
+            // involved on this path at all. Modelling it off the snapshot (as this did until
+            // 2261) put the one name the client always knows behind the one cache that can miss:
+            // decision 2260's realm-cache load dropped our own guid, the feed pushed a nameless
+            // player over the roster seat, and `UnitName("player")` read nil in the world.
+            //
+            // The buffer's emptiness is still the reference's own nil — it just means something
+            // a snapshot cannot say, and something a client that is in the world never is:
+            // "no Enter World has been committed in this process".
+            if let Some(seeded) = player_record_arm(lua, &token, |r| r.name.clone()) {
+                let name = if seeded.is_empty() {
+                    Value::Nil
+                } else {
+                    Value::String(lua.create_string(&seeded)?)
+                };
+                return Ok((name, Value::Nil));
+            }
             let name = with_unit(lua, &token, None, |u| Some(u.name.clone()))?;
             let name = match name {
                 None => Value::Nil,
                 Some(Some(n)) => Value::String(lua.create_string(&n)?),
-                Some(None)
-                    if token
-                        .as_deref()
-                        .is_some_and(|t| t.eq_ignore_ascii_case("player")) =>
-                {
-                    Value::Nil
-                }
                 Some(None) => Value::String(unknownobject(lua)?),
             };
             Ok((name, Value::Nil))
@@ -492,6 +535,36 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitIsPlayer",
         lua.create_function(|lua, token: Option<String>| {
             unit_predicate(lua, &token, |u| u.is_player)
+        })?,
+    )?;
+    // UnitIsPlusMob(unit) → 1 if this unit is a "plus" mob, else nil (`0x516d40`, extent
+    // `[0x516d40,0x516d8f)`). One bit of the SAME `UNIT_FIELD_FLAGS` word `UnitPlayerControlled`
+    // reads: `shr ecx,6; test cl,1` — bit 6, `UNIT_FLAG_PLUS_MOB 0x40`.
+    //
+    // **It is not a rank read**, which is the trap the name sets. `UnitClassification` is its
+    // table neighbour and answers off the gated creature rank (decision 0782), so the obvious
+    // implementation is `rank > 0` — but `0x516d40` never calls the rank getter `0x605620` (whose
+    // six callers are enumerated) and never touches the creature cache. The two agree in practice
+    // because the SERVER derives the bit from the rank — vmangos `Creature::UpdateEntry` sets it
+    // on `!IsPet() && rank > 0` (`Creature.cpp:634`, INFERRED from source) — so **rare** answers 1
+    // here alongside elite, rare-elite and world boss, while a player, a pet and a normal mob
+    // answer nil. Where they part is the unstreamed unit: a creature whose cache record has not
+    // arrived still carries its own flags, so this answers truthfully where a rank read would say
+    // "normal". No client code writes the bit (zero bitwise RMWs at `+0xa0` image-wide), so it is
+    // the server's word verbatim.
+    //
+    // No stock FrameXML file calls it, which is why nothing shipped ever raised on its absence;
+    // addons do (`FuBar_DakSmak` colours its tooltip with it), and calling the nil global is what
+    // B385 reported. Last of the three verbs decision 1834 left loudly absent.
+    // Decision 2209 (wow-re `9f84e7e4`,
+    // `system/ui/scratch/unit-verbs-controlled-charmed-creaturetype.md` §4.2).
+    g.set(
+        "UnitIsPlusMob",
+        lua.create_function(|lua, token: Option<String>| {
+            // One of 1834's quiet thirteen: no `lua_isstring` gate and no `Usage:` arm, so a nil
+            // or absent token is a quiet nil. An UNRECOGNISED one still raises — the body reaches
+            // the shared resolver through `0x515940`, and that is `unit_predicate`'s own gate.
+            unit_predicate(lua, &token, |u| u.flags & 0x40 != 0)
         })?,
     )?;
 
@@ -832,6 +905,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitRace("unit")"#,
             )?);
+            // The `"player"` arm is the RECORD, not the snapshot (decision 2263): `0x518269`
+            // reads `0x5abdd0` — `0xc27e80`, the char-enum row's race byte — and resolves it
+            // through `ChrRaces`, never reaching the unit resolver. See [`PlayerRecord`].
+            if let Some(pair) = player_record_arm(lua, &token, |r| r.race.clone()) {
+                return match pair {
+                    Some((loc, file)) => Ok((
+                        Value::String(lua.create_string(&loc)?),
+                        Value::String(lua.create_string(&file)?),
+                    )),
+                    None => Ok((Value::Nil, Value::Nil)),
+                };
+            }
             let pair = with_unit(lua, &token, None, |u| {
                 u.race.clone().zip(u.race_file.clone())
             })?;
@@ -852,6 +937,17 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitClass("unit")"#,
             )?);
+            // The `"player"` arm is the RECORD (decision 2263): `0x5183b9` → `0x5abde0`,
+            // `0xc27e81` through `ChrClasses`. Second return is the UPPERCASE token.
+            if let Some(pair) = player_record_arm(lua, &token, |r| r.class.clone()) {
+                return match pair {
+                    Some((loc, file)) => Ok((
+                        Value::String(lua.create_string(&loc)?),
+                        Value::String(lua.create_string(&file)?),
+                    )),
+                    None => Ok((Value::Nil, Value::Nil)),
+                };
+            }
             let pair = with_unit(lua, &token, None, |u| {
                 u.class.clone().zip(u.class_file.clone())
             })?;
@@ -915,7 +1011,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token,
                 r#"Usage: UnitSex("unit")"#,
             )?);
-            let sex = with_unit(lua, &token, 0u8, |u| u.sex)?;
+            // The `"player"` arm is the RECORD (decision 2263): `0x517ef9` → `0x5abdf0`,
+            // `0xc27e82`. **No bounds check anywhere on that path** — the byte indexes
+            // `fild [4*eax+0x808be4]` over `{2,3,1,6}` directly — so an unset record answers `2`
+            // ("male") in the reference too, which is what our `0` maps to below.
+            let sex = match player_record_arm(lua, &token, |r| r.sex) {
+                Some(sex) => sex,
+                None => with_unit(lua, &token, 0u8, |u| u.sex)?,
+            };
             Ok(Value::Integer(i64::from(if sex == 0 { 2 } else { sex })))
         })?,
     )?;

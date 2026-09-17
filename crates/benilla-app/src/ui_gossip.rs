@@ -34,7 +34,7 @@ use benilla_ui::script::{GossipMenu, GossipOptionView, GossipQuestRow, ScriptVal
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_quest::{row_is_active, row_is_one_click};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 /// The open gossip menu, filled by the net bridge ([`crate::net`]) and read by [`feed_gossip`]. The
@@ -201,7 +201,7 @@ impl Plugin for UiGossipPlugin {
                 // push before the input pass so an open/close is on screen the same frame; drain
                 // after it so a click's intent goes out the same frame (mirrors ui_items).
                 close_npc_session_out_of_range::<GossipState>.before(feed_gossip),
-                feed_gossip.before(UiInput),
+                feed_gossip.in_set(UiFeed),
                 drain_gossip.after(UiInput),
             ),
         );
@@ -309,12 +309,11 @@ fn snapshot(state: &GossipState) -> Option<GossipMenu> {
 /// Push the current menu into the VM and fire the open/close events on a transition (or a content
 /// change — the greeting arriving a frame after the menu). Diffed against a `Local` memory, exactly
 /// like the container feed's per-bag diff.
-#[allow(clippy::too_many_arguments)]
 fn feed_gossip(
     script: Option<NonSendMut<UiScript>>,
     state: Res<GossipState>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     states: Res<crate::world_state::WorldStates>,
     mut last: Local<crate::ui_script::VmMemo<Option<GossipMenu>>>,
@@ -351,7 +350,7 @@ fn feed_gossip(
     let mut fresh = snapshot(&state);
     // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
     if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
-        let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+        let player = crate::npc_text::player_identity(&self_q, &names, &commands);
         *greeting = crate::npc_text::substitute(
             greeting,
             &crate::npc_text::MacroContext {

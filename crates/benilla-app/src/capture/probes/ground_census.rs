@@ -114,7 +114,6 @@ type CensusQuery = (
 
 /// One census line per [`ground_derived`] body within [`GroundCensus::radius`] of ours, worst drop
 /// first, under a summary line naming the count that matters.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn fire_ground_census(
     mut probe: ResMut<GroundCensus>,
     time: ProbeClock,
@@ -122,7 +121,7 @@ fn fire_ground_census(
     // reader back to the server's own tables to answer it — and the cache is already warm: it is
     // asked at first *sight* for every unit that streams in. A `None` is a name still in flight,
     // never a missing one.
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     net_commands: Res<NetCommands>,
     world: benilla_world::collision::WorldCollision,
     point: benilla_world::world_point::WorldPoint,

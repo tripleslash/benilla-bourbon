@@ -57,7 +57,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::NpcSession;
 
 /// One side's offer as the wire delivered it — the seven slots (index 0 = trade slot 1 … index 6 =
@@ -492,8 +492,16 @@ impl NpcSession for TradeSession {
 
 pub(crate) struct UiTradePlugin;
 
+/// Block Trades' change callback (1764, 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut block: ResMut<BlockTrades>) {
+    if ev.is("BlockTrades") {
+        block.0 = ev.flag();
+    }
+}
+
 impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<TradeSession>()
             .init_resource::<BlockTrades>()
             .add_systems(
@@ -504,7 +512,7 @@ impl Plugin for UiTradePlugin {
                     // the same frame (the ui_mail ordering exactly). After the UnitFeed set so the
                     // resolved item-template store is landed. No range-guard registration — a
                     // trade's cancel is server-driven (the module doc).
-                    feed_trade.after(crate::ui_unit::UnitFeed).before(UiInput),
+                    feed_trade.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     // The incoming request's answer needs no VM at all — it is wire policy over
                     // engine state — so it sits ahead of the feed, and an accepted request's
                     // `partner` is on screen the same frame the window opens.
@@ -594,11 +602,10 @@ fn streamed_player<'a>(
     index.0.get(&guid).and_then(|e| stores.get(*e).ok())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn answer_trade_request(
     mut trade: ResMut<TradeSession>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     social: Res<crate::ui_social::SocialState>,
     cinematic: Res<crate::cinematic::Cinematic>,
@@ -720,7 +727,7 @@ fn answer_trade_request(
 /// is decision 0592 P3.
 fn resolve_slot(
     item: &TradeItem,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> TradeSlotItem {
@@ -756,7 +763,7 @@ fn own_item_at(
     bag: i64,
     slot: u32,
     store: Option<&ObjectStore>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<TradeItem> {
     let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, items);
@@ -788,7 +795,7 @@ fn own_item_at(
 /// Resolve one side's wire offer into the Lua-facing side state.
 fn resolve_side(
     offer: &TradeOffer,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> TradeSideState {
@@ -805,9 +812,9 @@ fn resolve_side(
 /// Build the Lua-facing snapshot from [`TradeSession`] — `None` when no trade window is open.
 fn snapshot(
     trade: &TradeSession,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<TradeState> {
     if !trade.open {
@@ -827,13 +834,12 @@ fn snapshot(
 /// against `Local` memory, exactly like the mail/merchant feeds. The accept-update fires **after** the
 /// show/update block so an open frame's `TRADE_SHOW` (which hides the highlights) is followed by the
 /// glow, not overwritten by it.
-#[allow(clippy::too_many_arguments)]
 fn feed_trade(
     script: Option<NonSendMut<UiScript>>,
     mut trade: ResMut<TradeSession>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The status arms' second guard (`0x468460(guid, TYPEMASK_PLAYER)`) — see
@@ -855,7 +861,7 @@ fn feed_trade(
     let last_player_gold = last_player_gold.get(&script);
     let last_their_gold = last_their_gold.get(&script);
 
-    let fresh = snapshot(&trade, &mut items, icons.as_deref(), &mut names, &commands);
+    let fresh = snapshot(&trade, &items, icons.as_deref(), &names, &commands);
     let opened = !*last_open && trade.is_open();
     let closed = *last_open && !trade.is_open();
     let changed = fresh != *last;
@@ -979,14 +985,13 @@ fn feed_trade(
 /// the token → player guid → `CMSG_INITIATE_TRADE` (recording the target so `OPEN_WINDOW` can name
 /// it); `AcceptTrade`/`CancelTradeAccept` → the accept/un-accept verbs (with the optimistic local
 /// glow); `CloseTrade` → `CMSG_CANCEL_TRADE` + a local clear.
-#[allow(clippy::too_many_arguments)]
 fn drain_trade(
     script: Option<NonSendMut<UiScript>>,
     mut trade: ResMut<TradeSession>,
     commands: Res<NetCommands>,
     selection: Res<Selection>,
     group: Res<GroupState>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
 ) {
     let Some(mut script) = script else {
@@ -1043,7 +1048,7 @@ fn drain_trade(
         if let Some(trade_slot) = id.checked_sub(1).and_then(|n| u8::try_from(n).ok()) {
             // Optimistic own display: vmangos echoes the placement only to the partner, so resolve the
             // bag item and fill our own column client-side (decision 0592 P2).
-            if let Some(item) = own_item_at(bag, slot, store, &mut items, &commands) {
+            if let Some(item) = own_item_at(bag, slot, store, &items, &commands) {
                 trade.place_own_item(id, item);
             }
             info!(target: "trade", "set item: slot {id} <- bag {bag}/{slot} (wire {wire_bag}/{wire_slot}); sending CMSG_SET_TRADE_ITEM");

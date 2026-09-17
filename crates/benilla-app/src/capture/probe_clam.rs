@@ -184,7 +184,7 @@ fn window_open(script: &UiScript, loot: &LootState) -> bool {
 fn find_in_backpack(
     store: &ObjectStore,
     entry: u32,
-    items: &mut Items,
+    items: &Items,
     net: &NetCommands,
 ) -> Option<(u64, u32)> {
     let (i, guid) = (0..16u8)
@@ -204,13 +204,12 @@ fn find_in_backpack(
         .map(|_| (guid, u32::from(i) + 1))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn clam_probe(
     time: ProbeClock,
     mut probe: ResMut<ClamProbe>,
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     mut cfg: ResMut<LootConfig>,
     loot: Res<LootState>,
     latch: Res<LootLatch>,
@@ -241,7 +240,7 @@ fn clam_probe(
             probe.phase = Phase::Stocking { sent_at: now };
         }
         Phase::Stocking { sent_at } => {
-            if let Some((guid, slot)) = find_in_backpack(store, entry, &mut items, &net) {
+            if let Some((guid, slot)) = find_in_backpack(store, entry, &items, &net) {
                 info!(
                     "PROBE_CLAM: item {entry} is guid {guid:#x} in backpack slot {slot} — \
                      sampling {CONTROL_FRAMES} control frames with it UNCLICKED"

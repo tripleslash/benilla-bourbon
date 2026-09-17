@@ -18,7 +18,7 @@ use benilla_protocol::EntityKind;
 
 use crate::creature_anim::AnimSoundEvent;
 use crate::entities::mount::{MountBody, MountChild};
-use crate::net::{NetEntity, ObjectStore, SelfPlayer};
+use crate::net::{FieldChanged, NetEntity, ObjectStore, SelfPlayer};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
@@ -108,7 +108,6 @@ const fn bark_kit(voice: &benilla_formats::CreatureVoice, state: u8) -> u32 {
 ///    client's behaviour, not an oversight of ours. (It is not reachable through the pet barks on
 ///    a vmangos server: `SendPetTalk` is gated on `SUMMON_PET`, and only those four voices carry
 ///    the columns — see [`pet_talk_vocals`].)
-#[allow(clippy::too_many_arguments)]
 fn play_bark(
     kits: &mut SoundKits,
     assets: &WorldAssets,
@@ -150,13 +149,16 @@ fn play_bark(
     }
 }
 
-/// Play the death vocal on a **live** death: a unit whose store transitions alive→dead. First
-/// sight already-dead records silently (a streamed corpse doesn't cry — the same distinction the
-/// animation driver makes for the settled-corpse pose).
-#[allow(clippy::too_many_arguments)]
+/// Play the death vocal on a **live** death — the reference's two triggers, each a field edge
+/// (decision 2297): the `UNIT_FIELD_HEALTH` watcher's alive→dead arm (`0x6046f0` at `0x6047a3`,
+/// `OLD > 0 && NEW ≤ 0` — the real death handler `0x605860`) and the `UNIT_DYNAMIC_FLAGS`
+/// watcher's `UNIT_DYNFLAG_DEAD` SET edge (`0x600543`), which fires the very same `0x623a40(4)`
+/// — so a feign drops the body with its death cry, exactly like a kill (decision 1022). A unit
+/// that streams in already dead cries nothing: the edge stream is create-suppressed, the same
+/// distinction the animation driver makes for the settled-corpse pose.
 fn death_vocals(
-    changed: Query<(Entity, &NetEntity, &ObjectStore, &Transform), Changed<ObjectStore>>,
-    mut known_dead: Local<EntityHashMap<bool>>,
+    mut edges: MessageReader<FieldChanged>,
+    units: Query<(&NetEntity, &Transform)>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -164,24 +166,22 @@ fn death_vocals(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
+    use benilla_protocol::field::{FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_HEALTH, UNIT_DYNFLAG_DEAD};
     let (Some(voices), Some(mut kits), Some(assets)) = (voices, kits, assets) else {
         return;
     };
     let listener = listener.pos;
-    for (entity, net, store, transform) in &changed {
-        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+    for e in edges.read() {
+        let died = (e.unit_field(FIELD_UNIT_HEALTH) && e.old > 0 && e.new == 0)
+            || (e.unit_field(FIELD_UNIT_DYNAMIC_FLAGS)
+                && e.old & UNIT_DYNFLAG_DEAD == 0
+                && e.new & UNIT_DYNFLAG_DEAD != 0);
+        if !died {
             continue;
         }
-        // Reads-dead, not really-dead (decision 1022): the reference's `UNIT_DYNAMIC_FLAGS` watcher
-        // fires `0x623a40(4)` — the death vocal state — on the `UNIT_DYNFLAG_DEAD` set edge
-        // (`0x600543`), the very same call its real death handler makes (`0x6251b0`). So a feign
-        // drops the body with its death cry, exactly like a kill.
-        let dead = store.0.unit_reads_dead();
-        let was = known_dead.insert(entity, dead);
-        let fresh_death = was == Some(false) && dead;
-        if !fresh_death {
+        let Ok((net, transform)) = units.get(e.entity) else {
             continue;
-        }
+        };
         let Some(voice) = net.display_id.and_then(|d| voices.0.for_display(d)) else {
             continue;
         };
@@ -191,7 +191,7 @@ fn death_vocals(
             &mut out,
             &config,
             listener,
-            entity,
+            e.entity,
             transform.translation,
             voice,
             BARK_DEATH,
@@ -240,7 +240,6 @@ fn death_vocals(
 /// for as long as it sounds, and [`kit::object_sound_playing`] is `0x4591f0`. ALERT (class 8) and
 /// HOSTILE (the priority route) consult it below; the combat vocals (classes 0–3) consult it in
 /// `super::combat`. Players are exempt — the CGPlayer twin `0x62f880` omits the gate entirely.
-#[allow(clippy::too_many_arguments)]
 fn ai_reaction_vocals(
     mut reactions: MessageReader<crate::net::AiReactionMessage>,
     units: Query<(&NetEntity, &Transform, Option<&MountChild>)>,
@@ -334,7 +333,6 @@ fn ai_reaction_vocals(
 /// the packet for `GetPetType() == SUMMON_PET`, i.e. those same demons, at a **10% roll** per
 /// order (`Unit.cpp:8939`, `PetHandler.cpp:522`, `PetAI.cpp:335`; the other 90% is
 /// `SendPetAIReaction`, the growl). A hunter's pet never reaches either half.
-#[allow(clippy::too_many_arguments)]
 fn pet_talk_vocals(
     mut talks: MessageReader<crate::net::PetTalkMessage>,
     units: Query<(&NetEntity, &Transform)>,
@@ -404,7 +402,6 @@ fn pet_talk_vocals(
 /// **vmangos never sends this packet**, so nothing here fires against our server today. It is
 /// built because the reference is the spec, and because it is what makes loading column 29 a
 /// mechanism rather than a guess.
-#[allow(clippy::too_many_arguments)]
 fn pet_dismiss_sounds(
     mut dismissals: MessageReader<crate::net::PetDismissSoundMessage>,
     voices: Option<Res<CreatureVoices>>,
@@ -457,7 +454,6 @@ fn pet_dismiss_sounds(
 /// is **forced** regardless of the kit's own 0x200 flag — every col-23 kit in 5875 is authored
 /// `*Loop*` yet half omit the flag, so respecting it would silence half the class (`0x461d80`'s
 /// flag handling is unpinned; the record covers the reading).
-#[allow(clippy::too_many_arguments)]
 fn creature_body_loops(
     units: Query<(
         Entity,
@@ -568,7 +564,6 @@ fn creature_body_loops(
 ///   `BasiliskStand2`, so it is audible — and it is the only model in 5875 that authors `$FDX`
 ///   *and* reaches a nonzero stand column (censused across all 20 models that reach one of the 19
 ///   rows carrying a stand kit).
-#[allow(clippy::too_many_arguments)]
 fn creature_anim_vocals(
     mut events: MessageReader<AnimSoundEvent>,
     // GlobalTransform: the mount child's local Transform is the seat-relative ~origin — world
@@ -654,7 +649,6 @@ fn creature_anim_vocals(
 /// sound at all — the grunt is predicted at the landing frame off the client's own fall height.
 /// The dust leg of the same predictor lives in `creature_anim::env_damage`; both gate on the
 /// shared [`crate::creature_anim::HARD_LANDING_DESCENT`].
-#[allow(clippy::too_many_arguments)]
 fn fall_landing_vocals(
     mut landings: MessageReader<crate::creature_anim::HardLanding>,
     units: Query<(&NetEntity, &Transform)>,

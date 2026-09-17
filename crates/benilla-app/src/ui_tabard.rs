@@ -35,7 +35,7 @@ use benilla_ui::script::{TabardHost, TabardIntent, UiScript, TABARD_COUNTS, TABA
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::portrait::PaperDollBooth;
 use crate::ui_guild::GuildState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The open designer: the vendor it was opened on (`[0xbdcee8]`), and the save-in-flight latch
@@ -149,13 +149,12 @@ pub(crate) fn preflight(
     Ok(design.map(|v| v as u32))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_tabard(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TabardOpen>,
     mut design: ResMut<TabardDesign>,
     mut booth: ResMut<PaperDollBooth>,
-    mut guilds: ResMut<GuildState>,
+    guilds: Res<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut last_host: Local<crate::ui_script::VmMemo<Option<TabardHost>>>,
@@ -223,7 +222,7 @@ fn feed_tabard(
 fn drain_tabard(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TabardOpen>,
-    mut guilds: ResMut<GuildState>,
+    guilds: Res<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
@@ -299,7 +298,7 @@ impl Plugin for TabardUiPlugin {
                 (
                     reset_on_world_enter.before(feed_tabard),
                     close_npc_session_out_of_range::<TabardOpen>.before(feed_tabard),
-                    feed_tabard.before(UiInput),
+                    feed_tabard.in_set(UiFeed),
                     drain_tabard.after(UiInput),
                 ),
             );

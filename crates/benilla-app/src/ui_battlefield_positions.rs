@@ -39,7 +39,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_world_map::{project_on_displayed, WorldMapUiData};
 
 /// The reference's request throttle: `RequestBattlefieldPositions` sends at most once per 5000 ms.
@@ -105,7 +105,6 @@ fn flag_token(faction: Option<&str>) -> Option<&'static str> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn feed_battlefield_positions(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<BattlefieldPositions>,
@@ -116,7 +115,7 @@ fn feed_battlefield_positions(
     group: Res<GroupState>,
     guids: Res<GuidIndex>,
     unit_pos: Query<&GlobalTransform, With<NetEntity>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     // What the empty push last carried (`(has_list, icon_scale bits)`): with no list the engine
     // is told once per change, not per frame; with one, every frame — the positions move.
@@ -236,7 +235,7 @@ impl Plugin for BattlefieldPositionsPlugin {
             Update,
             (
                 reset_on_world_enter.before(feed_battlefield_positions),
-                feed_battlefield_positions.before(UiInput),
+                feed_battlefield_positions.in_set(UiFeed),
                 drain_battlefield_positions.after(UiInput),
             ),
         );

@@ -3,7 +3,7 @@
 //! the per-frame loop — the plugin remains the stable face that wires both.
 
 use avian3d::prelude::*;
-use bevy::camera::{PerspectiveProjection, Projection};
+use bevy::camera::{CameraOutputMode, PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
@@ -25,6 +25,20 @@ use super::{
 /// the character controller is in.)
 const DEFAULT_MOVE_SPEED: f32 = 7.0;
 
+/// The world camera's `Camera` — output mode `Skip` (decisions 2206 and 2234,
+/// [`benilla_world::final_pass`]): nothing writes this camera's target, and bevy's `upscaling`
+/// blit — a pure copy of the finished frame into it — is skipped. The world's final pass, the
+/// FFXGlow combine, is the first draw of the player-UI camera's main pass now
+/// (`benilla_world::ffx_glow::FfxBackdrop`), reading this view's finished main texture straight
+/// into the interface's byte buffer; the target the camera carries is a size-carrier only
+/// ([`crate::world_backdrop`]).
+fn world_camera_output() -> Camera {
+    Camera {
+        output_mode: CameraOutputMode::Skip,
+        ..default()
+    }
+}
+
 fn spawn_fallback_camera(commands: &mut Commands, msaa: Msaa) {
     commands.spawn((
         Camera3d::default(),
@@ -36,6 +50,7 @@ fn spawn_fallback_camera(commands: &mut Commands, msaa: Msaa) {
         Hdr,
         Tonemapping::None,
         benilla_world::ffx_glow::FfxGlow::WORLD,
+        world_camera_output(),
         Transform::from_xyz(0.0, 50.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
         FlyCam {
             yaw: 0.0,
@@ -118,9 +133,10 @@ pub(super) fn setup_player(
         // tonemapper + scene-referred lighting for a modern look.)
         Hdr,
         Tonemapping::None,
-        // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`
-        // — and, in the gamma lane, the owner of the frame's single output decode.
+        // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`.
+        // This view runs its blur; its combine is the UI camera's own ground pass (2234).
         benilla_world::ffx_glow::FfxGlow::WORLD,
+        world_camera_output(),
         Transform::from_translation(spawn + Vec3::new(0.0, 60.0, 60.0)).looking_at(spawn, Vec3::Y),
         // PHASE 0: no PBR ambient fill, no distance fog — pitch-black clean slate. The faithful scene
         // light is rebuilt in-shader from Light.dbc (terrain/model WGSL), not via Bevy PBR lights.

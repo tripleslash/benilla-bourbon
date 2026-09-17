@@ -68,7 +68,7 @@ pub(super) fn leader_changed(
     errors: &mut UiErrorKeys,
     name: &str,
     self_guid: &SelfGuid,
-    names: &mut NameCache,
+    names: &NameCache,
     net_commands: &NetCommands,
 ) {
     let own = self_guid
@@ -88,7 +88,6 @@ pub(super) fn leader_changed(
 /// read them and both were empty for an out-of-area member before this — the raid grid's class
 /// column (`ui_party::feed::raid_roster`, whose own-row twin of this hole 1549 §7 found live), and
 /// the party frame's 2D portrait stand-in (`portrait::temporary_portrait`, report B315).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn list(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,
@@ -98,7 +97,7 @@ pub(super) fn list(
     members: Vec<GroupMemberEntry>,
     leader: u64,
     loot: Option<GroupLootInfo>,
-    names: &mut NameCache,
+    names: &NameCache,
     index: &GuidIndex,
     net_commands: &NetCommands,
 ) {
@@ -276,7 +275,7 @@ mod tests {
             vec![member(leader, "Frostshake"), member(far, "Thalyn")],
             leader,
             None,
-            &mut names,
+            &names,
             &GuidIndex::default(),
             &net,
         );
@@ -305,7 +304,7 @@ mod tests {
             vec![member(leader, "Frostshake"), member(far, "Thalyn")],
             leader,
             None,
-            &mut names,
+            &names,
             &GuidIndex::default(),
             &net,
         );
@@ -427,7 +426,7 @@ mod tests {
             UiErrorKeys::default(),
             QuestGiver::default(),
         );
-        let mut names = NameCache::default();
+        let names = NameCache::default();
         let (near, far) = (0x11u64, 0x22u64);
 
         // `near` is streamed, `far` is not.
@@ -446,7 +445,7 @@ mod tests {
                 members,
                 near,
                 None,
-                &mut names,
+                &names,
                 &index,
                 &net,
             );

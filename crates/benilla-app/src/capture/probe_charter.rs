@@ -453,13 +453,12 @@ fn probe_guild_name(prefix: &str) -> String {
     format!("{prefix} {secs:08}")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn charter_probe(
     time: ProbeClock,
     mut probe: ResMut<CharterProbe>,
     gossip: Res<GossipState>,
     registrar: Res<GuildRegistrarState>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     player: Res<Player>,

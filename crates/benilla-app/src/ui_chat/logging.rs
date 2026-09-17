@@ -133,7 +133,11 @@ pub(super) fn sync_chat_logging(
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(
         Update,
-        sync_chat_logging.run_if(in_state(crate::char_select::ClientState::InWorld)),
+        // After the tick: the flags are Lua's (`LoggingChat`/`LoggingCombat`), read the frame
+        // they move.
+        sync_chat_logging
+            .after(crate::ui_script::UiInput)
+            .in_set(crate::char_select::InWorldGated),
     );
 }
 

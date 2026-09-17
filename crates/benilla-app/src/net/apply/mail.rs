@@ -76,7 +76,6 @@ fn take_empties(entry: &MailListEntry, action: u32) -> bool {
 /// take/return/delete then re-syncs the inbox with a fresh `CMSG_GET_MAIL_LIST` (the reference
 /// client's inbox-refresh moment); an EQUIP_ERROR routes to the existing inventory-error surface;
 /// any other failure surfaces the red error line.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn send_mail_result(
     mail_id: u32,
     action: u32,
@@ -147,8 +146,7 @@ pub(super) fn send_mail_result(
 /// `SessionEvent::MailItemText` (`SMSG_ITEM_TEXT_QUERY_RESPONSE`) — land the letter body in the
 /// ask-once cache + clear its pending flag; the feed repaints (MAIL_INBOX_UPDATE) on the change.
 pub(super) fn mail_item_text(text_id: u32, text: String, mail: &mut MailOpen) {
-    mail.bodies.insert(text_id, text);
-    mail.pending_bodies.remove(&text_id);
+    mail.bodies.insert(text_id, Some(text));
 }
 
 /// `SessionEvent::ReceivedMail` (`SMSG_RECEIVED_MAIL`) — mail just arrived. `seconds` is the wire's

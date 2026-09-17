@@ -82,7 +82,9 @@ pub(crate) use clock::{process_cpu_secs, process_faults, system_cpu_ticks, threa
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
 #[cfg(feature = "dev")]
 pub(crate) use hud::PerfHud;
-pub(crate) use journal::{FpsJournalPlugin, FpsJournalSetting};
+pub(crate) use journal::FpsJournalPlugin;
+#[cfg(test)]
+pub(crate) use journal::{on_cvar, FpsJournalSetting};
 #[cfg(feature = "dev")]
 pub(crate) use main_split::MainThreadSplit;
 
@@ -186,6 +188,13 @@ impl Plugin for PerfPlugin {
         if let Some(c) = census::cpu_census::CpuCensus::from_env() {
             app.insert_resource(c);
             app.add_systems(Update, census::cpu_census::cpu_census);
+        }
+        // `WOW_RES_CENSUS=<at>:<secs>` — the resource change census (see its module doc): on how
+        // many of the window's frames each resource read as changed, noisiest first — the
+        // finder for the dead-gate class 1982's `noisy=` counted five of by hand.
+        if let Some(c) = census::res_census::ResCensus::from_env() {
+            app.insert_resource(c);
+            app.add_systems(Last, census::res_census::res_census);
         }
         #[cfg(target_os = "macos")]
         stall::plugin(app);

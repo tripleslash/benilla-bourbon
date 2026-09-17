@@ -1,20 +1,21 @@
-//! The shopping-compare + chat-link tooltips over the REAL shipped XMLs (decision 0274 P4):
-//! shift over a bag item fires `SHOW_COMPARE_TOOLTIP`, CharacterFrame's doll-slot listener
-//! (ref PaperDollFrame.lua:621-640) seats `ShoppingTooltip1` on the matching slot, the armed
-//! `SetInventoryItem` renders the byte law's compare shape over the template's own adopted
-//! small-font ladder, and `SetItemRef` fills the parked `ItemRefTooltip`.
+//! The shopping-compare + chat-link tooltips over the REAL shipped XMLs (decision 0274 P4,
+//! re-based by 2202, scoped back to the reference by 2210): a VENDOR row hover raises
+//! `ShoppingTooltip1/2` through the stock `MerchantFrame.xml`, their armed `SetInventoryItem`
+//! renders the byte law's compare shape over the template's own adopted small-font ladder, and
+//! `SetItemRef` fills the parked `ItemRefTooltip`.
 //!
-//! **The bag end of that flow is the REFERENCE's own code since 1751.** The hover source used to be
-//! benilla's `BenillaBagSlot_OnEnter` on a `BenillaBagFrame`; it is the reference's
-//! `ContainerFrameItemButton_OnEnter` on one of its recycled `ContainerFrame1..12` now. Same two
-//! calls arm the compare (`GameTooltip:SetOwner` + `SetBagItem`), so what these tests pin is
-//! unchanged — but the handler reads `this`, so they drive the mouse
-//! ([`super::test_ui::hover`]) instead of calling it.
+//! **1.12.1 has no hover compare, and neither does benilla now.** `SHOW_COMPARE_TOOLTIP` (event
+//! 377) has zero fire sites in 5875, so `PaperDollFrame.lua:621-640` is dead code there and the
+//! vendor row (plus the auction row, 1971) is the only live consumer of the shopping plates
+//! (wow-re `merchant-compare-item-law.md` §8). benilla fired that event until 2202 and then drove
+//! the plates itself on a shift-held hover until 2210; both were supersets of a client that
+//! compares only where its own FrameXML asks. The plates' geometry and lifetime belong to that
+//! FrameXML — this engine seats none of them.
 //!
-//! **The doll end went the same way.** `CharacterFrame.xml` and `PaperDollFrame.xml` are the
-//! reference's own too now, so `BenillaPaperDollSlot_OnEnter` is gone and the hover is stock
-//! `PaperDollItemSlotButton_OnEnter` (`PaperDollFrame.lua:739-764`), which reads `this` as well.
-//! The doll-slot names (`CharacterHeadSlot` and kin) are unchanged; the mouse is what reaches them.
+//! **The hover sources are the REFERENCE's own code since 1751**, so these tests drive the MOUSE
+//! ([`super::test_ui::hover`]) rather than calling handlers: `MerchantItemButton`'s OnEnter, and
+//! stock `PaperDollItemSlotButton_OnEnter` (`PaperDollFrame.lua:739-764`) for the doll slots
+//! (`CharacterHeadSlot` and kin — the names are unchanged; the mouse is what reaches them).
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, InvSlotView, InventorySlots, ItemTemplateView, UiScript,
@@ -180,91 +181,6 @@ fn seed_items(s: &mut UiScript) {
     );
 }
 
-/// Shift over a bag helm with the character window OPEN: `ShoppingTooltip1` seats on the head
-/// doll slot (ANCHOR_RIGHT), renders gray "Currently Equipped" + the equipped helm through the
-/// template's ADOPTED small-font ladder (line 1 = GameFontNormalSmall's 10px face — the
-/// engine-created lines of the MAIN tooltip stay on its own faces), the compact cut drops the
-/// description, and releasing shift hides the pair. With the window CLOSED nothing shows —
-/// the 1.12 behavior.
-#[test]
-fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = harness_with_bags();
-    s.set_unit("player", Some(player()));
-    seed_items(&mut s);
-
-    // Open the bag and hover the helm slot. The button is ASKED for by its own `GetID()` — the
-    // reference numbers a window's buttons backwards and recycles the windows (1751), so neither
-    // the frame name nor the button index is a property to assume.
-    s.run("MainMenuBarBackpackButton:Click()").unwrap();
-    s.take_sounds();
-    let btn = bag_slot_button(&s, 0, 1);
-    hover(&mut s, &btn);
-    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
-
-    // Character window CLOSED: the shift edge fires, no listener answers, nothing shows.
-    s.set_modifiers(true, false, false);
-    assert!(
-        !s.eval::<bool>("return ShoppingTooltip1:IsShown()").unwrap(),
-        "no compare with the character window closed"
-    );
-    s.set_modifiers(false, false, false);
-
-    // Open the window; the shift edge now seats the compare on the head slot.
-    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
-    s.take_sounds();
-    hover(&mut s, &btn);
-    s.set_modifiers(true, false, false);
-    assert!(s.errors().is_empty(), "compare errors: {:?}", s.errors());
-    let ok: bool = s
-        .eval(
-            "local p, rel = ShoppingTooltip1:GetPoint() \
-             return ShoppingTooltip1:IsShown() \
-               and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
-               and ShoppingTooltip1TextLeft2:GetText() == \"Test Helm\" \
-               and rel:GetName() == \"CharacterHeadSlot\" and p == \"BOTTOMLEFT\"",
-        )
-        .unwrap();
-    assert!(ok, "the compare plate seats on the head doll slot");
-    // The adopted ladder: the shopping plate's line 1 wears GameFontNormalSmall (10px); the
-    // MAIN tooltip's engine-created line 1 keeps the header face — different sizes.
-    let ok: bool = s
-        .eval(
-            "local _, sh = ShoppingTooltip1TextLeft1:GetFont() \
-             local _, mh = GameTooltipTextLeft1:GetFont() \
-             return sh == 10 and mh > sh",
-        )
-        .unwrap();
-    assert!(
-        ok,
-        "the template's small-font ladder rides the compare plate"
-    );
-    // The compact cut: the equipped helm's description never prints on the compare plate.
-    let ok: bool = s
-        .eval(
-            "for i = 1, ShoppingTooltip1:NumLines() do \
-               if getglobal(\"ShoppingTooltip1TextLeft\" .. i):GetText() == \"\\\"Snug.\\\"\" then \
-                 return false \
-               end \
-             end \
-             return true",
-        )
-        .unwrap();
-    assert!(ok, "compact cut drops the description");
-    // One helm slot → exactly one shopping tooltip.
-    assert!(
-        !s.eval::<bool>("return ShoppingTooltip2:IsShown()").unwrap(),
-        "a single-slot item fires one compare"
-    );
-    // Release hides the pair; the bag hover itself stays.
-    s.set_modifiers(false, false, false);
-    let ok: bool = s
-        .eval("return not ShoppingTooltip1:IsShown() and GameTooltip:IsShown()")
-        .unwrap();
-    assert!(ok, "release hides the compare, keeps the hover");
-    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
-}
-
 /// A chat item link through the ref router: `SetItemRef` shows the parked `ItemRefTooltip`
 /// (BOTTOM +80, ANCHOR_PRESERVE keeps the XML seat) with the linked item's law; the corner
 /// close button hides it.
@@ -300,11 +216,8 @@ fn item_ref_tooltip_renders_a_chat_link() {
 /// durability pair off the slot view, never the template's authored max/max (ref
 /// PaperDollItemSlotButton_OnEnter l.741: `SetInventoryItem`, not an id/template render;
 /// director-caught: broken gear read 100% in the char window while the bag read it right).
-/// And shift over the doll slot compares NOTHING — a worn item compared with itself is no
-/// comparison: `SetInventoryItem` never arms, and its content clear drops any stale arm left
-/// by an earlier bag hover.
 #[test]
-fn doll_hover_renders_the_live_instance_and_never_self_compares() {
+fn doll_hover_renders_the_live_instance() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with_bags();
     s.set_unit("player", Some(player()));
@@ -351,16 +264,9 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
     s.take_sounds();
     let btn = bag_slot_button(&s, 0, 1);
     hover(&mut s, &btn);
+    // The doll slot needs its window open to be hoverable at all.
     s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
-    // …and the arm really IS live at this point — asserted, not assumed, because the whole test
-    // below is a NEGATIVE and would pass just as well if the bag hover had quietly armed nothing.
-    s.set_modifiers(true, false, false);
-    assert!(
-        s.eval::<bool>("return ShoppingTooltip1:IsShown()").unwrap(),
-        "fixture: the bag hover armed a compare, so the doll hover has something to clear"
-    );
-    s.set_modifiers(false, false, false);
 
     // The doll hover: the live pair, not the template's 40/40. Stock
     // `PaperDollItemSlotButton_OnEnter` reads `this`, so the mouse is what reaches it — and moving
@@ -381,12 +287,140 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
         "the doll hover carries the instance's live pair"
     );
 
-    // Shift over the worn item: no compare — not even off the bag hover's stale arm.
-    s.set_modifiers(true, false, false);
-    assert!(
-        !s.eval::<bool>("return ShoppingTooltip1:IsShown()").unwrap(),
-        "a worn item never compares with itself"
-    );
-    s.set_modifiers(false, false, false);
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// **The compare 1.12.1 actually has**, end to end over the stock file: hovering a vendor row
+/// raises `ShoppingTooltip1/2` against what is worn, headed by the gray `Currently Equipped`.
+///
+/// `MerchantFrame.xml`'s `MerchantItemButton` OnEnter is the whole law and this exercises it as
+/// written — `SetMerchantCompareItem` as the predicate, `SetOwner(GameTooltip, "ANCHOR_NONE")`,
+/// `TOPLEFT`/`GameTooltip` `TOPRIGHT` (0, −10), the same call again, `Show()`; plate 2 the same
+/// off plate 1 at (0, 0). The engine supplies only the two bindings and the compare render; the
+/// geometry, the second fill and both `Show`s are the reference's Lua. Two worn rings against a
+/// ring on the shelf, so BOTH plates answer — the case that pins the offset walk.
+///
+/// And it pins the CONTENT the plate carries, because that is where we were wrong (2216): the
+/// compare call sites pass p4 = 0, so a plate is the worn item's ordinary tooltip with one gray
+/// line on top — an EPIC ring's name reads purple, not white, and its flavour text is not cut.
+#[test]
+fn shipped_merchant_row_raises_the_compare_plates() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    // Two worn rings, a third on the shelf: offset 1 and 2 both find a candidate.
+    let mut inv: InventorySlots = Default::default();
+    // The worn ring under plate 1 is EPIC and carries flavour text — the two things the old
+    // conflated compare flag took away.
+    for (slot, id, name, quality) in [
+        (11usize, 7000u32, "Old Loop", 4u32),
+        (12, 7001, "Older Loop", 1),
+    ] {
+        inv[slot] = Some(InvSlotView {
+            item_id: id,
+            count: 1,
+            quality: quality as i32,
+            name: Some(name.into()),
+            ..Default::default()
+        });
+        s.set_item_template(
+            id,
+            ItemTemplateView {
+                quality,
+                description: "Round.".into(),
+                ..armor_template(name, 11)
+            },
+        );
+    }
+    s.set_inventory_slots(inv);
+    s.set_item_template(8000, armor_template("Shiny Loop", 11));
+    s.set_merchant(Some(benilla_ui::script::MerchantState {
+        items: vec![benilla_ui::script::MerchantItem {
+            name: Some("Shiny Loop".into()),
+            texture: Some("Interface\\Icons\\INV_Jewelry_Ring_03".into()),
+            price: 100,
+            quantity: 1,
+            num_available: -1,
+            item_id: 8000,
+            max_stack: Some(1),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    s.take_sounds();
+
+    // The mouse, not the handler: `MerchantItemButton`'s OnEnter reads `this`.
+    hover(&mut s, "MerchantItem1ItemButton");
+    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
+    let ok: bool = s
+        .eval(
+            "local p1, r1, rp1, x1, y1 = ShoppingTooltip1:GetPoint() \
+             local p2, r2, rp2, x2, y2 = ShoppingTooltip2:GetPoint() \
+             return GameTooltipTextLeft1:GetText() == \"Shiny Loop\" \
+               and ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown() \
+               and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
+               and ShoppingTooltip1TextLeft2:GetText() == \"Old Loop\" \
+               and ShoppingTooltip2TextLeft2:GetText() == \"Older Loop\" \
+               and p1 == \"TOPLEFT\" and r1:GetName() == \"GameTooltip\" \
+               and rp1 == \"TOPRIGHT\" and x1 == 0 and y1 == -10 \
+               and p2 == \"TOPLEFT\" and r2:GetName() == \"ShoppingTooltip1\" \
+               and rp2 == \"TOPRIGHT\" and x2 == 0 and y2 == 0",
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "the vendor row raises both plates at the stock geometry"
+    );
+    // p4 = 0 over the stock file: the plate is the FULL tooltip, in the worn item's own colours.
+    let ok: bool = s
+        .eval(
+            "local r, g, b = ShoppingTooltip1TextLeft2:GetTextColor() \
+             local flavour = nil \
+             for i = 1, ShoppingTooltip1:NumLines() do \
+               if getglobal(\"ShoppingTooltip1TextLeft\"..i):GetText() == \"\\\"Round.\\\"\" then flavour = i end \
+             end \
+             return flavour ~= nil and math.abs(r - 0.639) < 0.01 \
+               and math.abs(g - 0.208) < 0.01 and math.abs(b - 0.933) < 0.01",
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "the epic ring's plate reads purple and keeps its flavour text — no compact cut"
+    );
+    // The plate wears the template's own small-font ladder (10px), the main tooltip its header face.
+    let ok: bool = s
+        .eval(
+            "local _, sh = ShoppingTooltip1TextLeft1:GetFont() \
+             local _, mh = GameTooltipTextLeft1:GetFont() \
+             return sh == 10 and mh > sh",
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "the template's small-font ladder rides the compare plate"
+    );
+    // Leaving the row hides the tooltip, and the stock OnHide takes both plates with it.
+    hover(&mut s, "UIParent");
+    let ok: bool = s
+        .eval(
+            "return not GameTooltip:IsShown() \
+               and not ShoppingTooltip1:IsShown() and not ShoppingTooltip2:IsShown()",
+        )
+        .unwrap();
+    assert!(ok, "the plates leave with the tooltip that owns them");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// An armour template in one `InventoryType` — the CLASS is what the selection law compares by
+/// (wow-re `merchant-compare-item-law.md` §3).
+fn armor_template(name: &str, inventory_type: u32) -> ItemTemplateView {
+    ItemTemplateView {
+        name: name.into(),
+        quality: 1,
+        class: 4,
+        subclass: 1,
+        inventory_type,
+        armor: 5,
+        ..Default::default()
+    }
 }

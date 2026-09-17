@@ -1038,6 +1038,47 @@ fn real_main_hand_autopick_family() {
     assert_eq!(wf_totem.targets, 0, "a totem summon binds nothing");
 }
 
+/// **The prospecting leg of `0x495d60` is dead on 5875 data** — the fact two cast-failure
+/// argument arms rest on not being written (decision 2292). That validator's effect loop has a
+/// third leg past the two enchant ones: `0x495df1 jne 0x495f36` falls into
+/// `0x495f39 cmp DWORD PTR [eax],0x7f`, and inside it sit the only image-wide raises of
+/// `SPELL_FAILED_PROSPECT_NEED_MORE` (`0x49614e`) and `SPELL_FAILED_MIN_SKILL` (`0x496128`).
+/// vmangos sends neither reason from anywhere, so if no shipped spell carries
+/// [`SPELL_EFFECT_PROSPECTING`] there is no route to either message at all — and none does.
+///
+/// This lives in the formats crate rather than beside the arms because it is a claim about the
+/// **data**: if a data set ever ships a prospecting spell, this fails and names the two arms that
+/// just came alive. Skips without client data.
+#[test]
+fn real_prospecting_effect_is_absent_from_5875() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let raw = chain.read_file(SPELL).expect("Spell.dbc");
+    let set = parse(&raw, spell_schema(), "Spell.dbc").expect("parse Spell.dbc");
+
+    let mut slots = 0usize;
+    for r in set.records() {
+        for i in 0..3 {
+            slots += 1;
+            assert_ne!(
+                u32_at(r, COL_EFFECT_1 + i).unwrap_or(0),
+                crate::SPELL_EFFECT_PROSPECTING,
+                "spell {} carries SPELL_EFFECT_PROSPECTING in effect slot {i} — `0x495d60`'s \
+                 third leg is reachable now, so cast-fail reasons 0x84 PROSPECT_NEED_MORE and \
+                 0x90 MIN_SKILL can raise and `ui_action::cast_fail` owes them argument arms \
+                 (decision 2292)",
+                u32_at(r, 0).unwrap_or(0)
+            );
+        }
+    }
+    // The scan covering nothing would pass just as quietly, so pin the shape of the file too.
+    assert_eq!(
+        slots,
+        22357 * 3,
+        "every effect slot of every 5875 row was read"
+    );
+}
+
 /// The item-target family and its gate columns (decision 0923), against the real 5875 file. The
 /// reference's `TargetingWantsItem 0x6e6330` is `flag_word & 0x4010`, and on shipped data those
 /// two bits are **never** mixed with a unit bit — the whole family is `Targets` exactly `0x10`
@@ -1435,5 +1476,151 @@ fn real_is_harmful_pins() {
             !row(id).is_harmful(),
             "{name} ({id}) does not target enemies"
         );
+    }
+}
+
+/// **The channel bar's naming law on the real build-5875 `Spell.dbc`** (decision 2284) — the two
+/// bits `SpellChannelStart 0x6e7550` tests, and the population that makes the default the
+/// interesting half.
+///
+/// The cast bar names its spell unless a bit forbids it; the channel bar says "Channeling" unless
+/// a bit permits it. Exactly **9** of the 323 channeled rows permit it and **2** suppress the bar
+/// outright, so "Channeling" is what a player sees for essentially every channel in the game.
+/// A column slip, or a bit read off the wrong `AttributesEx*`, fails here. Skips without client
+/// data.
+#[test]
+fn real_channel_bar_name_law() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // The generic leg — every rank of Blizzard, plus the other channels a player meets daily.
+    // These are the rows that read the literal word, and Blizzard is the one that prompted 2284.
+    for id in [
+        10u32, 6141, 8427, 10185, 10186, 10187, // Blizzard, all six ranks
+        5143,  // Arcane Missiles
+        15407, // Mind Flay
+        689,   // Drain Life
+        5740,  // Rain of Fire
+    ] {
+        let d = cat.get(id).unwrap_or_else(|| panic!("spell {id}"));
+        assert!(
+            !d.channel_bar_own_name(),
+            "{id} {:?} reads \"Channeling\", not its own name (AttributesEx {:#010x})",
+            d.name,
+            d.attributes_ex
+        );
+        assert!(!d.no_channel_bar(), "{id} {:?} still shows a bar", d.name);
+    }
+
+    // The named leg — the sharpest control wow-re names: Fishing and Mind Flay take opposite
+    // legs of the same `0x6e75a1`, and vanilla really does print one name and one generic word.
+    for (id, name) in [
+        (7620u32, "Fishing"),
+        (18248, "Fishing"),
+        (20578, "Cannibalize"),
+    ] {
+        let d = cat.get(id).unwrap_or_else(|| panic!("spell {id}"));
+        assert!(d.channel_bar_own_name(), "{id} names itself on the bar");
+        assert_eq!(d.name, name);
+    }
+
+    // The suppressor — a total one, and the only two rows that carry it.
+    for id in [24322u32, 24323] {
+        assert!(
+            cat.get(id).expect("Blood Siphon").no_channel_bar(),
+            "{id} Blood Siphon shows no channel bar at all"
+        );
+    }
+
+    // The population, which is the law's real shape: the opt-ins are a rounding error.
+    let channeled: Vec<_> = cat.iter().filter(|(_, d)| d.tooltip_channeled()).collect();
+    assert_eq!(channeled.len(), 323, "channeled rows in the shipped file");
+    assert_eq!(
+        channeled
+            .iter()
+            .filter(|(_, d)| d.channel_bar_own_name())
+            .count(),
+        9,
+        "only nine channeled rows print their own name"
+    );
+    assert_eq!(
+        channeled.iter().filter(|(_, d)| d.no_channel_bar()).count(),
+        2,
+        "only the two Blood Siphons suppress the bar"
+    );
+}
+
+/// The talent spell-modifier gate's two columns — `SpellFamilyName` 160 and the `SpellFamilyFlags`
+/// pair 161/162 — against the shipped 5875 `Spell.dbc`.
+///
+/// Three things are asserted, and each would catch a different slip. The **family histogram** is
+/// the column pin: the eleven nonzero values are exactly the vmangos `SpellFamilyNames` set, and
+/// their counts are the shipped file's own (a one-column slip lands on 159/163, neither of which
+/// looks like this). The **popcount census** is what makes the reader's 64-iteration walk
+/// load-bearing rather than defensive — 322 rows set more than one bit, and the highest index in
+/// the whole table is 35, so the HIGH dword is live. The **three worked spells** pin the join
+/// direction: 4987 sets 12 and 33, which a low-dword-only read or a swapped pair both get wrong.
+///
+/// Numbers from wow-re `system/spell/scratch/spellmod-table-law.md` (Provenance), re-measured here
+/// off the file this catalog actually loads. Skips without client data.
+#[test]
+fn real_spell_family_columns_carry_the_modifier_gate() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    let mut families: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    let mut popcounts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    let mut max_bit = 0u32;
+    for (_, d) in cat.iter() {
+        *families.entry(d.spell_family).or_default() += 1;
+        *popcounts
+            .entry(d.spell_family_flags.count_ones())
+            .or_default() += 1;
+        if d.spell_family_flags != 0 {
+            max_bit = max_bit.max(63 - d.spell_family_flags.leading_zeros());
+        }
+    }
+    assert_eq!(
+        families,
+        [
+            (0, 18243),
+            (1, 47),
+            (3, 563),
+            (4, 350),
+            (5, 466),
+            (6, 493),
+            (7, 450),
+            (8, 316),
+            (9, 393),
+            (10, 362),
+            (11, 500),
+            (13, 174),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<u32, usize>>(),
+        "SpellFamilyName histogram — the vmangos SpellFamilyNames set, and only it"
+    );
+    assert_eq!(
+        popcounts.values().skip(1).sum::<usize>() - popcounts[&1],
+        322,
+        "rows setting MORE than one family bit — the reader's sum is live"
+    );
+    assert_eq!(max_bit, 35, "the highest family bit index in the file");
+
+    // The three worked examples. Frostbolt spans one dword, Cleanse spans BOTH, Cure Poison lives
+    // entirely in the high one.
+    for (id, family, bits) in [
+        (116u32, 3u32, &[5u32, 19, 20, 30][..]),
+        (4987, 10, &[12, 33]),
+        (526, 11, &[35]),
+    ] {
+        let d = cat.get(id).unwrap_or_else(|| panic!("spell {id}"));
+        assert_eq!(d.spell_family, family, "{id} {:?} family", d.name);
+        let set: Vec<u32> = (0..64)
+            .filter(|b| d.spell_family_flags >> b & 1 == 1)
+            .collect();
+        assert_eq!(set, bits, "{id} {:?} family bits", d.name);
     }
 }

@@ -35,7 +35,7 @@ mod emitdump;
 mod model;
 mod quads;
 pub mod render;
-pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1291)
+pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1294)
 
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
@@ -456,6 +456,17 @@ impl ParticleEmitter {
     /// instance ends ([`Self::drain_on_owner_loss`]).
     pub fn anchor(&self) -> Option<Entity> {
         self.anchor
+    }
+
+    /// The **emission clock's host** ([`EmitClock::Host`]) — the model instance whose live
+    /// `AnimationPlayer` names the sequence this emitter samples its rate/gate tracks against;
+    /// `None` for a pinned or effect clock. The read an instrument or a wiring test needs, because
+    /// the difference is invisible in every other observable: a hosted and a pinned emitter build,
+    /// pool, tick and draw identically, and differ only in *which* sequence's tracks they read —
+    /// which is the whole difference between a firearm's muzzle blast firing and never firing
+    /// (decision 2281).
+    pub fn emit_host(&self) -> Option<Entity> {
+        self.host
     }
 
     /// Switch this emitter to [`OwnerLoss::Drain`] — **the effect is ending, so its already-emitted

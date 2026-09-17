@@ -30,11 +30,10 @@ use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 ///   `bonding == 2` item raises `AUTOEQUIP_BIND_CONFIRM` and sends NOTHING. `suppress` is the
 ///   reference's own parameter, set on the re-issue `EquipPendingItem` drives — which is what stops
 ///   the accept from asking the same question again forever.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_auto_equip(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     bag_index: u8,
     slot: u8,
@@ -90,7 +89,7 @@ pub(crate) fn send_auto_equip(
 /// visibly dimmed), pre-existing and out of this slice's scope to fix.
 pub(super) fn drain_container_autoequips(
     script: Option<NonSendMut<UiScript>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -114,7 +113,7 @@ pub(super) fn drain_container_autoequips(
         send_auto_equip(
             &mut script,
             &mut gate,
-            &mut items,
+            &items,
             &commands,
             bag_index,
             wire_slot,
@@ -256,7 +255,6 @@ pub(super) fn drain_inventory_uses(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_container_uses(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -419,7 +417,7 @@ pub(super) fn drain_container_uses(
             if send_auto_equip(
                 &mut script,
                 &mut gate,
-                &mut ladder.items,
+                &ladder.items,
                 &ladder.commands,
                 bag_index,
                 wire_slot,
@@ -664,7 +662,7 @@ pub(super) fn drain_container_moves(
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     mut pending: ResMut<PendingItemOps>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -701,7 +699,7 @@ pub(super) fn drain_container_moves(
         send_container_move(
             &mut script,
             &mut gate,
-            &mut items,
+            &items,
             &commands,
             store,
             &mut pending,
@@ -726,11 +724,10 @@ fn is_equip_position(bag_index: u8, slot: u8) -> bool {
 /// same body with `suppress` set, rather than a second copy of it that has to be kept agreeing.
 ///
 /// Returns whether the move was sent (`false` = deferred behind `EQUIP_BIND_CONFIRM`).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_container_move(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     store: Option<&ObjectStore>,
     pending: &mut PendingItemOps,
@@ -909,6 +906,7 @@ mod tests {
             .init_resource::<crate::ui_cast::PendingCast>()
             .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
             .init_resource::<crate::cooldowns::Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_action::CastErrors>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_action::AutoRepeatActive>()
@@ -1043,7 +1041,7 @@ pub(super) fn drain_bind_confirm_answers(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut pending: ResMut<PendingItemOps>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -1075,7 +1073,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_container_move(
                     &mut script,
                     &mut gate,
-                    &mut items,
+                    &items,
                     &commands,
                     store,
                     &mut pending,
@@ -1097,7 +1095,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_auto_equip(
                     &mut script,
                     &mut gate,
-                    &mut items,
+                    &items,
                     &commands,
                     bag_index,
                     slot,
@@ -1657,6 +1655,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_cast::PendingCast>()
             .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
             .init_resource::<crate::cooldowns::Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_action::CastErrors>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_action::AutoRepeatActive>()

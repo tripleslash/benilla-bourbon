@@ -2371,16 +2371,20 @@ mod tests {
                  flow works without it",
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
-            (
-                "LEARNED_SPELL_IN_TAB",
-                "SpellBookFrame.lua — the tab flash when a new spell lands in it; the reference \
-                 fires it with the tab index on spell add, which benilla's spellbook feed does not \
-                 derive yet (1952)",
-            ),
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             ("PLAYER_DAMAGE_DONE_MODS", "PaperDollFrame.lua"),
-            ("SHOW_COMPARE_TOOLTIP", "PaperDollFrame.lua"),
+            (
+                "SHOW_COMPARE_TOOLTIP",
+                "PaperDollFrame.lua — the second `TRADE_REQUEST` (decision 1764): event 377 is \
+                 registered in 5875 and signalled from NOWHERE (zero fire sites in wow-re's own \
+                 census, `merchant-compare-item-law.md` §8), so this listener is dead code THERE \
+                 too. benilla fired it from 0283 until 2202, then drove the plates itself on a \
+                 shift-held hover until 2210; both were supersets. Nothing in this engine seats a \
+                 shopping plate now — the reference's own callers do (`MerchantFrame.xml:63-80`, \
+                 the auction rows), which is the whole of the compare in 1.12.1. Producing this \
+                 event would be a divergence, not a fix",
+            ),
             ("SYSMSG", "UIErrorsFrame.lua"),
             ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
             (

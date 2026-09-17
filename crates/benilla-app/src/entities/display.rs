@@ -127,11 +127,52 @@ pub(super) struct EntityPart {
     /// the **first key** seeded as the material tint (pixel-identical to the old static bake);
     /// the effect lane clones + ticks the tint per instance. `None` for constant tints.
     pub(super) rgb_anim: Option<std::sync::Arc<benilla_formats::RgbAnim>>,
+    /// The per-file-sequence-slot form of [`Self::rgb_anim`], carried only where the slots
+    /// disagree (decision 1408) — [`Self::uv_seq`]'s twin, and the reason a GameObject may need a
+    /// material of its own. Five batches on three GameObject models author one, and **four of
+    /// them bake nothing in slot 0**, so `rgb_anim` is `None` for them and a shared material can
+    /// only ever seed white: the hunter's Freezing Trap glow card is the class (decision 2295).
+    pub(super) rgb_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 3]>>>,
+    /// The part's **texture-transform (UV) loop** — the translation track that scrolls this
+    /// batch's stage UVs (decision 0130 phase 3, wow-re `m2-texanim-uv`). The **effect lane**
+    /// ([`super::spell_fx`]) samples it per instance on its own clip clock, through a material
+    /// clone (decision 2282); the unit/GameObject lane runs it on the shared, deduped material
+    /// (decision 2295). `None` for the ~98.6% of batches with no texture transform, and for all
+    /// WMO parts.
+    pub(super) uv_anim: Option<std::sync::Arc<benilla_formats::UvAnim>>,
+    /// The per-file-sequence-slot form of [`Self::uv_anim`], carried only where the slots
+    /// disagree (decision 1408) — an effect that advances `Stand` → `Hold` → `Decay` reads the
+    /// slot it is actually playing. `None` for every batch whose slots agree.
+    pub(super) uv_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+    /// The texture transform's **rotation** loop per file sequence slot (decision 2019) and its
+    /// scaling twin. Three effect models in the whole 1.12 corpus author them — Shield Wall's
+    /// halo turns *and* scales, Grounding Totem's glow is a scale-only transform — which is
+    /// precisely why the effect lane has to read them from the asset rather than from memory
+    /// (`benilla-extract fxuvscan`). `None` everywhere else.
+    pub(super) uv_rot_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
+    pub(super) uv_scale_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The part's flat **ground-plane quad** shape (detected at M2 load — see
     /// [`benilla_formats::GroundQuad`]). On a base-anchored spell effect the fx attach renders it
     /// as a projected surface decal ([`crate::ground_fx`]) instead of free geometry, so it drapes
     /// terrain like the selection ring. `None` for ordinary geometry and all WMO parts.
     pub(super) ground_quad: Option<benilla_formats::GroundQuad>,
+}
+
+impl EntityPart {
+    /// This part's four baked texture-transform channels, in the shape the engine's lanes take
+    /// them — **the one place a spawner reads them**, so "does this batch animate its transform"
+    /// has a single answer wherever it is asked (the effect attach's clone test, the entity
+    /// spawn's [`benilla_world::doodad_anim::AnimMatPart`] marker). `UvLoops::animates` is that
+    /// question: a scale-only transform and a dead-slot-0 translation each answer `None` to the
+    /// channel you would check first.
+    pub(super) fn uv_loops(&self) -> benilla_world::doodad_anim::UvLoops {
+        benilla_world::doodad_anim::UvLoops {
+            seqs: self.uv_seq.clone(),
+            single: self.uv_anim.clone(),
+            rot: self.uv_rot_seq.clone(),
+            scale: self.uv_scale_seq.clone(),
+        }
+    }
 }
 
 /// Everything needed to render one display id, cached so a model is loaded + built once and shared by
@@ -387,7 +428,6 @@ pub(super) fn empty_display() -> DisplayModel {
 /// Build a display model's spawn parts once its asset has loaded — each submesh's `WowModelMaterial`,
 /// with a creature skin slot filled from the display's variation (`<dir>\<name>.blp`). Returns early
 /// (leaving `parts` `None`) while the asset is still loading.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_parts(
     dm: &mut DisplayModel,
     m2s: &Assets<M2Model>,
@@ -398,6 +438,10 @@ pub(super) fn build_parts(
     forms: &mut benilla_world::model_forms::ModelForms,
     asset_server: &AssetServer,
     mats: &mut benilla_world::model_render::M2BatchMaterials,
+    // Where this display's animated texture transforms are delivered (decision 2295) — taken
+    // rather than reached for, because building an entity batch's material and putting it on the
+    // lane are one act.
+    uv: &mut benilla_world::model_render::EntityUvLane<'_>,
     // Whether this display is a GAMEOBJECT: gates the hull-collider build (chests/veins/doors;
     // creatures use unit collision).
     gameobject: bool,
@@ -529,7 +573,7 @@ pub(super) fn build_parts(
                     // the law that decides which of them collapse onto each other (decisions 0842
                     // / 0865 / 0831 / 0355). `None` cannot happen here: the caller gated on the
                     // light buffer before the first build.
-                    let v = mats.entity_variants(sub, texture, order);
+                    let v = mats.entity_variants(sub, texture, order, uv);
                     let v = v.expect("light buffer checked at entry");
                     EntityPart {
                         // Index-parallel with the submeshes by the forms contract; a miss is a
@@ -556,6 +600,11 @@ pub(super) fn build_parts(
                         welded_billboard: sub.geometry.welded_billboard,
                         alpha_anim: sub.alpha_anim.clone(),
                         rgb_anim: sub.rgb_anim.clone(),
+                        rgb_seq: sub.rgb_seq.clone(),
+                        uv_anim: sub.uv_anim.clone(),
+                        uv_seq: sub.uv_seq.clone(),
+                        uv_rot_seq: sub.uv_rot_seq.clone(),
+                        uv_scale_seq: sub.uv_scale_seq.clone(),
                         ground_quad: sub.ground_quad,
                     }
                 })
@@ -606,6 +655,11 @@ pub(super) fn build_parts(
                     welded_billboard: false, // …so nothing can be welded to one
                     alpha_anim: None,        // …nor colour/weight loops
                     rgb_anim: None,
+                    rgb_seq: None,
+                    uv_anim: None, // …nor texture transforms (WMO has none)
+                    uv_seq: None,
+                    uv_rot_seq: None,
+                    uv_scale_seq: None,
                     ground_quad: None, // the fx decal lane is M2-only
                 })
                 .collect()
@@ -649,7 +703,9 @@ fn model_local_collider(hull: &CollisionMesh) -> Option<Collider> {
     let verts: Vec<Vec3> = hull.positions.iter().map(|p| wow_to_bevy(*p)).collect();
     let tris: Vec<[u32; 3]> = hull
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     Some(Collider::trimesh(verts, tris))

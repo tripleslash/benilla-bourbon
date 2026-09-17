@@ -711,7 +711,7 @@ impl Plugin for TerrainPlugin {
 /// register its doodad/WMO placements. The desired square is gated on the map's WDT `MAIN` grid
 /// (decision 0476): a tile the map doesn't author is never requested — no NotFound error spam on
 /// open-ocean crossings, and the loading screen's ready/total counts only tiles that can exist.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // the bundled asset_stores tuple
+#[allow(clippy::type_complexity)] // the bundled asset_stores tuple
 fn stream_terrain(
     mut commands: Commands,
     mut state: ResMut<TerrainStreamer>,
@@ -1544,9 +1544,9 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
 /// tail-calls the chunk-rebuild walk (`0x6725a0` → `0x6b1d20`, wow-re terrain.md), so a change
 /// re-scatters the LOADED tiles too, not just future streams. The fresh `ClutterChunk`s spawn
 /// unbuilt and the lazy builder re-meshes the ~70 yd bubble over the next frames. Watches the
-/// VALUE, not `is_changed()`: the cvar sync's `Knobs` construction deref-muts every knob
-/// resource whenever any cvar moves, so the flag over-fires (cvars.rs notes the same trap).
-/// First sight only arms.
+/// VALUE, not `is_changed()`, because the predicate is "the density moved" and not "the resource
+/// moved": `ClutterConfig` also carries the detail-doodad cutout, whose console command would
+/// otherwise re-scatter every loaded tile. First sight only arms.
 fn rescatter_clutter(
     mut commands: Commands,
     mut streamer: ResMut<TerrainStreamer>,
@@ -1630,28 +1630,63 @@ fn handoff_straddlers(
     if !merge_on {
         return;
     }
-    let mut handed = 0u32;
-    for &uid in uids {
-        let Some(p) = placements.by_id.get_mut(&uid) else {
-            continue; // refs hit zero — released outright, nothing survives to hand off
-        };
-        if p.owner != dead || !matches!(p.model, ModelHandle::M2(_)) {
+    // The straddlers first — the dead tile's M2 placements that survived the release with refs
+    // left (a handful to ~90 of its ~1k uids) — then ONE pass over each 8-neighbour's list. The
+    // old shape asked `Vec::contains` of every neighbour's whole list per straddler: 8 × ~1k
+    // compares × every straddler, on every tile drop (1697 item 2).
+    let mut straddlers: HashMap<u32, Option<(i32, i32)>> = uids
+        .iter()
+        .copied()
+        .filter(|uid| {
+            placements
+                .by_id
+                .get(uid)
+                .is_some_and(|p| p.owner == dead && matches!(p.model, ModelHandle::M2(_)))
+        })
+        .map(|uid| (uid, None))
+        .collect();
+    if straddlers.is_empty() {
+        return; // refs hit zero — released outright, nothing survives to hand off
+    }
+    // A straddler's other referrer shares its MDDF row across a tile seam, so it is an
+    // 8-neighbour of the dead owner; the full scan is a fallback for data that defies that.
+    let neighbours = [-1i32, 0, 1]
+        .iter()
+        .flat_map(|dx| [-1i32, 0, 1].map(|dy| (dead.0 + dx, dead.1 + dy)))
+        .filter(|c| *c != dead);
+    for c in neighbours {
+        let Some(t) = tiles.get(&c) else {
             continue;
+        };
+        for uid in &t.placements {
+            if let Some(slot) = straddlers.get_mut(uid) {
+                if slot.is_none() {
+                    *slot = Some(c);
+                }
+            }
         }
-        // A straddler's other referrer shares its MDDF row across a tile seam, so it is an
-        // 8-neighbour of the dead owner; the full scan is a fallback for data that defies that.
-        let new_owner = [-1i32, 0, 1]
-            .iter()
-            .flat_map(|dx| [-1i32, 0, 1].map(|dy| (dead.0 + dx, dead.1 + dy)))
-            .find(|c| *c != dead && tiles.get(c).is_some_and(|t| t.placements.contains(&uid)))
-            .or_else(|| {
-                tiles
-                    .iter()
-                    .find(|(_, t)| t.placements.contains(&uid))
-                    .map(|(c, _)| *c)
-            });
+    }
+    if straddlers.values().any(Option::is_none) {
+        for (c, t) in tiles {
+            if *c == dead {
+                continue;
+            }
+            for uid in &t.placements {
+                if let Some(slot) = straddlers.get_mut(uid) {
+                    if slot.is_none() {
+                        *slot = Some(*c);
+                    }
+                }
+            }
+        }
+    }
+    let mut handed = 0u32;
+    for (uid, new_owner) in straddlers {
         let Some(new_owner) = new_owner else {
             warn!("straddler handoff: uid {uid} holds refs but no loaded tile references it");
+            continue;
+        };
+        let Some(p) = placements.by_id.get_mut(&uid) else {
             continue;
         };
         p.owner = new_owner;

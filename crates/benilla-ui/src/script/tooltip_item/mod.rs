@@ -14,14 +14,30 @@
 //! Residual INTERIMs cited inline: the dual-wield/off-hand proficiency exception
 //! (`0x5eab70`), the type cell's override red, the set-owned count source.
 //!
-//! **Compare mode** (0274 P4): `SetInventoryItem` on an ARMED shopping tooltip renders the byte
-//! law's compare shape — gray "Currently Equipped" first (`[arg+0x18]≠0`), the NAME white
-//! instead of quality-colored, and the compact early-return at `0x52e14c` (`[arg+0x14]≠0`):
-//! nothing after the charges/cooldown block. The engine fires `SHOW_COMPARE_TOOLTIP(slot, n)`
-//! for an equippable item on the MAIN GameTooltip while shift is held (ref PaperDollFrame.lua's
-//! listener seats `ShoppingTooltip<n>` on the paperdoll slot — so compares only show with the
-//! character window open, exactly the 1.12 behavior). When the real engine fires (render vs
-//! shift edge) is untraced — INTERIM: both, `arm_compare` + `on_shift_edge`.
+//! **Compare mode** (0274 P4, re-based by 2202, scoped back to the reference by 2210, and
+//! corrected to the census by 2216): `SetInventoryItem` on an ARMED shopping tooltip renders the
+//! equipped item's ORDINARY tooltip plus ONE extra line, first — the gray "Currently Equipped"
+//! (`[arg+0x18]≠0`). That is the entire difference. The builder's other flag, p4 `[arg+0x14]`,
+//! *is* a compact mode (white name, stat body jumped, early-return at `0x52e14c`) — but the two
+//! compare call sites pass it **zero**, so a shopping plate shows a quality-colored name and the
+//! full body, and a client that abbreviates here is wrong (wow-re `merchant-compare-item-law.md`
+//! §6). **Nothing in this engine seats a shopping plate**: the two callers that arm this mode
+//! are [`compare_against_worn`]'s own bindings — `SetMerchantCompareItem` and
+//! `SetAuctionCompareItem` — and the FrameXML that calls them (`MerchantFrame.xml:63-80`,
+//! `AuctionFrame`) owns the plates' geometry and lifetime, exactly as in 1.12.1. There is no
+//! hover compare in the reference at all: `SHOW_COMPARE_TOOLTIP` has zero fire sites in the whole
+//! image, so `PaperDollFrame.lua`'s slot listener is dead code there (wow-re
+//! `merchant-compare-item-law.md` §8).
+//!
+//! **`nameOnly`** (p4 `[arg+0x14]`, the flag 2216 had tangled with the header; built by 2224):
+//! the builder's
+//! compact mode, and the census that settled it found exactly one door onto it — this module's
+//! `SetInventoryItem`, third argument, a number `> 0`. It is what the image's own usage string
+//! `0x8552dc` calls it. No stock FrameXML caller passes it (all 8 sites are two-argument), so it
+//! is addon surface; it is nonetheless live code, and the mode is **trimmed, not bare** — the
+//! bind/lock region and the stat body are jumped and the tail is cut, but the slot/type cell,
+//! durability, every requirement line and the spell triggers all still print. Both flags ride in
+//! [`render::BuilderFlags`], a struct precisely so they cannot be collapsed again.
 //!
 //! **The red "you can't use this" law** (the director's explicit ask) — byte-verified §1-RED:
 //! red is the AddLine color `0xffff2020`, applied to requirement lines the ACTIVE player fails
@@ -46,18 +62,16 @@ mod names;
 mod render;
 
 use names::{quality_color, GRAY, WHITE};
-use render::render_view;
+use render::{render_view, BuilderFlags};
 
-/// Look up the store; a miss records the ask (the app sends `CMSG_ITEM_QUERY` and pushes back —
-/// the hover's re-enter loop repaints on arrival).
 /// The compare tooltips' shared body — what `SetMerchantCompareItem 0x536080` and
 /// `SetAuctionCompareItem 0x535d70` both run once their wrapper has an offered template and a
 /// re-based `offset` (wow-re `merchant-compare-item-law.md`): walk the offered type's candidate
 /// slots (`0x809200[InventoryType]`), skipping EMPTY slots without decrementing and slots whose
 /// worn item's CLASS differs, until `offset` occupied matches have been passed; then fill the
 /// ordinary EQUIPPED-item tooltip with the compare header on — the FULL body (`p4 = 0`) plus one
-/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the same `compare_armed` latch the
-/// shift-compare path uses and running `SetInventoryItem`, which is what the reference does too:
+/// gray `CURRENTLY_EQUIPPED` line (`p5 = 1`), by arming the `equipped_header_armed` latch and running
+/// `SetInventoryItem`, which is what the reference does too:
 /// `0x536080` calls the ordinary item builder `0x52b650` with the header flag set. The NUMBER 1 on
 /// success; nil on a miss, which does NOT clear the tooltip (the reference's nil exit touches
 /// nothing else).
@@ -99,7 +113,7 @@ fn compare_against_worn(
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         if let Ok(t) = super::tooltip::tip_mut(&mut model, h) {
-            t.compare_armed = true;
+            t.equipped_header_armed = true;
         }
     }
     this.get::<mlua::Function>("SetInventoryItem")?
@@ -107,6 +121,8 @@ fn compare_against_worn(
     Ok(Value::Integer(1))
 }
 
+/// Look up the store; a miss records the ask (the app sends `CMSG_ITEM_QUERY` and pushes back —
+/// the hover's re-enter loop repaints on arrival).
 fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let v = model.item_templates.get(&item_id).cloned();
@@ -205,8 +221,7 @@ fn render_by_id(
     fire_cleared(lua, h);
     match view_of(lua, item_id) {
         Some(v) => {
-            render_view(lua, this, &v, false, None)?;
-            arm_compare(lua, h, &v);
+            render_view(lua, this, &v, BuilderFlags::default(), None)?;
         }
         None => {
             if let Some(name) = fb_name {
@@ -224,11 +239,6 @@ fn render_by_id(
     Ok(())
 }
 
-/// The paperdoll slots an item of this InventoryType equips into (the 1.12
-/// `GetInventorySlotInfo` slot ids) — the `SHOW_COMPARE_TOOLTIP` targets. Two-slot families
-/// (rings, trinkets, one-hand weapons, and a two-hander displacing both hands) fire two
-/// shopping tooltips, ref PaperDollFrame.lua's `arg2`. Twin of the app-side
-/// `ui_items::find_equip_slot` (the equip-click fit rule) — one law, two consumers.
 /// The quest-item hover: the row's item by id, or an empty tooltip when the row is not there.
 fn set_quest_item_view(
     lua: &Lua,
@@ -249,6 +259,11 @@ fn set_quest_item_view(
     }
 }
 
+/// The paperdoll slots an item of this InventoryType equips into (the 1.12
+/// `GetInventorySlotInfo` slot ids) — the compare drive's candidate slots. Two-slot families
+/// (rings, trinkets, one-hand weapons, and a two-hander displacing both hands) can fill both
+/// shopping plates. Twin of the app-side `ui_items::find_equip_slot` (the equip-click fit rule) —
+/// one law, two consumers.
 fn equip_slots_for(inventory_type: u32) -> &'static [u32] {
     match inventory_type {
         1 => &[1],             // head
@@ -277,94 +292,6 @@ fn equip_slots_for(inventory_type: u32) -> &'static [u32] {
         17 => &[16],
         15 | 25 | 26 | 28 => &[18], // bow / thrown / wand-gun / relic
         _ => &[],
-    }
-}
-
-/// After an item render on the MAIN GameTooltip: remember the compare targets and, when shift
-/// is already held, fire the compare event now. (Other tooltip frames — shopping, ItemRef —
-/// never arm; the shift-edge drive (`on_shift_edge`) covers pressing shift mid-hover. Whether
-/// the real engine fires at render, at the edge, or both is untraced — INTERIM, both.)
-fn arm_compare(lua: &Lua, h: crate::widget::FrameHandle, v: &ItemTemplateView) {
-    let (is_main, shift) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let is_main = model.arena.lookup("GameTooltip") == Some(h);
-        let shift = model.modifiers.0;
-        if is_main {
-            let slots = equip_slots_for(v.inventory_type);
-            if let Ok(t) = super::tooltip::tip_mut(&mut model, h) {
-                t.compare_slots = slots.to_vec();
-            }
-        }
-        (is_main, shift)
-    };
-    if is_main && shift {
-        fire_compare(lua, h);
-    }
-}
-
-/// Fire `SHOW_COMPARE_TOOLTIP(slot, n)` for the main tooltip's remembered targets, ARMING
-/// `ShoppingTooltip<n>` for the compare render first (the listener's `SetOwner` +
-/// `SetInventoryItem` run inside the fire — ref PaperDollFrame.lua:621-640; the arm survives
-/// the SetOwner content clear, kinds.rs has the seam note).
-fn fire_compare(lua: &Lua, h: crate::widget::FrameHandle) {
-    let slots: Vec<u32> = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        match super::tooltip::tip_mut(&mut model, h) {
-            Ok(t) => t.compare_slots.clone(),
-            Err(_) => return,
-        }
-    };
-    for (i, slot) in slots.iter().take(2).enumerate() {
-        let n = (i + 1) as i64;
-        {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(sh) = model.arena.lookup(&format!("ShoppingTooltip{n}")) {
-                if let Ok(t) = super::tooltip::tip_mut(&mut model, sh) {
-                    t.compare_armed = true;
-                }
-            }
-        }
-        super::event::fire_global(
-            lua,
-            "SHOW_COMPARE_TOOLTIP",
-            &[
-                super::ScriptValue::Int(i64::from(*slot)),
-                super::ScriptValue::Int(n),
-            ],
-        );
-    }
-}
-
-/// The shift-edge compare drive (called from `UiScript::set_modifiers` on a shift transition):
-/// pressing shift over a live equippable item-hover fires the compares; releasing hides the
-/// shopping tooltips (INTERIM lifecycle — the real engine's edge handling is untraced).
-pub(super) fn on_shift_edge(lua: &Lua, down: bool) {
-    let (main, shown, has_targets) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let Some(h) = model.arena.lookup("GameTooltip") else {
-            return;
-        };
-        let shown = model.arena.frame(h).map(|f| f.shown).unwrap_or(false);
-        let has = match super::tooltip::tip_mut(&mut model, h) {
-            Ok(t) => !t.compare_slots.is_empty(),
-            Err(_) => false,
-        };
-        (h, shown, has)
-    };
-    if down {
-        if shown && has_targets {
-            fire_compare(lua, main);
-        }
-    } else {
-        for n in 1..=2 {
-            let sh = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.arena.lookup(&format!("ShoppingTooltip{n}"))
-            };
-            if let Some(sh) = sh {
-                super::tooltip::hide_tooltip(lua, sh);
-            }
-        }
     }
 }
 
@@ -419,7 +346,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest_log.detail.as_ref().and_then(|d| {
+                model.selected_quest_detail().and_then(|d| {
                     let v = match kind.as_str() {
                         "choice" => Some(&d.choices),
                         "reward" => Some(&d.rewards),
@@ -479,10 +406,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             match view_of(lua, id) {
                 Some(v) => {
-                    render_view(lua, &this, &v, false, Some(&inst))?;
+                    render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
                     // Unchanged from the `render_by_id` this leg used to share: a link dropped on
-                    // the MAIN tooltip still arms the shopping compare (`arm_compare`'s own gate).
-                    arm_compare(lua, h, &v);
                 }
                 None => {
                     if let Some(name) = link_name(&link) {
@@ -532,109 +457,123 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // (`mov eax,2` @0x534985). A carve of `0x532ee0`'s tail would upgrade this line.
     m.set(
         "SetInventoryItem",
-        lua.create_function(|lua, (this, unit, slot): (Table, String, usize)| {
-            let h = frame_handle_of(lua, &this)?;
-            let (item_id, name, quality, inst, compare) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let armed = match super::tooltip::tip_mut(&mut model, h) {
-                    Ok(t) => std::mem::take(&mut t.compare_armed),
-                    Err(_) => false,
-                };
-                let view = model
-                    .inv_slot(&unit, slot)
-                    .filter(|s| s.item_id != 0)
-                    .map(|s| {
-                        (
-                            s.item_id,
-                            s.name.clone(),
-                            s.quality,
-                            render::ItemInstance {
-                                // The slot's own name — app-composed, so it carries the
-                                // random-suffix roll off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
-                                name: s.name.clone(),
-                                durability: s.durability,
-                                creator: s.creator.clone(),
-                                has_text: false,
-                                flags: s.flags,
-                                already_bound: s.already_bound,
-                                // No petition line on the doll: a charter has `InventoryType = 0`
-                                // and cannot be equipped, so this hover can never be over one.
-                                petition: None,
-                                enchants: s.enchants.clone(),
-                                // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
-                                // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
-                                // is dead here too (wow-re `right-click-open.md` §1.2). Which leg
-                                // each takes is not pinned, and the case is unobservable anyway:
-                                // nothing openable is equippable, so the doll hover has no clam to
-                                // show. Left `false` deliberately — inventing a selector we have
-                                // not read would be the §4 trade, and there is nothing to gain.
-                                openable_source: false,
-                                duration_ms: s.duration_ms,
-                            },
-                        )
-                    });
-                match view {
-                    Some((id, name, q, inst)) => (id, name, q, inst, armed),
-                    // An EMPTY slot answers `nil` for hasItem — and still pushes the other two,
-                    // because the reference's own caller destructures all three unconditionally
-                    // and only then tests `hasItem`. Answering one value here would hand
-                    // `PaperDollItemSlotButton_OnEnter` a nil `repairCost` on every empty slot,
-                    // which its `repairCost and (repairCost > 0)` guard survives but pfUI's bare
-                    // `totalRep + repCost` does not.
-                    None => {
-                        return Ok(MultiValue::from_vec(vec![
-                            Value::Nil,
-                            Value::Nil,
-                            Value::Integer(0),
-                        ]))
-                    }
-                }
-            };
-            {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                clear_content(&mut model, h);
-            }
-            fire_cleared(lua, h);
-            match view_of(lua, item_id) {
-                Some(v) => render_view(lua, &this, &v, compare, Some(&inst))?,
-                None => {
-                    // Template in flight — the slot view's own name holds the plate (the same
-                    // 0138 posture as SetBagItem's miss path).
-                    // The compare header is a key like every other sentence (2045); this
-                    // fallback path shows it for exactly the reason the full render does.
-                    if compare {
-                        if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
-                            append_line(lua, &this, (t, GRAY), None, false)?;
+        lua.create_function(
+            |lua, (this, unit, slot, name_only): (Table, String, usize, Value)| {
+                let h = frame_handle_of(lua, &this)?;
+                // **The third argument the binary names itself**: `0x8552dc` carries
+                // `"Usage: SetInventoryItem(unit, slot [, nameOnly])"`, and `0x533027`–`0x53304c` is
+                // its gate — the flag seeds 0 and becomes 1 only on `lua_isnumber(L,4)` AND
+                // `lua_tonumber(L,4) > 0.0` STRICTLY. A miss does not raise; it leaves the zero and
+                // builds the ordinary tooltip. Three of this binding's four builder legs pass it
+                // through (wow-re `ui/scratch/tooltip-nameonly-p4-census.md` §3).
+                let name_only = super::binding_abi::positive_number_flag(lua, name_only)?;
+                let (item_id, name, quality, inst, currently_equipped) = {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let armed = match super::tooltip::tip_mut(&mut model, h) {
+                        Ok(t) => std::mem::take(&mut t.equipped_header_armed),
+                        Err(_) => false,
+                    };
+                    let view = model
+                        .inv_slot(&unit, slot)
+                        .filter(|s| s.item_id != 0)
+                        .map(|s| {
+                            (
+                                s.item_id,
+                                s.name.clone(),
+                                s.quality,
+                                render::ItemInstance {
+                                    // The slot's own name — app-composed, so it carries the
+                                    // random-suffix roll off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
+                                    name: s.name.clone(),
+                                    durability: s.durability,
+                                    creator: s.creator.clone(),
+                                    has_text: false,
+                                    flags: s.flags,
+                                    already_bound: s.already_bound,
+                                    // No petition line on the doll: a charter has `InventoryType = 0`
+                                    // and cannot be equipped, so this hover can never be over one.
+                                    petition: None,
+                                    enchants: s.enchants.clone(),
+                                    // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
+                                    // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
+                                    // is dead here too (wow-re `right-click-open.md` §1.2). Which leg
+                                    // each takes is not pinned, and the case is unobservable anyway:
+                                    // nothing openable is equippable, so the doll hover has no clam to
+                                    // show. Left `false` deliberately — inventing a selector we have
+                                    // not read would be the §4 trade, and there is nothing to gain.
+                                    openable_source: false,
+                                    duration_ms: s.duration_ms,
+                                },
+                            )
+                        });
+                    match view {
+                        Some((id, name, q, inst)) => (id, name, q, inst, armed),
+                        // An EMPTY slot answers `nil` for hasItem — and still pushes the other two,
+                        // because the reference's own caller destructures all three unconditionally
+                        // and only then tests `hasItem`. Answering one value here would hand
+                        // `PaperDollItemSlotButton_OnEnter` a nil `repairCost` on every empty slot,
+                        // which its `repairCost and (repairCost > 0)` guard survives but pfUI's bare
+                        // `totalRep + repCost` does not.
+                        None => {
+                            return Ok(MultiValue::from_vec(vec![
+                                Value::Nil,
+                                Value::Nil,
+                                Value::Integer(0),
+                            ]))
                         }
                     }
-                    if let Some(name) = name {
-                        let color = if compare {
-                            WHITE
-                        } else {
-                            quality_color(quality.max(0) as u32)
-                        };
-                        append_line(lua, &this, (name, color), None, false)?;
+                };
+                // p5 and p4, carried as one value but never as one flag (2216).
+                let flags = BuilderFlags {
+                    currently_equipped,
+                    name_only,
+                };
+                {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    clear_content(&mut model, h);
+                }
+                fire_cleared(lua, h);
+                match view_of(lua, item_id) {
+                    Some(v) => render_view(lua, &this, &v, flags, Some(&inst))?,
+                    None => {
+                        // Template in flight — the slot view's own name holds the plate (the same
+                        // 0138 posture as SetBagItem's miss path).
+                        // The compare header is a key like every other sentence (2045); this
+                        // fallback path shows it for exactly the reason the full render does.
+                        if flags.currently_equipped {
+                            if let Some(t) = crate::strings::global(lua, "CURRENTLY_EQUIPPED") {
+                                append_line(lua, &this, (t, GRAY), None, false)?;
+                            }
+                        }
+                        if let Some(name) = name {
+                            let color = if flags.name_only {
+                                WHITE
+                            } else {
+                                quality_color(quality.max(0) as u32)
+                            };
+                            append_line(lua, &this, (name, color), None, false)?;
+                        }
                     }
                 }
-            }
-            show_or_hide_empty(lua, h);
-            Ok(MultiValue::from_vec(vec![
-                Value::Integer(1),
-                // `hasCooldown` — **broader than its name**, and this is the one arm of it we can
-                // answer. The builder's Lua return is `[ebp-0x38]`, set by FOUR sites, only one of
-                // which is the cooldown line: LOCKED_WITH_ITEM, the temporary-enchant countdown,
-                // **the item's own duration line** (`0x52ce0d`), and ITEM_COOLDOWN_TIME. So a
-                // duration-bearing item answers truthy here with no cooldown of any kind, and an
-                // addon can see it (decision 1933's fold-back). The equipped-cooldown feed is
-                // still the INTERIM above; this is the half that now exists.
-                if inst.duration_ms.is_some() {
-                    Value::Boolean(true)
-                } else {
-                    Value::Nil
-                },
-                Value::Integer(0),
-            ]))
-        })?,
+                show_or_hide_empty(lua, h);
+                Ok(MultiValue::from_vec(vec![
+                    Value::Integer(1),
+                    // `hasCooldown` — **broader than its name**, and this is the one arm of it we can
+                    // answer. The builder's Lua return is `[ebp-0x38]`, set by FOUR sites, only one of
+                    // which is the cooldown line: LOCKED_WITH_ITEM, the temporary-enchant countdown,
+                    // **the item's own duration line** (`0x52ce0d`), and ITEM_COOLDOWN_TIME. So a
+                    // duration-bearing item answers truthy here with no cooldown of any kind, and an
+                    // addon can see it (decision 1933's fold-back). The equipped-cooldown feed is
+                    // still the INTERIM above; this is the half that now exists.
+                    if inst.duration_ms.is_some() {
+                        Value::Boolean(true)
+                    } else {
+                        Value::Nil
+                    },
+                    Value::Integer(0),
+                ]))
+            },
+        )?,
     )?;
 
     // GameTooltip:SetBagItem(bag, slot) → hasCooldown, repairCost — the real-instance hover.
@@ -703,7 +642,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             fire_cleared(lua, h);
             match view_of(lua, item_id) {
                 Some(v) => {
-                    render_view(lua, &this, &v, false, Some(&inst))?;
+                    render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
                     let (merchant_open, repairing) = {
                         let model = lua.app_data_mut::<Model>().expect("model app_data");
                         (model.merchant.is_some(), model.repair_mode)
@@ -715,7 +654,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             append_line(lua, &this, (t, WHITE), None, false)?;
                         }
                     }
-                    arm_compare(lua, h, &v);
                 }
                 None => {
                     // Template in flight. The real client early-outs to an EMPTY tooltip here
@@ -789,7 +727,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     ..Default::default()
                 };
                 match view_of(lua, item.item_id) {
-                    Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                    Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                     None => {
                         if let Some(name) = item.name.clone() {
                             append_line(
@@ -839,7 +777,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             match view_of(lua, row.item_id) {
-                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                 // Template in flight — the row's name holds the plate (SetBagItem's 0138 posture;
                 // the re-enter loop repaints when the push lands).
                 None => {
@@ -892,7 +830,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             match view_of(lua, entry.item_id) {
-                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                Some(v) => render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?,
                 None => {
                     if let Some(name) = entry.name.clone() {
                         append_line(
@@ -1099,8 +1037,15 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 fire_cleared(lua, h);
                 match view_of(lua, row.item_id) {
                     Some(v) => {
-                        render_view(lua, &this, &v, false, None)?;
-                        arm_compare(lua, h, &v);
+                        render_view(lua, &this, &v, BuilderFlags::default(), None)?;
+                        // **The vendor tab arms nothing** — `MerchantFrame.xml:67-80` seats
+                        // `ShoppingTooltip1/2` itself on every hover of it, unconditionally, and
+                        // that is the reference's own live compare. Arming here would put the
+                        // shift drive on the same two plates the stock row already owns, and its
+                        // release edge would then hide a compare the player never asked it to.
+                        // The BUYBACK tab is the other branch of the same button and seats
+                        // nothing, so it arms like any other hover.
+                        if buyback {}
                     }
                     None => {
                         // Template in flight: the row's own stat head as a minimal view.
@@ -1121,7 +1066,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             block: head.block,
                             ..Default::default()
                         };
-                        render_view(lua, &this, &v, false, None)?;
+                        render_view(lua, &this, &v, BuilderFlags::default(), None)?;
                     }
                 }
                 show_or_hide_empty(lua, h);
@@ -1164,8 +1109,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, Some(&inst))?;
-                arm_compare(lua, h, &v);
+                render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1214,8 +1158,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ..Default::default()
             };
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, Some(&inst))?;
-                arm_compare(lua, h, &v);
+                render_view(lua, &this, &v, BuilderFlags::default(), Some(&inst))?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1251,8 +1194,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, None)?;
-                arm_compare(lua, h, &v);
+                render_view(lua, &this, &v, BuilderFlags::default(), None)?;
             }
             show_or_hide_empty(lua, h);
             Ok(())
@@ -1283,8 +1225,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             fire_cleared(lua, h);
             if let Some(v) = view_of(lua, item_id) {
-                render_view(lua, &this, &v, false, None)?;
-                arm_compare(lua, h, &v);
+                render_view(lua, &this, &v, BuilderFlags::default(), None)?;
             }
             show_or_hide_empty(lua, h);
             Ok(())

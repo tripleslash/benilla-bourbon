@@ -139,6 +139,7 @@ pub mod doodad_anim;
 pub mod entity_shade;
 pub mod exterior_cull;
 pub mod ffx_glow;
+pub mod final_pass;
 pub mod frame_pace;
 pub mod ground_fx;
 pub mod instance_tint;
@@ -147,6 +148,7 @@ pub mod interior;
 pub mod launch_env;
 pub mod lighting;
 pub mod liquid;
+pub mod log_ring;
 
 /// macOS `Cmd+Q`, re-pointed at the window close so the gesture goes through an exit the client
 /// can actually observe (decision 1528).

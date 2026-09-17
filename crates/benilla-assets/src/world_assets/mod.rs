@@ -695,9 +695,15 @@ impl WorldAssets {
             // costs a frame or two of unbordered plate and then resolves itself; writing either
             // cache under `Pending` would make that permanent, because the pack lands in the
             // resident map a moment later and nothing would ever look again. See [`ReadMode`].
-            match decode_sprite(&self.chain, self.loose_root.as_deref(), path, ReadMode::Defer) {
+            match decode_sprite(
+                &self.chain,
+                self.loose_root.as_deref(),
+                path,
+                ReadMode::Defer,
+            ) {
                 SpriteLoad::Ready(decoded) => {
-                    self.resample_sources.insert(path.to_string(), Some(decoded));
+                    self.resample_sources
+                        .insert(path.to_string(), Some(decoded));
                 }
                 SpriteLoad::Pending => return None,
                 SpriteLoad::Missing => {
@@ -946,7 +952,7 @@ impl WorldAssets {
             ReadMode::Defer,
         ) {
             SpriteLoad::Ready((w, h, mut rgba)) => {
-                for px in rgba.chunks_exact_mut(4) {
+                for px in rgba.as_chunks_mut::<4>().0 {
                     px[0] = 0xFF;
                     px[1] = 0xFF;
                     px[2] = 0xFF;
@@ -1012,8 +1018,6 @@ impl WorldAssets {
     /// A `StandardMaterial` for a model submesh, deduped by (texture, blend) so submeshes/models
     /// sharing a texture share one material handle (enabling draw-call batching). A missing/failed
     /// texture falls back to a single shared untextured material.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn model_material(
         &mut self,
         texture: Option<&str>,

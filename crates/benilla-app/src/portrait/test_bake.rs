@@ -14,7 +14,6 @@ use benilla_assets::m2_url;
 
 /// The debug bake driver: when `WOW_PORTRAIT_TEST` is set, bake the named model into every slot once
 /// it loads, and own the booths (the live sync yields). See [`bake_test`].
-#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_test_portraits(
     mut commands: Commands,
     booths: Res<Booths>,
@@ -58,7 +57,6 @@ pub(super) fn sync_test_portraits(
 /// → the muted fallback) into every slot and frame each camera. A pipeline eyeball only — no skins, no
 /// cache. Returns `true` once the model has loaded + a light buffer exists and it's baked (the caller
 /// then stops re-baking).
-#[allow(clippy::too_many_arguments)]
 fn bake_test(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,
@@ -131,6 +129,7 @@ fn bake_test(
                     // right here — an eyeball bake should show the batch dimming the artist wrote.
                     alpha_anim: s.alpha_anim.clone(),
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect::<Vec<BoothPart>>()
         };
@@ -328,8 +327,8 @@ pub(crate) fn encode_target_readback(shot: &Image) -> Option<Image> {
     }
     let src = shot.data.as_ref()?;
     let mut out = Vec::with_capacity(src.len() / 2);
-    for texel in src.chunks_exact(8) {
-        for (c, half_pair) in texel.chunks_exact(2).enumerate() {
+    for texel in src.as_chunks::<8>().0 {
+        for (c, half_pair) in texel.as_chunks::<2>().0.iter().enumerate() {
             let v = half::f16::from_le_bytes([half_pair[0], half_pair[1]]).to_f32();
             // The sRGB transfer function for colour (channel 3 is plain coverage, never encoded) —
             // the same curve the swapchain's `…Srgb` write applies to the live frame.

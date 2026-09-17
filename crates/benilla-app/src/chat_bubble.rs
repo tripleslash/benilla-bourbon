@@ -379,7 +379,7 @@ fn load_bubble_art(
 /// pieces, tail, wrapped chatType-colored text — bottom-seated on the projected anchor.
 /// Runs after [`VPlateSet`] (the spawn gate reads this frame's plate verdict), inside the
 /// [`UiQuadAppend`] window.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_bubbles(
     mut queue: ResMut<BubbleQueue>,
     mut bubbles: ResMut<Bubbles>,
@@ -612,7 +612,6 @@ struct Pending {
 
 /// Append one bubble's draw list: the Backdrop pieces (bg fill inset by the border-unit +
 /// the 8-piece edge), the tail square, and the wrapped, centered, chatType-colored text.
-#[allow(clippy::too_many_arguments)] // the draw inputs + the jitter trace's decomposition
 fn draw_bubble(
     atlas: &mut UiFontAtlas,
     quads: &mut UiQuads,
@@ -816,8 +815,18 @@ pub(crate) struct BubbleSet;
 
 pub(crate) struct ChatBubblePlugin;
 
+/// The two bubble switches' change callback (1139, 2303): flags, like every other pair.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<BubbleConfig>) {
+    match ev.key().as_str() {
+        "chatbubbles" => bubbles.all = ev.flag(),
+        "chatbubblesparty" => bubbles.party = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for ChatBubblePlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<BubbleQueue>()
             .init_resource::<BubbleConfig>()
             .init_resource::<Bubbles>()

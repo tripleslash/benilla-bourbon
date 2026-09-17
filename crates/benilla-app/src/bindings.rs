@@ -15,8 +15,11 @@
 //!   probe is always first). Super held matches nothing;
 //! - [`Kind::Held`] commands **latch** on the matching press and unlatch on the *base key's*
 //!   release — the reference's `runOnUp` movement law, which is why tapping Shift mid-run does
-//!   not stop you, and why a chat box taking focus stops movement (latches clear on the capture
-//!   edge — the reference's own focus handler, `0x514490`) without eating the release;
+//!   not stop you, and why **nothing the UI does stops you**: a chat box taking focus and a
+//!   fullscreen frame eating a key both suppress the *press* and release nothing already held
+//!   (decision 2196). The only things that end a latch are the base key's release, the
+//!   [stuck-latch sweep](latch_and_dispatch) that stands in for a release the window never saw
+//!   (OS focus loss, the loading cover), and the VM swap;
 //! - [`Kind::Edge`]/[`Kind::EdgeUpDown`] run their 1.12 Lua bodies in the VM;
 //! - [`Kind::Host`] lands in [`BindingsState::fired`] for engine consumers (chat open, TAB
 //!   targeting, nameplates, autorun, camera zoom, …).
@@ -46,7 +49,7 @@ use bevy::prelude::*;
 use benilla_ui::script::keybind::{AddonBindingBody, KeybindCommand, KeybindRequest};
 use benilla_ui::script::UiScript;
 
-use crate::char_select::ClientState;
+use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
 
 pub(crate) mod chord;
@@ -131,8 +134,19 @@ pub(crate) struct BindingsState {
     /// Accumulated analog amount per host command this frame (wheel notches; a key press adds
     /// the reference's own 1.0 step) — the camera zoom's input.
     amounts: Vec<(Cmd, f32)>,
-    /// Rising edge of the keyboard-capture gate last frame (internal: clears Held latches once).
-    was_typing: bool,
+    /// **The pressed-key set — what makes a press a REPEAT** (decision 2204). The reference
+    /// classifies auto-repeat off its own list of keys it believes are down (`0x4248b3`), *not*
+    /// off the Win32 `lParam` repeat bit — so the OS bit is not what this reads either.
+    ///
+    /// Base keys, normalized ([`chord::normalize_key`]) exactly as [`latched`](Self::latched) is,
+    /// so `NUMPADENTER` repeating under a held `ENTER` is the repeat it looks like. Reconciled
+    /// against `ButtonInput` at the top of every pass, which is what wipes it on a window
+    /// activation change for free — and why a key still held across an alt-tab starts running
+    /// again on the way back, as it does in the reference.
+    ///
+    /// **Keyboard only, and the type says so.** The mouse plane is read as edges
+    /// (`just_pressed`), which cannot repeat, so it needs no classification of its own.
+    down: Vec<KeyCode>,
 }
 
 impl BindingsState {
@@ -169,13 +183,14 @@ impl BindingsState {
 }
 
 /// Which files this session's bindings live in — the macros-files pattern
-/// ([`crate::ui_macro::MacroFiles`]), resolved once the character is known.
+/// ([`crate::ui_macro::MacroFiles`]), written by [`seed_bindings_for_vm`] and read by the save
+/// verb. It carried a session-keyed `identity` memo while the character set was loaded from a
+/// per-frame system and had to recognise "same character, new VM"; the seed runs exactly once per
+/// VM by construction, so there is nothing left to dedupe (decision 2241).
 #[derive(Resource, Default)]
 struct BindingFiles {
     account: Option<std::path::PathBuf>,
     character: Option<std::path::PathBuf>,
-    /// Whose set 2 is loaded — **in the VM that is live now**. See [`load_character_bindings`].
-    identity: crate::ui_script::VmMemo<Option<(String, String)>>,
 }
 
 /// Label for this module's systems inside [`crate::ui_script::UiInput`] — the UI key feed is
@@ -194,20 +209,22 @@ impl Plugin for BindingsPlugin {
             .add_systems(
                 Update,
                 (
-                    // Once per **VM**, not once per process (decision 1290): a login builds a
-                    // fresh one, and an unseeded VM has no command registry at all —
-                    // `sync_dispatch` would build an empty map and every keybind in the session
-                    // would be dead. Hence `Update` with a session-keyed claim rather than
-                    // `PostStartup`, ordered ahead of the pair that reads what it registers.
-                    seed_bindings.before(sync_dispatch),
+                    // **The registry and both sets are seeded at the VM's birth, not here**
+                    // (decision 2241): [`seed_bindings_for_vm`] runs inside
+                    // `load_ingame_ui_on_world_entry`, before FrameXML and every addon. A
+                    // session-keyed `Update` claim answered *which* VM but not *when* inside its
+                    // life — and this table's readers are load-edge readers: stock
+                    // `ActionButton_OnLoad` paints its hotkey corner from `GetBindingKey` at
+                    // OnLoad, and an addon's `SetBinding` on a stock command needs the command to
+                    // exist.
                     (sync_dispatch, latch_and_dispatch)
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
-                        .before(benilla_world::schedule::WorldStage::Input)
-                        .run_if(in_state(ClientState::InWorld)),
-                    load_character_bindings.run_if(in_state(ClientState::InWorld)),
-                    drain_binding_requests.after(load_character_bindings),
+                        .in_set(InWorldGated),
+                    // After the tick: the requests are Lua's own (`SaveBindings`, `RunBinding`),
+                    // queued by handlers the tick dispatched, and a save must not wait a frame.
+                    drain_binding_requests.after(crate::ui_script::UiInput),
                 ),
             );
     }
@@ -228,24 +245,32 @@ pub(crate) fn registry_commands() -> Vec<KeybindCommand> {
         .collect()
 }
 
-/// Register the command registry with the engine table and seed the account set from disk — once
-/// per VM, before any window opens.
-fn seed_bindings(
-    script: Option<NonSendMut<UiScript>>,
-    mut files: ResMut<BindingFiles>,
-    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
-) {
-    let Some(mut script) = script else { return };
-    if !seeded.claim(&script) {
-        return;
-    }
+/// **The keybinding table goes into the VM before a single interface file runs** (decision 2241,
+/// through the seam 2240 established): the command registry, the account set, and the character's
+/// own set if it has one — all of it in one call at the VM's birth.
+///
+/// This was two `Update` systems with session-keyed claims. That answered *which* VM the memory was
+/// about (1290) and not *when inside its life* it ran, and since 2226 the whole interface load —
+/// FrameXML, every addon's file scope, `ADDON_LOADED`, `VARIABLES_LOADED`, `PLAYER_LOGIN` — happens
+/// inside one exclusive call that precedes the first `Update`. Two readers that costs:
+///
+/// - stock `ActionButton_OnLoad` ends in `ActionButton_UpdateHotkeys`, which paints the corner from
+///   `GetBindingText(GetBindingKey(action), …)`. With no registry every hotkey corner painted blank
+///   and only recovered on the `UPDATE_BINDINGS` `sync_dispatch` fires a frame later;
+/// - an addon's own `Bindings.xml` rows ARE registered during the walk, so the table held *only*
+///   those during the burst: `GetBindingKey("TOGGLEWORLDMAP")` answered nothing, `SetBinding` on a
+///   stock command was a silent nil, and the addons' rows occupied the low indices the Key Bindings
+///   window walks.
+///
+/// Seeding before the walk is also the reference's own order, and the engine was already built for
+/// it: `seed_binding_set` keeps the diff by NAME as well as positionally precisely so a set can be
+/// seeded before a command exists (1201), and `register_bindings` is idempotent per name, so the
+/// addon rows the walk registers afterwards still land.
+pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
     script.register_bindings(&registry_commands());
-    files.account = crate::local_state::bindings_account_path();
-    if let Some(overrides) = read_diff(&files.account) {
-        script.seed_binding_set(1, Some(store::resolve(&overrides)));
-    } else {
-        script.seed_binding_set(1, Some(store::resolve(&[])));
-    }
+    let account = crate::local_state::bindings_account_path();
+    let overrides = read_diff(&account).unwrap_or_default();
+    script.seed_binding_set(1, Some(store::resolve(&overrides)));
     script.load_binding_set(1);
     // The pair, not just the first half: `SPECS` ∪ `ABSENT` is the client's whole 1.12 command
     // surface, and a log line that says only how many landed cannot say how much is left
@@ -256,6 +281,32 @@ fn seed_bindings(
         SPECS.len() + commands::ABSENT.len(),
         commands::ABSENT.len()
     );
+
+    // The character's own set, if the roster names one — its file existing makes it the active set,
+    // the reference's own rule. The identity is the same one the edge resolves for the AddOn enable
+    // state a few lines above this call; absent (a rigged or capture run) leaves set 2 unseeded,
+    // exactly as the old per-frame system's early return did.
+    let id = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(crate::ui_macro::identity);
+    let character = id
+        .as_ref()
+        .and_then(|(realm, name)| crate::local_state::bindings_character_path(realm, name));
+    match read_diff(&character) {
+        Some(overrides) => {
+            script.seed_binding_set(2, Some(store::resolve(&overrides)));
+            script.load_binding_set(2);
+            info!("bindings: character-specific set loaded");
+        }
+        None => {
+            script.seed_binding_set(2, None);
+            script.load_binding_set(1);
+        }
+    }
+    if let Some(mut files) = world.get_resource_mut::<BindingFiles>() {
+        files.account = account;
+        files.character = character;
+    }
 }
 
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
@@ -273,37 +324,6 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
         Err(e) => {
             warn!("bindings: reading {}: {e}", path.display());
             None
-        }
-    }
-}
-
-/// Load the character-specific set once the roster names the character (the macros-load
-/// pattern); its file existing makes it the active set, the reference's own rule.
-fn load_character_bindings(
-    script: Option<NonSendMut<UiScript>>,
-    roster: Res<crate::char_select::Roster>,
-    mut files: ResMut<BindingFiles>,
-) {
-    let Some(mut script) = script else { return };
-    let Some(id) = crate::ui_macro::identity(&roster) else {
-        return;
-    };
-    // Session-keyed (1290): re-entering the world as the SAME character still meets a fresh VM
-    // with no set 2 in it, so "same identity" is only a reason to skip within one VM.
-    if files.identity.get(&script).as_ref() == Some(&id) {
-        return;
-    }
-    files.character = crate::local_state::bindings_character_path(&id.0, &id.1);
-    *files.identity.get(&script) = Some(id);
-    match read_diff(&files.character) {
-        Some(overrides) => {
-            script.seed_binding_set(2, Some(store::resolve(&overrides)));
-            script.load_binding_set(2);
-            info!("bindings: character-specific set loaded");
-        }
-        None => {
-            script.seed_binding_set(2, None);
-            script.load_binding_set(1);
         }
     }
 }
@@ -422,7 +442,6 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
 
 /// The dispatch pass — see the module doc. Runs right after the UI key feed (same frame's
 /// capture gate), before `WorldStage::Input` (a bound key must act this frame, once).
-#[allow(clippy::too_many_arguments)]
 fn latch_and_dispatch(
     script: Option<NonSendMut<UiScript>>,
     mut keyboard: MessageReader<KeyboardInput>,
@@ -519,23 +538,47 @@ fn latch_and_dispatch(
         // latches or fires happen while armed.
     }
 
-    // ── The typing edge ── a box taking focus stops movement (the reference's focus handler
-    // releases every direction bit, `0x514490`): Held latches clear once on the rising edge;
-    // EdgeUpDown latches stay armed — their release half still fires (the reference delivers
-    // the up of a pressed binding regardless).
-    let typing = capture.typing;
-    if typing && !state.was_typing {
-        state.latched.retain(|&(_, b)| match b {
-            Bound::Spec(c) => !matches!(SPECS[c.0 as usize].kind, Kind::Held),
-            // An addon's `runOnUp` latch is an EdgeUpDown pair by another name — its release half
-            // is a Lua body that must still run, so it stays armed for the same reason.
-            Bound::Addon(_) => true,
-        });
-    }
-    state.was_typing = typing;
+    // ── Who owns this frame's keys ── a focused EditBox eats every key for as long as it holds
+    // focus; a shown keyboard frame ate the particular keys in `capture.consumed`. Both suppress a
+    // PRESS below and do nothing else — **a UI focus change releases nothing already held**.
+    //
+    // This is where bug 2196 lived. The block here used to drop every [`Kind::Held`] latch on the
+    // rising edge of `capture.typing`, on a misreading of `0x514490` as "the reference's chat-focus
+    // handler": its sole caller `0x493058` hangs off the CSimpleTop root's WM_ACTIVATE callback
+    // slot (`[root+0x1134]`, event category 2, payload 0 = deactivate), so it is the **OS
+    // window-deactivate** handler, not a UI-focus one (wow-re `loading-screen-input-law.md`; the
+    // conflated phrasing was `rf79-autorun-cancel-set.md`'s "Chat EditBox / window focus" row).
+    // In the reference a focused box merely turns the movement handlers into no-ops and the
+    // direction bits are *frozen, not cleared* — so holding W and pressing ENTER keeps you
+    // running, and the world map eating the `M` that closes it keeps you running too. Both
+    // regressions were one clear.
+    //
+    // The window-deactivate clear needs no code of its own: bevy's `KeyboardFocusLost` →
+    // `ButtonInput::release_all` makes every latched base key read up, and the stuck-latch sweep
+    // at the bottom of this system turns that into real releases (the loading cover reaches it the
+    // same way, through `loading_screen::input`'s `swallow`).
+    //
+    // ── The pressed-key reconcile ── the reference keeps its own list of keys it believes are
+    // down and calls a press a REPEAT when the key is already on it (`0x4248b3`) — it never reads
+    // the Win32 `lParam` repeat bit. Ours is reconciled against bevy's button planes here, before
+    // this frame's messages are read, which buys two things at once (decision 2204):
+    //
+    // - a release the window never saw drops off the list, exactly as it drops off `latched` in
+    //   the sweep below — the list cannot go stale and start swallowing real presses;
+    // - **WM_ACTIVATE's wipe of the pressed-key set comes for free.** `KeyboardFocusLost` →
+    //   `ButtonInput::release_all` empties the plane, so a key still physically held across an
+    //   alt-tab is no longer on the list when we come back, and its next auto-repeat is therefore
+    //   a fresh DOWN that re-latches. That is the reference's own behaviour and not a happy
+    //   accident: `0x514490` cleared the direction bits on the way out, and `0x424790`'s wipe of
+    //   the pressed-key set is what lets the first repeat put them back — so you resume running
+    //   without lifting the key.
+    state
+        .down
+        .retain(|&kc| physically_down(BindKey::Key(kc), &keys, &buttons));
 
-    // ── Keyboard ── press edges latch/fire (exact-modifier chord match, no repeats, gated on
-    // typing and the capture arm); release edges unlatch and fire the runOnUp up-half.
+    // ── Keyboard ── press edges latch/fire (exact-modifier chord match, no repeats, gated on the
+    // two ownership terms and the capture arm); release edges unlatch and fire the runOnUp up-half.
+    let typing = capture.typing;
     for ev in keyboard.read() {
         let key = chord::normalize_key(ev.key_code);
         match ev.state {
@@ -552,7 +595,18 @@ fn latch_and_dispatch(
                             | KeyCode::ArrowUp
                             | KeyCode::ArrowDown
                     );
-                if armed || (typing && !arrow_exempt) || sup || ev.repeat {
+                // A keyboard frame's existence gate ate this one key (decision 1319) — the
+                // world map's fullscreen `OnKeyDown`, a cinematic, the stack-split spinner. Per
+                // key, so the map eating its own `M` leaves every other binding alone.
+                let eaten = capture.consumed.contains(&ev.key_code);
+                // **A repeat is a key we already believe is down** — the reference's own test, not
+                // the OS's repeat bit (2204). Registered before the gates below, so a key held
+                // through a focused chat box is still "down" and its repeats stay repeats.
+                let repeat = state.down.contains(&key);
+                if !repeat {
+                    state.down.push(key);
+                }
+                if armed || (typing && !arrow_exempt) || eaten || sup || repeat {
                     continue;
                 }
                 if state.latched.iter().any(|&(k, _)| k == BindKey::Key(key)) {
@@ -576,6 +630,7 @@ fn latch_and_dispatch(
                 }
             }
             ButtonState::Released => {
+                state.down.retain(|&kc| kc != key);
                 release(
                     &mut state,
                     &mut script,
@@ -684,19 +739,17 @@ fn latch_and_dispatch(
         }
     }
 
-    // ── The stuck-latch sweep ── a release the window never saw (focus loss, the macOS
-    // modifier eater's cousin): any latch whose base key reads up in the input state unlatches
-    // now, firing its up-half so a pushed action button unsticks visibly.
+    // ── The stuck-latch sweep ── a release the window never saw: any latch whose base key reads
+    // up in the input state unlatches now, firing its up-half so a pushed action button unsticks
+    // visibly. This is also where the reference's two real bulk clears land, because bevy already
+    // zeroes `ButtonInput` for both: **OS window deactivate** (`KeyboardFocusLost` →
+    // `release_all` — `0x514490`'s `and eax,0xfffff00f`, the direction bits released while
+    // autorun survives) and the loading cover (`loading_screen::input`'s `swallow` — the
+    // world-enter cascade's `0x5144c0`, which clears everything). Nothing about the UI's own
+    // keyboard focus reaches here, and that is the point (2196).
     let mut stuck: Vec<BindKey> = Vec::new();
     for &(k, _) in &state.latched {
-        let up = match k {
-            BindKey::Key(kc) => {
-                !keys.pressed(kc) && !(kc == KeyCode::Enter && keys.pressed(KeyCode::NumpadEnter))
-            }
-            BindKey::Mouse(b) => !buttons.pressed(b),
-            BindKey::WheelUp | BindKey::WheelDown => true,
-        };
-        if up && !stuck.contains(&k) {
+        if !physically_down(k, &keys, &buttons) && !stuck.contains(&k) {
             stuck.push(k);
         }
     }
@@ -725,6 +778,31 @@ impl BindingDispatch {
             addons: Vec::new(),
             seen_generation: crate::ui_script::VmMemo::default(),
         }
+    }
+}
+
+/// Is this base key physically down right now, per bevy's own button planes?
+///
+/// The one place that question is answered, because two callers ask it for two reasons and an
+/// answer that drifted between them would be a stuck latch on one side or a lost repeat on the
+/// other: the [stuck-latch sweep](latch_and_dispatch) (a release the window never saw) and the
+/// pressed-key reconcile beside it ([`BindingsState::down`]).
+///
+/// `ENTER` is the case that needs saying: [`chord::normalize_key`] folds `NUMPADENTER` into it, so
+/// the normalized key is down while *either* physical key is.
+fn physically_down(
+    key: BindKey,
+    keys: &ButtonInput<KeyCode>,
+    buttons: &ButtonInput<MouseButton>,
+) -> bool {
+    match key {
+        BindKey::Key(KeyCode::Enter) => {
+            keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter)
+        }
+        BindKey::Key(kc) => keys.pressed(kc),
+        BindKey::Mouse(b) => buttons.pressed(b),
+        // A notch is a press and a release in one frame; it is never "held".
+        BindKey::WheelUp | BindKey::WheelDown => false,
     }
 }
 
@@ -882,8 +960,20 @@ mod tests {
     fn release_key(app: &mut App, k: KeyCode) {
         key(app, k, bevy::input::ButtonState::Released, false);
     }
+    /// A press the OS has flagged as auto-repeat. Whether it *acts* as one is ours to decide
+    /// (2204), which is the whole point of the tests that use this.
+    fn repeat_key(app: &mut App, k: KeyCode) {
+        key(app, k, bevy::input::ButtonState::Pressed, true);
+    }
     fn state(app: &App) -> &BindingsState {
         app.world().resource::<BindingsState>()
+    }
+
+    /// What a keyboard FRAME ate this frame — the list `feed_ui_input` rewrites every pass, which
+    /// this harness has no copy of, so it is **set** rather than pushed (an accumulating list would
+    /// keep suppressing a key the frame stopped eating rounds ago).
+    fn frame_ate(app: &mut App, keys: &[KeyCode]) {
+        app.world_mut().resource_mut::<UiKeyboardCapture>().consumed = keys.to_vec();
     }
 
     /// One addon's `Bindings.xml`, in the reference's own shape: a `runOnUp` binding whose single
@@ -1026,14 +1116,6 @@ mod tests {
         );
     }
 
-    /// A `runOnUp` addon latch survives a chat box taking focus, and its release half still runs.
-    ///
-    /// The typing edge clears [`Kind::Held`] latches (the reference's focus handler releasing the
-    /// direction bits) and deliberately leaves [`Kind::EdgeUpDown`] armed, because the up half of
-    /// a *pressed* binding is delivered regardless of focus. An addon's `runOnUp` binding is that
-    /// same pair wearing one chunk, so it must follow the same rule — dropped on the focus edge,
-    /// it would leave whatever its down half started running forever, with no key left to press
-    /// to stop it.
     /// **The alt-arrow exemption: you can turn while the chat box has focus.**
     ///
     /// A focused EditBox swallows every key — that is the reference's own handler returning 1 on
@@ -1082,8 +1164,16 @@ mod tests {
         );
     }
 
+    /// **Nothing a box taking focus does releases what is already held** (2196), and a `runOnUp`
+    /// addon latch still delivers its up-half when the key finally goes up.
+    ///
+    /// The reference's focused box turns the movement handlers into no-ops — the direction bits are
+    /// frozen, not cleared — so a held binding of ANY kind rides the focus change out. This test
+    /// used to assert the opposite for [`Kind::Held`] (`assert!(!pressed(MOVE_FORWARD))`), on the
+    /// misreading of `0x514490` as a chat-focus handler that 2196 corrects: its sole caller hangs
+    /// off the WM_ACTIVATE slot, so it is the OS window-deactivate clear.
     #[test]
-    fn a_run_on_up_addon_latch_survives_the_typing_edge_and_still_releases() {
+    fn a_held_latch_rides_out_a_box_taking_focus_and_still_releases() {
         let mut script = UiScript::new().expect("VM");
         script.register_bindings(&registry_commands());
         script.register_addon_bindings(
@@ -1099,18 +1189,28 @@ mod tests {
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1);
 
-        // A box takes focus: movement stops, the addon's latch stays.
+        // A box takes focus. Both latches ride it out: the reference freezes the direction bits,
+        // it does not clear them.
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
-        assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "holding W and opening the chat box keeps you running (2196)"
+        );
         assert_eq!(
             lua_count(&app, "PROBE_UP"),
             0,
             "the focus edge is not a release — nothing has run the up half yet"
         );
 
+        // And the keys still stop when the player lets go, box focused or not.
+        release_key(&mut app, KeyCode::KeyW);
         release_key(&mut app, KeyCode::KeyJ);
         app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "releasing W stops you, while typing exactly as otherwise"
+        );
         assert_eq!(
             lua_count(&app, "PROBE_UP"),
             1,
@@ -1270,6 +1370,61 @@ mod tests {
         // Nothing is left latched: a wheel latch that outlived its notch would hold the down
         // state forever, with no key to press to end it.
         assert!(app.world().resource::<BindingsState>().latched.is_empty());
+    }
+
+    /// **Auto-repeat is classified off OUR pressed-key set, not the OS bit** (2204), and the
+    /// window-deactivate wipe is what makes a held key resume on the way back.
+    ///
+    /// Three laws in one run, because they are one mechanism:
+    ///
+    /// 1. a repeat of a key we already believe is down does NOT re-run its binding — the
+    ///    reference's own test (`0x4248b3`), which matters for the kinds that never latch (a held
+    ///    SPACE must jump once, not every 33 ms);
+    /// 2. a press carrying `repeat: true` that we do NOT have down is a fresh DOWN. The OS bit is
+    ///    not the authority — the reference reads its own list and never the Win32 `lParam` bit;
+    /// 3. so after a window deactivate — bevy's `KeyboardFocusLost` → `release_all`, which is our
+    ///    `0x514490`+`0x424790` pair — the first repeat of a key still physically held re-latches,
+    ///    and **you start running again without lifting the key**, as the reference does.
+    #[test]
+    fn a_repeat_is_a_key_we_already_have_down_so_a_held_key_resumes_after_an_alt_tab() {
+        let mut app = harness();
+        press_key(&mut app, KeyCode::Space);
+        app.update();
+        assert!(state(&app).fired(cmd::JUMP), "the first press jumps");
+
+        // (1) A repeat of a key we have down fires nothing — JUMP never latches, so the
+        // pressed-key set is the only thing standing between a held SPACE and a jump per frame.
+        repeat_key(&mut app, KeyCode::Space);
+        app.update();
+        assert!(
+            !state(&app).fired(cmd::JUMP),
+            "a repeat of a key already down is not a press"
+        );
+
+        // Movement, so the resume below has something to observe.
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+
+        // (3) The window is deactivated. Bevy empties the keyboard plane, which unlatches through
+        // the stuck-latch sweep AND empties our pressed-key set — the reference's two wipes.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "the deactivate releases the direction bits (0x514490)"
+        );
+
+        // (2)+(3) Back in the window, still holding W. The OS calls this a repeat; we do not have
+        // the key down any more, so it is a fresh press — and you run again without lifting it.
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the first repeat after re-activation re-latches (2204)"
+        );
     }
 
     #[test]
@@ -1451,25 +1606,38 @@ mod tests {
         assert!(!state(&app).pressed(by_name("BONUSACTIONBUTTON1")));
     }
 
+    /// **The typing gate blocks NEW presses and releases nothing already held** (2196).
+    ///
+    /// The two halves used to be one: the gate's rising edge dropped every [`Kind::Held`] latch, so
+    /// holding W and pressing ENTER stopped you dead. It rests on nothing — `0x514490`, the clear
+    /// that reading cited, is the OS window-deactivate handler (sole caller `0x493058`, off the
+    /// WM_ACTIVATE callback slot), and the reference's focused box only makes the movement handlers
+    /// no-ops: the bits are frozen, not cleared.
     #[test]
-    fn the_typing_gate_blocks_new_input_and_clears_held_latches_once() {
+    fn the_typing_gate_blocks_new_input_but_a_held_binding_keeps_running() {
         let mut app = harness();
         press_key(&mut app, KeyCode::KeyW);
         app.update();
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
-        // A box takes focus: movement stops (the reference's focus handler releases the
-        // direction bits), and new presses do nothing.
+        // A box takes focus. You keep running, and new presses type instead of binding.
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(
-            !state(&app).pressed(cmd::MOVE_FORWARD),
-            "latches clear on the capture edge"
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the capture edge is not a release — holding W keeps you running while you type"
         );
         press_key(&mut app, KeyCode::KeyX);
         app.update();
         assert!(
             !state(&app).fired(cmd::SIT_OR_STAND),
             "typed keys are not bindings"
+        );
+        // Letting go still stops you, box focused or not.
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "the release is delivered regardless of focus"
         );
         // Focus drops; keys work again.
         release_key(&mut app, KeyCode::KeyX);
@@ -1478,6 +1646,60 @@ mod tests {
         press_key(&mut app, KeyCode::KeyX);
         app.update();
         assert!(state(&app).fired(cmd::SIT_OR_STAND));
+    }
+
+    /// **The world map's shape** (2196, the director's report): a shown keyboard-enabled frame eats
+    /// the key that closes it, and that must cost the key its binding and nothing else.
+    ///
+    /// `WorldMapFrame` is `frameStrata="FULLSCREEN" enableKeyboard="true"` with an `<OnKeyDown>`
+    /// that re-matches `GetBindingKey("TOGGLEWORLDMAP")` in Lua and calls `RunBinding` itself, so
+    /// under the existence gate (decision 1319) it consumes every key while shown — including the
+    /// `M` that closes it. benilla reported that consumption as `typing`, whose rising edge then
+    /// dropped the movement latch: holding W and tapping `M` twice left you standing in a closed
+    /// map. The consumption is per KEY now, and releases nothing.
+    #[test]
+    fn a_keyboard_frame_eating_its_own_toggle_key_does_not_stop_a_held_run() {
+        let mut app = harness();
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+
+        // The map is open and eats this frame's `M` (its own Lua runs the toggle). `M` carries a
+        // `Kind::Edge` binding, which a no-VM harness cannot observe — so the suppression half is
+        // asserted on `X` below, and this leg asserts the half the report is about.
+        frame_ate(&mut app, &[KeyCode::KeyM]);
+        press_key(&mut app, KeyCode::KeyM);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "the frame ate the toggle key; you are still running (2196)"
+        );
+
+        // The eaten key loses its binding…
+        release_key(&mut app, KeyCode::KeyM);
+        app.update();
+        frame_ate(&mut app, &[KeyCode::KeyX]);
+        press_key(&mut app, KeyCode::KeyX);
+        app.update();
+        assert!(
+            !state(&app).fired(cmd::SIT_OR_STAND),
+            "the frame ate this key: its binding must not also fire"
+        );
+
+        // …and only that key. The old whole-frame flag suppressed every binding in the frame.
+        release_key(&mut app, KeyCode::KeyX);
+        app.update();
+        frame_ate(&mut app, &[KeyCode::KeyM]);
+        press_key(&mut app, KeyCode::KeyX);
+        app.update();
+        assert!(
+            state(&app).fired(cmd::SIT_OR_STAND),
+            "consumption is per key, not per frame"
+        );
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "and W has been held throughout"
+        );
     }
 
     #[test]

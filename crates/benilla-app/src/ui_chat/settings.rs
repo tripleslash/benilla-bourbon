@@ -807,17 +807,22 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ChatWindowFile>()
         // **The restore is not here.** `UPDATE_CHAT_WINDOWS`/`UPDATE_CHAT_COLOR` have to precede
         // the session's first chat line and `PLAYER_LOGIN` respectively, and no `run_if` can buy
-        // that: 1978's `not(ingame_ui_pending)` gate put the restore on exactly the frame the
+        // that: 1978's UI-is-up gate (`ingame_ui_up`) puts the restore on exactly the frame the
         // parked VM comes back and `feed_chat` drains the whole queued login burst, with nothing
         // ordering the two. It is called from `ui_script::lifecycle`'s world-entry load instead —
         // [`restore_chat_looks`], decision 2119. Only the watcher belongs in `Update`.
         .add_systems(
             Update,
-            watch_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
+            // After the tick: every write it watches is Lua's.
+            watch_chat_looks
+                .after(crate::ui_script::UiInput)
+                .in_set(crate::char_select::InWorldGated),
         )
         .add_systems(
             Update,
-            save_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
+            save_chat_looks
+                .after(crate::ui_script::UiInput)
+                .in_set(crate::char_select::InWorldGated),
         );
     // **The session-end flush is not registered here.** It is called from inside
     // `ui_script::end_ui_session` ([`fold_dying_vm_chat_cache`]) so that it covers `/reload` — a

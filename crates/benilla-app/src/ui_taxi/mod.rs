@@ -36,7 +36,7 @@ use benilla_ui::script::{TaxiUiState, UiScript};
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 mod routing;
@@ -130,13 +130,12 @@ impl NpcSession for TaxiState {
 /// on `OK` instead — the flight starts and the map has nothing left to show), present a
 /// first-visit discovery, and push the `UnitOnTaxi` ride flag off [`Player::server_riding`].
 /// Diffed against `Local` memory, the trainer/merchant feed shape.
-#[allow(clippy::too_many_arguments)]
 fn feed_taxi(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<TaxiState>,
     catalogs: Option<Res<TaxiCatalogs>>,
     player: Res<Player>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut cache: ResMut<TaxiRouteCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,
@@ -338,7 +337,7 @@ impl Plugin for UiTaxiPlugin {
                     // frame; push before the input pass so an open/close is on screen the same
                     // frame; drain after it (mirrors ui_merchant/ui_trainer).
                     close_npc_session_out_of_range::<TaxiState>.before(feed_taxi),
-                    feed_taxi.before(UiInput),
+                    feed_taxi.in_set(UiFeed),
                     drain_taxi.after(UiInput),
                 ),
             );

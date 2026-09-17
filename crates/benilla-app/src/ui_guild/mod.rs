@@ -35,8 +35,6 @@
 //!   (`0x4d1160`). See [`RosterUpdate`]: the two halves are one mechanism, and implementing either
 //!   without the other breaks it.
 
-use std::collections::{HashMap, HashSet};
-
 use benilla_formats::GuildEmblem;
 use benilla_protocol::messages::{
     guild_event, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
@@ -47,7 +45,8 @@ use benilla_ui::script::{LastOnline, UnitGuild};
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_script::UiInput;
+use crate::query_cache::QueryCache;
+use crate::ui_script::{UiFeed, UiInput};
 
 mod feed;
 mod lines;
@@ -158,14 +157,14 @@ pub(crate) struct GuildState {
     guild_id: u32,
     /// Our own `PLAYER_GUILDRANK` (field 192), **0-based**, `0` = guild master.
     rank_index: u32,
-    /// Guild id → identity, from `SMSG_GUILD_QUERY_RESPONSE`. Holds negatives (module doc).
-    identities: HashMap<u32, Identity>,
+    /// Guild id → identity, from `SMSG_GUILD_QUERY_RESPONSE`, ask-once through [`QueryCache`]
+    /// (decision 2288). Holds negatives (module doc).
+    identities: QueryCache<u32, Identity>,
     /// Bumped by every landed identity ([`Self::apply_query_response`]) — never by an ask. The
     /// gated unit feeds' watch counter (decision 1439): `unit_guild`'s miss resolves later, and
-    /// `is_changed` cannot flag the landing because the miss itself takes `&mut self` per frame.
+    /// `is_changed` could not flag the landing while the miss itself took `&mut self` per frame
+    /// (2288 made it `&self`; the counter stays as the finer signal).
     identity_generation: u64,
-    /// Guild ids with a `CMSG_GUILD_QUERY` in flight — the ask-once gate.
-    queried: HashSet<u32>,
     /// The message of the day. Kept beside the roster rather than inside it because `GE_MOTD`
     /// updates it on its own, and at login vmangos sends that event *before* any roster exists
     /// (`CharacterHandler.cpp:558`).
@@ -209,6 +208,12 @@ pub(crate) struct GuildState {
     pending_info: Vec<GuildInfo>,
 }
 
+impl crate::query_cache::AskOnce for GuildState {
+    fn clear_pending(&mut self) {
+        self.identities.clear_pending();
+    }
+}
+
 impl GuildState {
     /// Are we in a guild? Our own `PLAYER_GUILDID`, nothing else — answerable before any packet.
     pub(crate) fn in_guild(&self) -> bool {
@@ -224,10 +229,20 @@ impl GuildState {
         if (self.guild_id, self.rank_index) == (guild_id, rank_index) {
             return false;
         }
-        let left = self.guild_id != guild_id;
+        // **`0` here is "the descriptor has not told us yet", not "a guild we were in"** (B376).
+        // The mirror's id starts at 0 and only moves when our own avatar streams, which at a
+        // login is a whole packet burst AFTER the server has already sent the guild's MOTD
+        // (`SMSG_GUILD_EVENT 0x02`, vmangos `CharacterHandler.cpp` at the top of the login
+        // handler). Reading that first 0 → N as a guild *change* threw the MOTD away as the
+        // property of a guild we had left — and since the wipe happens here, at the top of the
+        // feed, it landed in the same call that would have fired `GUILD_MOTD` further down, so
+        // the login line was destroyed before it could ever be taken. A move OUT of a real
+        // guild (N → 0, or N → M) is the edge that genuinely invalidates the mirror.
+        let known = self.guild_id != 0;
+        let moved = self.guild_id != guild_id;
         self.guild_id = guild_id;
         self.rank_index = rank_index;
-        if left {
+        if moved && known {
             // A different guild (or none): everything the old roster said is about a guild we are
             // no longer in. The identity cache survives — it is keyed by id and still true.
             self.motd.clear();
@@ -235,6 +250,8 @@ impl GuildState {
             self.rank_rights.clear();
             self.members.clear();
             self.selection = 0;
+        }
+        if moved {
             self.note_roster_update(RosterUpdate::Applied);
         }
         self.dirty = true;
@@ -257,25 +274,24 @@ impl GuildState {
     /// Ask for a guild's identity if we do not already hold one — the lazy cache fill (module
     /// doc). Nothing else in this client ever sends `CMSG_GUILD_QUERY`: no world-entry priming, no
     /// sweep. A negative (`""` name) counts as held, so it is never re-asked.
-    fn request_identity(&mut self, guild_id: u32, commands: &NetCommands) {
-        if guild_id != 0
-            && !self.identities.contains_key(&guild_id)
-            && self.queried.insert(guild_id)
-        {
-            let _ = commands.0.send(ClientCommand::GuildQuery { guild_id });
+    fn request_identity(&self, guild_id: u32, commands: &NetCommands) {
+        if guild_id != 0 {
+            self.identities.get_or_ask(guild_id, || {
+                let _ = commands.0.send(ClientCommand::GuildQuery { guild_id });
+            });
         }
     }
 
     /// A guild's identity, if we hold a real one. `None` covers both "not asked yet / in flight"
     /// and "no such guild".
     fn identity(&self, guild_id: u32) -> Option<&Identity> {
-        self.identities.get(&guild_id).filter(|i| i.exists())
+        self.identities.get(guild_id).filter(|i| i.exists())
     }
 
     /// [`Self::request_identity`] then [`Self::identity`] — the read that also asks, shaped like
     /// [`crate::names::NameCache::resolve`]: it answers `None` for *this* call and the answer
     /// arrives later, which is the reference's behaviour and not a gap to paper over.
-    fn resolve_identity(&mut self, guild_id: u32, commands: &NetCommands) -> Option<&Identity> {
+    fn resolve_identity(&self, guild_id: u32, commands: &NetCommands) -> Option<&Identity> {
         self.request_identity(guild_id, commands);
         self.identity(guild_id)
     }
@@ -290,7 +306,7 @@ impl GuildState {
     /// while it has not arrived or the player has no guild. A miss sends the query, the lazy-cache
     /// idiom every other read of this cache uses.
     pub(crate) fn own_emblem_record(
-        &mut self,
+        &self,
         guild_id: u32,
         commands: &NetCommands,
     ) -> Option<[i32; 5]> {
@@ -308,8 +324,7 @@ impl GuildState {
     /// dropped so the next query anywhere re-fetches it — the tabards of every member in sight
     /// re-dress off the arrival, as the reference's guild-appearance refresh does.
     pub(crate) fn evict_own_identity(&mut self) {
-        if self.identities.remove(&self.guild_id).is_some() {
-            self.queried.remove(&self.guild_id);
+        if self.identities.evict(self.guild_id) {
             self.identity_generation = self.identity_generation.wrapping_add(1);
             self.dirty = true;
         }
@@ -317,11 +332,10 @@ impl GuildState {
 
     /// `SMSG_GUILD_QUERY_RESPONSE` — fill (or negatively fill) the identity cache.
     fn apply_query_response(&mut self, response: GuildQueryResponse) {
-        self.queried.remove(&response.guild_id);
         let ours = response.guild_id == self.guild_id;
         self.identities.insert(
             response.guild_id,
-            Identity {
+            Some(Identity {
                 name: response.name,
                 rank_names: response.rank_names,
                 emblem: GuildEmblem {
@@ -331,7 +345,7 @@ impl GuildState {
                     border_color: response.border_color,
                     background_color: response.background_color,
                 },
-            },
+            }),
         );
         self.identity_generation = self.identity_generation.wrapping_add(1);
         self.dirty = true;
@@ -373,8 +387,7 @@ impl GuildState {
                 // this packet.
                 let rank = notice.params.first().and_then(|p| p.parse::<usize>().ok());
                 let name = notice.params.get(1).cloned().unwrap_or_default();
-                if let (Some(rank), Some(identity)) =
-                    (rank, self.identities.get_mut(&self.guild_id))
+                if let (Some(rank), Some(identity)) = (rank, self.identities.get_mut(self.guild_id))
                 {
                     if let Some(slot) = identity.rank_names.get_mut(rank) {
                         *slot = name;
@@ -757,19 +770,42 @@ pub(crate) mod apply {
     }
 }
 
+/// **The guild feed, as an orderable thing** — so a system that must run after the guild events
+/// have fired can say so without reaching for the function (and dragging its private memo type
+/// into the crate's surface). Its one consumer is the chat drain, which the reference orders
+/// after the world-enter cascade's events: `ui_chat`'s registration has the addresses.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GuildFeed;
+
 /// The guild windows' session: the wire mirror, the VM feed, and the outbound intents.
 pub(crate) struct UiGuildPlugin;
 
+/// Guild Member Alert's change callback (1589, 2303) — conjunct 2 of the sign-on/sign-off
+/// line's condition; a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut notify: ResMut<GuildMemberNotify>) {
+    if ev.is("guildMemberNotify") {
+        notify.0 = ev.flag();
+    }
+}
+
 impl Plugin for UiGuildPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
+        crate::query_cache::register::<GuildState>(app);
         app.init_resource::<GuildState>()
             .init_resource::<GuildMemberNotify>()
             .add_systems(
                 Update,
                 (
-                    feed::feed_guild.before(UiInput),
+                    feed::feed_guild.in_set(UiFeed).in_set(GuildFeed),
                     feed::drain_guild.after(UiInput),
-                ),
+                )
+                    // **Never against the boot VM** (1348/1978, and B376's half of it): the feed
+                    // takes the MOTD and the roster edges through a [`crate::ui_script::VmMemo`]
+                    // that the entry load does not reset, so an edge spent on a VM with no frames
+                    // is spent for the whole login — the "Guild Message of the Day:" line fired
+                    // into nothing and never fired again. `ingame_ui_up`'s doc has the window.
+                    .run_if(crate::ui_script::ingame_ui_up),
             );
     }
 }
@@ -968,8 +1004,8 @@ mod tests {
             name: String::new(),
             ..Default::default()
         });
-        assert!(guild.identities.contains_key(&7), "cached as a negative");
-        assert!(!guild.queried.contains(&7), "and no longer in flight");
+        assert!(guild.identities.answered(7), "cached as a negative");
+        assert!(!guild.identities.is_pending(7), "and no longer in flight");
         assert!(
             guild.resolve_identity(7, &commands).is_none(),
             "an empty name is not a guild"
@@ -1066,7 +1102,9 @@ mod tests {
     #[test]
     fn leaving_the_guild_drops_the_roster_but_not_the_identities() {
         let mut guild = GuildState::default();
-        guild.identities.insert(7, identity("Legacy", &["GM"]));
+        guild
+            .identities
+            .insert(7, Some(identity("Legacy", &["GM"])));
         assert!(guild.mirror_self(7, 0), "joined");
         guild.apply_roster(GuildRoster {
             motd: "Raid at eight".into(),
@@ -1082,9 +1120,42 @@ mod tests {
         assert!(guild.members.is_empty());
         assert!(guild.motd.is_empty());
         assert_eq!(guild.selection, 0);
-        assert!(guild.identities.contains_key(&7), "identities survive");
+        assert!(guild.identities.answered(7), "identities survive");
 
         assert!(!guild.mirror_self(0, 0), "no edge when nothing moved");
+    }
+
+    /// **B376, at the line that caused it.** At a login the server sends `SMSG_GUILD_EVENT 0x02`
+    /// (the MOTD) a whole packet burst before our own avatar's descriptor carries
+    /// `PLAYER_GUILDID`, so the mirror's first sight of our guild id is `0 -> N` — and that is us
+    /// being TOLD which guild we are in, not us moving between two. Reading it as a move wiped the
+    /// MOTD that had already arrived, in the same `feed_guild` call that would have fired
+    /// `GUILD_MOTD` a few lines further down: the login line was destroyed before the edge could
+    /// be taken, and the text only came back when the guild pane asked for a roster — the report.
+    #[test]
+    fn learning_our_own_guild_id_is_not_leaving_a_guild() {
+        let mut guild = GuildState::default();
+        guild.apply_event(&event(
+            guild_event::MOTD,
+            &["Raid Wednesday at eight."],
+            None,
+        ));
+        assert!(!guild.in_guild(), "the descriptor has not said yet");
+
+        assert!(
+            guild.mirror_self(1, 3),
+            "the descriptor finally names the guild"
+        );
+        assert_eq!(
+            guild.motd, "Raid Wednesday at eight.",
+            "the MOTD is about the guild we have just been told we are in"
+        );
+        assert_eq!(
+            guild.roster_event,
+            Some(RosterUpdate::Stale),
+            "the pane still learns the snapshot moved — the MOTD packet's own stale signal, \
+             which outranks the `Applied` this edge notes"
+        );
     }
 
     /// Our own rank's rights word is read out of the roster's array by our own descriptor rank,
@@ -1124,13 +1195,13 @@ mod tests {
         guild.mirror_self(7, 0);
         guild
             .identities
-            .insert(7, identity("Legacy", &["GM", "Off"]));
+            .insert(7, Some(identity("Legacy", &["GM", "Off"])));
         guild.apply_event(&event(
             guild_event::UPDATE_RANK_NAME,
             &["1", "Officer"],
             None,
         ));
-        assert_eq!(guild.identities[&7].rank_name(1), "Officer");
+        assert_eq!(guild.identities.get(7).unwrap().rank_name(1), "Officer");
         assert!(guild.dirty);
     }
 
@@ -1198,7 +1269,7 @@ mod tests {
         let mut guild = GuildState::default();
         guild
             .identities
-            .insert(7, identity("Legacy", &["GM", "Off"]));
+            .insert(7, Some(identity("Legacy", &["GM", "Off"])));
 
         // A creature, and a guildless player: no PLAYER_GUILDID at all.
         let guildless = ObjectFields::from_pairs(&[]);
@@ -1239,9 +1310,9 @@ mod tests {
         let mut guild = GuildState::default();
         guild
             .identities
-            .insert(7, identity("Legacy", &["GM", "Off"]));
+            .insert(7, Some(identity("Legacy", &["GM", "Off"])));
         // The negative cache: a query that came back empty is "no such guild", not a blank name.
-        guild.identities.insert(8, identity("", &[]));
+        guild.identities.insert(8, Some(identity("", &[])));
 
         let guildless = ObjectFields::from_pairs(&[]);
         assert_eq!(unit_guild_name(&guildless, &mut guild, &commands), None);

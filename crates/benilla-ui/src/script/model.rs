@@ -789,6 +789,9 @@ pub(crate) struct Model {
     /// `(registered name, new value)` per Lua `SetCVar` since the app's last
     /// [`super::UiScript::take_cvar_changes`] drain — the knob-sync + config-dirty cue.
     pub(crate) cvar_changes: Vec<(String, String)>,
+    /// `(name, default)` per addon `RegisterCVar` that created a slot, since the host's last
+    /// [`super::UiScript::take_cvar_registrations`] drain (decision 2303).
+    pub(crate) cvar_registrations: Vec<(String, String)>,
     /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
     pub(crate) cvars_warned: HashSet<String>,
 
@@ -1219,11 +1222,16 @@ pub(crate) struct Model {
     pub(crate) bank_close: bool,
 
     /// The open trainer's service snapshot the app pushes (`None` = no trainer open), the
-    /// `BuyTrainerService` intents it drains, the engine-held 1-based selection (0 = none), and
-    /// whether `CloseTrainer` was called — the trainer seam ([`trainer`], decision 0237).
+    /// `BuyTrainerService` intents it drains, the engine-held selection, and whether `CloseTrainer`
+    /// was called — the trainer seam ([`trainer`], decision 0237).
+    ///
+    /// The selection is the selected service's **spell id**, not its row number. A row number is a
+    /// coordinate in a list that three independent things move under it — the state filter, a
+    /// collapse, and a re-list — and `GetTrainerSelectionIndex` answering with a stale-but-in-range
+    /// one is what left the detail pane describing a spell that had already left the window.
     pub(crate) trainer: Option<trainer::TrainerState>,
     pub(crate) trainer_buys: Vec<u32>,
-    pub(crate) trainer_selection: u32,
+    pub(crate) trainer_selection: Option<u32>,
     pub(crate) trainer_close: bool,
     /// The three state filters (available / unavailable / used) — the real client hides filtered
     /// service rows itself ([`trainer`]); all shown by default. A state filter hides *services*, never
@@ -1727,6 +1735,26 @@ pub(crate) struct Model {
     /// payload, so two calls in a frame are two captures.
     pub(crate) screenshot_asks: u32,
     pub(crate) realm_name: String,
+    /// **The local player record — `0xc27d80`, ours** (decisions 2261 and 2263).
+    ///
+    /// The bytes, the four verbs that read it and why `UnitLevel` is not among them are on
+    /// [`super::PlayerRecord`] itself; what belongs here is the *lifetime*, because that is what
+    /// this field's position in the `Model` decides.
+    ///
+    /// **Two writers, and the asymmetry between them is the mechanism.** The world-entry UI load
+    /// seeds it from the roster row of the pick in flight — our copy of the same char-enum record
+    /// — beside [`Self::realm_name`] and before the addon walk (1195's slot, 1230's source); and
+    /// [`super::UiScript::set_unit`] keeps it in step for any `"player"` push that **carries** the
+    /// field. A push that does not carry it leaves it standing. So the record can be corrected but
+    /// never blanked, which is the reference's never-cleared property expressed where it can be
+    /// relied on — and decision 2260 is why that matters: a name-cache miss for our own guid
+    /// reached Lua as a nameless player snapshot and took KLHThreatMeter down with it.
+    ///
+    /// Our VM is rebuilt per login (1290) where the reference's record simply persists, so each new
+    /// VM is told once. That is the whole of the difference, and it is unobservable: the four verbs
+    /// do not exist between logins either — they live only in the in-game table `0x850438`, which
+    /// `UI_Init` installs and the teardown nils, and `GlueScript_RegisterBindings 0x46abb0` skips.
+    pub(crate) player_record: super::PlayerRecord,
     /// The hearthstone bind location's NAME, behind `GetBindLocation()` — the app resolves the
     /// `SMSG_BINDPOINTUPDATE` area id through the same AreaTable catalog the hearthstone's `$z`
     /// token already uses, and pushes the resolved string here.
@@ -1773,6 +1801,18 @@ pub(crate) struct Model {
     /// `IsAltKeyDown` — pushed by the app's input pass ([`UiScript::set_modifiers`]) BEFORE the
     /// frame's mouse events, so a click handler's fork reads the state at click time.
     pub(crate) modifiers: (bool, bool, bool),
+}
+
+impl Model {
+    /// The detail pane of the row `SelectQuestLogEntry` currently names — resolved HERE, per call,
+    /// never baked into the pushed snapshot (decision 2247). The reference's detail bindings read
+    /// the selection variable and peek the quest cache inside the same call, so a select-then-read
+    /// pair within one frame answers about the row just selected; the app's push only supplies the
+    /// per-row data those reads land on. `None` for no selection, an out-of-range one, or a header.
+    pub(crate) fn selected_quest_detail(&self) -> Option<&quest_log::QuestLogDetail> {
+        let index = usize::try_from(self.quest_log_selection.checked_sub(1)?).ok()?;
+        self.quest_log.entries.get(index)?.detail.as_ref()
+    }
 }
 
 impl Model {
@@ -1989,6 +2029,7 @@ impl Model {
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
+            cvar_registrations: Vec::new(),
             cvars_warned: HashSet::new(),
             multisample_formats: Vec::new(),
             screen_resolutions: Vec::new(),
@@ -2105,7 +2146,7 @@ impl Model {
             bank_close: false,
             trainer: None,
             trainer_buys: Vec::new(),
-            trainer_selection: 0,
+            trainer_selection: None,
             trainer_close: false,
             trainer_filter: [true; 3],
             trainer_collapsed: HashSet::new(),
@@ -2213,6 +2254,7 @@ impl Model {
             played_time_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),
+            player_record: super::PlayerRecord::default(),
             bind_location: String::new(),
             gm_ticket_categories: Vec::new(),
             gm_ticket_intents: Vec::new(),

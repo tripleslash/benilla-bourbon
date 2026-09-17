@@ -8,14 +8,16 @@ use std::time::Duration;
 // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
 
+use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
 use crate::cooldowns::Cooldowns;
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
-use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells};
+use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
 use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
+use crate::ui_spellbook::LearnedInTab;
 
 use super::super::{GuidIndex, ObjectStore, SelfGuid};
 
@@ -53,11 +55,53 @@ pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerAct
 /// a level-up rank gain; decision 0237). The spellbook feed diffs `spells` each frame, so the insert
 /// is all it needs to surface (the add-gate that decides which known spells are *book* entries is
 /// the feed's, decision 0227). No action-bar change — learning a spell does not bar it.
-pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
+///
+/// It also **announces the learn in chat**, which is the reference's own tail on this packet and
+/// not a nicety: `0x5e61c0` -> `AddSpell(id, slot, 1, 1)` -> the registrar `0x4b25b0` with its
+/// announce flag set (decision 2243, [`announce_learn`]).
+pub(super) fn learned_spell(
+    spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+    tab_flash: &mut LearnedInTab,
+) {
     debug!("net: learned spell {spell_id}");
     if actions.spells.insert(spell_id) {
         actions.dirty = true;
     }
+    announce_learn(spell_id, spells, errors);
+    tab_flash.0.push(spell_id);
+}
+
+/// **The learn announcement** — the `ERR_LEARN_*` chat line the registrar `0x4b25b0` prints at
+/// `0x4b2909` for a spell learned *mid-session* (decision 2243).
+///
+/// Which of the three lines, and whether the argText carries the rank, is
+/// [`benilla_formats::SpellDisplay::learn_announcement`]'s — it is a `Spell.dbc` `Attributes` read
+/// and its byte trail lives with the record. What is this side's is the mapping to catalog keys:
+/// ids `0x37`/`0x38`/`0x39` are `MsgKind::Chat` rows carrying chat type `10`, so
+/// [`crate::ui_action::UiErrorKeys`] puts all three on the chat window's system channel without
+/// this call site naming a surface (decision 1770).
+///
+/// A missing catalog (`Spells` absent, a DBC that failed to load) says nothing at all, like every
+/// other display path here — and so does an unknown id, which is the reference's own bounds/null
+/// bail on the `Spell.dbc` store at the registrar's head (`0x4b25c6` / `0x4b25d2` / `0x4b25e0`,
+/// all three jumping straight to the epilogue).
+fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+    let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
+        return;
+    };
+    let Some(kind) = display.learn_announcement() else {
+        return;
+    };
+    let (key, arg) = match kind {
+        LearnAnnouncement::Spell => ("ERR_LEARN_SPELL_S", display.ranked_name()),
+        LearnAnnouncement::Ability => ("ERR_LEARN_ABILITY_S", display.ranked_name()),
+        // The recipe arm pushes the bare name — it returns before the rank composer.
+        LearnAnnouncement::Recipe => ("ERR_LEARN_RECIPE_S", display.name.clone()),
+    };
+    errors.0.push(UiError::s(key, arg));
 }
 
 /// A spell taken back out of the book (`SMSG_REMOVED_SPELL`, decision 1584) — the inverse of
@@ -67,16 +111,48 @@ pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
 /// only visible effect was the points coming back — the talent window went on drawing the ranks it
 /// had, because [`crate::ui_talent`] derives rank from exactly this set.
 ///
+/// It **announces the unlearn in chat** — *"You have unlearned %s."* — under
+/// [`benilla_formats::SpellDisplay::announces_unlearn`]'s four gates (decision 2246). 2243 claimed
+/// the opposite here, on a byte citation, and was wrong: it bounded `RemoveSpell 0x5e9fe0` at the
+/// `ret 0x8` at `0x5ea28f` and so never read the block at `0x5ea292`, which is a live branch
+/// target past that `ret`. `0x5ea2ab push 0x14a` is that block, and `SMSG_REMOVED_SPELL`'s arm
+/// (`0x5e43e3`) is the caller that reaches it with the flag set.
+///
 /// The insert's mirror image, and deliberately no more than that: the spellbook, talent and pet
 /// feeds all diff `spells` and fire their own refresh events, and
 /// [`crate::ui_action::LearnedAbilities`] re-derives off the same change (the reference's own
 /// unlearn write site, `0x4b2c50`). What happens to a **bar button** still pointing at the removed
 /// spell is a separate law this arm deliberately does not invent — see 1584's scope note.
-pub(super) fn removed_spell(spell_id: u32, actions: &mut PlayerActions) {
+pub(super) fn removed_spell(
+    spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+) {
     debug!("net: removed spell {spell_id}");
     if actions.spells.remove(&spell_id) {
         actions.dirty = true;
     }
+    announce_unlearn(spell_id, spells, errors);
+}
+
+/// **The unlearn announcement** — `ERR_SPELL_UNLEARNED_S` (`0x5ea2ab`), the counterpart to
+/// [`announce_learn`] and deliberately not a mirror of it (decision 2246).
+///
+/// The argText is the **bare** name: `0x5ea2a3` pushes `SpellRec+0x1e0` and there is no rank
+/// composer on this path at all, so a respec'd talent rank reads "You have unlearned Improved
+/// Fireball." with no "(Rank 3)". Which spells say it is
+/// [`benilla_formats::SpellDisplay::announces_unlearn`]'s — the bytes live with the record.
+fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+    let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
+        return;
+    };
+    if !display.announces_unlearn() {
+        return;
+    }
+    errors
+        .0
+        .push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
 }
 
 /// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old **in the book** (decision
@@ -86,15 +162,28 @@ pub(super) fn removed_spell(spell_id: u32, actions: &mut PlayerActions) {
 /// *here* as well would be a second, weaker copy of that law — weaker because this packet doesn't
 /// arrive at all when the rank was gained while the character was loading (vmangos suppresses it
 /// with `IsInWorld()`), which is exactly the case that shipped a dead rank-1 button.
-pub(super) fn superceded_spell(old_spell_id: u32, new_spell_id: u32, actions: &mut PlayerActions) {
+pub(super) fn superceded_spell(
+    old_spell_id: u32,
+    new_spell_id: u32,
+    actions: &mut PlayerActions,
+    spells: Option<&Spells>,
+    errors: &mut UiErrorKeys,
+    tab_flash: &mut LearnedInTab,
+) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
     actions.spells.remove(&old_spell_id);
     actions.spells.insert(new_spell_id);
     actions.dirty = true;
+    // A rank-up announces exactly like a first learn, and only once: the supersede pair `0x4b2f50`
+    // calls the unlearn `0x4b2c50` and then the registrar `0x4b25b0` with `mov edx,0x1`
+    // (`0x4b2f61`), and the unlearn half holds no `DisplayError` call at all (decision 2243).
+    announce_learn(new_spell_id, spells, errors);
+    // The rank-up reaches the registrar with the same flag set (`0x4b2f61 mov edx,0x1`), so it
+    // flashes the tab too — for the NEW rank, whose tab is the one it lands in (2252).
+    tab_flash.0.push(new_spell_id);
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cast_result(
     spell_id: u32,
     success: bool,
@@ -189,6 +278,7 @@ pub(super) fn cast_result(
                     arg,
                     // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
                     caster: crate::ui_action::Caster::Player,
+                    redisplay: false,
                 });
             }
         }
@@ -248,7 +338,6 @@ pub(super) fn cast_result(
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
 /// — the precast trigger the phase-2 casting animation loop builds on (decision 0099 phase 1).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spell_start(
     caster: u64,
     spell_id: u32,
@@ -365,7 +454,6 @@ const GO_TYPE_CHEST: i32 = 3;
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
 /// visually from the same Speed column (decision 0099 phase 4: the target lists go out as
 /// [`SpellGoTargets`] for the router's instant-impact/missile branch).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_go(
     caster: u64,
     spell_id: u32,
@@ -388,6 +476,9 @@ pub(super) fn spell_go(
     pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
+    // The three floating-text CVars, read inside the word emitter `0x607140` itself — so they
+    // gate the miss words below exactly as they gate a damage number (decision 2229).
+    text_gates: crate::combat_text::DamageTextGates,
     go_lid: &mut MessageWriter<crate::go_anim::GoLidOpen>,
     // The client-local loot-target latch — armed here for a chest (decision 1477, §6 above).
     loot_latch: &mut crate::ui_loot::LootLatch,
@@ -438,7 +529,7 @@ pub(super) fn spell_go(
     }
     // A cast that names a GameObject (an open-lock cast on a chest / locked door) hands off to the GO
     // animation driver, which gates on the open-lock effect and opens the lid on the cast going off
-    // (decision 0250). Independent of the caster being streamed to us — an observed open still animates.
+    // (decision 2271). Independent of the caster being streamed to us — an observed open still animates.
     if let Some(go_guid) = go_target {
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
@@ -621,26 +712,46 @@ pub(super) fn spell_go(
     // The miss list's floating words (0137 phase 2, the `0x6e7a70` handler): one outcome word
     // over each missed target — except REFLECT, which re-anchors to the caster (`0x6e7e51`).
     // Gate A applies to whichever unit the word lands over. Source-classified first (the color
-    // law's K, inside every emitter twin): another caster's misses draw nothing. The words keep
-    // the row-default white (this site's record push is unpinned — flagged open).
-    if !misses.is_empty()
-        && super::combat_log::classify_source(caster, index, self_guid, stores).is_some()
-    {
-        for &(guid, code) in &misses {
-            let anchor_guid = if code == 11 { caster } else { guid };
-            if self_guid.0 == Some(anchor_guid) {
-                continue;
-            }
-            if let (Some(&anchor), Some((word, category))) = (
-                index.0.get(&anchor_guid),
-                crate::combat_text::miss_word(code),
-            ) {
-                text.write(crate::combat_text::CombatTextSpawn {
-                    anchor,
-                    text: word.to_string(),
-                    category,
-                    color: None,
-                });
+    // law's K, inside every emitter): another caster's misses draw nothing.
+    //
+    // **Two laws phase 2 left open, both closed by the 2229 §5.**
+    //
+    // *Timing* — `0x6e7d4e fld [SpellRec+0x94]; fcomp 0.0; test ah,0x44; jp 0x6e7e71` skips this
+    // inline emit whenever `Spell.dbc` Speed is nonzero. A TRAVELLING spell's word is floated by
+    // the projectile's own arrival instead ([`crate::entities::MissileMiss`]), so a resisted
+    // Fireball reads "Resist" when the ball lands; a Speed-0 ability prints here, now. No
+    // catalog degrades to printing here, the way a NULL record degrades everywhere else.
+    //
+    // *Colour* — `0x6e7d73 mov edi,[ebp-0x8]` / `0x6e7dcc push edi` pushes the resolved SpellRec,
+    // not NULL, so the word runs the same B/K override as a number: a bit-15-clear spell's "Miss"
+    // is spell-GOLD. The three CVar gates come with it — they are read inside `0x607140`, which
+    // every word path calls, so `CombatDamage 0` silences these words too.
+    if !misses.is_empty() && display.is_none_or(|d| d.speed == 0.0) {
+        if let Some(color) = super::combat_log::classify_source(caster, index, self_guid, stores)
+            .and_then(|source| {
+                crate::combat_text::damage_color(
+                    text_gates,
+                    source,
+                    crate::combat_text::melee_styled(display),
+                )
+            })
+        {
+            for &(guid, code) in &misses {
+                let anchor_guid = if code == 11 { caster } else { guid };
+                if self_guid.0 == Some(anchor_guid) {
+                    continue;
+                }
+                if let (Some(&anchor), Some((word, category))) = (
+                    index.0.get(&anchor_guid),
+                    crate::combat_text::miss_word(code),
+                ) {
+                    text.write(crate::combat_text::CombatTextSpawn {
+                        anchor,
+                        text: word.to_string(),
+                        category,
+                        color,
+                    });
+                }
             }
         }
     }
@@ -697,7 +808,6 @@ pub(super) fn spell_go(
 
 /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
 /// `Casting` state seam the same as [`spell_go`].
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_failed_other(
     caster: u64,
     spell_id: u32,
@@ -945,6 +1055,23 @@ pub(super) fn aura_duration(
     durations.set(slot, remaining_ms, now_secs);
 }
 
+/// One cell of one talent spell-modifier table (`SMSG_SET_FLAT_SPELL_MODIFIER` /
+/// `SMSG_SET_PCT_SPELL_MODIFIER`) — `HandleSetSpellModifier 0x6e9950`'s whole body, which is a
+/// single store: the server sends the absolute value of that `(family bit, op)` pair, never a
+/// delta, so there is nothing to accumulate and nothing to invalidate.
+///
+/// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
+/// documents why it is ours and not the reference's).
+pub(super) fn set_spell_modifier(
+    flat: bool,
+    mask_bit: u8,
+    op: u8,
+    value: i32,
+    mods: &mut crate::spell_mods::SpellModifiers,
+) {
+    mods.set(flat, mask_bit, op, value);
+}
+
 /// The caster's chain-target hop array, filled from a wire target list — the reference's
 /// `0x605780` (decision 0955): it **clears before it fills** and **skips any entry equal to the
 /// unit's own guid** (`0x6057bf`/`0x6057c9`). Targets not streamed to us drop out here: an endpoint
@@ -1000,15 +1127,199 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::ACTION_KIND_SPELL;
 
+    /// A catalog holding one row, so the announce tests can name a real `Attributes` value.
+    fn catalog_with(id: u32, display: benilla_formats::SpellDisplay) -> Spells {
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog =
+            benilla_formats::SpellCatalog::from_displays([(id, display)].into_iter().collect());
+        spells
+    }
+
+    /// The report this arm was missing entirely: training at a class trainer printed nothing in
+    /// chat. Heroic Strike carries `SPELL_ATTR_ABILITY`, so the reference's `0x4b29b3 add eax,0x37`
+    /// lands on `0x38` — the *ability* wording — and the argText is the client's `"%s (%s)"`.
+    #[test]
+    fn a_learned_ability_announces_the_ability_line_with_its_rank() {
+        let spells = catalog_with(
+            78,
+            benilla_formats::SpellDisplay {
+                name: "Heroic Strike".to_string(),
+                rank: Some("Rank 1".to_string()),
+                attributes: 0x10,
+                ..Default::default()
+            },
+        );
+        let mut actions = PlayerActions::default();
+        let mut errors = UiErrorKeys::default();
+        let mut flash = LearnedInTab::default();
+        learned_spell(78, &mut actions, Some(&spells), &mut errors, &mut flash);
+
+        assert_eq!(errors.0.len(), 1, "one line, once");
+        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 1)"));
+        // The same live-mutation flag gates the tab flash, so the queue takes it too (2252).
+        assert_eq!(flash.0, vec![78], "queued for LEARNED_SPELL_IN_TAB");
+    }
+
+    /// The other two arms of the same block, from the same entry point: a plain row is a *spell*,
+    /// and a tradeskill row is a *recipe* whose argText drops the rank (the reference returns from
+    /// `0x4b2944` without ever reaching the subtext composer).
+    #[test]
+    fn the_spell_and_recipe_arms_pick_their_own_key_and_argument() {
+        let spells = catalog_with(
+            133,
+            benilla_formats::SpellDisplay {
+                name: "Fireball".to_string(),
+                rank: Some("Rank 1".to_string()),
+                attributes: 0x10000,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            133,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
+        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Fireball (Rank 1)"));
+
+        let spells = catalog_with(
+            2550,
+            benilla_formats::SpellDisplay {
+                name: "Cooking".to_string(),
+                rank: Some("Apprentice".to_string()),
+                attributes: 0x20,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            2550,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
+        assert_eq!(errors.0[0].key, "ERR_LEARN_RECIPE_S");
+        assert_eq!(
+            errors.0[0].arg_s(),
+            Some("Cooking"),
+            "the recipe arm pushes the bare name"
+        );
+    }
+
+    /// A rank-up is `SMSG_SUPERCEDED_SPELL`, and the supersede pair `0x4b2f50` reaches the
+    /// registrar with `edx = 1` — so it announces, naming the NEW rank, and exactly once (the
+    /// unlearn half holds no `DisplayError` call).
+    #[test]
+    fn a_rank_up_announces_the_new_rank_once() {
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(
+            [
+                (
+                    78,
+                    benilla_formats::SpellDisplay {
+                        name: "Heroic Strike".to_string(),
+                        rank: Some("Rank 1".to_string()),
+                        attributes: 0x10,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    284,
+                    benilla_formats::SpellDisplay {
+                        name: "Heroic Strike".to_string(),
+                        rank: Some("Rank 2".to_string()),
+                        attributes: 0x10,
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut actions = PlayerActions::default();
+        actions.spells.insert(78);
+        let mut errors = UiErrorKeys::default();
+        let mut flash = LearnedInTab::default();
+        superceded_spell(
+            78,
+            284,
+            &mut actions,
+            Some(&spells),
+            &mut errors,
+            &mut flash,
+        );
+
+        assert_eq!(errors.0.len(), 1, "one line for a rank-up, not two");
+        assert_eq!(
+            flash.0,
+            vec![284],
+            "the NEW rank's tab flashes, not the old one's"
+        );
+        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 2)"));
+    }
+
+    /// The silent cases, which are the ones a naive "print on every learn" would get wrong: a
+    /// `DO_NOT_DISPLAY` row (every language, every weapon proficiency — the packets a fresh
+    /// character receives in bulk), and a spell the catalog does not know at all.
+    #[test]
+    fn a_do_not_display_spell_and_an_unknown_id_announce_nothing() {
+        let spells = catalog_with(
+            668,
+            benilla_formats::SpellDisplay {
+                name: "Language: Common".to_string(),
+                attributes: 0xC0,
+                ..Default::default()
+            },
+        );
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            668,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
+        learned_spell(
+            99999,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
+        assert!(
+            errors.0.is_empty(),
+            "PASSIVE|DO_NOT_DISPLAY is silent, and so is an id with no record"
+        );
+    }
+
     #[test]
     fn learned_spell_adds_to_the_book_once() {
         let mut actions = PlayerActions::default();
-        learned_spell(6603, &mut actions);
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            6603,
+            &mut actions,
+            None,
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
         assert!(actions.spells.contains(&6603));
         assert!(actions.dirty, "a new spell dirties the feed");
 
         actions.dirty = false;
-        learned_spell(6603, &mut actions);
+        learned_spell(
+            6603,
+            &mut actions,
+            None,
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
         assert!(
             !actions.dirty,
             "re-learning a known spell is a no-op (insert returns false)"
@@ -1030,7 +1341,14 @@ mod tests {
             },
         );
 
-        superceded_spell(78, 284, &mut actions);
+        superceded_spell(
+            78,
+            284,
+            &mut actions,
+            None,
+            &mut UiErrorKeys::default(),
+            &mut LearnedInTab::default(),
+        );
 
         assert!(
             !actions.spells.contains(&78),
@@ -1073,6 +1391,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1140,6 +1459,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (
@@ -1177,6 +1497,298 @@ mod tests {
             "the in-flight cast's own GO finishes the bar"
         );
         assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
+    }
+
+    /// **A broken channel flashes green and fades — it never goes red "Interrupted"**, and the
+    /// whole of `Spell::cancel()`'s wire is driven here because the correctness rests on a gate
+    /// that does not mention channels.
+    ///
+    /// vmangos cancels a running channel (moved, turned, target died, `CMSG_CANCEL_CHANNELLING`)
+    /// with **two** packets, in this order (`Spell.cpp` `Spell::cancel`, `SPELL_STATE_CASTING`):
+    ///
+    /// ```text
+    /// SendChannelUpdate(0, true)   -> MSG_CHANNEL_UPDATE(0)      -> SPELLCAST_CHANNEL_STOP
+    /// SendInterrupted(0)           -> SMSG_SPELL_FAILED_OTHER    -> ??? (SendObjectMessageToSet
+    ///                                                                 (…, /*self*/ true))
+    /// ```
+    ///
+    /// The second one **reaches the caster too**, so the obvious reading is that the bar turns red
+    /// a frame after it flashed green. It must not, and three independent things say so:
+    ///
+    /// - vmangos deliberately withholds the *other* interrupt signal —
+    ///   `sendInterrupt = !(m_channeled && m_spellState != SPELL_STATE_PREPARING)` gates
+    ///   `SendCastResult(SPELL_FAILED_INTERRUPTED)` off, with the comment "channeled spells don't
+    ///   display interrupted message even if they are interrupted";
+    /// - the reference's own `SMSG_SPELL_FAILED_OTHER` handler (`0x6e8e40`, opcode `0x2a6`) fires
+    ///   **no FrameScript event at all** — its whole body is `0x60d040` + `0x614150`, the *unit's*
+    ///   cast state, and wow-re's boundary line for it lists no `-> ui` edge;
+    /// - and stock `CastingBarFrame.lua` guards its red arm with `not this.channeling`.
+    ///
+    /// Ours lands on the same behaviour by a **fourth** route, which is the one worth pinning:
+    /// [`spell_failed_other`]'s red edge is keyed to a live `Casting` component, and a channel
+    /// never has one — `Casting` is inserted only for `cast_time_ms > 0`, and `SMSG_SPELL_GO`
+    /// (which always precedes `MSG_CHANNEL_START` in `handle_immediate`) removes it regardless.
+    /// That is correct and it is also invisible: nothing in `spell_failed_other` says "channel",
+    /// so a future change to when `Casting` is armed would turn every broken channel red with no
+    /// test to catch it. This is that test.
+    #[test]
+    fn a_cancelled_channel_never_turns_the_bar_red() {
+        use crate::creature_anim::Casting;
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const BLIZZARD: u32 = 10;
+        let t0 = Instant::now();
+
+        let mut app = App::new();
+        app.add_message::<CastEvent>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<CastBarFeed>()
+            .init_resource::<PendingCast>()
+            .init_resource::<QueuedMeleeSpell>()
+            .init_resource::<ActiveChannel>();
+        let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(10, self_e);
+        app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+        // 1-2. MSG_CHANNEL_START, then the server's own end: MSG_CHANNEL_UPDATE(0).
+        {
+            let world = app.world_mut();
+            let mut feed = world.remove_resource::<CastBarFeed>().unwrap();
+            let mut channel = world.remove_resource::<ActiveChannel>().unwrap();
+            channel_start(BLIZZARD, 8_000, &mut channel, &mut feed);
+            assert_eq!(
+                channel.current(t0 + Duration::from_secs(1)),
+                Some(BLIZZARD),
+                "the mirror is armed while the channel runs"
+            );
+            channel_update(0, &mut channel, &mut feed);
+            assert_eq!(
+                channel.current(t0 + Duration::from_secs(1)),
+                None,
+                "update 0 closes the mirror, so the action button unlights"
+            );
+            world.insert_resource(feed);
+            world.insert_resource(channel);
+        }
+
+        // 3. SendInterrupted(0) — SMSG_SPELL_FAILED_OTHER, addressed to us, for the channel's id.
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      casting: Query<&Casting>,
+                      mut cast_events: MessageWriter<CastEvent>,
+                      self_guid: Res<SelfGuid>,
+                      mut cast_bar: ResMut<CastBarFeed>,
+                      mut pending: ResMut<PendingCast>,
+                      mut queued_melee: ResMut<QueuedMeleeSpell>| {
+                    spell_failed_other(
+                        10,
+                        BLIZZARD,
+                        &mut commands,
+                        &index,
+                        &casting,
+                        &mut cast_events,
+                        &self_guid,
+                        &mut cast_bar,
+                        &mut pending,
+                        &mut queued_melee,
+                        1,
+                    );
+                },
+            )
+            .unwrap();
+
+        let feed = &app.world().resource::<CastBarFeed>().0;
+        assert!(
+            !feed
+                .iter()
+                .any(|e| matches!(e, CastBarEdge::Interrupted | CastBarEdge::Failed)),
+            "a cancelled channel pushes NO red edge — the bar flashes green and fades"
+        );
+        assert_eq!(feed.len(), 2, "exactly the two channel edges");
+        assert!(matches!(feed[0], CastBarEdge::ChannelStart { .. }));
+        assert!(matches!(
+            feed[1],
+            CastBarEdge::ChannelUpdate { remaining_ms: 0 }
+        ));
+    }
+
+    /// **The GO's inline miss word: gold, gated, and only for an INSTANT spell** (decision 2229).
+    ///
+    /// Phase 2 shipped this emit unconditional and hardcoded white. The §5 closed both halves:
+    /// - `0x6e7d4e fld [SpellRec+0x94]; fcomp 0.0; test ah,0x44; jp 0x6e7e71` — a spell with a
+    ///   **travel Speed** prints nothing here; its word rides the projectile's arrival instead
+    ///   ([`crate::entities::MissileMiss`]). Sinister Strike (Speed 0) prints now; Fireball
+    ///   (Speed 24) does not;
+    /// - `0x6e7d73`/`0x6e7dcc` push the resolved SpellRec, so the word takes the same B/K
+    ///   override a number would — **spell gold**, not the category-3 row default;
+    /// - and the `CombatDamage` gate lives inside `0x607140`, which this path calls, so it
+    ///   silences the word too — the leg this site was missing entirely.
+    #[test]
+    fn the_gos_inline_miss_word_is_gold_instant_only_and_cvar_gated() {
+        use crate::combat_text::{CombatTextSpawn, COLOR_SPELL_GOLD};
+        use crate::creature_anim::Casting;
+        use crate::go_anim::GoLidOpen;
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const SINISTER_STRIKE: u32 = 1752; // Speed 0 — an instant melee ability
+        const FIREBALL: u32 = 133; // Speed 24 — it travels
+
+        let make_spells = || crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [
+                    (
+                        SINISTER_STRIKE,
+                        benilla_formats::SpellDisplay {
+                            name: "Sinister Strike".into(),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        FIREBALL,
+                        benilla_formats::SpellDisplay {
+                            name: "Fireball".into(),
+                            speed: 24.0,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+
+        // Our cast (guid 10) misses a creature (guid 20). Returns the words it floated.
+        let fire = |spell: u32, combat_damage: bool| {
+            let mut app = App::new();
+            app.add_message::<CastEvent>()
+                .add_message::<SpellGoTargets>()
+                .add_message::<CombatTextSpawn>()
+                .add_message::<GoLidOpen>()
+                .add_message::<crate::creature_anim::SheathRequest>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<CastBarFeed>()
+                .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::items::Items>();
+            let self_e = app
+                .world_mut()
+                .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
+                .id();
+            let victim_e = app
+                .world_mut()
+                .spawn((Guid(20), ObjectStore::default()))
+                .id();
+            {
+                let mut index = app.world_mut().resource_mut::<GuidIndex>();
+                index.0.insert(10, self_e);
+                index.0.insert(20, victim_e);
+            }
+            app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let spells = make_spells();
+            let gates = crate::combat_text::DamageTextGates {
+                combat_damage,
+                ..Default::default()
+            };
+            app.world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          casting: Query<&Casting>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          mut go_targets: MessageWriter<SpellGoTargets>,
+                          self_guid: Res<SelfGuid>,
+                          stores: Query<&mut ObjectStore>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>,
+                          mut queued_melee: ResMut<QueuedMeleeSpell>,
+                          mut text: MessageWriter<CombatTextSpawn>,
+                          mut go_lid: MessageWriter<GoLidOpen>,
+                          mut cooldowns: ResMut<Cooldowns>,
+                          mut pet_bar: ResMut<crate::ui_pet::PetBar>,
+                          mut items: ResMut<crate::items::Items>,
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                        let net_commands = crate::net::NetCommands(tx.clone());
+                        spell_go(
+                            10,
+                            spell,
+                            0,
+                            vec![],
+                            vec![(20, 1)], // one MISS
+                            Some(20),
+                            None,
+                            None,
+                            None,
+                            None,
+                            &mut commands,
+                            &index,
+                            &casting,
+                            &mut cast_events,
+                            &mut go_targets,
+                            &self_guid,
+                            &stores,
+                            &mut cast_bar,
+                            &mut pending,
+                            &mut queued_melee,
+                            &mut text,
+                            gates,
+                            &mut go_lid,
+                            &mut crate::ui_loot::LootLatch::default(),
+                            (
+                                &mut cooldowns,
+                                Some(&spells),
+                                &mut items,
+                                &net_commands,
+                                &mut pet_bar,
+                            ),
+                            (
+                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut sheath,
+                                false,
+                            ),
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+            app.world_mut()
+                .resource_mut::<Messages<CombatTextSpawn>>()
+                .drain()
+                .map(|s| (s.text, s.category, s.color))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            fire(SINISTER_STRIKE, true),
+            vec![("Miss".to_string(), 3, Some(COLOR_SPELL_GOLD))],
+            "an instant ability's miss word prints here, in spell gold — not white"
+        );
+        assert!(
+            fire(FIREBALL, true).is_empty(),
+            "Speed 24: `0x6e7d4e` skips the inline emit — the projectile floats it on arrival"
+        );
+        assert!(
+            fire(SINISTER_STRIKE, false).is_empty(),
+            "CombatDamage 0 gates the word emitter, not just the number emitter"
+        );
     }
 
     /// **The GO handler's PET leg** (decision 1031): a spell going off on a unit WE own arms the
@@ -1241,6 +1853,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1298,6 +1911,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (
@@ -1374,6 +1988,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1442,6 +2057,7 @@ mod tests {
                         &mut pending,
                         &mut queued_melee,
                         &mut text,
+                        crate::combat_text::DamageTextGates::default(),
                         &mut go_lid,
                         &mut crate::ui_loot::LootLatch::default(),
                         (
@@ -1503,6 +2119,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<AutoRepeatActive>();
 
         let self_e = app
@@ -1611,13 +2228,114 @@ mod tests {
         let mut actions = PlayerActions::default();
         actions.spells.extend([14522, 14788, 14789]);
 
-        removed_spell(14788, &mut actions);
+        let mut errors = UiErrorKeys::default();
+        removed_spell(14788, &mut actions, None, &mut errors);
         assert!(!actions.spells.contains(&14788));
         assert!(actions.dirty);
 
         actions.dirty = false;
-        removed_spell(14788, &mut actions);
+        removed_spell(14788, &mut actions, None, &mut errors);
         assert!(!actions.dirty, "a spell we never knew is not a repaint");
+    }
+
+    /// The unlearn line and its four silent gates (decision 2246) — the behaviour decision 2243
+    /// asserted, with a byte citation, did not exist. The argText is the BARE name: there is no
+    /// rank composer on this path, so a respec'd rank says "Improved Fireball", never
+    /// "Improved Fireball (Rank 3)".
+    #[test]
+    fn an_unlearn_announces_the_bare_name_and_four_things_silence_it() {
+        let row = |attributes: u32, cast_ui: u32| benilla_formats::SpellDisplay {
+            name: "Improved Fireball".to_string(),
+            rank: Some("Rank 3".to_string()),
+            attributes,
+            cast_ui,
+            ..Default::default()
+        };
+
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            11069,
+            &mut PlayerActions::default(),
+            Some(&catalog_with(11069, row(0, 0))),
+            &mut errors,
+        );
+        assert_eq!(errors.0.len(), 1);
+        assert_eq!(errors.0[0].key, "ERR_SPELL_UNLEARNED_S");
+        assert_eq!(
+            errors.0[0].arg_s(),
+            Some("Improved Fireball"),
+            "no rank on the unlearn path"
+        );
+
+        // …and each gate on its own, every one of them silent.
+        for (attributes, cast_ui, why) in [
+            (
+                0x20,
+                0,
+                "IS_TRADESKILL — the container join zeroes the flag at 0x5ea170",
+            ),
+            (
+                0,
+                1,
+                "castUI > 0 takes the container walk and never reaches 0x5ea292",
+            ),
+            (0x80, 0, "DO_NOT_DISPLAY — the sign test at 0x5ea29b"),
+        ] {
+            let mut errors = UiErrorKeys::default();
+            removed_spell(
+                11069,
+                &mut PlayerActions::default(),
+                Some(&catalog_with(11069, row(attributes, cast_ui))),
+                &mut errors,
+            );
+            assert!(errors.0.is_empty(), "{why}");
+        }
+
+        // An unknown id says nothing, like every other display path here.
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            99999,
+            &mut PlayerActions::default(),
+            Some(&catalog_with(11069, row(0, 0))),
+            &mut errors,
+        );
+        assert!(errors.0.is_empty());
+    }
+
+    /// `castUI` gates the unlearn line and NOT the learn line — the reference tests it only
+    /// afterwards, at `0x4b29bf`, to decide the book slot. So a `castUI > 0` spell announces when
+    /// it arrives and is silent when it goes. Asserted because the two methods reading the same
+    /// field for different answers is exactly the kind of asymmetry a later edit "tidies" away.
+    #[test]
+    fn cast_ui_silences_the_unlearn_but_not_the_learn() {
+        let spells = catalog_with(
+            1234,
+            benilla_formats::SpellDisplay {
+                name: "Some Castbar Spell".to_string(),
+                cast_ui: 2,
+                ..Default::default()
+            },
+        );
+
+        let mut errors = UiErrorKeys::default();
+        learned_spell(
+            1234,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+            &mut LearnedInTab::default(),
+        );
+        assert_eq!(errors.0.len(), 1, "the learn block never reads castUI");
+        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+
+        let mut errors = UiErrorKeys::default();
+        removed_spell(
+            1234,
+            &mut PlayerActions::default(),
+            Some(&spells),
+            &mut errors,
+        );
+        assert!(errors.0.is_empty(), "…but the unlearn block does");
     }
     /// **The GO-deferred auto-attack start** (`HandleSpellGo` @ `0x6e83c0`, decision 1593) — the
     /// half of `combat-feel-law.md` §A3 benilla shipped without, because ten hand-picked warrior
@@ -1683,6 +2401,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1748,6 +2467,7 @@ mod tests {
                             &mut pending,
                             &mut queued_melee,
                             &mut text,
+                            crate::combat_text::DamageTextGates::default(),
                             &mut go_lid,
                             &mut crate::ui_loot::LootLatch::default(),
                             (
@@ -1871,6 +2591,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<AutoRepeatActive>()
                 .init_resource::<crate::ui_action::ChainCasts>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();

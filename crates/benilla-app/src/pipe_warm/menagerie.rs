@@ -67,6 +67,9 @@ pub(super) struct WarmLanes<'w> {
     /// The image store (0958): the twin booth's render target and the effect-lane warm's
     /// stand-in texture are created here for the life of the pass.
     pub(super) images: ResMut<'w, Assets<Image>>,
+    /// The UI quad store (2262): the minimap interior composite's tile material is built here
+    /// through its own production builder, for the tile-quad warm rig below.
+    ui_quads: ResMut<'w, Assets<crate::ui_pass::UiQuadMaterial>>,
 }
 
 /// One portrait/paperdoll booth camera + its layer ([`crate::portrait`], 0938): the booths run
@@ -96,12 +99,12 @@ pub(super) type BoothCamQuery<'w, 's> = Query<
 /// variant encoding can never drift from the real spawn paths; meshes from the production
 /// submesh builders (or their attribute-exact stand-ins) so the vertex layouts can't either.
 /// Returns the entity count.
-#[allow(clippy::too_many_arguments)] // one arg per store/anchor, the file's builder convention
 pub(super) fn spawn_menagerie(
     commands: &mut Commands,
     cam: Entity,
     booth: Option<(Entity, &bevy::camera::visibility::RenderLayers)>,
     warm_booth: &(Entity, bevy::camera::visibility::RenderLayers),
+    warm_ortho: &(Entity, bevy::camera::visibility::RenderLayers),
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<WowModelMaterial>,
     lanes: &mut WarmLanes,
@@ -390,6 +393,14 @@ pub(super) fn spawn_menagerie(
     // (the class real bakes install) — that otherwise compiles live on the first in-world
     // portrait. A unit's gear (any family, any layout, far-swapped included when submerged)
     // can reach a booth pane. Shard rows can't (particle instances never ride booth layers).
+    //
+    // …and onto the ORTHOGRAPHIC twin (2262), the third projection class: the UI model tile
+    // atlas's camera. Its rigs are built by `ui_models` through `portrait::material_variant`,
+    // which clones the world material and swaps only the light buffer — the same pipeline key,
+    // under a class nothing warmed. **Minus the far twins**, which the booths do take: a far
+    // twin is `model_render::classify_water_side` swapping a material for an eye-and-model
+    // straddle of a water plane, and a tile is a `<Model>` widget's own file on its own stage —
+    // there is no water plane in a tile and no classify pass runs over one.
     for (mesh, aabb, skinned) in &layouts {
         for mat in mats.iter().chain(far_mats.iter()) {
             spawn_model_rig(commands, cam, None, mesh, aabb, *skinned, mat);
@@ -410,6 +421,18 @@ pub(super) fn spawn_menagerie(
                 commands,
                 warm_booth.0,
                 Some(warm_booth.1.clone()),
+                mesh,
+                aabb,
+                *skinned,
+                mat,
+            );
+            count += 1;
+        }
+        for mat in &mats {
+            spawn_model_rig(
+                commands,
+                warm_ortho.0,
+                Some(warm_ortho.1.clone()),
                 mesh,
                 aabb,
                 *skinned,
@@ -542,7 +565,9 @@ pub(super) fn spawn_menagerie(
     // The plain-`StandardMaterial` lanes (0938 — the director's evening log). The fallback cube
     // (`entities::CubeAssets`, drawn while any entity's model streams) uses the production mesh
     // + materials, on the world camera AND a booth layer (a cube-bodied target can reach a
-    // portrait pane). The nameplate and raid-mark materials are built on first need, so the lane
+    // portrait pane) — but NOT the orthographic twin (2262): `ui_models` has no cube fallback at
+    // all, a tile's root simply stays bare until its M2 is resident, so no cube ever draws
+    // through the tile camera. The nameplate and raid-mark materials are built on first need, so the lane
     // warms REPRESENTATIVES with the builders' exact key fields (`nameplates::spawn_nameplates`,
     // `raid_marks::place_marks` — texture presence is not a key axis); the plate/mark quads
     // share the static-plain attribute set.
@@ -611,6 +636,43 @@ pub(super) fn spawn_menagerie(
         mark,
         &mut count,
     );
+
+    // The **minimap interior composite's tile quad** (1466, warmed by 2262). A `Material2d`
+    // pipeline is keyed on `(view key, MESH LAYOUT)`, and `UiQuadMaterial` therefore has TWO
+    // pipelines, not the one `warm_ui_quad_lane`'s doc claimed: the HUD's batch mesh is
+    // POSITION+UV_0+COLOR, the composite's tile is `Rectangle` — POSITION+NORMAL+UV_0. The
+    // composite's own camera cannot be warmed through (it is `is_active: false` until the player
+    // is inside a baked WMO interior, and an inactive camera is not extracted at all, so there is
+    // no view to specialise against) — but it does not need to be: the two cameras' VIEW keys are
+    // byte-identical (both `Msaa::Off`, neither HDR, same tonemap defs — confirmed by diffing the
+    // two variants in a `WOW_PIPE_TRACE` inventory, which differ in nothing but the vertex defs
+    // and buffer layout). So drawing the composite's mesh + its production material through the
+    // player-UI camera mints exactly the composite's pipeline, under the cover.
+    //
+    // The texture is a real 1×1 stand-in rather than a default handle, so the material's
+    // `AsBindGroup` cannot land on the retry path: a `#[texture]` binding whose `Some(handle)`
+    // does not resolve returns `RetryNextUpdate`, and a warm rig that never prepares is a warm
+    // rig that draws nothing and warms nothing, silently. `warm_effect_lane` binds a stand-in
+    // for the same reason.
+    let tile_tex = lanes.images.add(Image::default());
+    commands.spawn((
+        Mesh2d(meshes.add(crate::ui_pass::tile_quad_mesh())),
+        MeshMaterial2d(
+            lanes
+                .ui_quads
+                .add(crate::ui_pass::UiQuadMaterial::interior_tile(
+                    tile_tex,
+                    crate::minimap::INTERIOR_TILE_ALPHA_REF,
+                )),
+        ),
+        // Visible — unlike the model rigs, which the pacing reveals a slice at a time. It is one
+        // pipeline, drawn once at a scale that covers no pixel worth speaking of.
+        Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::splat(0.001)),
+        crate::ui_pass::ui_render_layers(),
+        WarmRig,
+    ));
+    count += 1;
+
     count
 }
 
@@ -726,14 +788,16 @@ fn warm_pos_uv_mesh() -> Mesh {
     m
 }
 
-/// A tiny quad in the liquid grid's layout — POSITION + NORMAL + UV_0 + UV_1, plus COLOR when
-/// `colored`.
+/// A tiny quad in the liquid grid's layout — POSITION + NORMAL + UV_0 + UV_1, plus
+/// `ATTRIBUTE_COLOR` when `body_color` is set.
 ///
-/// Both layouts ship: `liquid::surface::liquid_bevy_mesh` inserts the first four always and adds
-/// `ATTRIBUTE_COLOR` for a WMO interior pool, which carries its `MOMT.diffColor` body colour on the
-/// vertex. Two layouts is two pipelines per material, and a mesh attribute set is a pipeline key —
-/// which is why warming only the four-attribute one left every dungeon pool compiling live.
-fn warm_liquid_mesh(colored: bool) -> Mesh {
+/// **Both forms are real** (2262's lesson, found by the sweep after it): `liquid_bevy_mesh` takes
+/// an `Option<[f32; 3]>` body colour and inserts the fifth attribute only for an INTERIOR WMO
+/// pool that is not fullbright — the ADT and WMO-exterior lanes pass `None`. `liquid.wgsl:275`
+/// reads it behind `#ifdef VERTEX_COLORS`, so the two are separate pipelines. This doc used to
+/// claim `liquid::surface` "inserts exactly these four attributes", which is what kept the second
+/// one out of the menagerie.
+fn warm_liquid_mesh(body_color: bool) -> Mesh {
     let mut m = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -751,7 +815,8 @@ fn warm_liquid_mesh(colored: bool) -> Mesh {
     m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4]);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs.clone());
     m.insert_attribute(Mesh::ATTRIBUTE_UV_1, uvs);
-    if colored {
+    if body_color {
+        // The production insert's shape exactly (`liquid_bevy_mesh`): one RGBA per vertex, alpha 1.
         m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0, 1.0, 1.0, 1.0]; 4]);
     }
     m.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
@@ -826,11 +891,29 @@ mod tests {
     /// be named in the pipe_warm module, or this red-bars the build.
     #[test]
     fn every_custom_pipeline_lane_has_a_warm_contributor() {
-        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let warm_src = std::fs::read_to_string(src_root.join("pipe_warm/mod.rs")).unwrap()
-            + &std::fs::read_to_string(src_root.join("pipe_warm/menagerie.rs")).unwrap();
+        // Lanes whose one pipeline compiles covered BY CONSTRUCTION, each with the reason:
+        // - UiGammaPipeline (`ui_gamma`, decision 2206): one variant, keyed on the swapchain's
+        //   view format, specialised in the first frame's prepare — pre-world, so covered
+        //   (`publish_cover`: `state != InWorld`) — and the surface's format never changes
+        //   after, so no later variant exists. Not a timing race like `UiQuadMaterial`'s: the
+        //   view exists from frame one, and the pipeline is what bevy's own output blit was.
+        //   (Its world-lane twin, benilla-world's `FfxCombinePipeline`, is outside this scan
+        //   and compiles under the same cover: the player-UI camera's backdrop pair is keyed on
+        //   that camera's own main texture and specialised on its first frame, pre-world, and a
+        //   bake's pair on the bake image's fixed format. That list was one short — a world view
+        //   also has its OWN pair, for the frames nothing claims it, and 2262 found it compiling
+        //   live at app exit. `prepare_textures` now specialises that pair on every frame rather
+        //   than only on the frame it first needs it.)
+        let exempt = ["UiGammaPipeline"];
+        let own_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let warm_src = std::fs::read_to_string(own_src.join("pipe_warm/mod.rs")).unwrap()
+            + &std::fs::read_to_string(own_src.join("pipe_warm/menagerie.rs")).unwrap();
         let mut missing = Vec::new();
-        for (path, text) in walk_rs(&src_root) {
+        let files: Vec<_> = workspace_src_roots()
+            .iter()
+            .flat_map(|r| walk_rs(r))
+            .collect();
+        for (path, text) in files {
             for needle in [
                 "impl SpecializedRenderPipeline for ",
                 "impl SpecializedMeshPipeline for ",
@@ -842,7 +925,7 @@ mod tests {
                         .chars()
                         .take_while(|c| c.is_alphanumeric() || *c == '_')
                         .collect();
-                    if !warm_src.contains(&ty) {
+                    if !exempt.contains(&ty.as_str()) && !warm_src.contains(&ty) {
                         missing.push(format!("{ty} (impl in {})", path.display()));
                     }
                 }
@@ -854,6 +937,41 @@ mod tests {
              menagerie can't see compiles its pipelines live on first draw (decisions \
              0837/0938/0958)"
         );
+    }
+
+    /// **The scan root: every crate in the workspace, not just this one.**
+    ///
+    /// Both lane-coverage scans below used to walk `CARGO_MANIFEST_DIR/src` — which is
+    /// `crates/benilla-app/src`, and every lane either scan exists to catch lives in
+    /// **`benilla-world`**: all eight 3-D `MaterialPlugin` registrations, and both real hand-rolled
+    /// pipelines (`FfxCombinePipeline`, `EffectPipeline`). The only `Specialized*Pipeline` impl in
+    /// benilla-app is `UiGammaPipeline`, which the test then exempts — so the custom-lane assertion
+    /// could not fail, ever, and the material assertion could only ever see the two 2-D/UI
+    /// families. Both tests were green because they were looking at an empty room; the exempt list
+    /// even named `TerrainMaterial`/`WdlMaterial`, types the walk could never reach. Found by the
+    /// sweep after 2262, which is the third time in this file's history that a lane shipped
+    /// unwarmed because the instrument could not see it.
+    fn workspace_src_roots() -> Vec<std::path::PathBuf> {
+        // `crates/benilla-app` → `crates`, then every crate's `src` under it.
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("CARGO_MANIFEST_DIR always has a parent")
+            .to_path_buf();
+        let mut roots: Vec<std::path::PathBuf> = std::fs::read_dir(&crates)
+            .expect("the crates/ directory is always readable from a test")
+            .filter_map(|e| {
+                let p = e.ok()?.path().join("src");
+                p.is_dir().then_some(p)
+            })
+            .collect();
+        roots.sort();
+        assert!(
+            roots.len() > 1,
+            "the lane scans must walk the whole workspace — a single root is the bug this \
+             function exists to prevent (only {roots:?} found under {})",
+            crates.display(),
+        );
+        roots
     }
 
     /// Every `.rs` file under `src`, read — shared by both lane-coverage scans.
@@ -895,17 +1013,28 @@ mod tests {
         //   ring — always drawn under the entry cover by construction, no per-variant key axis.
         // - AddUiMaterial: drawn only by the glue screens, and every pre-world frame counts
         //   as covered (`publish_cover`: `state != InWorld`).
+        // - ShadowCasterMaterial (fork: `player_shadow`): one depth-only material on the shadow
+        //   map's private render layer, with no key axis of its own; its casters are collected
+        //   from the world the entry cover is already hiding. NOT measured against the
+        //   live-compile tripwire yet — a fork-side follow-up, recorded here rather than hidden.
         let families: [(&str, &[&str]); 3] = [
-            ("MaterialPlugin::<", &["TerrainMaterial", "WdlMaterial"]),
+            (
+                "MaterialPlugin::<",
+                &["TerrainMaterial", "WdlMaterial", "ShadowCasterMaterial"],
+            ),
             ("Material2dPlugin::<", &[]),
             ("UiMaterialPlugin::<", &["AddUiMaterial"]),
         ];
-        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let own_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         // "Named in this file" = anywhere in the pipe_warm module folder.
-        let warm_src = std::fs::read_to_string(src_root.join("pipe_warm/mod.rs")).unwrap()
-            + &std::fs::read_to_string(src_root.join("pipe_warm/menagerie.rs")).unwrap();
+        let warm_src = std::fs::read_to_string(own_src.join("pipe_warm/mod.rs")).unwrap()
+            + &std::fs::read_to_string(own_src.join("pipe_warm/menagerie.rs")).unwrap();
         let mut missing = Vec::new();
-        for (path, text) in walk_rs(&src_root) {
+        let files: Vec<_> = workspace_src_roots()
+            .iter()
+            .flat_map(|r| walk_rs(r))
+            .collect();
+        for (path, text) in files {
             for (needle, exempt) in families {
                 for (i, _) in text.match_indices(needle) {
                     // A preceding ident char means this match is really a longer family's name

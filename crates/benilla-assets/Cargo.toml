@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Bevy AssetSource + AssetLoaders over the WoW 1.12.1 MPQ patch chain"
 
+[lints]
+workspace = true
+
 [features]
 # Forwarded dev/player seam (0026 · 1173/1174 · 1175). Default-on. `benilla-formats` must be taken
 # with `default-features = false` and its `dev` re-exported here: it is default-on there too, so
@@ -14,6 +17,9 @@ default = ["dev"]
 dev = ["benilla-formats/dev"]
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use (`anim_rng`'s session seed).
+web-time = "1"
 anyhow.workspace = true
 bevy.workspace = true
 benilla-formats = { path = "../benilla-formats", default-features = false }

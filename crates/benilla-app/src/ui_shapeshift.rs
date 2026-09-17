@@ -215,7 +215,6 @@ impl Plugin for UiShapeshiftPlugin {
                 // after the input pass so a stance click goes out the same frame.
                 feed_shapeshift_bar
                     .in_set(UnitFeed)
-                    .before(UiInput)
                     .before(crate::ui_action::CooldownEvents)
                     .before(crate::ui_aura::AuraEvents),
                 drain_shapeshift_casts.after(UiInput),
@@ -226,7 +225,7 @@ impl Plugin for UiShapeshiftPlugin {
 
 /// Build the bar list from the known-spell set × the catalog, per the module-doc mechanism, and
 /// diff-push it.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn feed_shapeshift_bar(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -238,9 +237,10 @@ fn feed_shapeshift_bar(
     units: Query<&ObjectStore, Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<Reputations>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
+    spell_mods: Res<crate::spell_mods::SpellModifiers>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -284,6 +284,10 @@ fn feed_shapeshift_bar(
         (order, id)
     });
 
+    // The bags walked once for every form's reagent leg (see `feed_action_state`).
+    let carried = store
+        .map(|s| crate::ui_items::carried_counts(&s.0, &items))
+        .unwrap_or_default();
     let fresh: Vec<ShapeshiftFormView> = rows
         .into_iter()
         .map(|(id, d)| {
@@ -298,8 +302,10 @@ fn feed_shapeshift_bar(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
+                        carried: &carried,
+                        spell_mods: &spell_mods,
                     };
-                    usable::spell_usable(id, d, &spells, &ctx, &mut items, &commands).0
+                    usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
                 });
             let texture = form_texture(d, active);
             let cooldown = cooldowns

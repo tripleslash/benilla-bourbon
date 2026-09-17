@@ -18,7 +18,7 @@ use super::{class_name, Roster};
 /// Refill the row texts + visibility, the selected name, and the realm banner whenever the roster
 /// changes (a fresh enum, a selection move) — or when the screen was just (re)spawned (returning
 /// from the create screen finds an unchanged roster; the fresh, empty tree must still fill).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(super) fn refresh_list(
     roster: Res<Roster>,
     areas: Option<Res<AreaTableRes>>,
@@ -211,8 +211,10 @@ pub(super) fn feed_glue_preview(
     // glue screens, so the reset lives at the selection edge rather than in the resource.
     //
     // Keyed on the selection **counter**, not on who is shown: the ref's `SelectCharacter` zeroes
-    // the facing unconditionally (`0x472950`, above the already-built discriminator), so clicking
-    // the row you are already on re-squares the character too. See `Roster::select_seq`.
+    // the facing unconditionally (`0x472950`, above the already-built discriminator), so selecting
+    // the same index again — what a roster refresh does — re-squares the character too. A *click*
+    // on the selected row is gated out one level up and never gets here (`Roster::click_row`,
+    // 2194). See `Roster::select_seq`.
     if *showing != Some(roster.select_seq) {
         *showing = Some(roster.select_seq);
         preview.yaw = 0.0;

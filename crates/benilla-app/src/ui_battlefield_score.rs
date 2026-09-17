@@ -30,7 +30,7 @@ use benilla_ui::script::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStat
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_dialog_verbs::BattlefieldQueue;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::world_state_ui::WorldStateUiRes;
 
 /// `RequestBattlefieldScoreData`'s throttle — `0x4aa170`: `now + 0x1388`.
@@ -73,7 +73,7 @@ pub(crate) fn score_columns(catalog: &WorldStateUiRes, map: u32) -> Vec<Battlefi
 /// Resolve the raw board through the name cache; `None` while any name is still in flight.
 fn resolve_board(
     log: &PvpLogData,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
 ) -> Option<Vec<BattlefieldScoreRow>> {
     let mut rows = Vec::with_capacity(log.rows.len());
@@ -82,13 +82,12 @@ fn resolve_board(
         let (race, class) = names
             .player_traits(r.guid)
             .map_or((0, 0), |(race, class, _)| (race, class));
-        // `0` Horde, `1` Alliance, `-1` neither — the reference's mask walk lands on the same
-        // three values (§6.2), and every playable race has a fixed side in 1.12.
-        let faction = match crate::ui_unit::race_faction_group(race) {
-            Some("Alliance") => 1,
-            Some(_) => 0,
-            None => -1,
-        };
+        // `0` Horde, `1` Alliance, `-1` neither. `0x4aa200` walks the name-cache record's race
+        // through `ChrRaces` → `FactionTemplate` → factionGroupMask, which is `0x5efe00`'s walk
+        // with the null-row guards omitted — so it is [`crate::ui_unit::race_pvp_team`] and not a
+        // second copy of it. (It used to be one, re-derived here out of `race_faction_group`; a
+        // second copy of this walk is exactly what report B378 was, one surface over.)
+        let faction = i32::from(crate::ui_unit::race_pvp_team(race));
         let mut stats = [0u32; 8];
         for (slot, v) in stats.iter_mut().zip(&r.stats) {
             *slot = *v;
@@ -114,7 +113,7 @@ pub(crate) fn feed_battlefield_score(
     board: Res<BattlefieldScoreboard>,
     mut queue: ResMut<BattlefieldQueue>,
     catalog: Option<Res<WorldStateUiRes>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<BattlefieldScores>>>,
 ) {
@@ -125,7 +124,7 @@ pub(crate) fn feed_battlefield_score(
     script.set_battlefield_run_time_ms(queue.run_time_ms(now));
 
     let fresh = board.log.as_ref().and_then(|log| {
-        let rows = resolve_board(log, &mut names, &commands)?;
+        let rows = resolve_board(log, &names, &commands)?;
         let columns = queue
             .active_map()
             .zip(catalog.as_deref())
@@ -187,7 +186,7 @@ impl Plugin for BattlefieldScorePlugin {
                 // status-3 message, as in the client.
                 feed_battlefield_score
                     .before(crate::ui_dialog_verbs::feed_dialog_verbs)
-                    .before(UiInput),
+                    .in_set(UiFeed),
                 drain_battlefield_score.after(UiInput),
             ),
         );

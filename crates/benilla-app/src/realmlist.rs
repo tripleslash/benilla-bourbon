@@ -39,8 +39,21 @@ use bevy::prelude::*;
 /// before `cvars::load_config` applies the saved value at `Startup` — `lib.rs` orders it there.
 pub(crate) struct RealmlistPlugin;
 
+/// `realmList`'s change callback (1667, 2303): a string row — a value that is not an address
+/// is consumed with a warn, and the resource keeps its truth.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<Realmlist>) {
+    if !ev.is(CVAR_REALMLIST) {
+        return;
+    }
+    match normalize(&ev.new) {
+        Some(address) => realmlist.set(&address),
+        None => warn!("cvar realmList: unusable realmlist '{}' ignored", ev.new),
+    }
+}
+
 impl Plugin for RealmlistPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<Realmlist>();
     }
 }
@@ -116,11 +129,6 @@ impl Realmlist {
     /// What the next attempt dials.
     pub(crate) fn address(&self) -> &str {
         &self.address
-    }
-
-    /// Whether `$WOW_HOST` pinned this session (nothing may move it, nothing persists).
-    pub(crate) fn pinned_by_env(&self) -> bool {
-        self.pinned_by_env
     }
 
     /// Point at `address` — already through [`normalize`]. Ignored while pinned by the env, so a
@@ -294,7 +302,7 @@ mod tests {
         };
         r.set("somewhere.else.org");
         assert_eq!(r.address(), "harness.example.org");
-        assert!(r.pinned_by_env());
+        assert!(r.pinned_by_env);
     }
 
     #[test]

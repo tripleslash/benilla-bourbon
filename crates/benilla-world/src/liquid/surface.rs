@@ -378,7 +378,9 @@ pub(crate) fn spawn_liquids<'a>(
 fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
     let tris: Vec<[u32; 3]> = lq
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     if tris.is_empty() {
@@ -447,7 +449,6 @@ fn liquid_bevy_mesh(lq: &LiquidMesh, body_color: Option<[f32; 3]>) -> Mesh {
 /// floor. A liquid footprint has no floor of its own, so an unscoped pool claims every position
 /// under its XY forever — the Uldaman entrance read as submerged under a mushroom cave's water
 /// 186 yd overhead (0696), and Undercity's upper slime submerged the rooms 115 yd below it (0701).
-#[allow(clippy::too_many_arguments)] // one param per concern: assets, placement, fog block, scope
 pub(crate) fn spawn_wmo_liquids<'a>(
     commands: &mut Commands,
     liquids: impl Iterator<Item = &'a LiquidMesh>,

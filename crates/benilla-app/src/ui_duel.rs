@@ -49,7 +49,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_action::Spells;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// `SPELL_EFFECT_DUEL` — the `Effect[0]` value that identifies the duel spell in the player's own
 /// spellbook (7266 "Duel" on 1.12 data, granted to every race/class at creation). The reference
@@ -255,7 +255,7 @@ pub(crate) mod apply {
 fn feed_duel(
     script: Option<NonSendMut<UiScript>>,
     mut duel: ResMut<DuelState>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedDuel>>,
@@ -343,7 +343,6 @@ fn tick_countdown(time: Res<Time>, mut duel: ResMut<DuelState>, mut started: Loc
 }
 
 /// Drain the Era API's duel intents into their sends.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn drain_duel(
     script: Option<NonSendMut<UiScript>>,
     duel: Res<DuelState>,
@@ -469,7 +468,7 @@ impl Plugin for UiDuelPlugin {
                 // the VM — so the tick has to run first or every "Duel starting: N" lands a
                 // frame late.
                 tick_countdown.before(feed_duel),
-                feed_duel.before(UiInput),
+                feed_duel.in_set(UiFeed),
                 drain_duel.after(UiInput),
             ),
         );

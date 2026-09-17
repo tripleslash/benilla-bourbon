@@ -24,7 +24,8 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    read_cstring, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8, Vector3d,
+    capacity_hint, read_cstring, read_i32_le, read_packed_guid, read_u16_le, read_u32_le,
+    read_u64_le, read_u8, Vector3d,
 };
 
 /// `SMSG_CAST_RESULT`'s verdict: `u32 spellId, u8 status` — status `0` (`SPELL_RESULT_STATUS_OKAY`)
@@ -106,7 +107,7 @@ pub struct SpellCastTargets {
     pub mask: u16,
     pub unit_target: Option<u64>,
     /// The GameObject this cast targets (`TARGET_FLAG_GAMEOBJECT`) — an open-lock cast on a chest / locked
-    /// door rides here. Surfaced for the GO lid/door open animation (decision 0250); a unit spell leaves
+    /// door rides here. Surfaced for the GO lid/door open animation (decision 2271); a unit spell leaves
     /// it `None`. Mutually exclusive with `unit_target` in practice (the writer emits one guid).
     pub go_target: Option<u64>,
     pub dest: Option<Vector3d>,
@@ -242,13 +243,15 @@ pub(super) fn read_spell_go(r: &mut impl Read) -> io::Result<SpellGo> {
     let spell_id = read_u32_le(r)?;
     let cast_flags = read_u16_le(r)?;
 
+    // Both counts are `u8` placeholders the server writes back over (`Spell.cpp:4607-4609`);
+    // no tighter bound exists.
     let hit_count = read_u8(r)?;
-    let mut hits = Vec::with_capacity(hit_count as usize);
+    let mut hits = Vec::with_capacity(capacity_hint(hit_count, usize::from(u8::MAX)));
     for _ in 0..hit_count {
         hits.push(read_u64_le(r)?); // raw guid (Spell.cpp:4627,4635) — the hit list is never packed
     }
     let miss_count = read_u8(r)?;
-    let mut misses = Vec::with_capacity(miss_count as usize);
+    let mut misses = Vec::with_capacity(capacity_hint(miss_count, usize::from(u8::MAX)));
     for _ in 0..miss_count {
         let guid = read_u64_le(r)?;
         let reason = read_u8(r)?;
@@ -310,6 +313,39 @@ pub(super) fn read_channel_start(r: &mut impl Read) -> io::Result<(u32, u32)> {
 /// (sent on natural end and on interrupt alike). The cast bar's channel tick/close (decision 0137).
 pub(super) fn read_channel_update(r: &mut impl Read) -> io::Result<u32> {
     read_u32_le(r)
+}
+
+/// Read `SMSG_SET_FLAT_SPELL_MODIFIER` / `SMSG_SET_PCT_SPELL_MODIFIER` → `(mask_bit, op, value)`.
+///
+/// **Exactly 6 bytes, and the first byte is the one that is easy to get backwards.** The single
+/// handler `Spell_C::HandleSetSpellModifier 0x6e9950` reads `u8` (`6e9963`), `u8` (`6e996e`), `i32`
+/// (`6e9979`) — the widths are the stream accessors' own (`0x418cb0` advances the cursor by 1,
+/// `0x418e30` by 4) — and then stores at `imul eax,eax,0x1d; add eax,ecx`, i.e.
+/// **`index = field1 * 29 + field2`**. The reader `GetSpellModifiers 0x6e6b30` strength-reduces
+/// the same index to `4*op + 0x74*i` over a loop counter `i` bounded by `cmp eax,0x40`, which
+/// forces `field1 = i` (the `SpellFamilyFlags` **bit index**, 0..63) and `field2 = op` (the
+/// SpellModOp, 0..28) uniquely — and only that assignment fills the 64×29 table exactly
+/// (`29*63 + 28 == 1855`). The transposed reading addresses 47% of the array and would make the
+/// writer and the reader touch systematically disjoint cells, dropping every modifier silently.
+/// wow-re `system/spell/scratch/spellmod-table-law.md` §1/§3 — which was written to correct
+/// exactly that inversion in a note that had carried it, `verified`, for months.
+///
+/// **vmangos's writer says the same thing from the other end**, which is worth having because the
+/// client-side roles were published inverted once already: `Player::SendSpellMod`
+/// (`Objects/Player.cpp:17815`) loops `for (int eff = 0; eff < 64; ++eff)` over the modifier's
+/// 64-bit `mask` and, for each set bit, writes `uint8(eff)`, `uint8(mod->op)`, `int32(val)` — one
+/// packet per set bit, `val` the SUM of every matching modifier, i.e. absolute. `MAX_SPELLMOD`
+/// there is **29** (`Spells/SpellDefines.h`), the stride.
+///
+/// Both bytes are `movzx`-ed (unsigned); the value's signedness is fixed three independent ways by
+/// the reader (`sets dl` on the pct sum, `fild dword`, and a signed magic-divide). Neither byte is
+/// bounds-checked by the reference — that is the consumer's job, and
+/// `benilla::spell_mods::SpellModifiers` does it; this decode owns the shape only.
+pub(super) fn read_set_spell_modifier(r: &mut impl Read) -> io::Result<(u8, u8, i32)> {
+    let mask_bit = read_u8(r)?;
+    let op = read_u8(r)?;
+    let value = read_i32_le(r)?;
+    Ok((mask_bit, op, value))
 }
 
 /// Read `SMSG_UPDATE_AURA_DURATION` → `(slot, remaining_ms)` (vmangos
@@ -402,6 +438,26 @@ pub fn cast_spell_at_dest(spell_id: u32, dest: [f32; 3]) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_CAST_SPELL` aimed at a **source point** (decision 2218): the targeting-cursor
+/// commit for a `Targets & 0x20` spell — the *other* half of `BindLocation 0x6e60f0`, whose bit-5
+/// arm writes `SPELLCAST+0x30..0x38` and ORs `SOURCE_LOCATION (0x0020)` into the wire mask
+/// (`6e6105`–`6e6126`), exactly as its bit-6 arm does for the dest at `+0x3c..0x44`. Same block,
+/// same three `f32` WoW world coords, one bit over (vmangos `SpellCastTargets::read`,
+/// `SpellCastTargetsInfo.cpp:161-167`: `SOURCE_LOCATION → x,y,z`, `IsValidMapCoord`-gated, read
+/// **before** the dest triple).
+///
+/// The server centres the AoE on it: `TARGET_ENUM_UNITS_ENEMY_AOE_AT_SRC_LOC (15)` fills its
+/// target map with `FillAreaTargets(…, PUSH_SRC_CENTER, …)` (`Spell.cpp:2265`).
+pub fn cast_spell_at_source(spell_id: u32, src: [f32; 3]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(18);
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body.extend_from_slice(&TARGET_FLAG_SOURCE_LOCATION.to_le_bytes());
+    for c in src {
+        body.extend_from_slice(&c.to_le_bytes());
+    }
+    body
+}
+
 /// Body of `CMSG_CANCEL_AURA` (vmangos `WorldPackets::Spell::CancelAura`, `Server/Packets/Spell.h:55-62`):
 /// one `u32` spell id. The server cancels **by spell, not by slot** — `HandleCancelAuraOpcode`
 /// (`SpellHandler.cpp:333-405`) looks the spell up, refuses passives, `SPELL_ATTR_NO_AURA_CANCEL`
@@ -449,6 +505,37 @@ mod tests {
     }
 
     #[test]
+    fn cast_spell_at_source_body_golden() {
+        // spell_id 265 (Area Death (TEST) — Martin Fury's on-use, LE) + mask SOURCE_LOCATION
+        // 0x0020 (LE `20 00`) + the source Vec3 as three f32 LE. VERIFIED against vmangos
+        // `SpellCastTargets::read` (`SpellCastTargetsInfo.cpp:161-167`), which reads the SOURCE
+        // triple BEFORE the dest one and `IsValidMapCoord`-gates it. Decision 2218.
+        assert_eq!(
+            cast_spell_at_source(265, [1.0, -2.5, 3.0]),
+            [
+                0x09, 0x01, 0x00, 0x00, // spell id 265
+                0x20, 0x00, // TARGET_FLAG_SOURCE_LOCATION
+                0x00, 0x00, 0x80, 0x3F, // x = 1.0
+                0x00, 0x00, 0x20, 0xC0, // y = -2.5
+                0x00, 0x00, 0x40, 0x40, // z = 3.0
+            ],
+            "CMSG_CAST_SPELL (ground source) body"
+        );
+        // One bit apart from its twin, and nothing else: the two bodies differ in exactly the
+        // mask byte.
+        let (src, dest) = (
+            cast_spell_at_source(265, [1.0, -2.5, 3.0]),
+            cast_spell_at_dest(265, [1.0, -2.5, 3.0]),
+        );
+        assert_eq!(src.len(), dest.len());
+        assert_eq!(
+            src.iter().zip(&dest).filter(|(a, b)| a != b).count(),
+            1,
+            "source and dest bodies differ only in the mask"
+        );
+    }
+
+    #[test]
     fn aura_bodies_golden() {
         // CMSG_CANCEL_AURA: a lone u32 spell id, LE. 1126 (Mark of the Wild) = 0x0000_0466. The
         // server cancels by spell — there is no slot byte to get wrong.
@@ -461,6 +548,37 @@ mod tests {
         assert!(
             r.is_empty(),
             "the body is exactly 5 bytes — slot is a byte, not a dword"
+        );
+    }
+
+    /// The spell-modifier body, byte for byte — and the field ORDER, which is the whole trap.
+    #[test]
+    fn set_spell_modifier_body_golden() {
+        // mask_bit 35 (0x23) · op 14 (0x0e, SPELLMOD_COST) · value -30 (0xFFFF_FFE2 LE).
+        let body = [0x23, 0x0E, 0xE2, 0xFF, 0xFF, 0xFF];
+        let mut r = &body[..];
+        assert_eq!(read_set_spell_modifier(&mut r).unwrap(), (35, 14, -30));
+        assert!(
+            r.is_empty(),
+            "the body is exactly 6 bytes — two bytes and a dword, never three dwords"
+        );
+
+        // The two bytes are NOT interchangeable, and this body is chosen so that a swap is
+        // detectable rather than plausible: 35 is a legal mask bit (0..=63) and an ILLEGAL op
+        // (0..=28), so a decode that read them the other way round would hand the consumer an op
+        // of 35 — off the end of the table's 29-wide axis.
+        let (mask_bit, op, _) = read_set_spell_modifier(&mut &body[..]).unwrap();
+        assert!(
+            mask_bit >= 29,
+            "field 1 would be an out-of-range op if swapped"
+        );
+        assert!(op < 29, "field 2 is a legal op as read");
+
+        // Both bytes are unsigned (`movzx`) and the value is signed: 0xFF in field 1 is bit 255,
+        // not -1, and it is the consumer that must refuse it.
+        assert_eq!(
+            read_set_spell_modifier(&mut &[0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00][..]).unwrap(),
+            (255, 255, 1)
         );
     }
 }

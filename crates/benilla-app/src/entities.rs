@@ -93,8 +93,8 @@ pub(crate) use collision_height::CollisionHeight;
 /// Spell-visual effect models (decision 0099 phase 3): a casting unit's attach-point `.mdx` glows,
 /// spawned under the same attach-point joints as held items, lifetime per the kit stage.
 mod missile;
-pub(crate) use missile::MissileSound;
 use missile::{attach_missile_models, move_missiles, spawn_missiles};
+pub(crate) use missile::{MissileMiss, MissileSound, PendingMissiles};
 
 /// WMO-display GameObject doodad props (the ship's sails / the zeppelin's rotor): the WMO's MODD
 /// M2s spawned as children of the streamed gameobject, so they ride a moving transport.
@@ -608,7 +608,6 @@ pub(crate) struct DisplayBuildSet;
 /// doc for why a clear is always safe mid-session). These caches are get-or-insert at every use
 /// site, so a cleared entry rebuilds on the next spawn that wants it; without this, every display
 /// id, material key, and composited skin ever seen stayed resident for the life of the process.
-#[allow(clippy::too_many_arguments)]
 fn evict_display_caches(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
     mut composites: ResMut<SkinComposites>,
@@ -825,6 +824,8 @@ impl Plugin for EntitiesPlugin {
         .init_resource::<missile::PendingMissiles>()
         // The projectile flight-loop edges (`crate::sound::missile` consumes them).
         .add_message::<MissileSound>()
+        // A travelling spell's DEFERRED outcome word (`crate::combat_text`, decision 2229).
+        .add_message::<MissileMiss>()
         // The cast router's dest one-shot orders (`dest_fx`, decision 0797).
         .add_message::<dest_fx::GroundBurst>()
         // A live display-id swap's rebuild edge — consumed by the morph-latch replay
@@ -1221,7 +1222,6 @@ fn setup_entities(
 /// For every display id active among the net entities: ensure its [`DisplayModel`] exists (resolve the
 /// catalog + request the model handle), and once the handle has loaded, build its spawn parts (the
 /// per-submesh material, with creature skin slots filled from the display's variations).
-#[allow(clippy::too_many_arguments)]
 fn update_display_models(
     // `ObjectStore` rides along for the corpses: which cache holds a corpse's model is a
     // descriptor question (`CORPSE_FLAG_BONES`), not a display-id one — decision 1706.
@@ -1235,6 +1235,10 @@ fn update_display_models(
     mut forms: ResMut<benilla_world::model_forms::ModelForms>,
     asset_server: Res<AssetServer>,
     mut mats: benilla_world::model_render::M2BatchMaterials,
+    // The UV lane a batch's texture transform is delivered on (decision 2295): an entity batch is
+    // seeded AND registered in one call, so a display built here can never be marked-but-frozen.
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     // The bone-pile display cache + the ChrRaces fileStrings its paths are built from (1706).
     mut bones: ResMut<corpse::BonesModels>,
     // The glue-preview want (decisions 0423 + 0465): the glue screens' look's body displayId, so
@@ -1250,6 +1254,15 @@ fn update_display_models(
         return; // no lighting yet → no materials to build
     }
     let (m2s, wmos) = (&model_assets.0, &model_assets.1);
+    // `instance: None` — every display cache here is keyed by display id and shared by every unit
+    // wearing it, so these materials belong to the batch. The one population that needs its own
+    // (a GameObject whose file-sequence slots bake different loops) takes its clone at spawn,
+    // where the host entity exists (`attach::dress`).
+    let mut uv = benilla_world::model_render::EntityUvLane {
+        reg: &mut uv_reg,
+        table: &mut anim_table,
+        instance: None,
+    };
 
     // The (kind, display) pairs live in the world this frame — cheap to collect.
     let mut actives: Vec<(EntityKind, u32)> = entities
@@ -1315,6 +1328,17 @@ fn update_display_models(
             // `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display, which is the
             // reference's own lookup at `0x5d6759`.
             EntityKind::Unit | EntityKind::Player | EntityKind::Corpse => {
+                // Peek through `&` first: `Option<ResMut<T>>::as_deref_mut` marks the resource
+                // changed whether or not a byte is written, and `resolve_equipment`'s skip gate
+                // reads `Creatures::is_changed()` — so an every-frame `&mut` here re-resolved
+                // every rigged unit's equipment every frame (1697 item 1). A display that is
+                // present and built asks nothing of the cache.
+                if creatures
+                    .as_deref()
+                    .is_some_and(|cr| cr.models.get(&disp).is_some_and(|dm| dm.parts.is_some()))
+                {
+                    continue;
+                }
                 let Some(cr) = creatures.as_deref_mut() else {
                     continue;
                 };
@@ -1331,12 +1355,21 @@ fn update_display_models(
                             &mut forms,
                             &asset_server,
                             &mut mats,
+                            &mut uv,
                             false, // gameobject: creatures — no hull collider, no bake variant
                         );
                     }
                 }
             }
             EntityKind::GameObject => {
+                // The same peek, for the same reason (no gate reads this tick today; the census
+                // that finds the next one should not have to look past it).
+                if gameobjects
+                    .as_deref()
+                    .is_some_and(|go| go.models.get(&disp).is_some_and(|dm| dm.parts.is_some()))
+                {
+                    continue;
+                }
                 let Some(go) = gameobjects.as_deref_mut() else {
                     continue;
                 };
@@ -1353,6 +1386,7 @@ fn update_display_models(
                             &mut forms,
                             &asset_server,
                             &mut mats,
+                            &mut uv,
                             true, // gameobject: hull collider + the interior BAKE material variant
                         );
                     }
@@ -1378,6 +1412,7 @@ fn update_display_models(
                         &mut forms,
                         &asset_server,
                         &mut mats,
+                        &mut uv,
                         false, // gameobject: a prop body — unit lighting, no hull collider
                     );
                 }
@@ -1387,54 +1422,69 @@ fn update_display_models(
 
     // Held-item displays (decision 0072): entries are created by `resolve_equipment`; build each
     // one's parts once its M2 loads. Items are static meshes — no collider, unit lighting.
-    if let Some(held) = held.as_deref_mut() {
-        for dm in held.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: held items — unit lighting, no collider
-                );
+    // Each of the three path-keyed caches below is `&mut`-borrowed only when it holds an
+    // unbuilt entry — the read-side scan is a few hundred `Option` tests, the write-side tick
+    // would have read as "changed" on every frame of every run.
+    fn unbuilt<K>(models: &HashMap<K, DisplayModel>) -> bool {
+        models.values().any(|dm| dm.parts.is_none())
+    }
+    if held.as_deref().is_some_and(|h| unbuilt(&h.models)) {
+        if let Some(held) = held.as_deref_mut() {
+            for dm in held.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        &mut uv,
+                        false, // gameobject: held items — unit lighting, no collider
+                    );
+                }
             }
         }
     }
 
     // Spell-effect displays (decision 0099 phase 3): entries are created by
     // `spell_fx::resolve_spell_fx`; the same build, keyed by model path instead of display id.
-    if let Some(fx) = spell_fx.as_deref_mut() {
-        for dm in fx.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: effects — unit lighting, no collider
-                );
+    if spell_fx.as_deref().is_some_and(|f| unbuilt(&f.models)) {
+        if let Some(fx) = spell_fx.as_deref_mut() {
+            for dm in fx.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        &mut uv,
+                        false, // gameobject: effects — unit lighting, no collider
+                    );
+                }
             }
         }
     }
 
     // Item/enchant glow models (decision 0805): path-keyed like the effect cache above, entries
     // created by `resolve_equipment`'s glow resolve.
-    if let Some(glows) = glows.as_deref_mut() {
-        for dm in glows.models.values_mut() {
-            if dm.parts.is_none() {
-                build_parts(
-                    dm,
-                    m2s,
-                    wmos,
-                    &mut forms,
-                    &asset_server,
-                    &mut mats,
-                    false, // gameobject: effects — unit lighting, no collider
-                );
+    if glows.as_deref().is_some_and(|g| unbuilt(&g.models)) {
+        if let Some(glows) = glows.as_deref_mut() {
+            for dm in glows.models.values_mut() {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        &mut uv,
+                        false, // gameobject: effects — unit lighting, no collider
+                    );
+                }
             }
         }
     }
@@ -1632,6 +1682,11 @@ mod display_mirror_tests {
             }),
             alpha_anim: None,
             rgb_anim: None,
+            rgb_seq: None,
+            uv_anim: None,
+            uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
             ground_quad: None,
         }
     }

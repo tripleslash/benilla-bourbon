@@ -7,11 +7,12 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_packed_guid, read_u32_le, read_u8};
+use crate::wire::{capacity_hint, read_packed_guid, read_u32_le, read_u8};
 
 mod fields;
 mod movement;
 
+pub use fields::field;
 pub use fields::{
     power_display_scale, quest_slot_state, CorpseLook, ObjectFields, OwnerFallback,
     PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
@@ -92,7 +93,7 @@ impl Object {
 
 fn read_guid_list(r: &mut impl Read) -> io::Result<Vec<u64>> {
     let count = read_u32_le(r)?;
-    let mut guids = Vec::with_capacity(count.min(0xFFFF) as usize);
+    let mut guids = Vec::with_capacity(capacity_hint(count, 0xFFFF));
     for _ in 0..count {
         guids.push(read_packed_guid(r)?);
     }
@@ -103,7 +104,7 @@ fn read_guid_list(r: &mut impl Read) -> io::Result<Vec<u64>> {
 pub(super) fn read_update_object(r: &mut impl Read) -> io::Result<Vec<Object>> {
     let amount_of_objects = read_u32_le(r)?;
     let _has_transport = read_u8(r)?;
-    let mut objects = Vec::with_capacity(amount_of_objects.min(0xFFFF) as usize);
+    let mut objects = Vec::with_capacity(capacity_hint(amount_of_objects, 0xFFFF));
     for _ in 0..amount_of_objects {
         objects.push(Object::read(r)?);
     }

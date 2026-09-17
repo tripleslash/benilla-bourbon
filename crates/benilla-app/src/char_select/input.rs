@@ -24,7 +24,7 @@ const DOUBLE_CLICK_SECS: f32 = 0.4;
 /// back/escape (return to the login screen — decision 0539, retiring 0465 §6's exit-the-client
 /// collapse), arrow-key cycling. Inert while the delete dialog is up (it owns the keyboard and
 /// sits over the buttons).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn select_input(
     buttons: Query<(Entity, &SelectAction)>,
     clicks: Res<crate::glue::GlueClicks>,
@@ -64,13 +64,15 @@ pub(super) fn select_input(
                 // within the window is the double-click → enter world.
                 let double =
                     last_click.is_some_and(|(row, at)| row == i && now - at < DOUBLE_CLICK_SECS);
-                let was = roster.selected();
                 *last_click = Some((i, now));
-                // The ref selects on **every** click, the row you were already on included — which
-                // is what re-squares the facing (`Roster::select_seq`). Only the double still
-                // needs the "already selected" test.
-                roster.select(Some(i));
-                if was == Some(i) && double {
+                // Selecting is gated on the row actually CHANGING — the ref's own
+                // `CharacterSelectButton_OnClick` is that gate and nothing else, so the row you
+                // are already on is not re-selected and keeps the facing you dragged into it
+                // (`Roster::click_row`, decision 2194).
+                roster.click_row(i);
+                // `OnDoubleClick` runs the same gated select and then enters the world
+                // unconditionally — it does not re-test what was selected before.
+                if double {
                     enter_world = true;
                 }
             }

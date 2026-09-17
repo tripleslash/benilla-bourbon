@@ -1,8 +1,8 @@
-//! GameObject open/close animation (decision 0242; chest lid folded in by 0250) — a **client-side**
+//! GameObject open/close animation (decision 0242; chest lid folded in by 2271) — a **client-side**
 //! `GAMEOBJECT_STATE` drives a skeletal M2 sequence, so a **door** swings, a **button** depresses, and a
 //! **chest lid** opens/closes on its §243 state machine.
 //!
-//! **The model (0250, §5-VERIFIED):** the real client keeps *one* stored state per GameObject (the
+//! **The model (2271, §5-VERIFIED):** the real client keeps *one* stored state per GameObject (the
 //! binary's `go+0x27c`) and *one* `SetGoState` that all callers funnel through; a change of that state
 //! plays the §243 transition. benilla mirrors that exactly — [`GoAnim::state`] is the single source of
 //! truth, written by the **three callers** the RE census pinned:
@@ -72,8 +72,9 @@ use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 use std::time::Duration;
 
-use crate::creature_anim::{advance_track, scan_events, select, AnimSoundEvent};
+use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
+use benilla_world::model_fade::DespawnFade;
 use benilla_world::schedule::WorldStage;
 
 /// `GO_STATE_ACTIVE` (vmangos `GOState`) — the **open** state (door swung, chest lid up). Passable.
@@ -87,7 +88,7 @@ const GO_STATE_READY: u32 = 1;
 /// object plays this once and *then* goes away; see [`DespawnAnimAnnounced`].
 const ANIM_DESPAWN: u16 = 157;
 
-/// Marker + client-side state for an animated GameObject (decisions 0242/0250). Instanced by
+/// Marker + client-side state for an animated GameObject (decisions 0242/2271). Instanced by
 /// [`crate::entities::attach`] on an animatable GO type whose model authors sequences; driven by
 /// [`drive_go_anim`]. Distinct from creatures' `AnimDriver` so the two drivers never touch one entity.
 #[derive(Component, Default)]
@@ -101,10 +102,6 @@ pub(crate) struct GoAnim {
     /// leaving (first sight settles the resting pose **silently** — a door that streams in already open
     /// must not replay its swing).
     shown: Option<u32>,
-    /// The last `GAMEOBJECT_STATE` seen on the wire, so [`sync_wire_go_state`] writes `state` only on a
-    /// *genuine* wire change — a chest's wire state is constant (its lid is driven by loot events, not the
-    /// wire), so an unrelated values-update (a dyn-flag, a position) must not re-close an open lid.
-    last_wire: Option<u32>,
     /// A pending **one-shot** play, as an `AnimationData.dbc` id — the second, disjoint arm
     /// channel of wow-re `gameobject-anim-arm.md` §2c, never the §243 lid family. The reference
     /// has ONE such slot fed by ONE entry point (`0x5f8c50(GO, code)` → slot 15), whose 7-entry
@@ -303,7 +300,7 @@ fn collider_is_solid(wire_state: Option<u32>) -> bool {
 }
 
 /// A cast launched at a GameObject (`SMSG_SPELL_GO` carrying a `TARGET_FLAG_GAMEOBJECT`), bridged from the
-/// net apply layer to this module (decision 0250). [`open_go_lid`] opens the target's lid/door iff the
+/// net apply layer to this module (decision 2271). [`open_go_lid`] opens the target's lid/door iff the
 /// spell carries an open-lock effect and the GO is an animated type — the client's `Spell_C` open path.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct GoLidOpen {
@@ -436,27 +433,36 @@ fn resolve(prev: Option<u32>, cur: u32) -> Option<Play> {
 
 /// Caller 1 (the wire, §243): track each animated GO's `GAMEOBJECT_STATE` from the wire, acting only on a
 /// *genuine* wire change. This is the door/button driver (the server flips their state over the wire) and
-/// the first-sight rest-pose seed for every animated GO (a chest streams in closed). Runs on the seed
-/// (`Added<GoAnim>`, when attach tags the entity) and on any later descriptor delta; the `last_wire`
-/// guard makes an unrelated field change (position, dyn-flags) a no-op, so a chest whose wire state is
-/// constant is never re-closed by one — its lid is owned by the loot callers below.
+/// the first-sight rest-pose seed for every animated GO (a chest streams in closed). Two inputs, both
+/// exact (decision 2297): the seed (`Added<GoAnim>`, when attach tags the entity — read off the store),
+/// and the field EDGE on `GAMEOBJECT_STATE` for any later delta. An unrelated field change (position,
+/// dyn-flags) is not an edge on this dword, so a chest whose wire state is constant is never re-closed by
+/// one — its lid is owned by the loot callers below. That used to need a `last_wire` shadow on the
+/// component; the edge carries the old value itself.
 #[allow(clippy::type_complexity)]
 fn sync_wire_go_state(
-    mut gos: Query<(&ObjectStore, &mut GoAnim), Or<(Changed<ObjectStore>, Added<GoAnim>)>>,
+    mut edges: MessageReader<crate::net::FieldChanged>,
+    // The seed leg and the edge leg both write `GoAnim`; one `ParamSet`, two disjoint views.
+    mut gos: ParamSet<(
+        Query<(&ObjectStore, &mut GoAnim), Added<GoAnim>>,
+        Query<&mut GoAnim>,
+    )>,
 ) {
-    for (store, mut anim) in &mut gos {
+    for (store, mut anim) in &mut gos.p0() {
         // Absent ⇒ the wire default `0` = ACTIVE (decision 0757) — vmangos omits zero fields, so a
         // door that spawns OPEN sends none. Reading that as "unknown" left `state` at `None`, and
-        // the object rested at its loader pose instead of Opened. The `last_wire` guard is
-        // unaffected: a constant wire state (a chest's `Some(1)`) still compares equal frame to
-        // frame, so the client-predicted lid is still never re-closed by an unrelated delta.
-        let wire = Some(store.0.gameobject_state().unwrap_or(GO_STATE_ACTIVE));
-        if wire == anim.last_wire {
-            continue; // an unrelated field changed (position, flags, dyn-flags) — not our transition
+        // the object rested at its loader pose instead of Opened.
+        anim.state = Some(store.0.gameobject_state().unwrap_or(GO_STATE_ACTIVE));
+    }
+    let mut live = gos.p1();
+    for e in edges.read() {
+        if e.kind != benilla_protocol::messages::ObjectType::GameObject
+            || e.index != benilla_protocol::field::FIELD_GAMEOBJECT_STATE
+        {
+            continue;
         }
-        anim.last_wire = wire;
-        if let Some(s) = wire {
-            anim.state = Some(s);
+        if let Ok(mut anim) = live.get_mut(e.entity) {
+            anim.state = Some(e.new);
         }
     }
 }
@@ -581,10 +587,18 @@ fn arm_despawn_anim(mut gos: Query<&mut GoAnim, Changed<DespawnAnimAnnounced>>) 
 ///
 /// Runs AFTER [`drive_go_anim`], and that ordering is load-bearing in both directions. On the
 /// arming frame the drive has just set [`GoAnim::transient`], so the object is held; on the frame
-/// [`retire_transient_anim`] clears it (the window ended) nothing re-arms 157, so the object pops.
+/// [`retire_transient_anim`] clears it (the window ended) nothing re-arms 157, so the release runs.
 /// An entity that never armed anything — no [`GoAnim`], a model that doesn't author 157 — fails the
-/// test on its very first pass and pops the same frame, which is today's behaviour for everything
+/// test on its very first pass and is released the same frame, which is the case for everything
 /// that isn't an egg.
+///
+/// **"Released" is a fade, not a pop** (decision 2198). What the deferred `0x464920` runs into is
+/// the base OnDeactivate `0x6145e0`, which hands the object's model to the `SWModelFadeout`
+/// scheduler `0x672df0` on its way out — so the object stops existing while its model keeps
+/// drawing and ramps to zero. A looted chest whose static model authors no `Despawn` sequence is
+/// exactly this path with no animation in front of it, and popping it was the report that found
+/// the missing hop. [`DespawnFade`] is that hand-off; it arms once and drives itself, so the pin
+/// comes off with it and this query stops matching.
 fn release_despawn_pin(
     mut commands: Commands,
     pinned: Query<(Entity, Option<&GoAnim>), With<PendingDestroy>>,
@@ -593,7 +607,10 @@ fn release_despawn_pin(
         if go.is_some_and(|g| g.transient.is_some_and(|t| t.id == ANIM_DESPAWN)) {
             continue;
         }
-        commands.entity(e).try_despawn();
+        commands
+            .entity(e)
+            .try_remove::<PendingDestroy>()
+            .try_insert(DespawnFade::default());
     }
 }
 
@@ -704,6 +721,43 @@ fn retire_transient_anim(
     }
 }
 
+/// **The GameObject arm's instrument** (`WOW_MOVE_TRACE_TAGS=goa`) — one line per arm, carrying
+/// everything the roll decided: the requested `AnimationData.dbc` id, what the §2c remap turned it
+/// into, the `_rand` draw itself, and the **file sequence slot** the weighted walk landed on.
+///
+/// That last column is the one this exists for. A GameObject's variation chain is not cosmetic:
+/// the per-sequence material lanes (2295) key their UV and tint loops by `seq_index`, so *which
+/// take is armed* is what decides whether a Blood of Heroes pool bubbles at all (slot 0 authors no
+/// texture transform, slot 1 does) and whether an Onyxia lava trap spurts. From outside, an arm
+/// that re-rolls every window and one that armed once and stalled look identical — both are "a
+/// still pool" for as long as you happen to watch — and the three legs that produce the difference
+/// (`0x5f39fa`'s already-armed skip, the collapse-to-0 leg that jumps past it, the completion that
+/// re-enters through slot 14) are invisible in a screenshot. One line per arm makes the cycle,
+/// its period and its distribution readable directly.
+fn trace_arm(
+    entity: Entity,
+    lane: &str,
+    requested: u16,
+    want: u16,
+    frozen: bool,
+    roll: u16,
+    clip: &benilla_assets::AnimClip,
+) {
+    if !benilla_assets::trace::enabled_for("goa") {
+        return;
+    }
+    benilla_assets::trace::line(
+        "goa",
+        &format!(
+            "{lane} e={entity} id={requested}->{want}{} roll={roll} seq={} freq={} dur={:.3}",
+            if frozen { " frozen" } else { "" },
+            clip.seq_index,
+            clip.frequency,
+            clip.duration,
+        ),
+    );
+}
+
 /// Play the §243 sequence for a change of the client-side [`GoAnim::state`] (written by any of the three
 /// callers). Mirrors the state-transition detection of [`crate::sound::gameobject`] (first sight silent),
 /// but points it at the model instead of the mixer — one system owns the visual, the other the audio.
@@ -721,7 +775,7 @@ fn drive_go_anim(
     mut dispatch: MessageWriter<GoStateDispatch>,
     // The client's single `_rand` stream (wow-re `rf36-rand-stub.md`), as `creature_anim` keeps
     // one: op4's variation roll draws from it on every GameObject arm below.
-    mut rng: Local<u32>,
+    mut rng: ResMut<benilla_assets::AnimRng>,
 ) {
     for (entity, mut go, mut player, mut tr, anims) in &mut gos {
         // ── The §243 state arm ─────────────────────────────────────────────────────────────────
@@ -772,7 +826,9 @@ fn drive_go_anim(
                     if skip {
                         continue;
                     }
-                    if let Some(clip) = anims.pick_variation(want, select::msvc_rand(&mut rng)) {
+                    let roll = rng.draw();
+                    if let Some(clip) = anims.pick_variation(want, roll) {
+                        trace_arm(entity, "state", play.anim_id(), want, frozen, roll, clip);
                         go.armed_id = Some(want);
                         // Snap a rest pose (blend 0 — a stream-in must not swing); ease a motion
                         // over its authored blend.
@@ -846,7 +902,9 @@ fn drive_go_anim(
                 // Slot 15 funnels through the same slot-34 → `0x5f3930` arm as the state channel
                 // (§2c), so it rolls a variation for the same reason — a Custom0 with two authored
                 // takes alternates them.
-                if let Some(clip) = anims.pick_variation(id, select::msvc_rand(&mut rng)) {
+                let roll = rng.draw();
+                if let Some(clip) = anims.pick_variation(id, roll) {
+                    trace_arm(entity, "custom", id, id, false, roll, clip);
                     go.armed_id = Some(id);
                     go.rest_window = None;
                     let node = clip.node;
@@ -872,11 +930,11 @@ fn drive_go_anim(
 /// scoped to the door/button types ([`collision_follows_state`]); a chest keeps its collider whatever its
 /// state.
 ///
-/// **Reconciles on an `ObjectStore` change OR on the collider's arrival** (idempotent either way).
+/// **Reconciles on a `GAMEOBJECT_STATE` edge OR on the collider's arrival** (idempotent either way).
 /// The `Added<Collider>` half is load-bearing, not belt-and-braces (decision 0763): a streamed
 /// GameObject's descriptor lands with the create block, but its `Collider` is baked from the M2
 /// hull and inserted by `entities::attach` only when the **asset finishes loading**, frames later.
-/// Watching `Changed<ObjectStore>` alone meant the two conditions were never true in the same frame
+/// Watching the descriptor alone meant the two conditions were never true in the same frame
 /// for a freshly streamed object — the descriptor changed while there was no collider, the collider
 /// arrived while the descriptor was quiet — so the reconcile never ran at all, and every door kept
 /// the enabled collider it was born with. A *closed* door is solid by default and looked correct;
@@ -884,17 +942,24 @@ fn drive_go_anim(
 /// reporter's workaround exactly: toggling the object from the GM panel changes the descriptor
 /// *after* the collider exists, so the reconcile finally fires.
 ///
-/// Same shape as [`sync_wire_go_state`]'s `Or<(Changed<ObjectStore>, Added<GoAnim>)>` — the
-/// seed-plus-delta pair this file already uses for every other state consumer.
-#[allow(clippy::type_complexity)]
+/// The descriptor half is the field edge on the one dword this reads (decision 2297) — the same
+/// seed-plus-edge pair [`sync_wire_go_state`] uses.
 fn drive_go_collision(
     mut commands: Commands,
-    gos: Query<
-        (Entity, &ObjectStore, Has<ColliderDisabled>),
-        (With<Collider>, Or<(Changed<ObjectStore>, Added<Collider>)>),
-    >,
+    gos: Query<(&ObjectStore, Has<ColliderDisabled>), With<Collider>>,
+    arrived: Query<Entity, Added<Collider>>,
+    mut edges: MessageReader<crate::net::FieldChanged>,
 ) {
-    for (entity, store, disabled) in &gos {
+    let state_edges = edges.read().filter(|e| {
+        e.kind == benilla_protocol::messages::ObjectType::GameObject
+            && e.index == benilla_protocol::field::FIELD_GAMEOBJECT_STATE
+    });
+    let mut due: bevy::ecs::entity::EntityHashSet = arrived.iter().collect();
+    due.extend(state_edges.map(|e| e.entity));
+    for entity in due {
+        let Ok((store, disabled)) = gos.get(entity) else {
+            continue;
+        };
         if !collision_follows_state(store.0.gameobject_type_id()) {
             continue;
         }
@@ -1193,6 +1258,8 @@ mod tests {
         ));
         app.init_resource::<Time>();
         app.init_resource::<NextStep>();
+        // The client's ONE `rand()` stream (2301) — the arm rolls a variation off it.
+        app.init_resource::<benilla_assets::AnimRng>();
         // The state dispatch's audio consumer lives in `sound::gameobject`; here it is recorded
         // instead, so a test can assert *which* edges re-enter `0x5f3cb0`.
         app.add_message::<GoStateDispatch>();
@@ -1627,17 +1694,23 @@ mod tests {
         advance(&mut app, 2700);
         app.update();
         assert!(
-            app.world().get_entity(go).is_err(),
-            "the window ended — the pin drops and the deferred destroy runs"
+            app.world().get::<DespawnFade>(go).is_some(),
+            "the window ended — the pin drops and the deferred destroy hands the model to the fade"
+        );
+        assert!(
+            app.world().get::<PendingDestroy>(go).is_none(),
+            "and the pin comes off with it, so the release stops re-arming the fade"
         );
     }
 
     /// The other half of the same rule: a model that doesn't author 157 (or an object with no
     /// animation machine at all — a totem, a DynamicObject, both of which `SendObjectDeSpawnAnim`
-    /// also fires for) must keep today's **instant pop**. Nothing arms, so the pin never forms and
-    /// the release runs on its first pass.
+    /// also fires for) has nothing to play, so the pin never forms and the release runs on its
+    /// first pass — straight to the fade, with no animation in front of it. **This is the looted
+    /// chest** (decision 2198): `DeadmineCargoBoxes.m2` is a fully static model, so the announced
+    /// despawn resolves to nothing and the teardown fade is the whole observable.
     #[test]
-    fn an_unownable_despawn_anim_still_pops_instantly() {
+    fn an_unownable_despawn_anim_goes_straight_to_the_fade() {
         let (mut app, go) = crate_app(&[]); // the crate family only — no 157
         app.update();
 
@@ -1646,8 +1719,8 @@ mod tests {
             .insert((DespawnAnimAnnounced, PendingDestroy));
         app.update();
         assert!(
-            app.world().get_entity(go).is_err(),
-            "nothing to play ⇒ the ordinary instant destroy, same frame"
+            app.world().get::<DespawnFade>(go).is_some(),
+            "nothing to play ⇒ the teardown fade, same frame — never a pop"
         );
     }
 
@@ -1766,7 +1839,7 @@ mod tests {
 
     #[test]
     fn chest_animates_but_keeps_its_collider() {
-        // A chest (3) is on the animation machine (0250) but off the collision gate (0249): you see the
+        // A chest (3) is on the animation machine (2271) but off the collision gate (0249): you see the
         // lid move, but you never walk through an open chest.
         assert!(go_animates(3));
         assert!(!collision_follows_state(3));

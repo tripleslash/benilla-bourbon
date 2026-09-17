@@ -40,7 +40,7 @@ use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands};
 use crate::player::Player;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 /// The leash radius, squared: the CRT initialiser's `fld [0x806574]; fmul` of the `.rdata` f32
 /// `5.55555534362793` (§7.1).
@@ -98,6 +98,13 @@ impl Battlefield {
         self.anchor = None;
         self.verdicts.clear();
         self.players.clear();
+    }
+
+    /// The guid the last `SMSG_BATTLEFIELD_LIST` came from — the join's opcode choice reads it,
+    /// and [`crate::capture::ProbeBgQueuePlugin`] waits on it to know the list actually landed
+    /// (a body under the bracket floor is refused at the HELLO, so the list never arrives).
+    pub(crate) fn battlemaster(&self) -> Option<u64> {
+        self.list.as_ref().map(|l| l.battlemaster)
     }
 
     /// The listed map — `[0xb6eba4]`, which is 0 (a real Map.dbc row) with nothing listed.
@@ -210,14 +217,13 @@ fn group_fits(catalog: Option<&MapCatalog>, map_id: u32, group: Option<&GroupSta
 /// Every frame, before the dialog feed fires `UPDATE_BATTLEFIELD_STATUS` and the score feed
 /// fires `UPDATE_BATTLEFIELD_SCORE`: the list (when it changed), the queue slots (always), the
 /// `BATTLEFIELDS_SHOW` event with its anchor, the leash, and the speaking handlers' lines.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn feed_battlefield(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<Battlefield>,
     queue: Res<BattlefieldQueue>,
     maps: Option<Res<MapCatalogRes>>,
     player: Res<Player>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
 ) {
@@ -361,11 +367,13 @@ impl Plugin for BattlefieldPlugin {
         app.init_resource::<Battlefield>().add_systems(
             Update,
             (
-                reset_on_world_enter.before(feed_battlefield),
+                reset_on_world_enter
+                    .in_set(crate::ui_script::UiFeed)
+                    .before(feed_battlefield),
                 feed_battlefield
                     .before(crate::ui_battlefield_score::feed_battlefield_score)
                     .before(crate::ui_dialog_verbs::feed_dialog_verbs)
-                    .before(UiInput),
+                    .in_set(UiFeed),
                 drain_battlefield.after(UiInput),
             ),
         );

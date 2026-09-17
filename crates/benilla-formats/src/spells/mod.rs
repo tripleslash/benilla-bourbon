@@ -122,7 +122,7 @@ mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
 pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
-pub use display::{FormRefusal, OpenLock, SpellDisplay};
+pub use display::{FormRefusal, LearnAnnouncement, OpenLock, SpellDisplay};
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
 mod immunity;
@@ -210,6 +210,14 @@ const COL_START_RECOVERY_TIME: usize = 158;
 /// `PreventionType` (`SpellRec+0x294`, `0x294/4 == 165`) — see [`SpellDisplay::prevention_type`]
 /// for the two-way pin that separates it from its `DmgClass` neighbour at 164.
 const COL_PREVENTION_TYPE: usize = 165;
+/// `SpellFamilyName` (`SpellRec+0x280`, `0x280/4 == 160`) / `SpellFamilyFlags` low+high
+/// (`+0x284`/`+0x288`, 161/162) — the talent spell-modifier gate and its row selector, read by
+/// `GetSpellModifiers 0x6e6b30` at `6e6b38`/`6e6b46` and `6e6b83` (wow-re
+/// `system/spell/scratch/spellmod-table-law.md` §5). See [`SpellDisplay::spell_family`] and
+/// [`SpellDisplay::spell_family_flags`]; the shipped-file anchors are in
+/// [`catalog_tests`].
+const COL_SPELL_FAMILY_NAME: usize = 160;
+const COL_SPELL_FAMILY_FLAGS_LOW: usize = 161;
 /// `Targets` (`SpellRec+0x34`, `0x34/4 == 13`) — the wire `TARGET_FLAG_*` seed mask the cast-arm
 /// loads into its targeting flag_word (`0x6e525a`, wow-re `wave-cast.md`, VERIFIED). Empirical
 /// pin against the binder's bit semantics: Resurrection 2006 = `0x8000` (corpse-ally bit 15),
@@ -402,6 +410,20 @@ const ATTR_EX3_NORMAL_RANGED_ATTACK: u32 = 0x8000;
 /// to themselves about what this attribute does to the spell, and it reached a player's screen
 /// because we printed the name unconditionally.
 const ATTR_EX3_NO_CASTING_BAR_TEXT: u32 = 0x4;
+/// `AttributesEx3` bit 13 (`0x2000`) — **this spell shows no CHANNEL bar at all**. The channel
+/// handler's own suppressor, and a *total* one: `0x6e7595 test ch,0x20` on `[SpellRec+0x24]`
+/// (`ch` = bits 8-15, so bit 13 — not [`ATTR_EX3_NO_CASTING_BAR_TEXT`]'s bit 2) jumps straight to
+/// the return, so `SPELLCAST_CHANNEL_START` never fires. Exactly two rows in the shipped 5875 file
+/// carry it, both 24322/24323 "Blood Siphon".
+const ATTR_EX3_NO_CHANNEL_BAR: u32 = 0x2000;
+/// `AttributesEx` bit 29 (`0x2000_0000`) — **the channel bar prints this spell's own name**
+/// instead of the generic word. `0x6e759a test DWORD PTR [SpellRec+0x1c],0x20000000`: set ⇒
+/// `Name[locale]`, clear ⇒ the GlobalStrings value of `CHANNELING`. Nine of the 323 channeled rows
+/// in the shipped file set it — the four Fishing ranks (7620/7731/7732/18248), 20578 Cannibalize,
+/// 11403 Dream Vision, 24937 Using Control Console and the two Blood Siphons (which the suppressor
+/// above hides anyway). Every other channel — Blizzard, Arcane Missiles, Mind Flay, Drain Life,
+/// Rain of Fire, Hurricane, Tranquility, Evocation, First Aid — reads "Channeling".
+const ATTR_EX_CHANNEL_BAR_OWN_NAME: u32 = 0x2000_0000;
 /// `Attributes` bit `0x2` — the "uses the ranged slot" attribute (mangos `SPELL_ATTR_RANGED`).
 /// One half of the client's ranged-stance gate (module docs).
 const ATTR_RANGED: u32 = 0x2;
@@ -426,6 +448,11 @@ const ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS: u32 = 0x20000;
 /// (decision 0216 §8, `benilla-ui/src/script/spellbook.rs`) refuses it outright rather than
 /// sending a doomed cast the server would just reject.
 const ATTR_PASSIVE: u32 = 0x40;
+/// `Attributes` bit `0x10` — `SPELL_ATTR_ABILITY` (cmangos `SpellDefines.h`). The **only** thing
+/// the 1.12 client reads it for is the learn announcement's wording: `0x4b29a9 setne al` /
+/// `0x4b29b3 add eax,0x37` picks message id `0x37` `ERR_LEARN_SPELL_S` when the bit is clear and
+/// `0x38` `ERR_LEARN_ABILITY_S` when it is set. See [`SpellDisplay::learn_announcement`].
+const ATTR_ABILITY: u32 = 0x10;
 /// `Attributes` bit `0x80` — `SPELL_ATTR_DO_NOT_DISPLAY` (cmangos `SpellDefines.h`: "Hidden in
 /// Spellbook, Aura Icon, Combat Log"): THE spellbook add-gate (decision 0227) AND the `Attributes`
 /// half of the aura-bar display filter ([`SpellDisplay::hidden_from_aura_bar`] — the cache
@@ -541,16 +568,38 @@ pub const SPELL_EFFECT_CREATE_ITEM: u32 = 24;
 /// (`0x4b2623: cmp [esi+0xf4], 0x5f` — `0x5f == 95`), and the cursor's skin leg requires that latch
 /// (decision 0752).
 pub const SPELL_EFFECT_SKINNING: u32 = 95;
-/// `SpellEffects` values `53`/`54` — `SPELL_EFFECT_ENCHANT_ITEM` (permanent) /
-/// `SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY` (vmangos `SharedDefines.h`): the item-targeted craft
-/// casts the CraftFrame sends with `TARGET_FLAG_ITEM` (0437 phase 3).
 /// `SpellEffects` value `39` — `SPELL_EFFECT_LANGUAGE`: the effect that makes a spell *be* a
 /// language. Its `EffectMiscValue_1` is the `Languages.dbc` id, which is how a language reaches a
 /// skill line at all — see [`SpellCatalog::language_spell`].
 pub const SPELL_EFFECT_LANGUAGE: u32 = 39;
 
+/// `SpellEffects` values `53`/`54` — `SPELL_EFFECT_ENCHANT_ITEM` (permanent) /
+/// `SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY` (vmangos `SharedDefines.h`): the item-targeted craft
+/// casts the CraftFrame sends with `TARGET_FLAG_ITEM` (0437 phase 3).
 pub const SPELL_EFFECT_ENCHANT_ITEM: u32 = 53;
 pub const SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY: u32 = 54;
+
+/// `SpellEffects` value `127` — `SPELL_EFFECT_PROSPECTING`, and **no 5875 spell carries it**
+/// (pinned by `real_prospecting_effect_is_absent_from_5875`). It is named here because the
+/// absence is load-bearing rather than incidental: the item-target validator `0x495d60` has a
+/// third leg past its two enchant ones, gated on exactly this value (`0x495f39: cmp [eax],0x7f`),
+/// and that leg holds the only raise sites image-wide for the cast-failure reasons `0x84`
+/// PROSPECT_NEED_MORE (`0x49614e`) and `0x90` MIN_SKILL (`0x496128`). The server sends neither
+/// reason either, so on this build both messages are unreachable — which is why
+/// `ui_action::cast_fail` models neither arm (decision 2292).
+///
+/// **The number is the binary's own, not a later build's enum ported backwards.** `TryCast
+/// 0x6e4b60` carries a matched pair of `Effect[0]` gates two instructions apart:
+/// `0x6e4ca2 cmp eax,0x63` (99) raises `SPELL_FAILED_DISENCHANT_WHILE_LOOTING` (`0x6e4cbb`), and
+/// `0x6e4cd4 cmp [edx+0xf4],0x7f` raises `SPELL_FAILED_PROSPECT_WHILE_LOOTING` (`0x6e4cee`). That
+/// pairing names 99 ↔ disenchant and 127 ↔ prospect in 5875's own hand — and makes `0x83` dead
+/// on the same grounds as `0x84`/`0x90`, while its sibling `0x82` stays live (effect 99 ships).
+///
+/// The **code** is live and only the **data** is absent: 127 is handled in three reachable places
+/// (`0x495f39`, `0x6e4cd4`, and the effect classifier `0x6e3b80`'s 128-entry case table at
+/// `0x6e3bdc`, which maps it to the default arm). Nothing here is dead-stripped — 5875 ships
+/// prospecting with no prospecting spell to reach it.
+pub const SPELL_EFFECT_PROSPECTING: u32 = 127;
 
 /// `Spell.dbc` × `SpellIcon.dbc`, joined: spell id → name + icon path, plus the **learn-spell map**
 /// (a `SPELL_EFFECT_LEARN_SPELL` spell → the spell it teaches). Vanilla trainers offer a *learn*
@@ -776,6 +825,11 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                     u32_at(r, COL_EFFECT_MECHANIC_1 + i).unwrap_or(0)
                 }),
                 prevention_type: u32_at(r, COL_PREVENTION_TYPE).unwrap_or(0),
+                spell_family: u32_at(r, COL_SPELL_FAMILY_NAME).unwrap_or(0),
+                // Low dword first: bit `i >= 32` lives in column 162, which the reference reads as
+                // `[edi + 4*(i>>5) + 0x284]` — the same little-endian pair this join makes.
+                spell_family_flags: u64::from(u32_at(r, COL_SPELL_FAMILY_FLAGS_LOW).unwrap_or(0))
+                    | u64::from(u32_at(r, COL_SPELL_FAMILY_FLAGS_LOW + 1).unwrap_or(0)) << 32,
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
                 effects: [0, 1, 2].map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0)),

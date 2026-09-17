@@ -1123,6 +1123,13 @@
             end
             SetCVar(row.cvar, value, row.cvarEvent)
             OptionsRow_WritePartner(row, value)
+            -- fork: the `gx*` rows are LATCHED since upstream's registry (2303): a `SetCVar` on
+            -- one only stages, and nothing moves until `RestartGx()` — the stock video window's
+            -- Okay. This window commits on the click, so it asks for the commit on the click too;
+            -- without it the Vertical Sync box would stage a value the session never applies.
+            if string.sub(row.cvar, 1, 2) == "gx" then
+                RestartGx()
+            end
         end
 
         -- **The PARTNER write (2180).** Three of 1.12's own rows drive a SECOND CVar that

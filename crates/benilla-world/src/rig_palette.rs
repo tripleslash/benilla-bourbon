@@ -146,6 +146,10 @@ pub struct RigPalettes {
     /// Allocations refused since the last census line (`WOW_RIG_CENSUS`) — the exhaustion
     /// diagnosis's live denial rate (decision 0863). Read-and-reset by [`census_rig_palettes`].
     denied: u32,
+    /// Has the exhaustion warn already been logged this session? A latch, not a counter, and
+    /// deliberately never reset: [`Self::denied`] is `mem::take`n by the census, so gating the
+    /// warn on it would re-fire once per census window instead of once per session (2264).
+    denied_warned: bool,
     /// `WOW_RIG_COST` meters (decision 0736 premise check): whole-vec deep copies this frame
     /// (`Arc::make_mut` clones when the extract still holds last publish's reference), the µs
     /// they took, and the rows (bones) written. Printed + reset by [`publish_rig_palettes`].
@@ -174,6 +178,7 @@ impl Default for RigPalettes {
             peak_bones: 0,
             live_bones: 0,
             denied: 0,
+            denied_warned: false,
             cost_copies: 0,
             cost_copy_us: 0.0,
             cost_rows: 0,
@@ -603,11 +608,19 @@ impl RigPalettes {
     /// why this returns the pair and [`Self::world_palette`] (a picker read, not a precision one)
     /// does not.
     pub fn rider_placement(&self, slot: u16) -> Option<(Vec3, Vec3)> {
+        self.row_placement(slot, 0)
+    }
+
+    /// The same pair for an arbitrary bone of a slot. A bind-pose rider repeats one frame across
+    /// every row, so row 0 answers for the model; a **posed** one (decision 2281 — the flexing
+    /// ranged prop) does not, and asking which bone is the only way to see that its rows differ at
+    /// all. `None` for an unallocated slot or a bone past its length.
+    pub fn row_placement(&self, slot: u16, bone: u32) -> Option<(Vec3, Vec3)> {
         let s = slot as usize;
-        if *self.slot_len.get(s)? == 0 {
+        if bone >= *self.slot_len.get(s)? {
             return None;
         }
-        let r = 3 * *self.table.get(s)? as usize;
+        let r = 3 * (*self.table.get(s)? + bone) as usize;
         let o = self.origins.get(s)?;
         Some((
             Vec3::new(o[0], o[1], o[2]),
@@ -697,7 +710,8 @@ impl RigSkin {
 
     /// Allocate a palette rig over live joint entities (the effect/booth/equipment lane — the
     /// change sweep computes its rows; doodads moved to [`Self::allocate_bones`], decision 1365).
-    /// `None` (with one loud warn per session) when the table is full — the caller renders the
+    /// `None` (with one loud warn per session — a promise this doc made for a long time before
+    /// the code kept it, 2264) when the table is full — the caller renders the
     /// static bind-pose mesh instead.
     pub fn allocate(
         palettes: &mut RigPalettes,
@@ -724,11 +738,22 @@ impl RigSkin {
             }),
             None => {
                 palettes.denied += 1;
-                let (s, b, ps, pb) = palettes.occupancy();
-                warn!(
-                    "rig palette exhausted ({bones} bones wanted; live {s} slots / {b} bones, \
-                     peak {ps}/{pb}) — rig renders at bind pose"
-                );
+                // **Once per session, as this function's doc has always promised.** It did not
+                // keep that promise: the denial path warned on every call, and the lazy-doodad
+                // caller retries *every frame while the host is drawn*
+                // (`doodad_anim::lazy` — "table full — the warn fired; the gate retries while
+                // drawn"), so a crowded scene turned one fact into a per-frame flood that buries
+                // every other warning in the log. The repeats were never the signal anyway:
+                // `denied` is already counted here and already reported by the palette census.
+                if !palettes.denied_warned {
+                    palettes.denied_warned = true;
+                    let (s, b, ps, pb) = palettes.occupancy();
+                    warn!(
+                        "rig palette exhausted ({bones} bones wanted; live {s} slots / {b} bones, \
+                         peak {ps}/{pb}) — rig renders at bind pose. Further denials are counted \
+                         in `denied`, not logged; run with WOW_RIG_CENSUS for the running tally."
+                    );
+                }
                 None
             }
         }

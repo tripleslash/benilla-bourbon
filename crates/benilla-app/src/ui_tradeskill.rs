@@ -97,7 +97,7 @@ impl Plugin for UiTradeSkillPlugin {
                     // the same frame; the feed pushes before the input pass (the trainer's order);
                     // the drain + repeat machine run after it so a Create click casts this frame.
                     open_trade_skill.before(feed_trade_skill),
-                    feed_trade_skill.in_set(UnitFeed).before(UiInput),
+                    feed_trade_skill.in_set(UnitFeed),
                     drain_trade_skill.after(UiInput),
                 ),
             );
@@ -228,7 +228,7 @@ pub(crate) fn difficulty(rank: u32, low: u32, high: u32) -> TradeSkillDifficulty
 fn recipe_icon(
     d: &benilla_formats::SpellDisplay,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> Option<String> {
     let item = d.effect_item_type[0];
@@ -241,7 +241,6 @@ fn recipe_icon(
 
 /// Build one recipe row: reagents/tools/product resolved through the ask-once template cache
 /// (`None` names re-resolve next frame when the template lands — the item-row precedent).
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn resolve_recipe(
     spell_id: u32,
     rank: u32,
@@ -251,7 +250,7 @@ fn resolve_recipe(
     icons: Option<&ItemDisplays>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     cooldowns: &crate::cooldowns::Cooldowns,
     now: Instant,
@@ -366,7 +365,6 @@ fn resolve_recipe(
 /// Build the book: the known attr-`0x20` recipes of the open line, difficulty-banded against the
 /// current rank. No sort applied here — the engine owns ALL ordering (group + tier + name, the
 /// VERIFIED two-level law, decision 0446 wow-re `tradeskill` TU-B).
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (the feed precedent)
 fn feed_trade_skill(
     script: Option<NonSendMut<UiScript>>,
     open: Res<TradeSkillOpen>,
@@ -378,7 +376,7 @@ fn feed_trade_skill(
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
     repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
@@ -419,7 +417,7 @@ fn feed_trade_skill(
                     icons.as_deref(),
                     subclasses.as_deref(),
                     store,
-                    &mut items,
+                    &items,
                     &commands,
                     &cooldowns,
                     now,
@@ -586,7 +584,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
             Some("ITEM".into()),
         );
     }
@@ -601,7 +599,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_ENCHANT_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
             Some("ITEM".into()),
         );
     }
@@ -617,24 +615,24 @@ mod tests {
         // EffectItemType[0] == 0: 0x55ba30 short-circuits on a zero id before hashing.
         let none = recipe(SPELL_EFFECT_ENCHANT_ITEM, 0);
         assert_eq!(
-            recipe_icon(&none, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&none, Some(&icons), &deps.items, &deps.commands),
             None,
         );
 
         // A template that never lands (the async row) — nil, and the ask goes out exactly once.
         let missing = recipe(SPELL_EFFECT_CREATE_ITEM, 999);
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
             None,
         );
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
             None,
         );
         assert_eq!(deps.queried_entries(), vec![999], "ask-once, not ask-often");
 
         // The template landed but ItemDisplayInfo is unresolved — still nil, still not "SPELL".
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
-        assert_eq!(recipe_icon(&d, None, &mut deps.items, &deps.commands), None);
+        assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
     }
 }

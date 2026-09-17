@@ -58,9 +58,9 @@ impl Plugin for ClutterPlugin {
 /// global is read at draw time and needs no rebuild; ours costs a re-mesh of the ~30 chunks in the
 /// bubble, which the per-frame cap spreads over a few frames.
 ///
-/// Watches the **value**, not `is_changed()`, for the reason `terrain_stream::rescatter_clutter`
-/// spells out: the cvar sync deref-muts every knob resource whenever any cvar moves, so the flag
-/// over-fires. First sight only arms.
+/// Watches the **value**, not `is_changed()`, because the predicate is "the cutout moved" and
+/// not "the resource moved": `ClutterConfig` also carries the density, whose own writer would
+/// otherwise cost a re-mesh of the bubble on every detail-slider notch. First sight only arms.
 fn remesh_on_cutout_change(
     mut commands: Commands,
     cfg: Res<ClutterConfig>,
@@ -413,7 +413,6 @@ pub(crate) fn scatter_tile_clutter(
 /// and spawn them as children of `chunk_entity` (so a tile unload cascades to them). Returns the spawned
 /// entities (tracked on the `ClutterChunk` for distance teardown). Same merge as the old per-tile path,
 /// now per-chunk so only the ~70 yd bubble is ever built/drawn.
-#[allow(clippy::too_many_arguments)]
 fn build_chunk_clutter(
     chunk_entity: Entity,
     models: &[(String, Vec<ShadedPlacement>)],
@@ -561,7 +560,6 @@ fn frustum_corner_reach(fov_y: f32, aspect: f32) -> f32 {
 /// the player instead of every loaded tile and, with the per-frame build cap, spreads the cost so a
 /// tile-load no longer builds 256 chunks at once. Build/teardown happen where the fade ramp is
 /// already alpha 0, so they are invisible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_chunk_clutter(
     mut commands: Commands,
     cam: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
@@ -654,17 +652,29 @@ pub(crate) fn stream_chunk_clutter(
         );
         cc.built = built;
     }
+    // Two cases, and only one is a defect — the message always said so, but BOTH were warnings, so
+    // the benign one cried wolf. A login/teleport burst has a BACKLOG: the per-frame cap is why the
+    // near chunks are late, and the whole burst runs behind the loading cover. The director's
+    // 2026-09-15 log has three of these at t+1.7 s under a cover that did not lift until t+4.3 s —
+    // including one announcing grass at 4.4 yd that nobody could possibly have seen. With NO
+    // backlog the cap is not the cause: the distance gate let a near chunk through late on an
+    // ordinary frame, the player can see that one, and that one still warns.
     if late > 0 {
-        warn!(
-            "clutter: {late} chunk(s) built INSIDE the {:.0} yd horizon (nearest {late_nearest:.1} yd) \
-             — grass appeared where it could already be seen; {}",
-            cfg.fade_far,
-            if backlog > 0 {
-                format!("{backlog} more still queued behind the {CLUTTER_BUILDS_PER_FRAME}/frame cap (expected in a login/teleport burst)")
-            } else {
-                "no build backlog, so the DISTANCE GATE let it through late".to_string()
-            }
-        );
+        if backlog > 0 {
+            debug!(
+                "clutter: {late} chunk(s) built inside the {:.0} yd horizon (nearest \
+                 {late_nearest:.1} yd) — {backlog} more queued behind the \
+                 {CLUTTER_BUILDS_PER_FRAME}/frame cap (the expected login/teleport burst)",
+                cfg.fade_far,
+            );
+        } else {
+            warn!(
+                "clutter: {late} chunk(s) built INSIDE the {:.0} yd horizon (nearest \
+                 {late_nearest:.1} yd) — grass appeared where it could already be seen, and with \
+                 no build backlog, so the DISTANCE GATE let it through late",
+                cfg.fade_far,
+            );
+        }
     }
 }
 

@@ -384,7 +384,7 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
 /// Update (the schedule the mesh pipelines support). The per-frame *placement* is
 /// [`place_nameplates`] (PostUpdate, off this frame's propagated pose) — a fresh plate spawned
 /// here gets its first seat there, same frame (Update commands flush before PostUpdate).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn drive_nameplates(
     mut commands: Commands,
     units: Query<(
@@ -414,7 +414,7 @@ pub(crate) fn drive_nameplates(
         // The UnitName* cvar mask (0992) — the kind gates below read it.
         Res<NameConfig>,
     ),
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     // The guild-identity cache (1257) — the a5 line's text, and the lazy `CMSG_GUILD_QUERY` a
     // miss sends. `ResMut` because the read IS the ask ([`crate::ui_guild::unit_guild_name`]).
     mut guilds: ResMut<crate::ui_guild::GuildState>,
@@ -816,8 +816,20 @@ pub(crate) struct NameplatesPlugin;
 #[derive(Resource)]
 struct NameAnchorTrace(bool);
 
+/// The overhead-name rows' change callback (decision 2303): the name trio and the guild line.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut names: ResMut<NameConfig>) {
+    match ev.key().as_str() {
+        "unitnameplayer" => names.player = ev.flag(),
+        "unitnamenpc" => names.npc = ev.flag(),
+        "unitnameown" => names.own = ev.flag(),
+        "unitnameplayerguild" => names.player_guild = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for NameplatesPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.insert_resource(NameAnchorTrace(
             std::env::var_os("WOW_PROBE_NAME_TRACE").is_some(),
         ))

@@ -156,13 +156,12 @@ fn age(now: f64, at: f64) -> String {
 /// The journal overlay: while inspect is armed, the recent casts as a top-left column, newest
 /// first — click a row to copy its one-line identity block. Shares the inspector card's style
 /// (decision 0025's one overlay look).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn journal_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,
     journal: Res<CastJournal>,
     self_guid: Res<SelfGuid>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     net_commands: Res<NetCommands>,
     time: Res<Time>,
     // The copied row's edge stamp (`CastRecord::at` is unique per row) + when the copy happened,

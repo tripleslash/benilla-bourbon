@@ -66,7 +66,6 @@ pub(super) fn frame(elapsed: f32, count: &mut u32) -> Option<u32> {
 
 /// Dump one emitter's live pool against the camera it billboards toward.
 #[cold]
-#[allow(clippy::too_many_arguments)] // the sim loop's full draw context, verbatim
 pub(super) fn dump_emitter(
     fidx: u32,
     def: &ParticleEmitterDef,
@@ -104,8 +103,8 @@ pub(super) fn dump_emitter(
     } else {
         // Per-quad diagonal |v2−v0| over the WHOLE range — the young (big) quads live at the
         // tail, and only reading quad 0 (the oldest, smallest) once mis-called a mesh "sane".
-        let diag = |q: &[EffectVertex]| (Vec3::from(q[2].pos) - Vec3::from(q[0].pos)).length();
-        let quads: Vec<f32> = written.chunks_exact(4).map(diag).collect();
+        let diag = |q: &[EffectVertex; 4]| (Vec3::from(q[2].pos) - Vec3::from(q[0].pos)).length();
+        let quads: Vec<f32> = written.as_chunks::<4>().0.iter().map(diag).collect();
         let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
         for &d in &quads {
             dmin = dmin.min(d);

@@ -9,16 +9,11 @@ use benilla_protocol::{ObjectFields, SessionEvent};
 use bevy::prelude::*;
 
 use super::{
-    AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
-    Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
-    PendingTransfer, PetDismissSoundMessage, PetTalkMessage, RemoteMotion, Reputations, SelfGuid,
-    SelfPlayer, ServerSoundMessage, ServerTime, ServerWallClock, TeleportMessage, UnitMoveModes,
-    WorldportMessage,
+    Guid, GuidIndex, NetCommands, NetEvents, NetStatus, ObjectStore, Reputations, SelfGuid,
+    SelfPlayer,
 };
-use benilla_world::weather::WeatherMessage;
 
 mod anim;
-mod auction;
 mod chat;
 mod combat;
 mod combat_chat;
@@ -31,12 +26,15 @@ mod mount;
 mod names;
 mod npc;
 mod objects;
+mod params;
 mod pet;
 mod quests;
 mod session;
 mod spells;
 mod trade;
 mod world;
+
+use params::{ActionStores, AnimWriters, Catalogs, Clocks, ObjectQueries, Session, WindowStores};
 
 // The arm families, split out of the dispatch match below (each `pub(super)` fn is one arm's
 // body; the match stays the dispatcher, one call per arm — see the child modules).
@@ -54,8 +52,8 @@ use quests::{
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
     clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, removed_spell,
-    spell_book, spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go,
-    spell_start, superceded_spell,
+    set_spell_modifier, spell_book, spell_chain_targets, spell_cooldowns, spell_delayed,
+    spell_failed_other, spell_go, spell_start, superceded_spell,
 };
 
 /// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
@@ -87,473 +85,190 @@ fn addressed_store<'a>(
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
 
-/// Drain the inbound event channel and mutate real ECS entities: spawn on create, move existing,
-/// despawn on remove, attach/clear movement splines, and surface teleport/worldport/clock changes.
-// The tuple params below batch resources to stay under Bevy's 16-SystemParam ceiling; clippy reads
-// the 5-element ResMut tuples as "very complex types", but a named alias per tuple would be less
-// legible than the inline, commented groups.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(crate) fn apply_net_updates(
+/// The drain: take this frame's events off the channel and run them, **in packet order**, through
+/// the two halves of the dispatch (decision 2305) — first the kinds the `match` below still owns,
+/// through [`apply_unpeeled`], then the kinds a subsystem has claimed in the handler table
+/// ([`super::handlers`]), each handler a one-shot system over this exclusive world. One frame,
+/// packet order, before anything else in [`benilla_world::schedule::WorldStage::Net`] runs: the
+/// property 0006 built and 2265 said every split must keep.
+pub(crate) fn apply_net_updates(world: &mut World) {
+    let events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
+    super::handlers::dispatch(world, events, |world, unclaimed| {
+        if let Err(e) = world.run_system_cached_with(apply_unpeeled, unclaimed) {
+            panic!("the drain's dispatch match did not run: {e}");
+        }
+    });
+}
+
+/// The dispatch `match` — every kind no subsystem has claimed yet (2305's migration runs one
+/// window family at a time out of here into its own module's handlers). Mutates real ECS
+/// entities: spawn on create, move existing, despawn on remove, attach/clear movement splines,
+/// and surface teleport/worldport/clock changes; parks the rest into window state.
+fn apply_unpeeled(
+    In(events): In<Vec<SessionEvent>>,
     mut commands: Commands,
-    events: Res<NetEvents>,
+    net_commands: Res<NetCommands>,
     mut index: ResMut<GuidIndex>,
     mut self_guid: ResMut<SelfGuid>,
     mut status: ResMut<NetStatus>,
-    // The two server clocks, paired in one param (the 16-SystemParam ceiling this signature
-    // already lives against): the in-game day/night clock the lighting reads, and the wall clock
-    // the absolute descriptor stamps are dated in (decision 1150). Different quantities, same
-    // handler file.
-    mut clocks: (ResMut<ServerTime>, ResMut<ServerWallClock>),
     mut reputations: ResMut<Reputations>,
-    mut transforms: Query<&mut Transform>,
-    mut stores: Query<&mut ObjectStore>,
-    // One tuple param (the 16-SystemParam ceiling this signature already lives against): the three
-    // per-unit motion states the drain writes. [`RemoteMotion`] is a relayed player's dead-reckon;
-    // [`UnitMoveModes`] is any unit's server-granted movement modes (decision 1780);
-    // [`crate::transport::TransportRider`] is the deck a unit is standing on and its pose there
-    // (decision 1936). Different components, one concern — what the wire says about how a body we
-    // don't control is moving.
-    mut motion: (
-        Query<&mut RemoteMotion>,
-        Query<&mut UnitMoveModes>,
-        Query<&mut crate::transport::TransportRider>,
-    ),
-    // One tuple param (the 16-SystemParam ceiling): the session-lifecycle one-shot writers — the
-    // player's teleport/worldport snaps + the glue-screen edges (decision 0193).
-    session_msgs: (
-        MessageWriter<TeleportMessage>,
-        MessageWriter<WorldportMessage>,
-        // **The two park publications, paired** — the tuple is at Bevy's 16-param ceiling, and
-        // these are the pair that belongs together: the realm list and the character roster are
-        // the same thing one park apart, each published so the app's policy can answer it.
-        (
-            MessageWriter<CharListMessage>,
-            MessageWriter<crate::net::RealmListMessage>,
-        ),
-        // **The pick park's two verdicts, paired** (the tuple is at Bevy's 16-element ceiling, and
-        // these belong together): what a create/delete came back with, and the refusal of the pick
-        // itself.
-        (
-            MessageWriter<CharActionResultMessage>,
-            MessageWriter<super::CharacterLoginFailedMessage>,
-        ),
-        // **The world-entry pair** — the tuple is at Bevy's 16-element ceiling, and these two are
-        // one edge: the entry message, and the `SMSG_ADDON_INFO` verdict that the entry's own UI
-        // load reads before the first addon's file-scope code asks `GetNumAddOns()` (2175).
-        (
-            MessageWriter<EnteredWorldMessage>,
-            ResMut<crate::net::AddonInfoReply>,
-        ),
-        MessageWriter<LoggedOutMessage>,
-        MessageWriter<super::SpeedChangeMessage>,
-        // The two server-authored mover edges the controller both *applies* and *answers*, paired to
-        // stay inside Bevy's 16-element tuple limit — and they do belong together: a granted mode
-        // (decisions 0308, 0866) and a knockback launch (decision 1702) are the same handshake, an
-        // edge the server may not act on until our own live pose comes back.
-        (
-            MessageWriter<super::MoveModeMessage>,
-            MessageWriter<super::KnockBackMessage>,
-        ),
-        // The login screen's dialog + reconnect-policy feed (decision 0539).
-        MessageWriter<super::LoginStageMessage>,
-        // The login queue's position feed (decision 1681).
-        MessageWriter<super::LoginQueuedMessage>,
-        MessageWriter<super::LoginFailedMessage>,
-        MessageWriter<super::DisconnectedMessage>,
-        // The server's own answer to a GM dot-command, readable rather than only logged — the
-        // probe shield's confirmation channel (decision 0677).
-        MessageWriter<super::ServerSaidMessage>,
-        // A `MSG_MOVE_*` the server addressed to OUR mover (decision 0725): a pose it wrote, with
-        // no handshake — the controller applies it in `player::wire_in`.
-        MessageWriter<super::SelfMoveMessage>,
-        // The possession handoff (`SMSG_CLIENT_CONTROL_UPDATE`): control of a unit granted or
-        // revoked. Forwarded verbatim — only the controller knows the pose it would have to park.
-        MessageWriter<super::ClientControlMessage>,
-        // A cinematic to play (`SMSG_TRIGGER_CINEMATIC`) — `crate::cinematic` owns both the
-        // playback and the ack that has to answer it (decision 0196).
-        MessageWriter<super::CinematicTriggeredMessage>,
-    ),
-    // One tuple param (the 16-SystemParam ceiling): the ask-once query caches + the gossip/merchant
-    // state the net drain fills for the NPC-interaction windows (decision 0081).
-    caches: (
-        ResMut<crate::names::NameCache>,
-        ResMut<crate::items::Items>,
-        ResMut<crate::ui_gossip::GossipState>,
-        ResMut<crate::ui_merchant::MerchantOpen>,
-        // Nested pair: the two gossip-reached NPC service sessions the net drain fills whose
-        // state is a whole open window (the tuple is at the 16-param ceiling).
-        (
-            ResMut<crate::ui_trainer::TrainerOpen>,
-            ResMut<crate::ui_stable::StableOpen>,
-        ),
-        // Nested triple (the tuple is at the 16-param ceiling): the loot window state, the
-        // client-local loot-target latch (the kneel's self trigger, decision 0515), and the open
-        // group-loot rolls (decision 0591).
-        (
-            ResMut<crate::ui_loot::LootState>,
-            ResMut<crate::ui_loot::LootLatch>,
-            ResMut<crate::ui_loot_roll::LootRolls>,
-        ),
-        ResMut<crate::ui_chat::ChatLog>,
-        ResMut<crate::ui_quest::QuestGiver>,
-        // Nested pair (the tuple is at the 16-param ceiling): the quest-log template cache, and
-        // the party quest-share state (decision 1733) — the verdicts on a quest we pushed and the
-        // escort confirm. Same family, one slot; unlike most nestings here these two genuinely
-        // belong together, since a share is a quest-log verb.
-        (
-            ResMut<crate::ui_quest_log::QuestLog>,
-            ResMut<crate::ui_quest_share::QuestShare>,
-        ),
-        ResMut<crate::go_templates::GameObjectTemplates>,
-        ResMut<crate::net::HomeBind>,
-        ResMut<crate::net::Proficiencies>,
-        ResMut<crate::net::DroppedOpcodes>,
-        // The death arc's wire-fed store (decision 0308): reclaim expiry, corpse location,
-        // resurrect offer, the spirit-healer confirm.
-        ResMut<crate::death::DeathNet>,
-        // The party/raid roster mirror + its composed system lines (decision 0434).
-        ResMut<crate::ui_party::GroupState>,
-        // The taxi-map session (decision 0484 phase 1) + the mailbox session + its login-scoped
-        // arrival countdown (decision 0544) + the player-trade session (decision 0592) + the bank
-        // session and its purchase-refusal queue (decision 0604) + the world-state table the
-        // NPC-text `$<n>w` tokens read + the duel session (decision 0633), grouped to stay under
-        // Bevy's 16-SystemParam ceiling (this tuple's 16th and last slot).
-        (
-            ResMut<crate::ui_taxi::TaxiState>,
-            ResMut<crate::ui_mail::MailOpen>,
-            ResMut<crate::ui_mail::MailPending>,
-            ResMut<crate::ui_trade::TradeSession>,
-            ResMut<crate::ui_bank::BankOpen>,
-            ResMut<crate::ui_bank::BankErrors>,
-            ResMut<crate::world_state::WorldStates>,
-            ResMut<crate::ui_duel::DuelState>,
-            ResMut<crate::ui_social::SocialState>,
-            // The pending logout/quit (decision 0674): the server's response and cancel-ack land
-            // here, and `crate::ui_logout` turns them into the countdown dialog.
-            ResMut<crate::ui_logout::LogoutState>,
-            // The shared AreaTable catalog — the exploration arm's area-id → name resolve
-            // (decision 0828) — and the race-keyed discovery-jingle catalog (decision 0829).
-            // Either absent if its DBC failed to load.
-            Option<Res<crate::area::AreaTableRes>>,
-            Option<Res<crate::sound::ExplorationSounds>>,
-            // The mirror-timer queue (decision 0874): the breath/fatigue START/PAUSE/STOP edges,
-            // drained into the FrameXML bars by `crate::ui_mirror`.
-            ResMut<crate::ui_mirror::MirrorTimerFeed>,
-            // The pet action bar's server-authoritative state + its own cooldown store
-            // (decision 0982), replaced wholesale on every `SMSG_PET_SPELLS`; and the by-key red
-            // error queue its refused-order feedback rides (the `DisplayError` route, resolved
-            // through the VM's own GlobalStrings by `ui_action::feed_actions`).
-            ResMut<crate::ui_pet::PetBar>,
-            ResMut<crate::ui_action::UiErrorKeys>,
-            // The ask-once book-page cache (decision 1105) — every readable's text, keyed by
-            // `PageText` id; the reader session repaints off it.
-            // Paired into one slot: the group is itself at Bevy's 16-param ceiling, so a 17th
-
-            // entry stops the whole system implementing `SystemParam` — nesting is the same
-
-            // escape this tuple already is. Third member: the guild session (decision 1257) —
-            // the identity/roster mirror the seven `SessionEvent::Guild*` arms below drive.
-            (
-                ResMut<crate::ui_item_text::PageTexts>,
-                ResMut<crate::net::PlayedTimeAnswer>,
-                ResMut<crate::ui_guild::GuildState>,
-                // The innkeeper's pending bind question (decision 1331) — `SMSG_BINDER_CONFIRM`
-                // parks the innkeeper's guid here and `crate::ui_binder` turns it into the
-                // CONFIRM_BINDER dialog, whose Accept is the only thing that binds anything.
-                ResMut<crate::ui_binder::BinderState>,
-                // The class trainer's pending respec question (decision 1580) — the inbound
-                // `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
-                // `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose
-                // Accept is the only thing that unlearns anything. The binder's twin above.
-                (
-                    ResMut<crate::ui_talent_wipe::TalentWipeState>,
-                    // The dialog engine's verbs (decision 1963): the pet trainer's latch, the
-                    // instance-boot clock, the area spirit healer, the battleground queue and
-                    // the meeting-stone queue — each a feed for a stock dialog. Nested beside
-                    // the talent wipe because this tuple sits at Bevy's sixteen-entry limit.
-                    (
-                        ResMut<crate::ui_dialog_verbs::PetUnlearnState>,
-                        ResMut<crate::ui_dialog_verbs::InstanceBoot>,
-                        ResMut<crate::ui_dialog_verbs::AreaSpiritHealer>,
-                        ResMut<crate::ui_dialog_verbs::BattlefieldQueue>,
-                        ResMut<crate::ui_dialog_verbs::MeetingStone>,
-                        ResMut<crate::ui_battlefield_score::BattlefieldScoreboard>,
-                        ResMut<crate::ui_battlefield::Battlefield>,
-                        ResMut<crate::tutorial::Tutorials>,
-                        ResMut<crate::ui_battlefield_positions::BattlefieldPositions>,
-                        ResMut<crate::ui_tabard::TabardOpen>,
-                    ),
-                ),
-                // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
-                // stamped with — the wire carries no map field, so "where you were standing when
-                // the guard told you" is the client's to remember (`crate::poi_marker`).
-                ResMut<crate::poi_marker::PoiMarker>,
-                Option<Res<benilla_world::world_map::CurrentMap>>,
-                // The inspect-honor reply (decision 1512) — `MSG_INSPECT_HONOR_STATS` is the only
-                // source of another player's honor numbers, so the reply parks here and
-                // `crate::ui_honor` pushes it into the pane and fires `INSPECT_HONOR_UPDATE`.
-                ResMut<crate::ui_honor::InspectHonor>,
-                // The auctioneer session (decision 1511) — the hello reply opens it, the three
-                // list results fill it, and `crate::ui_auction` feeds it to the window.
-                ResMut<crate::ui_auction::AuctionOpen>,
-                // Guild Member Alert (decision 1589) — the CVar knob the sign-on/sign-off pair's
-                // display condition reads; see `ui_guild::apply::event` for the four conjuncts.
-                Res<crate::ui_guild::GuildMemberNotify>,
-                // The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the
-                // world point here and the minimap renderer derives everything else from it.
-                ResMut<crate::minimap::MinimapPing>,
-                // The GM ticket (decision 1673) — `SMSG_GMTICKET_GETTICKET` replaces the held
-                // ticket here and BUMPS AN ANSWER COUNTER, which is what `crate::ui_gm_ticket`
-                // diffs on: the Help window re-polls every 10 minutes and an unchanged answer
-                // still has to re-fire `UPDATE_TICKET`.
-                ResMut<crate::ui_gm_ticket::GmTicketState>,
-                // The guild-charter session (decision 1672) — two resources because only the
-                // registrar half is NPC-bound: `SMSG_PETITION_SHOWLIST` opens the registrar, and
-                // `SMSG_PETITION_SHOW_SIGNATURES` opens the item-bound charter window, which must
-                // survive walking away from the registrar.
-                ResMut<crate::ui_petition::GuildRegistrarState>,
-                ResMut<crate::ui_petition::PetitionState>,
-                // The pending summon question (decision 1747) — `SMSG_SUMMON_REQUEST` parks the
-                // summoner's guid, zone and expiry here and `crate::ui_summon` turns it into the
-                // CONFIRM_SUMMON dialog, whose Accept is the only packet in the flow.
-                ResMut<crate::ui_summon::SummonState>,
-                // The instance-lockout bookkeeping (decision 1748) — four of its six packets
-                // queue a GlobalStrings-templated chat line here for `crate::ui_instance` to
-                // resolve against the VM, and two write the latch behind
-                // `CanShowResetInstances()`.
-                ResMut<crate::ui_instance::InstanceState>,
-            ),
-        ),
-    ),
-    // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
-    // and the cast-bar feed (decision 0137), plus the item-lock bookkeeping the inventory-failure
-    // arm also drains (decision 0216 §4 / 0218 §3 — this apply site has no `UiScript` to fire
-    // `ITEM_LOCK_CHANGED` through, so the transitioned slots queue in `LockTransitions` for
-    // the container feed to pick up).
-    mut ui_actions: (
-        ResMut<crate::ui_action::PlayerActions>,
-        // Nested group (the tuple is at the 16-param ceiling): the cast + mount error queues,
-        // both drained into the red error line by `ui_action::feed_actions`, plus the
-        // FactionTemplate catalog the combat log's friend/foe split reads (B297). The catalog has
-        // nothing to do with the other two — it rides here purely because this is where the
-        // ceiling left room. Absent if the DBC failed to load, which degrades an unresolved unit
-        // to the friendly side of the classifier rather than dropping its lines.
-        (
-            ResMut<crate::ui_action::CastErrors>,
-            ResMut<crate::ui_action::MountErrors>,
-            Option<Res<crate::target::ring::Factions>>,
-            // The `modalNextSpell` chain's outbox (1597) — `cast_result` fills it, the ui_action
-            // drain sends it through the one cast path. Rides here for the same reason the
-            // catalog does: this is where the ceiling left room.
-            ResMut<crate::ui_action::ChainCasts>,
-            // The taming-refusal queue (decision 2039) — `SMSG_PET_TAME_FAILURE`'s reason byte.
-            // Its own queue rather than `UiErrorKeys` because its message needs TWO GlobalStrings
-            // lookups, and the inner one is only reachable at the drain (see the resource's doc).
-            ResMut<crate::ui_action::PetTameFailures>,
-            // The combat-feedback CVars — the eight display ranges, `CombatLogPeriodicSpells`,
-            // and the three floating-text gates. Rides here for exactly the reason the
-            // FactionTemplate catalog two fields up does: the signature is at the 16-param ceiling
-            // and this is where the room is. One bundle rather than three `Res`, so the use sites
-            // read `cvars.ranges` instead of `ui_actions.1 .7`.
-            crate::ui_chat::combat::CombatFeedbackCvars<'_>,
-        ),
-        ResMut<crate::ui_items::EquipErrors>,
-        ResMut<crate::ui_merchant::MerchantErrors>,
-        ResMut<crate::ui_cast::CastBarFeed>,
-        ResMut<crate::pending_item_ops::PendingItemOps>,
-        ResMut<crate::pending_item_ops::LockTransitions>,
-        // Nested pair (the tuple is at the ceiling): the two NPC-service windows' error queues,
-        // each drained onto its window's red line by its own feed.
-        (
-            ResMut<crate::ui_trainer::TrainerErrors>,
-            ResMut<crate::ui_stable::StableErrors>,
-        ),
-        ResMut<crate::ui_cast::PendingCast>,
-        // The cooldown store + the Spell.dbc catalog its wire laws read, and the live
-        // auto-repeat state the bar's flash rides (decision 0137 phase 4).
-        ResMut<crate::cooldowns::Cooldowns>,
-        Option<Res<crate::ui_action::Spells>>,
-        ResMut<crate::ui_action::AutoRepeatActive>,
-        // Our own running channel (the IsCurrentAction channel leg, decision 0137 phase 4).
-        ResMut<crate::ui_cast::ActiveChannel>,
-        // Pre-formatted UIErrorsFrame lines — text the wire already resolved, so there is no
-        // GlobalStrings key to look up: the death durability notice, `SMSG_NOTIFICATION`, and
-        // `SMSG_AREA_TRIGGER_MESSAGE`. Drained by `ui_action::feed_actions` beside UiErrorKeys.
-        ResMut<crate::ui_action::UiErrorTexts>,
-        // The queued on-next-swing strike (the melee-slot half of the cast tracking) — the
-        // wire resolves it here: GO fires it, a failing result/interrupt kills it.
-        ResMut<crate::ui_cast::QueuedMeleeSpell>,
-    ),
-    net_commands: Res<NetCommands>,
-    // One tuple param (Bevy's 16-SystemParam ceiling): the audio + combat/cast bridge writers, the
-    // cast-state read the spell-id-keyed `Casting` reap needs (decision 0107), and the floating
-    // combat-text feed (decision 0137 phase 2).
-    mut audio: (
-        MessageWriter<ServerSoundMessage>,
-        MessageWriter<WeatherMessage>,
-        MessageWriter<EmoteMessage>,
-        MessageWriter<crate::creature_anim::SwingMessage>,
-        Query<&crate::creature_anim::Casting>,
-        MessageWriter<crate::creature_anim::CastEvent>,
-        MessageWriter<crate::creature_anim::SpellGoTargets>,
-        MessageWriter<crate::combat_text::CombatTextSpawn>,
-        MessageWriter<crate::creature_anim::SwingImpact>,
-        MessageWriter<crate::creature_anim::SwingFlush>,
-        MessageWriter<crate::go_anim::GoLidOpen>,
-        // The aggro/alert vocal flare + the pushed-kit play (decision 0280).
-        MessageWriter<AiReactionMessage>,
-        MessageWriter<crate::creature_anim::KitPush>,
-        // The remote landing predictor's report (decision 0415): a relayed FALL_LAND fires the
-        // grunt + dust puff for an observed mover, the way the self controller does for us.
-        MessageWriter<crate::creature_anim::HardLanding>,
-        // An observed rider's flourish (`SMSG_MOUNTSPECIAL_ANIM`, decision 0441 P2) — the
-        // unit → mount-child hop happens in `creature_anim::flourish_to_anim`.
-        MessageWriter<crate::creature_anim::MountFlourish>,
-        // The UNIT_COMBAT event feed (the portrait hit indicator, decision 0576) + the
-        // COMBAT_TEXT_UPDATE feed (the center combat text, decision 0578) — the spell arms'
-        // self-facing twins of the floating-text spawn — and the sheath setter's queue, which the
-        // ATTACKERSTATEUPDATE arm's melee auto-draw writes into. Nested: the tuple is at the
-        // 16-param ceiling.
-        (
-            MessageWriter<crate::ui_unit::UnitCombatFeedback>,
-            MessageWriter<crate::ui_unit::CombatTextEvent>,
-            MessageWriter<crate::creature_anim::SheathRequest>,
-            // The GO one-shot Custom play (`SMSG_GAMEOBJECT_CUSTOM_ANIM` — the bobber's bite
-            // splash, decision 1086), the step-8 sibling of the `GoLidOpen` writer above.
-            MessageWriter<crate::go_anim::GoCustomAnim>,
-            // Are *we* already swinging? The ref's `[player+0xc48]`, mirrored by the
-            // server-echoed [`crate::creature_anim::Engaged`] — read by the GO handler's deferred
-            // auto-attack start (`0x6e83e7`, decision 1593). Filter-only, so it conflicts with
-            // nothing else in this drain.
-            Query<(), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
-            // The pet's bark (`SMSG_PET_ACTION_SOUND`, decision 2039) — `AiReactionMessage`'s
-            // sibling: both are pure audio that resolves a guid and hands the sound layer a
-            // state for the SAME `0x623a40` dispatcher. Nested for the same reason as its
-            // neighbours: the outer tuple is at the 16-param ceiling.
-            MessageWriter<PetTalkMessage>,
-            MessageWriter<PetDismissSoundMessage>,
-            // The swing-refusal seam's two edges (`crate::swing_refusal`, decision 2037): the four
-            // `SMSG_ATTACKSWING_*` refusals, and our own landed swing, which clears their latch.
-            // ONE writer for both so the drain hands them on in packet order.
-            MessageWriter<crate::swing_refusal::SwingRefusalEdge>,
-        ),
-    ),
-    // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
-    // self-only `SMSG_UPDATE_AURA_DURATION` lands here keyed by raw slot, timestamped for the
-    // `ui_aura` slot-join — plus the ping clock, which this drain now only CLEARS on a
-    // disconnect: the measuring moved to the read thread with B346's fix.
-    // Grouped as a tuple to stay under Bevy's 16-SystemParam ceiling.
-    //
-    // The stamp clock is `Time<Real>`, NOT the default virtual one, and both its readers
-    // (`aura_duration`, `corpse_reclaim_delay`) are the reason: a span the SERVER sends us counts
-    // down in real seconds, so it must be stamped and read on a real clock. `Time<Virtual>` clamps
-    // at 250 ms per frame (`max_delta`), which is right for simulation — a 2 s hitch must not
-    // teleport animations — and wrong here: every long frame would quietly ADD that much to every
-    // buff timer, so an aura would vanish with seconds still showing on its clock. Measured on a
-    // hitchy run: the virtual clock lost 20 s against real in 33 s (decision 0846).
-    mut aura: (
-        ResMut<crate::ui_aura::AuraDurations>,
-        Res<Time<Real>>,
-        Res<super::PingShared>,
-        // READ-only: every write to a mover's speed set goes through this drain's
-        // `objects::SpeedStage` and lands in one flush at the end (decision 1478).
-        Query<&super::UnitSpeeds>,
-        // The PlayAnimation call-order counter (`creature_anim::PlaySeq`): every
-        // animation-bearing message this drain emits stamps `next()`, in packet order.
-        ResMut<crate::creature_anim::PlaySeq>,
-        // The EnvironmentalDamage.dbc 6-slot table (damage type → SpellVisualKit) the
-        // `SMSG_ENVIRONMENTALDAMAGELOG` arm reads — the fall-landing dust puff.
-        Option<Res<crate::creature_anim::EnvDamageTable>>,
-        // The far-teleport latch + the armed-transport lens for the worldport's spare
-        // predicate (decision 0455: a boat whose path touches the destination map survives
-        // the purge; the TRANSFER_PENDING transport block routes NEW_WORLD's coordinates).
-        ResMut<PendingTransfer>,
-        Query<&crate::transport::Transport>,
-        // The REAL-time clock the relayed-move replay runs on (decisions 0601/0615): a remote's
-        // fire-time is stamped against this, and `drain_pending_moves`/`extrapolate_remote_units`
-        // read the same clock. Virtual time's `max_delta` clamp falls behind real time under
-        // occlusion throttling and would displace the whole replay schedule.
-        Res<Time<bevy::time::Real>>,
-    ),
+    // The families, by name (`params`): the drain destructures each one below so every arm
+    // reads a plain local.
+    clocks: Clocks,
+    objects: ObjectQueries,
+    session: Session,
+    windows: WindowStores,
+    actions: ActionStores,
+    anim: AnimWriters,
+    catalogs: Catalogs,
 ) {
+    let Clocks {
+        mut server_time,
+        mut wall_clock,
+        real: real_clock,
+    } = clocks;
+    let ObjectQueries {
+        mut transforms,
+        mut stores,
+        remote: mut remote_motion,
+        modes: mut unit_modes,
+        mut riders,
+        speeds: unit_speeds,
+        transports,
+        casting: casting_units,
+        engaged_self,
+        mut field_changes,
+    } = objects;
+    let ActionStores {
+        mut player_actions,
+        mut cast_errors,
+        mut mount_errors,
+        mut chain_casts,
+        mut pet_tame_failures,
+        mut learned_in_tab,
+        mut equip_errors,
+        mut merchant_errors,
+        mut cast_bar,
+        mut pending_item_ops,
+        mut lock_transitions,
+        mut trainer_errors,
+        mut stable_errors,
+        mut pending_cast,
+        cooldowns: mut cooldown_store,
+        mut auto_repeat,
+        mut active_channel,
+        mut ui_error_texts,
+        mut queued_melee,
+        mut aura_durations,
+        mut spell_mods,
+    } = actions;
+    let AnimWriters {
+        mut server_sounds,
+        weather: mut weather_msgs,
+        mut emotes,
+        mut swings,
+        mut cast_events,
+        mut spell_go_targets,
+        combat_text: mut combat_text_spawns,
+        mut swing_impacts,
+        mut swing_flushes,
+        go_lid_open: mut go_lid_opens,
+        mut ai_reactions,
+        mut kit_pushes,
+        mut hard_landings,
+        mut mount_flourishes,
+        unit_combat: mut unit_combat_feedback,
+        mut combat_text_events,
+        mut sheath_requests,
+        go_custom_anim: mut go_custom_anims,
+        pet_talk: mut pet_talks,
+        pet_dismiss: mut pet_dismiss_sounds,
+        swing_refusals: mut swing_refusal_edges,
+        mut play_seq,
+    } = anim;
+    let Catalogs {
+        factions: faction_catalog,
+        spells: spell_catalog,
+        combat_cvars,
+        env_damage: env_damage_table,
+        area_table,
+        exploration_sounds,
+        current_map,
+        guild_notify,
+    } = catalogs;
     // A `&mut` to the counter itself (deref-coerced through the `ResMut`), so the arms that stamp
     // it *conditionally* can take it by reference and only advance it when they emit.
-    let play_seq: &mut crate::creature_anim::PlaySeq = &mut aura.4;
-    let (
+    let play_seq: &mut crate::creature_anim::PlaySeq = &mut play_seq;
+    let WindowStores {
         mut names,
         mut items,
         mut gossip,
         mut merchant,
-        (mut trainer_open, mut stable_open),
-        (mut loot, mut loot_latch, mut loot_rolls),
+        mut trainer_open,
+        mut stable_open,
+        mut loot,
+        mut loot_latch,
+        mut loot_rolls,
         mut chat_log,
         mut quest,
-        (mut quest_log, mut quest_share),
+        mut quest_log,
+        mut quest_share,
         mut go_templates,
         mut home_bind,
         mut proficiencies,
         mut dropped,
         mut death_net,
         mut group,
-        (
-            mut taxi,
-            mut mail_open,
-            mut mail_pending,
-            mut trade_session,
-            mut bank_open,
-            mut bank_errors,
-            mut world_states,
-            mut duel,
-            mut social,
-            mut logout,
-            area_table,
-            exploration_sounds,
-            mut mirror_timers,
-            mut pet_bar,
-            mut ui_error_keys,
-            (
-                mut page_texts,
-                mut played_time_answer,
-                mut guild,
-                mut binder,
-                (
-                    mut talent_wipe,
-                    (
-                        mut pet_unlearn,
-                        mut instance_boot,
-                        mut area_spirit,
-                        mut battlefield_queue,
-                        mut meeting_stone,
-                        mut battlefield_scoreboard,
-                        mut battlefield,
-                        mut tutorials,
-                        mut battlefield_positions,
-                        mut tabard,
-                    ),
-                ),
-                mut poi_marker,
-                current_map,
-                mut inspect_honor,
-                mut auction_open,
-                guild_notify,
-                mut ping,
-                mut gm_ticket,
-                mut registrar,
-                mut petition,
-                mut summon,
-                mut instances,
-            ),
-        ),
-    ) = caches;
-    let (
+        mut taxi,
+        mut mail_open,
+        mut mail_pending,
+        mut trade_session,
+        mut bank_open,
+        mut bank_errors,
+        mut world_states,
+        mut duel,
+        mut social,
+        mut logout,
+        mut mirror_timers,
+        mut pet_bar,
+        mut ui_error_keys,
+        mut page_texts,
+        mut played_time_answer,
+        mut guild,
+        mut binder,
+        mut talent_wipe,
+        mut pet_unlearn,
+        mut instance_boot,
+        mut area_spirit,
+        mut battlefield_queue,
+        mut meeting_stone,
+        mut battlefield_scoreboard,
+        mut battlefield,
+        mut tutorials,
+        mut battlefield_positions,
+        mut tabard,
+        mut poi_marker,
+        mut inspect_honor,
+        mut ping,
+        mut gm_ticket,
+        mut registrar,
+        mut petition,
+        mut summon,
+        mut instances,
+    } = windows;
+    let Session {
         mut teleports,
         mut worldports,
-        (mut char_lists, mut realm_lists),
-        (mut char_actions, mut char_login_failures),
-        (mut entered_world, mut addon_reply),
+        mut char_lists,
+        mut realm_lists,
+        mut char_actions,
+        mut char_login_failures,
+        mut entered_world,
+        mut addon_reply,
         mut logged_out,
         mut speed_changes,
-        (mut move_modes, mut knockbacks),
+        mut move_modes,
+        mut knockbacks,
         mut login_stages,
         mut login_queued,
         mut login_failures,
@@ -562,7 +277,8 @@ pub(crate) fn apply_net_updates(
         mut self_moves,
         mut client_control,
         mut cinematics,
-    ) = session_msgs;
+        transfer: mut pending_transfer,
+    } = session;
     // Descriptor seeds/deltas for objects created *earlier in this same drain* can't land on their
     // entities yet (the spawn `Command` hasn't run), so they accumulate here and flush once at the end.
     // This also removes a latent clobber: a plain per-delta `insert` on a not-yet-spawned entity would
@@ -586,15 +302,15 @@ pub(crate) fn apply_net_updates(
                 self_guid: &self_guid,
                 group: Some(&group),
                 index: &index,
-                factions: ui_actions.1 .2.as_deref(),
+                factions: faction_catalog.as_deref(),
                 reputations: &reputations,
-                spells: ui_actions.10.as_deref(),
-                ranges: &ui_actions.1 .5.ranges,
-                periodic: ui_actions.1 .5.periodic.0,
+                spells: spell_catalog.as_deref(),
+                ranges: &combat_cvars.ranges,
+                periodic: combat_cvars.periodic.0,
             }
         };
     }
-    for ev in events.0.try_iter() {
+    for ev in events {
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
             SessionEvent::LoginQueued { position, realm } => {
@@ -674,14 +390,13 @@ pub(crate) fn apply_net_updates(
                     &mut mail_open,
                     &mut mail_pending,
                     &mut trade_session,
-                    &mut auction_open,
                     &mut bank_open,
                     &mut duel,
                     &mut social,
                     &mut guild,
                     &mut gm_ticket,
-                    &mut ui_actions.9,
-                    &mut aura.6,
+                    &mut cooldown_store,
+                    &mut pending_transfer,
                     &mut disconnects,
                 );
             }
@@ -718,9 +433,10 @@ pub(crate) fn apply_net_updates(
                     &mut transforms,
                     &mut stores,
                     &mut pending,
+                    &mut field_changes,
                     &mut speed_stage,
-                    &mut names,
-                    &mut go_templates,
+                    &names,
+                    &go_templates,
                     &net_commands,
                 )
             }
@@ -747,7 +463,11 @@ pub(crate) fn apply_net_updates(
             // `[CMovement+0xac] += lag`). A guid we do not hold is dropped, faithfully: the
             // reference resolves under `TYPEMASK_UNIT` and returns on a miss.
             SessionEvent::MoveTimeSkipped { guid, lag_ms } => {
-                if let Some(mut m) = index.0.get(&guid).and_then(|&e| motion.0.get_mut(e).ok()) {
+                if let Some(mut m) = index
+                    .0
+                    .get(&guid)
+                    .and_then(|&e| remote_motion.get_mut(e).ok())
+                {
                     m.relay.skip_time(lag_ms);
                 }
             }
@@ -766,7 +486,7 @@ pub(crate) fn apply_net_updates(
                 // The scheduled-replay law (decisions 0601/0615): `unit_move` runs the mover's own
                 // replay chain over this packet's wire stamp to get its client fire-time, then
                 // applies it now if due, else queues it on the unit for `drain_pending_moves`.
-                let now_ms = aura.8.elapsed_secs_f64() * 1000.0;
+                let now_ms = real_clock.elapsed_secs_f64() * 1000.0;
                 objects::unit_move(
                     guid,
                     crate::net::motion::RelayMove {
@@ -784,9 +504,9 @@ pub(crate) fn apply_net_updates(
                     &mut commands,
                     &index,
                     &self_guid,
-                    &mut motion.0,
+                    &mut remote_motion,
                     &mut transforms,
-                    &mut audio.13,
+                    &mut hard_landings,
                     &mut self_moves,
                 );
             }
@@ -795,7 +515,15 @@ pub(crate) fn apply_net_updates(
                 // reclaim latch is re-asked on that edge, as the reference's `FLAGS` mirror
                 // handler `0x5d6d60` does (1729).
                 death::recheck_corpse(guid, &fields, &self_guid, &mut death_net);
-                objects::object_values(guid, fields, &index, &mut stores, &mut pending, &mut items)
+                objects::object_values(
+                    guid,
+                    fields,
+                    &index,
+                    &mut stores,
+                    &mut pending,
+                    &mut field_changes,
+                    &mut items,
+                )
             }
             SessionEvent::ObjectDestroyed(guid) => {
                 death::forget_corpse(guid, &mut death_net);
@@ -837,11 +565,11 @@ pub(crate) fn apply_net_updates(
                 duration_ms,
                 flying,
                 run_mode,
-                objects::modes_of(guid, &index, &motion.1, &staged_modes).rooted(),
+                objects::modes_of(guid, &index, &unit_modes, &staged_modes).rooted(),
                 &mut commands,
                 &index,
                 &mut transforms,
-                &mut motion.2,
+                &mut riders,
             ),
             SessionEvent::Teleport {
                 guid,
@@ -872,26 +600,26 @@ pub(crate) fn apply_net_updates(
                     needs_ack,
                     &mut commands,
                     &mut index,
-                    &mut aura.6,
-                    &aura.7,
+                    &mut pending_transfer,
+                    &transports,
                     &mut worldports,
                 )
             }
             SessionEvent::TransferPending {
                 map_id,
                 transport_entry,
-            } => session::transfer_pending(map_id, transport_entry, &mut aura.6),
+            } => session::transfer_pending(map_id, transport_entry, &mut pending_transfer),
             SessionEvent::TransferAborted { reason } => {
-                session::transfer_aborted(reason, &mut aura.6)
+                session::transfer_aborted(reason, &mut pending_transfer)
             }
             SessionEvent::TimeSpeed {
                 hours,
                 minutes,
                 day_serial,
                 timescale,
-            } => session::time_speed(hours, minutes, day_serial, timescale, &mut clocks.0),
+            } => session::time_speed(hours, minutes, day_serial, timescale, &mut server_time),
             SessionEvent::ServerUnixTime { unix_time } => {
-                session::server_unix_time(unix_time, &mut clocks.1)
+                session::server_unix_time(unix_time, &mut wall_clock)
             }
             SessionEvent::Reputations { standings } => {
                 session::reputations(standings, &mut reputations)
@@ -902,7 +630,7 @@ pub(crate) fn apply_net_updates(
                 combat_chat::faction_standing(
                     &standings,
                     &reputations,
-                    ui_actions.1 .2.as_deref(),
+                    faction_catalog.as_deref(),
                     &mut chat_log,
                 );
                 session::reputation_delta(standings, &mut reputations, &mut quest)
@@ -928,7 +656,7 @@ pub(crate) fn apply_net_updates(
                     credit.victim_guid,
                     u8::try_from(credit.victim_rank).unwrap_or(0),
                 );
-                audio.15 .1.write(crate::ui_unit::CombatTextEvent {
+                combat_text_events.write(crate::ui_unit::CombatTextEvent {
                     message_type: "HONOR_GAINED",
                     data: Some(credit.honor.to_string()),
                     extra: None,
@@ -957,7 +685,7 @@ pub(crate) fn apply_net_updates(
                     zone,
                     delay_ms,
                     dead_or_ghost,
-                    aura.1.elapsed_secs_f64(),
+                    real_clock.elapsed_secs_f64(),
                     &mut summon,
                 );
             }
@@ -1048,7 +776,7 @@ pub(crate) fn apply_net_updates(
                     &mut binder,
                     &mut ui_error_keys,
                     area_table.as_deref(),
-                    &mut audio.0,
+                    &mut server_sounds,
                 )
             }
             SessionEvent::Proficiency {
@@ -1101,24 +829,24 @@ pub(crate) fn apply_net_updates(
                 objects::gameobject_info(entry, type_id, display_id, name, &data, &mut go_templates)
             }
             SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
-                objects::gameobject_custom_anim(guid, anim_id, &mut audio.15 .3)
+                objects::gameobject_custom_anim(guid, anim_id, &mut go_custom_anims)
             }
             SessionEvent::GameObjectDespawnAnim { guid } => {
                 objects::gameobject_despawn_anim(guid, &mut commands, &index)
             }
             SessionEvent::FishNotHooked => loot::fish_verdict(false, &mut ui_error_keys),
             SessionEvent::FishEscaped => loot::fish_verdict(true, &mut ui_error_keys),
-            SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut audio.0),
-            SessionEvent::PlayMusic { music_id } => world::play_music(music_id, &mut audio.0),
+            SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut server_sounds),
+            SessionEvent::PlayMusic { music_id } => world::play_music(music_id, &mut server_sounds),
             SessionEvent::PlayObjectSound { sound_id, guid } => {
-                world::play_object_sound(sound_id, guid, &index, &mut audio.0)
+                world::play_object_sound(sound_id, guid, &index, &mut server_sounds)
             }
             SessionEvent::Weather {
                 weather_type,
                 grade,
                 sound_id,
                 instant,
-            } => world::weather(weather_type, grade, sound_id, instant, &mut audio.1),
+            } => world::weather(weather_type, grade, sound_id, instant, &mut weather_msgs),
             SessionEvent::TextEmote {
                 guid,
                 text_emote,
@@ -1128,25 +856,48 @@ pub(crate) fn apply_net_updates(
                 text_emote,
                 target_name,
                 &index,
-                &mut audio.2,
+                &mut emotes,
                 &mut chat_log,
             ),
             SessionEvent::Emote { guid, emote_id } => {
-                anim::emote(guid, emote_id, &index, &mut audio.2)
+                anim::emote(guid, emote_id, &index, &mut emotes)
             }
             // The spell-book/action-bar pair → the action store the UI feed reads
             // (`crate::ui_action`), sent once at login (and the bar again on server-side edits).
             SessionEvent::SpellBook {
                 spell_ids,
                 cooldowns,
-            } => spell_book(spell_ids, cooldowns, &mut ui_actions.0, &mut ui_actions.9),
-            SessionEvent::ActionButtons { buttons } => action_buttons(buttons, &mut ui_actions.0),
-            SessionEvent::SpellLearned { spell_id } => learned_spell(spell_id, &mut ui_actions.0),
-            SessionEvent::SpellRemoved { spell_id } => removed_spell(spell_id, &mut ui_actions.0),
+            } => spell_book(
+                spell_ids,
+                cooldowns,
+                &mut player_actions,
+                &mut cooldown_store,
+            ),
+            SessionEvent::ActionButtons { buttons } => action_buttons(buttons, &mut player_actions),
+            SessionEvent::SpellLearned { spell_id } => learned_spell(
+                spell_id,
+                &mut player_actions,
+                spell_catalog.as_deref(),
+                &mut ui_error_keys,
+                &mut learned_in_tab,
+            ),
+            SessionEvent::SpellRemoved { spell_id } => removed_spell(
+                spell_id,
+                &mut player_actions,
+                spell_catalog.as_deref(),
+                &mut ui_error_keys,
+            ),
             SessionEvent::SpellSuperceded {
                 old_spell_id,
                 new_spell_id,
-            } => superceded_spell(old_spell_id, new_spell_id, &mut ui_actions.0),
+            } => superceded_spell(
+                old_spell_id,
+                new_spell_id,
+                &mut player_actions,
+                spell_catalog.as_deref(),
+                &mut ui_error_keys,
+                &mut learned_in_tab,
+            ),
             SessionEvent::CastResult {
                 spell_id,
                 success,
@@ -1160,17 +911,17 @@ pub(crate) fn apply_net_updates(
                 &mut commands,
                 &self_guid,
                 &index,
-                &mut ui_actions.1 .0,
-                &audio.4,
-                &mut audio.5,
-                &mut ui_actions.4,
-                &mut ui_actions.8,
-                &mut ui_actions.14,
-                &mut ui_actions.9,
-                &mut ui_actions.11,
-                ui_actions.10.as_deref(),
+                &mut cast_errors,
+                &casting_units,
+                &mut cast_events,
+                &mut cast_bar,
+                &mut pending_cast,
+                &mut queued_melee,
+                &mut cooldown_store,
+                &mut auto_repeat,
+                spell_catalog.as_deref(),
                 &net_commands,
-                &mut ui_actions.1 .3,
+                &mut chain_casts,
                 play_seq.next(),
             ),
             SessionEvent::InventoryFailure {
@@ -1183,9 +934,9 @@ pub(crate) fn apply_net_updates(
                 required_level,
                 item_guid,
                 bag_slot,
-                &mut ui_actions.2,
-                &mut ui_actions.5,
-                &mut ui_actions.6,
+                &mut equip_errors,
+                &mut pending_item_ops,
+                &mut lock_transitions,
                 &mut loot_latch,
             ),
             SessionEvent::Chat(m) => {
@@ -1220,9 +971,9 @@ pub(crate) fn apply_net_updates(
             SessionEvent::ChatRestricted => {
                 chat::broadcast(crate::ui_chat::Broadcast::ChatRestricted, &mut chat_log)
             }
-            SessionEvent::Notification { text } => chat::notification(text, &mut ui_actions.13),
+            SessionEvent::Notification { text } => chat::notification(text, &mut ui_error_texts),
             SessionEvent::AreaTriggerMessage { text } => {
-                chat::area_trigger_message(text, &mut ui_actions.13)
+                chat::area_trigger_message(text, &mut ui_error_texts)
             }
             SessionEvent::PlayedTime { total, level } => {
                 // BOTH halves, and they are not redundant. The chat breakdown is our stand-in for
@@ -1251,7 +1002,7 @@ pub(crate) fn apply_net_updates(
                 &mut ui_error_keys,
                 &name,
                 &self_guid,
-                &mut names,
+                &names,
                 &net_commands,
             ),
             SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut ui_error_keys),
@@ -1270,7 +1021,7 @@ pub(crate) fn apply_net_updates(
                 members,
                 leader,
                 loot,
-                &mut names,
+                &names,
                 &index,
                 &net_commands,
             ),
@@ -1440,7 +1191,7 @@ pub(crate) fn apply_net_updates(
             }
             SessionEvent::PetitionSignResults(results) => crate::ui_petition::apply::sign_results(
                 &mut petition,
-                &mut names,
+                &names,
                 self_guid.0.unwrap_or(0),
                 results,
                 &net_commands,
@@ -1495,7 +1246,7 @@ pub(crate) fn apply_net_updates(
                 corpse_map,
             } => death::corpse_query(found, display_map, position, corpse_map, &mut death_net),
             SessionEvent::CorpseReclaimDelay { delay_ms } => {
-                death::corpse_reclaim_delay(delay_ms, aura.1.elapsed_secs_f64(), &mut death_net)
+                death::corpse_reclaim_delay(delay_ms, real_clock.elapsed_secs_f64(), &mut death_net)
             }
             SessionEvent::ResurrectRequest {
                 caster,
@@ -1529,8 +1280,8 @@ pub(crate) fn apply_net_updates(
                 apply,
                 &mut commands,
                 &index,
-                &mut motion.1,
-                &mut motion.0,
+                &mut unit_modes,
+                &mut remote_motion,
                 &mut staged_modes,
             ),
             SessionEvent::KnockBack {
@@ -1545,10 +1296,10 @@ pub(crate) fn apply_net_updates(
                 combat::attack_start(attacker, victim, &mut commands, &index)
             }
             SessionEvent::AttackStop { attacker, victim } => {
-                combat::attack_stop(attacker, victim, &mut commands, &index, &mut audio.9)
+                combat::attack_stop(attacker, victim, &mut commands, &index, &mut swing_flushes)
             }
             SessionEvent::AiReaction { unit, reaction } => {
-                combat::ai_reaction(unit, reaction, &index, &mut audio.11)
+                combat::ai_reaction(unit, reaction, &index, &mut ai_reactions)
             }
             SessionEvent::AttackerState(s) => {
                 combat_chat::attacker_state(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
@@ -1556,17 +1307,19 @@ pub(crate) fn apply_net_updates(
                     s,
                     &index,
                     &self_guid,
-                    &mut audio.3,
-                    &mut audio.8,
-                    &mut audio.15 .1,
-                    &mut audio.15 .2,
-                    &mut audio.15 .7,
+                    &mut swings,
+                    &mut swing_impacts,
+                    &mut combat_text_events,
+                    &mut sheath_requests,
+                    &mut swing_refusal_edges,
                     &stores,
                     play_seq.next(),
                 )
             }
-            SessionEvent::AttackSwingError(e) => combat::attack_swing_error(e, &mut audio.15 .7),
-            SessionEvent::CancelCombat => combat::cancel_combat(&mut audio.15 .7),
+            SessionEvent::AttackSwingError(e) => {
+                combat::attack_swing_error(e, &mut swing_refusal_edges)
+            }
+            SessionEvent::CancelCombat => combat::cancel_combat(&mut swing_refusal_edges),
             SessionEvent::FeignDeathResisted => combat::feign_death_resisted(&mut ui_error_keys),
             SessionEvent::SpellDamageLog(s) => {
                 combat_chat::spell_damage_log(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
@@ -1575,11 +1328,11 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
-                    ui_actions.10.as_deref(),
-                    *ui_actions.1 .5.damage_text,
-                    &mut audio.7,
-                    &mut audio.15 .0,
-                    &mut audio.15 .1,
+                    spell_catalog.as_deref(),
+                    *combat_cvars.damage_text,
+                    &mut combat_text_spawns,
+                    &mut unit_combat_feedback,
+                    &mut combat_text_events,
                 )
             }
             SessionEvent::PeriodicAuraLog(s) => {
@@ -1588,7 +1341,7 @@ pub(crate) fn apply_net_updates(
                 // the handler `0x626dd0` does, and a zero jumps to the bare epilogue `0x6271b4`:
                 // no chat line, no floating tick number, no periodic miss word. Gating inside
                 // either half below would model it as two filters; it is one gate over both.
-                if !ui_actions.1 .5.periodic.0 {
+                if !combat_cvars.periodic.0 {
                     continue;
                 }
                 combat_chat::periodic_aura_log(
@@ -1603,12 +1356,12 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
-                    ui_actions.10.as_deref(),
-                    *ui_actions.1 .5.damage_text,
-                    &mut audio.7,
-                    &mut audio.15 .0,
-                    &mut audio.15 .1,
-                    &mut names,
+                    spell_catalog.as_deref(),
+                    *combat_cvars.damage_text,
+                    &mut combat_text_spawns,
+                    &mut unit_combat_feedback,
+                    &mut combat_text_events,
+                    &names,
                     &net_commands,
                 )
             }
@@ -1618,9 +1371,9 @@ pub(crate) fn apply_net_updates(
                     s,
                     &index,
                     &self_guid,
-                    &mut audio.15 .0,
-                    &mut audio.15 .1,
-                    &mut names,
+                    &mut unit_combat_feedback,
+                    &mut combat_text_events,
+                    &names,
                     &net_commands,
                 )
             }
@@ -1632,7 +1385,7 @@ pub(crate) fn apply_net_updates(
                     &transforms,
                     &mut chat_log,
                 );
-                combat_log::spell_energize_log(s, &self_guid, &mut audio.15 .1)
+                combat_log::spell_energize_log(s, &self_guid, &mut combat_text_events)
             }
             SessionEvent::DamageShield(s) => {
                 combat_chat::damage_shield(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
@@ -1641,9 +1394,9 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
-                    *ui_actions.1 .5.damage_text,
-                    &mut audio.7,
-                    &mut audio.15 .0,
+                    *combat_cvars.damage_text,
+                    &mut combat_text_spawns,
+                    &mut unit_combat_feedback,
                 )
             }
             SessionEvent::SpellLogMiss(s) => {
@@ -1653,11 +1406,11 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
-                    ui_actions.10.as_deref(),
-                    *ui_actions.1 .5.damage_text,
-                    &mut audio.7,
-                    &mut audio.15 .0,
-                    &mut audio.15 .1,
+                    spell_catalog.as_deref(),
+                    *combat_cvars.damage_text,
+                    &mut combat_text_spawns,
+                    &mut unit_combat_feedback,
+                    &mut combat_text_events,
                 )
             }
             // ── the combat log's completeness block (1703) ────────────────────────────────
@@ -1705,9 +1458,13 @@ pub(crate) fn apply_net_updates(
                 &transforms,
                 &mut chat_log,
             ),
-            SessionEvent::XpGain(x) => {
-                combat_log::xp_gain(x, &index, &self_guid, &mut audio.7, &mut chat_log)
-            }
+            SessionEvent::XpGain(x) => combat_log::xp_gain(
+                x,
+                &index,
+                &self_guid,
+                &mut combat_text_spawns,
+                &mut chat_log,
+            ),
             SessionEvent::ExplorationXp(x) => combat_log::exploration_xp(
                 x,
                 area_table.as_deref(),
@@ -1715,7 +1472,7 @@ pub(crate) fn apply_net_updates(
                 &index,
                 &self_guid,
                 &stores,
-                &mut audio.0,
+                &mut server_sounds,
                 &mut chat_log,
             ),
             SessionEvent::LevelUp(l) => combat_log::level_up(l, &mut chat_log),
@@ -1735,11 +1492,11 @@ pub(crate) fn apply_net_updates(
                 ammo_display_id,
                 &mut commands,
                 &index,
-                &mut audio.5,
+                &mut cast_events,
                 &self_guid,
-                &mut ui_actions.4,
-                &mut ui_actions.8,
-                ui_actions.10.as_deref(),
+                &mut cast_bar,
+                &mut pending_cast,
+                spell_catalog.as_deref(),
                 play_seq.next(),
             ),
             SessionEvent::SpellGo {
@@ -1766,28 +1523,29 @@ pub(crate) fn apply_net_updates(
                 item_caster,
                 &mut commands,
                 &index,
-                &audio.4,
-                &mut audio.5,
-                &mut audio.6,
+                &casting_units,
+                &mut cast_events,
+                &mut spell_go_targets,
                 &self_guid,
                 &stores,
-                &mut ui_actions.4,
-                &mut ui_actions.8,
-                &mut ui_actions.14,
-                &mut audio.7,
-                &mut audio.10,
+                &mut cast_bar,
+                &mut pending_cast,
+                &mut queued_melee,
+                &mut combat_text_spawns,
+                *combat_cvars.damage_text,
+                &mut go_lid_opens,
                 &mut loot_latch,
                 (
-                    &mut ui_actions.9,
-                    ui_actions.10.as_deref(),
+                    &mut cooldown_store,
+                    spell_catalog.as_deref(),
                     &mut items,
                     &net_commands,
                     &mut pet_bar,
                 ),
                 (
-                    &mut ui_actions.11,
-                    &mut audio.15 .2,
-                    !audio.15 .4.is_empty(),
+                    &mut auto_repeat,
+                    &mut sheath_requests,
+                    !engaged_self.is_empty(),
                 ),
                 play_seq.next(),
             ),
@@ -1801,23 +1559,23 @@ pub(crate) fn apply_net_updates(
                 spell_id,
                 &mut commands,
                 &index,
-                &audio.4,
-                &mut audio.5,
+                &casting_units,
+                &mut cast_events,
                 &self_guid,
-                &mut ui_actions.4,
-                &mut ui_actions.8,
-                &mut ui_actions.14,
+                &mut cast_bar,
+                &mut pending_cast,
+                &mut queued_melee,
                 play_seq.next(),
             ),
             SessionEvent::SpellDelayed { caster, delay_ms } => spell_delayed(
                 caster,
                 delay_ms,
                 &self_guid,
-                &mut ui_actions.4,
-                &mut ui_actions.8,
+                &mut cast_bar,
+                &mut pending_cast,
             ),
             SessionEvent::CancelAutoRepeat => cancel_auto_repeat(
-                &mut ui_actions.11,
+                &mut auto_repeat,
                 &self_guid,
                 &index,
                 &mut commands,
@@ -1825,15 +1583,15 @@ pub(crate) fn apply_net_updates(
             ),
             SessionEvent::SpellCooldowns { caster, cooldowns } => {
                 if let Some(store) =
-                    addressed_store(caster, &self_guid, &mut ui_actions.9, &mut pet_bar)
+                    addressed_store(caster, &self_guid, &mut cooldown_store, &mut pet_bar)
                 {
-                    spell_cooldowns(caster, cooldowns, ui_actions.10.as_deref(), store);
+                    spell_cooldowns(caster, cooldowns, spell_catalog.as_deref(), store);
                 }
             }
             SessionEvent::ItemCooldown {
                 item_guid,
                 spell_id,
-            } => item_cooldown(item_guid, spell_id, &items, &mut ui_actions.9),
+            } => item_cooldown(item_guid, spell_id, &items, &mut cooldown_store),
             // The item-lifetime countdown's ONLY feed (decision 1933): park the deadline on the
             // item store, exactly as the enchant timer below does — vmangos's own writer says the
             // `ITEM_FIELD_DURATION` field the client also holds is not what it displays from.
@@ -1849,21 +1607,21 @@ pub(crate) fn apply_net_updates(
             } => items.set_enchant_deadline(item_guid, slot, seconds),
             SessionEvent::CooldownEvent { spell_id, caster } => {
                 if let Some(store) =
-                    addressed_store(caster, &self_guid, &mut ui_actions.9, &mut pet_bar)
+                    addressed_store(caster, &self_guid, &mut cooldown_store, &mut pet_bar)
                 {
                     cooldown_event(spell_id, caster, store);
                 }
             }
             SessionEvent::ClearCooldown { spell_id, caster } => {
                 if let Some(store) =
-                    addressed_store(caster, &self_guid, &mut ui_actions.9, &mut pet_bar)
+                    addressed_store(caster, &self_guid, &mut cooldown_store, &mut pet_bar)
                 {
                     clear_cooldown(spell_id, caster, store);
                 }
             }
             SessionEvent::CooldownCheat { caster } => {
                 if let Some(store) =
-                    addressed_store(caster, &self_guid, &mut ui_actions.9, &mut pet_bar)
+                    addressed_store(caster, &self_guid, &mut cooldown_store, &mut pet_bar)
                 {
                     cooldown_cheat(caster, store);
                 }
@@ -1871,40 +1629,49 @@ pub(crate) fn apply_net_updates(
             // The pet action bar (decision 0982) — server-authoritative, so PET_SPELLS is a
             // wholesale replace and its zero-guid form is the teardown.
             SessionEvent::PetSpells(spells) => {
-                pet::pet_spells(*spells, ui_actions.10.as_deref(), &mut pet_bar)
+                pet::pet_spells(*spells, spell_catalog.as_deref(), &mut pet_bar)
             }
             SessionEvent::PetMode(mode) => pet::pet_mode(mode, &mut pet_bar),
             SessionEvent::PetActionFeedback { reason } => {
                 pet::pet_action_feedback(reason, &mut ui_error_keys)
             }
             SessionEvent::PetCastFailed { spell_id, reason } => {
-                pet::pet_cast_failed(spell_id, reason, &mut ui_actions.1 .0)
+                pet::pet_cast_failed(spell_id, reason, &mut cast_errors)
             }
             // The three pet-feedback arms and the pet's voice (decision 2039). Each was
             // name-table-only until then; each is something the reference visibly does.
             SessionEvent::PetTameFailure { reason } => {
-                pet::pet_tame_failure(reason, &mut ui_actions.1 .4)
+                pet::pet_tame_failure(reason, &mut pet_tame_failures)
             }
             SessionEvent::PetNameInvalid => pet::pet_name_invalid(&mut ui_error_keys),
             SessionEvent::PetBroken => pet::pet_broken(&mut ui_error_keys),
             SessionEvent::PetActionSound { pet_guid, talk } => {
-                pet::pet_action_sound(pet_guid, talk, &index, &mut audio.15 .5)
+                pet::pet_action_sound(pet_guid, talk, &index, &mut pet_talks)
             }
             SessionEvent::PetDismissSound { model_id, position } => {
-                pet::pet_dismiss_sound(model_id, position, &mut audio.15 .6)
+                pet::pet_dismiss_sound(model_id, position, &mut pet_dismiss_sounds)
             }
             SessionEvent::ChannelStart {
                 spell_id,
                 duration_ms,
-            } => channel_start(spell_id, duration_ms, &mut ui_actions.12, &mut ui_actions.4),
+            } => channel_start(spell_id, duration_ms, &mut active_channel, &mut cast_bar),
             SessionEvent::ChannelUpdate { remaining_ms } => {
-                channel_update(remaining_ms, &mut ui_actions.12, &mut ui_actions.4)
+                channel_update(remaining_ms, &mut active_channel, &mut cast_bar)
             }
-            SessionEvent::AuraDuration { slot, remaining_ms } => {
-                aura_duration(slot, remaining_ms, &mut aura.0, aura.1.elapsed_secs_f64())
-            }
+            SessionEvent::AuraDuration { slot, remaining_ms } => aura_duration(
+                slot,
+                remaining_ms,
+                &mut aura_durations,
+                real_clock.elapsed_secs_f64(),
+            ),
+            SessionEvent::SpellModifier {
+                flat,
+                mask_bit,
+                op,
+                value,
+            } => set_spell_modifier(flat, mask_bit, op, value, &mut spell_mods),
             SessionEvent::PlaySpellVisual { unit, kit_id } => {
-                anim::play_spell_visual(unit, kit_id, &index, play_seq, &mut audio.12)
+                anim::play_spell_visual(unit, kit_id, &index, play_seq, &mut kit_pushes)
             }
             SessionEvent::EnvironmentalDamageLog(e) => {
                 combat_chat::environmental_damage_log(
@@ -1917,9 +1684,9 @@ pub(crate) fn apply_net_updates(
                 anim::environmental_damage_log(
                     e,
                     &index,
-                    aura.5.as_deref(),
+                    env_damage_table.as_deref(),
                     play_seq,
-                    &mut audio.12,
+                    &mut kit_pushes,
                 )
             }
             // The gossip/vendor/trainer NPC-interaction family — arm bodies in `npc`.
@@ -1946,7 +1713,7 @@ pub(crate) fn apply_net_updates(
                 &poi,
                 &mut poi_marker,
                 current_map.as_ref().map_or(0, |m| m.0),
-                aura.1.elapsed_secs_f64(),
+                real_clock.elapsed_secs_f64(),
             ),
             // Questgiver panels (decision 0088): fill the `QuestGiver` the quest feed
             // (`crate::ui_quest`) reads. Each panel packet replaces the open view; the greeting/gossip
@@ -2012,7 +1779,7 @@ pub(crate) fn apply_net_updates(
                 npc::trainer_buy_succeeded(trainer, spell_id, &mut trainer_open, &net_commands)
             }
             SessionEvent::TrainerBuyFailed { error, .. } => {
-                npc::trainer_buy_failed(error, &mut ui_actions.7 .0)
+                npc::trainer_buy_failed(error, &mut trainer_errors)
             }
             SessionEvent::InvalidatePlayer { guid } => names::invalidate_player(guid, &mut names),
             SessionEvent::ListStabledPets {
@@ -2020,12 +1787,9 @@ pub(crate) fn apply_net_updates(
                 num_stable_slots,
                 pets,
             } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open, &mut names),
-            SessionEvent::StableResult { result } => npc::stable_result(
-                result,
-                &mut stable_open,
-                &mut ui_actions.7 .1,
-                &net_commands,
-            ),
+            SessionEvent::StableResult { result } => {
+                npc::stable_result(result, &mut stable_open, &mut stable_errors, &net_commands)
+            }
             SessionEvent::TaxiNodesShown {
                 flightmaster,
                 nearest_node,
@@ -2046,11 +1810,15 @@ pub(crate) fn apply_net_updates(
                 vendor,
                 item_entry,
                 reason,
-            } => {
-                npc::vendor_buy_failed(vendor, item_entry, reason, &mut merchant, &mut ui_actions.3)
-            }
+            } => npc::vendor_buy_failed(
+                vendor,
+                item_entry,
+                reason,
+                &mut merchant,
+                &mut merchant_errors,
+            ),
             SessionEvent::VendorSellFailed { reason, .. } => {
-                npc::vendor_sell_failed(reason, &mut ui_actions.3)
+                npc::vendor_sell_failed(reason, &mut merchant_errors)
             }
             SessionEvent::ForceSpeedChange {
                 guid,
@@ -2063,20 +1831,20 @@ pub(crate) fn apply_net_updates(
                 counter,
                 speed,
                 &index,
-                &aura.3,
+                &unit_speeds,
                 &mut speed_stage,
                 &self_guid,
                 &mut speed_changes,
             ),
             SessionEvent::SpeedChanged { guid, kind, speed } => {
-                objects::speed_changed(guid, kind, speed, &index, &aura.3, &mut speed_stage)
+                objects::speed_changed(guid, kind, speed, &index, &unit_speeds, &mut speed_stage)
             }
             // ── The mount arc (decision 0441) — arm bodies in `mount` ─────────────────────────
             SessionEvent::MountResult { mount, code } => {
-                mount::mount_result(mount, code, &mut ui_actions.1 .1)
+                mount::mount_result(mount, code, &mut mount_errors)
             }
             SessionEvent::MountSpecial { guid } => {
-                mount::mount_special(guid, &self_guid, &index, &mut audio.14)
+                mount::mount_special(guid, &self_guid, &index, &mut mount_flourishes)
             }
             // Possession's control half (B211). Forwarded whole and unjudged: the guid may name us
             // (a revoke) or somebody else (a grant), and only the controller can act on either —
@@ -2117,7 +1885,7 @@ pub(crate) fn apply_net_updates(
                 item,
                 &mut mail_open,
                 &net_commands,
-                &mut ui_actions.2,
+                &mut equip_errors,
             ),
             SessionEvent::MailItemText { text_id, text } => {
                 mail::mail_item_text(text_id, text, &mut mail_open)
@@ -2135,41 +1903,6 @@ pub(crate) fn apply_net_updates(
             SessionEvent::NextMailTime { seconds } => {
                 mail::next_mail_time(seconds, &mut mail_pending)
             }
-            // The auction house arc (decision 1511 P1): the hello reply OPENS the window — our
-            // send does not — and the three list results fill the three tabs.
-            SessionEvent::AuctionHello {
-                auctioneer,
-                house_id,
-            } => auction::auction_hello(auctioneer, house_id, &mut auction_open),
-            SessionEvent::AuctionCommandResult {
-                auction_id,
-                action,
-                error,
-                tail,
-            } => {
-                auction::auction_command_result(auction_id, action, error, &tail, &mut auction_open)
-            }
-            SessionEvent::AuctionListResult {
-                auctions,
-                total_count,
-            } => auction::auction_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionOwnerListResult {
-                auctions,
-                total_count,
-            } => auction::auction_owner_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionBidderListResult {
-                auctions,
-                total_count,
-            } => auction::auction_bidder_list_result(auctions, total_count, &mut auction_open),
-            SessionEvent::AuctionBidderNotification(n) => {
-                auction::auction_bidder_notification(&n, &mut auction_open)
-            }
-            SessionEvent::AuctionOwnerNotification(n) => {
-                auction::auction_owner_notification(&n, &mut auction_open)
-            }
-            SessionEvent::AuctionRemovedNotification { item_entry, .. } => {
-                auction::auction_removed_notification(item_entry, &mut auction_open)
-            }
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the
             // `TradeSession` the trade feed (`crate::ui_trade`) reads.
@@ -2185,6 +1918,15 @@ pub(crate) fn apply_net_updates(
             SessionEvent::WorldStates { scope, states } => {
                 world::world_states(scope, states, &mut world_states)
             }
+            // A kind with no arm here is one a subsystem has claimed in the handler table
+            // (decision 2305) — routed there by the drain, so it never reaches this match — or a
+            // new kind nobody handles, which `every_session_event_kind_has_one_owner` names at
+            // test time and this names at run time: the reference discards an unregistered
+            // opcode in silence; this client says so.
+            other => error!(
+                "net: {:?} reached the dispatch match with no arm — neither peeled nor handled",
+                benilla_protocol::SessionEventKind::from(&other)
+            ),
         }
     }
     // Flush the staged descriptor seeds/deltas onto the entities born this drain (now spawned by the

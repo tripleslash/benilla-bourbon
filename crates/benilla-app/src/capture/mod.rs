@@ -93,6 +93,8 @@ mod phase_probe;
 mod pick_probe;
 mod probe_auction;
 mod probe_bank;
+mod probe_bg;
+mod probe_bg_queue;
 mod probe_binder;
 mod probe_book;
 mod probe_castcancel;
@@ -101,6 +103,7 @@ mod probe_charter;
 mod probe_chest;
 mod probe_clam;
 mod probe_crossing;
+pub(crate) mod probe_env;
 mod probe_gm_ticket;
 mod probe_goquest;
 mod probe_guard_poi;
@@ -110,6 +113,7 @@ mod probe_model_camera;
 mod probe_partner;
 mod probe_rig;
 mod probe_service;
+mod probe_stone;
 mod probe_taxi;
 mod probe_vendor_swap;
 mod probes;
@@ -122,6 +126,8 @@ pub(crate) use phase_probe::PhaseProbePlugin;
 pub(crate) use pick_probe::PickProbePlugin;
 pub(crate) use probe_auction::ProbeAuctionPlugin;
 pub(crate) use probe_bank::ProbeBankPlugin;
+pub(crate) use probe_bg::ProbeBgPlugin;
+pub(crate) use probe_bg_queue::ProbeBgQueuePlugin;
 pub(crate) use probe_binder::ProbeBinderPlugin;
 pub(crate) use probe_book::ProbeBookPlugin;
 pub(crate) use probe_castcancel::ProbeCastCancelPlugin;
@@ -139,6 +145,7 @@ pub(crate) use probe_model_camera::ProbeModelCameraPlugin;
 pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_service::ProbeServicePlugin;
+pub(crate) use probe_stone::ProbeStonePlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probe_vendor_swap::ProbeVendorSwapPlugin;
 pub(crate) use probes::{
@@ -911,7 +918,6 @@ impl Plugin for CapturePlugin {
 /// Each frame, force the deterministic capture conditions: pinned time-of-day, no perf HUD, and the
 /// fixed camera pose. Runs in `WorldStage::Present` (after `control` is gated off and after terrain
 /// streaming reads the camera), so the harness is the sole, stable author of the view.
-#[allow(clippy::too_many_arguments)]
 fn pin_scene(
     ctx: Res<CaptureCtx>,
     mut debug: ResMut<DebugState>,
@@ -991,7 +997,8 @@ fn hold_clock(mut clock: ResMut<Time<Virtual>>) {
 
 /// The three scene-population queries the `FPS_PROBE` line prints — bundled because they are one
 /// concern (how much world is resident, and how much of it survived the cull) and because
-/// `drive_capture` sits against Bevy's 16-parameter ceiling, which `cvars::KnobParams` hit first.
+/// `drive_capture` sits against Bevy's 16-parameter ceiling, which the CVar host's old knob
+/// bundle hit first (retired by 2303).
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ProbeCensus<'w, 's> {
     particles: Query<'w, 's, &'static benilla_world::particles::ParticleEmitter>,
@@ -1000,7 +1007,6 @@ pub(crate) struct ProbeCensus<'w, 's> {
 }
 
 /// Drive the capture lifecycle: wait for streaming, settle, screenshot, exit.
-#[allow(clippy::too_many_arguments)]
 fn drive_capture(
     mut ctx: ResMut<CaptureCtx>,
     mut watch: ResMut<FrameWatch>,
@@ -1087,7 +1093,9 @@ fn drive_capture(
             if watch.stable >= stable_frames() || capped {
                 if let Some(px) = watch.prev.as_deref() {
                     if px
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
                     {
                         error!(

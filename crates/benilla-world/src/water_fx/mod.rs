@@ -323,7 +323,6 @@ fn build_patch(
 
 /// Classify + gate + emit for one unit this frame (the driver `0x5fa760`, once per unit per
 /// frame; emission paced by the unit's shared cooldown cell).
-#[allow(clippy::too_many_arguments)]
 fn drive_unit(
     foam_state: &mut UnitFoam,
     alloc: &mut dyn FnMut(FoamRecord),
@@ -433,7 +432,6 @@ fn drive_unit(
 /// so a map kept across a spell of cata would put one frame's worth of `dt` against minutes of
 /// travel the moment the player switched back — a single fat wake at the far end of a jump the unit
 /// never made.
-#[allow(clippy::too_many_arguments)] // the emitter's real input set; the index ride-along tipped it
 fn emit_water_foam(
     time: Res<Time>,
     detail: Res<WaterDetail>,

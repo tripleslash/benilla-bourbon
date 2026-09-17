@@ -398,7 +398,6 @@ fn poi_icon_cell(icon: u32) -> Option<[f32; 4]> {
 /// Draw the landmark layer: in-range POI icons at position, then the nearest-3 rim arrows,
 /// each rotated to point at its POI. Records a hover hit (later-drawn wins, matching draw
 /// order).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_landmarks(
     ctx: &BlipCtx,
     cat: Option<&AreaPoiCatalog>,
@@ -566,7 +565,7 @@ pub(super) fn emit_party_arrows(
 pub(super) fn drive_blip_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hover: Res<MinimapBlipHover>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<(String, Vec2)>>>,
 ) {

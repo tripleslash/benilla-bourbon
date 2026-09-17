@@ -146,7 +146,14 @@ impl LoginRefusal {
 
 /// One decoded event from the world stream. Carries only primitives + the coarse [`EntityKind`]
 /// classification — no wire types leak to the app, and no running state lives here.
-#[derive(Debug, Clone)]
+///
+/// [`SessionEventKind`] is its fieldless twin (one variant per variant, derived): the key the
+/// app's packet-handler table dispatches on, as the reference's table is keyed by opcode.
+#[derive(Debug, Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(SessionEventKind),
+    derive(Hash, PartialOrd, Ord, strum::EnumIter, strum::IntoStaticStr)
+)]
 pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
@@ -854,7 +861,7 @@ pub enum SessionEvent {
         misses: Vec<(u64, u8)>,
         target: Option<u64>,
         /// The GameObject an open-lock cast launched at (`TARGET_FLAG_GAMEOBJECT`) — opens a chest lid /
-        /// locked door (decision 0250). `None` for a unit spell.
+        /// locked door (decision 2271). `None` for a unit spell.
         go_target: Option<u64>,
         /// The ground point a dest-targeted cast launched at (`TARGET_FLAG_DEST_LOCATION`), raw
         /// WoW coords — where a ground AOE's launch-side visual belongs (the B132 follow-up;
@@ -914,6 +921,19 @@ pub enum SessionEvent {
         item_guid: u64,
         slot: u32,
         seconds: u32,
+    },
+    /// One cell of a talent spell-modifier table, absolutely (`SMSG_SET_FLAT_SPELL_MODIFIER` /
+    /// `SMSG_SET_PCT_SPELL_MODIFIER`): `flat` picks the table, `mask_bit` is the spell's
+    /// `SpellFamilyFlags` **bit index** (the row) and `op` the SpellModOp (the column). Neither
+    /// byte is bounded on the wire — the consumer (`benilla::spell_mods`) refuses an out-of-range
+    /// pair rather than reproducing the reference's own overrun. `value` is **absolute**, not a
+    /// delta; the wire shape and the `bit * 29 + op` index law are on
+    /// [`crate::messages::ServerPacket::SpellModifier`].
+    SpellModifier {
+        flat: bool,
+        mask_bit: u8,
+        op: u8,
+        value: i32,
     },
     /// Start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's parked timers now
     /// (`SMSG_COOLDOWN_EVENT`).
@@ -1596,6 +1616,13 @@ pub enum SessionEvent {
     },
 }
 
+impl SessionEventKind {
+    /// Every kind, in declaration order — for a census that asks "who handles each?".
+    pub fn all() -> impl Iterator<Item = Self> {
+        <Self as strum::IntoEnumIterator>::iter()
+    }
+}
+
 /// The result of polling the reader for the next packet's events.
 pub enum Poll {
     /// A packet decoded into these events. `events` is **empty** for an opcode we parse but do not
@@ -1604,9 +1631,16 @@ pub enum Poll {
     /// census counted it like any other packet. A relayed move landing in an unmodelled opcode was
     /// therefore indistinguishable from one that never arrived. `opcode` rides along so the net
     /// thread can name what actually came off the wire.
+    ///
+    /// `tail` is how many body bytes the decoder left unconsumed
+    /// ([`crate::messages::parse_server_with_tail`]): a length-framed body lets a decoder shorter
+    /// than the server's layout succeed silently, and this is the one number that shows it. An
+    /// instrument, not a verdict — the packet decoded, its events are real, and the tail is
+    /// announced (once per opcode) rather than turned into a [`Poll::Skipped`].
     Events {
         opcode: u16,
         events: Vec<SessionEvent>,
+        tail: usize,
     },
     /// An unparseable packet was skipped — kept the stream aligned, not an error. Carries the
     /// opcode (for the app's dropped-packet tally) and a short description (opcode + error + a hex

@@ -59,10 +59,7 @@ impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CraftOpen>().add_systems(
             Update,
-            (
-                feed_craft.in_set(UnitFeed).before(UiInput),
-                drain_craft.after(UiInput),
-            ),
+            (feed_craft.in_set(UnitFeed), drain_craft.after(UiInput)),
         );
     }
 }
@@ -131,7 +128,6 @@ fn craft_tooltip(spell_id: u32, d: &benilla_formats::SpellDisplay) -> CraftToolt
 }
 
 /// Build the craft snapshot — `None` when the window is closed or the catalogs haven't loaded.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (the feed precedent)
 fn feed_craft(
     script: Option<NonSendMut<UiScript>>,
     open: Res<CraftOpen>,
@@ -141,7 +137,7 @@ fn feed_craft(
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
 ) {

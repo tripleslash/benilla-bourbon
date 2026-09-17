@@ -19,7 +19,8 @@
 //! durability model), and the ghost state beyond plain death. CanAssist inside 10b is the
 //! reaction-rank stand-in the ring/`can_attack` share, pending the true `0x6066f0` walk.
 
-use crate::ui_items::{count_of, InventoryScope};
+use benilla_protocol::messages::ItemUseSpell;
+
 use benilla_formats::{
     SpellDisplay, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED,
     SPELL_EFFECT_TRADE_SKILL,
@@ -28,6 +29,7 @@ use benilla_formats::{
 use crate::cooldowns::Cooldowns;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Reputations};
+use crate::spell_mods::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
 
 use super::Spells;
@@ -48,6 +50,12 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) factions: Option<&'a Factions>,
     pub(crate) reputations: &'a Reputations,
     pub(crate) cooldowns: &'a Cooldowns,
+    /// The talent spell-modifier tables — leg 12's cost goes through them ([`power_cost`]).
+    pub(crate) spell_mods: &'a SpellModifiers,
+    /// Every carried entry's count, walked ONCE by the caller for the frame
+    /// ([`crate::ui_items::carried_counts`]) — leg 3 reads reagents and totems off it instead
+    /// of walking the bags per reagent per slot.
+    pub(crate) carried: &'a std::collections::HashMap<u32, u32>,
 }
 
 /// How many equipment indices the search covers — `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the
@@ -153,7 +161,7 @@ pub(crate) fn equipped_item_reason(d: &SpellDisplay) -> u8 {
 pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> bool {
     // The reference's four short-circuits, all answering "fits" without looking at a single slot
@@ -256,13 +264,88 @@ fn equipped_slots_match(
         })
 }
 
+/// The **ITEM arm** of the usable compute — `0x4e5050`'s item branch, whole. benilla answered
+/// `count > 0 || equipped` here and nothing else, which left a stack of food full-colour in
+/// combat; the reference runs three more gates, and the third is the whole spell walk.
+///
+/// 1. **the count cache** `[0xbc6390+slot*4] == 0` ⇒ `(false, false)` (`4e50ab`). `held` is our
+///    stand-in: carried copies ([`crate::ui_items::InventoryScope::CARRIED`], decision 1158's documented narrowing)
+///    or a copy worn on an equipment slot. The reference fills that cache from `0x4e6d20`, whose
+///    mask `0x4e6d20`→`0x622439` rewrites to **`0x47`** — equipment `0..0x12`, bag slots, the
+///    backpack, container contents and **the keyring**, bank excluded. So the `|| equipped` half
+///    is *redundant* there rather than an addition (worn copies already count), and two narrower
+///    divergences stay open and named: our `CARRIED` omits the **keyring** (a key on the bar reads
+///    count 0 where the reference reads 1), and we do not model the reference's charges fork —
+///    a `spellcharges[0] ∉ {0, -1}` item sums `|ITEM_FIELD_SPELL_CHARGES[0]|`, so a spent
+///    0-charge copy greys at `4e50ab`. Both are count-scope work, not this arm's.
+/// 2. **`IsItemOnCooldown 0x6e2fc0`** (`4e50d0`) ⇒ `(false, false)`. It resolves the item's FIRST
+///    ON_USE block — `rec+0x11c[i] > 0 && rec+0x130[i] == 0`, `6e3006`–`6e3023`, the same scan
+///    behind [`benilla_protocol::messages::ItemInfo::use_spell`] — and asks
+///    `0x6e1690(spellId, itemId = the item ENTRY)`. That predicate is the **on-hold-record** test,
+///    NOT a general on-cooldown one (wow-re `spell/scratch/gcd-power-gate.md` §3, which corrects
+///    `wave-cooldown.md`'s published gloss): it reads neither a running timed cooldown nor the
+///    GCD. So a potion mid-cooldown keeps its colour under its own sweep, and nothing on the bar
+///    greys for the global cooldown. **The entry is the key**, not `0`: `0x6e2fc0` is the sole
+///    consumer of `0x6e1690`'s item-keyed form image-wide (`6e3037 push esi`), every other caller
+///    passing `0` — so querying leg 11's `(spell, 0)` form here would never find an item's own
+///    parked record, which is how our cooldown store keys it (`(use_spell, entry)`).
+/// 3. **the plain-spell walk.** The resolver `0x4e5a50`'s ITEM arm hands that same first ON_USE
+///    spell back with `*outType = 0` **hard-written** (wow-re `action-button-state-api.md` §0), so
+///    `4e51ab`/`4e51b0 je 0x4e521d` is taken and the button runs the entire
+///    `Spell_C::IsSpellUsableNow 0x6e3d60` gate walk — [`spell_usable`] — exactly as a spell slot
+///    does. **This is where food greys in combat**: every `Food`/`Drink` row in the shipped
+///    `Spell.dbc` (433/434/435, 1127/1129/1131, 1133/1135/1137, 5004–5007, 6410, …) carries
+///    `Attributes = 0x18000100`, bit 28 among them — [`ATTR_NOT_IN_COMBAT`], the walk's leg 8. It
+///    is not a food rule: 453 of the shipped rows carry that bit (bandages, mounts, disguises).
+/// 4. an item with **no** on-use spell resolves 0 and falls into the resolver-0 leg, whose ITEM-tag
+///    test answers `usable = 1` outright (`4e5127`–`4e5135`; §2b.3's consequence iv, "once the
+///    item-count and item-cooldown checks of §2 pass"). An equipped sword on the bar is
+///    full-colour, not grey — and so is an item whose template is still in flight, which is what
+///    keeps a freshly-seen slot from flickering grey for a frame.
+///
+/// A resolved on-use spell the catalog has no row for reads **grey** with `notEnoughMana = 0` —
+/// the reference's `4e5193 jg` / `4e51a0 jne` fall-through at `4e51aa`, and the same answer the
+/// SPELL arm already gives an unknown id.
+pub(crate) fn item_usable(
+    entry: u32,
+    use_spell: Option<&ItemUseSpell>,
+    held: bool,
+    ctx: &UsableCtx,
+    spells: Option<&Spells>,
+    items: &Items,
+    commands: &NetCommands,
+) -> (bool, bool) {
+    if !held {
+        return (false, false);
+    }
+    // Gate 4's early answer: no on-use spell (or no template yet) — the ITEM tag alone lights it.
+    let Some(use_spell) = use_spell else {
+        return (true, false);
+    };
+    let spell_id = use_spell.spell_id;
+    let d = spells.and_then(|s| s.catalog.get(spell_id));
+    // Gate 2, keyed as `0x6e2fc0` keys it: the item ENTRY as `0x6e1690`'s `itemId`, and the
+    // item's own resolved category where it has one (the `spellcategory[5]` override, §2c.4).
+    let category = match use_spell.category {
+        0 => d.map_or(0, |d| d.category),
+        c => c,
+    };
+    if ctx.cooldowns.has_on_hold_record(spell_id, entry, category) {
+        return (false, false);
+    }
+    let (Some(d), Some(spells)) = (d, spells) else {
+        return (false, false);
+    };
+    spell_usable(spell_id, d, spells, ctx, items, commands)
+}
+
 /// The walk. Returns `(usable, not_enough_mana)` — the `IsUsableAction` pair.
 pub(crate) fn spell_usable(
     spell_id: u32,
     d: &SpellDisplay,
     spells: &Spells,
     ctx: &UsableCtx,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
 ) -> (bool, bool) {
     // Early-out (`0x6e3d99`): a tradeskill "spell" is always usable.
@@ -274,13 +357,14 @@ pub(crate) fn spell_usable(
         return (false, false);
     }
     // Leg 3 (`0x6e4000`): every reagent pair in bag counts; every totem tool present.
+    let carried = |entry: u32| ctx.carried.get(&entry).copied().unwrap_or(0);
     for &(entry, count) in &d.reagents {
-        if entry != 0 && count_of(&ctx.store.0, items, entry, InventoryScope::CARRIED) < count {
+        if entry != 0 && carried(entry) < count {
             return (false, false);
         }
     }
     for &totem in &d.totems {
-        if totem != 0 && count_of(&ctx.store.0, items, totem, InventoryScope::CARRIED) == 0 {
+        if totem != 0 && carried(totem) == 0 {
             return (false, false);
         }
     }
@@ -365,11 +449,11 @@ pub(crate) fn spell_usable(
     // predicate is the corrected `0x6e1690` (an on-hold-record test, wow-re `gcd-power-gate.md`
     // §3): Stealth greys while its record is PARKED; once the event starts the clocks — and for
     // every ordinary cooldown — the button never greys from here.
-    if d.cooldown_on_event() && ctx.cooldowns.has_on_hold_record(spell_id, Some(d)) {
+    if d.cooldown_on_event() && ctx.cooldowns.has_on_hold_record(spell_id, 0, d.category) {
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`–`0x6e3feb`): the power gate — the SOLE notEnoughMana writer (B2).
-    if !can_afford(d, ctx.store) {
+    if !can_afford(d, ctx.store, ctx.spell_mods) {
         return (false, true);
     }
     (true, false)
@@ -380,12 +464,17 @@ pub(crate) fn spell_usable(
 /// `CalculatePowerCost` shape, clamped at 0 on the way out; every nonzero row is a creature
 /// spell, so the clamp choice is dormant for players), and `ManaCostPercentage` of the pool
 /// 0948 chose per type (base mana for mana spells — the vmangos basis — max pool otherwise,
-/// health included for negative types). One law, every consumer: the usable walk's leg 12, the
-/// press-path power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's
-/// own caller set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The
-/// reference's per-school unit mods and spell-mods (talent cost cuts) are not modeled — 0948's
-/// standing gap, now stated once here.
-pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
+/// health included for negative types) — and then the talent cost cut, `SPELLMOD_COST` (op 14),
+/// which `0x6e31b0` applies inside itself at `6e32e3` through the integer applier `0x6e6af0`
+/// ([`crate::spell_mods`]). One law, every consumer: the usable walk's leg 12, the press-path
+/// power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's own caller
+/// set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The reference's
+/// per-school unit mods are still not modeled — what remains of 0948's standing gap.
+///
+/// **The modifier is why this one is behavioural and not only cosmetic**: the press-path gate
+/// refuses a cast it judges unaffordable and sends **no packet at all** (`0x609657`'s failure
+/// block), so an unmodified cost makes benilla refuse casts a talented character can afford.
+pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> u32 {
     let power_type = d.power_type as i32;
     let base = if d.mana_cost_pct == 0 {
         0
@@ -403,7 +492,11 @@ pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
     let cost = i64::from(d.mana_cost)
         + level_delta * i64::from(d.mana_cost_per_level)
         + i64::from(base) * i64::from(d.mana_cost_pct) / 100;
-    u32::try_from(cost).unwrap_or(0)
+    // The talent cut, on the data terms and before the 0-clamp on the way out. The relative order
+    // of the two is dormant for players — every nonzero `manaCostPerlevel` row is a creature spell
+    // (above), so nothing reaches the modifier negative.
+    let cost = cost.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    u32::try_from(mods.apply(d, OP_COST, cost)).unwrap_or(0)
 }
 
 /// Whether the caster can afford `d`'s power cost — the shared availability-vs-cost compare
@@ -411,14 +504,14 @@ pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
 /// (`0x6094f0` @ `0x60962c`, decision 0948): raw `UNIT_FIELD_POWER[type]` — ANY negative
 /// PowerType reads `UNIT_FIELD_HEALTH` instead (the ref's `jl` at `0x609631`; Bloodrage's −2) —
 /// signed-compared against [`power_cost`]'s number.
-pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
+pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> bool {
     let power_type = d.power_type as i32;
     let avail = if power_type < 0 {
         store.0.unit_health().unwrap_or(0)
     } else {
         store.0.unit_power(power_type as u8).unwrap_or(0)
     };
-    avail >= power_cost(d, store)
+    avail >= power_cost(d, store, mods)
 }
 
 #[cfg(test)]
@@ -478,7 +571,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(&needs_a_weapon, &store, &mut deps.items, &deps.commands)
+            equipped_item_fits(&needs_a_weapon, &store, &deps.items, &deps.commands)
         };
 
         // CONTROL — armed, the sword satisfies it.
@@ -541,7 +634,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(d, &store, &mut deps.items, &deps.commands)
+            equipped_item_fits(d, &store, &deps.items, &deps.commands)
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -614,7 +707,7 @@ mod tests {
                     ..Default::default()
                 },
                 &store,
-                &mut deps.items,
+                &deps.items,
                 &deps.commands,
             )
         };
@@ -634,6 +727,8 @@ mod tests {
         store: &'a ObjectStore,
         cooldowns: &'a Cooldowns,
         reputations: &'a Reputations,
+        carried: &'a std::collections::HashMap<u32, u32>,
+        spell_mods: &'a SpellModifiers,
     ) -> UsableCtx<'a> {
         UsableCtx {
             store,
@@ -641,6 +736,8 @@ mod tests {
             factions: None,
             reputations,
             cooldowns,
+            carried,
+            spell_mods,
         }
     }
 
@@ -648,17 +745,66 @@ mod tests {
         let cooldowns = Cooldowns::default();
         let reputations = Reputations(Vec::new());
         let spells = Spells::empty_for_tests();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
+        let carried = crate::ui_items::carried_counts(&store.0, &items);
+        let spell_mods = SpellModifiers::default();
         spell_usable(
             1,
             d,
             &spells,
-            &ctx(store, &cooldowns, &reputations),
-            &mut items,
+            &ctx(store, &cooldowns, &reputations, &carried, &spell_mods),
+            &items,
             &commands,
         )
+    }
+
+    /// **The behavioural half of the spell-modifier system, and the reason op 14 is the first op
+    /// wired** (wow-re `spellmod-table-law.md` §9): the press-path gate compares the caster's
+    /// power against [`power_cost`] and, when short, refuses locally and sends **no**
+    /// `CMSG_CAST_SPELL` at all (`0x609657`'s fall-through failure block). With the tables unread,
+    /// a talent-discounted spell the server would happily accept is refused by the client.
+    ///
+    /// So: a mage with 80 mana and a 100-mana spell cannot cast it; one `SMSG_SET_PCT_SPELL_MODIFIER`
+    /// for that spell's `(family bit, op 14)` cell flips both the number and the verdict.
+    #[test]
+    fn a_talent_cost_cut_reaches_the_cost_and_the_press_path_gate() {
+        // Family 3 (mage), family bit 5 — the shape a real talent's `SpellFamilyMask` names.
+        let d = SpellDisplay {
+            spell_family: 3,
+            spell_family_flags: 1 << 5,
+            mana_cost: 100,
+            ..Default::default()
+        };
+        let store = ObjectStore(ObjectFields::from_pairs(&[(23, 80)]));
+
+        let mut mods = SpellModifiers::default();
+        mods.set_class_family(3);
+        assert_eq!(
+            power_cost(&d, &store, &mods),
+            100,
+            "no packet yet — the flat DBC cost"
+        );
+        assert!(
+            !can_afford(&d, &store, &mods),
+            "80 mana does not buy a 100 mana spell"
+        );
+
+        // The server's cell for (bit 5, op 14): −30%.
+        mods.set(false, 5, OP_COST, -30);
+        assert_eq!(power_cost(&d, &store, &mods), 70);
+        assert!(
+            can_afford(&d, &store, &mods),
+            "the talent brings it inside the pool, so TryCast must send the cast"
+        );
+
+        // A warrior's copy of the same spell id takes nothing — the family gate, from this side.
+        let other_class = SpellDisplay {
+            spell_family: 4,
+            ..d
+        };
+        assert_eq!(power_cost(&other_class, &store, &mods), 100);
     }
 
     /// Each modeled gate trips alone, and only the power leg raises notEnoughMana (B2).
@@ -776,7 +922,7 @@ mod tests {
         let cooldowns = Cooldowns::default();
         let reputations = Reputations(Vec::new());
         let spells = Spells::empty_for_tests();
-        let mut items = Items::default();
+        let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let execute = SpellDisplay {
@@ -787,6 +933,7 @@ mod tests {
 
         let healthy = ObjectStore(ObjectFields::from_pairs(&[(22, 100), (125, 0)]));
         let low = ObjectStore(ObjectFields::from_pairs(&[(22, 10), (125, 0x2)]));
+        let carried = crate::ui_items::carried_counts(&me.0, &items);
         for (target, expect) in [(&healthy, false), (&low, true)] {
             let ctx = UsableCtx {
                 store: &me,
@@ -794,9 +941,11 @@ mod tests {
                 factions: None,
                 reputations: &reputations,
                 cooldowns: &cooldowns,
+                carried: &carried,
+                spell_mods: &SpellModifiers::default(),
             };
             assert_eq!(
-                spell_usable(5308, &execute, &spells, &ctx, &mut items, &commands),
+                spell_usable(5308, &execute, &spells, &ctx, &items, &commands),
                 (expect, false)
             );
         }

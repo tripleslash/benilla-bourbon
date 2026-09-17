@@ -173,7 +173,9 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
-pub use meeting_stone::{meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue};
+pub use meeting_stone::{
+    meeting_stone_join, meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue,
+};
 pub use mirror_timer::{
     read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
     MirrorTimerStart,
@@ -184,7 +186,7 @@ pub use movement::{
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;
-pub use parse::parse_server;
+pub use parse::{parse_server, parse_server_with_tail};
 pub use pet::{
     pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
     pet_stop_attack, pet_tame_failure_key, pet_unlearn, PetActionEntry, PetMode, PetSpellCooldown,
@@ -217,7 +219,8 @@ pub use quest::{
     QUEST_EMOTE_COUNT, QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
 };
 pub use reputation::{
-    set_faction_at_war, set_faction_inactive, set_watched_faction, WATCHED_FACTION_NONE,
+    set_faction_at_war, set_faction_inactive, set_watched_faction, FACTION_LIST_LEN,
+    WATCHED_FACTION_NONE,
 };
 pub use roster::{
     CharCreateReq, CharEnumItem, Character, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK,
@@ -234,8 +237,8 @@ pub use social::{
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
-    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_gameobject, cast_spell_item,
-    CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
+    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_gameobject,
+    cast_spell_item, CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
@@ -256,6 +259,7 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use tutorial::{tutorial_flag, TutorialFlags};
+pub use update_object::field;
 pub use update_object::{
     power_display_scale, quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState,
     Object, ObjectFields, ObjectType, OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot,

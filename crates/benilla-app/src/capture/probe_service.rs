@@ -340,7 +340,6 @@ fn open_window(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 fn service_probe(
     time: ProbeClock,
     mut probe: ResMut<ServiceProbe>,
@@ -519,6 +518,9 @@ fn service_probe(
                     let why: &str = match other {
                         ServiceAction::AskBinder => "CONFIRM_BINDER, no packet",
                         ServiceAction::AskSpiritHealer => "CONFIRM_XP_LOSS, no packet",
+                        ServiceAction::AcquireSpiritGuide => {
+                            "adopts the area spirit healer; the packet leaves from the cache"
+                        }
                         ServiceAction::Silent(w) => w,
                         ServiceAction::Send(_) | ServiceAction::SellFromCursor(_) => {
                             unreachable!()

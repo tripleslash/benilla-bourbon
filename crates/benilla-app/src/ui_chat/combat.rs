@@ -172,6 +172,17 @@ impl CombatLogRanges {
         self.death
     }
 
+    /// Whether `name` is one of the eight — asked before [`Self::set`] so an observer holding
+    /// the resource mutably does not flag a change it did not make.
+    pub(crate) fn is_range_cvar(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case(DEATH_LOG_RANGE_CVAR)
+            || (0..self.class.len()).any(|i| {
+                UnitClass::from_index(i)
+                    .range_cvar()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(name))
+            })
+    }
+
     /// Apply one `SetCVar` to the table — `true` if the name was one of the eight.
     ///
     /// The class names are walked through [`UnitClass::range_cvar`] so this module keeps exactly
@@ -192,6 +203,20 @@ impl CombatLogRanges {
             }
         }
         false
+    }
+}
+
+/// The combat log rows' change callback (decision 2303): the eight display ranges (yards, the
+/// CVar's float field) and the periodic-effects switch.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut ranges: ResMut<CombatLogRanges>,
+    mut periodic: ResMut<LogPeriodicSpells>,
+) {
+    if ev.is(LOG_PERIODIC_CVAR) {
+        periodic.0 = ev.flag();
+    } else if ranges.is_range_cvar(&ev.name) {
+        ranges.set(&ev.name, ev.num());
     }
 }
 
@@ -229,10 +254,9 @@ pub(crate) const LOG_PERIODIC_CVAR: &str = "CombatLogPeriodicSpells";
 /// **The combat-feedback CVars, as one system parameter** — what a packet handler needs to know
 /// about the player's settings before it emits a line or a floating number.
 ///
-/// Bundled for the reason [`crate::cvars::KnobParams`] is: `net::apply::apply_net_updates` lives
-/// against Bevy's 16-parameter ceiling, and three more `Res` would have gone into a nested tuple
-/// as positional fields nobody can read at the use site. They are one concern anyway — the
-/// reference reads all three inside the same combat-log/world-text translation unit.
+/// Bundled because they are one concern — the reference reads all three inside the same
+/// combat-log/world-text translation unit — and read by the net drain as the combat-feedback
+/// member of its catalogs (`net::apply::params::Catalogs`).
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct CombatFeedbackCvars<'w> {
     /// The eight display ranges.
@@ -370,7 +394,6 @@ impl UnitClass {
 /// [`crate::target::ring::can_attack_from_player`] is specialised to the local player as the
 /// attacker (1530). We run the direction we have. It differs only for a unit that can attack you
 /// while you cannot attack it, which needs the general two-unit form to answer.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn classify(
     guid: u64,
     self_guid: &SelfGuid,
@@ -1065,11 +1088,7 @@ pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> O
 /// same ask-once name cache every other client-composed chat line waits on. `None` = not yet
 /// answered; the caller re-tries next frame, exactly as the reference's deferred-name queue
 /// (`DAT_00c4e208`, drained by the name-ready callback `0x6294b0`) replays its message.
-pub(crate) fn object_name(
-    guid: u64,
-    names: &mut NameCache,
-    commands: &NetCommands,
-) -> Option<String> {
+pub(crate) fn object_name(guid: u64, names: &NameCache, commands: &NetCommands) -> Option<String> {
     // Guid 0 = "the name is already in the fills" — no wire endpoint is ever guid 0, so the
     // sentinel costs nothing and is what lets `/chattest` drive the real drain with literal names.
     if guid == 0 {

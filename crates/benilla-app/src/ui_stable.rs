@@ -41,7 +41,7 @@ use benilla_ui::script::{StableIntent, StablePetSlot, StableState, UiScript, NUM
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_pet_stats::{PetFamilyTables, PetStatTables};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 pub(crate) struct UiStablePlugin;
@@ -57,7 +57,7 @@ impl Plugin for UiStablePlugin {
                     // frame; push before the input pass so an open/close is on screen the same frame;
                     // drain after it (the trainer/merchant/gossip ordering).
                     close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
-                    feed_stable.before(UiInput),
+                    feed_stable.in_set(UiFeed),
                     drain_stable.after(UiInput),
                     // AFTER the VM ticks, unlike every other booth feed: this one reads the
                     // *selection*, which a click on a slot writes during `UiInput` — and
@@ -143,7 +143,7 @@ impl NpcSession for StableOpen {
 /// gating the whole row: a pet whose query is in flight still shows its name and level.
 fn resolve_pet(
     wire: &StabledPet,
-    names: &mut NameCache,
+    names: &NameCache,
     families: Option<&PetFamilyTables>,
     stats: Option<&PetStatTables>,
     commands: &NetCommands,
@@ -193,10 +193,9 @@ fn resolve_pet(
 }
 
 /// Build the Lua-facing snapshot from [`StableOpen`] — `None` when no stable is open.
-#[allow(clippy::too_many_arguments)]
 fn snapshot(
     open: &StableOpen,
-    names: &mut NameCache,
+    names: &NameCache,
     families: Option<&PetFamilyTables>,
     stats: Option<&PetStatTables>,
     next_slot_cost: u32,
@@ -228,7 +227,6 @@ fn snapshot(
 
 /// Push the current stable into the VM and fire the show/update/close events on a transition (or a
 /// content change). Diffed against a `Local` memory, exactly like the trainer/merchant feeds.
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn feed_stable(
     script: Option<NonSendMut<UiScript>>,
     // ResMut only to consume the fresh-list latch; the feed never authors stable content.
@@ -238,7 +236,7 @@ fn feed_stable(
     stats: Option<Res<PetStatTables>>,
     prices: Option<Res<StableSlotPrices>>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut errors: ResMut<StableErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<StableState>>>,
     mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -273,7 +271,7 @@ fn feed_stable(
     let has_live_pet = bar.spells.pet_guid != 0;
     let fresh = snapshot(
         &open,
-        &mut names,
+        &names,
         families.as_deref(),
         stats.as_deref(),
         next_slot_cost,

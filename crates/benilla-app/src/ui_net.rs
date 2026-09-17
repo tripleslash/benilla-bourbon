@@ -18,20 +18,24 @@ use bevy::prelude::*;
 
 use benilla_ui::script::UiScript;
 
+use benilla_assets::LockRecover;
+
 use crate::net::PingShared;
-use crate::ui_script::UiInput;
+use crate::ui_script::UiFeed;
 
 pub(crate) struct UiNetPlugin;
 
 impl Plugin for UiNetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, feed_net_stats.before(UiInput));
+        app.add_systems(Update, feed_net_stats.in_set(UiFeed));
     }
 }
 
 /// Push the averaged round trip behind `GetNetStats()`.
 fn feed_net_stats(script: Option<NonSendMut<UiScript>>, ping: Res<PingShared>) {
     let Some(mut script) = script else { return };
-    let latency = ping.0.lock().expect("ping clock").avg_latency_ms();
+    // Recovered, not unwrapped: the net threads hold this lock too, and a panic there must end
+    // the connection, not the app (decision 2265 §B1).
+    let latency = ping.0.lock_recover().avg_latency_ms();
     script.set_latency_ms(latency);
 }

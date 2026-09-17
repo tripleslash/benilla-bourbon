@@ -362,6 +362,23 @@ pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 /// chain `CharProc` consumes once and zeroes (decision 0955). Body in [`super::spells`].
 pub const SMSG_SPELL_UPDATE_CHAIN_TARGETS: u16 = 0x0330; // 816
 
+/// The **talent spell-modifier** pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 614/615) — the only
+/// feed for every talent that cheapens a spell, shortens its cast or cooldown, extends its range
+/// or radius, or lengthens its duration. Body in [`super::spells::read_set_spell_modifier`];
+/// decision-level law in wow-re `system/spell/scratch/spellmod-table-law.md`.
+///
+/// **One handler, two tables.** Both opcodes register to `Spell_C::HandleSetSpellModifier
+/// 0x6e9950` (`0x6e7245`/`0x6e7255`), which reads the same 6-byte body either way and forks on the
+/// opcode alone (`6e9989: cmp edi,0x267`): `0x266` stores into the FLAT table `0xcead60`, `0x267`
+/// into the PCT table `0xcecb30`, each `i32[64][29]`. The store is a plain `mov`, so the server
+/// sends the **absolute** value of one cell, never a delta (vmangos `Player::SendSpellMod` sends
+/// one packet per set mask bit carrying that pair's total).
+///
+/// That is why the two share a variant here rather than taking one each: the wire shape is
+/// identical and the opcode IS the discriminant, exactly as the reference treats it.
+pub const SMSG_SET_FLAT_SPELL_MODIFIER: u16 = 0x0266; // 614
+pub const SMSG_SET_PCT_SPELL_MODIFIER: u16 = 0x0267; // 615
+
 // The cooldown wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 308/176/309/478/481; the client
 // handlers are byte-verified in wow-re `wave-handlers.md` — 0x6e9460/0x6e95d0/0x6e9670/0x6e9730;
 // decision 0137 phase 4). Bodies in [`super::spells`].
@@ -1161,6 +1178,16 @@ pub const CMSG_AREA_SPIRIT_HEALER_QUEUE: u16 = 0x02E3; // 739
 /// healer with a positive time arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`
 /// (decision 1963).
 pub const SMSG_AREA_SPIRIT_HEALER_TIME: u16 = 0x02E4; // 740
+/// The meeting stone's JOIN — the packet a right-click on a `GAMEOBJECT_TYPE_MEETINGSTONE` (23)
+/// sends: `u64 gameObjectGuid`, built and sent by `0x4c9ff0` from the tail (`0x5f6af6`) of that
+/// type's own use-slot validator `0x5f69d0` = `[0x80bf40+0x1c]` (decision 2283, VERIFIED by
+/// wow-re's §5 round on that function). Twelve bytes on the wire, body exactly eight, no padding.
+///
+/// A meeting stone **cannot** send [`CMSG_GAMEOBJ_USE`]: the shared sender `0x5f33e0` has zero
+/// direct callers and is reachable only as some vtable's `+0x1c`, which type 23's is not. And
+/// vmangos would drop it anyway — `GameObject::Use` has an explicit do-nothing type-23 arm
+/// (`GameObject.cpp:1836`, "Should never be called for this type of object").
+pub const CMSG_MEETINGSTONE_JOIN: u16 = 0x0292; // 658
 /// `CancelMeetingStoneRequest()`'s packet (§8): EMPTY. Gated client-side on party leadership
 /// only; clears nothing — the server's `0x295` reply does (decision 1963). The emulators' name
 /// for this number does not line up with the client's block; the number is what is verified.

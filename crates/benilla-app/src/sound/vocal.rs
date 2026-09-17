@@ -250,7 +250,6 @@ fn build_vocal_table(
 /// Say one error-speech line in the local player's own voice — the app-side entry point
 /// [`super::message`] calls, and the only caller there should ever be (the reference has exactly
 /// one too).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn speak_line(
     line: u8,
     speech: &mut VocalSpeech,
@@ -330,13 +329,11 @@ mod tests {
             race: Some(1),
             ..Default::default()
         };
-        for slot in &mut s.table {
-            *slot = Slot {
-                normal,
-                annoyed,
-                annoyed_variations: variations,
-            };
-        }
+        s.table.fill(Slot {
+            normal,
+            annoyed,
+            annoyed_variations: variations,
+        });
         s
     }
 

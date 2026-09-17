@@ -464,9 +464,7 @@ mod tests {
     /// empty string**, which is the assumption `mask_uncached`'s zero-length break rests on.
     #[test]
     fn every_shipped_pattern_compiles_and_none_matches_empty() {
-        let Some(data) = benilla_formats::wow_data() else {
-            return;
-        };
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let profanity = benilla_formats::load_chat_profanity(&mut chain).expect("profanity");
         let spam = benilla_formats::load_spam_messages(&mut chain).expect("spam");
@@ -489,9 +487,7 @@ mod tests {
     /// The shipped data end to end: the oracle's own sentences through the real lists.
     #[test]
     fn the_shipped_lists_reproduce_the_oracle_sentences() {
-        let Some(data) = benilla_formats::wow_data() else {
-            return;
-        };
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let profanity = benilla_formats::load_chat_profanity(&mut chain).expect("profanity");
         let spam = benilla_formats::load_spam_messages(&mut chain).expect("spam");
@@ -599,8 +595,19 @@ fn load_text_filter_lists(
 
 pub(crate) struct TextFilterPlugin;
 
+/// The two filter switches' change callback (decision 2303): flags — the reference's own
+/// callbacks (`0x403570`, `0x4035b0`) mirror `SStrToInt(newValue)` into a global the same way.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut switches: ResMut<TextFilterSwitches>) {
+    match ev.key().as_str() {
+        "profanityfilter" => switches.profanity = ev.flag(),
+        "spamfilter" => switches.spam = ev.flag(),
+        _ => {}
+    }
+}
+
 impl Plugin for TextFilterPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<TextFilterSwitches>()
             .init_resource::<TextFilter>()
             .add_systems(

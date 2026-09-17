@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
 # `Date.now()` in a browser, where std's panics on first use.

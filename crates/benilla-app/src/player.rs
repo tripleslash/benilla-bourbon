@@ -326,6 +326,8 @@ impl Plugin for PlayerPlugin {
             Update,
             world_focus::release_post_snap_hold.after(benilla_world::schedule::WorldStage::Stream),
         );
+        app.add_observer(camera::on_cvar);
+        app.add_observer(camera_dynamics::on_cvar);
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
@@ -347,7 +349,7 @@ impl Plugin for PlayerPlugin {
                 )
                     .in_set(WorldStage::Input)
                     .before(control)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    .in_set(crate::char_select::InWorldGated),
             );
         app.add_systems(
             Startup,
@@ -372,7 +374,7 @@ impl Plugin for PlayerPlugin {
                 .in_set(PlayerControlSet)
                 .in_set(WorldStage::Input)
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         )
         // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
         // executor, like the sheath queue).
@@ -386,7 +388,7 @@ impl Plugin for PlayerPlugin {
             land::land_here
                 .in_set(WorldStage::Input)
                 .before(control)
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         )
         // (The two scripted probe drivers that used to sit here — `WOW_PROBE_LOOK`'s
         // mouse-turn and `WOW_PROBE_CAM`'s camera park — are the harness's now, and register
@@ -401,7 +403,7 @@ impl Plugin for PlayerPlugin {
                 .in_set(WorldStage::Input)
                 .before(control)
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         )
         // A session END releases the avatar — a confirmed `/logout`, or a lost session
         // (decision 1262): the streamed entity is despawned by the net drain either way, and
@@ -466,7 +468,7 @@ impl Plugin for PlayerPlugin {
                 .in_set(WorldStage::Input)
                 .before(control)
                 .before(follow::steer_follow)
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         )
         // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
         // input immediately BEFORE the controller, which folds the flag into its forward axis.
@@ -477,7 +479,7 @@ impl Plugin for PlayerPlugin {
             follow::steer_follow
                 .in_set(WorldStage::Input)
                 .before(control)
-                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                .in_set(crate::char_select::InWorldGated),
         )
         // The self-avatar zoom-in fade rides the same `MeshTag`/material channel as the interior
         // classifier + the appear/despawn fades, so it must run *after* both to win the frame while

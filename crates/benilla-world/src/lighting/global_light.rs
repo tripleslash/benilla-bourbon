@@ -241,11 +241,15 @@ pub(super) fn register(app: &mut App) {
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
-    app.sub_app_mut(RenderApp).add_systems(
-        Render,
-        (upload_light, super::prop_probes::upload_prop_probes)
-            .in_set(RenderSystems::PrepareResources),
-    );
+    // Guarded like every other render-side registration in the tree: a headless build (no GPU,
+    // `backends: None`) has no render app, and the schedule tests build the engine that way.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(
+            Render,
+            (upload_light, super::prop_probes::upload_prop_probes)
+                .in_set(RenderSystems::PrepareResources),
+        );
+    }
 }
 
 /// Create the single persistent storage buffer. `RenderDevice` is a main-world resource (inserted in
@@ -287,7 +291,7 @@ pub(super) fn per_frame_blob_bytes() -> u64 {
 /// std430 blob. The `.w` lanes carry the faithful invariants the shaders expect (Mod2x 1.0, clamp on,
 /// terrain shininess 20, fog-enable, farclip wall); the model SH coeffs and both water swatches are
 /// derived here once per frame (they used to be recomputed + pushed per-material in `apply_wow_lighting`).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn build_light_data(
     light: Res<WowLighting>,
     debug: Res<DebugState>,
@@ -402,8 +406,14 @@ fn build_light_data(
     // alternate frame to frame, which a 1 Hz sample cannot see at all. Reading a per-second dump as
     // evidence of per-frame stability is how that light was cleared once already (0665's parked
     // culling test made the same mistake with a different instrument).
-    if let Some(mode) = std::env::var_os("WOW_POINTS_DUMP") {
-        let every = if mode == *"frame" { 0.0 } else { 1.0 };
+    static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
+        std::sync::OnceLock::new();
+    if let Some(mode) = POINTS_DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) {
+        let every = if mode.as_os_str() == "frame" {
+            0.0
+        } else {
+            1.0
+        };
         let now = time.elapsed_secs_f64();
         if now - *last_dump >= every {
             *last_dump = now;
@@ -447,8 +457,13 @@ fn build_light_data(
     // can still be moving. A dump of selected rows would answer "did ambient move?"; only the full
     // set answers "did ANY shading input move?", and that is the question worth a run. Rows are
     // printed as raw f32 bits, so a change far below a printed decimal cannot hide.
-    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
-        let every = if mode == *"frame" { 0.0 } else { 1.0 };
+    static LIGHT_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    if let Some(mode) = LIGHT_DUMP.get_or_init(|| std::env::var_os("WOW_LIGHT_DUMP")) {
+        let every = if mode.as_os_str() == "frame" {
+            0.0
+        } else {
+            1.0
+        };
         let now = time.elapsed_secs_f64();
         if now - *last_rows_dump >= every {
             *last_rows_dump = now;

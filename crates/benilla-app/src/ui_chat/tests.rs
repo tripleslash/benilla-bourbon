@@ -2540,47 +2540,6 @@ fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
     );
 }
 
-/// `detailDoodadAlpha` — the reference's own console command (`0x6739a0`), and the dial that
-/// decides where ground clutter first appears (the detail-doodad draw alpha-tests
-/// `texel.a × distance_ramp` against it). It is a **console command**, not a CVar (registrar
-/// `0x63f9e0`, not `CVar::Register`), so it arrives through the console drain rather than the
-/// CVar store `ConsoleExec` writes — this pins the classifier that splits the two. The three
-/// cases the reference distinguishes: in range sets it, out of range is REJECTED rather than
-/// saturated (`0x6739b9: cmp eax,0xff; jbe`), and unparseable is that same rejection.
-#[test]
-fn console_detail_doodad_alpha_parses() {
-    use super::input::{console_command, ParsedChat};
-    assert_eq!(
-        console_command("detailDoodadAlpha 8"),
-        ParsedChat::DetailDoodadAlpha { value: Some(8) }
-    );
-    // The console is case-insensitive, like the engine's own table lookup.
-    assert_eq!(
-        console_command("DETAILDOODADALPHA 255"),
-        ParsedChat::DetailDoodadAlpha { value: Some(255) }
-    );
-    assert_eq!(
-        console_command("detailDoodadAlpha 256"),
-        ParsedChat::DetailDoodadAlpha { value: None }
-    );
-    assert_eq!(
-        console_command("detailDoodadAlpha wat"),
-        ParsedChat::DetailDoodadAlpha { value: None }
-    );
-    // Bare = report the current value; and the sibling command still routes.
-    assert_eq!(
-        console_command("detailDoodadAlpha"),
-        ParsedChat::DetailDoodadAlpha { value: None }
-    );
-    assert_eq!(console_command("reloadUI"), ParsedChat::ReloadUi);
-    assert_eq!(
-        console_command("nosuchthing"),
-        ParsedChat::ConsoleUnknown {
-            cmd: "nosuchthing".to_string()
-        }
-    );
-}
-
 /// **The ding block is printed once, by the reference's own window.**
 ///
 /// `benilla.toc` sources `Interface\FrameXML\ChatFrame.xml` off the player's chain, and stock
@@ -2722,8 +2681,11 @@ fn the_free_professions_line_is_printed_once() {
 /// Pre-2119 the restore was an `Update` system and this probe saw `windows = nil`,
 /// `colors = nil`, `registered = ""` at `PLAYER_LOGIN`.
 ///
-/// The probe is planted in the boot VM the way `world_entry_tests` plants its addon: the entry
-/// load runs onto the VM that already exists, so a frame created here hears the whole load.
+/// The probe is planted as a real loose ADDON, the way `world_entry_tests` plants its own. It
+/// cannot be a frame created on the boot VM beforehand: since 2226 the entry load BUILDS the VM it
+/// runs on, so anything seated on the character screen's VM is gone before the first event fires.
+/// An addon's file scope runs inside the load — after the XML, before `VARIABLES_LOADED` — which
+/// is exactly the vantage point this probe wants, and the one the reference gives an addon too.
 #[test]
 fn the_chat_cache_restore_is_finished_before_player_login() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -2732,14 +2694,46 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = std::env::temp_dir().join(format!("benilla-chat-order-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
+    let home = tmp.join("benilla-config");
+    let probe = home.join("AddOns").join("ChatOrderProbe");
+    std::fs::create_dir_all(&probe).expect("hermetic home + probe addon dir");
+    std::fs::write(
+        probe.join("ChatOrderProbe.toc"),
+        "## Interface: 11200\nChatOrderProbe.lua\n",
+    )
+    .expect("probe toc");
+    std::fs::write(
+        probe.join("ChatOrderProbe.lua"),
+        r#"
+        ChatOrderProbe = { order = "" }
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("VARIABLES_LOADED")
+        f:RegisterEvent("UPDATE_CHAT_WINDOWS")
+        f:RegisterEvent("UPDATE_CHAT_COLOR")
+        f:RegisterEvent("PLAYER_LOGIN")
+        f:SetScript("OnEvent", function()
+            -- The burst is 100+ events; record it once so the order string stays readable.
+            if not string.find(ChatOrderProbe.order, event, 1, 1) then
+                ChatOrderProbe.order = ChatOrderProbe.order .. event .. " "
+            end
+            if event == "UPDATE_CHAT_WINDOWS" then
+                ChatOrderProbe.windows = (ChatOrderProbe.windows or 0) + 1
+            elseif event == "UPDATE_CHAT_COLOR" then
+                ChatOrderProbe.colors = (ChatOrderProbe.colors or 0) + 1
+            elseif event == "PLAYER_LOGIN" then
+                ChatOrderProbe.loginWindows = ChatOrderProbe.windows or 0
+                ChatOrderProbe.loginColors = ChatOrderProbe.colors or 0
+                ChatOrderProbe.loginRegistered =
+                    (ChatFrame1 and ChatFrame1.messageTypeList
+                        and table.concat(ChatFrame1.messageTypeList, ",")) or ""
+            end
+        end)
+        "#,
+    )
+    .expect("probe lua");
     let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
-    let _home = crate::local_state::test_env::EnvGuard::set(
-        "BENILLA_HOME",
-        tmp.join("benilla-config")
-            .to_str()
-            .expect("utf-8 temp path"),
-    );
+    let _home =
+        crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().expect("utf-8"));
 
     let mut world = bevy::prelude::World::new();
     world.init_resource::<crate::ui_script::AddOnIdentity>();
@@ -2748,37 +2742,6 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
     world.init_resource::<super::edit::ChannelState>();
     world.init_resource::<super::settings::ChatWindowFile>();
     crate::ui_script::setup_script(&mut world);
-
-    world
-        .non_send_resource::<benilla_ui::script::UiScript>()
-        .run(
-            r#"
-            ChatOrderProbe = { order = "" }
-            local f = CreateFrame("Frame")
-            f:RegisterEvent("VARIABLES_LOADED")
-            f:RegisterEvent("UPDATE_CHAT_WINDOWS")
-            f:RegisterEvent("UPDATE_CHAT_COLOR")
-            f:RegisterEvent("PLAYER_LOGIN")
-            f:SetScript("OnEvent", function()
-                -- The burst is 100+ events; record it once so the order string stays readable.
-                if not string.find(ChatOrderProbe.order, event, 1, 1) then
-                    ChatOrderProbe.order = ChatOrderProbe.order .. event .. " "
-                end
-                if event == "UPDATE_CHAT_WINDOWS" then
-                    ChatOrderProbe.windows = (ChatOrderProbe.windows or 0) + 1
-                elseif event == "UPDATE_CHAT_COLOR" then
-                    ChatOrderProbe.colors = (ChatOrderProbe.colors or 0) + 1
-                elseif event == "PLAYER_LOGIN" then
-                    ChatOrderProbe.loginWindows = ChatOrderProbe.windows or 0
-                    ChatOrderProbe.loginColors = ChatOrderProbe.colors or 0
-                    ChatOrderProbe.loginRegistered =
-                        (ChatFrame1 and ChatFrame1.messageTypeList
-                            and table.concat(ChatFrame1.messageTypeList, ",")) or ""
-                end
-            end)
-            "#,
-        )
-        .expect("order probe");
 
     world.insert_resource(crate::char_select::Roster::with_pending_pick(
         vec![benilla_protocol::Character {

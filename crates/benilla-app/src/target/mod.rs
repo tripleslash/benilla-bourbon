@@ -70,6 +70,20 @@ pub(crate) mod cursor_mode;
 mod flash;
 mod highlight;
 pub(crate) mod hover;
+/// The headless hover probe (2250) — see its header.
+mod hover_probe;
+
+/// The probe's aim for a window with no OS cursor — for the tooltip's cursor-seated arm and the
+/// UI mouse feed (2250; 2255 made it THIS frame's aim as the pick published it, rather than a
+/// second, independently recomputed one that disagreed with the pick on 34 sweep frames in 35).
+pub(crate) fn hover_probe_point() -> Option<bevy::math::Vec2> {
+    hover_probe::now()
+}
+
+/// Is the headless hover probe armed? (Gates its own log lines outside this module.)
+pub(crate) fn hover_probe_armed() -> bool {
+    hover_probe::armed()
+}
 pub(crate) mod lock;
 mod relations;
 mod reticle;
@@ -242,14 +256,30 @@ impl Default for PickOcclusion {
 ///
 /// Written by [`latch_press_pick`] at the head of the target chain, which runs **before**
 /// [`hover::update_hover`] can clear anything, so the values it copies are the pick as of the press.
+///
+/// **Both buttons read it** (decision 2230). 1122 built this for the left button and left
+/// [`click::act_on_right_click`] on the live hover, where it appeared to work only because the
+/// release frame re-picks at the restored cursor and — for a body click that moved nothing —
+/// lands back on the same unit. It is not the same pick: the plate case has no body under the
+/// cursor to re-find, so a right-click on a V-plate acted on nothing at all.
 #[derive(Resource, Default, Clone, Copy)]
 pub(crate) struct PressPick {
     pub(crate) hovered: Hovered,
     pub(crate) object: HoveredObject,
     pub(crate) occlusion: PickOcclusion,
-    /// The cursor's Attack classification at the press — the reference's new-target validation
-    /// (`0x5ecb70`), which likewise reads the pick the gesture started on, not a live one.
-    pub(crate) attack: bool,
+    /// The **context cursor as of the press** — the classification the whole right-click ladder
+    /// forks on (Attack/Speak/Loot/the GameObject arms) plus its `unable` range gray, and the
+    /// reference's new-target validation (`0x5ecb70`) likewise reads the pick the gesture started
+    /// on, not a live one. Latched whole rather than as the single Attack bit it used to be,
+    /// because every one of those forks is the same frozen pick's answer.
+    pub(crate) cursor: cursor_mode::WorldCursor,
+}
+
+impl PressPick {
+    /// Was the press an **Attack**-cursor press? `0x5ecb70`'s new-target validation.
+    pub(crate) fn attack(&self) -> bool {
+        self.cursor.kind == cursor_mode::CursorKind::Attack
+    }
 }
 
 /// Latch the frame's pick as a press begins — the [`PressPick`] writer.
@@ -281,7 +311,7 @@ pub(crate) fn latch_press_pick(
         hovered: *hovered,
         object: *object,
         occlusion: *occlusion,
-        attack: cursor.kind == cursor_mode::CursorKind::Attack,
+        cursor: *cursor,
     };
 }
 
@@ -359,11 +389,25 @@ impl Default for ClickConfig {
 #[derive(Resource, Default)]
 pub(crate) struct AssistAttack(pub(crate) bool);
 
+/// The targeting rows' change callback (decision 2303): two flags.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut click: ResMut<ClickConfig>,
+    mut assist: ResMut<AssistAttack>,
+) {
+    match ev.key().as_str() {
+        "deselectonclick" => click.deselect_on_click = ev.flag(),
+        "assistattack" => assist.0 = ev.flag(),
+        _ => {}
+    }
+}
+
 /// Targeting: click-to-select + the ground selection ring.
 pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
             .init_resource::<AssistAttack>()
@@ -567,7 +611,7 @@ mod tests {
             .press(MouseButton::Left);
         world.run_system(id).unwrap();
         assert_eq!(world.resource::<PressPick>().hovered.guid, Some(BOAR));
-        assert!(world.resource::<PressPick>().attack, "Attack rode along");
+        assert!(world.resource::<PressPick>().attack(), "Attack rode along");
 
         // The drag begins: the look session blanks the live hover, every frame, for as long as it
         // lasts. The latch must not follow it down.

@@ -24,7 +24,8 @@
 //! refusal. The window opening clears the gate, so the first search is always allowed. (INTERIM,
 //! decision 1511 — pinned to the in-flight §5's TU-2.)
 //!
-//! The net bridge ([`crate::net::apply::auction`]) fills [`AuctionOpen`] from the wire. Each frame
+//! The packet handlers ([`net`], in the net handler table — decision 2305) fill [`AuctionOpen`]
+//! from the wire. Each frame
 //! [`feed_auction`] resolves each [`AuctionListEntry`] to a Lua-facing row (name/quality/icon via
 //! the ask-once item-template cache + `ItemDisplayInfo.dbc`, seller via the ask-once name cache,
 //! the time-left bucket from the wire's milliseconds), applies the sort, pushes the snapshot, and
@@ -49,12 +50,14 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 mod sort;
 
 use sort::SortStack;
+
+mod net;
 
 /// The browse query rate limit, in seconds. **VERIFIED** (wow-re §5 TU-2): the reference arms the
 /// gate with `tick + 0x1388` *after* the packet goes out, re-checks it inside the query itself,
@@ -387,6 +390,7 @@ pub(crate) struct UiAuctionPlugin;
 
 impl Plugin for UiAuctionPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<AuctionOpen>().add_systems(
             Update,
             (
@@ -396,7 +400,16 @@ impl Plugin for UiAuctionPlugin {
                 // out the same frame. After the UnitFeed set so a row's tooltip reads a landed
                 // item-template store.
                 close_npc_session_out_of_range::<AuctionOpen>.before(feed_auction),
-                feed_auction.after(crate::ui_unit::UnitFeed).before(UiInput),
+                // Gated on the interface being up (decision 2279): `AuctionOpen::messages` is
+                // filled by the server's unprompted sold/outbid/expired notices, and one landing
+                // in the same drain as the login burst would be resolved and shown on the boot
+                // VM — lost — if this ran in 2214's one-frame window. The queue is bounded by
+                // what the server sends while no interface is up, and the refresh flags the same
+                // packets set survive as wire re-asks either way.
+                feed_auction
+                    .after(crate::ui_unit::UnitFeed)
+                    .in_set(UiFeed)
+                    .run_if(crate::ui_script::ingame_ui_up),
                 drain_auction.after(UiInput),
             ),
         );
@@ -427,13 +440,12 @@ fn time_left_bucket(ms: u32) -> u32 {
 /// row's full enchant/property/suffix tail (an auction row carries all three, so it gets the
 /// complete link rather than the zeroed one a bag slot settles for). `None`s stay `None` while a
 /// query is in flight — the row shows a placeholder and fills in when the answer lands.
-#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn resolve_row(
     entry: &AuctionListEntry,
     self_guid: Option<u64>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
 ) -> AuctionRow {
@@ -523,13 +535,12 @@ pub(crate) fn categories(
 }
 
 /// Resolve + sort one list into its display rows.
-#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn rows_for(
     slot: &AuctionListSlot,
     self_guid: Option<u64>,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
-    names: &mut NameCache,
+    names: &NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
 ) -> Vec<AuctionRow> {
@@ -577,13 +588,12 @@ type AuctionCatalogs<'w> = (
 
 /// Push the current auction house into the VM and fire the show/close/list-update events on a
 /// transition or content change. Diffed against a `VmMemo`, exactly like the merchant/mail feeds.
-#[allow(clippy::too_many_arguments)] // one parameter per ask-once cache a row reads
 fn feed_auction(
     script: Option<NonSendMut<UiScript>>,
     mut auction: ResMut<AuctionOpen>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     time: Res<Time>,
     catalogs: AuctionCatalogs,
@@ -661,9 +671,9 @@ fn feed_auction(
             let rows = rows_for(
                 slot,
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );
@@ -748,15 +758,14 @@ fn feed_auction(
 }
 
 /// Drain the Lua intents into the auction `CMSG`s.
-#[allow(clippy::too_many_arguments)]
 fn drain_auction(
     script: Option<NonSendMut<UiScript>>,
     mut auction: ResMut<AuctionOpen>,
     commands: Res<NetCommands>,
     time: Res<Time>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
     // The click→auction-id map re-derives the same sorted rows the feed pushed, so it resolves
     // them the same way, roll included (1547).
@@ -849,9 +858,9 @@ fn drain_auction(
             let rows = rows_for(
                 &auction.lists[bid.list],
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );
@@ -867,9 +876,9 @@ fn drain_auction(
             let rows = rows_for(
                 &auction.lists[OWNER],
                 self_guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
-                &mut names,
+                &names,
                 &commands,
                 rolls,
             );

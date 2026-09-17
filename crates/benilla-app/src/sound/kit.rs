@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use bevy::prelude::*;
 use kira::sound::PlaybackState;
 
@@ -585,7 +585,6 @@ pub(crate) enum KitRef<'a> {
 /// Silently succeeds without playing when the kit is out of range or duplicate-suppressed
 /// (matching the client: gates are not errors) — `Ok(false)` is that outcome, see
 /// [`play_kit_ext`]'s return.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn play_kit(
     kits: &mut SoundKits,
     assets: &WorldAssets,
@@ -626,7 +625,6 @@ pub(crate) fn play_kit(
 /// per-bus cap, the duplicate walk), and callers that care read that zero. Almost none do, and
 /// `Ok(false)` reads exactly like `Ok(())` did for them; [`super::vocal`]'s escalation counter is
 /// the one place the distinction is the mechanism.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn play_kit_ext(
     kits: &mut SoundKits,
     assets: &WorldAssets,
@@ -790,7 +788,18 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
 
-    let mixer = out.mixer.as_mut().context("no audio device")?;
+    // **No device is a no-op, not an error.** Running silent (`WOW_NOSOUND=1`, CI, an unattended
+    // probe — or a player whose device is genuinely gone) is a startup fact `sound::plugin`
+    // already warns about ONCE. Returning `Err` here turned that one fact into a warn PER EVENT
+    // at every one of this module's ~25 call sites: a 75 s lava probe logged 3975 identical
+    // `no audio device` lines, 89% of the file, which is why `liquid_loop` grew a guard of its
+    // own — and a probe sweep still footstepped one warn every half-second. The fix belongs here,
+    // at the one place that knows, rather than as a guard repeated at each caller. `false` is the
+    // signal this function already uses for "the gates dropped it", which is exactly what
+    // happened.
+    let Some(mixer) = out.mixer.as_mut() else {
+        return Ok(false);
+    };
     let (track, handle) = match pos {
         Some(p) => {
             // `EAXDef 0` = no `SoundSamplePreferences` row = the reference's NULL-slot skip at
@@ -1025,7 +1034,10 @@ pub(crate) fn play_file(
     if !claim_voice(out, amp) {
         return Ok(());
     }
-    let mixer = out.mixer.as_mut().context("no audio device")?;
+    // No device is a no-op here too — see the note in [`play_kit_ext`].
+    let Some(mixer) = out.mixer.as_mut() else {
+        return Ok(());
+    };
     let handle = mixer.play_2d(data)?;
     if let Some(probe) = out.probe.as_ref() {
         probe.note_play(0, path, "sfx", "2d");
@@ -1244,11 +1256,19 @@ pub(super) fn pump_channels(
                 }
             }
         }
+        // Compare before the write, on both arms (1362's no-op-write law, the audio edition):
+        // `set_volume` is a command into the audio thread's queue whether or not the value
+        // moved, and on a still frame every live channel's amp is bit-identical to last
+        // frame's — the glide an earlier write started completes on its own. The handle's
+        // volume is `amp_to_db(ch.amp)` from `play` onward, so the field IS the handle's state.
         let Some(p) = ch.pos else {
             // 2D: only the category slider can move under a live channel.
-            ch.amp = config.category_amp(ch.category) * ch.v * ch.gain;
-            ch.handle
-                .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+            let amp = config.category_amp(ch.category) * ch.v * ch.gain;
+            if amp != ch.amp {
+                ch.amp = amp;
+                ch.handle
+                    .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+            }
             return true;
         };
         let d_sq = math::dist_sq(listener, p);
@@ -1257,16 +1277,19 @@ pub(super) fn pump_channels(
             ch.handle.stop(mixer::declick());
             return false;
         }
-        ch.amp = config.category_amp(ch.category)
+        let amp = config.category_amp(ch.category)
             * ch.v
             * ch.gain
             * math::fmod_rolloff(d_sq, ch.min_dist)
             * near_field(d_sq, ch.cutoff);
-        // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here is a
-        // click. It is also the one that scales — every live channel steps together when a frame
-        // hitches, which is what a "crack fest" under OBS actually was.
-        ch.handle
-            .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+        if amp != ch.amp {
+            ch.amp = amp;
+            // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here
+            // is a click. It is also the one that scales — every live channel steps together when
+            // a frame hitches, which is what a "crack fest" under OBS actually was.
+            ch.handle
+                .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
+        }
         true
     });
 }

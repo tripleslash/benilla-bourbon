@@ -1,4 +1,4 @@
-//! The Set* entry points: the shift-compare seats and their CURRENTLY_EQUIPPED shape,
+//! The Set* entry points: the vendor compare's CURRENTLY_EQUIPPED shape,
 //! SetInventoryItem outside compare, and SetHyperlink's item-link filter.
 
 use std::collections::HashMap;
@@ -6,14 +6,19 @@ use std::collections::HashMap;
 use super::script;
 use crate::script::*;
 
-/// The shopping-compare pipeline end-to-end (0274 P4): a bag-ring hover on the main GameTooltip
-/// with shift held fires `SHOW_COMPARE_TOOLTIP` once per finger slot; a ref-shaped listener
-/// (PaperDollFrame.lua:621-640) seats ShoppingTooltip1/2, whose ARMED `SetInventoryItem` renders
-/// the byte law's compare shape — the gray CURRENTLY_EQUIPPED header, WHITE name, the compact cut (the
-/// description never prints). Releasing shift hides the pair; a shift-up hover fires nothing
-/// until the rising edge.
+/// The compare SHAPE, driven the only way 1.12.1 drives it: the vendor row's
+/// `SetMerchantCompareItem` (`MerchantFrame.xml:63-80`). The armed render is the equipped item's
+/// ORDINARY tooltip plus ONE line, first — the gray CURRENTLY_EQUIPPED header (p5). Both compare
+/// call sites pass p4 (compact) ZERO, so the two things that are easy to get wrong here are
+/// pinned as negatives: the name keeps its QUALITY color (this worn ring is epic, so the assert
+/// bites), and nothing is cut at `0x52e14c` — the description still prints (2216).
+///
+/// **And the negative control that keeps this engine out of it** (2210): a bag hover seats
+/// nothing, with shift or without, because the reference has no hover compare at all —
+/// `SHOW_COMPARE_TOOLTIP` has zero fire sites in 5875, so nothing may reach a listener for it
+/// either. The plates belong to whatever FrameXML raises them, and this engine raises none.
 #[test]
-fn shift_compare_fires_seats_and_renders_the_compare_shape() {
+fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     let mut inv: InventorySlots = Default::default();
@@ -21,7 +26,9 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         durability: None,
         item_id: 7000,
         name: Some("Old Loop".into()),
-        quality: 1,
+        // EPIC — a white name and a quality name are the same pixel at quality 1, which is how
+        // the conflated flag survived a green test for as long as it did.
+        quality: 4,
         ..Default::default()
     });
     inv[12] = Some(InvSlotView {
@@ -36,7 +43,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         7000,
         ItemTemplateView {
             name: "Old Loop".into(),
-            quality: 1,
+            quality: 4,
             inventory_type: 11,
             description: "Round.".into(),
             ..Default::default()
@@ -91,67 +98,84 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
             slots,
         }),
     );
+    // The plates are ordinary GameTooltip frames the FrameXML owns — the engine knows nothing
+    // about them (`ShoppingTooltip` does not occur in the image at all).
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("LEFT", 0, 0); a:SetWidth(10); a:SetHeight(10)
         -- CreateFrame'd frames start SHOWN; the shipped XML instances are hidden="true".
         CreateFrame("GameTooltip", "GameTooltip"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip2"):Hide()
+        -- A ref-shaped SHOW_COMPARE_TOOLTIP listener, kept as the NEGATIVE control: 5875 never
+        -- signals event 377 (zero fire sites, wow-re merchant-compare-item-law.md §8), so nothing
+        -- benilla does may reach this handler.
         compare_calls = {}
-        for slot = 11, 12 do
-            local f = CreateFrame("Button", "Doll" .. slot)
-            f:SetPoint("CENTER", 100, 0); f:SetWidth(8); f:SetHeight(8)
-            f.invSlotId = slot
-            f:RegisterEvent("SHOW_COMPARE_TOOLTIP")
-            f:SetScript("OnEvent", function()
-                if arg1 ~= this.invSlotId or arg2 > 2 then return end
-                table.insert(compare_calls, arg1 .. ":" .. arg2)
-                local tooltip = getglobal("ShoppingTooltip" .. arg2)
-                local anchor = "ANCHOR_RIGHT"
-                if arg2 > 1 then anchor = "ANCHOR_BOTTOMRIGHT" end
-                tooltip:SetOwner(this, anchor)
-                local hasItem = tooltip:SetInventoryItem("player", this.invSlotId)
-                if not hasItem then tooltip:Hide() end
-            end)
-        end
+        local watcher = CreateFrame("Frame", "CompareWatcher")
+        watcher:RegisterEvent("SHOW_COMPARE_TOOLTIP")
+        watcher:SetScript("OnEvent", function()
+            table.insert(compare_calls, arg1 .. ":" .. arg2)
+        end)
     "#,
     )
     .unwrap();
-    // Shift up: the hover renders the main tooltip, no compare fires.
+
+    // ── A hover is not a compare, with shift or without ────────────────────────────────────
     s.run(
         r#"
         GameTooltip:SetOwner(Slot, "ANCHOR_RIGHT")
         GameTooltip:SetBagItem(0, 1)
-        assert(table.getn(compare_calls) == 0, "no compare while shift is up")
-        assert(not ShoppingTooltip1:IsShown())
+        assert(not ShoppingTooltip1:IsShown(), "a bag hover seats no plate")
     "#,
     )
     .unwrap();
-    // The rising edge fires both ring slots in order.
     s.set_modifiers(true, false, false);
     s.run(
         r#"
-        assert(table.getn(compare_calls) == 2, "two ring compares, got " .. table.getn(compare_calls))
-        assert(compare_calls[1] == "11:1" and compare_calls[2] == "12:2", "slot:index order")
-        assert(ShoppingTooltip1:IsShown() and ShoppingTooltip2:IsShown())
-        assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
-        assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
-        assert(ShoppingTooltip2TextLeft2:GetText() == "Older Loop")
-        -- The compact cut at 0x52e14c: the description never prints on a compare.
-        for i = 1, ShoppingTooltip1:NumLines() do
-            assert(getglobal("ShoppingTooltip1TextLeft" .. i):GetText() ~= "\"Round.\"",
-                   "compact cut dropped the description")
-        end
-        -- The pair anchors to the DOLL slots (ref: SetOwner(this, ...)), index 2 below-right.
-        local p1, r1 = ShoppingTooltip1:GetPoint()
-        local p2, r2 = ShoppingTooltip2:GetPoint()
-        assert(r1:GetName() == "Doll11" and p1 == "BOTTOMLEFT", "1 rides ANCHOR_RIGHT")
-        assert(r2:GetName() == "Doll12" and p2 == "TOPLEFT", "2 rides ANCHOR_BOTTOMRIGHT")
+        assert(table.getn(compare_calls) == 0, "the dead event never fires")
+        assert(not ShoppingTooltip1:IsShown() and not ShoppingTooltip2:IsShown(),
+               "shift over a hover seats no plate either — 1.12 has no hover compare")
+        assert(GameTooltip:IsShown(), "and the hover itself is untouched")
     "#,
     )
     .unwrap();
-    // The compare colors: gray header, WHITE name (never the quality color) — the byte law.
+    s.set_modifiers(false, false, false);
+
+    // ── The vendor row, which is where the compare actually lives ──────────────────────────
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            name: Some("New Loop".into()),
+            item_id: 7002,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    s.run(
+        r#"
+        -- MerchantFrame.xml:67-78, in miniature: fill as the predicate, seat, fill again, show.
+        assert(ShoppingTooltip1:SetMerchantCompareItem(1, 1), "the worn ring is a candidate")
+        ShoppingTooltip1:SetOwner(GameTooltip, "ANCHOR_NONE")
+        ShoppingTooltip1:ClearAllPoints()
+        ShoppingTooltip1:SetPoint("TOPLEFT", "GameTooltip", "TOPRIGHT", 0, -10)
+        ShoppingTooltip1:SetMerchantCompareItem(1, 1)
+        ShoppingTooltip1:Show()
+        assert(ShoppingTooltip1:IsShown())
+        assert(ShoppingTooltip1TextLeft1:GetText() == "[CURRENTLY_EQUIPPED]")
+        assert(ShoppingTooltip1TextLeft2:GetText() == "Old Loop")
+        -- p4 = 0: there is NO compact cut here. The description prints, exactly as it does on a
+        -- plain SetInventoryItem of the same ring.
+        local described = nil
+        for i = 1, ShoppingTooltip1:NumLines() do
+            if getglobal("ShoppingTooltip1TextLeft" .. i):GetText() == "\"Round.\"" then
+                described = i
+            end
+        end
+        assert(described, "the compare tooltip is the FULL tooltip — the description prints")
+        assert(table.getn(compare_calls) == 0, "and still no dead event")
+    "#,
+    )
+    .unwrap();
+    // The compare colors: gray header, and the name in its own QUALITY color — the byte law.
     s.resolve();
     let quads = s.extract();
     let color_of = |txt: &str| {
@@ -173,13 +197,115 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         "CURRENTLY_EQUIPPED is gray, got {gray:?}"
     );
     let name = color_of("Old Loop");
-    assert_eq!(name, [1.0, 1.0, 1.0, 1.0], "compare name is WHITE");
-    // Releasing shift hides the pair; the main tooltip stays.
-    s.set_modifiers(false, false, false);
+    assert!(
+        (name[0] - 0.639).abs() < 0.01
+            && (name[1] - 0.208).abs() < 0.01
+            && (name[2] - 0.933).abs() < 0.01,
+        "the compare name wears the item's own quality color (epic purple), got {name:?}"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// **`nameOnly`** — `SetInventoryItem`'s optional third argument, p4 of the builder, and the ONLY
+/// door onto the compact render in 1.12.1 (wow-re `ui/scratch/tooltip-nameonly-p4-census.md`: 27
+/// of 31 call sites pass a provable zero, one forwards, and the three that carry a flag are all
+/// this binding's). No stock FrameXML caller passes it — all 8 stock call sites are
+/// two-argument — so this is addon surface, and it is live code, not a dead arm.
+///
+/// The mode is **trimmed, not bare**, and that is the half a plausible implementation gets wrong:
+/// two non-contiguous cuts plus an early return. Gone: the bind/lock region, the whole stat body,
+/// and everything past the cooldown line. Kept: the name (white), the slot/type cell, durability,
+/// every requirement line and the spell triggers.
+#[test]
+fn set_inventory_item_name_only_is_the_trimmed_build() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        durability: Some((50, 90)),
+        item_id: 8100,
+        name: Some("Sealed Blade".into()),
+        quality: 4,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.set_item_template(
+        8100,
+        ItemTemplateView {
+            name: "Sealed Blade".into(),
+            quality: 4,
+            class: 2,
+            subclass: 7,
+            inventory_type: 13,
+            // One line from each of the three regions p4 treats differently: CONJURED / the bind
+            // line / UNIQUE / LOCKED are CUT, ARMOR is CUT, and the type cell, durability, the
+            // level requirement and the trigger all SURVIVE.
+            flags: 0x2,
+            bonding: 1,
+            max_count: 1,
+            lock_id: 7,
+            armor: 100,
+            max_durability: 90,
+            required_level: 40,
+            spell_triggers: vec![(1, 100, "Zap".into())],
+            description: "Sealed.".into(),
+            ..Default::default()
+        },
+    );
     s.run(
         r#"
-        assert(not ShoppingTooltip1:IsShown() and not ShoppingTooltip2:IsShown(), "release hides")
-        assert(GameTooltip:IsShown(), "the item hover itself stays")
+        local a = CreateFrame("Button", "Slot13"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+
+        function has(needle)
+            for i = 1, TT:NumLines() do
+                local t = getglobal("TTTextLeft" .. i):GetText()
+                if t and string.find(t, needle, 1, true) then return true end
+            end
+            return false
+        end
+
+        -- ── no third argument: the full build ──────────────────────────────────────────────
+        assert(tt:SetInventoryItem("player", 16) == 1)
+        assert(has("[ITEM_CONJURED]") and has("[ITEM_BIND_ON_PICKUP]")
+               and has("[ITEM_UNIQUE]") and has("[LOCKED]"), "full: the bind/lock region")
+        assert(has("[ARMOR 100]"), "full: the stat body")
+        assert(has("[INVTYPE_WEAPON]") and has("[DURABILITY 50/90]")
+               and has("[MIN_LEVEL 40]") and has("Zap"), "full: the kept lines")
+        assert(has("\"Sealed.\""), "full: the description")
+        local r, g, b = TTTextLeft1:GetTextColor()
+        assert(math.abs(r - 0.639) < 0.01 and math.abs(g - 0.208) < 0.01
+               and math.abs(b - 0.933) < 0.01, "full: the name is epic purple")
+
+        -- ── nameOnly = 1: trimmed, not bare ───────────────────────────────────────────────
+        assert(tt:SetInventoryItem("player", 16, 1) == 1, "nameOnly still answers 1")
+        assert(TTTextLeft1:GetText() == "Sealed Blade")
+        local r2, g2, b2 = TTTextLeft1:GetTextColor()
+        assert(r2 == 1 and g2 == 1 and b2 == 1, "nameOnly: the NAME goes white (0x52b8b3)")
+        assert(not has("[ITEM_CONJURED]") and not has("[ITEM_BIND_ON_PICKUP]")
+               and not has("[ITEM_UNIQUE]") and not has("[LOCKED]"),
+               "nameOnly: the bind/lock region is cut (0x52bac3)")
+        assert(not has("[ARMOR 100]"), "nameOnly: the stat body is cut (0x52c225)")
+        assert(not has("\"Sealed.\""), "nameOnly: the early return (0x52e14e) drops the tail")
+        assert(has("[INVTYPE_WEAPON]"), "nameOnly KEEPS the slot/type cell — between the two cuts")
+        assert(has("[DURABILITY 50/90]") and has("[MIN_LEVEL 40]") and has("Zap"),
+               "nameOnly KEEPS durability, the requirements and the triggers")
+
+        -- ── the gate's polarity: is-number AND strictly > 0 (0x53304a) ────────────────────
+        -- Absent, nil, 0, a negative and a non-numeric string all leave the flag at its zero
+        -- seed, and none of them RAISES — this argument is not `number_arg`'s shape.
+        local full = { nil, 0, -1, "nope", {}, false }
+        for i = 1, 6 do
+            tt:SetInventoryItem("player", 16, full[i])
+            assert(has("[ARMOR 100]"), "a non-positive third argument builds the FULL tooltip")
+        end
+        -- A numeric STRING passes lua_isnumber, and a fraction is still > 0.
+        tt:SetInventoryItem("player", 16, "1")
+        assert(not has("[ARMOR 100]"), "a numeric string is a number to lua_isnumber")
+        tt:SetInventoryItem("player", 16, 0.5)
+        assert(not has("[ARMOR 100]"), "strictly greater than zero, not >= 1")
     "#,
     )
     .unwrap();

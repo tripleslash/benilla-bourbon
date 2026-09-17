@@ -473,6 +473,26 @@ pub(crate) fn count_of(
     total
 }
 
+/// Every carried entry's count in ONE walk — [`count_of`] for a caller that asks about many
+/// entries on one frame. The action bar asked `count_of` once per reagent, per totem and per
+/// item slot, each a whole walk of the bags to sum one entry; one walk answers all of them, and
+/// the per-entry question becomes a lookup. Same scope, same per-copy stack sum.
+pub(crate) fn carried_counts(
+    store: &ObjectFields,
+    items: &Items,
+) -> std::collections::HashMap<u32, u32> {
+    let mut counts = std::collections::HashMap::new();
+    walk_inventory::<()>(store, items, InventoryScope::CARRIED, |_, _, guid| {
+        if let Some(fields) = items.object(guid) {
+            if let Some(entry) = fields.object_entry() {
+                *counts.entry(entry).or_insert(0) += fields.item_stack_count().unwrap_or(1);
+            }
+        }
+        None
+    });
+    counts
+}
+
 /// How far [`find_item`] looks, and which copies count — the two mode bits the reference's own
 /// callers pass into the inventory walker `0x622420` (wow-re `action-item-slot.md` §8.2).
 #[derive(Clone, Copy, Default)]
@@ -555,7 +575,7 @@ pub(crate) fn collect_inventory(
 ///
 /// A slot whose item template is still in flight can't be judged and reads as "not a key"; the
 /// answer lands within a frame or two and the feed re-pushes.
-pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCommands) -> bool {
+pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommands) -> bool {
     // Every guid mode 0x4f reaches, in the walker's own order — a container is recursed into as it
     // is passed (the depth-first rule), which is why each bag's contents follow its own slot.
     // Collected first, then judged: the template lookup needs `items` mutably (the ask-once query).
@@ -823,7 +843,7 @@ pub(crate) fn send_item_use(
     };
     // The disarm ladder, asked of the caster's own inventory (decision 1903).
     let disarmed_hand = ctx.rel.self_store.and_then(|store| {
-        crate::items::disarmed_equipment_slot(store, &mut ladder.items, &ladder.commands)
+        crate::items::disarmed_equipment_slot(store, &ladder.items, &ladder.commands)
     });
     match item_use_route(it, aura_cancels, disarmed_hand) {
         ItemUseRoute::CantUseDisarmed => {
@@ -874,7 +894,7 @@ pub(crate) fn send_item_use(
             if !suppress
                 && it
                     .guid
-                    .is_some_and(|g| gate.use_binds(&mut ladder.items, &ladder.commands, g)) =>
+                    .is_some_and(|g| gate.use_binds(&ladder.items, &ladder.commands, g)) =>
         {
             gate.defer_use(script, it);
             false
@@ -1154,16 +1174,15 @@ impl Plugin for UiItemsPlugin {
                     // pie waits for the NEXT store change).
                     feed_containers
                         .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents)
-                        .before(UiInput),
+                        .before(crate::ui_action::CooldownEvents),
                     // The shared item-tooltip store: answer stat asks before the input pass so a
                     // re-hover the very next frame already sees them.
-                    feed_item_stats.in_set(UnitFeed).before(UiInput),
-                    feed_item_sets.in_set(UnitFeed).before(UiInput),
+                    feed_item_stats.in_set(UnitFeed),
+                    feed_item_sets.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM (1547) — before the input pass, so
                     // the first hover of the session already resolves a drop's suffix lines.
-                    feed_random_properties.in_set(UnitFeed).before(UiInput),
-                    feed_player_req.in_set(UnitFeed).before(UiInput),
+                    feed_random_properties.in_set(UnitFeed),
+                    feed_player_req.in_set(UnitFeed),
                     // After the input pass, so a click's UseContainerItem goes out the same frame.
                     drain_container_uses.after(UiInput),
                     // The left-click pick/place/split drain — a queued move → CMSG_SWAP_INV_ITEM /
@@ -1746,13 +1765,13 @@ mod find_item_tests {
         item(&mut items, 0xF2, BREAD, None);
 
         // Nothing at all.
-        assert!(!has_key(&player(&[]), &mut items, &commands));
+        assert!(!has_key(&player(&[]), &items, &commands));
         // A non-key in the backpack is not a key.
-        assert!(!has_key(&player(&[(23, 0xF2)]), &mut items, &commands));
+        assert!(!has_key(&player(&[(23, 0xF2)]), &items, &commands));
         // The director's own case: the key sitting in keyring slot 1.
-        assert!(has_key(&player(&[(81, 0xF1)]), &mut items, &commands));
+        assert!(has_key(&player(&[(81, 0xF1)]), &items, &commands));
         // And in the backpack, before it has been filed.
-        assert!(has_key(&player(&[(23, 0xF1)]), &mut items, &commands));
+        assert!(has_key(&player(&[(23, 0xF1)]), &items, &commands));
 
         // The BANK — reachable only because HasKey passes 0x4f rather than the walker's default
         // 0x47. `find_item` must NOT see the same copy (its mode omits 0x08).
@@ -1760,7 +1779,7 @@ mod find_item_tests {
         banked.insert(39u16, 0xF1u64);
         let store = bank_player(&banked);
         assert!(
-            has_key(&store, &mut items, &commands),
+            has_key(&store, &items, &commands),
             "a key in the bank still gives you a keyring"
         );
         assert_eq!(

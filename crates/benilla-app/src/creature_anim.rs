@@ -390,7 +390,6 @@ pub(crate) fn stop_attack_local(
 /// `0x6131d9`). `0x5ecb70`'s own validator legs — the target's alive-or-feign + `CanAttack
 /// 0x606980` walk, and the `[0xb4b3e4]` world gate — stay with the callers that already compute
 /// them (`target::scan`'s `new_attackable`, the drain's `attack_actor_refusal`).
-#[allow(clippy::too_many_arguments)] // the tail writes four sinks; the alternative is a bundle
 pub(crate) fn start_attack_local(
     entity: Entity,
     target: u64,
@@ -444,7 +443,6 @@ pub(crate) fn start_attack_local(
 /// `[0xb4b3e4]` — the reference's second condition on the stop arm, a world/session global also
 /// tested at `0x5ecbc0` — is unmodelled; nothing in benilla can be false there while a press is
 /// being drained.
-#[allow(clippy::too_many_arguments)] // the seams' write set, minus the bundle a caller can't hold
 pub(crate) fn toggle_attack_local(
     entity: Entity,
     target: u64,
@@ -582,7 +580,9 @@ pub(crate) enum CastEventKind {
     /// — the `0x60d450` fallback a basic shot's impact kit resolves through (decision 0370).
     Impact { weapon_visual: Option<u32> },
     /// A projectile arrived at a **ground point** instead of on a unit — the client's per-tick
-    /// missile dispatch taking its ground arm (`0x61e1d0` → `0x61d870`), reached by the single
+    /// missile dispatch taking `0x61e1d0` → `0x61d870`, which is the **no-live-target** arm, not
+    /// a ground arm as such (a target that despawned mid-flight lands there too; wow-re
+    /// `missile-arrival-dispatch.md`). Ours is reached only by the single
     /// missile a dest-targeted GO with an empty hit list launches
     /// ([`spell_visual::MissileSpawn::ground_aim`]). `entity` is the **caster** — `0x61d870`
     /// plays the kit on it, not on anything at the point — and `pos` is the arrival position,
@@ -1263,6 +1263,26 @@ impl Plugin for CreatureAnimPlugin {
                     // entity-visuals chain so the arrow appears/vanishes the frame the keyframe
                     // lands, not one behind.
                     drive_nock_latch,
+                    // …and, off the same two keys, the RANGED PROP's own clip (decision 2281):
+                    // the bow's limbs bend on `$BWP`, and on `$BWR` a gun fires the muzzle blast
+                    // its BowRelease(161) sequence carries. Beside the latch because the reference
+                    // arms both from one handler each, and ahead of the entity-visuals chain so the
+                    // prop's pose is this frame's before the rider lane reads it.
+                    crate::ranged_flex::flex_ranged_props
+                        // The per-sequence material samplers (`SeqHosts`) ask an anim host which
+                        // slot it is playing; a prop that armed 161 this frame must be answering
+                        // for 161, not for last frame's Stand. The chain's own `.before(
+                        // EntityVisualsSet)` does not reach them — they hang off `ModelVisSet`.
+                        .before(benilla_world::model_render::ModelVisSet),
+                    // …and the un-nock's reset (`0x60f59d`), which the reference reaches from the
+                    // SAME `$BWR` it just armed on. It must run AFTER the arm, or its skip-while-
+                    // releasing guard has nothing to read and a gun's blast is cancelled on the
+                    // frame it starts — the chain gives it that order by construction.
+                    crate::ranged_flex::reset_ranged_props_on_unnock
+                        // Same edge as the arm above, and for the same reason: this writes the
+                        // prop's player too, and the per-sequence material samplers must answer
+                        // for the clip it leaves armed.
+                        .before(benilla_world::model_render::ModelVisSet),
                     // …and the `$BTH` puff off the same scan: another SpellKitFx writer, so it
                     // belongs ahead of the entity-visuals chain like its `arm_*_fx` siblings.
                     fire_breath,
@@ -1390,6 +1410,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWP",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();
@@ -1401,6 +1422,7 @@ mod nock_latch_tests {
             entity: unit,
             ident: *b"$BWR",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();
@@ -1415,6 +1437,7 @@ mod nock_latch_tests {
             entity: bare,
             ident: *b"$BWP",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         app.update();

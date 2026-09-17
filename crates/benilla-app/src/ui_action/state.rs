@@ -23,7 +23,7 @@
 //! §2a fold-back: reagents, forms, stealth, aura states (the Execute-family target dependence),
 //! the works.
 
-use crate::ui_items::{count_of, InventoryScope};
+use crate::ui_items::carried_counts;
 use std::collections::HashMap;
 // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
@@ -385,7 +385,7 @@ fn resolve_through_macro(
 }
 
 /// Compute + diff-push every occupied slot's dynamic state, and fire the reference event edges.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(super) fn feed_action_state(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -396,13 +396,15 @@ pub(super) fn feed_action_state(
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
     // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
     // ground targeting — plus the macro→spell binding the MACRO arm resolves through
-    // (decision 0983), which rides here for the same ceiling reason.
+    // (decision 0983) and the talent spell-modifier tables that leg 12's cost reads through,
+    // both of which ride here for the same ceiling reason.
     cast_state: (
         Res<crate::ui_cast::PendingCast>,
         Res<crate::ui_cast::QueuedMeleeSpell>,
         Res<crate::ui_cast::ActiveChannel>,
         Res<super::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
+        Res<crate::spell_mods::SpellModifiers>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -410,7 +412,7 @@ pub(super) fn feed_action_state(
     units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<crate::net::Reputations>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<StateMemory>>,
 ) {
@@ -435,8 +437,14 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound, spell_mods) = &cast_state;
     let me = self_q.iter().next();
+    // The bags, walked ONCE for the frame: every reagent, totem and item-count question below
+    // reads this table. It used to be one whole walk per question — per reagent per spell slot,
+    // per item slot — for the same bags each time (1697 item 13).
+    let carried = me
+        .map(|(s, _, _, _)| carried_counts(&s.0, &items))
+        .unwrap_or_default();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
         .map(|(s, _, _, _)| s.0.unit_shapeshift_form())
@@ -525,9 +533,11 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
+                        carried: &carried,
+                        spell_mods,
                     };
                     let (u, oom) =
-                        usable::spell_usable(button.action, d, sp, &ctx, &mut items, &commands);
+                        usable::spell_usable(button.action, d, sp, &ctx, &items, &commands);
                     st.usable = u;
                     st.not_enough_mana = oom;
                 } else {
@@ -559,15 +569,15 @@ pub(super) fn feed_action_state(
                 }
             }
             ACTION_KIND_ITEM => {
-                let template = items.template(button.action, 0, &commands).cloned();
+                // Only the on-use spell leaves the template (`ItemUseSpell` is `Copy`) — not a
+                // clone of the whole `ItemInfo` (its Strings and Vecs) per item slot per frame.
+                let use_spell = items
+                    .template(button.action, 0, &commands)
+                    .and_then(|t| t.use_spell);
                 // `IsConsumableAction` is NOT fed from here. It reads nothing but this template
                 // (`0x4e5250`), so it is slot IDENTITY, and it rides the identity feed's push
                 // beside the count it gates — `super::feed`'s ITEM arm, decision 1301.
-                let count = me
-                    .map(|(s, _, _, _)| {
-                        count_of(&s.0, &items, button.action, InventoryScope::CARRIED)
-                    })
-                    .unwrap_or(0);
+                let count = carried.get(&button.action).copied().unwrap_or(0);
                 // Worn on any equipment slot (0..18) — the green border's IsEquippedAction.
                 st.equipped = me.is_some_and(|(s, _, _, _)| {
                     (0..19).any(|i| {
@@ -577,8 +587,34 @@ pub(super) fn feed_action_state(
                             == Some(button.action)
                     })
                 });
-                st.usable = count > 0 || st.equipped;
-                if let Some(u) = template.as_ref().and_then(|t| t.use_spell) {
+                // The rest of `0x4e5050`'s ITEM arm — the count gate, `IsItemOnCooldown`, and
+                // the item's on-use spell run through the SAME `0x6e3d60` walk a spell slot
+                // takes ([`super::usable::item_usable`]). Food greys in combat from leg 8 there.
+                // No active player and the reference answers (0,0) before resolving anything
+                // (§2a P0) — which is `ActionState::default()`'s `usable`.
+                if let Some((store, _, _, _)) = me {
+                    let ctx = usable::UsableCtx {
+                        store,
+                        target_store: target.map(|(s, _)| s),
+                        factions: factions.as_deref(),
+                        reputations: &reputations,
+                        cooldowns: &cooldowns,
+                        carried: &carried,
+                        spell_mods,
+                    };
+                    let (u, oom) = usable::item_usable(
+                        button.action,
+                        use_spell.as_ref(),
+                        count > 0 || st.equipped,
+                        &ctx,
+                        spells.as_deref(),
+                        &items,
+                        &commands,
+                    );
+                    st.usable = u;
+                    st.not_enough_mana = oom;
+                }
+                if let Some(u) = use_spell {
                     let d = spells.as_ref().and_then(|s| s.catalog.get(u.spell_id));
                     let info = cooldowns.info(u.spell_id, button.action, d, now);
                     st.cooldown = info.ui_triple(anchor, ui_now);
@@ -811,6 +847,7 @@ mod tests {
         app.insert_resource(actions)
             .insert_resource(bound)
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<crate::ui_cast::PendingCast>()
@@ -845,6 +882,118 @@ mod tests {
                 .eval::<bool>("local _, oom = IsUsableAction(2) return oom and true or false")
                 .unwrap(),
             "grey, not the out-of-power blue: notEnoughMana stays 0 on the spell-less leg"
+        );
+    }
+
+    /// **Food on the bar greys in combat** — the feed end to end, at the symptom. An ITEM slot's
+    /// usable verdict is the reference's `0x4e5050` ITEM arm, which resolves the item's on-use
+    /// spell (`0x4e5a50`) and walks it through `Spell_C::IsSpellUsableNow 0x6e3d60`; every
+    /// Food/Drink spell in the shipped `Spell.dbc` carries `Attributes` bit 28
+    /// (`ATTR_NOT_IN_COMBAT`, the walk's leg 8), so a stack of food is grey while
+    /// `UNIT_FLAG_IN_COMBAT` is up and full-colour the moment it drops. Before this test the
+    /// ITEM arm answered `count > 0 || equipped` and nothing else, and food stayed lit.
+    #[test]
+    fn food_on_the_bar_greys_while_the_player_is_in_combat() {
+        use benilla_protocol::messages::{ActionButton, ItemUseSpell};
+        use benilla_protocol::ObjectFields;
+
+        // `Conjured Muffin`-shaped: one ON_USE block casting spell 433 "Food", which the shipped
+        // DBC gives `Attributes = 0x18000100` — bit 28 among them.
+        const FOOD_ITEM: u32 = 1487;
+        const FOOD_SPELL: u32 = 433;
+        // Descriptor indices, raw (the codebase's test idiom): `ITEM_FIELD_STACK_COUNT` and
+        // `PLAYER_FIELD_PACK_SLOT_1` — the backpack's first slot, the walker's CARRIED section.
+        const STACK: u16 = 14;
+        const PACK_SLOT_1: u16 = 532;
+
+        let lit = |in_combat: bool| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            let mut actions = PlayerActions::default();
+            actions.buttons.insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: FOOD_ITEM,
+                    kind: ACTION_KIND_ITEM,
+                },
+            );
+            let mut items = Items::default();
+            items.insert_object(
+                0xF0,
+                ObjectFields::from_pairs(&[(3, FOOD_ITEM), (STACK, 10)]),
+            );
+            items.insert_template(
+                FOOD_ITEM,
+                Some(benilla_protocol::messages::ItemInfo {
+                    use_spell: Some(ItemUseSpell {
+                        spell_id: FOOD_SPELL,
+                        cooldown_ms: -1,
+                        category: 0,
+                        category_cooldown_ms: -1,
+                    }),
+                    ..crate::items::test_template("Conjured Muffin")
+                }),
+            );
+            let food = SpellDisplay {
+                attributes: 0x1800_0100,
+                ..Default::default()
+            };
+            app.insert_resource(actions)
+                .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+                .insert_resource(Spells {
+                    catalog: benilla_formats::SpellCatalog::from_displays(
+                        [(FOOD_SPELL, food)].into_iter().collect(),
+                    ),
+                    forms: Default::default(),
+                    ranges: Default::default(),
+                    cast_times: Default::default(),
+                    durations: Default::default(),
+                    radii: Default::default(),
+                })
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::ui_script::UiClock>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::ui_cast::PendingCast>()
+                .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
+                .init_resource::<crate::ui_cast::ActiveChannel>()
+                .init_resource::<crate::ui_action::SpellTargeting>()
+                .init_resource::<Selection>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<crate::net::Reputations>()
+                .insert_resource(items)
+                .insert_resource(NetCommands(tx));
+            // The player: alive, with the ten muffins in backpack slot 1.
+            let flags = (1u32 << 3)
+                | if in_combat {
+                    crate::player::UNIT_FLAG_IN_COMBAT
+                } else {
+                    0
+                };
+            app.world_mut().spawn((
+                SelfPlayer,
+                Transform::default(),
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (22, 100),
+                    (23, 500),
+                    (46, flags),
+                    (PACK_SLOT_1, 0xF0),
+                ])),
+            ));
+            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.add_systems(Update, feed_action_state);
+            app.update();
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<bool>("return (IsUsableAction(1)) and true or false")
+                .unwrap()
+        };
+
+        assert!(lit(false), "out of combat the muffins are full-colour");
+        assert!(
+            !lit(true),
+            "in combat the food's on-use spell fails leg 8 and the button greys"
         );
     }
 

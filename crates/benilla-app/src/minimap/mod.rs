@@ -129,7 +129,7 @@ fn texel_stretch(extent_yd: f32) -> f32 {
 /// above `224/255` (wow-re `system/minimap/scratch/wmo-interior-minimap-composite.md`, VERIFIED).
 /// Written as the exact f32 the client computes rather than the ratio, because that ULP is the
 /// value fragments are compared against.
-const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
+pub(crate) const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
 
 /// The corpse blip's edge as a fraction of the widget side (the POIIcons cell is authored 16px on
 /// a 140px minimap ≈ 0.11; INTERIM eyeball beside [`ARROW_FRACTION`]'s).
@@ -236,6 +236,23 @@ pub(crate) struct MinimapZoom {
     /// `minimapInsideZoom` — the indoor index (the radius table's), persisted separately so zooming
     /// indoors never disturbs the outdoor level.
     pub(crate) inside: u8,
+}
+
+/// The two zoom indices' change callback (1131, 2303): each index lands on its own field,
+/// clamped exactly like the client's `set_zoom` (`0x6daa10`: clamp at 5) — the widget clamps
+/// again on the way in, so a hand-edited level lands in range whichever path it takes.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut zoom: ResMut<MinimapZoom>) {
+    match ev.key().as_str() {
+        "minimapzoom" => zoom.outdoor = zoom_index(ev.num()),
+        "minimapinsidezoom" => zoom.inside = zoom_index(ev.num()),
+        _ => {}
+    }
+}
+
+/// A stored minimap zoom level → a valid index: truncate to int and clamp into
+/// `[0, MINIMAP_ZOOM_LEVELS)`, the client's own `set_zoom` clamp.
+fn zoom_index(v: f32) -> u8 {
+    v.clamp(0.0, f32::from(benilla_ui::widget::MINIMAP_ZOOM_LEVELS - 1)) as u8
 }
 
 impl Default for MinimapZoom {
@@ -406,7 +423,6 @@ fn minimap_interior<'a>(
 /// Fills the extracted widget hole: the visible tile quads (clipped to the widget, masked to the
 /// circle) and the player arrow, appended at the widget's own z (stable sort keeps append order
 /// within a key, so the arrow rides above the tiles and below the widget's children).
-#[allow(clippy::too_many_arguments)]
 fn emit_minimap(
     widget: Res<MinimapWidget>,
     assets: Option<Res<MinimapAssets>>,
@@ -468,9 +484,12 @@ fn emit_minimap(
     // `WOW_MM_ZOOM=0..5` forces the zoom level of whichever map is showing — a capture instrument
     // (pairs with the `WOW_MM_PROBE` interior probe). Indoors and outdoors each carry their own
     // persisted index, so the override stands in for both.
-    let zoom_override = std::env::var("WOW_MM_ZOOM")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok());
+    static ZOOM_OVERRIDE: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
+    let zoom_override = *ZOOM_OVERRIDE.get_or_init(|| {
+        std::env::var("WOW_MM_ZOOM")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok())
+    });
     let zoom = zoom_override.unwrap_or(slot.zoom);
     let inside_zoom = zoom_override.unwrap_or(slot.inside_zoom);
     let center = (slot.rect.min + slot.rect.max) * 0.5;
@@ -640,7 +659,8 @@ fn emit_minimap(
         // how many groups the flood-fill kept out of how many, and how many tiles that came to. The
         // reference's own Stormwind capture emitted 57 tiles at indoor zoom 3, which is the number
         // this is here to be compared against (wow-re `wmo-interior-no-adt-underlay.md`).
-        if std::env::var("WOW_MM_STATS").is_ok() {
+        static MM_STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *MM_STATS.get_or_init(|| std::env::var_os("WOW_MM_STATS").is_some()) {
             eprintln!(
                 "MM-STATS: radius {radius} yd, groups {}/{} selected, {} tiles composited",
                 drawable.iter().filter(|d| **d).count(),
@@ -741,7 +761,8 @@ fn emit_minimap(
         })
         .unwrap_or_default();
     let blip_ctx = (blip_px_per_yd > 0.0).then(|| {
-        if std::env::var("WOW_MM_BLIP_PROBE").is_ok() {
+        static BLIP_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *BLIP_PROBE.get_or_init(|| std::env::var_os("WOW_MM_BLIP_PROBE").is_some()) {
             eprintln!(
                 "BLIP-PROBE: arrow_art={} pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
                 blips::RimArrow::ALL
@@ -936,7 +957,6 @@ fn emit_minimap(
 /// — the client's own signal for "the effective zoom changed" (FrameXML `Minimap_OnEvent`). Without it
 /// the buttons keep the level you left (e.g. `ZoomIn` greyed from an outdoor max-zoom, still greyed
 /// indoors at level 3), which is the director's report (2026-07-09).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     world: benilla_world::world_point::WorldPoint,
@@ -1063,6 +1083,7 @@ pub(crate) struct MinimapPlugin;
 
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<MinimapWidget>()
             .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
@@ -1091,27 +1112,36 @@ impl Plugin for MinimapPlugin {
                     composite::drive_composite.after(UiQuadAppend),
                     // Before the script tick, so a zoom button pressed this frame routes to the
                     // indoor/outdoor index that matches where the player actually is.
-                    feed_minimap_inside.before(crate::ui_script::UiInput),
+                    feed_minimap_inside.in_set(crate::ui_script::UiFeed),
                     // Before the script tick, so an addon's OnUpdate steers off this frame's
                     // heading rather than last frame's.
-                    feed_minimap_player_facing.before(crate::ui_script::UiInput),
-                    // Before the emit that reads `MinimapAssets::mask`, so a mask set this frame
-                    // is the one this frame draws with.
-                    feed_minimap_mask.before(UiQuadAppend),
+                    feed_minimap_player_facing.in_set(crate::ui_script::UiFeed),
+                    // After the tick that can call `Minimap:SetMaskTexture`, before the emit that
+                    // reads `MinimapAssets::mask`: a mask set this frame is the one this frame
+                    // draws with.
+                    feed_minimap_mask
+                        .after(crate::ui_script::UiInput)
+                        .before(UiQuadAppend),
                     // Before the script tick, and after the containment verdict it reads: the
                     // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
                     // same tick, on a ping the renderer already drew at the end of last frame.
+                    // Gated on the interface being up (decision 2279): a group member's
+                    // `MSG_MINIMAP_PING` can land in the same drain as the login burst, and the
+                    // `fresh` latch it sets is spent by this system's take — on the boot VM, with
+                    // no `MiniMapPing` frame to show it, if this ran in 2214's one-frame window.
+                    // Gated, the latch simply waits for the first frame with an interface.
                     ping::drive_minimap_ping
                         .after(feed_minimap_inside)
-                        .before(crate::ui_script::UiInput),
+                        .in_set(crate::ui_script::UiFeed)
+                        .run_if(crate::ui_script::ingame_ui_up),
                     // Before the script tick, so GameTimeFrame's OnUpdate reads this frame's
                     // minute, not last frame's.
-                    feed_game_time.before(crate::ui_script::UiInput),
+                    feed_game_time.in_set(crate::ui_script::UiFeed),
                     // After the world-mouseover drive (UnitFeed): a same-frame world-hover→blip
                     // transition must end with the blip tooltip shown, not the fade.
                     blips::drive_blip_tooltip
                         .after(crate::ui_unit::UnitFeed)
-                        .before(crate::ui_script::UiInput),
+                        .in_set(crate::ui_script::UiFeed),
                 ),
             );
     }

@@ -741,7 +741,7 @@ fn spell_visual_wire_golden() {
 
 /// An open-lock cast on a chest / locked door: `SMSG_SPELL_GO` whose `SpellCastTargets` names a
 /// GameObject (`TARGET_FLAG_GAMEOBJECT`, no unit target). The decoder must surface the GO guid so the
-/// lid/door animation can open it (decision 0250) — the guid the older decode read for alignment and
+/// lid/door animation can open it (decision 2271) — the guid the older decode read for alignment and
 /// dropped.
 #[test]
 fn spell_go_surfaces_the_gameobject_target() {
@@ -1383,4 +1383,56 @@ fn combat_log_completeness_wire() {
         "0107", "e8030000", "01000000", "77000000", "01000000"
     ));
     assert!(messages::parse_server(messages::opcode::SMSG_SPELLLOGEXECUTE, &body).is_err());
+}
+
+/// The talent spell-modifier pair, end to end: both opcodes through `parse_server` and on into a
+/// [`SessionEvent`]. One handler, one body, and the opcode as the only discriminant — so the two
+/// bodies here are byte-identical and only the `flat` flag differs.
+#[test]
+fn spell_modifier_wire() {
+    // mask_bit 35 · op 14 (SPELLMOD_COST) · value -30. Bit 35 is deliberately past the low dword:
+    // it is a real shipped value (Cure Poison 526's only bit) and it is the half a 32-bit mask
+    // would quietly drop.
+    let body = hx("230ee2ffffff");
+    for (wire_op, is_flat) in [
+        (messages::opcode::SMSG_SET_FLAT_SPELL_MODIFIER, true),
+        (messages::opcode::SMSG_SET_PCT_SPELL_MODIFIER, false),
+    ] {
+        let packet = messages::parse_server(wire_op, &body).unwrap();
+        // The name recovers the opcode, which the collapsed-arm families cannot.
+        assert_eq!(
+            packet.name(),
+            if is_flat {
+                "SMSG_SET_FLAT_SPELL_MODIFIER"
+            } else {
+                "SMSG_SET_PCT_SPELL_MODIFIER"
+            }
+        );
+        match &packet {
+            ServerPacket::SpellModifier {
+                flat,
+                mask_bit,
+                op,
+                value,
+            } => assert_eq!((*flat, *mask_bit, *op, *value), (is_flat, 35, 14, -30)),
+            other => panic!("spell modifier, got {}", other.name()),
+        }
+        match decode(packet).pop().unwrap() {
+            SessionEvent::SpellModifier {
+                flat,
+                mask_bit,
+                op,
+                value,
+            } => assert_eq!((flat, mask_bit, op, value), (is_flat, 35, 14, -30)),
+            _ => panic!("spell modifier event"),
+        }
+    }
+
+    // Five bytes is not a body: the value is a dword, not the three bytes a "u8 u8 u8 i16" misread
+    // would take.
+    assert!(messages::parse_server(
+        messages::opcode::SMSG_SET_FLAT_SPELL_MODIFIER,
+        &hx("230ee2ffff")
+    )
+    .is_err());
 }

@@ -13,7 +13,9 @@ use benilla_ui::script::{
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{
+    ClientCommand, FieldChanged, FieldEdges, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer,
+};
 use crate::target::Selection;
 use crate::ui_script::gate;
 
@@ -103,7 +105,6 @@ pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 /// events on their edges. The per-member unit state is the 0434 §2 **merged view**: a streamed
 /// member's live descriptor wins; the `PARTY_MEMBER_STATS` snapshot covers the rest — and the
 /// roster status byte overlays both (the descriptor never carries connected/AFK/DND).
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_party(
     // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
     // failed to load, in which case no class reads as having a relic slot.
@@ -114,7 +115,9 @@ pub(super) fn feed_party(
     stores: Query<&ObjectStore>,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
-    self_q: Query<(&Guid, &ObjectStore), With<SelfPlayer>>,
+    // The per-field edges (decision 2297), for `fire_transitions`' watch-bridge arms.
+    mut edges: MessageReader<FieldChanged>,
+    self_q: Query<(Entity, &Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     names: Res<NameCache>,
     areas: Option<Res<crate::area::AreaTableRes>>,
@@ -134,6 +137,7 @@ pub(super) fn feed_party(
         return;
     };
     let (fed, vm_reset) = fed.get_reset(&script);
+    let edges = FieldEdges::collect(&mut edges);
     // The ready-check summary the timeout tick composed (decision 1989) — a client-composed
     // `CHAT_MSG_SYSTEM` line, pushed the way every other one is. Ahead of the gate: the tick
     // runs on the frame clock, not on anything the gate watches.
@@ -152,7 +156,20 @@ pub(super) fn feed_party(
     let area_moved = fed.area.moved(here.area().map_or(u64::MAX, u64::from));
     let group_changed = group.is_changed();
     let index_changed = index.is_changed();
-    let stores_changed = !changed_stores.is_empty();
+    // The members' descriptors and our own — the only stores the merged view below reads. This
+    // used to be "any store in the world moved", which in a crowd is true on every frame: the
+    // crowd profile of 2225 read this feed re-pushing a 39-member raid to the VM every frame of
+    // the pin, 0.47 ms traced, for rows that had not changed.
+    let stores_changed = self_q
+        .iter()
+        .next()
+        .is_some_and(|(e, _, _)| changed_stores.get(e).is_ok())
+        || group.members.iter().any(|m| {
+            index
+                .0
+                .get(&m.guid)
+                .is_some_and(|&e| changed_stores.get(e).is_ok())
+        });
     let stores_removed = !removed_stores.is_empty();
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
     let areas_changed = areas.as_ref().is_some_and(|r| r.is_changed());
@@ -189,12 +206,12 @@ pub(super) fn feed_party(
         return;
     }
     let self_pair = self_q.iter().next();
-    let self_guid = self_pair.map(|(g, _)| g.0);
+    let self_guid = self_pair.map(|(_, g, _)| g.0);
     // The party's PvP faction group (decision 0646 §1): our own. A 1.12 party is always one
     // faction, and a member out of streaming range has no descriptor to resolve one from — so
     // reading it off ourselves is exact for every member, present or not.
-    let own_group =
-        self_pair.and_then(|(_, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
+    let own_group = self_pair
+        .and_then(|(_, _, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
 
     // The party1..4 slot view: own-subgroup members, packet order (`GroupState::party_slots`,
     // the 0440 byte law) — in a plain party this is simply the roster.
@@ -257,7 +274,7 @@ pub(super) fn feed_party(
     };
     // The raid roster — `GetNumRaidMembers`/`GetRaidRosterInfo`/`UnitInRaid` all read this one
     // list, so the count can never disagree with the array the way it would if we kept both.
-    let me = self_pair.map(|(g, store)| RaidSelf {
+    let me = self_pair.map(|(_, g, store)| RaidSelf {
         guid: g.0,
         flags: group.own_flags,
         level: store.0.unit_level().unwrap_or(0),
@@ -321,7 +338,13 @@ pub(super) fn feed_party(
             gate.audit("feed_party", "a party-token snapshot");
             script.set_unit(token, snap.clone());
             if let Some(cur) = &snap {
-                crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
+                crate::ui_unit::fire_transitions(
+                    &mut script,
+                    token,
+                    fed.units[i].as_ref(),
+                    cur,
+                    &edges,
+                );
             }
             fed.units[i] = snap;
         }
@@ -372,7 +395,7 @@ pub(super) fn feed_party(
     for (i, token) in RAID_TOKENS.iter().enumerate() {
         let snap = raid_guids.get(i).and_then(|guid| {
             if Some(*guid) == self_guid {
-                let (_, store) = self_pair?;
+                let (_, _, store) = self_pair?;
                 let name = names.peek(*guid).map(str::to_string);
                 let mut s = crate::ui_unit::snapshot(store, name, 0, chr);
                 s.is_player = true;
@@ -405,6 +428,7 @@ pub(super) fn feed_party(
                     token,
                     fed.raid_units[i].as_ref(),
                     cur,
+                    &edges,
                 );
             }
             fed.raid_units[i] = snap;
@@ -859,7 +883,7 @@ pub(super) fn drain_party(
     script: Option<NonSendMut<UiScript>>,
     mut group: ResMut<GroupState>,
     selection: Res<Selection>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,

@@ -56,7 +56,7 @@
 //!   (The questgiver marker raises for a live plate too — a director-pinned DEVIATION: the
 //!   reference really does sit low under a plate (byte-verified, wow-re `questgiver-marker.md`
 //!   Q4a) and the director rejected that overlap; rationale on `quest_markers::pose_markers`,
-//!   0408/0409.)
+//!   2274/2275.)
 //!
 //! (The skull's trivial-gray leg is the shared grey check, [`benilla_ui::script::unit_is_grey`]
 //! — `0x5f0700`, §5-VERIFIED 2026-07-17, the same one the tooltip/quest-range APIs read; it is
@@ -372,7 +372,7 @@ fn feed_plate_globals(
 fn toggle_vplates(
     binds: Res<crate::bindings::BindingsState>,
     mut mode: ResMut<VPlateMode>,
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
 ) {
     use crate::bindings::cmd;
     let (was_enemies, was_friends) = (mode.enemies, mode.friends);
@@ -396,14 +396,12 @@ fn toggle_vplates(
         mode.friends = !both;
         info!("nameplates: all {}", if !both { "ON" } else { "OFF" });
     }
-    if let Some(mut script) = script {
-        let flag = |b: bool| if b { "1" } else { "0" };
-        if mode.enemies != was_enemies {
-            script.set_cvar_engine(CVAR_ENEMIES, flag(mode.enemies));
-        }
-        if mode.friends != was_friends {
-            script.set_cvar_engine(CVAR_FRIENDS, flag(mode.friends));
-        }
+    let flag = |b: bool| if b { "1" } else { "0" };
+    if mode.enemies != was_enemies {
+        cvars.set(CVAR_ENEMIES, flag(mode.enemies));
+    }
+    if mode.friends != was_friends {
+        cvars.set(CVAR_FRIENDS, flag(mode.friends));
     }
 }
 
@@ -433,13 +431,15 @@ struct PlateWorld<'w, 's> {
     camera: Query<'w, 's, (&'static Camera, &'static Transform), With<WorldCamera>>,
     // The cursor, for the plate-rect hover (OnEnter — the yellow name, this frame's rects).
     window: Query<'w, 's, &'static Window, With<bevy::window::PrimaryWindow>>,
+    // The pending ground-target cast — the plate's `+0x3c` hit-test veto (`0x7cba30`).
+    targeting: Res<'w, crate::ui_action::SpellTargeting>,
 }
 
 /// Gate + draw, every frame: decide which units carry a plate (into [`VPlates`], the
 /// name-exclusivity verdict), seat each one, and hand the result to the widget layer as
 /// [`PlateState`] — at constant screen size over the projected anchor + 2/3 yd. Runs after
 /// the script extract), after the targeting chain (it reads the frame's selection verdict).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_vplates(
     mode: Res<VPlateMode>,
     mut plates: ResMut<VPlates>,
@@ -449,7 +449,7 @@ fn drive_vplates(
     // the pointer is driving the camera.
     rig: Res<crate::player::CameraControl>,
     world: PlateWorld,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     net_commands: Res<NetCommands>,
     // The widget layer this drives (decision 2148). `None` in a VM-less run (a capture with the
     // interface off, a bare test app) — the gate below then costs one early return.
@@ -522,6 +522,18 @@ fn drive_vplates(
         *mouse_told.get(&script) = Some(looking);
         script.set_nameplate_mouse(!looking);
     }
+    // **The plate's OWN veto** (`0x7cba30`, the `+0x3c` override), which is a different mechanism
+    // from the freelook toggle above and has to stay one: while a ground-targeted spell is armed a
+    // plate refuses the hit test *before* the rect, so the reticle can be placed through it — and
+    // it does that without touching the mouse-enabled bit, so `IsMouseEnabled()` still answers
+    // truthfully to an addon. `TargetingWants::Location` is `0x6e6320`'s `flag & 0x60` verbatim.
+    // Written every frame rather than on an edge: it is a plain flag read at hit-test time, not a
+    // walk over the plate list, so there is no edge worth memoising.
+    script.set_nameplate_hit_test_veto(
+        world
+            .targeting
+            .wants(crate::ui_action::targeting::TargetingWants::Location),
+    );
     let hovered_key = script.hovered_nameplate();
     let clicked = script.take_nameplate_clicks();
     let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
@@ -684,7 +696,8 @@ fn drive_vplates(
         // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
         // this frame, in logical px — the machine-side check the capture PNG can't give
         // (fill/border/text hues overlap under zoom).
-        let trace = std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1");
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point
         // (the plate hangs below head + 2/3 yd), then the bucket-0 seat law — normalize, SOLVE
         // off the plates already claimed this frame, clamp the resolved center-X/top half a
@@ -869,8 +882,20 @@ pub(crate) struct VPlateSet;
 /// V-key nameplates: the toggles + the per-frame gate/draw.
 pub(crate) struct VPlatesPlugin;
 
+/// The two V-plate toggles' change callback (decision 2303) — the bitmask's two bits, flags
+/// like every other checkbox. Lowercased here like every arm; the consts carry the registered
+/// spelling.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut mode: ResMut<VPlateMode>) {
+    if ev.is(CVAR_ENEMIES) {
+        mode.enemies = ev.flag();
+    } else if ev.is(CVAR_FRIENDS) {
+        mode.friends = ev.flag();
+    }
+}
+
 impl Plugin for VPlatesPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<VPlateMode>()
             .init_resource::<VPlates>()
             .init_resource::<PlateHover>()
@@ -903,7 +928,7 @@ impl Plugin for VPlatesPlugin {
             // system would rewire all of that. A V press can therefore reach the globals a frame late,
             // which costs nothing: their only readers are `UpdateNameplates` at the two world-entry
             // events and an addon that calls it, never a per-frame path.
-            .add_systems(Update, feed_plate_globals.before(crate::ui_script::UiInput));
+            .add_systems(Update, feed_plate_globals.in_set(crate::ui_script::UiFeed));
     }
 }
 
@@ -990,34 +1015,40 @@ mod tests {
     #[test]
     fn the_v_key_mirrors_into_the_cvar_table() {
         use crate::bindings::{cmd, BindingsState};
+        use crate::cvars::Cvars;
         let mut app = App::new();
-        let script = benilla_ui::script::UiScript::new().unwrap();
-        script.register_cvars([(CVAR_ENEMIES, "0"), (CVAR_FRIENDS, "0")]);
         app.add_systems(Update, toggle_vplates)
             .init_resource::<VPlateMode>()
-            .insert_non_send_resource(script)
+            .init_resource::<Cvars>()
             .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
         app.update();
         assert!(app.world().resource::<VPlateMode>().enemies, "V turns on");
-        let mut script = app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let moved = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Cvars>()
+                .take_events()
+                .into_iter()
+                .map(|e| (e.name, e.new))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            script.take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_ENEMIES.to_string(), "1".to_string())],
-            "the change queues, so the host dirties the config file"
+            "the write is an accepted move, so the config dirties and the mirror learns it"
         );
-        assert_eq!(script.cvar(CVAR_FRIENDS).as_deref(), Some("0"), "untouched");
+        assert_eq!(
+            app.world().resource::<Cvars>().get(CVAR_FRIENDS),
+            Some("0"),
+            "untouched"
+        );
 
-        // And back: the same key mirrors the OFF as an engine write too.
+        // And back: the same key mirrors the OFF as a host write too.
         app.world_mut()
             .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
         app.update();
         assert!(!app.world().resource::<VPlateMode>().enemies, "V turns off");
         assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_ENEMIES.to_string(), "0".to_string())]
         );
 
@@ -1027,20 +1058,14 @@ mod tests {
         app.update();
         assert!(app.world().resource::<VPlateMode>().friends);
         assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
+            moved(&mut app),
             vec![(CVAR_FRIENDS.to_string(), "1".to_string())]
         );
 
         // A frame with nothing fired writes nothing at all.
         app.world_mut().insert_resource(BindingsState::default());
         app.update();
-        assert!(app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .take_cvar_changes()
-            .is_empty());
+        assert!(moved(&mut app).is_empty());
     }
 
     /// **The FrameXML mirror is owed to every VM** (decision 2132) — the mode's two bits reach

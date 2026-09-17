@@ -224,12 +224,19 @@ pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
 /// rule as [`GLUE_LAYER`]). This camera exists only while the warm pass runs
 /// ([`spawn_warm_booth`]); nothing but menagerie rigs ever rides its layer.
 pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
+/// pipe_warm's **orthographic twin camera**'s layer ([`crate::ui_models::spawn_warm_tile_cam`],
+/// decision 2262) — the next one past the twin booth's, same ladder rule. bevy_pbr keys a mesh
+/// pipeline on the view's projection CLASS, and the tile atlas's one camera is
+/// `Projection::Orthographic`: a THIRD class beside the world camera's Perspective and the twin
+/// booth's custom `WowPortraitProjection`. Like [`WARM_BOOTH_LAYER`] this camera exists only while
+/// the warm pass runs, and nothing but menagerie rigs ever rides its layer.
+pub(crate) const WARM_ORTHO_LAYER: usize = WARM_BOOTH_LAYER + 1;
 /// The **minimap interior composite**'s render layer (decision 1466) — the next one past the warm
 /// booth's. Not a portrait booth, but it is an offscreen camera with its own layer, and 0775's rule
 /// is that EVERY such layer is computed in this one ladder: the two booths that each worked out
 /// "the next layer past the paper doll's" in their own file landed on the same number, and the
 /// clash was silent in both rendering and the emitter→camera match.
-pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
+pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_ORTHO_LAYER + 1;
 /// The UI model tiles' layer (`crate::ui_models`, decision 2008): every `<Model>` widget's M2
 /// renders into one atlas through one camera on this layer.
 pub(crate) const UI_MODELS_LAYER: usize = MINIMAP_COMPOSITE_LAYER + 1;
@@ -262,7 +269,8 @@ const _: () = assert!(
         && INSPECT_LAYER != GLUE_LAYER
         && DRESSUP_LAYER > GLUE_LAYER
         && WARM_BOOTH_LAYER > DRESSUP_LAYER
-        && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER
+        && WARM_ORTHO_LAYER > WARM_BOOTH_LAYER
+        && MINIMAP_COMPOSITE_LAYER > WARM_ORTHO_LAYER
         && UI_MODELS_LAYER > MINIMAP_COMPOSITE_LAYER
         && UI_MODEL_CAM_LAYER_BASE > UI_MODELS_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
@@ -1196,11 +1204,19 @@ pub(crate) struct BoothFraming<'w> {
 /// Owns the portrait bake pipeline: the [`PortraitImages`] bridge + the per-slot off-screen booths.
 pub(crate) struct PortraitPlugin;
 
+/// The body panes' half-rate switch's change callback (1444, 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRate>) {
+    if ev.is("boothHalfRate") {
+        rate.half = ev.flag();
+    }
+}
+
 impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PortraitImages>()
             .init_resource::<PortraitBakes>()
             .init_resource::<PaneRate>()
+            .add_observer(on_cvar)
             .init_resource::<PaperDollBooth>()
             .init_resource::<InspectBooth>()
             .init_resource::<PetDollBooth>()
@@ -1388,7 +1404,6 @@ pub(crate) fn spawn_warm_booth(
 /// Startup: stand up one booth per slot — its image (registered in [`PortraitImages`]), a model-root
 /// entity, and a camera rendering only that slot's layer into the image (transparent, no bloom/MSAA,
 /// rendered before the world camera via a negative order).
-#[allow(clippy::too_many_arguments)]
 fn setup_booths(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -1684,7 +1699,6 @@ impl SnapKey {
     /// Build the key for `unit`'s pane this frame. `dress`/`rev` are the unit's own components
     /// (absent until its equipment first resolves, which is simply another value); `show` and
     /// `aspect` are the booth's.
-    #[allow(clippy::too_many_arguments)]
     fn build(
         unit: Entity,
         parts: &[&PortraitPart],
@@ -1895,7 +1909,6 @@ impl DressedLook<'_, '_> {
 /// [`PortraitPart`] children — into the booth whenever that look changes (new unit, gear swap,
 /// appearance refresh), re-framing the camera from the display's anchors. A live unit whose model
 /// hasn't attached yet shows the ref's 2D `TemporaryPortrait` stand-in instead (RE C5).
-#[allow(clippy::too_many_arguments)]
 fn sync_portraits(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2118,6 +2131,7 @@ fn sync_portraits(
                     // mirrored `PortraitPart` doesn't carry the batch's alpha loops.
                     alpha_anim: None,
                     twins: BoothTwins::default(),
+                    mat_anim: false,
                 })
                 .collect();
             let booth_riders: Vec<BoothRider> = riders
@@ -2237,7 +2251,6 @@ fn sync_portraits(
 /// pane showing, a change of dress, an explicit model event, a resize. Mirroring live put a bow
 /// drawn in combat straight onto the character sheet (`#bugs` B324); [`SnapKey`] carries the whole
 /// law and its byte provenance.
-#[allow(clippy::too_many_arguments)]
 fn sync_paperdoll(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2282,7 +2295,6 @@ fn sync_paperdoll(
 
 /// The inspect window's model pane (decision 0631 §4) — the paper doll's exact twin, pointed at
 /// whichever unit [`crate::ui_inspect`] resolved this frame instead of at the self player.
-#[allow(clippy::too_many_arguments)]
 fn sync_inspect_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2326,7 +2338,6 @@ fn sync_inspect_booth(
 
 /// The pet paper doll's model pane (decision 1057) — the inspect pane's exact twin, pointed at the
 /// pet [`crate::ui_pet_doll`] resolved this frame.
-#[allow(clippy::too_many_arguments)]
 fn sync_petdoll_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2455,7 +2466,6 @@ fn sync_stable_standin(
 /// subject entity. So this is [`sync_petdoll_booth`] with one `or` — which is the point of the
 /// stand-in: the summoned pet and the stabled pet reach the same bake through the same code, and so
 /// cannot drift apart in framing, lighting, animation or settle.
-#[allow(clippy::too_many_arguments)]
 fn sync_stable_booth(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -2506,7 +2516,6 @@ fn sync_stable_booth(
 /// `unit` is a **subject**, not necessarily a world unit: a [`PortraitStandIn`] mirrors the same
 /// way and carries its own display id, which is how the stable pane draws a pet that has no object
 /// anywhere ([`StableBooth`]).
-#[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
     palettes: &mut benilla_world::rig_palette::RigPalettes,
     slot: &str,
@@ -2636,6 +2645,7 @@ fn sync_body_booth(
                 // `None` — the same known gap as the glue preview's (decision 0807).
                 alpha_anim: None,
                 twins: BoothTwins::default(),
+                mat_anim: false,
             })
             .collect();
         let booth_riders: Vec<BoothRider> = riders
@@ -2829,7 +2839,6 @@ fn pipe_settle(compiling: bool, wake_drained: bool, held_for: f64) -> PipeSettle
 /// The pipeline warm pass is demand too (decision 0938): its menagerie duplicates rigs onto a
 /// booth layer so the booths' `Msaa::Off` pipeline twins compile behind the entry cover — which
 /// only works if the booth cameras render during the warm window.
-#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource/query
 fn gate_booth_cameras(
     mut commands: Commands,
     mut booths: ResMut<Booths>,

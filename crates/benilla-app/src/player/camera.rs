@@ -152,7 +152,9 @@ impl ZoomLimit {
         self.max = CAM_DIST_BASE_MAX * f;
     }
 
-    /// The live factor — what the CVar table and the config file carry.
+    /// The live factor — the inverse of [`Self::set_factor`], kept for the weld test (the
+    /// registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn factor(&self) -> f32 {
         self.max / CAM_DIST_BASE_MAX
     }
@@ -172,6 +174,54 @@ const LOOK_SENSITIVITY: f32 = 0.003;
 /// 0.5 … 1.5, step 0.05). A multiplier over [`LOOK_SENSITIVITY`], so the registered default 1.0
 /// reproduces the shipped feel exactly.
 pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// The camera rows' change callback (decision 2303) — the look, zoom and follow knobs.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut look: ResMut<LookConfig>,
+    mut zoom: ResMut<ZoomLimit>,
+    mut follow: ResMut<FollowConfig>,
+) {
+    let v = ev.num();
+    match ev.key().as_str() {
+        "mouseinvertpitch" => look.invert_pitch = v != 0.0,
+        // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
+        "mousespeed" => {
+            look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
+        }
+        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
+        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
+        // value stands. That is a different posture from every clamping row, and it is the
+        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
+        "camerayawmovespeed" | "camerapitchmovespeed" => {
+            if !CAMERA_SPEED_RANGE.contains(&v) {
+                warn!(
+                    "cvar {}: value out of range ({} - {}) — ignored",
+                    ev.name,
+                    CAMERA_SPEED_RANGE.start(),
+                    CAMERA_SPEED_RANGE.end()
+                );
+                return;
+            }
+            if ev.is("cameraYawMoveSpeed") {
+                look.yaw_speed = v;
+            } else {
+                look.pitch_speed = v;
+            }
+        }
+        "cameradistancemaxfactor" => zoom.set_factor(v),
+        // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
+        // default rather than as a dead camera (`FollowStyle::from_cvar`).
+        "camerasmoothstyle" => follow.style = FollowStyle::from_cvar(v),
+        // Its sibling selector — the one the reference swaps in for the externally-driven states.
+        "camerasmoothtrackingstyle" => follow.tracking_style = FollowStyle::from_cvar(v),
+        // The auto-follow rate, clamped to 1.12's own AUTO_FOLLOW_SPEED slider range.
+        "camerayawsmoothspeed" => {
+            follow.yaw_speed = v.clamp(*FOLLOW_SPEED_RANGE.start(), *FOLLOW_SPEED_RANGE.end());
+        }
+        _ => {}
+    }
+}
 
 /// **The mouse-look rate law, and the one place benilla's units are not the reference's.**
 ///
@@ -330,7 +380,9 @@ impl FollowStyle {
         }
     }
 
-    /// The CVar string this style is — the value the table and `config.toml` carry.
+    /// The CVar string this style is — the inverse of [`Self::from_cvar`], kept for the
+    /// round-trip test (the registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn cvar(self) -> &'static str {
         match self {
             Self::Never => "0",
@@ -957,18 +1009,33 @@ impl WorldMouse {
 /// gesture the world already has.
 pub(super) fn latch_world_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
-    // **The CHROME flag, not the raw one** — a V-plate is UI the camera looks straight through
-    // (decision 2159, and the concept is named on `PointerOverUiPanel`). Plates became real
-    // mouse-enabled widgets in 2148, so the pointer inside one makes `PointerOverUi` true — right
-    // for the world PICK (the plate publishes the mouseover itself, and its click selects) and
-    // wrong for the camera: a drag that begins over a plate has to turn the view, or nameplates
-    // become dead patches you cannot swing the camera from. The reference says the same thing from
-    // the other end — entering freelook DISABLES plate mouse input (`0x60f830`, from `0x483e80`),
-    // a toggle that would have nothing to do if a press on a plate could not reach freelook.
+    // **The raw flag — a press that lands on a V-plate is the PLATE's, not the camera's** (decision
+    // 2233, reversing 2159's exception).
     //
-    // The click does NOT leak through with it: `PlayerUiClickConsumed` still suppresses the
-    // `WorldClick`/`WorldRightClick` below, so a plate click stays the plate's own.
-    pointer_over_ui: Res<crate::ui_script::PointerOverUiPanel>,
+    // 2159 read it the other way and excepted plates here, on an inference from the other end:
+    // entering freelook disables plate mouse input (`0x60f830`, from `0x483e80`), "a toggle that
+    // would have nothing to do if a press on a plate could not reach freelook". The wow-re round
+    // this session dispatched refuted that: `0x60f830` has plenty to do for a press that starts on
+    // the **world** and then drags the pointer across a plate mid-turn. The press itself never gets
+    // there. `0x7662c0` delivers a mouse-down to exactly ONE frame — `[root+0x80]` else
+    // `[root+0x7c]` — sets the capture at `0x7663e9`, calls `[vt+0x68]`, and returns 0, stopping
+    // the bus walk; and `CBindings::ExecuteBinding 0x4b7990` has exactly six call sites image-wide,
+    // every one inside a `CGWorldFrame` vtable handler. So with a plate under the cursor the
+    // binding that would start mouselook is never reached, and the release goes to the plate's own
+    // click slot (`0x7792d0` → `0x7cb910` → `0x4949f0`, mask 1 select / mask 4 interact — the same
+    // two terminals the world right-click's object leg reaches).
+    //
+    // What it costs is real and is the reference's own cost: **you cannot swing the camera by
+    // dragging off a nameplate.** Plates are small dead patches for turning, exactly as in 1.12.
+    // The one exception is the plate's own `+0x3c` veto (`0x7cba30`) — while a ground-targeted
+    // spell is armed the plates refuse the hit test, the WorldFrame wins the press, and the gesture
+    // *does* enter mouselook. That is built where it belongs, in the hit test itself
+    // ([`benilla_ui::script::UiScript::set_nameplate_hit_test_veto`]), so it arrives here for free
+    // as `PointerOverUi` simply being false over a vetoing plate.
+    //
+    // `PointerOverUiPanel` keeps its other reader — the wheel still zooms with the cursor on a
+    // plate, which is a different law (the wheel walks PAST a frame that merely takes the mouse).
+    pointer_over_ui: Res<crate::ui_script::PointerOverUi>,
     mut rig: ResMut<CameraControl>,
     cameras: Query<&Camera, With<FlyCam>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -1048,7 +1115,6 @@ pub(crate) struct CameraPivot {
 /// [`PressGesture::is_click`] alone. There is no "promotion" and nothing cancels the click for
 /// having moved — the pending click used to be destroyed the moment the cursor crossed a 4 px
 /// threshold, which is why a drag could never select (ledger B226).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_look_session(
     buttons: &ButtonInput<MouseButton>,
     mouse_motion: &AccumulatedMouseMotion,
@@ -1255,7 +1321,6 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, m
 /// `feet`/`head` are the caller's, because the head offset is the avatar capsule's and those
 /// constants are a movement concern; `body_pivot` is the target height read off the driven body
 /// this frame, used only when nothing else is being watched.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_on_subject(
     dt: f32,
     turn_delta: f32,
@@ -1412,7 +1477,6 @@ pub(super) fn seat_on_subject(
 /// `head`/`player_pos` are precomputed by [`super::control`] (which owns the avatar capsule
 /// constants); `cam_pivot_height` is the world pivot height it derived from [`CameraPivot`] this
 /// frame.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_camera(
     dt: f32,
     turn_delta: f32,
@@ -1561,7 +1625,7 @@ pub(super) fn seat_camera(
     // camera-derived can be the cause" (0671) rests entirely on that being untrue, and it was never
     // measured. `open` is printed beside the eased arm so a hit/miss alternation in the CAST is
     // visible even on a frame where the ease has not yet moved the camera far enough to see.
-    if std::env::var_os("WOW_CAM_DUMP").is_some() {
+    if cam_dump_enabled() {
         // `follow=` is the auto-follow's own reading (1502): the offset the return is animating,
         // the state the input word classifies to, and — once armed — how far through the
         // transition this frame is. `off` moving while `arm` reads `-` means something other than
@@ -1655,7 +1719,7 @@ pub(super) fn seat_camera(
 /// compose (`wow_model.wgsl`: `out_rgb *= faded_alpha`) takes the card to black, which for an ADD blend
 /// is gone. That deliberately avoids `Visibility`, which the card's own hidden-owner mirror authors every
 /// frame in a different system.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
     self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<Embodied>>,
@@ -1925,6 +1989,13 @@ pub(super) fn fly_free(
         };
         cam_t.translation += dir.normalize() * cam.speed * boost * dt;
     }
+}
+
+/// `$WOW_CAM_DUMP` — the per-frame camera/turn dump (this file's seat and the controller's turn
+/// line share it). One read for the process: both sites sit on the every-frame path.
+pub(crate) fn cam_dump_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_CAM_DUMP").is_some())
 }
 
 #[cfg(test)]
