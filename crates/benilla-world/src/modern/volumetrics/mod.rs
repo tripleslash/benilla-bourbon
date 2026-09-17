@@ -102,9 +102,11 @@ pub struct FroxelTier {
 pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     let (mode, grid, range, point_lights, cloud_shadow, shafts) = match quality {
         LightingQuality::Low => (FogMode::Analytic, UVec3::ONE, 200.0, 0, 0.0, 0.9),
-        LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.45, 0.0),
-        LightingQuality::High => (FogMode::Froxel, UVec3::new(160, 90, 64), 450.0, 16, 0.5, 0.0),
-        LightingQuality::Ultra => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 32, 0.55, 0.0),
+        // No cloud shadows on any tier: the cloud layer is a dome that travels with the camera, so its
+        // shadows slid over the ground with the player — dark patches drifting ahead of every step.
+        LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.0, 0.0),
+        LightingQuality::High => (FogMode::Froxel, UVec3::new(160, 90, 64), 450.0, 16, 0.0, 0.0),
+        LightingQuality::Ultra => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 32, 0.0, 0.0),
     };
     FroxelTier {
         mode,

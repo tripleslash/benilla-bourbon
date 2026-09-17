@@ -167,7 +167,8 @@ pub fn solve(i: &MediaInputs) -> Media {
         inv_height: (1.0 - interior) / i.fog_falloff.max(1.0),
         near_clear,
         haze: i.haze.max(0.0) + 0.006 * storm,
-        noise: 0.6 + 0.3 * storm,
+        // Faint: drifting density wisps over the ground read as cloud shadows sliding past the player.
+        noise: 0.15 + 0.3 * storm,
         ambient_in,
         key_in,
         forward_share: i.forward.clamp(0.0, 1.0) * (1.0 - 0.5 * storm),
