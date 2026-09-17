@@ -200,7 +200,10 @@ impl Default for MsaaSetting {
     /// `$WOW_FARCLIP` (a value pinned into `config.toml` would make a measurement sticky). The
     /// spellings it has always accepted are kept: `off`/`0`/`1` all mean none.
     fn default() -> Self {
-        let samples = match std::env::var("WOW_MSAA").ok().as_deref() {
+        // fork: `launch_env`, not `std::env` — a browser tab has no process environment, so `?msaa=`
+        // is the only way this A/B lever reaches the web build. Native is unchanged (nothing seeded
+        // ⇒ `launch_env::var` is `std::env::var`).
+        let samples = match crate::launch_env::var("WOW_MSAA").as_deref() {
             Some("off") => Some(1),
             Some(v) => v.parse::<u32>().ok(),
             None => None,

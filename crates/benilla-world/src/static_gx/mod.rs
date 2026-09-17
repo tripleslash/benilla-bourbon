@@ -220,7 +220,9 @@ const WORD_MATTE: u32 = 1 << 28;
 /// anything that predates the flip. Read once; the plugin registers nothing when off.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() != Ok("0"))
+    // fork: `launch_env`, not `std::env` — the browser has no process environment, so `?static_gx=0`
+    // is how the retained lane's A/B arm reaches the web worldview. Native falls through unchanged.
+    *ON.get_or_init(|| crate::launch_env::var("WOW_STATIC_GX").as_deref() != Some("0"))
 }
 
 /// `WOW_WMO_BIAS=0` — B38's A/B diagnostic, honoured exactly where `model_material` honours

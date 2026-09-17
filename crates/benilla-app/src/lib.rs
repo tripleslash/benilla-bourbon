@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 20] = [
+    const SEEDED: [&str; 29] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -272,6 +272,21 @@ fn seed_launch_env() {
         "WOW_MODERN_CASTERREACH",
         "WOW_WORLDVIEW_FACE",
         "WOW_WORLDVIEW_PITCH",
+        // fork: the perf-rig levers. Each names a pass the modern frame pays for, and none of them
+        // reached the browser before — the readers took `std::env`, which on wasm32 always answers
+        // NotPresent, so the one build whose GPU sets the project's budget had no way to A/B its
+        // own passes. `?ssao=0`, `?msaa=`, `?static_gx=0` and the two SSILVB shape knobs.
+        "WOW_SSAO",
+        "WOW_SSGI",
+        "WOW_SSILVB_RADIUS",
+        "WOW_MSAA",
+        "WOW_STATIC_GX",
+        // …and the probe's own three (`benilla_world::perf_probe`): arm, resolution multiplier,
+        // and the name this configuration answers to in the output line.
+        "WOW_PERF",
+        "WOW_PERF_WARMUP",
+        "WOW_SUPERSCALE",
+        "WOW_PERF_LABEL",
     ];
     benilla_world::launch_env::seed(
         SEEDED

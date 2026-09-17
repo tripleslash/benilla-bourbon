@@ -162,6 +162,10 @@ pub mod model_render;
 pub mod modern;
 pub mod modkeys;
 pub mod particles;
+
+/// fork: the perf rig — a player-lane frame probe, because the browser build compiles
+/// `benilla-app::perf` out and the world viewer cannot reach it anyway (see the module header).
+pub mod perf_probe;
 pub mod ribbons;
 pub mod ride_frame;
 pub mod rig_anim;

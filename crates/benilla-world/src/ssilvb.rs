@@ -116,8 +116,13 @@ impl IndirectLighting {
     }
 }
 
+// fork: read through `launch_env` rather than `std::env` so the browser's world viewer can drive
+// this pass from the page (`?ssao=`, `?ssgi=`). wasm32 has no process environment at all, so the
+// A/B lever this module's doc calls "the only way to drive this pass from `benilla-worldview`" did
+// not in fact reach the one build whose GPU we most need to price. Native is unchanged: with
+// nothing seeded, `launch_env::var` IS `std::env::var`.
 fn env_strength(key: &str, fallback: f32) -> f32 {
-    match std::env::var(key).ok().and_then(|v| v.parse::<f32>().ok()) {
+    match crate::launch_env::var(key).and_then(|v| v.parse::<f32>().ok()) {
         Some(v) => v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end()),
         None => fallback,
     }
@@ -141,8 +146,7 @@ fn occluder_thickness() -> f32 {
 }
 
 fn env_f32(key: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
-    std::env::var(key)
-        .ok()
+    crate::launch_env::var(key)
         .and_then(|v| v.parse::<f32>().ok())
         .map_or(fallback, |v| v.clamp(lo, hi))
 }
