@@ -327,6 +327,7 @@ struct VolumeHistory {
     prev_grid: UVec3,
     frame: u32,
     reference_height: Option<f32>,
+    log_timer: f32,
 }
 
 /// The `i`-th element of the Halton sequence in `base`.
@@ -414,6 +415,19 @@ fn update_volume(
         _ => ground,
     };
     hist.reference_height = Some(reference_height);
+
+    // Dev (`?modern_foglog=1`): the solved medium every two seconds.
+    if crate::launch_env::var("WOW_MODERN_FOGLOG").as_deref() == Some("1") {
+        hist.log_timer -= dt;
+        if hist.log_timer <= 0.0 {
+            hist.log_timer = 2.0;
+            info!(
+                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?}",
+                media.density, media.near_clear, reference_height, media.key_in, media.ambient_in,
+                l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color
+            );
+        }
+    }
 
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()

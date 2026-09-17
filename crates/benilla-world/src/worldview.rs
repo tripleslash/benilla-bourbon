@@ -304,7 +304,7 @@ fn plugin(app: &mut App) {
     )
     .add_systems(
         Update,
-        (fly, toggle_indirect, wade_probe::toggle_wade_probe)
+        (fly, live_pose.after(fly), toggle_indirect, wade_probe::toggle_wade_probe)
             .in_set(crate::schedule::WorldStage::Input),
     )
     // The wade probe MOVES in the ordinary update, not the input stage: `water_fx`'s emitter reads
@@ -457,6 +457,59 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
             speed: 100.0,
         },
     ));
+}
+
+/// fork: modern lighting — `?worldview_pose=x,y,z,face,pitch[,ground]` (raw WoW coords, degrees),
+/// read LIVE (`launch_env::live_var`), so a reference framing can be dialled in from the page with
+/// `history.replaceState` while the streamed world stays loaded. With `ground`, `z` is ignored once
+/// the terrain under the eye has streamed and the eye sits that many yards above it.
+#[allow(clippy::type_complexity)]
+fn live_pose(
+    streamer: Option<Res<crate::terrain_stream::TerrainStreamer>>,
+    tiles: Option<Res<Assets<benilla_assets::AdtTile>>>,
+    mut cam: Query<(&mut Transform, &mut ViewCam)>,
+    mut last: Local<Option<(String, bool)>>,
+    debug: Option<ResMut<crate::dev_state::DebugState>>,
+) {
+    // The clock follows the page too (`?clock=`).
+    if let (Some(mut d), Some(m)) = (
+        debug,
+        crate::launch_env::live_var("WOW_CLOCK").and_then(|c| c.trim().parse::<u32>().ok()),
+    ) {
+        if d.lighting.follow_server_time || d.lighting.manual_minute != m % 1440 {
+            d.lighting.follow_server_time = false;
+            d.lighting.manual_minute = m % 1440;
+        }
+    }
+    let Some(v) = crate::launch_env::live_var("WOW_WORLDVIEW_POSE") else {
+        return;
+    };
+    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    if c.len() < 5 {
+        return;
+    }
+    let wants_ground = c.len() >= 6;
+    if last.as_ref().is_some_and(|(s, grounded)| *s == v && (*grounded || !wants_ground)) {
+        return;
+    }
+    let Ok((mut xf, mut view)) = cam.single_mut() else {
+        return;
+    };
+    let mut eye = wow_to_bevy([c[0], c[1], c[2]]);
+    let mut grounded = false;
+    if wants_ground {
+        if let (Some(s), Some(t)) = (streamer.as_deref(), tiles.as_deref()) {
+            if let Some(h) = crate::terrain_stream::terrain_height_under(s, t, eye) {
+                eye.y = h + c[5];
+                grounded = true;
+            }
+        }
+    }
+    view.yaw = c[3].to_radians();
+    view.pitch = c[4].to_radians();
+    xf.translation = eye;
+    xf.rotation = Quat::from_euler(EulerRot::YXZ, view.yaw, view.pitch, 0.0);
+    *last = Some((v, grounded));
 }
 
 /// WASD + Space/C fly, right-drag look, Ctrl boost, scroll to change speed (`G` toggles indirect
