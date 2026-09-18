@@ -868,7 +868,32 @@ impl MaterialExtension for LiquidExt {
 ///
 /// Textures + sampler ARE fragment-narrowable (the macro respects `visibility(fragment)` there)
 /// so the splat / alpha / shadow arrays stay fragment-only.
+/// fork: modern lighting — the terrain lane's only pipeline key: the latched lighting model
+/// ([`MODERN_MODEL_PIPELINES`]), exactly as [`WowModelKey::modern`] carries it for the model lane.
+///
+/// Terrain had no key at all, so both lighting models were compiled into every terrain pipeline and
+/// chosen by a storage read (`wow_light.point_count.y`). That is the shape that turned Chrome/Metal's
+/// leaf-card holes black on the model lane (bisected 2026-09-16: not any one modern block, but the
+/// fragment's size), and it cost the modern path a live `shadow_array` sample it then discarded —
+/// on the one lane already at the 16-texture cap this whole overhaul has been fighting.
+///
+/// One value is live per session (the latch is per world entry), so this mints no new variants at
+/// runtime; it only stops each pipeline compiling the half it will never run.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerrainKey {
+    modern: bool,
+}
+
+impl From<&TerrainExtension> for TerrainKey {
+    fn from(_: &TerrainExtension) -> Self {
+        Self {
+            modern: MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
+#[bind_group_data(TerrainKey)]
 pub struct TerrainExtension {
     #[texture(100, dimension = "2d_array", visibility(fragment))]
     #[sampler(105, visibility(fragment))]
@@ -911,6 +936,24 @@ impl MaterialExtension for TerrainExtension {
     }
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/terrain.wgsl".into()
+    }
+
+    /// fork: modern lighting — compile one lighting model, not both ([`TerrainKey`]). The def
+    /// reaches the vertex stage too, for symmetry with the model lane's `WOW_MODERN`; the vertex
+    /// stage reads nothing from it today.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if key.bind_group_data.modern {
+            descriptor.vertex.shader_defs.push("WOW_MODERN".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_MODERN".into());
+            }
+        }
+        Ok(())
     }
 }
 

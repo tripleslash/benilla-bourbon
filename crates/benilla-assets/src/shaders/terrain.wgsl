@@ -468,9 +468,17 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     }
     // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades replace
     // the realtime fetch; shadow removes the sun's share of the Gouraud primary, never the ambient.
-    let modern = wow_light.point_count.y > 0.5;
+    // fork: modern lighting — a shader def, not a storage read. Both models used to be compiled
+    // into every terrain pipeline and chosen at runtime; see `materials::TerrainKey` for why that
+    // is the shape that broke Metal's cutout discard on the model lane.
+#ifdef WOW_MODERN
+    let modern = true;
+#else
+    let modern = false;
+#endif
     var primary = in.primary;
-    if (modern) {
+#ifdef WOW_MODERN
+    {
         let mview_z = (view.view_from_world * in.world_position).z;
         let mn = normalize(in.world_normal);
         // The water mirror shades its cheaper tier (`sunshadow::mirror_view`).
@@ -500,12 +508,18 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let ambient = sunshadow::shade_floor(mix(wow_light.light_ambient.rgb * sky, gi.rgb, gi.w), wow_light.light_ambient.rgb);
         primary = ambient + wow_light.light_diffuse.rgb * (mndotl * world_shadow) + points;
     }
+#endif
 
     // STEP 4: MCSH baked shadow. On the reference path (pixelShaders+specular) terrain is ONE pass
     // through `terrainp_s.bls`, which carries the MCSH bit in the blend texture's alpha (1.0 lit / 0.0
     // shadowed) and uses it TWO ways (Q15) — NOT the Q11 separate ambient-tint overlay (that's the
     // legacy/non-pixelShaders path). Our `shadow_array` R8 is 255=shadowed/0=lit, so `shadow_lit =
     // 1 - mcsh`. Chunks with no MCSH map (`uv_b.y < 0`) are fully lit.
+    // fork: modern lighting — MCSH RETIRES in a modern frame (P3), and the three `select`s below
+    // used to prove it by sampling the map and then throwing the sample away. The sample is a live
+    // texture read and `shadow_array` is a live binding, on the lane that sits at the 16-texture
+    // cap; behind the def, a modern pipeline reads neither.
+#ifndef WOW_MODERN
     var shadow_lit = 1.0;
     let si = in.uv_b.y;
     if (si >= 0.0) {
@@ -518,9 +532,16 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // MCSH always remains the authored base. Realtime character coverage applies a neutral
     // attenuation and closes the sheen gate. This makes the result monotonic and hue-preserving:
     // a character can only darken the terrain already underneath it.
-    let shadow_lit_eff = select(shadow_lit, 1.0, modern); // modern: MCSH retires
-    let spec_gate = select(min(shadow_lit, world_shadow), world_shadow, modern);
-    let character_shadow_term = select(mix(SHADOW_SUN_FLOOR, 1.0, world_shadow), 1.0, modern);
+    let shadow_lit_eff = shadow_lit;
+    let spec_gate = min(shadow_lit, world_shadow);
+    let character_shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
+#else
+    // The same three values the `select`s produced on the modern arm, with nothing sampled to
+    // reach them.
+    let shadow_lit_eff = 1.0;
+    let spec_gate = world_shadow;
+    let character_shadow_term = 1.0;
+#endif
 
     // The faithful `terrainp_s` combine (Q15):
     //   diffuse  = tex · primary · (0.3·shadow + 0.7)   → a flat −30% in shadow, NO colour tint

@@ -279,9 +279,18 @@ fn latch_on_world_entry(
 /// (`benilla_assets::materials::MODERN_MODEL_PIPELINES`). On a latch edge every model material is
 /// touched, so it re-prepares under the new pipeline key; the runtime flag in the shader stays, so
 /// a material not yet re-prepared still renders the right model.
+///
+/// **Terrain is touched here too, and for terrain it is load-bearing rather than tidy.** The model
+/// lane keeps its runtime flag inside `WOW_MODERN`, so a stale model material still picks the right
+/// path; the terrain lane's def now *decides* the path (it is what lets a modern terrain pipeline
+/// stop sampling the retired MCSH map at all — `materials::TerrainKey`), so a terrain material left
+/// on the old key would render the other lighting model rather than merely carry dead code. A
+/// material created after the latch reads the atomic itself and is born correct; this sweep is for
+/// the ones that already existed.
 fn sync_model_pipelines(
     active: Res<ActiveLighting>,
     mut materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
+    mut terrain: ResMut<Assets<benilla_assets::materials::TerrainMaterial>>,
     mut last: Local<Option<bool>>,
 ) {
     let modern = active.is_modern();
@@ -297,6 +306,10 @@ fn sync_model_pipelines(
     let ids: Vec<_> = materials.ids().collect();
     for id in ids {
         let _ = materials.get_mut(id);
+    }
+    let terrain_ids: Vec<_> = terrain.ids().collect();
+    for id in terrain_ids {
+        let _ = terrain.get_mut(id);
     }
 }
 

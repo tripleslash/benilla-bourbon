@@ -284,19 +284,44 @@ fn spawn_reflection_camera(
 /// that weights the reflection is at its own floor.
 const MIN_EYE_HEIGHT: f32 = 0.5;
 
+/// fork (perf): how far past the view distance a liquid surface still arms the mirror (yd).
+///
+/// A surface's transform is its origin, not its extent, and an MCLQ surface is a chunk wide — so a
+/// lake whose origin sits just past the far clip can still have a corner inside it. One chunk
+/// (33.3 yd) would do; this is four, because the whole point of the margin is that being wrong
+/// costs a visible unreflected frame and being generous costs nothing but the frames where water is
+/// nearly in range anyway.
+const WATER_REACH_MARGIN: f32 = 133.0;
+
+/// fork (perf): how long the mirror stays up after the last frame water was in reach (seconds).
+const RELEASE_SECS: f32 = 1.0;
+
 /// Mirror the world camera into it, and decide whether the mirror runs at all.
 ///
-/// The conditions are the reference's own plus one: `HasFakeReflection()` is `waterDetail != 0`,
-/// and `RenderReflection` is skipped outright while `Liquid::CameraSubmerged()` — from underneath
-/// there is nothing above the surface to mirror, and `ProcWaterBelow` does not sample `samp1` in
-/// any permutation. The one addition is [`MIN_EYE_HEIGHT`].
+/// The conditions are the reference's own plus two: [`MIN_EYE_HEIGHT`], and — fork (perf) — that
+/// there is water anywhere near enough to reflect. `HasFakeReflection()` is `waterDetail != 0`, and
+/// `RenderReflection` is skipped outright while `Liquid::CameraSubmerged()` — from underneath there
+/// is nothing above the surface to mirror, and `ProcWaterBelow` does not sample `samp1` in any
+/// permutation.
+///
+/// **Why the second addition exists.** The plane is deliberately HELD when the eye leaves water
+/// (see the `held` binding below) so that stepping off a shore does not move the mirror four
+/// hundred yards in one frame. The cost of that kindness was never bounded: a camera in the middle
+/// of a dry zone still rendered a second, half-resolution pass over the whole scene, into a texture
+/// no fragment would sample, because the only liquid in the session was one the player walked past
+/// ten minutes ago. That is the single largest thing in the frame with nothing at all to show for
+/// it.
 #[allow(clippy::too_many_arguments)]
 fn sync_reflection_camera(
     detail: Res<WaterDetail>,
     underwater: Res<Underwater>,
     targets: Option<Res<LiquidScreenTargets>>,
     world: WorldPoint,
+    view: Res<crate::view::ViewDistance>,
+    time: Res<Time>,
+    liquids: Query<&GlobalTransform, With<super::surface::LiquidSurface>>,
     mut plane_out: ResMut<ReflectionPlane>,
+    mut water_seen_at: Local<f32>,
     mut held: Local<f32>,
     world_cam: Query<
         (&GlobalTransform, &Projection, &Camera),
@@ -332,9 +357,29 @@ fn sync_reflection_camera(
         None => *held,
     };
 
+    // fork (perf): is there water near enough to be worth a second scene render?
+    //
+    // Deliberately a DISTANCE test and not a frustum one. A frustum test would also stand the
+    // mirror down for a lake directly behind the camera — and then arm it mid-turn, one frame after
+    // the water is already on screen, which is a visible pop. Residency plus farclip is the
+    // conservative side of the same question: it keeps the mirror for every surface that could
+    // reach the frame however the camera turns, and drops it only where the streamer is holding no
+    // liquid at all. `RELEASE_SECS` then keeps it a moment longer, so a shoreline at the edge of
+    // the radius cannot toggle a whole scene pass on and off frame to frame.
+    let reach = view.farclip + WATER_REACH_MARGIN;
+    let near_water = liquids
+        .iter()
+        .any(|t| t.translation().distance_squared(eye) <= reach * reach);
+    if near_water {
+        *water_seen_at = time.elapsed_secs();
+    }
+    let water_recent = near_water || time.elapsed_secs() - *water_seen_at < RELEASE_SECS;
     // fork: `waterDetail 1` (SSR only) never renders the mirror; the shader's flag stays clear and
     // it reflects through the screen-space trace over the horizon colour.
-    let wanted = detail.has_planar_reflection() && !underwater.0.any() && eye.y - plane > MIN_EYE_HEIGHT;
+    let wanted = detail.has_planar_reflection()
+        && !underwater.0.any()
+        && eye.y - plane > MIN_EYE_HEIGHT
+        && water_recent;
     if camera.is_active != wanted {
         camera.is_active = wanted;
     }
@@ -489,6 +534,25 @@ pub(super) fn register(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    /// fork (perf): the mirror's water-reach margin must clear one MCLQ surface's own extent.
+    ///
+    /// A `LiquidSurface`'s transform is its ORIGIN and an MCLQ surface spans a chunk, so a lake
+    /// whose origin sits just past the far clip can still have a corner inside the frame. A margin
+    /// under one chunk would stand the mirror down on water the player can see, which is the one
+    /// way this optimization is allowed to be wrong and must not be.
+    #[test]
+    fn the_water_reach_margin_clears_a_whole_chunk() {
+        assert!(
+            super::WATER_REACH_MARGIN >= benilla_formats::CHUNK_SIZE,
+            "a surface's origin can be a chunk away from the part of it that is on screen"
+        );
+        assert!(
+            super::RELEASE_SECS > 0.0,
+            "without a release delay a shoreline at the edge of the radius toggles a whole scene \
+             pass on and off frame to frame"
+        );
+    }
+
     use super::*;
     use bevy::camera::CameraProjection;
     use bevy::render::view::Msaa;

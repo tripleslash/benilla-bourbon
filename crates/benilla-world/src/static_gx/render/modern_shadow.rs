@@ -107,6 +107,20 @@ struct ModernShadowFrame {
     cache: Option<Texture>,
     /// Per cascade: the key its cache layer was last written under (0 = invalid).
     cache_keys: [std::sync::atomic::AtomicU64; SHADOW_LAYERS],
+    /// fork (perf): did the dynamic pass actually draw into this layer last frame?
+    ///
+    /// The whole point of the per-frame restore is to undo the previous frame's entity casters, so
+    /// a layer nothing drew into still holds pure static depth and needs no restore at all. A
+    /// `Depth32Float` copy is 2048² × 4 B = **16.8 MiB**, and five of them ran every settled frame
+    /// — including the sky-occlusion layer, which has no dynamic pass at all (see the `is_sky`
+    /// skip below) and so was restored every frame to undo nothing.
+    ///
+    /// Per LAYER and not per region, because that is the only granularity the API offers:
+    /// wgpu-core's `validate_texture_copy_range` refuses a partial copy of a depth format on x/y
+    /// ("Multisampled and depth-stencil formats do not support partial copies on x and y
+    /// dimensions, but do support copying a subset of layers"), so the tempting
+    /// copy-only-the-casters'-rectangle is not expressible. Skipping the layer wholesale is.
+    layer_dirty: [std::sync::atomic::AtomicBool; SHADOW_LAYERS],
     offsets: Vec<u32>,
     /// fork: modern lighting (P6) — one caster view per cube face of every shadowed local light,
     /// and the key the atlas layer currently holds (0 = redraw).
@@ -635,7 +649,10 @@ impl ViewNode for GxShadowNode {
             let cached = active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
 
             if cached {
-                copy_layer(render_context.command_encoder(), static_cache, working, i as u32);
+                // Only what the previous frame's entity casters dirtied needs putting back.
+                if frame.layer_dirty[i].swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    copy_layer(render_context.command_encoder(), static_cache, working, i as u32);
+                }
             } else {
                 // Static pass: clear, then terrain and the static world.
                 let mut complete = ready.is_some();
@@ -735,6 +752,9 @@ impl ViewNode for GxShadowNode {
                         }
                     }
                 }
+                // Either way the layer was just cleared and redrawn, so nothing of the previous
+                // frame's dynamic casters survives in it.
+                frame.layer_dirty[i].store(false, std::sync::atomic::Ordering::Relaxed);
                 if active && complete {
                     copy_layer(render_context.command_encoder(), working, static_cache, i as u32);
                     slot.store(key, std::sync::atomic::Ordering::Relaxed);
@@ -771,6 +791,10 @@ impl ViewNode for GxShadowNode {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
+            // Whether anything is actually ISSUED, not whether the list was non-empty: every
+            // command is still cascade-culled below, so a far cascade can hold a full draw list
+            // and take none of it — and a layer nothing wrote needs no restore next frame.
+            let mut drew = false;
             for cmd in &entities.draws {
                 if outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
@@ -801,11 +825,16 @@ impl ViewNode for GxShadowNode {
                             i32::try_from(vslice.range.start).unwrap_or(0),
                             0..1,
                         );
+                        drew = true;
                     }
                     bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
                         pass.draw(vslice.range.clone(), 0..1);
+                        drew = true;
                     }
                 }
+            }
+            if drew {
+                frame.layer_dirty[i].store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
 

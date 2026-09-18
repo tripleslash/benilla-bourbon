@@ -267,7 +267,9 @@ struct GxPipelines {
     /// Keyed `(cutout, two_sided)`; specialized for the world view's (samples, format) pair —
     /// re-specialized if that pair ever changes (a window move across displays).
     pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
-    specialized_for: Option<(u32, TextureFormat)>,
+    /// fork: modern lighting — the latched model joins the key, so a latch edge re-specializes.
+    /// Without it the four pipelines would keep whichever lighting model the session opened on.
+    specialized_for: Option<(u32, TextureFormat, bool)>,
 }
 
 fn init_pipelines(
@@ -432,7 +434,11 @@ fn prepare_static_gx(
     } else {
         TextureFormat::bevy_default()
     };
-    let key = (msaa.samples(), format);
+    // fork: modern lighting — the latched model is read here, in the render world, from the same
+    // atomic the model lane keys on, so the two lanes cannot disagree about which frame this is.
+    let modern =
+        benilla_assets::materials::MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed);
+    let key = (msaa.samples(), format, modern);
     if pipes.specialized_for != Some(key) {
         pipes.view_layout = mesh_pipeline
             .get_view_layout(MeshPipelineViewLayoutKey::from(*msaa))
@@ -454,6 +460,15 @@ fn prepare_static_gx(
                 // fork: modern lighting (P3) — foliage transmission rides the two-sided key.
                 if two_sided {
                     defs.push(ShaderDefVal::from("GX_TWO_SIDED"));
+                }
+                // fork: modern lighting — compile ONE lighting model. Both used to ride every
+                // retained pipeline behind a storage read, which is the shape that turned
+                // Chrome/Metal's cutout holes black on the model lane (bisected 2026-09-16: not any
+                // one modern block, but the fragment's size). This lane has no booth or glue view —
+                // it draws the world camera and the water mirror, and both read the same modern
+                // light buffer — so the def can decide the path outright, as `MODERN_FRAME`.
+                if modern {
+                    defs.push(ShaderDefVal::from("WOW_MODERN"));
                 }
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(
