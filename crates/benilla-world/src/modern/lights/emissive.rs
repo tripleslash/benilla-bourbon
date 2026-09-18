@@ -13,7 +13,13 @@
 //! light and swords that glow, there is nothing to switch on — the light has to be *derived* from
 //! what the artist did author.
 //!
-//! **What it derives it from.** An emitter's over-life colour ramp ([`OverLife::color`]) is the
+//! **Two kinds of source, because artists authored glow two ways.** A fire is particles; a lamp,
+//! a corona, a rune or a lit window is usually an **additive render batch** — a billboard card with
+//! a glow texture, blended on top of the scene ([`benilla_assets::ModelSubmesh::additive`], "M2 glow
+//! cards / coronae"). The lampposts of Elwynn and Darkshore are the second kind, and a recipe that
+//! read only emitters looked straight past them.
+//!
+//! **What it derives an emitter from.** An emitter's over-life colour ramp ([`OverLife::color`]) is the
 //! artist's own statement of what colour the thing emits and how bright, keyed three times across a
 //! particle's life with the additive weight in `A`. [`synthesize`] takes the ramp's
 //! opacity-weighted mean, so a flame that fades to nothing over its life contributes what it
@@ -30,8 +36,22 @@
 //!
 //! In a corpus sweep those four take out the overwhelming majority of emitters, which is what keeps
 //! the 256-entry shared table from filling with dust motes.
+//!
+//! **What it derives a glow card from, and the one place this is an approximation.** A card's
+//! colour lives in two places: its authored vertex tint, and its texture. The tint we have — a
+//! constant M2 colour track is baked into the vertex colours at parse, so [`glow_emission`] reads
+//! them straight off the batch. The texture we do **not**: world art is decoded straight into a
+//! native mip chain with `RenderAssetUsages::RENDER_WORLD`, which the render world *takes* rather
+//! than copies, so no main-world system can read a texel of it — the same wall P5 hit when it had
+//! to voxelize on the GPU instead of baking on a worker.
+//!
+//! So a card whose tint is authored gets its authored hue, and a card that is white-on-white —
+//! tint white, hue entirely in the texture — gets [`UNTINTED_GLOW`], a warm incandescent stand-in.
+//! That is a guess, and it is the weakest number in this file: it is right for the lanterns,
+//! braziers and hearths that are most of the population, and wrong for a blue arcane crystal, which
+//! will light its surroundings amber. `?modern_emissive=0` turns the whole derivation off.
 
-use benilla_assets::{ModelEmitter, ModelLight};
+use benilla_assets::{ModelEmitter, ModelLight, ModelSubmesh};
 use benilla_formats::{OverLife, ParticleBlend};
 
 /// The weighted emission below which a source is not worth a table slot. In the authored 0..1 colour
@@ -54,6 +74,19 @@ const EMISSION_TO_INTENSITY: f32 = 0.55;
 /// every channel at full opacity; unclamped they out-shine a forge.
 const MAX_INTENSITY: f32 = 1.5;
 
+/// The hue a glow card gets when it authors no tint of its own — see the module note. Warm
+/// incandescent: the lanterns, torches, braziers and hearths this stands in for are most of the
+/// population, and the texture that holds the real answer is render-world only.
+const UNTINTED_GLOW: [f32; 3] = [1.0, 0.72, 0.38];
+/// How near white a card's vertex tint has to be before it counts as "untinted" and takes
+/// [`UNTINTED_GLOW`] instead. A card tinted deliberately is tinted well clear of this.
+const UNTINTED_LIMIT: f32 = 0.08;
+/// A glow card's own contribution scale relative to a particle emitter's. A card is a single
+/// steady quad rather than a cloud, and reads brighter for its size.
+const GLOW_WEIGHT: f32 = 0.9;
+/// Card half-extent (yd) that reads as a "one unit" glow — a lamppost's corona is about this.
+const REFERENCE_CARD: f32 = 0.5;
+
 /// A synthesized source, in exactly the terms `terrain_stream::point_light` takes: the authored
 /// linear RGB and the intensity scale that multiplies it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +101,14 @@ pub struct Emissive {
 /// a fifty-field parse record.
 pub type Source<'a> = (ParticleBlend, bool, &'a OverLife);
 
+/// One authored **glow card**: its alpha-weighted mean vertex tint and its half-extent in yards.
+/// [`glow_of`] builds it from a batch; a test builds it directly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glow {
+    pub tint: [f32; 4],
+    pub size: f32,
+}
+
 /// The light a model emits by virtue of what it draws, or `None` when it emits nothing this tier
 /// should stand in for.
 ///
@@ -77,6 +118,16 @@ pub type Source<'a> = (ParticleBlend, bool, &'a OverLife);
 pub fn synthesize<'a>(
     has_authored_light: bool,
     sources: impl IntoIterator<Item = Source<'a>>,
+) -> Option<Emissive> {
+    combine(has_authored_light, sources, [])
+}
+
+/// The full recipe: a model's particle emitters and its glow cards together, since a lamp may have
+/// both (a lantern's corona card and a candle flame) and they are one light.
+pub fn combine<'a>(
+    has_authored_light: bool,
+    sources: impl IntoIterator<Item = Source<'a>>,
+    glows: impl IntoIterator<Item = Glow>,
 ) -> Option<Emissive> {
     if has_authored_light {
         return None;
@@ -88,6 +139,15 @@ pub fn synthesize<'a>(
     let mut sum = [0.0f32; 3];
     for (blend, lit, ramp) in sources {
         let Some((r, g, b, w)) = emission_of(blend, lit, ramp) else {
+            continue;
+        };
+        weight += w;
+        sum[0] += r * w;
+        sum[1] += g * w;
+        sum[2] += b * w;
+    }
+    for glow in glows {
+        let Some((r, g, b, w)) = glow_emission(&glow) else {
             continue;
         };
         weight += w;
@@ -111,14 +171,96 @@ pub fn synthesize<'a>(
     })
 }
 
-/// [`synthesize`] over a loaded model's own parts — the form both spawners call.
-pub fn for_model(lights: &[ModelLight], emitters: &[ModelEmitter]) -> Option<Emissive> {
-    synthesize(
+/// [`combine`] over a loaded model's own parts — the form both spawners call.
+pub fn for_model(
+    lights: &[ModelLight],
+    emitters: &[ModelEmitter],
+    submeshes: &[ModelSubmesh],
+) -> Option<Emissive> {
+    combine(
         lights.iter().any(|l| l.def.casts()),
         emitters
             .iter()
             .map(|e| (e.def.blend, e.def.lit, &e.def.over_life)),
+        submeshes.iter().filter_map(glow_of),
     )
+}
+
+/// One batch read as a glow card, or `None` when it is not one.
+///
+/// `additive` is the whole test, and it is the artist's own word: the M2 render flag that says
+/// "add this on top of the scene rather than mixing it in", which is what a corona, a lamp's halo,
+/// a rune and a lit window are and what a wall, a plank and a leaf are not.
+pub fn glow_of(batch: &ModelSubmesh) -> Option<Glow> {
+    glow_of_geometry(&batch.geometry)
+}
+
+/// [`glow_of`] over the parsed batch itself — what the entity lane has in hand (an `EntityPart`
+/// keeps its `RenderSubmesh`, not the `ModelSubmesh` the world lane carries).
+pub fn glow_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
+    if !geometry.additive {
+        return None;
+    }
+    if geometry.positions.is_empty() {
+        return None;
+    }
+    // The alpha-weighted mean vertex tint. A constant M2 colour track is baked into the vertex
+    // colours at parse (`ModelSubmesh::tint_anim`'s note: a `Some` tint means the static bake was
+    // SKIPPED), so for the static case — which every placed lamp is — this is the authored colour.
+    let mut tint = [0.0f32; 4];
+    if geometry.vertex_colors.is_empty() {
+        tint = [1.0; 4];
+    } else {
+        for c in &geometry.vertex_colors {
+            for i in 0..4 {
+                tint[i] += c[i];
+            }
+        }
+        for slot in &mut tint {
+            *slot /= geometry.vertex_colors.len() as f32;
+        }
+    }
+    // The card's half-extent, from its own vertices — a lamppost's corona against a hearth's blaze.
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for p in &geometry.positions {
+        for i in 0..3 {
+            lo[i] = lo[i].min(p[i]);
+            hi[i] = hi[i].max(p[i]);
+        }
+    }
+    let size = (0..3)
+        .map(|i| (hi[i] - lo[i]) * 0.5)
+        .fold(0.0f32, f32::max);
+    Some(Glow { tint, size })
+}
+
+/// A glow card's contribution: `(r, g, b, weight)`.
+fn glow_emission(glow: &Glow) -> Option<(f32, f32, f32, f32)> {
+    let alpha = glow.tint[3].clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return None;
+    }
+    let rgb = [
+        glow.tint[0].max(0.0),
+        glow.tint[1].max(0.0),
+        glow.tint[2].max(0.0),
+    ];
+    let peak = rgb[0].max(rgb[1]).max(rgb[2]);
+    if peak <= 0.0 {
+        return None;
+    }
+    // Untinted (white, or no vertex colours at all) means the hue is in a texture the main world
+    // cannot read — see the module note. Take the warm stand-in and keep the card's own brightness.
+    let spread = peak - rgb[0].min(rgb[1]).min(rgb[2]);
+    let hue = if spread <= UNTINTED_LIMIT {
+        UNTINTED_GLOW
+    } else {
+        [rgb[0] / peak, rgb[1] / peak, rgb[2] / peak]
+    };
+    let scale = (glow.size / REFERENCE_CARD).clamp(0.25, 3.0);
+    let weight = peak * alpha * scale * GLOW_WEIGHT;
+    (weight >= MIN_EMISSION).then_some((hue[0], hue[1], hue[2], weight))
 }
 
 /// One source's contribution: `(r, g, b, weight)`, or `None` if it is not emission at all.
@@ -289,6 +431,70 @@ mod tests {
             None,
             "fully transparent over its whole life"
         );
+    }
+
+    fn card(tint: [f32; 4], size: f32) -> Glow {
+        Glow { tint, size }
+    }
+
+    /// GOLDEN — **the lamppost.** The glow around an Elwynn or Darkshore lantern is an additive
+    /// billboard card, not a particle emitter, and the first cut of this recipe looked straight
+    /// past every one of them. A model with no emitters at all still emits if it carries a card.
+    #[test]
+    fn a_glow_card_alone_emits() {
+        let e = combine(false, [], [card([1.0, 0.75, 0.4, 1.0], REFERENCE_CARD)])
+            .expect("a lantern's corona is a light");
+        assert!((e.color[0] - 1.0).abs() < 1e-5, "{:?}", e.color);
+        assert!(e.color[1] < e.color[0] && e.color[2] < e.color[1], "warm");
+        assert!(e.intensity_scale > 0.0);
+    }
+
+    /// A card whose tint is white has its hue in a texture the main world cannot read, so it takes
+    /// the warm stand-in rather than lighting the street bluish-white. The weakest assumption in
+    /// the file, and the one most worth pinning.
+    #[test]
+    fn an_untinted_card_takes_the_warm_stand_in() {
+        let white = combine(false, [], [card([1.0, 1.0, 1.0, 1.0], REFERENCE_CARD)]).unwrap();
+        for c in 0..3 {
+            assert!(
+                (white.color[c] - UNTINTED_GLOW[c]).abs() < 1e-4,
+                "{:?} vs {UNTINTED_GLOW:?}",
+                white.color
+            );
+        }
+        // An authored tint is NOT overridden: a blue rune stays blue.
+        let blue = combine(false, [], [card([0.2, 0.45, 1.0, 1.0], REFERENCE_CARD)]).unwrap();
+        assert!((blue.color[2] - 1.0).abs() < 1e-5);
+        assert!(blue.color[0] < 0.3, "{:?}", blue.color);
+    }
+
+    /// The authored light still wins over a card, exactly as it does over an emitter — a lamp that
+    /// ships both a light block and a corona must not light twice.
+    #[test]
+    fn a_card_cannot_double_an_authored_light() {
+        assert_eq!(
+            combine(true, [], [card([1.0, 0.75, 0.4, 1.0], REFERENCE_CARD)]),
+            None
+        );
+    }
+
+    /// A bigger card is a stronger light, and a transparent one is none.
+    #[test]
+    fn a_cards_size_and_alpha_carry() {
+        let small = combine(false, [], [card([1.0, 0.75, 0.4, 1.0], 0.1)]).unwrap();
+        let big = combine(false, [], [card([1.0, 0.75, 0.4, 1.0], 2.0)]).unwrap();
+        assert!(big.intensity_scale > small.intensity_scale);
+        assert_eq!(combine(false, [], [card([1.0, 0.75, 0.4, 0.0], 1.0)]), None);
+    }
+
+    /// A lamp with both a corona and a candle flame is still ONE light, and both contribute.
+    #[test]
+    fn cards_and_emitters_combine_into_one_light() {
+        let r = glow();
+        let both = combine(false, [add(&r)], [card([1.0, 0.75, 0.4, 1.0], REFERENCE_CARD)])
+            .expect("both");
+        let flame_only = combine(false, [add(&r)], []).unwrap();
+        assert!(both.intensity_scale > flame_only.intensity_scale);
     }
 
     /// However bright the ramp, one source can never out-shine a forge.

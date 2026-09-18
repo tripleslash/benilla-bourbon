@@ -260,7 +260,17 @@ pub struct ModernLights {
     pub tier: LightTier,
     /// The base cell coord — the grid's low corner in cell units.
     pub base: IVec3,
-    pub shadowed: Vec<ShadowLight>,
+    /// **The atlas slots, by index, holes included.** Not a compacted list of the lights that got
+    /// one: a light's slot NAMES the six atlas tiles its shadow was drawn into, and a fragment
+    /// reaches those tiles through a nibble the binning pass wrote. So a slot index has to mean the
+    /// same light from one frame to the next, or every fragment that reads slot `n` is handed some
+    /// other lamp's depth and shades against the wrong room.
+    ///
+    /// That is exactly what a compacted `Vec` could not promise: one light leaving the radius
+    /// shifted every light behind it up a slot, and the scene flipped between lit and black as the
+    /// player turned. `None` is a slot no light holds — the atlas tiles for it are cleared, which
+    /// reads as "nothing occludes" (reverse-Z clears to the far plane), so a hole is harmless.
+    pub shadowed: Vec<Option<ShadowLight>>,
 }
 
 impl Default for LightTier {
@@ -306,7 +316,9 @@ impl LightParams {
 /// This frame's parameters for the grid at `camera`.
 pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     let tier = &lights.tier;
-    let atlas = !lights.shadowed.is_empty();
+    // The atlas is live when the tier HAS slots — a frame in which every slot happens to be empty
+    // still binds the same layers, and each empty slot's tiles read as "nothing occludes".
+    let atlas = lights.shadowed.iter().any(Option::is_some);
     let mut flags = 0u32;
     if lights.on {
         flags |= 1;
@@ -314,9 +326,14 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     if atlas {
         flags |= 2;
     }
+    // Written BY SLOT, holes and all: a hole stays `Vec4::ZERO`, whose `w` (the range) is 0, and
+    // `light_bin.wgsl`'s `shadow_slot` skips a zero-range slot rather than matching a light that
+    // happens to stand at the world origin against it.
     let mut shadow = [Vec4::ZERO; MAX_SHADOWED];
     for (slot, light) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
-        shadow[slot] = light.pos.extend(light.range);
+        if let Some(light) = light {
+            shadow[slot] = light.pos.extend(light.range);
+        }
     }
     LightParams {
         dims: tier.dims.as_vec3().extend(tier.cell),
@@ -420,7 +437,7 @@ fn update_lights(
     lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
-    mut held: Local<Vec<ShadowLight>>,
+    mut held: Local<Vec<Option<ShadowLight>>>,
 ) {
     let tier = light_tier(active.quality);
     if !active.is_modern() || !tier.on || !lights_enabled() {
@@ -455,13 +472,6 @@ fn update_lights(
             if d > SHADOW_RADIUS || light.range <= 0.0 {
                 continue;
             }
-            // fork: P8, the aggressive cull. Six faces of depth is the most expensive thing one
-            // light can ask for, and the two cheapest reasons to refuse are geometric: the lamp's
-            // lit sphere is behind the camera, or it is too small on screen to read a shadow in.
-            // Both run before the ranking, so a culled light does not even compete for a slot.
-            if cull.is_some_and(|c| !c.worth_a_cube(pos, light.range)) {
-                continue;
-            }
             // The light's reach as the frame sees it: its authored energy over the distance the
             // camera stands at, so a bright chandelier two rooms away loses to the candle beside it.
             let lum = light.intensity * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
@@ -474,26 +484,10 @@ fn update_lights(
     // light that still qualifies keeps its slot until it leaves the radius outright, so a walk
     // through a lit room pays for the atlas once.
     let want = tier.shadowed.min(MAX_SHADOWED);
-    let keep: Vec<ShadowLight> = held
-        .iter()
-        .copied()
-        // A held light survives only while it is still a CANDIDATE, so the P8 cull above — which
-        // runs before the ranking — retires a slot as soon as the player turns away from the lamp
-        // or walks far enough off that it stops reading. Stickiness is there to stop a reshuffle
-        // per frame, not to outlive the reason the light was chosen.
-        .filter(|h| ranked.iter().any(|(_, c)| *c == *h))
-        .take(want)
-        .collect();
-    let mut chosen = keep;
-    for (_, candidate) in &ranked {
-        if chosen.len() >= want {
-            break;
-        }
-        if !chosen.contains(candidate) {
-            chosen.push(*candidate);
-        }
-    }
-    *held = chosen.clone();
+    held.resize(want, None);
+    held.truncate(want);
+    assign_slots(&mut held, &ranked, &cull);
+    let chosen = held.clone();
 
     *out = ModernLights {
         on: true,
@@ -501,6 +495,44 @@ fn update_lights(
         base: grid_base(&tier, cam),
         shadowed: chosen,
     };
+}
+
+/// **Slots are stable.** A light keeps its index for as long as it is still a candidate at all —
+/// still in the table, still admitted by its room, still inside [`SHADOW_RADIUS`]. Nothing else
+/// evicts it: not a better light arriving, and (since the flicker this caused) not the P8 cull.
+///
+/// The cull's job is to stop a lamp ACQUIRING six faces of depth it cannot pay back, so it is asked
+/// once, when a slot is being filled. Asking it every frame of a light's tenure instead made the
+/// whole set view-dependent — turn away from a lamp and it lost its slot, turn back and it took a
+/// different one — and since a slot NAMES six atlas tiles, and a fragment reaches those tiles
+/// through a nibble the binning pass wrote, every reshuffle pointed live fragments at another
+/// lamp's shadow. In a room with several lamps that reads as the scene flipping between lit and
+/// pitch black as the player turns, which is exactly what it did.
+fn assign_slots(
+    held: &mut [Option<ShadowLight>],
+    ranked: &[(f32, ShadowLight)],
+    cull: &Option<ShadowCull>,
+) {
+    for slot in held.iter_mut() {
+        if let Some(light) = *slot {
+            if !ranked.iter().any(|(_, c)| *c == light) {
+                *slot = None;
+            }
+        }
+    }
+    // Fill the holes, strongest candidate first, and only with lights the cull says are worth it.
+    for (_, candidate) in ranked
+        .iter()
+        .filter(|(_, c)| cull.is_none_or(|k| k.worth_a_cube(c.pos, c.range)))
+    {
+        if held.iter().flatten().any(|h| h == candidate) {
+            continue;
+        }
+        let Some(hole) = held.iter().position(Option::is_none) else {
+            break;
+        };
+        held[hole] = Some(*candidate);
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +619,89 @@ mod tests {
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
         );
+    }
+
+    fn lamp(x: f32) -> ShadowLight {
+        ShadowLight {
+            pos: Vec3::new(x, 0.0, 0.0),
+            range: 20.0,
+        }
+    }
+
+    fn ranked(lamps: &[ShadowLight]) -> Vec<(f32, ShadowLight)> {
+        lamps
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (100.0 - i as f32, *l))
+            .collect()
+    }
+
+    /// GOLDEN — **a light keeps its slot.** This is the fix for the bug the user saw: in Northshire
+    /// Abbey the scene flipped between lit and pitch black depending on which way they looked.
+    ///
+    /// A slot NAMES the six atlas tiles a lamp's shadow was drawn into, and every lit fragment
+    /// reaches those tiles through a nibble the binning pass wrote from the slot table. The set used
+    /// to be a compacted `Vec`, so one light dropping out shifted every light behind it up a slot —
+    /// and every fragment that had been reading slot 3 was suddenly handed slot 3's *new* occupant's
+    /// depth, shading a room against a lamp somewhere else entirely.
+    #[test]
+    fn a_light_keeps_its_slot_when_another_one_leaves() {
+        let (a, b, c) = (lamp(0.0), lamp(10.0), lamp(20.0));
+        let mut held = vec![None; 4];
+        assign_slots(&mut held, &ranked(&[a, b, c]), &None);
+        assert_eq!(held, vec![Some(a), Some(b), Some(c), None]);
+
+        // `b` leaves the radius — it is simply not a candidate any more.
+        assign_slots(&mut held, &ranked(&[a, c]), &None);
+        assert_eq!(
+            held,
+            vec![Some(a), None, Some(c), None],
+            "a and c must not move; b's slot becomes a hole"
+        );
+
+        // A new lamp takes the HOLE, not the end, and still nothing else moves.
+        let d = lamp(30.0);
+        assign_slots(&mut held, &ranked(&[a, c, d]), &None);
+        assert_eq!(held, vec![Some(a), Some(d), Some(c), None]);
+    }
+
+    /// The cull gates ACQUISITION only. A held light that the camera turns away from keeps its
+    /// slot — asking the cull again every frame is what made the set view-dependent, and a
+    /// view-dependent set of slots is the flicker above.
+    #[test]
+    fn the_cull_never_evicts_a_light_it_already_let_in() {
+        let facing = ShadowCull {
+            eye: Vec3::ZERO,
+            forward: Vec3::NEG_Z,
+            tan_half_fov: (std::f32::consts::FRAC_PI_4 * 0.5).tan(),
+        };
+        // Far enough down the view axis that turning around puts its whole lit sphere well behind
+        // the eye — a lamp merely a few yards behind you keeps its slot on the cull's own terms
+        // (`FRUSTUM_SLACK`), which is a different rule and is tested below.
+        let near = ShadowLight {
+            pos: Vec3::new(0.0, 0.0, -40.0),
+            range: 12.0,
+        };
+        let mut held = vec![None; 2];
+        assign_slots(&mut held, &ranked(&[near]), &Some(facing));
+        assert_eq!(held[0], Some(near), "in front and close: it gets a slot");
+
+        // Now the player turns right around. The lamp is behind them and would never be admitted
+        // fresh — but it is still in range, so it keeps what it has.
+        let turned = ShadowCull {
+            forward: Vec3::Z,
+            ..facing
+        };
+        assert!(
+            !turned.worth_a_cube(near.pos, near.range),
+            "precondition: the cull would refuse it now"
+        );
+        assign_slots(&mut held, &ranked(&[near]), &Some(turned));
+        assert_eq!(held[0], Some(near), "but it keeps the slot it already holds");
+
+        // It only goes when it stops being a candidate at all (out of range, or room-culled).
+        assign_slots(&mut held, &[], &Some(turned));
+        assert_eq!(held[0], None);
     }
 
     /// fork: P8 — the aggressive cull's two refusals, and the one thing it must NOT refuse.

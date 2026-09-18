@@ -225,6 +225,7 @@ pub(super) fn attach_item_glows(
         // recipe's own cap is what stops that running away.
         let emissive_on = benilla_world::modern::emissive_lights_on();
         let mut glow_sources = Vec::new();
+        let mut glow_cards = Vec::new();
         let mut glow_authored = false;
         let mut glow_at = (Vec3::ZERO, 0usize);
         for (slot, path) in paths
@@ -341,6 +342,17 @@ pub(super) fn attach_item_glows(
                         .iter()
                         .map(|e| (e.def.blend, e.def.lit, &e.def.over_life)),
                 );
+                // A glow model's additive CARDS count too, not only its emitters: 32 of the 35
+                // shipped ones are pure emitters, but `Sparkle_A.m2` is a lone camera-facing quad
+                // and would otherwise light nothing at all.
+                glow_cards.extend(
+                    dm.parts
+                        .iter()
+                        .flatten()
+                        .filter_map(|p| {
+                            benilla_world::modern::lights::emissive::glow_of_geometry(&p.geometry)
+                        }),
+                );
                 glow_at = (glow_at.0 + at, glow_at.1 + 1);
             }
         }
@@ -355,9 +367,11 @@ pub(super) fn attach_item_glows(
         // already says so (its ramp is a small additive sprite). What makes it read is the tier's
         // soft, faint cube shadow, not its brightness.
         if glow_at.1 > 0 {
-            if let Some(e) =
-                benilla_world::modern::lights::emissive::synthesize(glow_authored, glow_sources)
-            {
+            if let Some(e) = benilla_world::modern::lights::emissive::combine(
+                glow_authored,
+                glow_sources,
+                glow_cards,
+            ) {
                 let light = commands
                     .spawn((
                         benilla_world::terrain_stream::point_light(e.color, e.intensity_scale),

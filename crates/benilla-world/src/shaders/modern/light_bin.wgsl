@@ -29,11 +29,21 @@ struct LightBlock {
 // Which atlas slot a light holds, or `MAX_SHADOWED` when it holds none. Matched on position rather
 // than on table order: the shadowed set is chosen on the CPU a frame's worth of systems before the
 // table is packed, and nothing keeps the two orders in step.
+//
+// The slots themselves are STABLE across frames (`modern::lights::update_lights`) — a light keeps
+// its index until it leaves the radius — so the nibble this writes still names the same six atlas
+// tiles next frame. It did not always: a compacted set shifted every slot when one light dropped
+// out, and a fragment then shaded against another lamp's shadow.
 fn shadow_slot(pos: vec3<f32>) -> u32 {
     let n = u32(grid.params.misc.y);
     for (var s = 0u; s < locallight::MAX_SHADOWED; s = s + 1u) {
         if (s >= n) {
             break;
+        }
+        // A slot no light holds is all zeroes, and its `w` (the range) is what says so. Without
+        // this a lamp standing at the world origin would match every empty slot.
+        if (grid.shadow[s].w <= 0.0) {
+            continue;
         }
         let d = grid.shadow[s].xyz - pos;
         if (dot(d, d) < 1e-4) {

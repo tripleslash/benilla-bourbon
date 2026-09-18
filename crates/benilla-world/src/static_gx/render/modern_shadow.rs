@@ -303,8 +303,11 @@ fn prepare_modern_shadow(
     frame.local_offsets.clear();
     if let Some(lights) = lights.as_deref() {
         for light in &lights.shadowed {
+            // A hole still gets its six offsets, so a slot's tiles are always at `slot * 6 + face`
+            // however many lights are actually held — the identity the receivers' nibble depends on.
+            let pos = light.map_or(Vec3::ZERO, |l| l.pos);
             for face in 0..6 {
-                let clip_from_world = crate::modern::lights::cube_face_clip(light.pos, face);
+                let clip_from_world = crate::modern::lights::cube_face_clip(pos, face);
                 frame
                     .local_offsets
                     .push(uniforms.0.push(&CasterView { clip_from_world }));
@@ -1004,7 +1007,7 @@ impl GxShadowNode {
         frame: &ModernShadowFrame,
         view: &TextureView,
         view_bind: &BindGroup,
-        shadowed: &[crate::modern::lights::ShadowLight],
+        shadowed: &[Option<crate::modern::lights::ShadowLight>],
         slot_base: usize,
         tile: u32,
         casters: &[(&GxCellGpu, &GxCellDraw)],
@@ -1030,6 +1033,9 @@ impl GxShadowNode {
             occlusion_query_set: None,
         });
         for (i, light) in shadowed.iter().enumerate() {
+            // A hole's six tiles keep the clear the pass just laid down, which reads as "nothing
+            // occludes" — exactly what an unheld slot should mean.
+            let Some(light) = light else { continue };
             let slot = slot_base + i;
             // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner test
             // the cascades use flips sign behind the light. A torch reaches a handful of cells, so
@@ -1114,7 +1120,7 @@ impl GxShadowNode {
         view: &TextureView,
         view_bind: &BindGroup,
         entities: &EntityShadowFrame,
-        shadowed: &[crate::modern::lights::ShadowLight],
+        shadowed: &[Option<crate::modern::lights::ShadowLight>],
         slot_base: usize,
         tile: u32,
         pipeline_cache: &PipelineCache,
@@ -1144,6 +1150,7 @@ impl GxShadowNode {
             occlusion_query_set: None,
         });
         for (i, light) in shadowed.iter().enumerate() {
+            let Some(light) = light else { continue };
             let slot = slot_base + i;
             // The lamp's own reach first — a creature across the room casts nothing into this cube —
             // and the face cone second, which is where most of the list goes.
@@ -1265,12 +1272,23 @@ fn face_sees(face: usize, light: Vec3, center: Vec3, radius: f32) -> bool {
 /// One atlas LAYER's key: the shadowed lights it holds, as chosen, plus the static caster
 /// fingerprint. Never 0, which is the "redraw me" value. Per layer and not per atlas since P8, so a
 /// light entering the second layer does not invalidate the first layer's six.
-fn local_atlas_key(shadowed: &[crate::modern::lights::ShadowLight], static_hash: u64) -> u64 {
+fn local_atlas_key(
+    shadowed: &[Option<crate::modern::lights::ShadowLight>],
+    static_hash: u64,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for light in shadowed {
-        light.pos.to_array().map(f32::to_bits).hash(&mut h);
-        light.range.to_bits().hash(&mut h);
+        // The hole is hashed too: a slot emptying has to invalidate the layer, or its tiles keep
+        // the departed light's depth and the next light to take that slot inherits it.
+        match light {
+            Some(l) => {
+                1u8.hash(&mut h);
+                l.pos.to_array().map(f32::to_bits).hash(&mut h);
+                l.range.to_bits().hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
     }
     static_hash.hash(&mut h);
     h.finish().max(1)

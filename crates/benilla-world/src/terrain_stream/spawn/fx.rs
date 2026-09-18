@@ -109,14 +109,19 @@ pub(super) fn spawn_lights_for(
 /// first line, and the reason it is spelled there rather than here), so the two spawners can never
 /// both answer for one doodad.
 ///
-/// The light sits at the **emitters' own centroid** in model space, not the model origin: a wall
-/// sconce's flame is a yard out from its mounting point and half a yard up, and a light at the
-/// origin would put the glow inside the wall — which is the one placement error that reads
-/// immediately, because the cube shadow then has the wall between the light and the room.
+/// A lamppost is the case that made this take `submeshes` as well as `emitters`: the glow around
+/// an Elwynn or Darkshore lantern is an **additive billboard card**, not a particle emitter, so the
+/// first cut of this looked straight past every one of them.
+///
+/// The light sits at the **glowing part's own centroid** in model space, not at the model origin: a
+/// wall sconce's flame is a yard out from its mounting point and half a yard up, and a light at the
+/// origin would put the glow inside the wall — the one placement error that reads immediately,
+/// because the cube shadow then has that wall between the light and the room.
 pub(super) fn spawn_emissive_light_for(
     commands: &mut Commands,
     lights: &[ModelLight],
     emitters: &[ModelEmitter],
+    submeshes: &[benilla_assets::ModelSubmesh],
     transform: Transform,
     room: Option<&crate::wmo_portal::WmoGroupVis>,
     out: &mut Vec<Entity>,
@@ -124,10 +129,12 @@ pub(super) fn spawn_emissive_light_for(
     if !crate::modern::emissive_lights_on() {
         return;
     }
-    let Some(emissive) = crate::modern::lights::emissive::for_model(lights, emitters) else {
+    let Some(emissive) =
+        crate::modern::lights::emissive::for_model(lights, emitters, submeshes)
+    else {
         return;
     };
-    let Some(local) = emitter_centroid(emitters) else {
+    let Some(local) = glow_centroid(emitters, submeshes) else {
         return;
     };
     spawn_point_light(
@@ -140,22 +147,47 @@ pub(super) fn spawn_emissive_light_for(
     );
 }
 
-/// Where a model's emitters sit, averaged — raw WoW model space, `None` when it has none. Plain
-/// positions and not bone-composed: a placed prop's light bone is at rest by construction (the same
-/// premise [`spawn_lights_for`] above is built on), and an emitter riding a bone that *does* animate
-/// swings by inches, which is well inside the yard this light stands for.
-fn emitter_centroid(emitters: &[ModelEmitter]) -> Option<[f32; 3]> {
-    if emitters.is_empty() {
-        return None;
-    }
+/// Where a model's glowing parts sit, averaged — raw WoW model space, `None` when it has none.
+///
+/// Glow cards and emitters both count, and a card counts by the centre of its own geometry: a
+/// lamppost's corona card IS the lantern, so its centroid is where the light belongs, while the
+/// model origin is down at the foot of the post.
+///
+/// Plain positions, not bone-composed: a placed prop's light bone is at rest by construction (the
+/// same premise [`spawn_lights_for`] above is built on), and a part riding a bone that *does*
+/// animate swings by inches, well inside the yard this light stands for.
+fn glow_centroid(
+    emitters: &[ModelEmitter],
+    submeshes: &[benilla_assets::ModelSubmesh],
+) -> Option<[f32; 3]> {
     let mut sum = [0.0f32; 3];
+    let mut n = 0.0f32;
     for e in emitters {
         for c in 0..3 {
             sum[c] += e.def.position[c];
         }
+        n += 1.0;
     }
-    let n = emitters.len() as f32;
-    Some([sum[0] / n, sum[1] / n, sum[2] / n])
+    for batch in submeshes {
+        if crate::modern::lights::emissive::glow_of(batch).is_none() {
+            continue;
+        }
+        let positions = &batch.geometry.positions;
+        if positions.is_empty() {
+            continue;
+        }
+        let mut mid = [0.0f32; 3];
+        for p in positions {
+            for c in 0..3 {
+                mid[c] += p[c];
+            }
+        }
+        for c in 0..3 {
+            sum[c] += mid[c] / positions.len() as f32;
+        }
+        n += 1.0;
+    }
+    (n > 0.0).then(|| [sum[0] / n, sum[1] / n, sum[2] / n])
 }
 
 /// Spawn a [`WorldPointLight`] for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the
