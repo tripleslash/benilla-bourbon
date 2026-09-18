@@ -393,7 +393,8 @@ fn update_volume(
         fog_start: l.wmo_fog_start,
         fog_end: l.wmo_fog_end,
         zone_fog_end: l.zone_fog_end,
-        ambient: l.ambient,
+        // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
+        ambient: super::night_floor(l.ambient, l.sidn_night),
         // The key's horizon fade (a set moon scatters nothing into the haze).
         diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
         storm: l.storm_bcc,

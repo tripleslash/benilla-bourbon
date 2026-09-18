@@ -24,6 +24,19 @@ pub mod sun_arc;
 mod tick_heal;
 pub mod volumetrics;
 
+/// The moonlight floor a modern night keeps (gamma, the ambient row's units), ramped in by the SIDN
+/// night fraction. The authored night ambient plus a key light that fades out with the moon's own
+/// elevation leaves a moonless Darkshore midnight at almost nothing; the eye still reads a night
+/// exterior as blue-grey, not as black.
+pub const NIGHT_AMBIENT: [f32; 3] = [0.10, 0.13, 0.20];
+
+/// The ambient row a modern frame commits: the authored row, never below [`NIGHT_AMBIENT`] scaled by
+/// the night fraction (1 overnight, 0 by day).
+pub fn night_floor(ambient: [f32; 3], night: f32) -> [f32; 3] {
+    let n = night.clamp(0.0, 1.0);
+    [0, 1, 2].map(|c| ambient[c].max(NIGHT_AMBIENT[c] * n))
+}
+
 /// P1b's fixed exposure (the FFXGlow combine's `wave.w`); auto-exposure lands in P7.
 pub const MODERN_EXPOSURE: f32 = 1.0;
 
@@ -375,6 +388,16 @@ mod tests {
         assert_eq!(LightingModel::parse(" Modern "), Some(LightingModel::Modern));
         assert_eq!(LightingModel::parse("classic"), Some(LightingModel::Classic));
         assert_eq!(LightingModel::parse("2x"), None);
+    }
+
+    #[test]
+    fn a_modern_night_keeps_a_moonlight_floor() {
+        // Midnight (night = 1) over a nearly black authored row: the floor.
+        assert_eq!(night_floor([0.01, 0.01, 0.02], 1.0), NIGHT_AMBIENT);
+        // Daylight keeps the authored row exactly, whatever it is.
+        assert_eq!(night_floor([0.4, 0.45, 0.5], 0.0), [0.4, 0.45, 0.5]);
+        // A brighter authored night (a lit zone) is never dimmed to the floor.
+        assert_eq!(night_floor([0.3, 0.3, 0.3], 1.0), [0.3, 0.3, 0.3]);
     }
 
     #[test]

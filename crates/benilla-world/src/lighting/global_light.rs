@@ -353,7 +353,15 @@ fn build_light_data(
     } else {
         (1.0, 1.0)
     };
-    pack_model_core_rows(rows, l.ambient.map(|c| c * fill), l.diffuse.map(|c| c * key), l.sun_dir);
+    // fork: modern lighting — a modern night keeps a moonlight floor (`modern::night_floor`): the
+    // authored night row plus a key that fades with the moon's elevation left a moonless midnight
+    // black.
+    let ambient_row = if active.as_ref().is_some_and(|a| a.is_modern()) {
+        crate::modern::night_floor(l.ambient, l.sidn_night)
+    } else {
+        l.ambient
+    };
+    pack_model_core_rows(rows, ambient_row.map(|c| c * fill), l.diffuse.map(|c| c * key), l.sun_dir);
     // The dynamic point-light table (decision 0278): every spawned point light within
     // [`POINT_PACK_RADIUS`] of the camera, nearest-first when over capacity — the VERTEX stages of
     // `terrain.wgsl`/`wow_model.wgsl` walk it for the Gouraud point term (bevy's clusterable buffer
