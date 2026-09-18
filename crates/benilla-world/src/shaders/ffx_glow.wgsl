@@ -160,7 +160,11 @@ fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
 fn cinematic_grade(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let luma = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
     var c = mix(vec3<f32>(luma), g, ffx.grade.y);
-    c = clamp((c - vec3<f32>(0.5)) * ffx.grade.x + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Contrast as an S-curve, NOT a scale about mid grey: the latter maps everything below 0.5 toward
+    // zero, so a night exterior (whose pixels all sit near 0.08) went black on screen while a daylit
+    // one only gained a little snap. The curve fixes 0 and 1 and shapes the midtones between them.
+    let s = clamp(c * c * (vec3<f32>(3.0) - 2.0 * c), vec3<f32>(0.0), vec3<f32>(1.0));
+    c = mix(c, s, clamp((ffx.grade.x - 1.0) * 2.0, 0.0, 1.0));
     c = pow(c, vec3<f32>(max(ffx.grade.w, 0.01)));
     let edge = length((uv - vec2<f32>(0.5)) * vec2<f32>(1.25, 1.0)) * 1.3;
     return c * (1.0 - ffx.grade.z * smoothstep(0.35, 1.0, edge));
