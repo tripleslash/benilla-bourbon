@@ -10,7 +10,8 @@ pub(crate) mod prop_light;
 pub use assemble::{spawn_model_entities, SpawnedModel};
 pub use fx::point_light;
 use fx::{
-    emitter_fade, spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for,
+    emitter_fade, spawn_emissive_light_for, spawn_emitters_for, spawn_lights_for,
+    spawn_ribbons_for, spawn_wmo_lights_for,
 };
 
 use std::sync::Arc;
@@ -304,6 +305,16 @@ pub(super) fn spawn_loaded_placements(
                         &fade,
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, None, &mut ents);
+                    // fork: modern lighting (P8) — and, on Cinematic, the lamps that ship with no
+                    // light block at all. No-op on every other tier.
+                    spawn_emissive_light_for(
+                        &mut commands,
+                        &m.lights,
+                        &m.emitters,
+                        p.transform,
+                        None,
+                        &mut ents,
+                    );
                     tag_world_object(&mut commands, &ents, &object);
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
@@ -898,6 +909,17 @@ pub(super) fn spawn_loaded_placements(
                 &m.lights,
                 d.transform,
                 fade.room.as_ref(), // the prop's glow rides its rooms like its mesh (0689)
+                &mut ents,
+            );
+            // fork: modern lighting (P8) — the WMO doodad lamps: an inn's hearth, a keep's wall
+            // sconces, a chapel's candles, most of which author a flame card and nothing else. Same
+            // room gate as the light above, so one of them in a culled room still lights nothing.
+            spawn_emissive_light_for(
+                &mut commands,
+                &m.lights,
+                &m.emitters,
+                d.transform,
+                fade.room.as_ref(),
                 &mut ents,
             );
             tag_world_object(&mut commands, &ents, &object);

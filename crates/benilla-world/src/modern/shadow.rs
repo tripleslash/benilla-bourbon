@@ -44,14 +44,47 @@ pub const MAX_CASCADES: usize = 4;
 /// The sky-occlusion map rides the array layer after the cascades: a vertical light over the static
 /// world.
 pub const SKY_LAYER: usize = MAX_CASCADES;
-/// fork: modern lighting (P6) — the shadowed local lights' cube atlas rides one more layer, a 6×6
-/// tile grid of six faces for each of six lights. It costs a whole 2048² depth layer, so the web
-/// build does without it: the browser's default tier is Medium, whose tier row shadows no local
-/// light at all (`modern::lights::light_tier`).
-pub const LOCAL_SHADOW_LAYERS: usize = if cfg!(target_arch = "wasm32") { 0 } else { 1 };
-/// The atlas layer's index (equal to [`SHADOW_LAYERS`] when there is none, which reads as "off").
+/// fork: modern lighting (P6/P8) — the shadowed local lights' cube atlas rides the layers after the
+/// sky map, each a 6×6 tile grid holding the six faces of six lights. This is the **most** any tier
+/// asks for (P8's Cinematic); [`local_shadow_layers`] is how many the latched tier actually
+/// allocates, and the array is re-created to that depth at the latch
+/// (`fit_shadow_map`) — a High session pays for one, a Medium session for none.
+pub const MAX_LOCAL_SHADOW_LAYERS: usize = 2;
+/// The atlas's first layer (equal to [`MAX_CASCADES`] + 1 always; a tier with no atlas simply never
+/// names it, which `locallight::atlas_live` reads as "off").
 pub const LOCAL_LAYER: usize = MAX_CASCADES + 1;
-pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1 + LOCAL_SHADOW_LAYERS;
+/// Layers the array is allocated with at the very largest tier — the size every fixed-size
+/// per-layer table here is declared at.
+pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1 + MAX_LOCAL_SHADOW_LAYERS;
+
+/// Cube-atlas layers the tier wants. A `Depth32Float` 2048² layer is 16.8 MB in the array **and**
+/// 16.8 MB again in the render world's static cache, so a tier that shadows no local light must not
+/// allocate one — which is exactly what Low and Medium do (`modern::lights::light_tier`).
+///
+/// This replaced a `cfg!(target_arch = "wasm32")` const that gave the browser none at all, at any
+/// tier. **The browser's existing tiers keep exactly that**: P8 must not make a tier that shipped
+/// cost more than it did, and a web High that suddenly allocated a 16.8 MB layer and started
+/// rendering 24 cube faces would be precisely that. What the browser gains is the new tier, which a
+/// player has to go and pick — and which is defined by those layers.
+pub fn local_shadow_layers(quality: LightingQuality) -> usize {
+    match quality {
+        LightingQuality::Low | LightingQuality::Medium => 0,
+        LightingQuality::High | LightingQuality::Ultra => {
+            if cfg!(target_arch = "wasm32") {
+                0
+            } else {
+                1
+            }
+        }
+        LightingQuality::Cinematic => MAX_LOCAL_SHADOW_LAYERS,
+    }
+}
+
+/// Layers the array is created with for a session at `quality`: the cascades, the sky map, and the
+/// tier's cube-atlas layers.
+pub fn shadow_layers(quality: LightingQuality) -> usize {
+    MAX_CASCADES + 1 + local_shadow_layers(quality)
+}
 /// Half the sky map's footprint (yd): 1024 yd across at 0.5 yd a texel.
 pub const SKY_HALF_EXTENT: f32 = 512.0;
 /// The sky map re-centres on this grid, so it (and its static cache) holds while the camera moves.
@@ -100,6 +133,10 @@ pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
         LightingQuality::Medium => &[16.0, 60.0, 200.0, 500.0],
         LightingQuality::High => &[16.0, 55.0, 200.0, 600.0],
         LightingQuality::Ultra => &[20.0, 70.0, 250.0, 800.0],
+        // fork: P8 — the sun is Ultra's. Cinematic buys local lights, not a sixth cascade: the
+        // array's depth is what a new cascade would cost, and P8 spends that depth on the cube
+        // atlas instead (`local_shadow_layers`).
+        LightingQuality::Cinematic => &[20.0, 70.0, 250.0, 800.0],
     }
 }
 
@@ -194,12 +231,12 @@ pub(super) fn plugin(app: &mut App) {
 /// the lighting latch by [`fit_shadow_map`].
 const CLASSIC_SHADOW_MAP_SIZE: u32 = 1;
 
-fn shadow_map_image(size: u32) -> Image {
+fn shadow_map_image(size: u32, layers: usize) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
             width: size,
             height: size,
-            depth_or_array_layers: SHADOW_LAYERS as u32,
+            depth_or_array_layers: layers as u32,
         },
         TextureDimension::D2,
         TextureFormat::Depth32Float,
@@ -233,19 +270,32 @@ fn shadow_map_image(size: u32) -> Image {
 fn fit_shadow_map(
     active: Res<ActiveLighting>,
     mut images: ResMut<Assets<Image>>,
-    mut fitted: Local<Option<bool>>,
+    // fork: P8 — the DEPTH is latched too now, not just the edge: a tier's cube-atlas layers are
+    // 16.8 MB each here and again in the render world's static cache, so the array is created at
+    // the tier's own layer count rather than at the largest one any tier could ask for.
+    mut fitted: Local<Option<(bool, usize)>>,
 ) {
     let modern = active.is_modern();
-    if *fitted == Some(modern) {
+    // A classic session keeps the full layer COUNT at one texel each (28 bytes): nothing samples
+    // it, but a layer index a shader names still has to exist in the view it binds.
+    let layers = if modern {
+        shadow_layers(active.quality)
+    } else {
+        SHADOW_LAYERS
+    };
+    if *fitted == Some((modern, layers)) {
         return;
     }
-    *fitted = Some(modern);
+    *fitted = Some((modern, layers));
     let size = if modern { SHADOW_MAP_SIZE } else { CLASSIC_SHADOW_MAP_SIZE };
-    let current = images
-        .get(MODERN_SHADOW_MAP.id())
-        .map(|i| i.texture_descriptor.size.width);
-    if current != Some(size) {
-        let _ = images.insert(MODERN_SHADOW_MAP.id(), shadow_map_image(size));
+    let current = images.get(MODERN_SHADOW_MAP.id()).map(|i| {
+        (
+            i.texture_descriptor.size.width,
+            i.texture_descriptor.size.depth_or_array_layers as usize,
+        )
+    });
+    if current != Some((size, layers)) {
+        let _ = images.insert(MODERN_SHADOW_MAP.id(), shadow_map_image(size, layers));
     }
 }
 
@@ -256,7 +306,7 @@ fn create_shadow_assets(
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
     // Classic-sized until the lighting latches (`fit_shadow_map`).
-    let image = shadow_map_image(CLASSIC_SHADOW_MAP_SIZE);
+    let image = shadow_map_image(CLASSIC_SHADOW_MAP_SIZE, SHADOW_LAYERS);
     let _ = images.insert(MODERN_SHADOW_MAP.id(), image);
 
     // P4: the froxel fog parameters and the cloud-shadow grid ride behind the cascades

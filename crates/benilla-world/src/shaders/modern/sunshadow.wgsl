@@ -27,7 +27,13 @@ struct ModernBlock {
     // member of the BLOCK and not of `LightGrid`: a lane copies the parameters by value and must
     // never copy 864 KB of cells with them.
     lights: locallight::LightGrid,
-    light_spare: array<vec4<f32>, 22>,
+    // fork: P8 — the twelve shadowed lights' positions and ranges, moved OUT of `LightGrid` so the
+    // struct every lit fragment copies by value shrank from ten rows to five (see the note beside
+    // `LightGrid`). Only the binning compute pass reads them.
+    light_shadow: array<vec4<f32>, 12>,
+    // The padding that keeps the probe array behind this region 256-aligned. The REGION is 512 B
+    // whatever P8 moved around inside it, which is why the probe offset did not shift a byte.
+    light_spare: array<vec4<f32>, 15>,
     light_cells: array<vec4<u32>, 55296>,
     // P5: the probe field itself, last because it is the block's only runtime-sized member.
     probes: array<probegi::GiProbe>,

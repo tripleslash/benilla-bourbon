@@ -64,13 +64,18 @@ impl LightingModel {
     }
 }
 
-/// The modern model's quality tier (the plan's tier table). CVar `lightingQuality`: `0`–`3`.
+/// The modern model's quality tier (the plan's tier table). CVar `lightingQuality`: `0`–`4`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum LightingQuality {
     Low = 0,
     Medium = 1,
     High = 2,
     Ultra = 3,
+    /// fork: modern lighting (P8) — Ultra's sun, fog and GI, plus the *local* light work that tier
+    /// is named for: every authored lamp and every glowing weapon is a real light, the strongest
+    /// dozen of them cast soft filtered cube shadows, and entities cast into those cubes. It is
+    /// the one tier where a light source the reference only ever drew as a sprite emits.
+    Cinematic = 4,
 }
 
 impl LightingQuality {
@@ -86,12 +91,32 @@ impl LightingQuality {
         if !v.is_finite() {
             return Self::PLATFORM_DEFAULT;
         }
-        match v.round().clamp(0.0, 3.0) as u8 {
+        match v.round().clamp(0.0, 4.0) as u8 {
             0 => Self::Low,
             1 => Self::Medium,
             2 => Self::High,
-            _ => Self::Ultra,
+            3 => Self::Ultra,
+            _ => Self::Cinematic,
         }
+    }
+
+    /// Every tier, in order — the one list the tier-table tests sweep, so a new row can never be
+    /// added to the enum and forgotten by a table.
+    pub const ALL: [Self; 5] = [
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Ultra,
+        Self::Cinematic,
+    ];
+
+    /// Is this the tier that lights from authored *emissive* sources — a weapon's enchant glow, a
+    /// brazier that ships with no M2 light — rather than only from the lights the reference
+    /// commits? One predicate, read by the two spawners and by the light grid alike, so the three
+    /// can never disagree about what a Cinematic frame contains
+    /// (`modern::lights::emissive`).
+    pub fn lights_emissive_sources(self) -> bool {
+        self >= Self::Cinematic
     }
 
     pub fn as_cvar(self) -> u8 {
@@ -151,9 +176,30 @@ impl ActiveLighting {
 /// upstream wrote them. Written only by [`latch_on_world_entry`].
 static MODERN_FRAME: AtomicBool = AtomicBool::new(false);
 
+/// fork: P8 — the same device for the same reason, one tier further in. The two spawners that would
+/// have to ask whether this session lights emissive sources — `terrain_stream::spawn`'s placement
+/// walk and `benilla-app`'s equipment attach — are upstream-owned systems already nested against
+/// Bevy's 16-parameter limit, and threading a resource into either is a merge hazard for a
+/// question whose answer is one latched bit. Written only by [`latch_on_world_entry`].
+static EMISSIVE_LIGHTS: AtomicBool = AtomicBool::new(false);
+
 /// Is the world frame linear (a modern session)?
 pub fn frame_is_modern() -> bool {
     MODERN_FRAME.load(Ordering::Relaxed)
+}
+
+/// Does this session light from authored *emissive* sources — a glowing weapon, a brazier that
+/// ships no M2 light (`modern::lights::emissive`)? True only in a modern session on the Cinematic
+/// tier, and only while the bisect lever allows it (`$WOW_MODERN_EMISSIVE=0`, browser
+/// `?modern_emissive=0`).
+pub fn emissive_lights_on() -> bool {
+    EMISSIVE_LIGHTS.load(Ordering::Relaxed) && emissive_enabled()
+}
+
+/// The emissive-source bisect lever.
+fn emissive_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch_on(&CELL, "WOW_MODERN_EMISSIVE")
 }
 
 /// Bisect switches (`$WOW_MODERN_SUNARC=0`, `$WOW_MODERN_CPUHOOKS=0`; browser `?modern_sunarc=0`,
@@ -273,6 +319,10 @@ fn latch_on_world_entry(
         *active = next;
     }
     MODERN_FRAME.store(active.is_modern(), Ordering::Relaxed);
+    EMISSIVE_LIGHTS.store(
+        active.is_modern() && active.quality.lights_emissive_sources(),
+        Ordering::Relaxed,
+    );
 }
 
 /// Model pipelines compile the modern code only in a modern session
@@ -341,10 +391,22 @@ mod tests {
         assert_eq!(LightingQuality::from_cvar(-4.0), LightingQuality::Low);
         assert_eq!(LightingQuality::from_cvar(1.4), LightingQuality::Medium);
         assert_eq!(LightingQuality::from_cvar(2.6), LightingQuality::Ultra);
-        assert_eq!(LightingQuality::from_cvar(99.0), LightingQuality::Ultra);
+        assert_eq!(LightingQuality::from_cvar(4.0), LightingQuality::Cinematic);
+        assert_eq!(LightingQuality::from_cvar(99.0), LightingQuality::Cinematic);
         assert_eq!(
             LightingQuality::from_cvar(f32::NAN),
             LightingQuality::PLATFORM_DEFAULT
         );
+        // `ALL` is what every tier table sweeps, so it has to hold every tier and hold them in
+        // order — a row added to the enum and left out of here would silently stop being checked.
+        assert_eq!(LightingQuality::ALL.len(), 5);
+        for (i, q) in LightingQuality::ALL.iter().enumerate() {
+            assert_eq!(LightingQuality::from_cvar(i as f32), *q);
+            assert_eq!(q.as_cvar() as usize, i);
+        }
+        // Only the top tier lights from things that merely glow; every tier that shipped before P8
+        // still lights from exactly the sources the reference commits.
+        assert!(LightingQuality::Cinematic.lights_emissive_sources());
+        assert!(!LightingQuality::Ultra.lights_emissive_sources());
     }
 }

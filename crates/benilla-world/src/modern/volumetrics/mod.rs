@@ -107,6 +107,11 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
         LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.0, 0.0),
         LightingQuality::High => (FogMode::Froxel, UVec3::new(160, 90, 64), 450.0, 16, 0.0, 0.0),
         LightingQuality::Ultra => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 32, 0.0, 0.0),
+        // fork: P8 — the same grid as Ultra (the volume is allocated once at the platform's largest,
+        // so a finer one would need a bigger allocation on every tier), but twice the point lights
+        // scattered through it: Cinematic's whole point is that there are far more local lights in
+        // the frame, and haze a lamp does not reach is haze that lamp does not read as being in.
+        LightingQuality::Cinematic => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 64, 0.0, 0.0),
     };
     FroxelTier {
         mode,
@@ -596,7 +601,7 @@ mod tests {
 
     #[test]
     fn tiers_fit_the_allocation_and_low_runs_no_compute() {
-        for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::High, LightingQuality::Ultra] {
+        for q in LightingQuality::ALL {
             let t = froxel_tier(q);
             assert!(t.grid.cmple(VOLUME_ALLOC).all(), "{q:?}");
         }

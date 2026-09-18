@@ -216,6 +216,17 @@ pub(super) fn attach_item_glows(
             continue;
         }
         let mut spawned = 0usize;
+        // fork: modern lighting (`FORK.md` P8) — the glow's own light, gathered
+        // across the slots and spawned once below. Per ITEM and not per slot: the common visual
+        // repeats one effect along the whole blade (BlueGlow_Med ×5), and five lights for one sword
+        // would be five table slots and five cube-shadow candidates for one glow. Every slot's
+        // emitters go into ONE `synthesize` call, which is the same rule it applies to the several
+        // emitters of a single model — five sprites along a blade *are* brighter than one, and the
+        // recipe's own cap is what stops that running away.
+        let emissive_on = benilla_world::modern::emissive_lights_on();
+        let mut glow_sources = Vec::new();
+        let mut glow_authored = false;
+        let mut glow_at = (Vec3::ZERO, 0usize);
         for (slot, path) in paths
             .iter()
             .enumerate()
@@ -319,6 +330,43 @@ pub(super) fn attach_item_glows(
                 None, // the glow models author one looping sequence — the default pick
             );
             spawned += 1;
+            // fork: P8 — what this slot contributes to the weapon's light, and where it sits. A
+            // glow model that authors a real M2 light of its own suppresses the synthesis outright
+            // (there are none today, but a torch-like effect model would, and then its own light
+            // wins) — the same law the doodad path takes, spelled by the same function.
+            if emissive_on {
+                glow_authored |= dm.lights.iter().any(|l| l.def.casts());
+                glow_sources.extend(
+                    dm.emitters
+                        .iter()
+                        .map(|e| (e.def.blend, e.def.lit, &e.def.over_life)),
+                );
+                glow_at = (glow_at.0 + at, glow_at.1 + 1);
+            }
+        }
+        // fork: P8 — **the glowing sword.** One light for the item, at the mean of the points its
+        // glow actually landed on (not of the points the visual *authors*: a model missing an
+        // attachment hangs nothing there, and averaging a point nothing was hung on would drag the
+        // light off the blade). A child of the item root, so it rides the hand through the
+        // animation, survives a sheath swap the way the glow instances do, and dies with the weapon
+        // — the same lifecycle rule `carried_light` states for an authored M2 light.
+        //
+        // The intensity is the recipe's, unscaled: an enchant glow is a faint source and the recipe
+        // already says so (its ramp is a small additive sprite). What makes it read is the tier's
+        // soft, faint cube shadow, not its brightness.
+        if glow_at.1 > 0 {
+            if let Some(e) =
+                benilla_world::modern::lights::emissive::synthesize(glow_authored, glow_sources)
+            {
+                let light = commands
+                    .spawn((
+                        benilla_world::terrain_stream::point_light(e.color, e.intensity_scale),
+                        Transform::from_translation(glow_at.0 / glow_at.1 as f32),
+                        Visibility::default(),
+                    ))
+                    .id();
+                commands.entity(root).add_child(light);
+            }
         }
         commands.entity(root).insert(ItemGlowAttached);
         // Counted from what actually spawned, never from what the row *authors* — the two differ

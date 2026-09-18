@@ -187,6 +187,25 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             interior: false,
             chebyshev: true,
         },
+        // fork: P8 — Ultra's grids (`MAX_CASCADES` is 5 and Ultra's 4 + the interior sub-grid
+        // already fills it, and the probe pool is allocated at one size for every tier), traced
+        // harder: 64 rays on a 4-frame period. The bounce matters more here than on any other tier
+        // because Cinematic is the tier where a room's only light may be the hearth it bounces.
+        LightingQuality::Cinematic => GiTier {
+            on: true,
+            dims: UVec3::new(32, 16, 32),
+            cascades: 4,
+            spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
+            rays: 64,
+            period: 4,
+            levels: 4,
+            voxel: [0.75, 2.25, 6.0, 12.0],
+            voxels: 96,
+            reach: 380.0,
+            steps: 192,
+            interior: false,
+            chebyshev: true,
+        },
     }
 }
 
@@ -549,6 +568,7 @@ mod tests {
             LightingQuality::Medium,
             LightingQuality::High,
             LightingQuality::Ultra,
+            LightingQuality::Cinematic,
         ] {
             let t = gi_tier(q);
             assert!(t.cascades <= MAX_CASCADES, "{q:?}");

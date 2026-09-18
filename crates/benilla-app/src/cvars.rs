@@ -1190,7 +1190,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // ── fork-owned block: modern lighting (FORK.md) ──
     // `lightingModel` — 0 classic (upstream's 1.12.1 reproduction, the default), 1 modern.
-    // `lightingQuality` — the modern tier, 0 low … 3 ultra; Medium in the browser, High natively.
+    // `lightingQuality` — the modern tier, 0 low … 4 cinematic; Medium in the browser, High
+    // natively. Cinematic (P8) is the local-light tier: every authored lamp and every glowing
+    // weapon emits, twelve of them cast soft cube shadows, and entities cast into those cubes.
     // Both latch at world entry. `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` override session-only.
     ours(
         "lightingModel",

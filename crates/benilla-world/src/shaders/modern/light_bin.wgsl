@@ -18,7 +18,8 @@ struct LightTable {
 // as `sunshadow::ModernBlock`'s `lights` + `light_spare` + `light_cells`.
 struct LightBlock {
     params: locallight::LightGrid,
-    spare: array<vec4<f32>, 22>,
+    shadow: array<vec4<f32>, 12>,
+    spare: array<vec4<f32>, 15>,
     cells: array<vec4<u32>, 55296>,
 }
 
@@ -29,15 +30,17 @@ struct LightBlock {
 // than on table order: the shadowed set is chosen on the CPU a frame's worth of systems before the
 // table is packed, and nothing keeps the two orders in step.
 fn shadow_slot(pos: vec3<f32>) -> u32 {
-    let p = grid.params;
-    let n = u32(p.misc.y);
-    for (var s = 0u; s < n; s = s + 1u) {
-        let d = p.shadow[s].xyz - pos;
+    let n = u32(grid.params.misc.y);
+    for (var s = 0u; s < locallight::MAX_SHADOWED; s = s + 1u) {
+        if (s >= n) {
+            break;
+        }
+        let d = grid.shadow[s].xyz - pos;
         if (dot(d, d) < 1e-4) {
             return s;
         }
     }
-    return 6u;
+    return locallight::MAX_SHADOWED;
 }
 
 @compute @workgroup_size(64)
@@ -111,8 +114,10 @@ fn bin_lights(@builtin(global_invocation_id) id: vec3<u32>) {
         } else {
             words.z = words.z | byte;
         }
+        // The nibble holds `slot + 1` (0 = "no cube"), so it addresses up to fifteen slots and P8's
+        // twelve fit it unchanged — the cell is still one `vec4<u32>`.
         let slot = shadow_slot(light.points[2u * i].xyz);
-        if (slot < 6u) {
+        if (slot < locallight::MAX_SHADOWED) {
             words.w = words.w | ((slot + 1u) << (k * 4u));
         }
     }

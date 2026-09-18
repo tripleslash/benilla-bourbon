@@ -839,6 +839,10 @@
         BENILLA_TOOLTIP_LIGHTING_QUALITY =
             "The detail of Modern lighting: shadow range and resolution, light shaft resolution and "
             .. "bounced light.\n\n"
+            .. "Cinematic additionally lights the world from things that only ever glowed - lamps, "
+            .. "braziers and candles that carry no light of their own, and enchanted weapons - and "
+            .. "gives a dozen of them soft shadows that characters cast into. It is much more "
+            .. "expensive than Ultra.\n\n"
             .. "Has no effect on Classic lighting. Takes effect the next time the world loads."
 
         -- Brightness (2182). 1.12's own OPTION_TOOLTIP_GAMMA cannot ride this row: its whole
@@ -3277,6 +3281,7 @@
                                                     { text = "Medium", value = "1" },
                                                     { text = "High", value = "2" },
                                                     { text = "Ultra", value = "3" },
+                                                    { text = "Cinematic", value = "4" },
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>

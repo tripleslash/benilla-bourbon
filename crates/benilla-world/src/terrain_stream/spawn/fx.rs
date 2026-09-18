@@ -97,6 +97,67 @@ pub(super) fn spawn_lights_for(
     }
 }
 
+/// fork: modern lighting (`FORK.md` P8) — **the lamp that is only a flame card.**
+///
+/// A great many braziers, candles, sconces and hearths author no M2 light at all: the reference drew
+/// their fire as an additive sprite over an unlit wall and that was the look. On the Cinematic tier
+/// they emit, from a light [`crate::modern::lights::emissive`] derives from the very ramp that
+/// sprite is drawn with. Every other tier returns before touching anything, so this is dead weight
+/// in a classic, Low, Medium, High or Ultra session — one atomic load per placement.
+///
+/// It is a no-op for a model that authors its own light (that gate is `emissive::synthesize`'s
+/// first line, and the reason it is spelled there rather than here), so the two spawners can never
+/// both answer for one doodad.
+///
+/// The light sits at the **emitters' own centroid** in model space, not the model origin: a wall
+/// sconce's flame is a yard out from its mounting point and half a yard up, and a light at the
+/// origin would put the glow inside the wall — which is the one placement error that reads
+/// immediately, because the cube shadow then has the wall between the light and the room.
+pub(super) fn spawn_emissive_light_for(
+    commands: &mut Commands,
+    lights: &[ModelLight],
+    emitters: &[ModelEmitter],
+    transform: Transform,
+    room: Option<&crate::wmo_portal::WmoGroupVis>,
+    out: &mut Vec<Entity>,
+) {
+    if !crate::modern::emissive_lights_on() {
+        return;
+    }
+    let Some(emissive) = crate::modern::lights::emissive::for_model(lights, emitters) else {
+        return;
+    };
+    let Some(local) = emitter_centroid(emitters) else {
+        return;
+    };
+    spawn_point_light(
+        commands,
+        transform.transform_point(wow_to_bevy(local)),
+        emissive.color,
+        emissive.intensity_scale,
+        room.cloned(),
+        out,
+    );
+}
+
+/// Where a model's emitters sit, averaged — raw WoW model space, `None` when it has none. Plain
+/// positions and not bone-composed: a placed prop's light bone is at rest by construction (the same
+/// premise [`spawn_lights_for`] above is built on), and an emitter riding a bone that *does* animate
+/// swings by inches, which is well inside the yard this light stands for.
+fn emitter_centroid(emitters: &[ModelEmitter]) -> Option<[f32; 3]> {
+    if emitters.is_empty() {
+        return None;
+    }
+    let mut sum = [0.0f32; 3];
+    for e in emitters {
+        for c in 0..3 {
+            sum[c] += e.def.position[c];
+        }
+    }
+    let n = emitters.len() as f32;
+    Some([sum[0] / n, sum[1] / n, sum[2] / n])
+}
+
 /// Spawn a [`WorldPointLight`] for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the
 /// interior fixture sources — forge fire, inn fireplaces, chapel candles/chandeliers). These radiate onto
 /// the NPCs/doodads near each fixture and onto the building's own walls/floor (decision 0273). Position

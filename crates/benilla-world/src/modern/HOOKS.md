@@ -134,6 +134,11 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/liquid/{mod,reflect}.rs` | `ReflectionPlane` re-exported; `ReflectionPlane::live_plane` | P7 perf |
 | `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_MODERN_MIRRORTIER` (dev A/B: every view shades the mirror tier) and `WOW_MODERN_CASTERREACH` (dev A/B: cascade caster reach, yd) | P7 perf |
 | `benilla-world/src/liquid/ripple.rs` | fix (not modern-only): catch-up steps bind `RipplePipeline::settled` (prev = placement), so a two-step frame no longer reprojects the field twice and drags ripples with the camera | P7 perf |
+| `benilla-world/src/terrain_stream/spawn/fx.rs` | `spawn_emissive_light_for` + `emitter_centroid` beside `spawn_lights_for`; a no-op unless `modern::emissive_lights_on()` | P8 |
+| `benilla-world/src/terrain_stream/spawn/mod.rs` | the ADT-doodad and WMO-doodad placement walks each call `spawn_emissive_light_for` after `spawn_lights_for` | P8 |
+| `benilla-app/src/entities/item_glow.rs` | `attach_item_glows` accumulates the glow models' emitters across the visual's slots and spawns one `WorldPointLight` child of the item root | P8 |
+| `benilla-app/src/cvars.rs`, `assets/ui/OptionsFrame.xml` | `lightingQuality` reaches 4; a "Cinematic" dropdown row and the tooltip paragraph for it | P8 |
+| `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_MODERN_EMISSIVE` (`?modern_emissive=0`) | P8 |
 
 ## Planned hooks (not yet landed)
 

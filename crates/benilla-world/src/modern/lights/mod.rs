@@ -31,13 +31,22 @@ use super::{ActiveLighting, LightingQuality};
 use crate::lighting::{LightRooms, WorldPointLight};
 use crate::view::WorldCamera;
 
+pub mod emissive;
 pub mod node;
 
 /// Lights one cell can name. Mirrors `locallight.wgsl`'s `PER_CELL`.
+///
+/// Eight, and not more, because the cell is one `vec4<u32>`: two words of eight byte indices and
+/// one of eight nibble slots. Widening it widens the grid's 864 KB region by the same factor for
+/// every tier, so P8 buys its extra lights with a **finer** grid instead (`light_tier`) — more
+/// cells of eight, not fewer cells of sixteen.
 pub const PER_CELL: usize = 8;
-/// Shadowed lights the atlas layer holds: [`ATLAS_TILES`]² tiles of six faces each.
-pub const MAX_SHADOWED: usize = 6;
-/// Tiles per side in the atlas layer.
+/// Shadowed lights the atlas holds: six per layer ([`ATLAS_TILES`]² tiles of six faces each), and
+/// at most [`crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS`] layers.
+pub const MAX_SHADOWED: usize = 6 * crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS;
+/// Shadowed lights one atlas layer holds.
+pub const PER_ATLAS_LAYER: usize = 6;
+/// Tiles per side in an atlas layer.
 pub const ATLAS_TILES: u32 = 6;
 /// Cells allocated in the block, whatever the session's tier — the largest any tier uses. Held at
 /// one size so a quality change never re-creates the buffer every material binds.
@@ -45,7 +54,9 @@ pub const CELL_ALLOC: usize = 48 * 24 * 48;
 /// Bytes of one cell (`vec4<u32>`).
 pub const CELL_BYTES: usize = 16;
 /// Size of [`LightParams::std430`] — `locallight.wgsl`'s `LightGrid` prefix. A multiple of 256, so
-/// the GI block behind it keeps the 256-aligned probe offset the blend pass binds.
+/// the GI block behind it keeps the 256-aligned probe offset the blend pass binds. P8 doubled the
+/// shadowed set (6 → 12 rows) and added a filter row; the region was 512 B with 22 spare rows, so
+/// it absorbed both without moving the probe offset a byte.
 pub const LIGHT_PARAM_BYTES: usize = 32 * 16;
 /// Everything P6 adds to the modern storage block.
 pub const BLOCK_LIGHT_BYTES: usize = LIGHT_PARAM_BYTES + CELL_ALLOC * CELL_BYTES;
@@ -59,6 +70,19 @@ const CUBE_BIAS_YD: f32 = 0.12;
 const TILE_INSET_TEXELS: f32 = 2.0;
 /// How near the camera a light has to be to be worth a cube.
 const SHADOW_RADIUS: f32 = 70.0;
+/// fork: P8 — how fast a cube's penumbra opens: face-uv texels of blur per yard between the light
+/// and the receiver, at a nominal one-yard emitter. A brazier is about that wide; a sword's glow is
+/// narrower and a chandelier wider, but the light table carries no emitter size, so one opening
+/// stands for all of them and the tier's tap count decides how smooth it reads.
+const PENUMBRA_OPENING: f32 = 0.9;
+/// fork: P8 — the aggressive cull's screen test: a light whose lit sphere subtends less than this
+/// fraction of the viewport's height gets no cube, however bright it is. A lamp 60 yd off across a
+/// square is a dozen pixels of shading; six faces of depth for it is the cost of a building.
+const MIN_SCREEN_FRACTION: f32 = 0.035;
+/// fork: P8 — and how far outside the frustum a light may still sit and keep its cube. Not zero:
+/// a lamp just off the left edge still lights the wall the camera IS looking at, and a hard frustum
+/// test would pop its shadow on and off as the player turned. Measured in the light's own ranges.
+const FRUSTUM_SLACK: f32 = 0.35;
 
 /// What a quality tier bins.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +94,28 @@ pub struct LightTier {
     pub cell: f32,
     /// Lights that get a cube shadow (0 below High — the plan's tier table).
     pub shadowed: usize,
+    /// fork: P8 — filter taps on a cube lookup. `1` is P6's single hardware compare; more taps are
+    /// a Vogel disc whose radius opens with the receiver's distance from the light (the penumbra a
+    /// finite emitter would cast), which is what "soft" means here.
+    pub taps: u32,
+    /// fork: P8 — how much of a local light a shadow may take away. Below `1` the shadow is
+    /// **faint**: a lamp's occluded side keeps some of it. This is not a cheat for a bad filter —
+    /// a WoW point light stands in for a whole fixture (a brazier's fire, a sconce's flame and its
+    /// bowl's bounce), so a hard zero behind a chair reads as a hole the reference never had. A
+    /// glowing sword is the extreme case the user named: its shadow should be *there* and should
+    /// not be a silhouette.
+    pub shade: f32,
+    /// fork: P8 — do entity casters (characters, creatures, the weapon in a hand) draw into the
+    /// cube atlas? Costs the atlas its full cache: the layer must be restored and redrawn each
+    /// frame, the same deal the cascades already make.
+    pub dynamic_casters: bool,
+    /// fork: P8 — run the geometric cull ([`ShadowCull`]) over the candidates for an atlas slot.
+    ///
+    /// It only ever *removes* work, but it also removes shadows a tier used to draw, so it is a
+    /// tier row and not a global: P8 must not change what High and Ultra look like any more than it
+    /// changes what they cost. Cinematic needs it because it is the tier with twelve slots to fill
+    /// and a world full of newly-emitting lamps to fill them from.
+    pub aggressive_cull: bool,
 }
 
 impl LightTier {
@@ -78,10 +124,19 @@ impl LightTier {
         dims: UVec3::ONE,
         cell: 1.0,
         shadowed: 0,
+        taps: 1,
+        shade: 1.0,
+        dynamic_casters: false,
+        aggressive_cull: false,
     };
 
     pub fn cells(&self) -> usize {
         (self.dims.x * self.dims.y * self.dims.z) as usize
+    }
+
+    /// Atlas layers the tier's shadowed set spans.
+    pub fn atlas_layers(&self) -> usize {
+        self.shadowed.div_ceil(PER_ATLAS_LAYER)
     }
 }
 
@@ -95,18 +150,38 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             dims: UVec3::new(32, 16, 32),
             cell: 8.0,
             shadowed: 0,
+            ..LightTier::OFF
         },
         LightingQuality::High => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
             cell: 6.0,
             shadowed: 4,
+            ..LightTier::OFF
         },
+        // Untouched by P8, deliberately: one hardware compare, no penumbra, no shade floor, no
+        // entity casters and no cull — the row P6 shipped, so an Ultra frame costs and looks exactly
+        // what it did before this tier existed.
         LightingQuality::Ultra => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
             cell: 4.5,
+            shadowed: PER_ATLAS_LAYER,
+            ..LightTier::OFF
+        },
+        // fork: P8. The grid is the finest a 48³ allocation allows — 3 yd cells reach 144 yd across,
+        // which is a city block, and at Cinematic that block holds every lamp post, every window
+        // candle and every drawn weapon rather than the handful the reference commits. Twelve lights
+        // shadow, over both atlas layers, with a 12-tap Vogel disc and entity casters in the cubes.
+        LightingQuality::Cinematic => LightTier {
+            on: true,
+            dims: UVec3::new(48, 24, 48),
+            cell: 3.0,
             shadowed: MAX_SHADOWED,
+            taps: 12,
+            shade: 0.90,
+            dynamic_casters: true,
+            aggressive_cull: true,
         },
     }
 }
@@ -115,6 +190,59 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
 pub fn lights_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_LIGHTS").as_deref() != Some("0"))
+}
+
+/// fork: P8 — **the aggressive cull**: the two geometric reasons to refuse a light its six faces of
+/// depth, asked before the light is even ranked.
+///
+/// Both are about the *lit sphere*, not the light's point: a lamp behind the camera still lights the
+/// wall in front of it, so the test is whether that sphere is visible, and it is deliberately
+/// generous ([`FRUSTUM_SLACK`]) so a shadow does not pop as the player turns. What it does refuse,
+/// hard, is a lamp on the far side of a square — [`MIN_SCREEN_FRACTION`] of the viewport is a dozen
+/// pixels, and at that size a cube shadow is six 341² depth renders spent on something the eye
+/// cannot resolve.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowCull {
+    eye: Vec3,
+    forward: Vec3,
+    /// `tan(vertical fov / 2)` — how many yards of sphere one viewport height spans at one yard.
+    tan_half_fov: f32,
+}
+
+impl ShadowCull {
+    /// From the world camera. A camera with no `Projection` (the world view's bare setups, and every
+    /// unit test) reads as Bevy's default perspective, whose vertical fov is π/4.
+    pub fn new(camera: &GlobalTransform, projection: Option<&Projection>) -> Self {
+        let fov = match projection {
+            Some(Projection::Perspective(p)) => p.fov,
+            // An orthographic or custom projection has no single fov; π/4 keeps the screen test's
+            // scale honest rather than turning it off, and the frustum half still applies.
+            _ => std::f32::consts::FRAC_PI_4,
+        };
+        Self {
+            eye: camera.translation(),
+            forward: camera.forward().as_vec3(),
+            tan_half_fov: (fov * 0.5).tan().max(1e-3),
+        }
+    }
+
+    /// Is a light at `pos` reaching `range` yards worth an atlas slot?
+    pub fn worth_a_cube(&self, pos: Vec3, range: f32) -> bool {
+        let to = pos - self.eye;
+        let along = to.dot(self.forward);
+        // Behind the eye by more than the slack the lit sphere allows: nothing it lights can be in
+        // frame either, because the sphere itself is behind the near plane.
+        if along < -(range * (1.0 + FRUSTUM_SLACK)) {
+            return false;
+        }
+        // The screen test, measured at the sphere — a light's apparent size is the size of what it
+        // lights, not of the emitter. In front of the eye the sphere spans `2·range` yards at depth
+        // `along`, over a viewport spanning `2·along·tan(fov/2)`; behind it, `along` is small or
+        // negative and the sphere is by definition large on screen, so the test passes.
+        let depth = along.max(1e-3);
+        let fraction = range / (depth * self.tan_half_fov);
+        fraction >= MIN_SCREEN_FRACTION
+    }
 }
 
 /// One light that owns six atlas tiles this frame.
@@ -148,6 +276,10 @@ pub struct LightParams {
     pub base: Vec4,
     pub misc: Vec4,
     pub shadow_misc: Vec4,
+    /// fork: P8 — the soft-shadow filter: `x` taps, `y` the penumbra opening (texels of face uv per
+    /// yard of receiver distance), `z` the shade floor (how much of a light a shadow may take),
+    /// `w` the atlas's first layer. Named `soft` in the WGSL, where `filter` is a reserved keyword.
+    pub soft: Vec4,
     pub shadow: [Vec4; MAX_SHADOWED],
 }
 
@@ -159,6 +291,7 @@ impl LightParams {
         row(self.base);
         row(self.misc);
         row(self.shadow_misc);
+        row(self.soft);
         for s in &self.shadow {
             row(*s);
         }
@@ -199,6 +332,12 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
             CUBE_BIAS_YD,
             TILE_INSET_TEXELS,
             1.0 / shadow_map_size as f32,
+        ),
+        soft: Vec4::new(
+            tier.taps as f32,
+            PENUMBRA_OPENING,
+            tier.shade,
+            crate::modern::shadow::LOCAL_LAYER as f32,
         ),
         shadow,
     }
@@ -275,7 +414,9 @@ pub(super) fn plugin(app: &mut App) {
 
 fn update_lights(
     active: Res<ActiveLighting>,
-    cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    // fork: P8 — the camera's `Projection` as well as its transform: the aggressive cull needs the
+    // frustum and the vertical field of view to answer "is this lamp worth six faces of depth".
+    cameras: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
     lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
@@ -289,16 +430,19 @@ fn update_lights(
         }
         return;
     }
-    let Some(camera) = cameras.iter().next() else {
+    let Some((camera, projection)) = cameras.iter().next() else {
         return;
     };
     let cam = camera.translation();
+    let cull = tier
+        .aggressive_cull
+        .then(|| ShadowCull::new(camera, projection));
 
     // The shadowed set: the strongest few lights near the camera, under the same room gate the
     // packed table itself runs (`global_light::build_light_data`) — a torch in a culled room is not
     // in the table, so it must not hold an atlas slot either.
     let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
-    if crate::modern::shadow::LOCAL_SHADOW_LAYERS > 0 && tier.shadowed > 0 {
+    if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
         for (light, gt, rooms) in &lights_q {
             if !crate::wmo_portal::room_admits(
                 rooms.map(|r| &r.0),
@@ -309,6 +453,13 @@ fn update_lights(
             let pos = gt.translation();
             let d = pos.distance(cam);
             if d > SHADOW_RADIUS || light.range <= 0.0 {
+                continue;
+            }
+            // fork: P8, the aggressive cull. Six faces of depth is the most expensive thing one
+            // light can ask for, and the two cheapest reasons to refuse are geometric: the lamp's
+            // lit sphere is behind the camera, or it is too small on screen to read a shadow in.
+            // Both run before the ranking, so a culled light does not even compete for a slot.
+            if cull.is_some_and(|c| !c.worth_a_cube(pos, light.range)) {
                 continue;
             }
             // The light's reach as the frame sees it: its authored energy over the distance the
@@ -326,6 +477,10 @@ fn update_lights(
     let keep: Vec<ShadowLight> = held
         .iter()
         .copied()
+        // A held light survives only while it is still a CANDIDATE, so the P8 cull above — which
+        // runs before the ranking — retires a slot as soon as the player turns away from the lamp
+        // or walks far enough off that it stops reading. Stickiness is there to stop a reshuffle
+        // per frame, not to outlive the reason the light was chosen.
         .filter(|h| ranked.iter().any(|(_, c)| *c == *h))
         .take(want)
         .collect();
@@ -369,6 +524,38 @@ mod tests {
 
     #[test]
     fn every_tier_fits_the_allocation_and_the_atlas() {
+        for q in LightingQuality::ALL {
+            let t = light_tier(q);
+            assert!(t.cells() <= CELL_ALLOC, "{q:?}: {}", t.cells());
+            assert!(t.shadowed <= MAX_SHADOWED, "{q:?}");
+            // Every shadowed light must have six tiles somewhere in the layers the tier allocates.
+            let layers = crate::modern::shadow::local_shadow_layers(q);
+            assert!(
+                t.atlas_layers() <= layers,
+                "{q:?}: {} shadowed lights need {} layer(s), the tier allocates {layers}",
+                t.shadowed,
+                t.atlas_layers(),
+            );
+            assert!(
+                t.shadowed.div_ceil(PER_ATLAS_LAYER) * PER_ATLAS_LAYER
+                    <= layers * PER_ATLAS_LAYER,
+                "{q:?}"
+            );
+            assert!(t.taps <= 12, "{q:?}: the shader's MAX_TAPS is 12");
+            assert!((0.0..=1.0).contains(&t.shade), "{q:?}");
+        }
+        assert!(!light_tier(LightingQuality::Low).on);
+        assert_eq!(light_tier(LightingQuality::Medium).shadowed, 0);
+        assert_eq!(PER_ATLAS_LAYER as u32 * 6, ATLAS_TILES * ATLAS_TILES);
+    }
+
+    /// fork: P8 — **the no-regression gate.** The tier rows that existed before P8 must be the rows
+    /// they were: one hardware compare, no penumbra, no shade floor, no entity casters in the cubes
+    /// and no cull. Everything P8 costs has to be spent on P8's own tier, and this is what says so —
+    /// a `taps: 2` typed into the Ultra row would otherwise double a lookup every lit fragment in
+    /// every lamp-lit room makes, and nothing in the frame would announce it.
+    #[test]
+    fn p8_costs_nothing_on_the_tiers_that_shipped_before_it() {
         for q in [
             LightingQuality::Low,
             LightingQuality::Medium,
@@ -376,16 +563,51 @@ mod tests {
             LightingQuality::Ultra,
         ] {
             let t = light_tier(q);
-            assert!(t.cells() <= CELL_ALLOC, "{q:?}: {}", t.cells());
-            assert!(t.shadowed <= MAX_SHADOWED, "{q:?}");
-            assert!(
-                t.shadowed as u32 * 6 <= ATLAS_TILES * ATLAS_TILES,
-                "{q:?}: the atlas holds {} tiles",
-                ATLAS_TILES * ATLAS_TILES
+            assert_eq!(t.taps, 1, "{q:?} must take P6's single hardware compare");
+            assert_eq!(t.shade, 1.0, "{q:?} must have no shade floor");
+            assert!(!t.dynamic_casters, "{q:?} must keep its fully cached atlas");
+            assert!(!t.aggressive_cull, "{q:?} must choose its lights as it did");
+            assert!(t.shadowed <= PER_ATLAS_LAYER, "{q:?}: one atlas layer at most");
+            // And no tier that shipped may allocate a layer it did not allocate before: one
+            // natively above Medium, none at all in the browser.
+            let want = match (q, cfg!(target_arch = "wasm32")) {
+                (LightingQuality::Low | LightingQuality::Medium, _) | (_, true) => 0,
+                _ => 1,
+            };
+            assert_eq!(
+                crate::modern::shadow::local_shadow_layers(q),
+                want,
+                "{q:?}"
             );
         }
-        assert!(!light_tier(LightingQuality::Low).on);
-        assert_eq!(light_tier(LightingQuality::Medium).shadowed, 0);
+        // …and the tier that is new is allowed to cost what it says it costs.
+        let cine = light_tier(LightingQuality::Cinematic);
+        assert!(cine.taps > 1 && cine.dynamic_casters && cine.aggressive_cull);
+        assert_eq!(
+            crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
+            crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
+        );
+    }
+
+    /// fork: P8 — the aggressive cull's two refusals, and the one thing it must NOT refuse.
+    #[test]
+    fn the_cull_refuses_the_small_and_the_far_behind() {
+        let cull = ShadowCull {
+            eye: Vec3::ZERO,
+            forward: Vec3::NEG_Z,
+            tan_half_fov: (std::f32::consts::FRAC_PI_4 * 0.5).tan(),
+        };
+        // A lamp right in front, close: obviously worth it.
+        assert!(cull.worth_a_cube(Vec3::new(0.0, 0.0, -8.0), 12.0));
+        // The same lamp far enough away that its whole lit sphere is a sliver of the viewport.
+        assert!(!cull.worth_a_cube(Vec3::new(0.0, 0.0, -900.0), 12.0));
+        // Well behind the eye, and its sphere with it: nothing it lights can be in frame.
+        assert!(!cull.worth_a_cube(Vec3::new(0.0, 0.0, 40.0), 12.0));
+        // But a lamp just behind the eye keeps its cube — it still lights the wall the camera IS
+        // looking at, and a hard test here pops a shadow on and off as the player turns.
+        assert!(cull.worth_a_cube(Vec3::new(0.0, 0.0, 6.0), 12.0));
+        // Off to the side, well within its own reach of the view axis: kept, same reason.
+        assert!(cull.worth_a_cube(Vec3::new(9.0, 0.0, -10.0), 12.0));
     }
 
     /// The whole cube lookup rests on this: the matrix a face is *rendered* under and the analytic
