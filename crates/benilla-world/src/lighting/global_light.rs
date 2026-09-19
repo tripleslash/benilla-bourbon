@@ -505,13 +505,20 @@ fn build_light_data(
                 boxed += usize::from(dv.x.abs().max(dv.z.abs()) <= 33.570_166);
                 sphere += usize::from(dv.length() <= 48.0);
             }
-            eprintln!(
+            // `bevy::log::info!`, not `eprintln!` — and that is the whole difference between a
+            // probe and a probe you can USE. On wasm `eprintln!` goes to a stderr nothing is
+            // reading, so the browser (the one build whose GPU sets the project's budget, and the
+            // only place the light count was ever in question) printed nothing at all and read
+            // exactly like the dump not running. The emission dump was made reachable the same way
+            // in `d7f4b594`. One record, built and logged once, rather than nine lines the console
+            // interleaves with everything else.
+            let mut out = format!(
                 "[points] {} packed, cam {cam_pos:.1?} — this chunk's candidates: {boxed} (was {sphere} at the 48 yd sphere), 3 slots",
                 pts.len()
             );
             for (d2, p, _, rgb, _) in pts.iter().take(8) {
-                eprintln!(
-                    "  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]",
+                out.push_str(&format!(
+                    "\n  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]",
                     d2.sqrt(),
                     p.x,
                     p.y,
@@ -519,8 +526,9 @@ fn build_light_data(
                     rgb[0],
                     rgb[1],
                     rgb[2]
-                );
+                ));
             }
+            bevy::log::info!("{out}");
         }
     }
     // `WOW_LIGHT_DUMP=frame` (or `=1` for 1 Hz): the WHOLE packed header, bit-exact, per frame.
