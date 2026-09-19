@@ -3,6 +3,7 @@
 //! `part-shape-kernels.md`). Split from the emitter module face (`particles.rs`) purely along
 //! this concern; the laws and cites live on [`emit_local`] itself.
 
+use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::ParticleEmitterDef;
 use bevy::prelude::*;
 
@@ -143,6 +144,21 @@ pub(super) fn emit_local(
     // starburst's spray plane onto the screen plane (the impact flashes). Applied at emission,
     // so every consumer (anchored bake, model-space storage, child emitters) inherits it.
     (origin + rot90(local), rot90(dir))
+}
+
+/// One birth folded out of the emitter's local WoW frame into **world** — the `0x10` CLEAR arm
+/// (`0x7b8b0f 0x7bca80(pos, E)` with translation, `0x7b8acf 0x7bcb40(vel, E)` as a 3×3). Split
+/// out of the sim's birth loop so the frame law is nameable on its own: `emit_place` is the
+/// emitter's LIVE bone transform in world, so the axis a sprite travels along is whatever that
+/// frame's rotation makes of the kernel's local +Z — and every host rotation between the world
+/// and the emitter's bone has to reach here, or the cloud sprays along the world axes instead
+/// of the host's. That is the whole content of the weapon-glow direction law
+/// (`benilla-app`'s `item_glow` tests, which drive this through a swing).
+pub fn birth_world(emit_place: &Transform, base: Vec3, dir: Vec3, speed: f32) -> (Vec3, Vec3) {
+    (
+        emit_place.transform_point(wow_to_bevy(base.to_array())),
+        emit_place.rotation * (emit_place.scale * wow_to_bevy((dir * speed).to_array())),
+    )
 }
 
 #[cfg(test)]

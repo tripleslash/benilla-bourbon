@@ -1141,11 +1141,7 @@ pub(super) fn simulate_particles(
             // that can later move. MODEL mode (`0x10` SET) stores raw emitter-local and the draw
             // re-applies the live matrix instead (`0x7b8aa5`/`0x7b3efb`).
             let (mut pos, vel) = if anchored {
-                (
-                    emit_place.transform_point(wow_to_bevy(base.to_array())),
-                    emit_place.rotation
-                        * (emit_place.scale * wow_to_bevy((dir * speed).to_array())),
-                )
+                crate::particles::emit::birth_world(&emit_place, base, dir, speed)
             } else {
                 (base, dir * speed)
             };

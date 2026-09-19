@@ -37,6 +37,7 @@ mod quads;
 pub mod render;
 pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1294)
 
+pub use emit::birth_world;
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
 // The water-plane interleave classification — shared with the ribbon sim (a trail is one of the
