@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 32] = [
+    const SEEDED: [&str; 33] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -280,6 +280,10 @@ fn seed_launch_env() {
         // could reach the browser: this list is an allowlist, so a key missing from it is simply
         // never seeded and the probe stays silent — which reads exactly like the code not running.
         "WOW_POINTS_DUMP",
+        // …and the emission front end's own (`?emit_dump=<label>[,period]`): which sequence slot an
+        // emitter resolved and what its ten per-frame tracks sampled there. The dump that answers
+        // "this effect moves wrong" without guessing at it.
+        "WOW_EMIT_DUMP",
         // …and the viewer's own anchor (`?worldview_at=x,y[,z]`), without which the browser can
         // only ever look at the one default spot — and an interior like Northshire Abbey is
         // portal-culled from outside it, so the bug being chased was not on screen at all.

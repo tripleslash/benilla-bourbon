@@ -26,7 +26,10 @@ use benilla_formats::{ParamsNow, ParticleEmitterDef};
 /// Parsed `$WOW_EMIT_DUMP`: `(lowercased label substring, period seconds)`. `None` = off, and
 /// every entry point below then does nothing at all.
 static FILTER: std::sync::LazyLock<Option<(String, f32)>> = std::sync::LazyLock::new(|| {
-    let v = std::env::var("WOW_EMIT_DUMP").ok()?;
+    // Through `launch_env`, not `std::env`: on wasm the process environment is always empty, so
+    // this probe could never run in the browser — and "this effect looks wrong" reports arrive
+    // against whichever build the player is holding. Same gap the points dump had.
+    let v = crate::launch_env::var("WOW_EMIT_DUMP")?;
     // Only a trailing NUMBER is a period — a model path may itself contain a comma.
     let (label, period) = match v
         .rsplit_once(',')
