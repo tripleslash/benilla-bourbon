@@ -199,11 +199,14 @@ fn local_visibility(
     light_pos: vec3<f32>,
     world_pos: vec3<f32>,
     normal: vec3<f32>,
+    // The cube's near plane FOR THIS SLOT (`ShadowLight::near`), which the caller reads from the
+    // block's spare rows. It has to be the same number the face matrix was built with, or the
+    // depth this compares is not the depth that was stored.
+    near: f32,
 ) -> f32 {
     if (slot >= MAX_SHADOWED || !atlas_live(g)) {
         return 1.0;
     }
-    let near = g.shadow_misc.x;
     // Offset along the normal by a texel of the face, so a lit surface never shadows itself at a
     // grazing angle. One texel is `2 * major / tile` yards across at distance `major`.
     let raw = cube_face(world_pos - light_pos);
@@ -235,7 +238,16 @@ fn local_visibility(
     let spread = g.soft.y * g.shadow_misc.w * tiles * clamp(ct.w * 0.25, 0.35, 4.0);
     // Rotate the disc per fragment, from the receiver's own position: a fixed spiral banded every
     // lit floor with twelve visible arms.
-    let rotation = fract(dot(world_pos, vec3<f32>(12.9898, 78.233, 37.719))) * 6.2831853;
+    //
+    // **Wrapped before it is hashed, and that is not cosmetic.** A WoW world coordinate runs to
+    // ±17066, and hashing it raw put `dot` up around 1.3e6 — where an f32 ulp is about an eighth,
+    // so `fract` collapsed to a handful of distinct values and the whole disc took the same few
+    // rotations across large patches of floor. Twelve taps in lockstep are not noise, they are a
+    // pattern, and the pool of light under a lamp came out structured instead of smooth. Taking
+    // the fraction first keeps the hash's input inside [0,1) with precision to spare, and wrapping
+    // every ten yards is invisible in a rotation.
+    let wrapped = fract(world_pos * 0.1);
+    let rotation = fract(dot(wrapped, vec3<f32>(12.9898, 78.233, 37.719))) * 6.2831853;
 
     var lit = 0.0;
     var taken = 0u;

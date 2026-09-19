@@ -64,6 +64,10 @@ pub const BLOCK_LIGHT_BYTES: usize = LIGHT_PARAM_BYTES + CELL_ALLOC * CELL_BYTES
 /// The cube faces' near plane (yd). A fixture light is a point, so this only has to clear the
 /// emitter's own geometry.
 pub const CUBE_NEAR: f32 = 0.25;
+/// How far past its own radius a fixture's geometry is pushed out of its cube. A lantern's frame
+/// stands a little outside the glow it houses, so clipping exactly at the glow's extent still
+/// leaves the ironwork casting.
+const FIXTURE_CLEARANCE: f32 = 1.6;
 /// Shadow bias, in yards back toward the light.
 const CUBE_BIAS_YD: f32 = 0.12;
 /// Tile border kept clear of filter taps, in texels.
@@ -250,7 +254,31 @@ impl ShadowCull {
 pub struct ShadowLight {
     pub pos: Vec3,
     pub range: f32,
+    /// **The cube's near plane, per light** — and the whole reason it is per light rather than the
+    /// one [`CUBE_NEAR`] every cube used to share.
+    ///
+    /// A synthesized light sits INSIDE the thing that emits it: a lantern's flame is behind the
+    /// lantern's own glass and iron frame. Drawn into a cube with a 0.25yd near plane, that frame
+    /// is a caster a hand's breadth from the light, so it projects its bars over the whole pool and
+    /// takes up to `shade` of the lamp away — the floor got a cage pattern instead of a circle, and
+    /// the lamp went dark the moment it was close enough to earn a cube at all. A lamp far enough
+    /// off to be denied one stayed at full brightness, which is the "super bright at a distance,
+    /// dim up close" the player saw, and every acquire and release of a slot was that same step,
+    /// which is what made them flicker.
+    ///
+    /// Geometry nearer the light than the near plane is simply clipped, so setting this to the
+    /// fixture's own radius means the fixture is never drawn into its own cube. Walls, furniture
+    /// and everything beyond it still shadow normally. This is also what makes a shadowed lamp and
+    /// an unshadowed one look alike, which is the property the distance behaviour depends on.
+    pub near: f32,
 }
+
+/// How far a synthesized light's own fixture reaches, in yards — the radius whose geometry must be
+/// clipped out of its cube. Attached by the spawn site that derived the light ([`emissive`]);
+/// authored M2 lights carry none, because an artist placing a light block put it where they wanted
+/// it and its model is not automatically in the way.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FixtureRadius(pub f32);
 
 /// This frame's grid placement and shadowed set, extracted for the render world (which owns the
 /// binning pass and the atlas render).
@@ -291,6 +319,10 @@ pub struct LightParams {
     /// `w` the atlas's first layer. Named `soft` in the WGSL, where `filter` is a reserved keyword.
     pub soft: Vec4,
     pub shadow: [Vec4; MAX_SHADOWED],
+    /// The twelve per-light near planes ([`ShadowLight::near`]), four to a row — written into the
+    /// first three `spare` rows, which cost nothing: the region was already padded to
+    /// [`LIGHT_PARAM_BYTES`] to keep the GI probe offset aligned, and this only fills padding.
+    pub slot_near: [Vec4; MAX_SHADOWED / 4],
 }
 
 impl LightParams {
@@ -303,6 +335,9 @@ impl LightParams {
         row(self.shadow_misc);
         row(self.soft);
         for s in &self.shadow {
+            row(*s);
+        }
+        for s in &self.slot_near {
             row(*s);
         }
         // `spare`: P7's per-zone local-light grading, and the padding that keeps the GI block's
@@ -330,9 +365,11 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     // `light_bin.wgsl`'s `shadow_slot` skips a zero-range slot rather than matching a light that
     // happens to stand at the world origin against it.
     let mut shadow = [Vec4::ZERO; MAX_SHADOWED];
+    let mut slot_near = [Vec4::splat(CUBE_NEAR); MAX_SHADOWED / 4];
     for (slot, light) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
         if let Some(light) = light {
             shadow[slot] = light.pos.extend(light.range);
+            slot_near[slot / 4][slot % 4] = light.near;
         }
     }
     LightParams {
@@ -357,6 +394,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
             crate::modern::shadow::LOCAL_LAYER as f32,
         ),
         shadow,
+        slot_near,
     }
 }
 
@@ -371,7 +409,7 @@ pub fn grid_base(tier: &LightTier, camera: Vec3) -> IVec3 {
 /// The convention is the shader's, not the other way round: `locallight::cube_face` picks the face
 /// and its uv analytically (no matrix reaches the fragment stage), and this builds the matrix that
 /// lands a caster exactly where that lookup will go looking for it. [`tests`] pins the pair.
-pub fn cube_face_clip(light_pos: Vec3, face: usize) -> Mat4 {
+pub fn cube_face_clip(light_pos: Vec3, face: usize, near: f32) -> Mat4 {
     let (axis, s, t) = face_basis(face);
     // View space looks down -Z with +Y up, and the shader's `t` runs *down* the face, so up = -t.
     let up = -t;
@@ -381,7 +419,7 @@ pub fn cube_face_clip(light_pos: Vec3, face: usize) -> Mat4 {
         Vec3::new(s.z, up.z, -axis.z),
     );
     let view = Mat4::from_mat3(rot) * Mat4::from_translation(-light_pos);
-    Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, CUBE_NEAR) * view
+    Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, near) * view
 }
 
 /// The major axis and the face's `s`/`t` directions — the twin of `locallight::cube_face`.
@@ -434,7 +472,12 @@ fn update_lights(
     // fork: P8 — the camera's `Projection` as well as its transform: the aggressive cull needs the
     // frustum and the vertical field of view to answer "is this lamp worth six faces of depth".
     cameras: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
-    lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
+    lights_q: Query<(
+        &WorldPointLight,
+        &GlobalTransform,
+        Option<&LightRooms>,
+        Option<&FixtureRadius>,
+    )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
     mut held: Local<Vec<Option<ShadowLight>>>,
@@ -460,7 +503,7 @@ fn update_lights(
     // in the table, so it must not hold an atlas slot either.
     let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
     if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
-        for (light, gt, rooms) in &lights_q {
+        for (light, gt, rooms, fixture) in &lights_q {
             if !crate::wmo_portal::room_admits(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
@@ -475,7 +518,16 @@ fn update_lights(
             // The light's reach as the frame sees it: its authored energy over the distance the
             // camera stands at, so a bright chandelier two rooms away loses to the candle beside it.
             let lum = light.intensity * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
-            ranked.push((lum / (1.0 + d), ShadowLight { pos, range: light.range }));
+            ranked.push((
+                lum / (1.0 + d),
+                ShadowLight {
+                    pos,
+                    range: light.range,
+                    // Clear the fixture, with a margin — a card's extent is the glow, and the iron
+                    // around it sits a little outside that.
+                    near: fixture.map_or(CUBE_NEAR, |f| CUBE_NEAR.max(f.0 * FIXTURE_CLEARANCE)),
+                },
+            ));
         }
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     }
@@ -625,6 +677,7 @@ mod tests {
         ShadowLight {
             pos: Vec3::new(x, 0.0, 0.0),
             range: 20.0,
+            near: CUBE_NEAR,
         }
     }
 
@@ -681,7 +734,8 @@ mod tests {
         let near = ShadowLight {
             pos: Vec3::new(0.0, 0.0, -40.0),
             range: 12.0,
-        };
+            near: CUBE_NEAR,
+            };
         let mut held = vec![None; 2];
         assign_slots(&mut held, &ranked(&[near]), &Some(facing));
         assert_eq!(held[0], Some(near), "in front and close: it gets a slot");
@@ -702,6 +756,35 @@ mod tests {
         // It only goes when it stops being a candidate at all (out of range, or room-culled).
         assign_slots(&mut held, &[], &Some(turned));
         assert_eq!(held[0], None);
+    }
+
+    /// GOLDEN — **a fixture may not shadow its own light.** A synthesized light sits inside the
+    /// thing that emits it, so with one shared near plane the lantern's own frame was a caster a
+    /// hand's breadth away, projecting its bars across the pool and taking most of the lamp with
+    /// it. That is what made a lamp dim as soon as it was close enough to earn a cube while a
+    /// distant one stayed at full brightness — and, at every acquire and release, flicker.
+    ///
+    /// Geometry nearer than the near plane is clipped, so the fixture's radius IS the fix.
+    #[test]
+    fn a_fixture_is_clipped_out_of_its_own_cube() {
+        let bare = CUBE_NEAR;
+        let housed = CUBE_NEAR.max(0.4 * FIXTURE_CLEARANCE);
+        assert!(
+            housed > 0.4,
+            "the near plane must clear the fixture it houses, not sit inside it: {housed}"
+        );
+        assert_eq!(bare, CUBE_NEAR, "an authored light keeps P6's near plane");
+
+        // And the matrix actually built for the cube uses it: a point at the fixture's own radius
+        // falls OUTSIDE the clip, while the floor the lamp lights stays inside.
+        let clip = cube_face_clip(Vec3::ZERO, 0, housed);
+        let on_the_frame = clip.project_point3(Vec3::new(0.4, 0.0, 0.0));
+        let on_the_floor = clip.project_point3(Vec3::new(6.0, 0.0, 0.0));
+        assert!(on_the_frame.z > 1.0, "the frame is clipped: {on_the_frame}");
+        assert!(
+            (0.0..=1.0).contains(&on_the_floor.z),
+            "the floor still casts: {on_the_floor}"
+        );
     }
 
     /// fork: P8 — the aggressive cull's two refusals, and the one thing it must NOT refuse.
@@ -741,7 +824,7 @@ mod tests {
             Vec3::new(2.0, 1.9, 1.8),
         ] {
             let (face, uv, major) = cube_face_of(v);
-            let clip = cube_face_clip(light, face);
+            let clip = cube_face_clip(light, face, CUBE_NEAR);
             let p = clip * (light + v).extend(1.0);
             let ndc = p.xyz() / p.w;
             let from_matrix = Vec2::new(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);

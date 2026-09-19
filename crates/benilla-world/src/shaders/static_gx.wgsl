@@ -171,14 +171,23 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
         }
         var vis = 1.0;
         if (!lite) {
+            let slot = locallight::cell_slot(cell, i);
+            // The slot's own near plane, from the first three spare rows — a synthesized light's
+            // is its fixture's radius, so the lantern around it was clipped out of its own cube
+            // rather than casting its frame across the floor.
+            var near = g.shadow_misc.x;
+            if (slot < locallight::MAX_SHADOWED) {
+                near = modern_block.light_spare[slot / 4u][slot % 4u];
+            }
             vis = locallight::local_visibility(
                 modern_shadow_map,
                 modern_shadow_samp,
                 g,
-                locallight::cell_slot(cell, i),
+                slot,
                 pos_range.xyz,
                 p,
                 nrm,
+                near,
             );
         }
         sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);

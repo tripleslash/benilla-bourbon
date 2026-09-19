@@ -305,9 +305,12 @@ fn prepare_modern_shadow(
         for light in &lights.shadowed {
             // A hole still gets its six offsets, so a slot's tiles are always at `slot * 6 + face`
             // however many lights are actually held — the identity the receivers' nibble depends on.
-            let pos = light.map_or(Vec3::ZERO, |l| l.pos);
+            let (pos, near) = light.map_or(
+                (Vec3::ZERO, crate::modern::lights::CUBE_NEAR),
+                |l| (l.pos, l.near),
+            );
             for face in 0..6 {
-                let clip_from_world = crate::modern::lights::cube_face_clip(pos, face);
+                let clip_from_world = crate::modern::lights::cube_face_clip(pos, face, near);
                 frame
                     .local_offsets
                     .push(uniforms.0.push(&CasterView { clip_from_world }));
