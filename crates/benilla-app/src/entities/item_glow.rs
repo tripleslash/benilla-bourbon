@@ -223,7 +223,6 @@ pub(super) fn attach_item_glows(
         // emitters go into ONE `synthesize` call, which is the same rule it applies to the several
         // emitters of a single model — five sprites along a blade *are* brighter than one, and the
         // recipe's own cap is what stops that running away.
-        let emissive_on = benilla_world::modern::emissive_lights_on();
         let mut glow_sources = Vec::new();
         let mut glow_cards = Vec::new();
         let mut glow_authored = false;
@@ -335,7 +334,7 @@ pub(super) fn attach_item_glows(
             // glow model that authors a real M2 light of its own suppresses the synthesis outright
             // (there are none today, but a torch-like effect model would, and then its own light
             // wins) — the same law the doodad path takes, spelled by the same function.
-            if emissive_on {
+            {
                 glow_authored |= dm.lights.iter().any(|l| l.def.casts());
                 glow_sources.extend(
                     dm.emitters
@@ -372,9 +371,16 @@ pub(super) fn attach_item_glows(
                 glow_sources,
                 glow_cards,
             ) {
+                // **No tier gate at attach time**, and that is the whole of why Teebu's Blazing
+                // Longsword did not glow. This runs once per weapon and then `ItemGlowAttached`
+                // seals it, so reading `emissive_lights_on()` here asked a question whose answer
+                // had not been decided yet — the lighting model latches after the session is up —
+                // and never asked again. The light is spawned unconditionally and tagged; the tier
+                // gate lives in `global_light`, per frame, exactly as it does for a lamppost.
                 let light = commands
                     .spawn((
                         benilla_world::terrain_stream::point_light(e.color, e.intensity_scale),
+                        benilla_world::modern::lights::SynthesizedLight,
                         Transform::from_translation(glow_at.0 / glow_at.1 as f32),
                         Visibility::default(),
                     ))
