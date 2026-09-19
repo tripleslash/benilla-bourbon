@@ -226,7 +226,18 @@ fn finish(a: GiAccum, recv: f32) -> vec4<f32> {
     // Applied for an INTERIOR receiver only (`recv`), because the exterior half of the class test
     // is a mild preference over an inferred class (see `accum`) and must not start dimming the
     // canopy bounce it was deliberately kept gentle for.
-    let survived = clamp(a.weight / a.base, 0.0, 1.0);
+    // Curved, not linear, and that is the difference between "much better" and done. The class
+    // factor bottoms out at the 0.05..0.08 clamp in `accum` rather than at zero, so a cell whose
+    // every probe was rejected still survives at ~0.08 — about a hundredth of full daylight once
+    // the confidence curve has it, which is exactly the faint bleed left after the first fix.
+    //
+    // A cell the class test almost entirely rejected holds no information an interior receiver can
+    // use, and reporting a hundredth of the sky is worse than reporting nothing: the fallback is
+    // the room's OWN authored ambient, which is right. So the share is pushed through a smoothstep
+    // that reaches zero well above the clamp's floor. A doorway cell, genuinely half interior and
+    // half exterior probes, still lands mid-curve and still spills its light inward — which is a
+    // real doorway doing a real thing, and must survive.
+    let survived = smoothstep(0.20, 0.60, clamp(a.weight / a.base, 0.0, 1.0));
     let confidence = clamp(a.weight * 3.0, 0.0, 1.0) * mix(1.0, survived, clamp(recv, 0.0, 1.0));
     return vec4<f32>(a.sum / a.weight, confidence);
 }
