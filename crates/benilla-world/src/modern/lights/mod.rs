@@ -82,7 +82,15 @@ const PENUMBRA_OPENING: f32 = 0.9;
 /// fork: P8 — the aggressive cull's screen test: a light whose lit sphere subtends less than this
 /// fraction of the viewport's height gets no cube, however bright it is. A lamp 60 yd off across a
 /// square is a dozen pixels of shading; six faces of depth for it is the cost of a building.
-const MIN_SCREEN_FRACTION: f32 = 0.035;
+const ADMIT_FRACTION: f32 = 0.035;
+/// fork: P8 — the hysteresis floor: a light already holding a slot keeps it until its lit sphere
+/// falls below this, well under [`ADMIT_FRACTION`]. Without a gap between the two a light sitting
+/// near the threshold takes and loses its cube on alternate frames.
+const KEEP_FRACTION: f32 = 0.020;
+/// fork: P8 — how fast a slot's shadow cross-fades in and out, in units of fade per second. A slot
+/// is never switched on or off: it ramps, so admitting or releasing one is invisible. ~4 frames at
+/// 60 Hz.
+const FADE_RATE: f32 = 15.0;
 /// fork: P8 — and how far outside the frustum a light may still sit and keep its cube. Not zero:
 /// a lamp just off the left edge still lights the wall the camera IS looking at, and a hard frustum
 /// test would pop its shadow on and off as the player turned. Measured in the light's own ranges.
@@ -196,19 +204,29 @@ pub fn lights_enabled() -> bool {
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_LIGHTS").as_deref() != Some("0"))
 }
 
-/// fork: P8 — **the aggressive cull**: the two geometric reasons to refuse a light its six faces of
-/// depth, asked before the light is even ranked.
+/// fork: P8 — **the cull**: is this light worth six faces of depth?
 ///
-/// Both are about the *lit sphere*, not the light's point: a lamp behind the camera still lights the
-/// wall in front of it, so the test is whether that sphere is visible, and it is deliberately
-/// generous ([`FRUSTUM_SLACK`]) so a shadow does not pop as the player turns. What it does refuse,
-/// hard, is a lamp on the far side of a square — [`MIN_SCREEN_FRACTION`] of the viewport is a dozen
-/// pixels, and at that size a cube shadow is six 341² depth renders spent on something the eye
-/// cannot resolve.
+/// **The metric is the light's solid angle at the eye, and it does not depend on where the camera
+/// is pointing.** That is the whole design, and it replaced a frustum test that did. A lamp's cube
+/// costs the same whether or not you are facing it, and — far more importantly — a set chosen by
+/// what is *in frame* changes every time the player turns their head. Each change admits or drops a
+/// light's shadow, so walls lit a moment ago fall into shadow and back out again: the "lights
+/// randomly light the walls and drop shadows depending on my view angle" this is the fix for.
+///
+/// Orientation invariance alone is not enough, because a light near the threshold would still
+/// chatter as the player walks. Two more things hold it steady, and all three are standard practice
+/// for a shadow atlas that has to evict:
+///
+/// 1. **Hysteresis.** A light is admitted at [`ADMIT_FRACTION`] and kept until it falls below
+///    [`KEEP_FRACTION`], which is well below it. Crossing back and forth costs nothing.
+/// 2. **A temporal cross-fade** ([`FADE_RATE`]). A slot's shadow ramps in when it is filled and
+///    ramps out before it is released, so the transition is never a step — the same treatment a
+///    modern renderer gives a shadow LOD change or a cached-atlas eviction.
+/// 3. **Stickiness.** A held light is never evicted to make room for a better one; only falling
+///    below `KEEP_FRACTION`, leaving [`SHADOW_RADIUS`] or being room-culled releases a slot.
 #[derive(Clone, Copy, Debug)]
 pub struct ShadowCull {
     eye: Vec3,
-    forward: Vec3,
     /// `tan(vertical fov / 2)` — how many yards of sphere one viewport height spans at one yard.
     tan_half_fov: f32,
 }
@@ -219,34 +237,44 @@ impl ShadowCull {
     pub fn new(camera: &GlobalTransform, projection: Option<&Projection>) -> Self {
         let fov = match projection {
             Some(Projection::Perspective(p)) => p.fov,
-            // An orthographic or custom projection has no single fov; π/4 keeps the screen test's
-            // scale honest rather than turning it off, and the frustum half still applies.
+            // An orthographic or custom projection has no single fov; π/4 keeps the scale honest
+            // rather than turning the test off.
             _ => std::f32::consts::FRAC_PI_4,
         };
         Self {
             eye: camera.translation(),
-            forward: camera.forward().as_vec3(),
             tan_half_fov: (fov * 0.5).tan().max(1e-3),
         }
     }
 
-    /// Is a light at `pos` reaching `range` yards worth an atlas slot?
-    pub fn worth_a_cube(&self, pos: Vec3, range: f32) -> bool {
-        let to = pos - self.eye;
-        let along = to.dot(self.forward);
-        // Behind the eye by more than the slack the lit sphere allows: nothing it lights can be in
-        // frame either, because the sphere itself is behind the near plane.
-        if along < -(range * (1.0 + FRUSTUM_SLACK)) {
-            return false;
-        }
-        // The screen test, measured at the sphere — a light's apparent size is the size of what it
-        // lights, not of the emitter. In front of the eye the sphere spans `2·range` yards at depth
-        // `along`, over a viewport spanning `2·along·tan(fov/2)`; behind it, `along` is small or
-        // negative and the sphere is by definition large on screen, so the test passes.
-        let depth = along.max(1e-3);
-        let fraction = range / (depth * self.tan_half_fov);
-        fraction >= MIN_SCREEN_FRACTION
+    /// How large the light's lit sphere is on screen, as a fraction of the viewport height — the
+    /// importance metric, and a function of DISTANCE only. A sphere of radius `range` at distance
+    /// `d` spans `2·range` across a viewport spanning `2·d·tan(fov/2)`.
+    pub fn screen_fraction(&self, pos: Vec3, range: f32) -> f32 {
+        range / (pos.distance(self.eye).max(1e-3) * self.tan_half_fov)
     }
+
+    /// Worth ACQUIRING a slot: the strict threshold.
+    pub fn worth_a_cube(&self, pos: Vec3, range: f32) -> bool {
+        self.screen_fraction(pos, range) >= ADMIT_FRACTION
+    }
+
+    /// Worth KEEPING one: the loose threshold. The gap between the two is the hysteresis.
+    pub fn still_worth_it(&self, pos: Vec3, range: f32) -> bool {
+        self.screen_fraction(pos, range) >= KEEP_FRACTION
+    }
+}
+
+/// One atlas slot's live state: the light in it, and how far its shadow has cross-faded in.
+///
+/// `fade` is what makes a slot change invisible. A slot is never switched on or off — it ramps at
+/// [`FADE_RATE`], and a slot on its way out (`retiring`) ramps to zero before the light actually
+/// releases it, so nothing pops when the shadowed set changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldSlot {
+    pub light: ShadowLight,
+    pub fade: f32,
+    pub retiring: bool,
 }
 
 /// One light that owns six atlas tiles this frame.
@@ -298,7 +326,7 @@ pub struct ModernLights {
     /// shifted every light behind it up a slot, and the scene flipped between lit and black as the
     /// player turned. `None` is a slot no light holds — the atlas tiles for it are cleared, which
     /// reads as "nothing occludes" (reverse-Z clears to the far plane), so a hole is harmless.
-    pub shadowed: Vec<Option<ShadowLight>>,
+    pub shadowed: Vec<Option<HeldSlot>>,
 }
 
 impl Default for LightTier {
@@ -323,6 +351,8 @@ pub struct LightParams {
     /// first three `spare` rows, which cost nothing: the region was already padded to
     /// [`LIGHT_PARAM_BYTES`] to keep the GI probe offset aligned, and this only fills padding.
     pub slot_near: [Vec4; MAX_SHADOWED / 4],
+    /// The twelve per-slot cross-fades — the next three `spare` rows, still inside the padding.
+    pub slot_fade: [Vec4; MAX_SHADOWED / 4],
 }
 
 impl LightParams {
@@ -340,6 +370,9 @@ impl LightParams {
         for s in &self.slot_near {
             row(*s);
         }
+        for s in &self.slot_fade {
+            row(*s);
+        }
         // `spare`: P7's per-zone local-light grading, and the padding that keeps the GI block's
         // probe offset 256-aligned.
         while out.len() - start < LIGHT_PARAM_BYTES {
@@ -353,7 +386,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     let tier = &lights.tier;
     // The atlas is live when the tier HAS slots — a frame in which every slot happens to be empty
     // still binds the same layers, and each empty slot's tiles read as "nothing occludes".
-    let atlas = lights.shadowed.iter().any(Option::is_some);
+    let atlas = lights.shadowed.iter().flatten().any(|h| h.fade > 0.0);
     let mut flags = 0u32;
     if lights.on {
         flags |= 1;
@@ -366,10 +399,15 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     // happens to stand at the world origin against it.
     let mut shadow = [Vec4::ZERO; MAX_SHADOWED];
     let mut slot_near = [Vec4::splat(CUBE_NEAR); MAX_SHADOWED / 4];
-    for (slot, light) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
-        if let Some(light) = light {
-            shadow[slot] = light.pos.extend(light.range);
-            slot_near[slot / 4][slot % 4] = light.near;
+    // fork: P8 — the per-slot cross-fade. 0 reads exactly as "this light has no cube", so a slot
+    // ramping in or out is indistinguishable from one that was never there; the shader mixes the
+    // lookup toward full visibility by it.
+    let mut slot_fade = [Vec4::ZERO; MAX_SHADOWED / 4];
+    for (slot, held) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
+        if let Some(held) = held {
+            shadow[slot] = held.light.pos.extend(held.light.range);
+            slot_near[slot / 4][slot % 4] = held.light.near;
+            slot_fade[slot / 4][slot % 4] = held.fade.clamp(0.0, 1.0);
         }
     }
     LightParams {
@@ -395,6 +433,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         ),
         shadow,
         slot_near,
+        slot_fade,
     }
 }
 
@@ -480,8 +519,10 @@ fn update_lights(
     )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
-    mut held: Local<Vec<Option<ShadowLight>>>,
+    mut held: Local<Vec<Option<HeldSlot>>>,
+    time: Res<Time>,
 ) {
+    let dt = time.delta_secs().clamp(0.0, 0.1);
     let tier = light_tier(active.quality);
     if !active.is_modern() || !tier.on || !lights_enabled() {
         if out.on {
@@ -538,7 +579,7 @@ fn update_lights(
     let want = tier.shadowed.min(MAX_SHADOWED);
     held.resize(want, None);
     held.truncate(want);
-    assign_slots(&mut held, &ranked, &cull);
+    assign_slots(&mut held, &ranked, &cull, dt);
     let chosen = held.clone();
 
     *out = ModernLights {
@@ -561,29 +602,53 @@ fn update_lights(
 /// lamp's shadow. In a room with several lamps that reads as the scene flipping between lit and
 /// pitch black as the player turns, which is exactly what it did.
 fn assign_slots(
-    held: &mut [Option<ShadowLight>],
+    held: &mut [Option<HeldSlot>],
     ranked: &[(f32, ShadowLight)],
     cull: &Option<ShadowCull>,
+    dt: f32,
 ) {
+    // 1. Decide which slots are on their way out. A held light retires only when it stops being a
+    //    candidate outright (out of range, room-culled) or falls below the KEEP threshold — never
+    //    because a better light turned up, and never because the player looked away.
     for slot in held.iter_mut() {
-        if let Some(light) = *slot {
-            if !ranked.iter().any(|(_, c)| *c == light) {
+        let Some(h) = slot else { continue };
+        let still_a_candidate = ranked.iter().any(|(_, c)| *c == h.light);
+        let still_big_enough = cull.is_none_or(|c| c.still_worth_it(h.light.pos, h.light.range));
+        h.retiring = !(still_a_candidate && still_big_enough);
+    }
+
+    // 2. Ramp. A retiring slot fades out and is released only once it reaches zero, so its shadow
+    //    is already gone by the time the tiles are handed to someone else.
+    let step = (FADE_RATE * dt).clamp(0.0, 1.0);
+    for slot in held.iter_mut() {
+        let Some(h) = slot else { continue };
+        if h.retiring {
+            h.fade -= step;
+            if h.fade <= 0.0 {
                 *slot = None;
             }
+        } else {
+            h.fade = (h.fade + step).min(1.0);
         }
     }
-    // Fill the holes, strongest candidate first, and only with lights the cull says are worth it.
+
+    // 3. Fill the free slots, strongest candidate first, and only with lights the cull admits at
+    //    the strict threshold. A new slot starts at zero fade and ramps in.
     for (_, candidate) in ranked
         .iter()
         .filter(|(_, c)| cull.is_none_or(|k| k.worth_a_cube(c.pos, c.range)))
     {
-        if held.iter().flatten().any(|h| h == candidate) {
+        if held.iter().flatten().any(|h| h.light == *candidate) {
             continue;
         }
         let Some(hole) = held.iter().position(Option::is_none) else {
             break;
         };
-        held[hole] = Some(*candidate);
+        held[hole] = Some(HeldSlot {
+            light: *candidate,
+            fade: 0.0,
+            retiring: false,
+        });
     }
 }
 
@@ -681,6 +746,19 @@ mod tests {
         }
     }
 
+    /// Settle the fades: enough frames that everything ramping has reached its end. Shadow state
+    /// is temporal now, so a test that wants a steady answer has to let it settle.
+    fn settle(held: &mut Vec<Option<HeldSlot>>, ranked: &[(f32, ShadowLight)], cull: &Option<ShadowCull>) {
+        for _ in 0..30 {
+            assign_slots(held, ranked, cull, 1.0 / 60.0);
+        }
+    }
+
+    /// Which light sits in each slot, fades ignored.
+    fn lights_in(held: &[Option<HeldSlot>]) -> Vec<Option<ShadowLight>> {
+        held.iter().map(|h| h.map(|h| h.light)).collect()
+    }
+
     fn ranked(lamps: &[ShadowLight]) -> Vec<(f32, ShadowLight)> {
         lamps
             .iter()
@@ -701,61 +779,117 @@ mod tests {
     fn a_light_keeps_its_slot_when_another_one_leaves() {
         let (a, b, c) = (lamp(0.0), lamp(10.0), lamp(20.0));
         let mut held = vec![None; 4];
-        assign_slots(&mut held, &ranked(&[a, b, c]), &None);
-        assert_eq!(held, vec![Some(a), Some(b), Some(c), None]);
+        settle(&mut held, &ranked(&[a, b, c]), &None);
+        assert_eq!(lights_in(&held), vec![Some(a), Some(b), Some(c), None]);
 
         // `b` leaves the radius — it is simply not a candidate any more.
-        assign_slots(&mut held, &ranked(&[a, c]), &None);
+        settle(&mut held, &ranked(&[a, c]), &None);
         assert_eq!(
-            held,
+            lights_in(&held),
             vec![Some(a), None, Some(c), None],
             "a and c must not move; b's slot becomes a hole"
         );
 
         // A new lamp takes the HOLE, not the end, and still nothing else moves.
         let d = lamp(30.0);
-        assign_slots(&mut held, &ranked(&[a, c, d]), &None);
-        assert_eq!(held, vec![Some(a), Some(d), Some(c), None]);
+        settle(&mut held, &ranked(&[a, c, d]), &None);
+        assert_eq!(lights_in(&held), vec![Some(a), Some(d), Some(c), None]);
     }
 
-    /// The cull gates ACQUISITION only. A held light that the camera turns away from keeps its
-    /// slot — asking the cull again every frame is what made the set view-dependent, and a
-    /// view-dependent set of slots is the flicker above.
-    #[test]
-    fn the_cull_never_evicts_a_light_it_already_let_in() {
-        let facing = ShadowCull {
-            eye: Vec3::ZERO,
-            forward: Vec3::NEG_Z,
+    fn cull_at(eye: Vec3) -> ShadowCull {
+        ShadowCull {
+            eye,
             tan_half_fov: (std::f32::consts::FRAC_PI_4 * 0.5).tan(),
-        };
-        // Far enough down the view axis that turning around puts its whole lit sphere well behind
-        // the eye — a lamp merely a few yards behind you keeps its slot on the cull's own terms
-        // (`FRUSTUM_SLACK`), which is a different rule and is tested below.
-        let near = ShadowLight {
-            pos: Vec3::new(0.0, 0.0, -40.0),
-            range: 12.0,
-            near: CUBE_NEAR,
-            };
-        let mut held = vec![None; 2];
-        assign_slots(&mut held, &ranked(&[near]), &Some(facing));
-        assert_eq!(held[0], Some(near), "in front and close: it gets a slot");
+        }
+    }
 
-        // Now the player turns right around. The lamp is behind them and would never be admitted
-        // fresh — but it is still in range, so it keeps what it has.
-        let turned = ShadowCull {
-            forward: Vec3::Z,
-            ..facing
-        };
+    /// GOLDEN — **turning the camera may not change which lights cast shadows.**
+    ///
+    /// This is the bug the player reported last: lights "randomly light the walls and drop shadows
+    /// depending on my view angle" in Northshire Abbey. The cull used to reject a light whose lit
+    /// sphere was behind the eye, which made the shadowed SET a function of where you were looking
+    /// — so every turn of the head admitted and dropped cubes, and walls fell in and out of shadow.
+    ///
+    /// The metric is the light's solid angle at the eye now, and a sphere's solid angle does not
+    /// care which way the camera faces. The eye does not move here; only the look direction would,
+    /// and it is not an input at all.
+    #[test]
+    fn the_cull_does_not_depend_on_where_the_camera_looks() {
+        let cull = cull_at(Vec3::ZERO);
+        // The same lamp, placed all around the eye at one distance: every answer must agree,
+        // because nothing about the test can see an orientation.
+        let behind = cull.screen_fraction(Vec3::new(0.0, 0.0, 30.0), 12.0);
+        for pos in [
+            Vec3::new(0.0, 0.0, -30.0),
+            Vec3::new(30.0, 0.0, 0.0),
+            Vec3::new(-30.0, 0.0, 0.0),
+            Vec3::new(0.0, 30.0, 0.0),
+            Vec3::new(30.0 / 2.0_f32.sqrt(), 0.0, -30.0 / 2.0_f32.sqrt()),
+        ] {
+            assert!(
+                (cull.screen_fraction(pos, 12.0) - behind).abs() < 1e-4,
+                "{pos} reads differently from straight behind: a turn would change the set"
+            );
+        }
+    }
+
+    /// GOLDEN — **hysteresis.** A light hovering at the admission threshold must not take and lose
+    /// its cube on alternate frames. It is admitted at `ADMIT_FRACTION` and kept until it falls
+    /// below `KEEP_FRACTION`, and the gap between them is what stops the chatter.
+    #[test]
+    fn a_light_at_the_threshold_does_not_chatter() {
         assert!(
-            !turned.worth_a_cube(near.pos, near.range),
-            "precondition: the cull would refuse it now"
+            KEEP_FRACTION < ADMIT_FRACTION,
+            "the keep threshold must be the looser one"
         );
-        assign_slots(&mut held, &ranked(&[near]), &Some(turned));
-        assert_eq!(held[0], Some(near), "but it keeps the slot it already holds");
+        // Placed exactly where it would just fail to be admitted fresh...
+        let range = 12.0;
+        let d_admit = range / (ADMIT_FRACTION * cull_at(Vec3::ZERO).tan_half_fov);
+        let cull = cull_at(Vec3::ZERO);
+        let outside = ShadowLight {
+            pos: Vec3::new(0.0, 0.0, -(d_admit * 1.05)),
+            range,
+            near: CUBE_NEAR,
+        };
+        assert!(!cull.worth_a_cube(outside.pos, outside.range), "not admitted");
+        assert!(
+            cull.still_worth_it(outside.pos, outside.range),
+            "but had it already held a slot, it would keep it — that gap is the hysteresis"
+        );
+    }
 
-        // It only goes when it stops being a candidate at all (out of range, or room-culled).
-        assign_slots(&mut held, &[], &Some(turned));
-        assert_eq!(held[0], None);
+    /// GOLDEN — **a slot never switches on or off, it ramps.** A cube arriving or leaving is the
+    /// moment a shadow would pop, so the fade is what makes the set's churn invisible: a new slot
+    /// starts at zero (reading exactly as "no cube"), and a retiring one reaches zero BEFORE it
+    /// releases its tiles.
+    #[test]
+    fn a_slots_shadow_cross_fades_in_and_out() {
+        let a = lamp(0.0);
+        let mut held = vec![None; 2];
+
+        // Admitted: it takes the slot immediately, and contributes NOTHING on the frame it
+        // arrives — a fade of zero reads exactly as "this light has no cube", which is the whole
+        // point. The filling happens after the ramp, so its first step lands next frame.
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0);
+        let h = held[0].expect("took a slot");
+        assert_eq!(h.light, a);
+        assert_eq!(h.fade, 0.0, "arrives dark");
+
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0);
+        let h = held[0].unwrap();
+        assert!(h.fade > 0.0 && h.fade < 1.0, "then ramps: {}", h.fade);
+
+        settle(&mut held, &ranked(&[a]), &None);
+        assert_eq!(held[0].unwrap().fade, 1.0, "settles at full shadow");
+
+        // Now it stops being a candidate. It must fade out, and hold its slot while it does —
+        // releasing the tiles first would hand a live shadow to whoever took the slot next.
+        assign_slots(&mut held, &[], &None, 1.0 / 60.0);
+        let h = held[0].expect("still holds the slot while fading out");
+        assert!(h.retiring && h.fade < 1.0, "{h:?}");
+
+        settle(&mut held, &[], &None);
+        assert_eq!(held[0], None, "released only once it reached zero");
     }
 
     /// GOLDEN — **a street lamp may not light the inside of the chapel beside it.**
@@ -815,25 +949,17 @@ mod tests {
         );
     }
 
-    /// fork: P8 — the aggressive cull's two refusals, and the one thing it must NOT refuse.
+    /// fork: P8 — the cull still refuses what it should: a lamp too small on screen to resolve a
+    /// shadow in. What it no longer refuses is anything for being out of frame.
     #[test]
-    fn the_cull_refuses_the_small_and_the_far_behind() {
-        let cull = ShadowCull {
-            eye: Vec3::ZERO,
-            forward: Vec3::NEG_Z,
-            tan_half_fov: (std::f32::consts::FRAC_PI_4 * 0.5).tan(),
-        };
-        // A lamp right in front, close: obviously worth it.
-        assert!(cull.worth_a_cube(Vec3::new(0.0, 0.0, -8.0), 12.0));
-        // The same lamp far enough away that its whole lit sphere is a sliver of the viewport.
-        assert!(!cull.worth_a_cube(Vec3::new(0.0, 0.0, -900.0), 12.0));
-        // Well behind the eye, and its sphere with it: nothing it lights can be in frame.
-        assert!(!cull.worth_a_cube(Vec3::new(0.0, 0.0, 40.0), 12.0));
-        // But a lamp just behind the eye keeps its cube — it still lights the wall the camera IS
-        // looking at, and a hard test here pops a shadow on and off as the player turns.
+    fn the_cull_refuses_a_lamp_too_small_to_read() {
+        let cull = cull_at(Vec3::ZERO);
+        // Across a zone: a dozen pixels of lit sphere, not worth six depth renders.
+        assert!(!cull.worth_a_cube(Vec3::new(0.0, 0.0, -600.0), 8.0));
+        // The lamp you are standing next to.
+        assert!(cull.worth_a_cube(Vec3::new(0.0, 0.0, -6.0), 12.0));
+        // And one directly behind you at the same distance is treated identically.
         assert!(cull.worth_a_cube(Vec3::new(0.0, 0.0, 6.0), 12.0));
-        // Off to the side, well within its own reach of the view axis: kept, same reason.
-        assert!(cull.worth_a_cube(Vec3::new(9.0, 0.0, -10.0), 12.0));
     }
 
     /// The whole cube lookup rests on this: the matrix a face is *rendered* under and the analytic

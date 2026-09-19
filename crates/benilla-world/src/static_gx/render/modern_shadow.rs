@@ -272,7 +272,28 @@ fn prepare_modern_shadow(
         }));
     }
     if frame.layers.is_empty() {
-        frame.layers = (0..SHADOW_LAYERS as u32)
+        // **The texture's OWN depth, not [`SHADOW_LAYERS`].** P8 latched the array's depth to the
+        // tier (`modern::shadow::fit_shadow_map`) so a session that shadows no local light stops
+        // paying 16.8 MB a layer for an atlas it never samples — but this loop kept building views
+        // for the largest depth any tier could ask for. On every tier below Cinematic, and on the
+        // web for High and Ultra, that asked a five-layer texture for views of layers 5 and 6:
+        //
+        //   Texture view array layer range (baseArrayLayer: 5, arrayLayerCount: 1) exceeds the
+        //   texture's array layer count (5).
+        //
+        // An invalid view invalidates the `modern_local_shadow` pass that attaches it, that pass's
+        // command buffer, and the submit carrying it — so `static_gx c0 t0` and the pbr pipelines
+        // all came up "invalid due to a previous error" and the screen went black. The readers
+        // already index this through `.get()`, so a shorter list simply means "no atlas here",
+        // which is what a tier with no local layers means.
+        bevy::log::info!(
+            "modern shadow: building {} layer views (texture {}x{} x {} layers)",
+            image.texture.depth_or_array_layers(),
+            image.texture.width(),
+            image.texture.height(),
+            image.texture.depth_or_array_layers(),
+        );
+        frame.layers = (0..image.texture.depth_or_array_layers())
             .map(|layer| {
                 image.texture.create_view(&TextureViewDescriptor {
                     label: Some("modern_shadow_layer"),
@@ -307,7 +328,7 @@ fn prepare_modern_shadow(
             // however many lights are actually held — the identity the receivers' nibble depends on.
             let (pos, near) = light.map_or(
                 (Vec3::ZERO, crate::modern::lights::CUBE_NEAR),
-                |l| (l.pos, l.near),
+                |h| (h.light.pos, h.light.near),
             );
             for face in 0..6 {
                 let clip_from_world = crate::modern::lights::cube_face_clip(pos, face, near);
@@ -1010,7 +1031,7 @@ impl GxShadowNode {
         frame: &ModernShadowFrame,
         view: &TextureView,
         view_bind: &BindGroup,
-        shadowed: &[Option<crate::modern::lights::ShadowLight>],
+        shadowed: &[Option<crate::modern::lights::HeldSlot>],
         slot_base: usize,
         tile: u32,
         casters: &[(&GxCellGpu, &GxCellDraw)],
@@ -1038,7 +1059,7 @@ impl GxShadowNode {
         for (i, light) in shadowed.iter().enumerate() {
             // A hole's six tiles keep the clear the pass just laid down, which reads as "nothing
             // occludes" — exactly what an unheld slot should mean.
-            let Some(light) = light else { continue };
+            let Some(light) = light.map(|h| h.light) else { continue };
             let slot = slot_base + i;
             // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner test
             // the cascades use flips sign behind the light. A torch reaches a handful of cells, so
@@ -1123,7 +1144,7 @@ impl GxShadowNode {
         view: &TextureView,
         view_bind: &BindGroup,
         entities: &EntityShadowFrame,
-        shadowed: &[Option<crate::modern::lights::ShadowLight>],
+        shadowed: &[Option<crate::modern::lights::HeldSlot>],
         slot_base: usize,
         tile: u32,
         pipeline_cache: &PipelineCache,
@@ -1153,7 +1174,7 @@ impl GxShadowNode {
             occlusion_query_set: None,
         });
         for (i, light) in shadowed.iter().enumerate() {
-            let Some(light) = light else { continue };
+            let Some(light) = light.map(|h| h.light) else { continue };
             let slot = slot_base + i;
             // The lamp's own reach first — a creature across the room casts nothing into this cube —
             // and the face cone second, which is where most of the list goes.
@@ -1276,7 +1297,7 @@ fn face_sees(face: usize, light: Vec3, center: Vec3, radius: f32) -> bool {
 /// fingerprint. Never 0, which is the "redraw me" value. Per layer and not per atlas since P8, so a
 /// light entering the second layer does not invalidate the first layer's six.
 fn local_atlas_key(
-    shadowed: &[Option<crate::modern::lights::ShadowLight>],
+    shadowed: &[Option<crate::modern::lights::HeldSlot>],
     static_hash: u64,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -1285,10 +1306,14 @@ fn local_atlas_key(
         // The hole is hashed too: a slot emptying has to invalidate the layer, or its tiles keep
         // the departed light's depth and the next light to take that slot inherits it.
         match light {
+            // The FADE is deliberately not hashed: it changes every frame while a slot ramps and
+            // the tiles do not depend on it, so hashing it would redraw six faces a frame for every
+            // cross-fade — exactly the cost this cache exists to avoid.
             Some(l) => {
                 1u8.hash(&mut h);
-                l.pos.to_array().map(f32::to_bits).hash(&mut h);
-                l.range.to_bits().hash(&mut h);
+                l.light.pos.to_array().map(f32::to_bits).hash(&mut h);
+                l.light.range.to_bits().hash(&mut h);
+                l.light.near.to_bits().hash(&mut h);
             }
             None => 0u8.hash(&mut h),
         }

@@ -203,8 +203,13 @@ fn local_visibility(
     // block's spare rows. It has to be the same number the face matrix was built with, or the
     // depth this compares is not the depth that was stored.
     near: f32,
+    // fork: P8 — this slot's CROSS-FADE, 0..1. A slot is never switched on or off: it ramps in when
+    // it is filled and out before it is released, so the shadowed set can change without anything
+    // popping. At 0 this returns exactly what a light with no cube returns, which is what makes a
+    // slot's arrival and departure invisible.
+    fade: f32,
 ) -> f32 {
-    if (slot >= MAX_SHADOWED || !atlas_live(g)) {
+    if (slot >= MAX_SHADOWED || !atlas_live(g) || fade <= 0.0) {
         return 1.0;
     }
     // Offset along the normal by a texel of the face, so a lit surface never shadows itself at a
@@ -228,7 +233,8 @@ fn local_visibility(
     let taps = max(u32(g.soft.x), 1u);
     if (taps <= 1u) {
         let face_uv = clamp(ct.xy, vec2<f32>(inset), vec2<f32>(1.0 - inset));
-        return textureSampleCompareLevel(map, samp, tile.xy + face_uv * tile.w, i32(tile.z), depth);
+        let one = textureSampleCompareLevel(map, samp, tile.xy + face_uv * tile.w, i32(tile.z), depth);
+        return mix(1.0, one, fade);
     }
 
     // The penumbra: a point light stands in for a fixture about a yard across, so the blur grows
@@ -263,5 +269,6 @@ fn local_visibility(
     }
     let visibility = lit / f32(max(taken, 1u));
     // Faint: the shadow may only take `shade` of the light away. `shade == 1` is P6's behaviour.
-    return mix(1.0 - g.soft.z, 1.0, visibility);
+    let shaded = mix(1.0 - g.soft.z, 1.0, visibility);
+    return mix(1.0, shaded, fade);
 }

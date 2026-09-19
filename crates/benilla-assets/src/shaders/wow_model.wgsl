@@ -276,7 +276,13 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 // `benilla_modern::locallight` for the same reason `modern_gi_ambient` does — the light table is
 // this lane's own binding, which a WGSL module cannot reach. `lite` (the water mirror) skips the cube
 // shadows.
-fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
+// fork: modern lighting (P6, gated in P8) — `interior` is the receiver's own INTERIOR bit. A light
+// that names no WMO rooms may not light an interior surface: a local light has no occluder unless
+// it holds one of the twelve cube slots, and `global_light`'s room term admits every room-less
+// light by law, so without this the street lamp outside lights the abbey's furniture through the
+// wall. The same rule `static_gx.wgsl` applies to the room's own surfaces, so a chair and the floor
+// it stands on agree.
+fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool) -> vec3<f32> {
     let g = modern_block.lights;
     let found = locallight::cell_at(g, p);
     if (found.y < 1u) {
@@ -288,6 +294,10 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
     for (var i = 0u; i < count; i = i + 1u) {
         let id = locallight::cell_light(cell, i);
         let pos_range = wow_light.points[2u * id];
+        // `w` is 1 for a light that belongs to a building (`global_light`'s packer).
+        if (interior && wow_light.points[2u * id + 1u].w < 0.5) {
+            continue;
+        }
         let to_light = pos_range.xyz - p;
         let d = length(to_light);
         let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
@@ -296,14 +306,28 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
         }
         var vis = 1.0;
         if (!lite) {
+            let slot = locallight::cell_slot(cell, i);
+            // fork: P8 — the slot's OWN near plane, from the block's first three spare rows. A
+            // synthesized light's is its fixture's radius, so a lantern is clipped out of its own
+            // cube instead of casting its frame across everything it lights. The row is loaded to
+            // a value first; `g` is only the small parameter head and does not carry these.
+            var near = g.shadow_misc.x;
+            if (slot < locallight::MAX_SHADOWED) {
+                let row = modern_block.light_spare[slot / 4u];
+                near = row[slot % 4u];
+            }
+            // The slot's cross-fade rides the next three spare rows, beside its near plane.
+            let frow = modern_block.light_spare[3u + slot / 4u];
             vis = locallight::local_visibility(
                 modern_shadow_map,
                 modern_shadow_samp,
                 g,
-                locallight::cell_slot(cell, i),
+                slot,
                 pos_range.xyz,
                 p,
                 nrm,
+                near,
+                frow[slot % 4u],
             );
         }
         sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
@@ -1492,7 +1516,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
     // in a modern frame, because the bake that used to stand in for them is gone.
     if (locallight::grid_live(modern_block.lights) && !is_rig) {
-        point_diffuse = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal), modern_lite);
+        point_diffuse = modern_local_lights(
+            in.world_position.xyz,
+            wow_normalize(in.world_normal),
+            is_interior,
+            modern_lite,
+        );
     }
 
 #else
@@ -1725,7 +1754,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let dbg = modern_block.cascades.params.w;
         if (dbg > 4.5) {
             // fork: modern lighting (P6) — mode 5: what the local-light grid put here.
-            out_rgb = modern_local_lights(in.world_position.xyz, wow_normalize(in.world_normal), false);
+            out_rgb = modern_local_lights(
+                in.world_position.xyz,
+                wow_normalize(in.world_normal),
+                is_interior,
+                false,
+            );
         } else if (dbg > 2.5) {
             let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, false); // modern GI debug view
             out_rgb = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);

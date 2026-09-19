@@ -188,8 +188,16 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool)
             // rather than casting its frame across the floor.
             var near = g.shadow_misc.x;
             if (slot < locallight::MAX_SHADOWED) {
-                near = modern_block.light_spare[slot / 4u][slot % 4u];
+                // The ROW is loaded to a value before the component is picked. Indexing a vector
+                // component dynamically straight off a storage buffer is not something the backend
+                // will take, and what it costs is the whole module: no entry points, so
+                // `static_gx c0 t0` and every pipeline sharing the module come out invalid and the
+                // screen goes black. A `let` copy of the row indexes fine.
+                let row = modern_block.light_spare[slot / 4u];
+                near = row[slot % 4u];
             }
+            // The slot's cross-fade rides the next three spare rows, beside its near plane.
+            let frow = modern_block.light_spare[3u + slot / 4u];
             vis = locallight::local_visibility(
                 modern_shadow_map,
                 modern_shadow_samp,
@@ -199,6 +207,7 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool)
                 p,
                 nrm,
                 near,
+                frow[slot % 4u],
             );
         }
         sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
@@ -848,7 +857,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let dbg = modern_block.cascades.params.w;
         if (dbg > 4.5) {
             // fork: modern lighting (P6) — mode 5: what the local-light grid put on this fragment.
-            rgb = modern_local_lights(in.world_position.xyz, n_lit, false);
+            rgb = modern_local_lights(
+                in.world_position.xyz,
+                n_lit,
+                (in.word & WORD_INTERIOR) != 0u,
+                false,
+            );
         } else if (dbg > 2.5) {
             let gdbg = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, false); // modern GI debug view
             rgb = select(gdbg.rgb, vec3<f32>(gdbg.w), dbg > 3.5);
