@@ -601,6 +601,11 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![false, false],
+                // This rig is room-DARK in the PVS sense, which is the `visible` row above and
+                // the whole subject of this test. Lighting reachability is a different question
+                // and not one this leg reads, so it takes the ungated default the portal pass
+                // itself falls back to (`lit = all true` for an instance nothing has gated).
+                lit: vec![true, true],
                 interior_fog: vec![false, false],
                 liquid_visited: vec![false, false],
                 flooded: vec![None, None],
