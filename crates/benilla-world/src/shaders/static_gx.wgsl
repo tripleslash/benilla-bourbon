@@ -151,7 +151,14 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 // `benilla_modern::locallight` for the same reason `modern_gi_ambient` does — the light table is
 // this lane's own binding, which a WGSL module cannot reach. `lite` (the water mirror) skips the cube
 // shadows.
-fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
+// fork: modern lighting (P6, gated in P8) — the local lights reaching one fragment.
+//
+// `interior` is the receiver's own INTERIOR bit, and it is a gate, not a grading term: a light that
+// names no WMO rooms may not light an interior surface at all. A local light has no occluder unless
+// it holds one of the twelve cube slots, and `global_light`'s room term admits every room-less light
+// by law, so without this a street lamp lights the inside of the chapel beside it through the wall.
+// Lights that DO name rooms already went through the portal gate and are not touched here.
+fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool) -> vec3<f32> {
     let g = modern_block.lights;
     let found = locallight::cell_at(g, p);
     if (found.y < 1u) {
@@ -163,6 +170,10 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, lite: bool) -> vec3<f32> {
     for (var i = 0u; i < count; i = i + 1u) {
         let id = locallight::cell_light(cell, i);
         let pos_range = wow_light.points[2u * id];
+        // `w` is 1 for a light that belongs to a building (`global_light`'s packer).
+        if (interior && wow_light.points[2u * id + 1u].w < 0.5) {
+            continue;
+        }
         let to_light = pos_range.xyz - p;
         let d = length(to_light);
         let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
@@ -484,7 +495,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
     // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
     if (locallight::grid_live(modern_block.lights)) {
-        point_lit_px = modern_local_lights(in.world_position.xyz, n_lit, modern_lite);
+        point_lit_px = modern_local_lights(
+            in.world_position.xyz,
+            n_lit,
+            (in.word & WORD_INTERIOR) != 0u,
+            modern_lite,
+        );
     }
 #endif
     // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,

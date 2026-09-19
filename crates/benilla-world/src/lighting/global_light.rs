@@ -372,7 +372,7 @@ fn build_light_data(
     // identity, over-gamut preserved). Entries past `count` stay stale in the blob — the count row
     // guards every reader.
     let cam_pos = cam.single().map(|t| t.translation()).unwrap_or(Vec3::ZERO);
-    let mut pts: Vec<(f32, Vec3, f32, [f32; 3])> = lights_q
+    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
         .filter(|(_, _, rooms)| {
             // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
@@ -384,14 +384,16 @@ fn build_light_data(
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             )
         })
-        .filter_map(|(pl, gt, _)| {
+        .filter_map(|(pl, gt, rooms)| {
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
                 let c = pl.color;
                 let s = pl.intensity / (4.0 * std::f32::consts::PI);
                 let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
-                (d2, p, pl.range, rgb)
+                // fork: modern lighting (P8) — whether this light BELONGS to a building, which is
+                // what decides if it may light an interior surface. See the `w` channel below.
+                (d2, p, pl.range, rgb, rooms.is_some())
             })
         })
         .collect();
@@ -399,9 +401,20 @@ fn build_light_data(
     pts.truncate(MAX_POINT_LIGHTS);
     let modern = if active.is_some_and(|a| a.is_modern()) { 1.0 } else { 0.0 };
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
-    for (i, (_, p, range, rgb)) in pts.iter().enumerate() {
+    for (i, (_, p, range, rgb, indoors)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
-        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], 0.0];
+        // fork: modern lighting (P8) — `w` is 1 for a light that names WMO rooms and 0 for one that
+        // names none, and a modern INTERIOR fragment takes only the former.
+        //
+        // A local light has no occluder unless it holds one of the twelve cube slots, and
+        // `room_admits` lets every room-less light through by law (it is "every light outside a
+        // building", and the reference never had a culled room's torch to register in the first
+        // place). Those two together mean a lamp in the street lights the inside of the chapel next
+        // to it, straight through the wall. That cost nothing while the lamps of Elwynn and
+        // Darkshore carried no light at all; deriving one from their glow cards is what made it a
+        // building full of morning sun. Lights that DO name rooms keep the portal gate above and
+        // are untouched, which is why this is the narrow rule and not an interior/exterior split.
+        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], f32::from(u8::from(*indoors))];
     }
     // `WOW_POINTS_DUMP=1`: print the committed point table once a second — the numeric probe for
     // "what is actually lighting this ground". A pool that reads wrong is one of a small set of
@@ -434,7 +447,7 @@ fn build_light_data(
             let snap = |v: f32| (((half + v) / cell).floor() + 0.5) * cell - half;
             let anchor = Vec3::new(snap(cam_pos.x), cam_pos.y, snap(cam_pos.z));
             let (mut boxed, mut sphere) = (0usize, 0usize);
-            for (_, p, _, _) in &pts {
+            for (_, p, _, _, _) in &pts {
                 let dv = *p - anchor;
                 boxed += usize::from(dv.x.abs().max(dv.z.abs()) <= 33.570_166);
                 sphere += usize::from(dv.length() <= 48.0);
@@ -443,7 +456,7 @@ fn build_light_data(
                 "[points] {} packed, cam {cam_pos:.1?} — this chunk's candidates: {boxed} (was {sphere} at the 48 yd sphere), 3 slots",
                 pts.len()
             );
-            for (d2, p, _, rgb) in pts.iter().take(8) {
+            for (d2, p, _, rgb, _) in pts.iter().take(8) {
                 eprintln!(
                     "  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]",
                     d2.sqrt(),

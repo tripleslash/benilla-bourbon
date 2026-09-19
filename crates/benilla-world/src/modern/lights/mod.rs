@@ -758,6 +758,34 @@ mod tests {
         assert_eq!(held[0], None);
     }
 
+    /// GOLDEN — **a street lamp may not light the inside of the chapel beside it.**
+    ///
+    /// A local light has no occluder at all unless it holds one of the twelve cube slots, and
+    /// `global_light`'s room term admits every room-less light by law — it is "every light outside
+    /// a building", and the reference never had a culled room's torch to register. So the `w`
+    /// channel of the light table's colour row carries whether the light belongs to a building, and
+    /// a modern INTERIOR fragment takes only the lights that do.
+    ///
+    /// This cost nothing while the lamps of Elwynn and Darkshore carried no light block at all.
+    /// Deriving one from their glow cards is what turned it into a chapel full of morning sun.
+    #[test]
+    fn the_light_tables_w_channel_says_whether_a_light_may_reach_an_interior() {
+        // The packer writes 1 for a light that names rooms and 0 for one that names none; the gate
+        // in `static_gx.wgsl` is `interior && w < 0.5 -> skip`. Both halves of that, as arithmetic.
+        let street = 0.0f32;
+        let chapel = 1.0f32;
+        let admits = |interior: bool, w: f32| !(interior && w < 0.5);
+
+        assert!(!admits(true, street), "the street lamp stays out of the room");
+        assert!(admits(true, chapel), "the room's own sconce still lights it");
+        assert!(admits(false, street), "and the street lamp still lights the street");
+        assert!(
+            admits(false, chapel),
+            "a building's own light still reaches its exterior walls — the portal gate, not this \
+             one, is what decides that"
+        );
+    }
+
     /// GOLDEN — **a fixture may not shadow its own light.** A synthesized light sits inside the
     /// thing that emits it, so with one shared near plane the lantern's own frame was a caster a
     /// hand's breadth away, projecting its bars across the pool and taking most of the lamp with
