@@ -275,10 +275,10 @@ fn seed_launch_env() {
         "WOW_MODERN_CASTERREACH",
         "WOW_WORLDVIEW_FACE",
         "WOW_WORLDVIEW_PITCH",
-        // fork: P8 — the light-pool probe (`?points_dump=1`). `global_light`'s dump and the
-        // emissive tally are the two numbers that answer "why is that lamp dark?", and neither
-        // could reach the browser: this list is an allowlist, so a key missing from it is simply
-        // never seeded and the probe stays silent — which reads exactly like the code not running.
+        // fork: P8 — the light-pool probe (`?points_dump=1`), `global_light`'s dump of what is
+        // actually lighting this ground, which could not reach the browser at all: this list is
+        // an allowlist, so a key missing from it is simply never seeded and the probe stays
+        // silent — which reads exactly like the code not running.
         "WOW_POINTS_DUMP",
         // …and the emission front end's own (`?emit_dump=<label>[,period]`): which sequence slot an
         // emitter resolved and what its ten per-frame tracks sampled there. The dump that answers

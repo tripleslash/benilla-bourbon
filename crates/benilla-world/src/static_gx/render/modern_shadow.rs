@@ -286,13 +286,6 @@ fn prepare_modern_shadow(
         // all came up "invalid due to a previous error" and the screen went black. The readers
         // already index this through `.get()`, so a shorter list simply means "no atlas here",
         // which is what a tier with no local layers means.
-        bevy::log::info!(
-            "modern shadow: building {} layer views (texture {}x{} x {} layers)",
-            image.texture.depth_or_array_layers(),
-            image.texture.width(),
-            image.texture.height(),
-            image.texture.depth_or_array_layers(),
-        );
         frame.layers = (0..image.texture.depth_or_array_layers())
             .map(|layer| {
                 image.texture.create_view(&TextureViewDescriptor {

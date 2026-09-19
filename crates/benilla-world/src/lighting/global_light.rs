@@ -152,6 +152,10 @@ pub(super) const MAX_POINT_LIGHTS: usize = 256;
 /// than ~300 yd is sub-pixel and usually fogged, and the cap keeps the per-vertex selection walk
 /// (0285: each unit picks its ≤3 nearest from this table) bounded.
 const POINT_PACK_RADIUS: f32 = 300.0;
+/// fork: P8 — how fast a light ramps into and out of the committed table, in units of fade per
+/// second. ~4 frames at 60 Hz: long enough that no edge reads as a switch, short enough that a
+/// lamp is at full strength by the time the player has finished stepping through the door.
+const ADMIT_FADE_RATE: f32 = 15.0;
 
 /// **The rooms a point light belongs to** — a WMO's own MOLT fixture (the groups whose MOLR names
 /// it) or one of its props' M2 lights (the groups whose MODR names the prop). Absent on an ADT map
@@ -298,11 +302,14 @@ fn build_light_data(
     view: Res<ViewDistance>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     lights_q: Query<(
+        Entity,
         &WorldPointLight,
         &GlobalTransform,
         Option<&LightRooms>,
         Option<&crate::modern::lights::SynthesizedLight>,
     )>,
+    // fork: P8 — each light's admission fade, keyed by entity. See the gather below.
+    mut admit: Local<bevy::platform::collections::HashMap<Entity, f32>>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
@@ -377,38 +384,56 @@ fn build_light_data(
     // identity, over-gamut preserved). Entries past `count` stay stale in the blob — the count row
     // guards every reader.
     let cam_pos = cam.single().map(|t| t.translation()).unwrap_or(Vec3::ZERO);
+    // fork: P8 — **every light fades in and out of the table; none of them ever switches.**
+    //
+    // Admission is a per-frame verdict made of hard edges: a room gate that flips as the player
+    // crosses a doorway, a pack radius, a tier switch. Committing that verdict directly meant a
+    // lamp appearing or vanishing between one frame and the next, which is the flicker reported
+    // walking around Northshire Abbey and in and out of its door. Nothing about a lamp changes
+    // when the player steps over a threshold, so nothing about its light may either.
+    //
+    // So the verdict drives a ramp instead, and the ramp scales the colour this light COMMITS. A
+    // light on its way out is still in the table, dimming; at zero it leaves. Every edge above is
+    // smoothed by this one mechanism, including ones not yet thought of.
+    let dt = time.delta_secs().clamp(0.0, 0.1);
+    let step = (ADMIT_FADE_RATE * dt).clamp(0.0, 1.0);
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
-        .filter(|(_, _, _, synthesized)| {
-            // fork: P8 — the tier gate for DERIVED lights, applied where the light is read rather
-            // than where it is spawned. A lamppost's light entity always exists; whether it reaches
-            // the table is this frame's question, so changing tier takes effect at once and a
-            // doodad that streamed in before the lighting latched is not left permanently dark.
-            synthesized.is_none() || crate::modern::emissive_lights_on()
-        })
-        .filter(|(_, _, rooms, _)| {
+        .filter_map(|(entity, pl, gt, rooms, synthesized)| {
+            let p = gt.translation();
+            let d2 = p.distance_squared(cam_pos);
+            // The tier gate for DERIVED lights, read where the light is READ rather than where it
+            // was spawned: a lamppost's light entity always exists, and whether it reaches the
+            // table is this frame's question — so a doodad that streamed in before the lighting
+            // latched is not left permanently dark.
+            let tier_ok = synthesized.is_none() || crate::modern::emissive_lights_on();
             // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
             // visibility test bolted onto a faithful gather: the reference's register walk has no
             // such term either, it simply never has a culled room's torch to register. Ungated for
             // every light that names no rooms, which is every light outside a building.
-            crate::wmo_portal::room_admits_light(
+            let room_ok = crate::wmo_portal::room_admits_light(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
-            )
-        })
-        .filter_map(|(pl, gt, rooms, _)| {
-            let p = gt.translation();
-            let d2 = p.distance_squared(cam_pos);
-            (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
-                let c = pl.color;
-                let s = pl.intensity / (4.0 * std::f32::consts::PI);
-                let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
-                // fork: modern lighting (P8) — whether this light BELONGS to a building, which is
-                // what decides if it may light an interior surface. See the `w` channel below.
-                (d2, p, pl.range, rgb, rooms.is_some())
-            })
+            );
+            let admitted =
+                tier_ok && room_ok && d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS;
+            let fade = admit.entry(entity).or_insert(0.0);
+            *fade = if admitted {
+                (*fade + step).min(1.0)
+            } else {
+                (*fade - step).max(0.0)
+            };
+            if *fade <= 0.0 {
+                return None;
+            }
+            let c = pl.color;
+            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade;
+            let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
+            Some((d2, p, pl.range, rgb, rooms.is_some()))
         })
         .collect();
+    // A despawned light must not keep its ramp: the next entity to reuse that id would inherit it.
+    admit.retain(|e, _| lights_q.contains(*e));
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     // fork: P8 — how many lights actually wanted in. Deriving a light from every glow card made
     // this a real number rather than a formality: past the cap the table keeps the nearest and
@@ -673,6 +698,14 @@ mod tests {
             crate::terrain_stream::point_light([0.466_666_7, 0.290_196_1, 0.133_333_34], 3.0),
             GlobalTransform::from_translation(Vec3::new(0.0, 1.5, 0.0)),
         ));
+        // Past the admission ramp before reading: every light now fades INTO the table rather
+        // than switching on (`ADMIT_FADE_RATE`), and the ramp scales the colour it commits — so
+        // a torch sampled mid-fade is a dimmed torch, and this golden is about the commit
+        // expression, not the ramp. One frame of the ramp's own dt clamp (0.1 s ⇒ step 1.5,
+        // saturated) puts it at full strength, which is where the authored product is legible.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(100));
         app.update();
 
         let rows = &app.world().resource::<WowLightData>().0;
