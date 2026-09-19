@@ -855,7 +855,25 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
 #ifdef WOW_MODERN
     if (modern_block.cascades.params.w > 0.5) {
         let dbg = modern_block.cascades.params.w;
-        if (dbg > 4.5) {
+        if (dbg > 5.5) {
+            // fork: P8 — mode 6: **cell occupancy**, the probe for "why is that lamp dark?".
+            // The binning pass records how many lights REACHED each cell alongside how many it
+            // could keep (`PER_CELL`), so this shows where the per-cell budget is the thing
+            // deciding a light's fate rather than the light's own falloff:
+            //   green  = the cell kept everything that reached it
+            //   yellow = full, nothing dropped
+            //   red    = over budget, and how far over
+            let dgrid = modern_block.lights;
+            let dcell = modern_block.light_cells[locallight::cell_at(dgrid, in.world_position.xyz).x];
+            let kept = f32(locallight::cell_count(dcell));
+            let reached = f32((dcell.x >> 8u) & 0xffu);
+            let over = max(reached - kept, 0.0);
+            rgb = select(
+                vec3<f32>(0.0, kept / 8.0, 0.0),
+                mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), min(over / 8.0, 1.0)),
+                over > 0.0,
+            );
+        } else if (dbg > 4.5) {
             // fork: modern lighting (P6) — mode 5: what the local-light grid put on this fragment.
             rgb = modern_local_lights(
                 in.world_position.xyz,

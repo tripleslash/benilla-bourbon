@@ -126,14 +126,33 @@ pub(super) fn spawn_emissive_light_for(
     room: Option<&crate::wmo_portal::WmoGroupVis>,
     out: &mut Vec<Entity>,
 ) {
-    if !crate::modern::emissive_lights_on() {
-        return;
-    }
-    let Some(emissive) =
-        crate::modern::lights::emissive::for_model(lights, emitters, submeshes)
+    // **No tier gate here.** The light is spawned whatever the tier, tagged
+    // [`SynthesizedLight`], and `global_light` drops it from the table when the tier does not want
+    // it. Gating the spawn instead made a lamp's fate depend on whether it streamed in before or
+    // after the lighting latch — see that type's note.
+    //
+    // fork: P8 — **the tally** (`?points_dump=1`). "Some lampposts do not work" is not one
+    // question but four, and they are answered in different places: the model may author its own
+    // light (so this declines by design), it may carry no additive card or qualifying emitter at
+    // all, its card may be too dark to clear `MIN_EMISSION`, or it may be fine here and lost later
+    // to a table or per-cell budget. Guessing between those cost a day; counting them does not.
+    let authored = lights.iter().any(|l| l.def.casts());
+    let has_glow = submeshes
+        .iter()
+        .any(|b| crate::modern::lights::emissive::glow_of(b).is_some())
+        || !emitters.is_empty();
+    let Some(emissive) = crate::modern::lights::emissive::for_model(lights, emitters, submeshes)
     else {
+        emissive_tally(if authored {
+            EmissiveOutcome::Authored
+        } else if has_glow {
+            EmissiveOutcome::TooDark
+        } else {
+            EmissiveOutcome::NoGlow
+        });
         return;
     };
+    emissive_tally(EmissiveOutcome::Lit);
     let Some((local, radius)) = glow_centroid(emitters, submeshes) else {
         return;
     };
@@ -151,9 +170,10 @@ pub(super) fn spawn_emissive_light_for(
     // over the pool it is supposed to be casting. See `ShadowLight::near`.
     let scale = transform.scale.max_element().max(1e-3);
     for e in &out[before..] {
-        commands
-            .entity(*e)
-            .insert(crate::modern::lights::FixtureRadius(radius * scale));
+        commands.entity(*e).insert((
+            crate::modern::lights::FixtureRadius(radius * scale),
+            crate::modern::lights::SynthesizedLight,
+        ));
     }
 }
 
@@ -166,6 +186,52 @@ pub(super) fn spawn_emissive_light_for(
 /// Plain positions, not bone-composed: a placed prop's light bone is at rest by construction (the
 /// same premise [`spawn_lights_for`] above is built on), and a part riding a bone that *does*
 /// animate swings by inches, well inside the yard this light stands for.
+/// What became of one model's bid for a synthesized light.
+#[derive(Clone, Copy)]
+pub(super) enum EmissiveOutcome {
+    /// Got one.
+    Lit,
+    /// Declined by design: the artist authored a casting light block and it wins.
+    Authored,
+    /// No additive glow card and no particle emitter — nothing to derive a light FROM.
+    NoGlow,
+    /// It had a glow, but the recipe read it as too dark to be a light.
+    TooDark,
+}
+
+/// Count the outcomes and print them when they change, under `?points_dump=1` / `$WOW_POINTS_DUMP`.
+pub(super) fn emissive_tally(outcome: EmissiveOutcome) {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    static LIT: AtomicU32 = AtomicU32::new(0);
+    static AUTHORED: AtomicU32 = AtomicU32::new(0);
+    static NO_GLOW: AtomicU32 = AtomicU32::new(0);
+    static TOO_DARK: AtomicU32 = AtomicU32::new(0);
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    let slot = match outcome {
+        EmissiveOutcome::Lit => &LIT,
+        EmissiveOutcome::Authored => &AUTHORED,
+        EmissiveOutcome::NoGlow => &NO_GLOW,
+        EmissiveOutcome::TooDark => &TOO_DARK,
+    };
+    slot.fetch_add(1, Relaxed);
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| crate::launch_env::var("WOW_POINTS_DUMP").is_some()) {
+        return;
+    }
+    // Print on each doubling, so a streaming world reports progress without flooding.
+    let total = LIT.load(Relaxed) + AUTHORED.load(Relaxed) + NO_GLOW.load(Relaxed) + TOO_DARK.load(Relaxed);
+    let next = NEXT.load(Relaxed);
+    if total >= next && NEXT.compare_exchange(next, next * 2, Relaxed, Relaxed).is_ok() {
+        bevy::log::info!(
+            "emissive lights: {} lit, {} declined (artist's own light), {} no glow at all, {} too dark",
+            LIT.load(Relaxed),
+            AUTHORED.load(Relaxed),
+            NO_GLOW.load(Relaxed),
+            TOO_DARK.load(Relaxed),
+        );
+    }
+}
+
 /// Returns the centroid and the **fixture radius** around it: how far the glowing part's own
 /// geometry reaches, which is what has to be clipped out of the light's cube.
 fn glow_centroid(

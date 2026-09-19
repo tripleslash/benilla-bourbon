@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 30] = [
+    const SEEDED: [&str; 32] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -275,6 +275,15 @@ fn seed_launch_env() {
         "WOW_MODERN_CASTERREACH",
         "WOW_WORLDVIEW_FACE",
         "WOW_WORLDVIEW_PITCH",
+        // fork: P8 — the light-pool probe (`?points_dump=1`). `global_light`'s dump and the
+        // emissive tally are the two numbers that answer "why is that lamp dark?", and neither
+        // could reach the browser: this list is an allowlist, so a key missing from it is simply
+        // never seeded and the probe stays silent — which reads exactly like the code not running.
+        "WOW_POINTS_DUMP",
+        // …and the viewer's own anchor (`?worldview_at=x,y[,z]`), without which the browser can
+        // only ever look at the one default spot — and an interior like Northshire Abbey is
+        // portal-culled from outside it, so the bug being chased was not on screen at all.
+        "WOW_WORLDVIEW_AT",
         // fork: the perf-rig levers. Each names a pass the modern frame pays for, and none of them
         // reached the browser before — the readers took `std::env`, which on wasm32 always answers
         // NotPresent, so the one build whose GPU sets the project's budget had no way to A/B its

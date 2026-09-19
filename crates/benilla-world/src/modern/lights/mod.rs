@@ -308,6 +308,18 @@ pub struct ShadowLight {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FixtureRadius(pub f32);
 
+/// A light this fork DERIVED from a model's glow rather than one the artist authored
+/// ([`emissive`]).
+///
+/// It exists so the tier gate can be applied where the light is *read* instead of where it is
+/// spawned. Gating the spawn looked equivalent and was not: the lighting model latches after the
+/// world has begun streaming, so every doodad that arrived before the latch asked "are emissive
+/// lights on?", got `false`, and was never asked again. Which lampposts lit up came down to whether
+/// they happened to stream in before or after that frame — and they re-rolled it on every reload,
+/// which is a lamp blinking for no reason the player can see.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct SynthesizedLight;
+
 /// This frame's grid placement and shadowed set, extracted for the render world (which owns the
 /// binning pass and the atlas render).
 #[derive(Resource, Clone, ExtractResource, Default)]
@@ -890,6 +902,32 @@ mod tests {
 
         settle(&mut held, &[], &None);
         assert_eq!(held[0], None, "released only once it reached zero");
+    }
+
+    /// GOLDEN — **a derived light's tier gate is read where the light is READ, not where it is
+    /// spawned.** The two look equivalent and are not: the lighting model latches a frame or more
+    /// after the world starts streaming, so a doodad that arrived first asked "are emissive lights
+    /// on?", was told no, and was never asked again. Which of Northshire's lampposts lit came down
+    /// to streaming order, and re-rolled on every reload — a lamp blinking for no visible reason,
+    /// and others simply never working.
+    ///
+    /// The entity is spawned unconditionally and tagged; the table decides per frame.
+    #[test]
+    fn a_derived_lights_tier_gate_is_read_per_frame_not_latched_at_spawn() {
+        // The rule `global_light`'s filter applies, as arithmetic: an authored light is never
+        // gated, and a derived one follows the tier as it stands THIS frame.
+        let admits = |synthesized: bool, emissive_on: bool| !synthesized || emissive_on;
+
+        assert!(admits(false, false), "an authored light is never gated");
+        assert!(admits(false, true));
+        assert!(!admits(true, false), "derived, tier says no: out of the table");
+        assert!(admits(true, true), "derived, tier says yes: in it");
+
+        // The property that matters: the answer depends only on the tier now, never on when the
+        // doodad happened to spawn. Same inputs, same answer, whichever order they arrived in.
+        for on in [true, false] {
+            assert_eq!(admits(true, on), on, "spawn order cannot enter into it");
+        }
     }
 
     /// GOLDEN — **a street lamp may not light the inside of the chapel beside it.**

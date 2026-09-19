@@ -230,7 +230,10 @@ pub fn sun_arc_enabled() -> bool {
 /// The shadow debug view (`$WOW_MODERN_SHADOWDEBUG`, browser `?modern_shadowdebug=`): `1` = the modern
 /// receivers output raw sun visibility as grey, `2` = sky visibility, `3` = the probe field's
 /// irradiance (P5), `4` = how much of it the fragment's probe cell answered, `5` = what the local
-/// light grid put on the fragment, cube shadows included (P6). `0` (default) = off.
+/// light grid put on the fragment, cube shadows included (P6), `6` = **cell occupancy** (P8): green
+/// where the cell kept every light that reached it, yellow where it is exactly full, red where more
+/// lights reached it than `PER_CELL` can name — the probe for "why is that lamp dark?", which is a
+/// budget question and not a falloff one. `0` (default) = off.
 pub fn shadow_debug_mode() -> u8 {
     static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| {

@@ -297,7 +297,12 @@ fn build_light_data(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    lights_q: Query<(&WorldPointLight, &GlobalTransform, Option<&LightRooms>)>,
+    lights_q: Query<(
+        &WorldPointLight,
+        &GlobalTransform,
+        Option<&LightRooms>,
+        Option<&crate::modern::lights::SynthesizedLight>,
+    )>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
@@ -374,7 +379,14 @@ fn build_light_data(
     let cam_pos = cam.single().map(|t| t.translation()).unwrap_or(Vec3::ZERO);
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
-        .filter(|(_, _, rooms)| {
+        .filter(|(_, _, _, synthesized)| {
+            // fork: P8 — the tier gate for DERIVED lights, applied where the light is read rather
+            // than where it is spawned. A lamppost's light entity always exists; whether it reaches
+            // the table is this frame's question, so changing tier takes effect at once and a
+            // doodad that streamed in before the lighting latched is not left permanently dark.
+            synthesized.is_none() || crate::modern::emissive_lights_on()
+        })
+        .filter(|(_, _, rooms, _)| {
             // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
             // visibility test bolted onto a faithful gather: the reference's register walk has no
             // such term either, it simply never has a culled room's torch to register. Ungated for
@@ -384,7 +396,7 @@ fn build_light_data(
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             )
         })
-        .filter_map(|(pl, gt, rooms)| {
+        .filter_map(|(pl, gt, rooms, _)| {
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
@@ -398,7 +410,21 @@ fn build_light_data(
         })
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // fork: P8 — how many lights actually wanted in. Deriving a light from every glow card made
+    // this a real number rather than a formality: past the cap the table keeps the nearest and
+    // DROPS the rest, and the set it drops changes as the camera moves — which is a light blinking
+    // on and off for no reason the player can see.
+    let in_range = pts.len();
     pts.truncate(MAX_POINT_LIGHTS);
+    if in_range > MAX_POINT_LIGHTS {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            bevy::log::warn!(
+                "modern lights: {in_range} lights within {POINT_PACK_RADIUS} yd but the table holds                  {MAX_POINT_LIGHTS} — the {} past the cap drop in and out as the camera moves",
+                in_range - MAX_POINT_LIGHTS,
+            );
+        }
+    }
     let modern = if active.is_some_and(|a| a.is_modern()) { 1.0 } else { 0.0 };
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
     for (i, (_, p, range, rgb, indoors)) in pts.iter().enumerate() {
@@ -427,10 +453,12 @@ fn build_light_data(
     // alternate frame to frame, which a 1 Hz sample cannot see at all. Reading a per-second dump as
     // evidence of per-frame stability is how that light was cleared once already (0665's parked
     // culling test made the same mistake with a different instrument).
-    static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
-        std::sync::OnceLock::new();
-    if let Some(mode) = POINTS_DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) {
-        let every = if mode.as_os_str() == "frame" {
+    // Read through `launch_env`, not `std::env`: on wasm the process environment is empty, so the
+    // browser could never reach this probe — which is exactly where the light pool needed measuring.
+    // `benilla_app::webenv` seeds the page's `WOW_*` query params into it before the app is built.
+    static POINTS_DUMP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(mode) = POINTS_DUMP.get_or_init(|| crate::launch_env::var("WOW_POINTS_DUMP")) {
+        let every = if mode == "frame" {
             0.0
         } else {
             1.0
