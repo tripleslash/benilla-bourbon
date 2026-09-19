@@ -201,6 +201,23 @@ pub fn glow_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glo
     if !geometry.additive {
         return None;
     }
+    // **An ENV-MAPPED layer is a reflection, not an emitter.** The shine/reflect pass authored over
+    // a weapon, a shield or a polished fitting (`ARMORREFLECT3` on the ballista's bolt heads,
+    // `BALISTASHINE02` on the loose bolts — 264 shared sections across 221 world doodads, see
+    // `RenderSubmesh::section`) is additive exactly as a corona is, so `additive` alone cannot tell
+    // the two apart. What can is that such a batch's texture coordinates are GENERATED from the
+    // view-space reflection vector rather than authored ([`RenderSubmesh::env_map`]): it is showing
+    // the world back to the camera, and a mirror is not a lamp.
+    //
+    // It is also the batch this recipe is least able to read. An env-mapped layer usually carries
+    // no vertex colours — its UVs are frequently every vertex at one point, because the runtime
+    // supplies them — so the alpha-weighted mean below degrades to opaque white, which is the
+    // LARGEST weight the recipe can assign. That is why the symptom is not a subtle one: the
+    // vendor's weapon rack outside Northshire Abbey threw light across the road, from a stand of
+    // perfectly ordinary unenchanted swords.
+    if geometry.env_map {
+        return None;
+    }
     if geometry.positions.is_empty() {
         return None;
     }
@@ -321,6 +338,53 @@ mod tests {
 
     fn add(r: &OverLife) -> Source<'_> {
         (ParticleBlend::Add, false, r)
+    }
+
+    /// A glow card, as a batch: additive, with an authored tint and a corona's half-extent.
+    fn glow_batch(tint: [f32; 4]) -> benilla_formats::RenderSubmesh {
+        benilla_formats::RenderSubmesh {
+            additive: true,
+            positions: vec![
+                [-REFERENCE_CARD, 0.0, -REFERENCE_CARD],
+                [REFERENCE_CARD, 0.0, REFERENCE_CARD],
+            ],
+            vertex_colors: vec![tint; 2],
+            ..Default::default()
+        }
+    }
+
+    /// GOLDEN — **a mirror is not a lamp.** An ENV-MAPPED additive layer is the shine/reflect pass
+    /// artists author over metal (`ARMORREFLECT3`, `BALISTASHINE02` — 264 shared sections across
+    /// 221 world doodads), and it blends exactly like a corona, so `additive` alone reads it as
+    /// one. It has to be refused on the one thing that does separate them: its texture coordinates
+    /// are generated from the view reflection vector rather than authored.
+    ///
+    /// The director's report is the shape of the bug: the vendor's weapon rack outside Northshire
+    /// Abbey threw light across the road, from a stand of ordinary unenchanted swords whose only
+    /// "glow" was their env-map shine. And it was not subtle, for the reason the second assert
+    /// pins — such a batch carries no vertex colours, so the tint recipe degrades to opaque white,
+    /// the largest weight it can assign. An env-mapped layer is the brightest possible false
+    /// positive, not a marginal one.
+    #[test]
+    fn an_env_mapped_shine_layer_is_not_a_glow_card() {
+        let shine = benilla_formats::RenderSubmesh {
+            env_map: true,
+            ..glow_batch([1.0; 4])
+        };
+        assert_eq!(
+            glow_of_geometry(&shine),
+            None,
+            "a weapon's reflection pass was read as a light source"
+        );
+        // The same batch WITHOUT the env-map flag is the brightest card this recipe knows — which
+        // is exactly what the rack was contributing before the refusal.
+        let lamp = glow_batch([1.0; 4]);
+        let read = glow_of_geometry(&lamp).expect("an untinted additive card IS a glow card");
+        assert_eq!(read.tint, [1.0; 4], "white at full alpha — the maximum weight");
+        assert!(
+            combine(false, [], [read]).is_some(),
+            "and it synthesizes a real light, so refusing it is what stops the rack glowing"
+        );
     }
 
     /// GOLDEN — **the authored answer always wins.** A model that ships a casting M2 light gets no
