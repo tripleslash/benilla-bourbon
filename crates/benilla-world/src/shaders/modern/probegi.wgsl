@@ -155,10 +155,13 @@ struct GiAccum {
     sum: vec3<f32>,
     weight: f32,
     sky: f32,
+    /// The same weight **before** the class match — the denominator that says how much of this cell
+    /// the class test threw away. See [`finish`].
+    base: f32,
 }
 
 fn start() -> GiAccum {
-    return GiAccum(vec3<f32>(0.0), 0.0, 0.0);
+    return GiAccum(vec3<f32>(0.0), 0.0, 0.0, 0.0);
 }
 
 fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f32>, nrm: vec3<f32>) -> GiAccum {
@@ -184,6 +187,7 @@ fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f3
     // only mildly prefers exterior probes, because the probe's side of the test IS inferred and a
     // probe deep under a canopy is legitimately dark and legitimately outdoors — a symmetric test
     // would throw P5's canopy bounce away along with the room's.
+    let base_w = w;
     let leak = pk.recv * (1.0 - probe.depth.z);
     let spill = (1.0 - pk.recv) * probe.depth.z;
     w = w * clamp(1.0 - leak * 0.92 - spill * 0.35, 0.05, 1.0);
@@ -199,15 +203,32 @@ fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f3
         }
     }
     let e = max(probe.dc.rgb + probe.sh_x.rgb * nrm.x + probe.sh_y.rgb * nrm.y + probe.sh_z.rgb * nrm.z, vec3<f32>(0.0));
-    return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w);
+    return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w, a.base + base_w);
 }
 
 // rgb = the irradiance over pi the ambient row is replaced by; w = how much of the cell answered.
-fn finish(a: GiAccum) -> vec4<f32> {
-    if (a.weight <= 1e-5) {
+// `recv` is the receiver's interior class, as [`pick`] took it.
+fn finish(a: GiAccum, recv: f32) -> vec4<f32> {
+    if (a.weight <= 1e-5 || a.base <= 1e-5) {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(a.sum / a.weight, clamp(a.weight * 3.0, 0.0, 1.0));
+    // **The class match has to reach the CONFIDENCE, not just the weights.** It scales each probe's
+    // weight, but the colour is normalised by the total weight — so a cell in which the class test
+    // rejected *every* probe still returns their irradiance at full strength, merely with all the
+    // weights small together. Interior receivers are where that shows: the cascades are camera
+    // centred, so from across the room only the coarse ones cover a point, and a 54 yd probe
+    // spacing has no probe inside the building at all. Northshire Abbey lit up with the daylight
+    // outside it, and got correctly dark as the player walked close enough for the fine cascade to
+    // answer.
+    //
+    // `weight / base` is the share of this cell that survived the class test. Folding it into the
+    // confidence lets the lane fall back to the room's authored ambient instead of the sky.
+    // Applied for an INTERIOR receiver only (`recv`), because the exterior half of the class test
+    // is a mild preference over an inferred class (see `accum`) and must not start dimming the
+    // canopy bounce it was deliberately kept gentle for.
+    let survived = clamp(a.weight / a.base, 0.0, 1.0);
+    let confidence = clamp(a.weight * 3.0, 0.0, 1.0) * mix(1.0, survived, clamp(recv, 0.0, 1.0));
+    return vec4<f32>(a.sum / a.weight, confidence);
 }
 
 // The nearest probe's slot — the froxels' one-tap lookup.

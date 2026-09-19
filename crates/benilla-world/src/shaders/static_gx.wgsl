@@ -130,7 +130,7 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
         for (var k = 0u; k < 8u; k = k + 1u) {
             acc = probegi::accum(acc, g, pk, k, modern_block.probes[probegi::tap_index(g, pk, k)], p, nrm);
         }
-        let cell_gi = probegi::finish(acc);
+        let cell_gi = probegi::finish(acc, pk.recv);
         let share = select(left * pk.inside, 1.0, lite);
         sum = sum + cell_gi.rgb * (cell_gi.w * share);
         answered = answered + cell_gi.w * share;

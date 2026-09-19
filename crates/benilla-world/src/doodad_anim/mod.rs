@@ -1202,6 +1202,7 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![true],
+                lit: vec![true],
                 interior_fog: vec![false],
                 liquid_visited: vec![false],
                 flooded: vec![None],

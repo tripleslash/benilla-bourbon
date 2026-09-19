@@ -557,7 +557,7 @@ fn update_lights(
     let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
     if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
         for (light, gt, rooms, fixture) in &lights_q {
-            if !crate::wmo_portal::room_admits(
+            if !crate::wmo_portal::room_admits_light(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             ) {

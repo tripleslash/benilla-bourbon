@@ -375,6 +375,8 @@ pub(super) fn spawn_loaded_placements(
                                 world_from_local: p.transform.compute_affine(),
                                 name_set: p.name_set,
                                 visible: vec![true; m.group_nav.len()],
+                                // Lit until a flood narrows it, on the same fail-open as `visible`.
+                                lit: vec![true; m.group_nav.len()],
                                 // Nothing wears the building's own fog until a flood says
                                 // it is on the chain (`WmoPortalInstance::interior_fog`).
                                 interior_fog: vec![false; m.group_nav.len()],

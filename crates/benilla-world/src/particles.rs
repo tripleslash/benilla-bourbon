@@ -1287,6 +1287,7 @@ pub(crate) mod tests {
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
             visible: vec![true, false, false],
+            lit: vec![true, false, false],
             interior_fog: vec![false; 3],
         };
         let fade = |groups: Option<&[u16]>| EmitterFade {

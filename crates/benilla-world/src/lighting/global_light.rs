@@ -391,7 +391,7 @@ fn build_light_data(
             // visibility test bolted onto a faithful gather: the reference's register walk has no
             // such term either, it simply never has a culled room's torch to register. Ungated for
             // every light that names no rooms, which is every light outside a building.
-            crate::wmo_portal::room_admits(
+            crate::wmo_portal::room_admits_light(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             )

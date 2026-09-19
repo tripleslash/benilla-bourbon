@@ -185,6 +185,15 @@ impl WmoGroupVis {
     /// wears the fog of any of them. A lookup miss reads FALSE, the opposite of `drawn_by`'s
     /// fail-open: a missing bit here must not paint a room's fog onto the open world, and the scene
     /// fog is what every un-gated surface already wears.
+    /// The LIGHTING verdict: lit iff any referencing group is reachable through portals from the
+    /// camera's room ([`WmoPortalInstance::lit`]). The twin of [`Self::drawn_by`], on the same
+    /// fail-open, and deliberately NOT the same set — see that field.
+    pub fn lit_by(&self, inst: &WmoPortalInstance) -> bool {
+        self.groups
+            .iter()
+            .any(|&g| inst.lit.get(g as usize).copied().unwrap_or(true))
+    }
+
     pub fn interior_fogged_by(&self, inst: &WmoPortalInstance) -> bool {
         self.groups.iter().any(|&g| inst.fogs_group(g))
     }
@@ -220,6 +229,20 @@ pub fn room_admits(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstan
     }
 }
 
+/// [`room_admits`] for a LIGHT. Same shape, different set: a light is admitted by portal
+/// reachability ([`WmoPortalInstance::lit`]) rather than by this frame's frustum-clipped cull, so
+/// tilting the camera cannot switch a lamp on and off.
+pub fn room_admits_light(
+    room: Option<&WmoGroupVis>,
+    instance: Option<&WmoPortalInstance>,
+) -> bool {
+    match (room, instance) {
+        (None, _) => true,
+        (Some(r), Some(inst)) => r.lit_by(inst),
+        (Some(_), None) => false,
+    }
+}
+
 /// One placed WMO building's portal-cull state. Spawned alongside the building's geometry; despawns
 /// with the placement (it's pushed into the placement's entity list).
 #[derive(Component)]
@@ -237,6 +260,18 @@ pub struct WmoPortalInstance {
     /// PVS. Seeded all-`true` (everything shows until the first compute, and forever for portal-less
     /// props).
     pub visible: Vec<bool>,
+    /// **Per-group LIGHTING reachability** — which rooms this frame's camera can be lit from.
+    ///
+    /// Not [`Self::visible`], and the difference is the whole point. `visible` is the reference's
+    /// portal cull, and that cull clips the frustum to each doorway: a room drops out of it the
+    /// moment the doorway leaves the screen. Gating LIGHTS on it made a lamp's light blink as the
+    /// player tilted the camera or stepped back — Northshire Abbey's entrance lamp, which sits
+    /// right beside the portal that decides it.
+    ///
+    /// This is the same graph walked without the frustum: which groups are reachable through
+    /// portals from the room the camera stands in, whatever is on screen. Turning the camera cannot
+    /// change it, which is exactly the property a light needs. Seeded all-`true`, like `visible`.
+    pub lit: Vec<bool>,
     /// Per-group **interior-fog** gate for this frame (the client's `[0xca7f00]`): `true` = this
     /// group's surfaces and its doodads draw with the building's MFOG triple, `false` = they
     /// inherit the scene fog. Computed by the same flood as `visible` — see [`GroupPvs`] for the
@@ -433,6 +468,10 @@ fn compute_wmo_pvs(
                 held.visible = vec![true; groups];
                 changed = true;
             }
+            if held.lit.len() != groups || held.lit.iter().any(|v| !*v) {
+                held.lit = vec![true; groups];
+                changed = true;
+            }
             if held.interior_fog.len() != groups || held.interior_fog.iter().any(|v| *v) {
                 held.interior_fog = vec![false; groups];
                 changed = true;
@@ -468,6 +507,11 @@ fn compute_wmo_pvs(
             &world_from_local,
             &mut (&mut tap, &mut log),
         );
+        let lit = lighting_reach(&model, eye_local, terrain_local);
+        if inst.bypass_change_detection().lit != lit {
+            inst.bypass_change_detection().lit = lit;
+            inst.set_changed();
+        }
         if inst.bypass_change_detection().visible != fresh.visible {
             inst.bypass_change_detection().visible = fresh.visible;
             inst.set_changed();
@@ -752,6 +796,56 @@ impl<T: FloodTrace> FloodTrace for Option<T> {
     }
 }
 
+/// **Which rooms the camera can be LIT from** — the portal graph walked with no frustum at all.
+///
+/// Deliberately not [`compute_pvs_traced`], and deliberately much simpler. That function is a
+/// faithful carve of the reference's cull, down to clipping the frustum to each doorway and
+/// dropping a branch whose window closes; several decisions rest on it and it must not be bent to
+/// serve lighting. But that same frustum clipping is what made a lamp's light blink when the player
+/// tilted the camera — the room the lamp stands in left the *screen*, so the cull dropped it, so its
+/// light left the table.
+///
+/// A light's reach is a property of the building, not of where the player is looking. So this walks
+/// the same graph on connectivity alone: from the group the camera stands in, out through every
+/// portal, as far as the graph goes. No frustum, no windows, no front-side test — a lamp behind you
+/// lights the wall in front of you, and a lamp through a doorway you are not looking at still lights
+/// its own room.
+///
+/// With no containing group (the camera outside the building) every group is lit: the building's
+/// own lights are then gated by range alone, which is what the open world already does.
+fn lighting_reach(model: &WmoModel, eye_local: [f32; 3], terrain_z: Option<f32>) -> Vec<bool> {
+    let nav = &model.group_nav;
+    let mut lit = vec![false; nav.len()];
+    let seeds = down_ray_seeds(model, eye_local, terrain_z);
+    let mut stack: Vec<usize> = Vec::new();
+    match seeds.in_group {
+        Some(c) => {
+            stack.push(c);
+            if let Some(a) = seeds.across {
+                stack.push(a);
+            }
+        }
+        // Outside the building: no room gate at all.
+        None => return vec![true; nav.len()],
+    }
+    while let Some(gi) = stack.pop() {
+        if lit.get(gi).copied().unwrap_or(true) {
+            continue;
+        }
+        lit[gi] = true;
+        let Some(g) = nav.get(gi) else { continue };
+        let lo = g.ref_start as usize;
+        let hi = lo + g.ref_count as usize;
+        for r in model.portal_refs.get(lo..hi).unwrap_or(&[]) {
+            let to = r.group as usize;
+            if to < lit.len() && !lit[to] {
+                stack.push(to);
+            }
+        }
+    }
+    lit
+}
+
 /// The portal flood. Returns the per-group visible set (indexed by absolute group index). `eye_local` is
 /// the camera in WMO model space (WoW axes): it seeds the flood (the group whose floor it stands over —
 /// the down-ray) and drives the per-portal front-side test. `clip_from_world` / `world_from_local`
@@ -832,6 +926,7 @@ struct Flood<'a> {
     clip_from_world: &'a Mat4,
     world_from_local: &'a Affine3A,
     visible: Vec<bool>,
+    lit: Vec<bool>,
     interior_fog: Vec<bool>,
     /// The **deferred exterior-window worklist** Pass 1 leaves behind — the client's `[0xcbe324]`
     /// records, reset to empty at `0x6b3b51` and filled by the recursion at `0x6b4541`.
@@ -970,6 +1065,7 @@ fn compute_pvs_traced<T: FloodTrace>(
         clip_from_world,
         world_from_local,
         visible: vec![false; nav.len()],
+        lit: vec![false; nav.len()],
         interior_fog: vec![false; nav.len()],
         windows: Vec::new(),
         portal_pushed: vec![false; model.portal_infos.len()],
@@ -1284,6 +1380,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![false, true, false],
+            lit: vec![false, true, false],
             interior_fog: vec![false; 3],
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
@@ -1317,6 +1414,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![true; 3],
+            lit: vec![true; 3],
             interior_fog: vec![false, true, false],
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
@@ -1751,6 +1849,64 @@ mod tests {
 
     /// A bare model holding one vertical doorway portal in the WoW x=0 plane (y ∈ [-1,1], z ∈ [-1,1]),
     /// i.e. straddling the world origin.
+    /// A three-room chain: 0 —portal— 1 —portal— 2, with group 2 nowhere near the camera's view.
+    fn chain_model() -> WmoModel {
+        let mut m = portal_model();
+        // An interior room spanning the origin, so the down-ray's seed lands in group 0.
+        let room = |ref_start: u16, ref_count: u16| WmoGroupNav {
+            flags: 0,
+            bbox_min: [-8.0, -8.0, -8.0],
+            bbox_max: [8.0, 8.0, 8.0],
+            ref_start,
+            ref_count,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        };
+        m.group_nav = vec![room(0, 1), room(1, 2), room(3, 1)];
+        m.portal_refs = vec![
+            WmoPortalRef { portal: 0, group: 1, side: 1 },
+            WmoPortalRef { portal: 0, group: 0, side: -1 },
+            WmoPortalRef { portal: 0, group: 2, side: 1 },
+            WmoPortalRef { portal: 0, group: 1, side: -1 },
+        ];
+        m
+    }
+
+    /// GOLDEN — **a light's room gate is reachability, and reachability cannot see the camera.**
+    ///
+    /// The lamp at Northshire Abbey's entrance blinked as the player tilted the camera or backed
+    /// away. Lights were gated on [`WmoPortalInstance::visible`] — the reference's portal cull,
+    /// which clips the frustum to each doorway — so looking away from the doorway dropped the room
+    /// and the lamp's light left the table. A lamp beside a portal re-rolls that verdict on every
+    /// small camera move.
+    ///
+    /// [`lighting_reach`] takes no orientation and no projection **at all**: its signature is the
+    /// guarantee, and this pins the behaviour behind it — every room on the portal chain is lit
+    /// from the camera's own room, however far down the chain and whatever is on screen.
+    #[test]
+    fn lighting_reach_floods_the_whole_portal_chain_and_ignores_the_view() {
+        let m = chain_model();
+        // Standing in room 0. Room 2 is two doorways away and cannot be on screen through both.
+        let lit = lighting_reach(&m, [-1.0, 0.0, 0.0], None);
+        assert_eq!(
+            lit.len(),
+            3,
+            "one verdict per group"
+        );
+        assert!(lit.iter().all(|v| *v), "every room on the chain is lit: {lit:?}");
+    }
+
+    /// Outside the building there is no room gate at all — the building's lights are then bounded
+    /// by range alone, which is what the open world already does.
+    #[test]
+    fn lighting_reach_outside_a_building_gates_nothing() {
+        let m = chain_model();
+        // Far above everything: the down-ray finds no containing group.
+        let lit = lighting_reach(&m, [0.0, 0.0, 10_000.0], None);
+        assert!(lit.iter().all(|v| *v), "{lit:?}");
+    }
+
     fn portal_model() -> WmoModel {
         WmoModel {
             wmo_id: 0,
