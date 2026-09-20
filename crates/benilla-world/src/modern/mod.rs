@@ -137,8 +137,9 @@ impl LightingQuality {
     }
 }
 
-/// What the player asked for. Written by `benilla-app`'s CVar host; takes effect at the next
-/// world entry (see [`ActiveLighting`]).
+/// What the player asked for. Written by `benilla-app`'s CVar host. The MODEL takes effect at the
+/// next world entry; the QUALITY tier takes effect on the frame it is written (see
+/// [`ActiveLighting`]).
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub struct LightingSettings {
     pub model: LightingModel,
@@ -159,10 +160,22 @@ impl Default for LightingSettings {
     }
 }
 
-/// What this world session actually renders with: [`LightingSettings`] copied once, when a
-/// [`WorldCamera`] appears. Latched rather than live because switching models swaps materials,
-/// render-graph nodes and a few hundred pipelines — work that belongs behind the loading cover,
-/// the same posture as `gxMultisample`.
+/// What this world session actually renders with.
+///
+/// The MODEL is latched: copied from [`LightingSettings`] once, when a [`WorldCamera`] appears.
+/// Switching models swaps materials, render-graph nodes and a few hundred pipelines — work that
+/// belongs behind the loading cover, the same posture as `gxMultisample`.
+///
+/// The TIER is **live**: it follows [`LightingSettings::quality`] on the frame the player moves the
+/// dropdown, because nothing about a tier change needs the loading cover. Every consumer already
+/// reads the tier per frame (`shadow::cascade_splits`, `gi::gi_tier`, `lights::light_tier`,
+/// `volumetrics::froxel_tier`), the two allocations a tier sizes already refit on a change to this
+/// resource (`shadow::fit_shadow_map`, `volumetrics::resize_volume_image`, and the render world
+/// drops its static caches when the shadow array's texture id moves), and the Cinematic gate is
+/// read where a light is READ rather than where it was spawned (`global_light`,
+/// `SynthesizedLight`), so a lamp that streamed in on Ultra lights up on Cinematic without
+/// re-streaming. The tier costs a one-frame hitch when it crosses a boundary that re-sizes the
+/// shadow array, and nothing at all when it does not.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
 pub struct ActiveLighting {
     pub model: LightingModel,
@@ -186,14 +199,16 @@ impl ActiveLighting {
 
 /// The latched model as a process-wide bit, for the Rust-side hooks inside upstream-owned systems
 /// (sky colours, celestial and cloud materials, the FFXGlow combine) whose signatures stay as
-/// upstream wrote them. Written only by [`latch_on_world_entry`].
+/// upstream wrote them. Written only by [`resolve_active_lighting`].
 static MODERN_FRAME: AtomicBool = AtomicBool::new(false);
 
 /// fork: P8 — the same device for the same reason, one tier further in. The two spawners that would
 /// have to ask whether this session lights emissive sources — `terrain_stream::spawn`'s placement
 /// walk and `benilla-app`'s equipment attach — are upstream-owned systems already nested against
 /// Bevy's 16-parameter limit, and threading a resource into either is a merge hazard for a
-/// question whose answer is one latched bit. Written only by [`latch_on_world_entry`].
+/// question whose answer is one bit. It moves with the live tier, so a lamp that streamed in on
+/// Ultra is lit by the Cinematic the player just picked — which is why the readers ask it per
+/// frame rather than at spawn. Written only by [`resolve_active_lighting`].
 static EMISSIVE_LIGHTS: AtomicBool = AtomicBool::new(false);
 
 /// Is the world frame linear (a modern session)?
@@ -291,7 +306,7 @@ impl Plugin for ModernLightingPlugin {
         app.init_resource::<LightingSettings>()
             .init_resource::<ActiveLighting>()
             .add_plugins(ExtractResourcePlugin::<ActiveLighting>::default())
-            .add_systems(PreUpdate, (latch_on_world_entry, sync_model_pipelines).chain())
+            .add_systems(PreUpdate, (resolve_active_lighting, sync_model_pipelines).chain())
             .add_plugins((
                 sun_arc::plugin,
                 shadow::plugin,
@@ -305,35 +320,37 @@ impl Plugin for ModernLightingPlugin {
     }
 }
 
-fn latch_on_world_entry(
+/// [`ActiveLighting`] for this frame: the model as it was latched at world entry, the tier as the
+/// player has it set right now.
+fn resolve_active_lighting(
     settings: Res<LightingSettings>,
     mut active: ResMut<ActiveLighting>,
     cameras: Query<&Camera, With<WorldCamera>>,
     mut in_world: Local<bool>,
+    // The latched model. Out of the world it is Classic, whatever the player has selected.
+    mut model: Local<LightingModel>,
 ) {
     // The client spawns its world camera at startup and only switches it on for the world (and its
     // loading cover), so "in the world" is an ACTIVE world camera. Out of the world — login,
     // character select and creation — everything renders classic.
     let now = cameras.iter().any(|c| c.is_active);
-    if now == *in_world {
+    if now != *in_world {
+        *in_world = now;
+        *model = if now { settings.model } else { LightingModel::Classic };
+    }
+    // The tier rides through every frame, not just the edge — see [`ActiveLighting`]. Built and
+    // compared as a whole so the resource is only written when something actually moved: the
+    // readers that refit an allocation key off `is_changed()`, and a deref-mut every frame would
+    // re-create the fog volume forever.
+    let next = ActiveLighting {
+        model: *model,
+        quality: settings.quality,
+    };
+    if *active == next {
         return;
     }
-    *in_world = now;
-    let next = if now {
-        ActiveLighting {
-            model: settings.model,
-            quality: settings.quality,
-        }
-    } else {
-        ActiveLighting {
-            model: LightingModel::Classic,
-            quality: settings.quality,
-        }
-    };
-    if *active != next {
-        info!("lighting latched: {:?} / {:?}", next.model, next.quality);
-        *active = next;
-    }
+    info!("lighting active: {:?} / {:?}", next.model, next.quality);
+    *active = next;
     MODERN_FRAME.store(active.is_modern(), Ordering::Relaxed);
     EMISSIVE_LIGHTS.store(
         active.is_modern() && active.quality.lights_emissive_sources(),
@@ -382,6 +399,119 @@ fn sync_model_pipelines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two latch tests drive the process-wide `MODERN_FRAME` / `EMISSIVE_LIGHTS` atomics, so
+    /// they take turns rather than racing each other inside one test binary.
+    static LATCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// How many frames a consumer saw [`ActiveLighting`] change — what `fit_shadow_map` and
+    /// `resize_volume_image` key their refits off.
+    #[derive(Resource, Default)]
+    struct Refits(u32);
+
+    fn count_refits(active: Res<ActiveLighting>, mut refits: ResMut<Refits>) {
+        if active.is_changed() {
+            refits.0 += 1;
+        }
+    }
+
+    /// The world, with one world camera whose `is_active` the test drives.
+    fn world_app(settings: LightingSettings) -> App {
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<ActiveLighting>()
+            .init_resource::<Refits>()
+            .add_systems(PreUpdate, (resolve_active_lighting, count_refits).chain());
+        app.world_mut()
+            .spawn((WorldCamera, Camera { is_active: false, ..default() }));
+        app
+    }
+
+    fn enter_world(app: &mut App, enter: bool) {
+        let mut cams = app.world_mut().query::<&mut Camera>();
+        for mut c in cams.iter_mut(app.world_mut()) {
+            c.is_active = enter;
+        }
+    }
+
+    fn active(app: &App) -> ActiveLighting {
+        *app.world().resource::<ActiveLighting>()
+    }
+
+    fn refits(app: &App) -> u32 {
+        app.world().resource::<Refits>().0
+    }
+
+    /// The MODEL waits for the loading cover; the TIER does not. A player who moves the Lighting
+    /// Quality dropdown standing in Northshire sees the new tier on the next frame, without
+    /// reloading the client — which is the whole reason the tier stopped being latched.
+    #[test]
+    fn the_tier_applies_live_and_the_model_still_waits_for_world_entry() {
+        let _guard = LATCH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = world_app(LightingSettings {
+            model: LightingModel::Modern,
+            quality: LightingQuality::High,
+        });
+
+        // Out of the world — login and character select — everything renders classic.
+        app.update();
+        assert_eq!(active(&app).model, LightingModel::Classic);
+
+        enter_world(&mut app, true);
+        app.update();
+        assert_eq!(active(&app).model, LightingModel::Modern);
+        assert_eq!(active(&app).quality, LightingQuality::High);
+
+        // The dropdown moves with the world already up: the tier follows on the next frame.
+        app.world_mut().resource_mut::<LightingSettings>().quality = LightingQuality::Cinematic;
+        app.update();
+        assert_eq!(active(&app).quality, LightingQuality::Cinematic);
+        assert!(emissive_lights_on(), "the Cinematic gate follows the live tier");
+
+        // And back down, the frame after.
+        app.world_mut().resource_mut::<LightingSettings>().quality = LightingQuality::Low;
+        app.update();
+        assert_eq!(active(&app).quality, LightingQuality::Low);
+        assert!(!emissive_lights_on());
+
+        // The model, meanwhile, is still the one latched at entry — a write to it moves no frame.
+        app.world_mut().resource_mut::<LightingSettings>().model = LightingModel::Classic;
+        app.update();
+        assert_eq!(active(&app).model, LightingModel::Modern);
+        assert!(frame_is_modern());
+
+        // …until the world is left and re-entered.
+        enter_world(&mut app, false);
+        app.update();
+        assert_eq!(active(&app).model, LightingModel::Classic);
+        assert!(!frame_is_modern());
+    }
+
+    /// The readers that refit an allocation — the shadow array's depth, the froxel volume — key off
+    /// `ActiveLighting::is_changed()`, and each refit re-prepares every material that binds the
+    /// thing. A latch that wrote the resource every frame would re-create both of them forever, so
+    /// a frame where neither the tier nor the model moved must leave the resource alone.
+    #[test]
+    fn a_still_frame_leaves_the_resource_untouched() {
+        let _guard = LATCH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = world_app(LightingSettings {
+            model: LightingModel::Modern,
+            quality: LightingQuality::High,
+        });
+        enter_world(&mut app, true);
+        for _ in 0..8 {
+            app.update();
+        }
+        // Exactly one: the world entry itself. (The very first frame writes nothing — a classic
+        // session at the platform default is what the resource already holds.)
+        assert_eq!(refits(&app), 1);
+
+        app.world_mut().resource_mut::<LightingSettings>().quality = LightingQuality::Ultra;
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(refits(&app), 2, "one tier move is one refit, not eight");
+    }
 
     #[test]
     fn model_cvar_round_trips_and_names_parse() {

@@ -304,7 +304,13 @@ fn plugin(app: &mut App) {
     )
     .add_systems(
         Update,
-        (fly, live_pose.after(fly), toggle_indirect, wade_probe::toggle_wade_probe)
+        (
+            fly,
+            live_pose.after(fly),
+            toggle_indirect,
+            cycle_lighting_tier,
+            wade_probe::toggle_wade_probe,
+        )
             .in_set(crate::schedule::WorldStage::Input),
     )
     // The wade probe MOVES in the ordinary update, not the input stage: `water_fx`'s emitter reads
@@ -358,6 +364,30 @@ fn toggle_indirect(
         lighting.ao,
         lighting.gi,
     );
+}
+
+/// **`T` cycles the lighting tier** — Low → Medium → High → Ultra → Cinematic → Low.
+///
+/// The worldview has no CVar host, so `?lighting_quality=` is the only tier knob it has and it is
+/// read once, at startup. That was fine while the tier latched at world entry and a change meant a
+/// reload anyway; now that the tier is live (`modern::ActiveLighting`), a relaunch is exactly the
+/// wrong instrument — it re-streams the zone, re-fits the probe field and re-seeds the fly camera,
+/// so the one thing the change is about, *the same frame rendered at two tiers*, is the one thing
+/// it cannot show. This is `toggle_indirect`'s reasoning, one knob over.
+///
+/// It writes [`LightingSettings`], not `ActiveLighting` — the same door the options dropdown pushes
+/// on, so what the key exercises is the real path and not a shortcut past it.
+fn cycle_lighting_tier(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<crate::modern::LightingSettings>,
+) {
+    if !keys.just_pressed(KeyCode::KeyT) {
+        return; // never touch the resource on a quiet frame — the latch keys off a real change
+    }
+    let all = crate::modern::LightingQuality::ALL;
+    let next = all[(settings.quality as usize + 1) % all.len()];
+    settings.quality = next;
+    info!("worldview: lighting tier -> {next:?}");
 }
 
 /// The one-shot frame writer behind `WOW_WORLDVIEW_SHOT` — fires once, then gives the screenshot

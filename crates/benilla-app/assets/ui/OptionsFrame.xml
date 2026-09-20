@@ -828,8 +828,9 @@
             .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
             .. "Modern water costs additional GPU time."
 
-        -- fork: the modern lighting model (FORK.md). Both CVars latch when the
-        -- world is entered, so a change shows the next time the world loads.
+        -- fork: the modern lighting model (FORK.md). The MODEL latches when the
+        -- world is entered, so a change shows the next time the world loads; the TIER applies to
+        -- the next frame, so the dropdown previews it under the open options window.
         BENILLA_TOOLTIP_LIGHTING_MODEL =
             "How the world is lit.\n\n"
             .. "Modern adds real-time sun shadows from every object, light shafts through fog and "
@@ -843,7 +844,7 @@
             .. "braziers and candles that carry no light of their own, and enchanted weapons - and "
             .. "gives a dozen of them soft shadows that characters cast into. It is much more "
             .. "expensive than Ultra.\n\n"
-            .. "Has no effect on Classic lighting. Takes effect the next time the world loads."
+            .. "Has no effect on Classic lighting. Takes effect immediately."
 
         -- Brightness (2182). 1.12's own OPTION_TOOLTIP_GAMMA cannot ride this row: its whole
         -- second sentence is "Increase brightness until you can clearly see all 21 levels of gray

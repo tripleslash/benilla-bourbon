@@ -28,7 +28,8 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderStorageBuffer;
 
 use benilla_assets::materials::{
-    TerrainMaterial, WowModelMaterial, MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP,
+    LiquidCataMaterial, LiquidMaterial, TerrainMaterial, WowModelMaterial, MODERN_SHADOW_CASCADES,
+    MODERN_SHADOW_MAP,
 };
 use benilla_formats::ModelBlend;
 use bevy::camera::primitives::Aabb;
@@ -264,9 +265,10 @@ fn shadow_map_image(size: u32, layers: usize) -> Image {
     image
 }
 
-/// Re-size the constant-handle shadow array whenever the latched model changes: full size for a
-/// modern session, one texel for a classic one. A write only on the edge, since it re-prepares every
-/// material that binds the handle.
+/// Re-size the constant-handle shadow array whenever the latched model or the live tier changes:
+/// full size for a modern session, one texel for a classic one, at the tier's own layer count.
+/// Only ever on a real change, since it re-prepares every material that binds the handle.
+#[allow(clippy::too_many_arguments)]
 fn fit_shadow_map(
     active: Res<ActiveLighting>,
     mut images: ResMut<Assets<Image>>,
@@ -274,6 +276,20 @@ fn fit_shadow_map(
     // 16.8 MB each here and again in the render world's static cache, so the array is created at
     // the tier's own layer count rather than at the largest one any tier could ask for.
     mut fitted: Local<Option<(bool, usize)>>,
+    // The four material families that bind the handle. A re-created texture leaves every prepared
+    // bind group holding the OLD view, so the ones that already exist have to be touched — the
+    // same duty `volumetrics::resize_volume_image` performs for the froxel volume.
+    //
+    // This used to be somebody else's job by luck rather than by design: the depth only ever moved
+    // on a model latch, and that same edge had `sync_model_pipelines` sweeping models and terrain
+    // and `resize_volume_image` sweeping models and both liquids, so between them all four got
+    // touched. The tier is live now, so a Medium→High move re-creates this texture on a frame
+    // where neither of those systems fires at all, and the sweep has to belong to the system that
+    // re-created it.
+    models: Option<ResMut<Assets<WowModelMaterial>>>,
+    terrain: Option<ResMut<Assets<TerrainMaterial>>>,
+    liquids: Option<ResMut<Assets<LiquidMaterial>>>,
+    cata: Option<ResMut<Assets<LiquidCataMaterial>>>,
 ) {
     let modern = active.is_modern();
     // A classic session keeps the full layer COUNT at one texel each (28 bytes): nothing samples
@@ -294,9 +310,24 @@ fn fit_shadow_map(
             i.texture_descriptor.size.depth_or_array_layers as usize,
         )
     });
-    if current != Some((size, layers)) {
-        let _ = images.insert(MODERN_SHADOW_MAP.id(), shadow_map_image(size, layers));
+    if current == Some((size, layers)) {
+        return;
     }
+    let _ = images.insert(MODERN_SHADOW_MAP.id(), shadow_map_image(size, layers));
+    let mut touched = 0;
+    if let Some(mut m) = models {
+        touched += m.iter_mut().count();
+    }
+    if let Some(mut m) = terrain {
+        touched += m.iter_mut().count();
+    }
+    if let Some(mut m) = liquids {
+        touched += m.iter_mut().count();
+    }
+    if let Some(mut m) = cata {
+        touched += m.iter_mut().count();
+    }
+    info!("modern shadow: array {size}² × {layers} allocated, {touched} materials rebound");
 }
 
 /// Insert the two constant-handle assets. Always (classic sessions too): the materials bind them

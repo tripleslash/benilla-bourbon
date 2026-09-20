@@ -382,8 +382,9 @@ pub(crate) fn on_cvar(
                 indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
             }
         }
-        // The fork's modern lighting (FORK.md). Both latch at the next world
-        // entry (`benilla_world::modern::ActiveLighting`), so a write here moves no frame now.
+        // The fork's modern lighting (FORK.md). The MODEL latches at the next
+        // world entry (`benilla_world::modern::ActiveLighting`), so a write here moves no frame
+        // now; the TIER is live, and the frame after this write is already rendered at it.
         "lightingmodel" => {
             if let Some(lighting) = fork.1.as_deref_mut() {
                 lighting.model = benilla_world::modern::LightingModel::from_cvar(v);
