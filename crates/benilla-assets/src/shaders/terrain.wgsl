@@ -258,6 +258,14 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
         let pos_range = wow_light.points[2u * i];
         let dv = pos_range.xyz - anchor;
         let d2 = dot(dv, dv);
+        // Ground is always an EXTERIOR receiver, so an INDOOR light (`w` = 1) is refused outright.
+        // This is not a cull bolted onto a faithful selection — it is what makes it faithful: the
+        // reference's register walk has no such term because it never has a culled room's torch to
+        // register in the first place, while we create every light once and keep it. Without it
+        // Northshire Abbey's candles lit the road through the abbey wall.
+        if (wow_light.points[2u * i + 1u].w >= 0.5) {
+            continue;
+        }
         // The hash sweep is horizontal (the grid keys on WoW x/y = Bevy z/x) and has no vertical
         // bound; ranking below is the full 3-D distance, as `0x71bf90` does.
         if (max(abs(dv.x), abs(dv.z)) > TERRAIN_REACH) {
@@ -299,6 +307,14 @@ fn point_light_select(anchor: vec3<f32>) -> vec3<u32> {
         let pos_range = wow_light.points[2u * i];
         let dv = pos_range.xyz - anchor;
         let d2 = dot(dv, dv);
+        // Ground is always an EXTERIOR receiver, so an INDOOR light (`w` = 1) is refused outright.
+        // This is not a cull bolted onto a faithful selection — it is what makes it faithful: the
+        // reference's register walk has no such term because it never has a culled room's torch to
+        // register in the first place, while we create every light once and keep it. Without it
+        // Northshire Abbey's candles lit the road through the abbey wall.
+        if (wow_light.points[2u * i + 1u].w >= 0.5) {
+            continue;
+        }
         if (max(abs(dv.x), abs(dv.z)) > TERRAIN_REACH) {
             continue;
         }

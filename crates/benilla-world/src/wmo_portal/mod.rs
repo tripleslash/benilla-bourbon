@@ -243,6 +243,31 @@ pub fn room_admits_light(
     }
 }
 
+/// **Is a room-bound light genuinely INDOORS?** — the light's own half of the surface lanes'
+/// indoor/outdoor class test, answered from the groups that name it.
+///
+/// Not the same question as "does it name rooms". A sconce bolted to the outside of Northshire
+/// Abbey names rooms too: it belongs to the building's `0x8` shell. Packing `w` from
+/// `rooms.is_some()` therefore read "is a WMO light", and a class test built on that would put
+/// every porch lamp and courtyard brazier in the game out the moment it tried to reject indoor
+/// light on outdoor ground.
+///
+/// The discriminator is the one the render path already uses for the receiver
+/// (`RenderSubmesh::interior`, the client's `groupFlags & 0x48` branch at `0x6b3f90`): a group is a
+/// true interior with neither `0x8` nor `0x40` set. ALL naming groups must be interior for the
+/// light to count as indoor — a fixture a courtyard also names can legitimately light that
+/// courtyard, and the error directions are lopsided (1276): wrongly "outdoor" leaves a light doing
+/// what it does today, wrongly "indoor" switches a working lamp off.
+pub fn rooms_are_indoor(vis: &WmoGroupVis, model: &WmoModel) -> bool {
+    !vis.groups.is_empty()
+        && vis.groups.iter().all(|&g| {
+            model
+                .group_nav
+                .get(g as usize)
+                .is_some_and(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
+        })
+}
+
 /// One placed WMO building's portal-cull state. Spawned alongside the building's geometry; despawns
 /// with the placement (it's pushed into the placement's entity list).
 #[derive(Component)]
@@ -1935,6 +1960,40 @@ mod tests {
             "one verdict per group"
         );
         assert!(lit.iter().all(|v| *v), "every room on the chain is lit: {lit:?}");
+    }
+
+    /// GOLDEN — **"names rooms" is not "is indoors", and the porch lamp is the difference.**
+    ///
+    /// The surface lanes' class test runs both ways off the packed `w`: an interior surface takes
+    /// only indoor lights, an exterior one only outdoor lights. That is only safe if `w` means
+    /// what it says. Packed from `rooms.is_some()` it meant "is a WMO light", and a sconce bolted
+    /// to the outside of the abbey names rooms too — so the two-way test would have switched off
+    /// every porch lamp and courtyard brazier in the game.
+    #[test]
+    fn a_lamp_on_a_buildings_outside_is_not_an_indoor_light() {
+        let mut m = floored_chain_model();
+        m.group_nav[0].flags |= EXTERIOR; // group 0 is the outdoor shell
+        let e = Entity::from_raw_u32(1).expect("a valid test entity id");
+        let vis = |groups: &[u16]| WmoGroupVis {
+            instance: e,
+            groups: groups.into(),
+        };
+        // A candle in the nave: only interior groups name it.
+        assert!(rooms_are_indoor(&vis(&[1, 2]), &m));
+        // A sconce on the shell — it lights the open world, and must survive the test.
+        assert!(!rooms_are_indoor(&vis(&[0]), &m));
+        // A fixture a courtyard ALSO names keeps its outdoor half: all naming groups must be
+        // interior, because the error directions are lopsided (1276).
+        assert!(!rooms_are_indoor(&vis(&[0, 1]), &m));
+        // `0x40`-only is an interior GRAPH group lit as outdoors — Stormwind's streets (decision
+        // 0475). A street lamp there is not an indoor light.
+        let mut streets = floored_chain_model();
+        streets.group_nav[1].flags |= EXTERIOR_LIT;
+        assert!(!rooms_are_indoor(&vis(&[1]), &streets));
+        // Naming nothing at all is the empty claim, not an indoor one.
+        assert!(!rooms_are_indoor(&vis(&[]), &m));
+        // A group index past the model answers the same way — a lookup miss is not "indoors".
+        assert!(!rooms_are_indoor(&vis(&[99]), &m));
     }
 
     /// Outside the building there is no room gate at all — the building's lights are then bounded

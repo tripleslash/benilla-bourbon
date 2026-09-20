@@ -413,6 +413,14 @@ fn build_light_data(
     mut admit: Local<bevy::platform::collections::HashMap<Entity, f32>>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
+    // …and the buildings themselves, for the `w` channel's INDOOR test — a light's rooms are group
+    // indices, and whether those groups are interiors is a property of the model
+    // ([`crate::wmo_portal::rooms_are_indoor`]).
+    // `Option`, because a lane can run before the asset collection exists (and the goldens below
+    // build a bare `App`). Absent ⇒ no light is classified indoors, which is the safe direction:
+    // wrongly "outdoor" leaves a light doing exactly what it did before this test existed, wrongly
+    // "indoor" switches a working lamp off (the 1276 lopsided-error rule again).
+    wmos: Option<Res<bevy::asset::Assets<benilla_assets::WmoModel>>>,
     mut data: ResMut<WowLightData>,
     time: Res<Time>,
     // fork: modern lighting — row 20 `.y` tells every world shader the frame is linear.
@@ -530,7 +538,15 @@ fn build_light_data(
             let c = pl.color;
             let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade;
             let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
-            Some((d2, p, pl.range, rgb, rooms.is_some()))
+            // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
+            let indoors = rooms.is_some_and(|r| {
+                portals
+                    .get(r.0.instance)
+                    .ok()
+                    .and_then(|inst| wmos.as_ref()?.get(&inst.handle))
+                    .is_some_and(|model| crate::wmo_portal::rooms_are_indoor(&r.0, model))
+            });
+            Some((d2, p, pl.range, rgb, indoors))
         })
         .collect();
     // A despawned light must not keep its ramp: the next entity to reuse that id would inherit it.
@@ -555,17 +571,24 @@ fn build_light_data(
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
     for (i, (_, p, range, rgb, indoors)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
-        // fork: modern lighting (P8) — `w` is 1 for a light that names WMO rooms and 0 for one that
-        // names none, and a modern INTERIOR fragment takes only the former.
+        // fork: modern lighting (P8) — **`w` is 1 for a light that is INDOORS**, and the surface
+        // lanes' class test runs both ways off it: an interior fragment takes only indoor lights,
+        // an exterior fragment takes only outdoor ones.
         //
-        // A local light has no occluder unless it holds one of the twelve cube slots, and
-        // `room_admits` lets every room-less light through by law (it is "every light outside a
-        // building", and the reference never had a culled room's torch to register in the first
-        // place). Those two together mean a lamp in the street lights the inside of the chapel next
-        // to it, straight through the wall. That cost nothing while the lamps of Elwynn and
-        // Darkshore carried no light at all; deriving one from their glow cards is what made it a
-        // building full of morning sun. Lights that DO name rooms keep the portal gate above and
-        // are untouched, which is why this is the narrow rule and not an interior/exterior split.
+        // A local light has no occluder unless it holds one of the twelve cube slots, so nothing
+        // else stops one crossing a wall. Both directions of that were reported on the same
+        // building: a street lamp lighting the inside of the chapel beside it, and then Northshire
+        // Abbey's own candles lighting the road outside and costing the frame to do it. They are
+        // one bug seen from two sides, and the side that matters is the RECEIVER's — which is why
+        // the answer lives here and in the lanes, and NOT in the portal gate above. A per-frame
+        // admitted set cannot tell the two apart: anything narrow enough to keep the abbey's
+        // candles off the road also darkens them when the player looks in through the door, which
+        // is exactly what a hop-capped `lighting_reach` did before it was backed out.
+        //
+        // `w` is derived from the naming groups' own `0x8`/`0x40` flags
+        // ([`crate::wmo_portal::rooms_are_indoor`]), NOT from "does it name rooms". The two differ
+        // on every porch lamp and courtyard brazier in the game: those name a building's shell, so
+        // the old reading called them indoor and a two-way test would have switched them off.
         fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], f32::from(u8::from(*indoors))];
     }
     // `WOW_POINTS_DUMP=1`: print the committed point table once a second — the numeric probe for

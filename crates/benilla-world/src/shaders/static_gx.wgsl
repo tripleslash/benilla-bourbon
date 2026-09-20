@@ -170,8 +170,13 @@ fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool)
     for (var i = 0u; i < count; i = i + 1u) {
         let id = locallight::cell_light(cell, i);
         let pos_range = wow_light.points[2u * id];
-        // `w` is 1 for a light that belongs to a building (`global_light`'s packer).
-        if (interior && wow_light.points[2u * id + 1u].w < 0.5) {
+        // `w` is 1 for a light that is INDOORS (`global_light`'s packer), and the test runs BOTH
+        // ways: an interior surface takes only indoor lights, an exterior one only outdoor lights.
+        // A local light has no occluder unless it holds a cube slot, so without this a lamp in the
+        // street lights the inside of the chapel beside it — and Northshire Abbey's candles light
+        // the road outside it, which is the same bug with the receiver swapped.
+        let indoor_light = wow_light.points[2u * id + 1u].w >= 0.5;
+        if (interior != indoor_light) {
             continue;
         }
         let to_light = pos_range.xyz - p;
