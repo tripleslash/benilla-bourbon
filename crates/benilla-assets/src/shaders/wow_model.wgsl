@@ -1515,7 +1515,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // reference's three-nearest selection where it is live, and it reaches the lanes the reference
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
     // in a modern frame, because the bake that used to stand in for them is gone.
-    if (locallight::grid_live(modern_block.lights) && !is_rig) {
+    //
+    // **And where this fragment is inside the grid at all.** It is camera-centred and only
+    // `dims × cell` yards across; beyond that `modern_local_lights` answers zero, and reading that
+    // as the answer overwrote the three-nearest selection with darkness — a doodad lit a step ago
+    // going dark as the camera backed away from it. Outside the grid the classic selection stands
+    // (and on the lanes the reference gives no point light, it is that same zero).
+    if (locallight::inside_grid(modern_block.lights, in.world_position.xyz) && !is_rig) {
         point_diffuse = modern_local_lights(
             in.world_position.xyz,
             wow_normalize(in.world_normal),

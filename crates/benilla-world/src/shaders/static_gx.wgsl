@@ -417,6 +417,12 @@ fn vertex(v: GxVertex) -> GxVsOut {
     // per-item SH probe at spawn, the entity path's own vertex-stage zeroing.
     if ((v.word & (WORD_WMO | WORD_INTERIOR)) != 0u) {
         out.point_lit = vec3<f32>(0.0);
+        // …and the per-pixel selection with it. It used to be left unwritten, which was harmless
+        // only because the grid overwrote the fragment's answer on every modern frame. Now that
+        // the fragment keeps this selection outside the grid, an unwritten output would be an
+        // undefined one — and index 0 is `point_light_eval`'s own "no light", so spelling it is
+        // both the defined value and the reference's answer for these lanes.
+        out.point_sel = vec3<u32>(0u);
     } else {
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
         out.point_sel = point_light_select(v.anchor);
@@ -503,7 +509,15 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // that three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
     // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
     // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
-    if (locallight::grid_live(modern_block.lights)) {
+    //
+    // **Where it is live AND where this fragment is actually inside it.** The grid is
+    // camera-centred and only `dims × cell` yards across, so most of a drawn frame is outside it;
+    // `modern_local_lights` answers zero out there, and taking that as the answer overwrote a
+    // perfectly good three-nearest selection with darkness. The symptom was a hard shell around
+    // the camera that swept over the world as the player walked — ground and props beyond it
+    // unlit, lighting up as they crossed in. Outside the grid the classic selection stands, which
+    // on the WMO and interior lanes is the reference's own zero.
+    if (locallight::inside_grid(modern_block.lights, in.world_position.xyz)) {
         point_lit_px = modern_local_lights(
             in.world_position.xyz,
             n_lit,
@@ -863,16 +877,27 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             //   green  = the cell kept everything that reached it
             //   yellow = full, nothing dropped
             //   red    = over budget, and how far over
+            //   blue   = OUTSIDE the grid — no cell, and so no local light from it at all
+            // That last one is not a budget verdict but the absence of any, and it used to read
+            // as cell 0's: `cell_at` answers `(0, 0)` off the grid and this took the `.x` without
+            // the `.y`, painting the whole far world with whatever cell 0 happened to hold. It is
+            // its own colour now, because the grid's edge is exactly the thing this probe is most
+            // often asked about — a lamp is dark out there whatever its budget says.
             let dgrid = modern_block.lights;
-            let dcell = modern_block.light_cells[locallight::cell_at(dgrid, in.world_position.xyz).x];
-            let kept = f32(locallight::cell_count(dcell));
-            let reached = f32((dcell.x >> 8u) & 0xffu);
-            let over = max(reached - kept, 0.0);
-            rgb = select(
-                vec3<f32>(0.0, kept / 8.0, 0.0),
-                mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), min(over / 8.0, 1.0)),
-                over > 0.0,
-            );
+            let dfound = locallight::cell_at(dgrid, in.world_position.xyz);
+            if (dfound.y < 1u) {
+                rgb = vec3<f32>(0.0, 0.2, 1.0);
+            } else {
+                let dcell = modern_block.light_cells[dfound.x];
+                let kept = f32(locallight::cell_count(dcell));
+                let reached = f32((dcell.x >> 8u) & 0xffu);
+                let over = max(reached - kept, 0.0);
+                rgb = select(
+                    vec3<f32>(0.0, kept / 8.0, 0.0),
+                    mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), min(over / 8.0, 1.0)),
+                    over > 0.0,
+                );
+            }
         } else if (dbg > 4.5) {
             // fork: modern lighting (P6) — mode 5: what the local-light grid put on this fragment.
             rgb = modern_local_lights(

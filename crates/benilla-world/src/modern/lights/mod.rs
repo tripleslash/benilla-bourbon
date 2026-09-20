@@ -146,6 +146,16 @@ impl LightTier {
         (self.dims.x * self.dims.y * self.dims.z) as usize
     }
 
+    /// fork: P8 — **how far this grid reaches from the camera**, in world yards per axis.
+    ///
+    /// The grid is camera-centred ([`grid_base`]) and `dims × cell` yards across, so this is half
+    /// of that. Past it a fragment falls in no cell, takes nothing from the grid, and — on a WMO
+    /// surface, which has no other source of local light in a modern frame — takes none at all.
+    /// It is the number the tier table has to be read against, and the one it did not state.
+    pub fn reach(&self) -> Vec3 {
+        self.dims.as_vec3() * self.cell * 0.5
+    }
+
     /// Atlas layers the tier's shadowed set spans.
     pub fn atlas_layers(&self) -> usize {
         self.shadowed.div_ceil(PER_ATLAS_LAYER)
@@ -181,14 +191,35 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             shadowed: PER_ATLAS_LAYER,
             ..LightTier::OFF
         },
-        // fork: P8. The grid is the finest a 48³ allocation allows — 3 yd cells reach 144 yd across,
-        // which is a city block, and at Cinematic that block holds every lamp post, every window
-        // candle and every drawn weapon rather than the handful the reference commits. Twelve lights
-        // shadow, over both atlas layers, with a 12-tap Vogel disc and entity casters in the cubes.
+        // fork: P8. Twelve lights shadow, over both atlas layers, with a 12-tap Vogel disc and
+        // entity casters in the cubes — and the same cell Ultra runs, for the reason below.
+        //
+        // **The cell was 3.0, and that was a defect, not a richer setting.** The allocation is
+        // fixed ([`CELL_ALLOC`] — one size on every tier, so a quality change never re-creates the
+        // buffer every material binds), so `cell` does not buy fineness for free: it *trades*
+        // reach for it. At 3 yd the grid spanned 144 × 72 × 144 yd, which is ±72 horizontally and
+        // ±36 vertically from the camera — the SHORTEST reach of any tier that has a grid at all,
+        // half of High's and two thirds of Ultra's. Everything past it took no local light, and on
+        // a WMO surface that means none at all: the grid is the only thing that lights one in a
+        // modern frame, because P6 retired the bake that used to. So the tier whose whole point is
+        // a city full of lamps went dark two streets out and lit up as the player walked in.
+        // Reported against Orgrimmar — braziers lighting nothing until you approach them, and the
+        // buildings around them unlit from across the square.
+        //
+        // The plan's tier row says "48³ cells of 3 yd" and states no reach, which is how the trade
+        // went unnoticed. [`LightTier::reach`] is the number that was missing, and the invariant
+        // is that no tier's grid may reach less far than the tier under it — which at this
+        // allocation pins Cinematic's cell to Ultra's. The cluster row is the one thing Cinematic
+        // no longer buys over Ultra; every other row here is untouched, and a fine cell that
+        // reaches nothing is worth less than a coarse one that reaches the street.
+        //
+        // Wanting 3 yd cells AND city reach needs more cells, not a smaller number here: 72×36×72
+        // holds Ultra's reach at 3 yd and costs 3.4× the allocation and the binning dispatch, on
+        // every tier at once. That is an allocation decision, not a tier decision.
         LightingQuality::Cinematic => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
-            cell: 3.0,
+            cell: 4.5,
             shadowed: MAX_SHADOWED,
             taps: 12,
             shade: 0.90,
@@ -747,6 +778,68 @@ mod tests {
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
+        );
+    }
+
+    /// **What each tier's grid actually reaches**, per axis — the number the tier table never
+    /// stated and the one a `cell` change has to be read against.
+    ///
+    /// `cell` looks like a quality knob and is not. The cell allocation is fixed ([`CELL_ALLOC`]),
+    /// so a finer cell is bought with reach one for one, and a fragment outside the grid takes
+    /// nothing from it — which on a WMO surface is the only local light it has in a modern frame.
+    /// Cinematic shipped at 3 yd and so reached ±72 yd horizontally and ±36 vertically: the least
+    /// of any tier with a grid, and less than the Ultra it is built on top of. The tier whose
+    /// whole point is a city full of lamps was the one that lit the least of a city.
+    ///
+    /// The vertical is the tight axis on every row — 24 cells, not 48 — and a city's ramps and
+    /// tiers live on it, so it is asserted apart rather than folded into one number.
+    #[test]
+    fn each_tiers_grid_reach_is_the_one_it_is_supposed_to_have() {
+        let reach = |q| light_tier(q).reach();
+        assert_eq!(reach(LightingQuality::Low), Vec3::new(0.5, 0.5, 0.5), "no grid");
+        assert_eq!(reach(LightingQuality::Medium), Vec3::new(128.0, 64.0, 128.0));
+        assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
+        assert_eq!(reach(LightingQuality::Ultra), Vec3::new(108.0, 54.0, 108.0));
+        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(108.0, 54.0, 108.0));
+    }
+
+    /// **Cinematic may never reach less far than the Ultra it is built on.** The tier is declared
+    /// as "= Ultra" plus twelve shadowed lights, soft taps, entity casters and emissive sources;
+    /// reaching *less* far than Ultra is not one of the things it is allowed to trade, because
+    /// past the grid a WMO surface has no local light at all and the trade is invisible in every
+    /// row of the table. This is the regression guard for the 3 yd cell.
+    #[test]
+    fn cinematic_never_reaches_less_far_than_ultra() {
+        let ultra = light_tier(LightingQuality::Ultra).reach();
+        let cine = light_tier(LightingQuality::Cinematic).reach();
+        assert!(
+            cine.cmpge(ultra).all(),
+            "Cinematic reaches {cine:?} yd against Ultra's {ultra:?} — a finer cell is paid for in \
+             reach at a fixed allocation, and past the grid a WMO surface is unlit",
+        );
+    }
+
+    /// **A standing gap, recorded rather than fixed: Ultra reaches less far than High.**
+    ///
+    /// Same mechanism as the Cinematic defect above and it predates P8 — Ultra's 4.5 yd cell is
+    /// P6's own row, and `light_tier` states in as many words that P8 must leave it alone so an
+    /// Ultra frame costs and looks exactly what it did before Cinematic existed. So this is not
+    /// quietly repaired here; it is pinned, so that the day someone does widen the allocation or
+    /// revisit P6's row, the test says what the answer should become.
+    ///
+    /// It is far less harmful than it was: outside the grid, terrain and exterior doodads now keep
+    /// the reference's own three-nearest selection instead of going black (`locallight::inside_grid`
+    /// and its three callers). A WMO surface is what still loses, because the reference gives one
+    /// no point light at all and the grid is its only source.
+    #[test]
+    fn ultra_still_reaches_less_far_than_high_and_that_is_known() {
+        let high = light_tier(LightingQuality::High).reach();
+        let ultra = light_tier(LightingQuality::Ultra).reach();
+        assert!(
+            ultra.cmplt(high).all(),
+            "Ultra now reaches {ultra:?} against High's {high:?}. If that was deliberate, this \
+             test is the one to delete — and `cinematic_never_reaches_less_far_than_ultra` should \
+             probably become a full monotonicity check over the whole ladder.",
         );
     }
 

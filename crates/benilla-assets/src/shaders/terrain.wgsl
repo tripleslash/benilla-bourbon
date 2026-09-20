@@ -509,8 +509,14 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // fork: modern lighting (FORK.md, P6) — the binned local-light grid
         // replaces the reference's three-nearest selection wherever it is live; Low has no grid and
         // keeps P3's per-pixel evaluation of that selection.
+        //
+        // **And wherever this fragment is inside it.** The grid is camera-centred and only
+        // `dims × cell` yards across; `modern_local_lights` answers zero beyond that, and taking
+        // that as the answer replaced the three-nearest selection with darkness on every chunk
+        // past the edge — a shell around the camera that swept over the ground as the player
+        // walked. Outside it, P3's own evaluation stands, which is what Low runs everywhere.
         var points = point_light_eval(in.point_sel, in.world_position.xyz, mn);
-        if (locallight::grid_live(modern_block.lights)) {
+        if (locallight::inside_grid(modern_block.lights, in.world_position.xyz)) {
             points = modern_local_lights(in.world_position.xyz, mn, lite);
         }
         // fork: modern lighting (FORK.md, P3) — ambient dimmed by the sky-occlusion map.
