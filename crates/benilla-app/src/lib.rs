@@ -280,10 +280,9 @@ fn seed_launch_env() {
         // an allowlist, so a key missing from it is simply never seeded and the probe stays
         // silent — which reads exactly like the code not running.
         "WOW_POINTS_DUMP",
-        // fork: modern lighting — the combine's deband dither (`?dither=0` to turn it back off).
-        // On by default in a modern frame since the tonemap's shoulder was widened: the shoulder
-        // is the band where 8-bit steps show, and the two are one fix. It could not be reached
-        // from the page at all before — the reader took `std::env`, empty on wasm.
+        // fork: modern lighting — the combine's deband dither (`?dither=1`), off by default like
+        // the native knob. It could not be reached from the page at all before: the reader took
+        // `std::env`, which on wasm is empty, so it read exactly like the dither not existing.
         "WOW_DITHER",
         // …and the emission front end's own (`?emit_dump=<label>[,period]`): which sequence slot an
         // emitter resolved and what its ten per-frame tracks sampled there. The dump that answers
