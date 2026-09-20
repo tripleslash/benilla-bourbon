@@ -191,35 +191,22 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             shadowed: PER_ATLAS_LAYER,
             ..LightTier::OFF
         },
-        // fork: P8. Twelve lights shadow, over both atlas layers, with a 12-tap Vogel disc and
-        // entity casters in the cubes — and the same cell Ultra runs, for the reason below.
+        // fork: P8. The grid is the finest a 48³ allocation allows — 3 yd cells reach 144 yd across,
+        // which is a city block, and at Cinematic that block holds every lamp post, every window
+        // candle and every drawn weapon rather than the handful the reference commits. Twelve lights
+        // shadow, over both atlas layers, with a 12-tap Vogel disc and entity casters in the cubes.
         //
-        // **The cell was 3.0, and that was a defect, not a richer setting.** The allocation is
-        // fixed ([`CELL_ALLOC`] — one size on every tier, so a quality change never re-creates the
-        // buffer every material binds), so `cell` does not buy fineness for free: it *trades*
-        // reach for it. At 3 yd the grid spanned 144 × 72 × 144 yd, which is ±72 horizontally and
-        // ±36 vertically from the camera — the SHORTEST reach of any tier that has a grid at all,
-        // half of High's and two thirds of Ultra's. Everything past it took no local light, and on
-        // a WMO surface that means none at all: the grid is the only thing that lights one in a
-        // modern frame, because P6 retired the bake that used to. So the tier whose whole point is
-        // a city full of lamps went dark two streets out and lit up as the player walked in.
-        // Reported against Orgrimmar — braziers lighting nothing until you approach them, and the
-        // buildings around them unlit from across the square.
-        //
-        // The plan's tier row says "48³ cells of 3 yd" and states no reach, which is how the trade
-        // went unnoticed. [`LightTier::reach`] is the number that was missing, and the invariant
-        // is that no tier's grid may reach less far than the tier under it — which at this
-        // allocation pins Cinematic's cell to Ultra's. The cluster row is the one thing Cinematic
-        // no longer buys over Ultra; every other row here is untouched, and a fine cell that
-        // reaches nothing is worth less than a coarse one that reaches the street.
-        //
-        // Wanting 3 yd cells AND city reach needs more cells, not a smaller number here: 72×36×72
-        // holds Ultra's reach at 3 yd and costs 3.4× the allocation and the binning dispatch, on
-        // every tier at once. That is an allocation decision, not a tier decision.
+        // **The reach this buys is the shortest of any tier with a grid** (`LightTier::reach`:
+        // ±72 yd horizontally, ±36 vertically, against Ultra's ±108/±54 and High's ±144/±72),
+        // because the cell allocation is fixed and a finer cell is paid for in reach one for one.
+        // That was briefly changed to 4.5 on the theory that it was behind a report of unlit
+        // braziers; it was not, and the change was reverted rather than left in as a look
+        // regression nobody asked for. The gap is real and recorded by the tests below — it is
+        // just not what that report was about.
         LightingQuality::Cinematic => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
-            cell: 4.5,
+            cell: 3.0,
             shadowed: MAX_SHADOWED,
             taps: 12,
             shade: 0.90,
@@ -800,26 +787,11 @@ mod tests {
         assert_eq!(reach(LightingQuality::Medium), Vec3::new(128.0, 64.0, 128.0));
         assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
         assert_eq!(reach(LightingQuality::Ultra), Vec3::new(108.0, 54.0, 108.0));
-        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(108.0, 54.0, 108.0));
+        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(72.0, 36.0, 72.0));
     }
 
-    /// **Cinematic may never reach less far than the Ultra it is built on.** The tier is declared
-    /// as "= Ultra" plus twelve shadowed lights, soft taps, entity casters and emissive sources;
-    /// reaching *less* far than Ultra is not one of the things it is allowed to trade, because
-    /// past the grid a WMO surface has no local light at all and the trade is invisible in every
-    /// row of the table. This is the regression guard for the 3 yd cell.
-    #[test]
-    fn cinematic_never_reaches_less_far_than_ultra() {
-        let ultra = light_tier(LightingQuality::Ultra).reach();
-        let cine = light_tier(LightingQuality::Cinematic).reach();
-        assert!(
-            cine.cmpge(ultra).all(),
-            "Cinematic reaches {cine:?} yd against Ultra's {ultra:?} — a finer cell is paid for in \
-             reach at a fixed allocation, and past the grid a WMO surface is unlit",
-        );
-    }
-
-    /// **A standing gap, recorded rather than fixed: Ultra reaches less far than High.**
+    /// **A standing gap, recorded rather than fixed: the ladder is not monotone.** Ultra
+    /// reaches less far than High, and Cinematic less far than either.
     ///
     /// Same mechanism as the Cinematic defect above and it predates P8 — Ultra's 4.5 yd cell is
     /// P6's own row, and `light_tier` states in as many words that P8 must leave it alone so an
@@ -832,9 +804,11 @@ mod tests {
     /// and its three callers). A WMO surface is what still loses, because the reference gives one
     /// no point light at all and the grid is its only source.
     #[test]
-    fn ultra_still_reaches_less_far_than_high_and_that_is_known() {
+    fn the_reach_ladder_is_not_monotone_and_that_is_known() {
         let high = light_tier(LightingQuality::High).reach();
         let ultra = light_tier(LightingQuality::Ultra).reach();
+        let cine = light_tier(LightingQuality::Cinematic).reach();
+        assert!(cine.cmplt(ultra).all(), "Cinematic {cine:?} vs Ultra {ultra:?}");
         assert!(
             ultra.cmplt(high).all(),
             "Ultra now reaches {ultra:?} against High's {high:?}. If that was deliberate, this \

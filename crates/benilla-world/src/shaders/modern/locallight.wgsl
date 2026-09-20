@@ -92,17 +92,6 @@ fn cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
     return vec2<u32>(u32(index), 1u);
 }
 
-// fork: P8 — is this point inside the grid's own extent at all?
-//
-// The distinction the callers need and `cell_at` alone does not give them: "inside the grid and
-// no light reaches here" and "outside the grid" look identical in the returned cell, and they are
-// not the same statement. The first is an answer; the second is the absence of one, and a caller
-// that reads it as an answer throws away whatever selection it already had — which is how a modern
-// frame ended up DARKER than a classic one past the grid's edge.
-fn inside_grid(g: LightGrid, p: vec3<f32>) -> bool {
-    return cell_at(g, p).y >= 1u;
-}
-
 // How many lights a cell holds.
 fn cell_count(cell: vec4<u32>) -> u32 {
     return min(cell.x & 0xffu, PER_CELL);

@@ -509,15 +509,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // that three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
     // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
     // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
-    //
-    // **Where it is live AND where this fragment is actually inside it.** The grid is
-    // camera-centred and only `dims × cell` yards across, so most of a drawn frame is outside it;
-    // `modern_local_lights` answers zero out there, and taking that as the answer overwrote a
-    // perfectly good three-nearest selection with darkness. The symptom was a hard shell around
-    // the camera that swept over the world as the player walked — ground and props beyond it
-    // unlit, lighting up as they crossed in. Outside the grid the classic selection stands, which
-    // on the WMO and interior lanes is the reference's own zero.
-    if (locallight::inside_grid(modern_block.lights, in.world_position.xyz)) {
+    if (locallight::grid_live(modern_block.lights)) {
         point_lit_px = modern_local_lights(
             in.world_position.xyz,
             n_lit,
