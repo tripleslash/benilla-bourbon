@@ -1035,6 +1035,68 @@ pub(super) fn attach_entity_visuals(
             super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
                 light_anchors.get(&bone).copied()
             });
+            // fork: P8 — **and the GameObject brazier that authors no light at all.**
+            //
+            // The line above is the reference's law and it only ever spawns what an artist wrote
+            // down. A great many braziers, fire pits, forges and candelabra write down nothing:
+            // their fire is an additive emitter or a flame card over an unlit wall, which is what
+            // `modern::lights::emissive` exists to stand in for on Cinematic. The ADT-doodad and
+            // WMO-prop lanes have derived that light since P8 landed; **this lane never did**, so
+            // every brazier the SERVER spawns — which in a city is most of them — was dark while
+            // the identical model staked into an ADT lit the street. Reported against Orgrimmar.
+            //
+            // **GameObjects only, and that is a scope decision rather than an oversight.** A
+            // GameObject is a placed prop in everything but the mechanism that spawns it, so it is
+            // the same population the doodad lanes already derive for and it inherits their
+            // calibration. Creatures and players are a different one — numerous, moving, and
+            // carrying effect models whose additive emitters are spell visuals rather than
+            // fixtures — and turning every one of those into a table light is its own decision,
+            // with its own cap arithmetic, not a line to slip in here.
+            //
+            // No tier gate, exactly as at the doodad sites and for the same reason `item_glow`
+            // spells out: attach runs once and the lighting model latches later, so a question
+            // asked here is asked before the answer exists. The light is spawned and tagged;
+            // `global_light` drops it per frame on any tier below Cinematic.
+            if net.kind == EntityKind::GameObject {
+                if let Some(dm) = dm {
+                    let parts = dm.parts.iter().flatten();
+                    if let Some(e) = benilla_world::modern::lights::emissive::combine(
+                        model_lights.iter().any(|l| l.def.casts()),
+                        dm.emitters
+                            .iter()
+                            .map(|em| (em.def.blend, em.def.lit, &em.def.over_life)),
+                        parts.clone().filter_map(|p| {
+                            benilla_world::modern::lights::emissive::glow_of_geometry(&p.geometry)
+                        }),
+                    ) {
+                        // The glowing part's own centroid, not the model origin — a brazier's fire
+                        // sits in its bowl, a yard or two up from the foot the origin is at, and a
+                        // light at the origin puts the glow inside the stand.
+                        if let Some((local, radius)) =
+                            benilla_world::modern::lights::emissive::glow_anchor(
+                                dm.emitters.iter().map(|em| em.def.position),
+                                parts.map(|p| p.geometry.as_ref()),
+                            )
+                        {
+                            let light = commands
+                                .spawn((
+                                    benilla_world::terrain_stream::point_light(
+                                        e.color,
+                                        e.intensity_scale,
+                                    ),
+                                    benilla_world::modern::lights::SynthesizedLight,
+                                    benilla_world::modern::lights::FixtureRadius(radius),
+                                    Transform::from_translation(
+                                        benilla_assets::coords::wow_to_bevy(local),
+                                    ),
+                                    Visibility::default(),
+                                ))
+                                .id();
+                            commands.entity(entity).add_child(light);
+                        }
+                    }
+                }
+            }
             // Ribbon trails (wisp streamers, trailing quest-object crystals) — the same host-bone
             // ride as the emitters; the trail self-despawns when its owner joint/entity goes.
             {

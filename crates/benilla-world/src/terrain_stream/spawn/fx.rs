@@ -134,7 +134,12 @@ pub(super) fn spawn_emissive_light_for(
     else {
         return;
     };
-    let Some((local, radius)) = glow_centroid(emitters, submeshes) else {
+    // The centroid and fixture radius are `emissive`'s own law, shared with the entity lane —
+    // a GameObject brazier is this same derivation over `EntityPart`s instead of `ModelSubmesh`es.
+    let Some((local, radius)) = crate::modern::lights::emissive::glow_anchor(
+        emitters.iter().map(|e| e.def.position),
+        submeshes.iter().map(|b| b.geometry.as_ref()),
+    ) else {
         return;
     };
     let before = out.len();
@@ -156,68 +161,6 @@ pub(super) fn spawn_emissive_light_for(
             crate::modern::lights::SynthesizedLight,
         ));
     }
-}
-
-/// Where a model's glowing parts sit, averaged — raw WoW model space, `None` when it has none.
-///
-/// Glow cards and emitters both count, and a card counts by the centre of its own geometry: a
-/// lamppost's corona card IS the lantern, so its centroid is where the light belongs, while the
-/// model origin is down at the foot of the post.
-///
-/// Plain positions, not bone-composed: a placed prop's light bone is at rest by construction (the
-/// same premise [`spawn_lights_for`] above is built on), and a part riding a bone that *does*
-/// animate swings by inches, well inside the yard this light stands for.
-///
-/// Returns the centroid and the **fixture radius** around it: how far the glowing part's own
-/// geometry reaches, which is what has to be clipped out of the light's cube.
-fn glow_centroid(
-    emitters: &[ModelEmitter],
-    submeshes: &[benilla_assets::ModelSubmesh],
-) -> Option<([f32; 3], f32)> {
-    let mut sum = [0.0f32; 3];
-    let mut n = 0.0f32;
-    for e in emitters {
-        for c in 0..3 {
-            sum[c] += e.def.position[c];
-        }
-        n += 1.0;
-    }
-    for batch in submeshes {
-        if crate::modern::lights::emissive::glow_of(batch).is_none() {
-            continue;
-        }
-        let positions = &batch.geometry.positions;
-        if positions.is_empty() {
-            continue;
-        }
-        let mut mid = [0.0f32; 3];
-        for p in positions {
-            for c in 0..3 {
-                mid[c] += p[c];
-            }
-        }
-        for c in 0..3 {
-            sum[c] += mid[c] / positions.len() as f32;
-        }
-        n += 1.0;
-    }
-    if n <= 0.0 {
-        return None;
-    }
-    let mid = [sum[0] / n, sum[1] / n, sum[2] / n];
-    // The reach: the furthest a glow card's own vertex gets from that centre. Emitters are points
-    // and contribute none — a flame has no frame around it to clip.
-    let mut radius = 0.0f32;
-    for batch in submeshes {
-        if crate::modern::lights::emissive::glow_of(batch).is_none() {
-            continue;
-        }
-        for p in &batch.geometry.positions {
-            let d = (0..3).map(|c| (p[c] - mid[c]).powi(2)).sum::<f32>().sqrt();
-            radius = radius.max(d);
-        }
-    }
-    Some((mid, radius))
 }
 
 /// Spawn a [`WorldPointLight`] for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the

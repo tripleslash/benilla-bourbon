@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 33] = [
+    const SEEDED: [&str; 34] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -280,6 +280,11 @@ fn seed_launch_env() {
         // an allowlist, so a key missing from it is simply never seeded and the probe stays
         // silent — which reads exactly like the code not running.
         "WOW_POINTS_DUMP",
+        // fork: modern lighting — the combine's deband dither (`?dither=0` to turn it back off).
+        // On by default in a modern frame since the tonemap's shoulder was widened: the shoulder
+        // is the band where 8-bit steps show, and the two are one fix. It could not be reached
+        // from the page at all before — the reader took `std::env`, empty on wasm.
+        "WOW_DITHER",
         // …and the emission front end's own (`?emit_dump=<label>[,period]`): which sequence slot an
         // emitter resolved and what its ten per-frame tracks sampled there. The dump that answers
         // "this effect moves wrong" without guessing at it.

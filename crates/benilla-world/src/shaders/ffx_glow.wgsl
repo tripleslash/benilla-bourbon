@@ -145,13 +145,39 @@ fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
 }
 
 // fork: modern lighting — the P1b tonemap: identity below the knee (so ordinary pixels keep their
-// classic value), an exponential shoulder above it that approaches white without clipping.
+// classic value), a shoulder above it that approaches white without clipping.
+//
+// **The shoulder is hyperbolic, and it used to be exponential.** Both satisfy "approaches white
+// without clipping"; they are not remotely equivalent in how much of the range above the knee
+// survives to the 8-bit present-encode, and the exponential one spent almost all of it at once:
+//
+//   input   exp shoulder      hyperbolic
+//     1.0   0.9264 (236)      0.9000 (230)
+//     1.2   0.9729 (248)      0.9333 (238)
+//     2.0   0.9995 (255)      0.9714 (248)
+//     5.0   1.0000 (255)      0.9909 (253)
+//
+// `exp(-over / (1 - k))` has spent 63 % of its headroom one knee-width past the knee and is
+// numerically white by 2.0 — so **everything brighter than about 1.2 landed in seven output
+// levels, and everything past 2.0 in one**. For scene pixels that is invisible; ordinary shading
+// rarely goes there. For an ADDITIVE EMISSIVE SPRITE it is the whole subject: a brazier's flame
+// card is a hot core well above 1.0 surrounded by a halo below the knee, so the halo kept its full
+// gradient while the core — the part that reads as fire — was crushed to a uniform near-white
+// blob with a visible contour where the knee cut in, and the few levels it did keep banded.
+// Reported as flame billboards looking "very flat + pixelated" under the modern shading, which is
+// exactly what those two numbers predict.
+//
+// The hyperbolic form is the standard Reinhard shoulder rebased onto the same knee: identical
+// below `k`, C1 at it, still asymptotic to 1.0, and it still has 15 usable levels left where the
+// exponential had run out. A flame keeps its internal contrast; a sun glint still rolls rather
+// than clips. See `combine_out`'s dither, which is the other half of this — a compressed band is
+// where 8-bit quantization becomes visible, and the two fixes are only whole together.
 const MODERN_BLOOM: f32 = 0.35;
 const MODERN_KNEE: f32 = 0.8;
 fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
     let k = MODERN_KNEE;
     let over = max(x - vec3<f32>(k), vec3<f32>(0.0));
-    let rolled = vec3<f32>(k) + (1.0 - k) * (vec3<f32>(1.0) - exp(-over / (1.0 - k)));
+    let rolled = vec3<f32>(k) + (1.0 - k) * (over / (over + vec3<f32>(1.0 - k)));
     return select(x, rolled, x > vec3<f32>(k));
 }
 

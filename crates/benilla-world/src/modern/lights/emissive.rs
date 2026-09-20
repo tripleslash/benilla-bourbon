@@ -252,6 +252,75 @@ pub fn glow_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glo
     Some(Glow { tint, size })
 }
 
+/// **Where a model's glowing parts sit, and how far their own geometry reaches** — the centroid the
+/// derived light is placed at and the fixture radius clipped out of its cube, in raw WoW model
+/// space. `None` when the model has no glowing part at all.
+///
+/// Shared by both lanes, and that is the point of it living here rather than beside either one. The
+/// world lane has `ModelSubmesh`es and the entity lane has `EntityPart`s — different types around
+/// the same `RenderSubmesh` — so a centroid written beside one of them is a law the other has to
+/// copy, and a copied law is one that drifts. Callers hand over emitter positions and card
+/// geometries; everything either lane decides about them is decided here.
+///
+/// The light sits at the **glowing part's own centroid**, not at the model origin: a wall sconce's
+/// flame is a yard out from its mounting point and half a yard up, and a light at the origin would
+/// put the glow inside the wall — the one placement error that reads immediately, because the cube
+/// shadow then has that wall between the light and the room.
+///
+/// Plain positions, not bone-composed: a placed prop's light bone is at rest by construction, and a
+/// part riding a bone that *does* animate swings by inches, well inside the yard this light stands
+/// for.
+///
+/// The radius is the furthest a glow card's own vertex gets from that centre. Emitters are points
+/// and contribute none — a flame has no frame around it to clip.
+pub fn glow_anchor<'a>(
+    emitter_positions: impl IntoIterator<Item = [f32; 3]>,
+    cards: impl IntoIterator<Item = &'a benilla_formats::RenderSubmesh> + Clone,
+) -> Option<([f32; 3], f32)> {
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0f32;
+    for pos in emitter_positions {
+        for c in 0..3 {
+            sum[c] += pos[c];
+        }
+        n += 1.0;
+    }
+    for geometry in cards.clone() {
+        if glow_of_geometry(geometry).is_none() {
+            continue;
+        }
+        let positions = &geometry.positions;
+        if positions.is_empty() {
+            continue;
+        }
+        let mut mid = [0.0f32; 3];
+        for p in positions {
+            for c in 0..3 {
+                mid[c] += p[c];
+            }
+        }
+        for c in 0..3 {
+            sum[c] += mid[c] / positions.len() as f32;
+        }
+        n += 1.0;
+    }
+    if n <= 0.0 {
+        return None;
+    }
+    let mid = [sum[0] / n, sum[1] / n, sum[2] / n];
+    let mut radius = 0.0f32;
+    for geometry in cards {
+        if glow_of_geometry(geometry).is_none() {
+            continue;
+        }
+        for p in &geometry.positions {
+            let d = (0..3).map(|c| (p[c] - mid[c]).powi(2)).sum::<f32>().sqrt();
+            radius = radius.max(d);
+        }
+    }
+    Some((mid, radius))
+}
+
 /// A glow card's contribution: `(r, g, b, weight)`.
 fn glow_emission(glow: &Glow) -> Option<(f32, f32, f32, f32)> {
     let alpha = glow.tint[3].clamp(0.0, 1.0);

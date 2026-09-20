@@ -934,14 +934,34 @@ fn prepare_textures(
 /// large enough to clear a level every frame hides it entirely — the reported
 /// small-moves-tick / big-moves-smooth split.
 ///
-/// **Off by default because it is a divergence.** The reference's framebuffer was 8-bit and
-/// undithered; this lane is byte-exact against it (0161) and dithering trades that for a smoother
-/// gradient. Bevy would normally apply its own in the tonemapping pass, but `Tonemapping::None`
-/// makes that node return immediately, so the `DebandDither::Enabled` our camera inherits from
-/// `Camera3d` never runs — this is the only place it can live.
+/// **Off by default in a CLASSIC frame, because there it is a divergence.** The reference's
+/// framebuffer was 8-bit and undithered; that lane is byte-exact against it (0161) and dithering
+/// trades that for a smoother gradient. Bevy would normally apply its own in the tonemapping pass,
+/// but `Tonemapping::None` makes that node return immediately, so the `DebandDither::Enabled` our
+/// camera inherits from `Camera3d` never runs — this is the only place it can live.
+///
+/// **On by default in a MODERN one, because there it is not.** A modern frame is tonemapped
+/// (`modern_tonemap`) and graded (`cinematic_grade`) before it is encoded; byte-exactness against
+/// the reference was given up two passes upstream, so there is nothing left for the undithered
+/// lane to protect — and the tonemap's shoulder is precisely a band where 8-bit steps show. The
+/// shoulder fix and this are one fix: widening the usable range above the knee is what gives the
+/// dither levels to spread a contour across. `?dither=0` turns it off again.
+///
+/// Read per call rather than latched, and through `launch_env` rather than `std::env`: the answer
+/// depends on the lighting model, which latches after the first frames are drawn — and on wasm the
+/// process environment is empty, so a `std::env` read could never reach the browser at all. This
+/// runs once per frame building one uniform; an atomic load and a map lookup is not a cost.
+/// `$WOW_DITHER` / `?dither=` — `Some(false)` for `0`, `Some(true)` for anything else present,
+/// `None` when the knob is absent and the frame's own model decides.
+fn dither_override() -> Option<bool> {
+    crate::launch_env::var("WOW_DITHER").map(|v| v.trim() != "0")
+}
+
 fn dither_armed() -> f32 {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    match *ON.get_or_init(|| std::env::var_os("WOW_DITHER").is_some()) {
+    if crate::modern::frame_is_modern() && dither_override() != Some(false) {
+        return 1.0;
+    }
+    match dither_override().unwrap_or(false) {
         true => 1.0,
         false => 0.0,
     }
@@ -1762,6 +1782,62 @@ mod tests {
     /// makes the effect a geometric warp rather than a brightness shimmer, and it is visible in the
     /// texels: `du` depends only on x, `dv` only on y (the shipped format is the signed two-channel
     /// bump format on both backends — `D3DFMT_V8U8` / `GL_DSDT8_NV`).
+    /// **The modern tonemap's shoulder has to leave room above the knee** — the flame-billboard
+    /// law, as a number rather than an adjective.
+    ///
+    /// The shoulder was `1 - exp(-over / (1 - k))`, which has spent 63 % of its headroom one
+    /// knee-width past the knee and is numerically white by 2.0. Scene pixels rarely go there and
+    /// never noticed. An additive emissive sprite lives there entirely: a brazier's flame card is
+    /// a hot core above 1.0 inside a halo below the knee, so the halo kept its gradient while the
+    /// core — the part that reads as fire — collapsed into a handful of output levels. Reported as
+    /// billboards looking "very flat + pixelated" under the modern shading.
+    ///
+    /// Asserted in 8-bit levels, because that is the unit the defect was visible in: the encode is
+    /// the only quantization in the frame, and a gradient with seven levels to live in bands.
+    #[test]
+    fn the_tonemaps_shoulder_keeps_a_flames_core_apart_from_its_peak() {
+        // The shader's own shoulder, transcribed: `k + (1-k) * over/(over + (1-k))`.
+        const K: f32 = 0.8;
+        let shoulder = |x: f32| {
+            let over = (x - K).max(0.0);
+            if x > K {
+                K + (1.0 - K) * (over / (over + (1.0 - K)))
+            } else {
+                x
+            }
+        };
+        let level = |x: f32| (shoulder(x) * 255.0).round() as i32;
+
+        // Identity below the knee: an ordinary pixel keeps its classic value.
+        assert_eq!(level(0.5), (0.5 * 255.0_f32).round() as i32);
+        assert_eq!(level(K), (K * 255.0_f32).round() as i32);
+        // Never clips, however hot.
+        assert!(shoulder(50.0) < 1.0);
+        // …and it is monotone, so a brighter texel is never darker on screen.
+        let (mut prev, mut x) = (0.0, 0.0);
+        while x < 8.0 {
+            let v = shoulder(x);
+            assert!(v >= prev, "shoulder dipped at {x}");
+            prev = v;
+            x += 0.01;
+        }
+        // **The regression itself.** A flame's core spans roughly 1.2..3.0; the old shoulder put
+        // all of that in 248..255 and everything past 2.0 on one value. Eight levels is the floor
+        // worth defending — below it the core is a flat blob and what little gradient survives
+        // bands.
+        let core = level(3.0) - level(1.2);
+        assert!(
+            core >= 8,
+            "the core 1.2..3.0 has only {core} output level(s) to live in — it will read flat, \
+             and the few it keeps will band",
+        );
+        // And the peak stays distinguishable from the body, which is what the old one lost first.
+        assert!(
+            level(8.0) > level(3.0),
+            "x=8 and x=3 land on the same level: the shoulder has run out again",
+        );
+    }
+
     #[test]
     fn the_wave_lut_is_one_sine_per_axis() {
         let lut = wave_lut_texels();
