@@ -381,6 +381,9 @@ pub(super) fn attach_item_glows(
                     .spawn((
                         benilla_world::terrain_stream::point_light(e.color, e.intensity_scale),
                         benilla_world::modern::lights::SynthesizedLight,
+                        // The wielder's room (see `LightOwner`): a glowing sword indoors is the
+                        // same refusal every other entity light was getting.
+                        benilla_world::lighting::LightOwner(root),
                         Transform::from_translation(glow_at.0 / glow_at.1 as f32),
                         Visibility::default(),
                     ))

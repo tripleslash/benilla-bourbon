@@ -179,6 +179,98 @@ const ADMIT_FADE_RATE: f32 = 15.0;
 #[derive(Component)]
 pub struct LightRooms(pub(crate) crate::wmo_portal::WmoGroupVis);
 
+/// fork: P8 — **the body an ENTITY-lane light belongs to**, so its [`LightRooms`] can follow that
+/// body from room to room.
+///
+/// A placed light's rooms are authored and static: a WMO prop's MOLR list names them once at spawn
+/// and they never change ([`crate::terrain_stream`]'s spawner). An entity's are neither. A
+/// GameObject brazier, a torch-bearing NPC and a glowing sword are all standing somewhere, that
+/// somewhere is a room or it is the open world, and it changes when they walk through a door — so
+/// the claim has to be re-read, and it has to be re-read from the BODY rather than from the light,
+/// which may hang three levels down a bone hierarchy from it.
+///
+/// **Without this every entity light was refused by every interior surface in the game.** The
+/// receiver-side gate is `static_gx.wgsl`'s `if (interior && …w < 0.5) { continue; }` — a light
+/// that names no rooms may not light an interior one, because a local light has no occluder unless
+/// it holds a cube slot and a street lamp would otherwise light the inside of the chapel beside it
+/// through the wall. That rule reads "names no rooms" as "is outdoors", which is true of an ADT
+/// doodad's lamp and false of everything on this lane: nothing in `benilla-app` ever attached
+/// [`LightRooms`], so `w` was 0 for every one of them, and a brazier standing in Orgrimmar lit
+/// nothing at all. Reported against a "Mighty Blaze" that cast no light on the floor it stood on.
+#[derive(Component, Clone, Copy)]
+pub struct LightOwner(pub Entity);
+
+/// fork: P8 — keep an entity light's [`LightRooms`] equal to the room its [`LightOwner`] stands in.
+///
+/// Cheap by construction: it walks the lights, not the bodies, and the world holds a handful of
+/// entity lights against thousands of bodies. The owner's own claim
+/// ([`crate::wmo_portal::UnitWmoRoom`]) is what it reads, so the expensive part — the down-ray that
+/// decides which room a body is in — is already paid for by the tracker that publishes it, once per
+/// body per MOVE rather than once per frame.
+///
+/// One group, not a set: a prop is named by every group whose MODR lists it and any of them being
+/// drawn is a chance to be drawn, but a body *stands in* exactly one room. The portal gate over it
+/// is then the same one a prop's light gets, and it is the behaviour we want — a brazier in a room
+/// the flood has culled lights nothing, which is what `room_admits_light` already says for props.
+fn track_entity_light_rooms(
+    mut commands: Commands,
+    lights: Query<(Entity, &LightOwner, Option<&LightRooms>), With<WorldPointLight>>,
+    owners: Query<&crate::wmo_portal::UnitWmoRoom>,
+    parents: Query<&ChildOf>,
+) {
+    for (light, owner, had) in &lights {
+        // **Up to the nearest BODY, not just to the named entity.** `LightOwner` names what the
+        // spawn site had in hand, and that is not always the thing standing in the room: a weapon
+        // enchant's light is owned by the ITEM root, which is itself a child of the wielder, and
+        // only the wielder is a wire body with a claim. Walking up covers all three lanes with one
+        // rule instead of asking each spawn site to know how deep it sits.
+        //
+        // Bounded, because an unbounded parent walk over a malformed hierarchy is a hang rather
+        // than a bug: a light is a child of a bone of a rig of a body at the very worst, and the
+        // chain that misses at eight is a chain that has nothing to find.
+        let mut at = owner.0;
+        let mut want = None;
+        for _ in 0..8 {
+            if let Ok(claim) = owners.get(at) {
+                want = claim.room();
+                break;
+            }
+            match parents.get(at) {
+                Ok(parent) => at = parent.parent(),
+                Err(_) => break,
+            }
+        }
+        // Only on a real change: `LightRooms` holds an `Arc`, and rebuilding one every frame for
+        // every torch in a city is an allocation per light per frame for an answer that moves at
+        // walking pace.
+        let same = match (&want, had) {
+            (Some(r), Some(LightRooms(vis))) => {
+                vis.instance == r.instance && vis.groups.len() == 1 && vis.groups[0] == r.group
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            continue;
+        }
+        match want {
+            Some(room) => {
+                commands
+                    .entity(light)
+                    .insert(LightRooms(crate::wmo_portal::WmoGroupVis {
+                        instance: room.instance,
+                        groups: std::sync::Arc::from([room.group]),
+                    }));
+            }
+            // Out in the open world again: the rooms come OFF, which is what puts the light back
+            // under the room-less law rather than leaving it claiming a building it has left.
+            None => {
+                commands.entity(light).remove::<LightRooms>();
+            }
+        }
+    }
+}
+
 /// **An authored WoW point light source** — an M2 light, a WMO MOLT omni, a carried torch —
 /// as the packed light table reads it. This used to be Bevy's `PointLight`, kept purely as a
 /// data carrier: [`build_light_data`] was its only reader in the engine, every lit surface
@@ -241,7 +333,16 @@ pub(super) fn register(app: &mut App) {
             PostUpdate,
             build_light_data
                 .after(bevy::transform::TransformSystems::Propagate)
-                .after(super::update_time_lighting),
+                .after(super::update_time_lighting)
+                // …and after the rooms it reads are current for this frame. `build_light_data`
+                // packs `indoors` straight off `LightRooms`, so a claim applied after it would
+                // spend a frame as "outdoors" — which for an entity light means a frame refused by
+                // every interior surface, i.e. a visible flicker at every doorway.
+                .after(track_entity_light_rooms),
+        )
+        .add_systems(
+            PostUpdate,
+            track_entity_light_rooms.after(bevy::transform::TransformSystems::Propagate),
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
@@ -594,6 +695,61 @@ fn upload_light(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GOLDEN — **an entity light inherits the room its body stands in**, and loses it again when
+    /// the body walks out.
+    ///
+    /// The gate this feeds is `static_gx.wgsl`'s `interior && w < 0.5 -> skip`, and `w` is just
+    /// "does this light name rooms". That rule reads "names no rooms" as "is outdoors", which is
+    /// true of a placed ADT lamp and false of every light on the entity lane — and nothing in
+    /// `benilla-app` attached [`LightRooms`], so a GameObject brazier standing inside Orgrimmar
+    /// was refused by the floor it stood on, by its own stand, and by every wall around it. A
+    /// "Mighty Blaze" lighting nothing at all is what this test is written from.
+    ///
+    /// The walk up matters as much as the claim: a weapon enchant's light is owned by the ITEM
+    /// root, which has no claim of its own — only the wielder underneath it does.
+    #[test]
+    fn an_entity_light_takes_the_room_its_body_is_standing_in() {
+        use crate::wmo_portal::{UnitWmoRoom, WmoRoom};
+
+        let mut app = App::new();
+        app.add_systems(Update, track_entity_light_rooms);
+
+        let instance = app.world_mut().spawn_empty().id();
+        // A body standing in group 7 of that building, and its light hanging off a bone of it.
+        let body = app
+            .world_mut()
+            .spawn(UnitWmoRoom::claimed(WmoRoom { instance, group: 7 }))
+            .id();
+        let bone = app.world_mut().spawn(ChildOf(body)).id();
+        let light = app
+            .world_mut()
+            .spawn((
+                WorldPointLight { color: [1.0; 3], intensity: 1.0, range: 10.0 },
+                LightOwner(bone),
+                ChildOf(bone),
+            ))
+            .id();
+        app.update();
+
+        let rooms = app.world().get::<LightRooms>(light);
+        let vis = rooms.map(|LightRooms(v)| (v.instance, v.groups.to_vec()));
+        assert_eq!(
+            vis,
+            Some((instance, vec![7u16])),
+            "the light must name the one room its body is in — without it the packer writes w = 0 \
+             and every interior surface refuses it",
+        );
+
+        // …and the body walks out into the open world.
+        *app.world_mut().get_mut::<UnitWmoRoom>(body).unwrap() = UnitWmoRoom::default();
+        app.update();
+        assert!(
+            app.world().get::<LightRooms>(light).is_none(),
+            "outdoors again, the rooms come OFF — a light left claiming a building it has left is \
+             one the portal gate can cull while it stands in the street",
+        );
+    }
 
     /// GOLDEN — the **live exterior M2 response** (0803): `wow_model.wgsl`'s doodad/entity lane must
     /// reproduce `E = A + I·D·(4/17)(0.375 + 2μ + 1.875μ²)` off the rows [`pack_model_core_rows`]

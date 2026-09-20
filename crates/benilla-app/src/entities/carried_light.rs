@@ -63,6 +63,15 @@ pub(super) fn spawn_carried_lights(
         let glow = commands
             .spawn((
                 point_light(l.def.diffuse_color, l.def.diffuse_intensity),
+                // fork: P8 — **which body's room this light is in.** Without it the light names no
+                // rooms, and a light that names no rooms may not light an INTERIOR surface at all
+                // (`static_gx.wgsl`'s `interior && w < 0.5` gate, the rule that stops a street lamp
+                // lighting the chapel beside it through the wall). That rule reads "no rooms" as
+                // "outdoors", which is true of a placed ADT lamp and false of every light on this
+                // lane — so until this was attached, a torch indoors, a fire elemental in a
+                // dungeon and a GameObject brazier in Orgrimmar all lit exactly nothing.
+                // `frame`, not `parent`: the room belongs to the BODY, and `parent` may be a bone.
+                benilla_world::lighting::LightOwner(frame),
                 Transform::from_translation(wow_to_bevy(local)),
                 Visibility::default(),
             ))

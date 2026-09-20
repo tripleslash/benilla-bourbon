@@ -1086,6 +1086,10 @@ pub(super) fn attach_entity_visuals(
                                     ),
                                     benilla_world::modern::lights::SynthesizedLight,
                                     benilla_world::modern::lights::FixtureRadius(radius),
+                                    // The room this brazier is standing in — see `LightOwner`.
+                                    // A derived light is refused by an interior surface without
+                                    // it exactly as an authored one is.
+                                    benilla_world::lighting::LightOwner(entity),
                                     Transform::from_translation(
                                         benilla_assets::coords::wow_to_bevy(local),
                                     ),
