@@ -818,57 +818,24 @@ fn lighting_reach(model: &WmoModel, eye_local: [f32; 3], terrain_z: Option<f32>)
     let mut lit = vec![false; nav.len()];
     let seeds = down_ray_seeds(model, eye_local, terrain_z);
     let mut stack: Vec<usize> = Vec::new();
-    // The eye standing on the building's own porch or outer terrace is the OUTSIDE leg, exactly as
-    // it is for visibility (`inside_leg`, and the interior claim's `[0xc7b748]` writer, which
-    // rejects an `0x8` group outright). Without this an exterior shell group would seed the
-    // interior flood and light the whole building from the front step.
-    let interior_seed = seeds
-        .in_group
-        .filter(|&gi| nav.get(gi).is_some_and(|n| n.flags & EXTERIOR == 0));
-    match interior_seed {
+    match seeds.in_group {
         Some(c) => {
             stack.push(c);
             if let Some(a) = seeds.across {
                 stack.push(a);
             }
         }
-        // **The outside leg.** Standing in the open world, a building's interior rooms do not light
-        // it: the wall is in the way, and the reference never has a culled room's torch to register
-        // in the first place (decision 0689's law). This used to return "every group lit", which is
-        // no gate at all — every candle in Northshire Abbey reached the open world through its
-        // walls, and paid for a table slot and a per-cell budget entry from outside the building.
+        // **Outside the building: no room gate at all**, and the narrower answers tried here do
+        // not work. `lit` is ONE set for the whole frame, so anything tight enough to stop an
+        // interior torch washing the road outside is also tight enough to darken that torch when
+        // the player looks straight at it through the doorway — a hop cap did exactly that, and
+        // the room you could plainly see through the abbey door went black.
         //
-        // The seed set is the groups that ARE the open world here — `0x8` outdoor shells and the
-        // `0x40` interior-graph groups the unit light classify lights as outdoors (Stormwind's
-        // streets are `0x40`-without-`0x8`, decision 0475; seeding `0x8` alone would put every
-        // street lamp in the city out the moment the camera left a street group). The same flag the
-        // VISIBILITY outside leg seeds from: if `0x8` is what decides a building is drawn from
-        // outside, it is what decides it is lit from outside.
-        //
-        // Then ONE hop inward, and no further. A doorway genuinely spills light — the Abbey's
-        // entrance lamp is the case the room gate was written around, and it sits one portal in —
-        // but a second doorway does not, and everything past it is the bleed. This is a fork
-        // ruling, not a byte law: the reference's own set is its frustum-clipped visible groups,
-        // and gating on THAT is what made the lamp blink as the camera turned (see the field doc).
-        // A hop count keeps the answer orientation-free, which is the property the gate exists for.
-        None => {
-            for (gi, g) in nav.iter().enumerate() {
-                if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 {
-                    lit[gi] = true;
-                }
-            }
-            for gi in (0..nav.len()).filter(|&i| lit[i]).collect::<Vec<_>>() {
-                let Some(g) = nav.get(gi) else { continue };
-                let lo = g.ref_start as usize;
-                let hi = lo + g.ref_count as usize;
-                for r in model.portal_refs.get(lo..hi).unwrap_or(&[]) {
-                    if let Some(slot) = lit.get_mut(r.group as usize) {
-                        *slot = true;
-                    }
-                }
-            }
-            return lit;
-        }
+        // The two cases differ by the RECEIVER, not by the light, so they cannot be separated
+        // here at all: that belongs to the indoor/outdoor class test the surface lanes already
+        // carry (`static_gx.wgsl`'s `modern_local_lights`, which rejects an outdoor light on an
+        // interior surface and wants the mirror-image rejection for the bleed).
+        None => return vec![true; nav.len()],
     }
     while let Some(gi) = stack.pop() {
         if lit.get(gi).copied().unwrap_or(true) {
@@ -1970,55 +1937,24 @@ mod tests {
         assert!(lit.iter().all(|v| *v), "every room on the chain is lit: {lit:?}");
     }
 
-    /// A chain whose group 0 is the building's OUTDOOR shell (`0x8`) — the shape of a chapel seen
-    /// from the road: shell → entrance hall → nave.
-    fn shelled_chain_model() -> WmoModel {
-        let mut m = floored_chain_model();
-        m.group_nav[0].flags |= EXTERIOR;
-        m
-    }
-
-    /// GOLDEN — **a building's interior does not light the open world.** Standing outside, the
-    /// lit set is the outdoor shell plus the rooms it opens directly onto, and nothing deeper.
+    /// Outside the building there is no room gate at all — the building's lights are then bounded
+    /// by range alone, which is what the open world already does.
     ///
-    /// This used to return "every group lit", which is not a gate: every candle in Northshire
-    /// Abbey reached the road through its walls, and each one paid for a point-table slot and a
-    /// per-cell budget entry while the room it stands in was not being drawn at all. The director
-    /// reported both halves — light bleeding out of the abbey, and the frame cost of looking at it
-    /// from outside with nothing of the inside on screen.
+    /// **A narrower answer was tried here and reverted.** Seeding the outdoor shell and flooding a
+    /// single portal hop inward stopped an interior torch washing the road, but it also darkened
+    /// the room you can see through the abbey's open door, because that room is more than one
+    /// portal from the shell. `lit` is one set for the whole frame and the two cases differ by the
+    /// receiver, so no verdict here can tell them apart — the bleed belongs to the surface lanes'
+    /// indoor/outdoor class test, not to this function. Keep that in mind before narrowing it
+    /// again.
     #[test]
-    fn lighting_reach_outside_lights_the_shell_and_one_room_in_and_no_deeper() {
-        let m = shelled_chain_model();
+    fn lighting_reach_outside_a_building_gates_nothing() {
+        let m = floored_chain_model();
         // Standing on the road beside the building — outside every group's own column, which is
         // what actually makes the down-ray answer "no containing group" (being merely high above
         // it does not: the ray still lands on a floor).
         let lit = lighting_reach(&m, [100.0, 0.0, 1.0], None);
-        assert_eq!(
-            lit,
-            vec![true, true, false],
-            "the shell and the room behind its doorway light the road; the nave does not"
-        );
-    }
-
-    /// …and the porch is not a loophole. The eye standing ON an `0x8` shell group takes the
-    /// OUTSIDE leg, exactly as visibility's `inside_leg` and the interior claim do — otherwise the
-    /// front step would seed the interior flood and light the whole building.
-    #[test]
-    fn lighting_reach_on_the_buildings_own_porch_is_still_outside() {
-        let m = shelled_chain_model();
-        // Standing on group 0's own floor — but group 0 is the outdoor shell.
-        let lit = lighting_reach(&m, [-6.0, 0.0, 1.0], None);
-        assert_eq!(lit, vec![true, true, false], "the porch lit the whole building");
-    }
-
-    /// A building with no outdoor shell at all (a placed dungeon interior) lights nothing outside
-    /// itself — the same answer its geometry already gives, since the visibility outside leg seeds
-    /// from the same flag and would draw none of it either.
-    #[test]
-    fn lighting_reach_outside_a_shell_less_building_lights_nothing() {
-        let m = floored_chain_model(); // every group interior-flagged
-        let lit = lighting_reach(&m, [100.0, 0.0, 1.0], None);
-        assert!(lit.iter().all(|v| !*v), "{lit:?}");
+        assert!(lit.iter().all(|v| *v), "{lit:?}");
     }
 
     fn portal_model() -> WmoModel {
