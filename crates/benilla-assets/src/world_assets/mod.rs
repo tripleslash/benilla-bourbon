@@ -406,6 +406,30 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
+/// Read one file from the **two stores the client's file layer has**: the patch chain, then — for
+/// an `Interface\AddOns\` path — the loose addon folder ([`loose_addon_file`]).
+///
+/// The rule shared by every by-path asset an addon can ship: art (the sprite decoder), fonts (the
+/// face loader) and **audio** (`PlayMusic`/`PlaySoundFile`) all reach a file the same way, and
+/// three copies of that would be three things to keep in step — the font leg was already a
+/// hand-rolled second copy of the sprite leg's order when audio became the third caller.
+///
+/// The reference asks the install tree *before* the archive (`0x647e60`'s attempt #4 is the MPQ —
+/// wow-re `ui/scratch/include-lua-dispatch.md` §4.1); the order is flipped here for the same
+/// reason [`decode_sprite`] flips it, and it is unobservable: the chain carries no `AddOns\` path,
+/// so every non-addon read stays on exactly the code it always ran.
+pub fn read_chain_or_loose(
+    chain: &Mutex<Chain>,
+    loose_root: Option<&Path>,
+    path: &str,
+) -> Option<Vec<u8>> {
+    if let Ok(bytes) = chain.lock_recover().read(path) {
+        return Some(bytes);
+    }
+    let file = loose_addon_file(loose_root?, &normalize_path(path))?;
+    std::fs::read(file).ok()
+}
+
 /// Map a **normalized** addon-relative path (`interface\addons\<addon>\<…>`, lowercase,
 /// backslashed — [`normalize_path`] has run) onto a file under the loose addon root, or `None` if
 /// it is not an `Interface\AddOns\` path or nothing is there.
@@ -523,6 +547,26 @@ impl WorldAssets {
             model_materials: SpatialCache::default(),
             shared_light,
         }
+    }
+
+    /// [`read_chain_or_loose`] over this store's own two halves — the by-path read for an asset
+    /// class with no decoder of its own here (audio: `PlayMusic`, `PlaySoundFile`).
+    pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
+        read_chain_or_loose(&self.chain, self.loose_root.as_deref(), path)
+    }
+
+    /// The **loose half alone** of [`read_chain_or_loose`], for a caller that has already asked
+    /// the chain itself and been told no.
+    ///
+    /// The sound kit is that caller: on the web target its chain read is the non-blocking
+    /// [`crate::chain::TryRead`] (a blocking fetch for a footstep is the freeze the whole
+    /// deferred-streaming design exists to prevent), and routing its miss back through
+    /// `read_file_or_loose` would pay a second chain lookup — and, worse, a *blocking* one — just
+    /// to reach the AddOns folder. The page never has a loose root, so this is `None` there and
+    /// the two targets agree by construction.
+    pub fn read_loose_only(&self, path: &str) -> Option<Vec<u8>> {
+        let file = loose_addon_file(self.loose_root.as_deref()?, &normalize_path(path))?;
+        std::fs::read(file).ok()
     }
 
     /// Install (or clear) the loose-file root for `Interface\AddOns\` sprite paths — see the
@@ -1194,6 +1238,52 @@ mod tests {
             None
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **The by-path read every addon-shipped asset resolves by** — chain first, then the one
+    /// loose folder ([`read_chain_or_loose`]). Audio is that rule's third caller, after art and
+    /// fonts, and an addon's own track is exactly the file no MPQ can hold: this leg is the whole
+    /// reason `PlayMusic("Interface\\AddOns\\…")` can make a sound at all.
+    ///
+    /// Against the **real** chain, because both legs matter — a client file must still come from
+    /// the archive, and only a real chain can show the loose folder is a *fallback* rather than a
+    /// shadow over it.
+    #[test]
+    fn read_chain_or_loose_asks_the_chain_then_an_addons_own_file_on_disk() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let root =
+            std::env::temp_dir().join(format!("benilla-loose-audio-test-{}", std::process::id()));
+        let addons = root.join("AddOns");
+        std::fs::create_dir_all(addons.join("Jukebox")).unwrap();
+        std::fs::write(addons.join("Jukebox").join("Track.mp3"), b"ID3!").unwrap();
+
+        // The archive leg: a client track the chain does carry.
+        let theme = read_chain_or_loose(
+            &chain,
+            Some(&addons),
+            "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3",
+        )
+        .expect("the glue theme lives in sound.MPQ");
+        assert!(theme.len() > 1_000_000, "the theme is a ~3 MB stored MP3");
+
+        // The loose leg: an addon's own track, named by the virtual path, spelt in its own case.
+        assert_eq!(
+            read_chain_or_loose(
+                &chain,
+                Some(&addons),
+                "Interface\\AddOns\\Jukebox\\Track.mp3"
+            )
+            .as_deref(),
+            Some(&b"ID3!"[..])
+        );
+        // In neither store: a plain miss, which every caller renders as silence.
+        assert!(read_chain_or_loose(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
+        // No folder configured (a capture run — `local_state` is hermetic there): chain only.
+        assert!(
+            read_chain_or_loose(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

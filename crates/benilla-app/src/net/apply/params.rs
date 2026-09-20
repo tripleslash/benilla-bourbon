@@ -133,22 +133,12 @@ pub(crate) struct Session<'w> {
 pub(crate) struct WindowStores<'w> {
     pub names: ResMut<'w, crate::names::NameCache>,
     pub items: ResMut<'w, crate::items::Items>,
-    pub gossip: ResMut<'w, crate::ui_gossip::GossipState>,
-    pub merchant: ResMut<'w, crate::ui_merchant::MerchantOpen>,
-    /// The two gossip-reached NPC service sessions whose state is a whole open window.
-    pub trainer_open: ResMut<'w, crate::ui_trainer::TrainerOpen>,
-    pub stable_open: ResMut<'w, crate::ui_stable::StableOpen>,
-    /// The loot window state, the client-local loot-target latch (the kneel's self trigger,
-    /// decision 0515), and the open group-loot rolls (decision 0591).
-    pub loot: ResMut<'w, crate::ui_loot::LootState>,
+    /// The client-local loot-target latch (the kneel's self trigger, decision 0515). The loot
+    /// window's handlers own it since 2319 (`ui_loot::net`); it stays here for the one arm that
+    /// still arms it — `SMSG_SPELL_GO` on a chest (decision 1477) — and leaves with the spells.
     pub loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
-    pub loot_rolls: ResMut<'w, crate::ui_loot_roll::LootRolls>,
     pub chat_log: ResMut<'w, crate::ui_chat::ChatLog>,
     pub quest: ResMut<'w, crate::ui_quest::QuestGiver>,
-    /// The quest-log template cache, and the party quest-share state (decision 1733) — the
-    /// verdicts on a quest we pushed and the escort confirm: a share is a quest-log verb.
-    pub quest_log: ResMut<'w, crate::ui_quest_log::QuestLog>,
-    pub quest_share: ResMut<'w, crate::ui_quest_share::QuestShare>,
     pub go_templates: ResMut<'w, crate::go_templates::GameObjectTemplates>,
     pub home_bind: ResMut<'w, crate::net::HomeBind>,
     pub proficiencies: ResMut<'w, crate::net::Proficiencies>,
@@ -158,91 +148,22 @@ pub(crate) struct WindowStores<'w> {
     pub death_net: ResMut<'w, crate::death::DeathNet>,
     /// The party/raid roster mirror + its composed system lines (decision 0434).
     pub group: ResMut<'w, crate::ui_party::GroupState>,
-    /// The taxi-map session (decision 0484 phase 1).
-    pub taxi: ResMut<'w, crate::ui_taxi::TaxiState>,
-    /// The mailbox session + its login-scoped arrival countdown (decision 0544).
-    pub mail_open: ResMut<'w, crate::ui_mail::MailOpen>,
-    pub mail_pending: ResMut<'w, crate::ui_mail::MailPending>,
-    /// The player-trade session (decision 0592).
-    pub trade_session: ResMut<'w, crate::ui_trade::TradeSession>,
-    /// The bank session and its purchase-refusal queue (decision 0604).
-    pub bank_open: ResMut<'w, crate::ui_bank::BankOpen>,
-    pub bank_errors: ResMut<'w, crate::ui_bank::BankErrors>,
     /// The world-state table the NPC-text `$<n>w` tokens read.
     pub world_states: ResMut<'w, crate::world_state::WorldStates>,
-    /// The duel session (decision 0633).
-    pub duel: ResMut<'w, crate::ui_duel::DuelState>,
-    pub social: ResMut<'w, crate::ui_social::SocialState>,
+    /// Read-only here since 2312 — the social handlers own it (`ui_social::net`); the chat arm
+    /// still reads the ignore list.
+    pub social: Res<'w, crate::ui_social::SocialState>,
     /// The pending logout/quit (decision 0674): the server's response and cancel-ack land here,
     /// and `crate::ui_logout` turns them into the countdown dialog.
     pub logout: ResMut<'w, crate::ui_logout::LogoutState>,
-    /// The mirror-timer queue (decision 0874): the breath/fatigue START/PAUSE/STOP edges, drained
-    /// into the FrameXML bars by `crate::ui_mirror`.
-    pub mirror_timers: ResMut<'w, crate::ui_mirror::MirrorTimerFeed>,
     /// The pet action bar's server-authoritative state + its own cooldown store (decision 0982),
     /// replaced wholesale on every `SMSG_PET_SPELLS`.
     pub pet_bar: ResMut<'w, crate::ui_pet::PetBar>,
     /// The by-key red error queue the pet bar's refused-order feedback rides (the `DisplayError`
     /// route, resolved through the VM's own GlobalStrings by `ui_action::feed_actions`).
     pub ui_error_keys: ResMut<'w, crate::ui_action::UiErrorKeys>,
-    /// The ask-once book-page cache (decision 1105) — every readable's text, keyed by `PageText`
-    /// id; the reader session repaints off it.
-    pub page_texts: ResMut<'w, crate::ui_item_text::PageTexts>,
     pub played_time_answer: ResMut<'w, crate::net::PlayedTimeAnswer>,
-    /// The guild session (decision 1257) — the identity/roster mirror the seven
-    /// `SessionEvent::Guild*` arms drive.
-    pub guild: ResMut<'w, crate::ui_guild::GuildState>,
-    /// The innkeeper's pending bind question (decision 1331) — `SMSG_BINDER_CONFIRM` parks the
-    /// innkeeper's guid here and `crate::ui_binder` turns it into the CONFIRM_BINDER dialog,
-    /// whose Accept is the only thing that binds anything.
-    pub binder: ResMut<'w, crate::ui_binder::BinderState>,
-    /// The class trainer's pending respec question (decision 1580) — the inbound
-    /// `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
-    /// `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose Accept is the
-    /// only thing that unlearns anything. The binder's twin.
-    pub talent_wipe: ResMut<'w, crate::ui_talent_wipe::TalentWipeState>,
-    /// The dialog engine's verbs (decision 1963): the pet trainer's latch, the instance-boot
-    /// clock, the area spirit healer, the battleground queue and the meeting-stone queue — each
-    /// a feed for a stock dialog.
-    pub pet_unlearn: ResMut<'w, crate::ui_dialog_verbs::PetUnlearnState>,
-    pub instance_boot: ResMut<'w, crate::ui_dialog_verbs::InstanceBoot>,
-    pub area_spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
-    pub battlefield_queue: ResMut<'w, crate::ui_dialog_verbs::BattlefieldQueue>,
-    pub meeting_stone: ResMut<'w, crate::ui_dialog_verbs::MeetingStone>,
-    pub battlefield_scoreboard: ResMut<'w, crate::ui_battlefield_score::BattlefieldScoreboard>,
-    pub battlefield: ResMut<'w, crate::ui_battlefield::Battlefield>,
     pub tutorials: ResMut<'w, crate::tutorial::Tutorials>,
-    pub battlefield_positions: ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>,
-    pub tabard: ResMut<'w, crate::ui_tabard::TabardOpen>,
-    /// The guard's directions marker (`SMSG_GOSSIP_POI`) — the wire carries no map field, so
-    /// "where you were standing when the guard told you" is the client's to remember
-    /// (`crate::poi_marker`).
-    pub poi_marker: ResMut<'w, crate::poi_marker::PoiMarker>,
-    /// The inspect-honor reply (decision 1512) — `MSG_INSPECT_HONOR_STATS` is the only source of
-    /// another player's honor numbers, so the reply parks here and `crate::ui_honor` pushes it
-    /// into the pane and fires `INSPECT_HONOR_UPDATE`.
-    pub inspect_honor: ResMut<'w, crate::ui_honor::InspectHonor>,
-    /// The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the world
-    /// point here and the minimap renderer derives everything else from it.
-    pub ping: ResMut<'w, crate::minimap::MinimapPing>,
-    /// The GM ticket (decision 1673) — `SMSG_GMTICKET_GETTICKET` replaces the held ticket here
-    /// and BUMPS AN ANSWER COUNTER, which is what `crate::ui_gm_ticket` diffs on: the Help window
-    /// re-polls every 10 minutes and an unchanged answer still has to re-fire `UPDATE_TICKET`.
-    pub gm_ticket: ResMut<'w, crate::ui_gm_ticket::GmTicketState>,
-    /// The guild-charter session (decision 1672) — two resources because only the registrar
-    /// half is NPC-bound: `SMSG_PETITION_SHOWLIST` opens the registrar, and
-    /// `SMSG_PETITION_SHOW_SIGNATURES` opens the item-bound charter window, which must survive
-    /// walking away from the registrar.
-    pub registrar: ResMut<'w, crate::ui_petition::GuildRegistrarState>,
-    pub petition: ResMut<'w, crate::ui_petition::PetitionState>,
-    /// The pending summon question (decision 1747) — `SMSG_SUMMON_REQUEST` parks the summoner's
-    /// guid, zone and expiry here and `crate::ui_summon` turns it into the CONFIRM_SUMMON dialog,
-    /// whose Accept is the only packet in the flow.
-    pub summon: ResMut<'w, crate::ui_summon::SummonState>,
-    /// The instance-lockout bookkeeping (decision 1748) — four of its six packets queue a
-    /// GlobalStrings-templated chat line here for `crate::ui_instance` to resolve against the
-    /// VM, and two write the latch behind `CanShowResetInstances()`.
-    pub instances: ResMut<'w, crate::ui_instance::InstanceState>,
 }
 
 /// The action bar's family: the cast/cooldown state and every error queue the red line drains
@@ -267,15 +188,7 @@ pub(crate) struct ActionStores<'w> {
     /// reason the reference sorts before it fires: the tab index is only correct against the
     /// rebuilt tab list, which is the spellbook feed's, not this apply's.
     pub learned_in_tab: ResMut<'w, crate::ui_spellbook::LearnedInTab>,
-    pub equip_errors: ResMut<'w, crate::ui_items::EquipErrors>,
-    pub merchant_errors: ResMut<'w, crate::ui_merchant::MerchantErrors>,
     pub cast_bar: ResMut<'w, crate::ui_cast::CastBarFeed>,
-    pub pending_item_ops: ResMut<'w, crate::pending_item_ops::PendingItemOps>,
-    pub lock_transitions: ResMut<'w, crate::pending_item_ops::LockTransitions>,
-    /// The two NPC-service windows' error queues, each drained onto its window's red line by its
-    /// own feed.
-    pub trainer_errors: ResMut<'w, crate::ui_trainer::TrainerErrors>,
-    pub stable_errors: ResMut<'w, crate::ui_stable::StableErrors>,
     pub pending_cast: ResMut<'w, crate::ui_cast::PendingCast>,
     /// The player's cooldown store (decision 0137 phase 4); the pet's is in its bar, and
     /// `addressed_store` picks between them.
@@ -367,9 +280,4 @@ pub(crate) struct Catalogs<'w> {
     /// 0828) — and the race-keyed discovery-jingle catalog (decision 0829).
     pub area_table: Option<Res<'w, crate::area::AreaTableRes>>,
     pub exploration_sounds: Option<Res<'w, crate::sound::ExplorationSounds>>,
-    /// The map the guard's directions marker is stamped with.
-    pub current_map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
-    /// Guild Member Alert (decision 1589) — the CVar knob the sign-on/sign-off pair's display
-    /// condition reads; see `ui_guild::apply::event` for the four conjuncts.
-    pub guild_notify: Res<'w, crate::ui_guild::GuildMemberNotify>,
 }

@@ -113,12 +113,19 @@ pub(crate) struct StreamingSoundHandle<Error>(StaticSoundHandle, std::marker::Ph
 
 #[cfg(target_arch = "wasm32")]
 impl<Error> StreamingSoundHandle<Error> {
-    /// The four [`StaticSoundHandle`] methods this module and its callers actually use — the
-    /// full control surface (`pause`/`seek_to`/`set_loop_region`/…) is identical between kira's
-    /// static and streaming handles (both expand the same `handle_param_setters!` macro), so
-    /// forwarding grows here the moment a caller needs more.
+    /// The [`StaticSoundHandle`] methods this module and its callers actually use — the full
+    /// control surface (`seek_to`/`set_loop_region`/…) is identical between kira's static and
+    /// streaming handles (both expand the same `handle_param_setters!` macro), so forwarding
+    /// grows here the moment a caller needs more. `pause`/`resume` are the Lua music slot's:
+    /// a cinematic borrows that stream rather than stopping it (`zone::apply_music_suppression`).
     pub(crate) fn set_volume(&mut self, volume: impl Into<kira::Value<Decibels>>, tween: Tween) {
         self.0.set_volume(volume, tween);
+    }
+    pub(crate) fn pause(&mut self, tween: Tween) {
+        self.0.pause(tween);
+    }
+    pub(crate) fn resume(&mut self, tween: Tween) {
+        self.0.resume(tween);
     }
     pub(crate) fn state(&self) -> kira::sound::PlaybackState {
         self.0.state()

@@ -246,6 +246,10 @@ pub(crate) struct PendingEntryUiLoad {
     frames: u32,
     covering: bool,
     identity: Option<(String, String)>,
+    /// Every character on this realm's list — the AddOn enable store's node set (decision 2311).
+    /// Resolved with `identity` at the first step, because the addon step that needs it runs
+    /// frames later and the roster resource may be gone by then.
+    roster: Vec<String>,
     version_check: bool,
     /// The builtin manifest's file list, resolved once at the first step.
     files: Vec<String>,
@@ -476,11 +480,12 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         let stage = world.resource::<PendingEntryUiLoad>().stage;
         match stage {
             EntryStage::Armed => {
-                let (identity, version_check) = entry_prepare(world, &mut script);
+                let (identity, roster, version_check) = entry_prepare(world, &mut script);
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
                 let files = Addon::builtin().toc.files;
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.identity = identity;
+                pending.roster = roster;
                 pending.version_check = version_check;
                 pending.covering = covering;
                 pending.started = Some(frame_start);
@@ -535,11 +540,16 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 pending.stage = EntryStage::ThirdParty;
             }
             EntryStage::ThirdParty => {
-                let (identity, version_check) = {
+                let (identity, roster, version_check) = {
                     let p = world.resource::<PendingEntryUiLoad>();
-                    (p.identity.clone(), p.version_check)
+                    (p.identity.clone(), p.roster.clone(), p.version_check)
                 };
-                let _ = addons::load_third_party(&mut script, identity.as_ref(), version_check);
+                let _ = addons::load_third_party(
+                    &mut script,
+                    identity.as_ref(),
+                    &roster,
+                    version_check,
+                );
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.done += 1;
                 pending.stage = EntryStage::Finish;
@@ -601,12 +611,23 @@ fn warm_chain_entries(world: &mut World) {
 /// the per-VM seeds and the raster seam. Shared by the sliced entry load
 /// ([`run_pending_entry_load`]) and the one-shot [`load_ingame_ui_on_world_entry`], so the two
 /// cannot drift on what a fresh entry VM is told.
-fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, String)>, bool) {
+fn entry_prepare(
+    world: &mut World,
+    script: &mut UiScript,
+) -> (Option<(String, String)>, Vec<String>, bool) {
     // The character whose AddOn enable state applies. Resolved before the load because the
     // enable file gates which addons run at all.
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // …and the realm's whole character list, which is the enable store's node set: the reference
+    // populates one `ADDONSTATELIST` node per character at char-list time, and an addon this
+    // character has never had an opinion about is resolved from what the others said
+    // (decision 2311).
+    let roster: Vec<String> = world
+        .get_resource::<crate::char_select::Roster>()
+        .map(|r| r.chars.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
     // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
     // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
     // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
@@ -726,7 +747,7 @@ fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, S
     // through its whole load edge and only converged a frame later off whatever poll the caller
     // had written to survive it.
     seat_raster_seam_for_load(world, script);
-    (identity, version_check)
+    (identity, roster, version_check)
 }
 
 /// The entry load's closing — everything after the files: minimap zoom seed, saved variables +
@@ -922,8 +943,8 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
-    let (identity, version_check) = entry_prepare(world, &mut script);
-    let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
+    let (identity, roster, version_check) = entry_prepare(world, &mut script);
+    let _ = load_ingame_ui(&mut script, identity.as_ref(), &roster, version_check);
     entry_finish(world, &mut script, identity);
     world.insert_non_send_resource(script);
     arm_leaving_world(world);

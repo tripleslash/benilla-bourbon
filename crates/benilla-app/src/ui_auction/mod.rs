@@ -10,9 +10,15 @@
 //! decorative: it keys the deposit rate the sell pane displays, and the six faction houses charge
 //! 5% where the neutral goblin house charges 25%.
 //!
-//! **Three lists, one session.** Browse (`"list"`), Bids (`"bidder"`) and Auctions (`"owner"`) are
-//! three independent server queries into one window. Each holds at most one 50-row page — the
-//! server's own cap — plus the pre-cap match count the pager needs, plus its own sort stack.
+//! **Three lists, one session — and three separate events.** Browse (`"list"`), Bids (`"bidder"`)
+//! and Auctions (`"owner"`) are three independent server queries into one window. Each holds at
+//! most one 50-row page — the server's own cap — plus the pre-cap match count the pager needs,
+//! plus its own sort stack, plus its own update event. The reference keeps them just as far apart
+//! (wow-re's auction node §1: three arrays, three counts, three sort stacks, and a fire-site
+//! census in which every `AUCTION_*_LIST_UPDATE` is fired by whatever just touched *its* array).
+//! So a list-update event here is a statement about **one** list; firing the other two runs the
+//! stock addon's other tabs over state they were never given, and the Auctions tab answers that
+//! by crashing (decision 2308).
 //!
 //! **Sorting is ours and paging is the server's**, which is the split that shapes this module: a
 //! header click re-orders rows we already hold and sends nothing ([`sort`]), while a page turn
@@ -164,6 +170,11 @@ pub(crate) struct AuctionListSlot {
     pub(crate) entries: Vec<AuctionListEntry>,
     /// `totalCount` — the pre-cap match count, which is what tells the pager there is a page 2.
     pub(crate) total: u32,
+    /// A result for **this** list has landed since the window opened — the interface asked for it
+    /// and the server answered. `false` is "we hold no such list", which is *not* "the list is
+    /// empty": an empty page still arrives, and still counts. It is what the server-driven
+    /// refreshes gate on (decision 2308).
+    received: bool,
     sort: SortStack,
 }
 
@@ -209,30 +220,28 @@ pub(crate) struct AuctionOpen {
     show_requested: bool,
     /// Fire `NEW_AUCTION_UPDATE` next feed — the sell slot changed.
     sell_slot_dirty: bool,
-    /// A result landed for this list, so **its** event is owed whether or not the snapshot
-    /// changed. Indexed by [`LIST`]/[`BIDDER`]/[`OWNER`], like [`Self::lists`].
+    /// A list result landed **for that list**, so *its* event is owed whether or not the snapshot
+    /// changed. Indexed [`LIST`]/[`BIDDER`]/[`OWNER`].
     ///
     /// Diffing the snapshot is not enough and the live probe is what proved it: an empty auction
     /// house, or re-running the same search, produces a result identical to what we already hold.
     /// The window's Browse pane clears its "Searching…" state only on `AUCTION_ITEM_LIST_UPDATE`,
     /// so on an empty server a search animated its dots forever and never reported a result.
     ///
-    /// **Per-list, not one flag for all three** — and that is the reference's own law, not a
-    /// tidying. The auction window's message handler (`0x4ca230`) is a five-case switch on the
-    /// message kind, whose jump table at `0x4ca3a4` sends cases 2/3/4 to `0x4ca36a`/`0x4ca371`/
-    /// `0x4ca378` — three `push` sites that each choose ONE event id (`0x1a8`
-    /// `AUCTION_ITEM_LIST_UPDATE`, `0x1a9` `AUCTION_OWNED_LIST_UPDATE`, `0x1aa`
-    /// `AUCTION_BIDDER_LIST_UPDATE`) and fall into a single shared `call 0x496720` at `0x4ca37d`.
-    /// One message, one event; there is no "invalidate all three" routine.
+    /// **Per list — that is the whole point** (decision 2308). This was one flag driving all three
+    /// fires, on 1511's reading that "one routine invalidates all three lists". The reference has
+    /// no such routine: three arrays, three counts, three sort stacks, **three separate events**,
+    /// each fired by whatever just touched *its* array. Firing the other two crashed the stock
+    /// `Blizzard_AuctionUI` outright — `AuctionFrameAuctions_Update` multiplies by
+    /// `AuctionFrameAuctions.page`, which the addon initialises only in that tab's `OnShow`, so a
+    /// browse result arriving while the player had never opened the Auctions tab raised
+    /// `attempt to perform arithmetic on field 'page' (a nil value)`.
     ///
-    /// Broadcasting all three was a real defect, not a harmless extra. `AUCTION_OWNED_LIST_UPDATE`
-    /// is the answer to `GetOwnerAuctionItems()`, and the stock addon calls that in exactly one
-    /// place — `AuctionFrameAuctions_OnShow` (ref Blizzard_AuctionUI.lua l.814), three lines above
-    /// the only assignment of `AuctionFrameAuctions.page` (l.817). `AuctionFrameAuctions_Update`
-    /// then reads that field unguarded (l.837), so an owned event delivered to a window whose
-    /// Auctions tab has never been shown raises
-    /// `attempt to perform arithmetic on field 'page' (a nil value)` — which is what walking up to
-    /// an auctioneer did here, on the first frame anything at all about the house changed.
+    /// The handler is `0x4ca230`, a five-case switch on the message kind whose jump table at
+    /// `0x4ca3a4` sends cases 2/3/4 to `0x4ca36a`/`0x4ca371`/`0x4ca378` — three `push` sites that
+    /// each choose ONE event id (`0x1a8` `AUCTION_ITEM_LIST_UPDATE`, `0x1a9`
+    /// `AUCTION_OWNED_LIST_UPDATE`, `0x1aa` `AUCTION_BIDDER_LIST_UPDATE`) and fall into one shared
+    /// `call 0x496720` at `0x4ca37d`. One message, one event, and no site that fires two.
     list_result_landed: [bool; 3],
     /// Empty the sell slot next feed — a listing was accepted, so the staged item is *gone*.
     ///
@@ -324,6 +333,7 @@ impl AuctionOpen {
     pub(crate) fn set_list(&mut self, which: usize, entries: Vec<AuctionListEntry>, total: u32) {
         self.list_result_landed[which] = true;
         let slot = &mut self.lists[which];
+        slot.received = true;
         slot.entries = entries;
         // A server that reports fewer total matches than it just sent us is not a case worth
         // trusting over our own eyes; the pager reads the larger of the two.
@@ -345,13 +355,20 @@ impl AuctionOpen {
     }
 
     /// Mark our own listings stale — the drain re-queries next frame.
+    ///
+    /// **Only a list we hold can be stale** (decision 2308). A notification says "the page you are
+    /// showing is now wrong"; if the interface has never asked for the owned list, there is no
+    /// such page, and re-asking would *introduce* one — landing an `AUCTION_OWNED_LIST_UPDATE` on
+    /// a tab whose `page` field the stock addon has not initialised yet. The reference cannot
+    /// reach that state at all: its notification handlers patch the cached row in place, so an
+    /// array it never fetched has nothing to patch and announces nothing.
     pub(crate) fn refresh_owner(&mut self) {
-        self.pending_owner_refresh = true;
+        self.pending_owner_refresh |= self.lists[OWNER].received;
     }
 
-    /// Mark the bids we hold stale.
+    /// Mark the bids we hold stale — under the same rule as [`Self::refresh_owner`].
     pub(crate) fn refresh_bidder(&mut self) {
-        self.pending_bidder_refresh = true;
+        self.pending_bidder_refresh |= self.lists[BIDDER].received;
     }
 
     /// Close the window (a client-side close — vanilla sends nothing).
@@ -696,17 +713,16 @@ fn feed_auction(
     let opened = last_open.is_none() && auction.auctioneer.is_some();
     let closed = last_open.is_some() && auction.auctioneer.is_none();
     let show_requested = std::mem::take(&mut auction.show_requested);
-    let result_landed = std::mem::take(&mut auction.list_result_landed);
+    let landed = std::mem::take(&mut auction.list_result_landed);
     let changed = fresh != *last;
-    // **One list, one event** ([`AuctionOpen::list_result_landed`]). A list owes its own event when
-    // a result landed for it, or when its page moved under us because an async name or template
-    // just filled a row in — and owes nothing when some *other* list moved, or when only the
-    // deposit rate resolved.
-    let owes = |which: usize| {
-        result_landed[which]
-            || fresh.as_ref().map(|f| &f.lists[which]) != last.as_ref().map(|l| &l.lists[which])
-    };
-    let (owes_list, owes_bidder, owes_owner) = (owes(LIST), owes(BIDDER), owes(OWNER));
+    // **Which events are owed, per list.** A landed result owes its own list's event outright; a
+    // changed list owes it because an async name or template just filled one of its rows in. The
+    // diff is per list rather than over the whole snapshot for the same reason the fires are
+    // (2308): an event names one list, and firing the other two runs the stock Lua's other tabs
+    // over state they were never given.
+    let owed: [bool; 3] = std::array::from_fn(|i| {
+        landed[i] || fresh.as_ref().map(|s| &s.lists[i]) != last.as_ref().map(|s| &s.lists[i])
+    });
     if changed {
         script.set_auction(fresh.clone());
     }
@@ -720,15 +736,17 @@ fn feed_auction(
             script.fire_event("AUCTION_HOUSE_SHOW", vec![]);
         }
         // Three literal fires, not a loop over names: the producer tripwire
-        // (`reference_ui::every_event_a_chain_file_registers_has_a_producer`) reads fire
-        // sites by their literal, and the stock addon registers all three (1971).
-        if owes_list {
+        // (`reference_ui::every_event_a_chain_file_registers_has_a_producer`) reads fire sites by
+        // their literal, and the stock addon registers all three (1971). Browse first, then Bids,
+        // then Auctions — the array's own order; the reference never fires two in one pass either,
+        // so nothing rests on it.
+        if owed[LIST] {
             script.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
         }
-        if owes_bidder {
+        if owed[BIDDER] {
             script.fire_event("AUCTION_BIDDER_LIST_UPDATE", vec![]);
         }
-        if owes_owner {
+        if owed[OWNER] {
             script.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
         }
     }
@@ -972,35 +990,69 @@ mod tests {
         );
     }
 
-    /// **A browse result owes nobody else's event** — the auctioneer crash, at its source.
+    /// **A result owes its OWN list's event and no other** (decision 2308).
     ///
-    /// The window used to hold ONE "a result landed" flag and fire all three list events off it,
-    /// so the first thing that moved after walking up to an auctioneer — a browse page, an async
-    /// item name, the deposit rate resolving — delivered `AUCTION_OWNED_LIST_UPDATE` to a window
-    /// whose Auctions tab had never been shown. `AuctionFrameAuctions_Update` reads
-    /// `AuctionFrameAuctions.page` unguarded, and only `AuctionFrameAuctions_OnShow` ever sets it:
-    /// `Blizzard_AuctionUI.lua:837: attempt to perform arithmetic on field 'page' (a nil value)`.
-    /// `auction_frame::the_owned_list_event_is_never_broadcast_to_an_unshown_auctions_tab` is the
-    /// same law asserted against the reference's own file.
-    ///
-    /// The switch at `0x4ca230` is the reference's answer: one message, one event.
+    /// The regression this guards is a crash, not a repaint: the stock `Blizzard_AuctionUI`'s
+    /// `AuctionFrameAuctions_Update` multiplies by `AuctionFrameAuctions.page`, and that field is
+    /// initialised only in the Auctions tab's `OnShow`. A browse result that also fired
+    /// `AUCTION_OWNED_LIST_UPDATE` therefore ran that tab's repaint before it had ever been
+    /// shown — `attempt to perform arithmetic on field 'page' (a nil value)`, on screen, on the
+    /// first search of the session. `auction_frame.rs` holds the Lua half of this.
     #[test]
-    fn a_landed_page_owes_only_its_own_list() {
+    fn a_result_owes_only_its_own_lists_event() {
         let mut open = AuctionOpen::default();
         open.open(0x1234, 1);
 
-        // A browse result — the only one the player asked for by walking up and searching.
         open.set_list(LIST, Vec::new(), 0);
         assert_eq!(
             open.list_result_landed,
             [true, false, false],
-            "the browse page owes AUCTION_ITEM_LIST_UPDATE and nothing else — an owned event              here raises in the stock addon's Auctions tab, which has never been shown"
+            "a browse result is not news about the player's bids or listings"
         );
 
-        // …and the owned page, when the Auctions tab finally asks for it, owes only its own.
         open.list_result_landed = [false; 3];
         open.set_list(OWNER, Vec::new(), 0);
         assert_eq!(open.list_result_landed, [false, false, true]);
+
+        open.list_result_landed = [false; 3];
+        open.set_list(BIDDER, Vec::new(), 0);
+        assert_eq!(open.list_result_landed, [false, true, false]);
+    }
+
+    /// **A refresh can only re-ask for a list we hold** (decision 2308) — the other half of the
+    /// same crash.
+    ///
+    /// "Your auction sold" arrives whenever the server feels like it, including while the player
+    /// is standing on the Browse tab having never opened the Auctions one. Turning that into a
+    /// fresh owner query would land an `AUCTION_OWNED_LIST_UPDATE` on that never-shown tab — the
+    /// nil `page` again, by a slower road. The reference cannot get there: its notification
+    /// handlers patch the cached row, and an array it never fetched has no row to patch.
+    #[test]
+    fn a_refresh_never_introduces_a_list_the_interface_never_asked_for() {
+        let mut open = AuctionOpen::default();
+        open.open(0x1234, 1);
+
+        open.refresh_owner();
+        open.refresh_bidder();
+        assert!(
+            !open.pending_owner_refresh && !open.pending_bidder_refresh,
+            "we hold neither list, so neither can have gone stale"
+        );
+
+        // The Auctions tab has now been shown once and the server answered — even with nothing in
+        // it. From here a sale really does invalidate what the player is looking at.
+        open.set_list(OWNER, Vec::new(), 0);
+        open.refresh_owner();
+        assert!(open.pending_owner_refresh, "a list we hold can go stale");
+        assert!(
+            !open.pending_bidder_refresh,
+            "and the other one still cannot"
+        );
+
+        // Closing forgets all of it — a notice landing after the window is gone re-asks nothing.
+        open.clear();
+        open.refresh_owner();
+        assert!(!open.pending_owner_refresh);
     }
 
     /// An accepted listing releases the sell slot. Without it the pane kept painting a phantom
