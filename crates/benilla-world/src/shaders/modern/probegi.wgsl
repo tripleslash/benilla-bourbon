@@ -138,9 +138,16 @@ fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -
     out.recv = clamp(recv_interior, 0.0, 1.0);
     out.base = vec3<i32>(clamp(lo, vec3<f32>(0.0), n - vec3<f32>(2.0))) + vec3<i32>(g.grid[c].xyz);
     out.frac = clamp(f - lo, vec3<f32>(0.0), vec3<f32>(1.0));
-    out.inside = clamp(edge - 0.5, 0.0, 1.0);
+    out.inside = clamp((edge - 0.5) / CASCADE_FADE, 0.0, 1.0);
     return out;
 }
+
+// How many probe cells a cascade's ownership fades over at its edge. The cascades are camera
+// centred, so the edge sweeps across the world as the player walks, and every point it crosses
+// swaps a coarse answer for a fine one. The two genuinely differ in a shaded street (a 6 yd lattice
+// cannot see an 8 yd alley's walls that a 2 yd one can), so a one-cell fade read as a darker band
+// creeping ahead of the player. Spread over three cells the same swap is a slow drift instead.
+const CASCADE_FADE: f32 = 3.0;
 
 fn tap_coord(pk: GiPick, k: u32) -> vec3<i32> {
     return pk.base + vec3<i32>(i32(k & 1u), i32((k >> 1u) & 1u), i32((k >> 2u) & 1u));

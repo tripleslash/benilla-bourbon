@@ -79,7 +79,12 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
         let share = select(left * pk.inside, 1.0, lite);
         sum = sum + cell_gi.rgb * (cell_gi.w * share);
         answered = answered + cell_gi.w * share;
-        left = left - share;
+        // Only the share that ANSWERED is spent: a cell the fine cascade is unsure of (freshly
+        // scrolled probes, probes inside walls) hands the rest to the coarser cascade rather than
+        // to the sky map. From afar that coarser cascade answered this point whole, so falling back
+        // to it keeps the point from changing as the player walks up to it. The mirror still
+        // takes the finest cascade alone.
+        left = left - select(share * cell_gi.w, 1.0, lite);
         if (left <= 0.001) {
             break;
         }

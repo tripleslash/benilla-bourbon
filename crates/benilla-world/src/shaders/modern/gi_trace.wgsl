@@ -246,13 +246,13 @@ fn trace_probes(@builtin(global_invocation_id) id: vec3<u32>) {
                     backfaces = backfaces + 1.0;
                 }
                 let lift = hit.pos + nrm * trace.tune.y;
-                let depth = dot(lift - trace.cam.xyz, trace.fwd.xyz);
-                let sun_vis = sunshadow::sun_visibility_fast(
+                // Placed by the map that holds it, never by where the camera looks: a hit behind
+                // the player is as shaded as one in front (`sun_visibility_anywhere`).
+                let sun_vis = sunshadow::sun_visibility_anywhere(
                     shadow_map,
                     shadow_samp,
                     modern_block.cascades,
                     lift,
-                    depth,
                 );
                 let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
                 // P6: the local lights too, so a room whose only light is a hearth still bounces.

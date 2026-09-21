@@ -229,6 +229,37 @@ fn sun_visibility_fast(
     return far_sun_visibility(map, samp, c, world_pos);
 }
 
+// Sun visibility at a world point that has no place in the view — the probe trace's ray hits, which
+// lie all around the camera, behind it as often as in front. `sun_visibility_fast` picks its cascade
+// by view depth and reads anything outside that cascade's map as LIT, which is right for a fragment
+// on screen and wrong for a wall behind the player: every probe near it took the shaded street
+// behind the camera for a sunlit one, bounced that light, and dimmed again once the player turned
+// or walked on and the wall came into a cascade. So the probes' brightness followed the camera.
+// Here the finest cascade whose map actually holds the point answers, and past all of them the
+// camera-independent far term does.
+fn sun_visibility_anywhere(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+) -> f32 {
+    let count = u32(c.params.x);
+    if (count == 0u) {
+        return 1.0;
+    }
+    // A texel in from the edge, so the compare's footprint never reads past the map.
+    let margin = c.params.y;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+        let ndc = clip.xyz / clip.w;
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (all(uv >= vec2<f32>(margin)) && all(uv <= vec2<f32>(1.0 - margin)) && ndc.z >= 0.0) {
+            return textureSampleCompareLevel(map, samp, uv, i32(i), ndc.z + c.depth_bias[i] * 2.0);
+        }
+    }
+    return far_sun_visibility(map, samp, c, world_pos);
+}
+
 // Sun visibility with no comparison sampler: a manual bilinear compare over `textureLoad`, four
 // offset footprints. For a layout that is already at the stage's sampler limit — the cata water.
 fn load_compare(map: texture_depth_2d_array, layer: i32, uv: vec2<f32>, depth: f32) -> f32 {
