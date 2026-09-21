@@ -146,8 +146,9 @@ impl ZoneLook {
 const ZONES: &[(u32, ZoneLook)] = &[
     // Teldrassil: dense purple canopy haze, a strong forward glow through the openings.
     (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.08, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::NEUTRAL }),
-    // Darnassus: Teldrassil's light, a little clearer.
-    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, ..ZoneLook::NEUTRAL }),
+    // Darnassus: Teldrassil's light, a little clearer. Its plazas are open sky, so the canopy boost the
+    // forest's beams ride on does not reach them: the shaft gain carries the city's own.
+    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, shafts: 0.6, ..ZoneLook::NEUTRAL }),
     // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
     (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, shafts: 1.5, ..ZoneLook::NEUTRAL }),
     // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.
@@ -200,8 +201,27 @@ const ZONES: &[(u32, ZoneLook)] = &[
     (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0030, forward: 0.6, key_scatter: 0.45, ..ZoneLook::NEUTRAL }),
     // Felwood: a sickly canopy.
     (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0036, forward: 0.65, key_scatter: 0.6, ..ZoneLook::NEUTRAL }),
-    // Stormwind City, Ironforge: cities keep the haze thin.
-    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0012, forward: 0.7, key_scatter: 0.5, ..ZoneLook::NEUTRAL }),
+    // Stormwind City: a light street haze, enough for the sun to fall between the rooftops as beams —
+    // a city has no canopy boost, so the shaft gain stands in for it (the streets are open sky).
+    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0018, forward: 0.7, key_scatter: 0.6, shafts: 0.6, ..ZoneLook::NEUTRAL }),
+    // Orgrimmar: Durotar's colour and grade, with the dusty canyon haze the plains around it do not
+    // need — the canyon walls and the spiked roofs are what cut the beams.
+    (1637, ZoneLook {
+        fog_tint: [1.7, 2.6, 1.8],
+        sky_tint: [1.05, 1.15, 0.8],
+        exposure: 0.95,
+        contrast: 1.2,
+        saturation: 0.82,
+        vignette: 0.4,
+        toe: 1.2,
+        haze: 0.0018,
+        glow: [1.25, 0.95, 0.75],
+        key_scatter: 0.7,
+        shafts: 0.6,
+        ..ZoneLook::NEUTRAL
+    }),
+    // Ironforge: an interior city, so its haze stays thin.
+
     (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0009, forward: 0.6, key_scatter: 0.4, ..ZoneLook::NEUTRAL }),
 ];
 

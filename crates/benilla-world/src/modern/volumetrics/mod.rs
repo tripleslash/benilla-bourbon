@@ -415,7 +415,10 @@ fn update_volume(
     let dt = time.delta_secs();
     let ground = wdl
         .as_deref()
-        .and_then(|w| regional_ground(|p| w.height_under(p), cam))
+        .and_then(|w| {
+            let regional = regional_ground(|p| w.height_under(p), cam)?;
+            Some(held_to_local_ground(regional, w.height_under(cam)))
+        })
         .map_or(cam.y, |g| g.min(cam.y));
     let reference_height = match hist.reference_height {
         Some(y) if (y - ground).abs() < 400.0 => y + (ground - y) * (dt / 2.0).min(1.0),
@@ -522,6 +525,23 @@ fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
     Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
 }
 
+/// How far the regional reference may sit below the ground under the camera (yd) — most of a
+/// height falloff, so the air the player stands in keeps about `e^-0.85` (~0.43) of the zone's
+/// density. Half a falloff (35) was tried first and read too milky in Darnassus.
+const LOCAL_FLOOR_YD: f32 = 60.0;
+
+/// The regional reference, never more than [`LOCAL_FLOOR_YD`] below the ground under the camera.
+///
+/// The regional mean is right in a valley and wrong on any high ground with low ground within
+/// 600 yd: the sea around Teldrassil put Darnassus's reference at 543 with its streets at 1316,
+/// eleven falloffs up, and the haze there (shafts included) was `e^-11` of the zone's — none at
+/// all. Stormwind (the harbour) and Orgrimmar (the canyon) lost most of theirs the same way.
+/// Held to the local ground the layer still does not follow a flying camera (the ground under it
+/// does not rise), and a valley seen from a ridge still reads denser, just not the ridge itself.
+fn held_to_local_ground(regional: f32, here: Option<f32>) -> f32 {
+    here.map_or(regional, |h| regional.max(h - LOCAL_FLOOR_YD))
+}
+
 /// Spacing (yd) of the regional ground samples around the camera.
 const GROUND_SAMPLE_YD: f32 = 300.0;
 
@@ -626,5 +646,15 @@ mod tests {
         let night = Vec3::new(0.3, -0.5, 0.1).normalize();
         let _ = cloud_grid(None, Vec3::ZERO, night, 0.5, &mut grid);
         assert!(grid.iter().all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn high_ground_beside_the_sea_keeps_its_haze() {
+        // Darnassus: the sea around Teldrassil drags the regional mean to 543, the streets are at 1316.
+        let r = held_to_local_ground(543.0, Some(1316.0));
+        assert_eq!(r, 1316.0 - LOCAL_FLOOR_YD);
+        // A valley keeps its regional reference, and no local height changes nothing.
+        assert_eq!(held_to_local_ground(40.0, Some(60.0)), 40.0);
+        assert_eq!(held_to_local_ground(543.0, None), 543.0);
     }
 }
