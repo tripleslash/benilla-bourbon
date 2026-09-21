@@ -926,7 +926,12 @@ impl GxShadowNode {
         let Some(working) = frame.texture.as_ref() else {
             return;
         };
-        let tile = SHADOW_MAP_SIZE / ATLAS_TILES;
+        // The tile's stride in the atlas, and the square of it a face is actually drawn into
+        // (`LightTier::tile_use` — Cinematic draws half the edge, a quarter of the depth).
+        let tile = (
+            SHADOW_MAP_SIZE / ATLAS_TILES,
+            crate::modern::lights::face_px(&lights.tier, SHADOW_MAP_SIZE),
+        );
         let dynamic = lights.tier.dynamic_casters;
         let entities = dynamic
             .then(|| world.get_resource::<EntityShadowFrame>())
@@ -1026,7 +1031,7 @@ impl GxShadowNode {
         view_bind: &BindGroup,
         shadowed: &[Option<crate::modern::lights::HeldSlot>],
         slot_base: usize,
-        tile: u32,
+        tile: (u32, u32),
         casters: &[(&GxCellGpu, &GxCellDraw)],
         pipes: (&RenderPipeline, &RenderPipeline),
         meshes: &RenderAssets<RenderMesh>,
@@ -1139,7 +1144,7 @@ impl GxShadowNode {
         entities: &EntityShadowFrame,
         shadowed: &[Option<crate::modern::lights::HeldSlot>],
         slot_base: usize,
-        tile: u32,
+        tile: (u32, u32),
         pipeline_cache: &PipelineCache,
         meshes: &RenderAssets<RenderMesh>,
         allocator: &MeshAllocator,
@@ -1246,19 +1251,21 @@ fn set_atlas_tile(
     pass: &mut bevy::render::render_phase::TrackedRenderPass<'_>,
     slot: usize,
     face: usize,
-    tile: u32,
+    (tile, drawn): (u32, u32),
 ) {
     let t = (slot % PER_ATLAS_LAYER) * 6 + face;
     let (tx, ty) = (t as u32 % ATLAS_TILES, t as u32 / ATLAS_TILES);
+    // The face is drawn into the tile's top-left `drawn` texels (the whole tile on every tier but
+    // Cinematic); the lookup scales its uv by the same fraction (`locallight::tile_use`).
     pass.set_viewport(
         (tx * tile) as f32,
         (ty * tile) as f32,
-        tile as f32,
-        tile as f32,
+        drawn as f32,
+        drawn as f32,
         0.0,
         1.0,
     );
-    pass.set_scissor_rect(tx * tile, ty * tile, tile, tile);
+    pass.set_scissor_rect(tx * tile, ty * tile, drawn, drawn);
 }
 
 /// fork: P8 — **does one cube face see this sphere at all?**

@@ -53,6 +53,7 @@
 
 use benilla_assets::{ModelEmitter, ModelLight, ModelSubmesh};
 use benilla_formats::{OverLife, ParticleBlend};
+use bevy::math::Vec3;
 
 /// The weighted emission below which a source is not worth a table slot. In the authored 0..1 colour
 /// space, after the opacity weighting — a dust mote's ramp lands two orders of magnitude under a
@@ -385,6 +386,132 @@ fn emission_of(blend: ParticleBlend, lit: bool, ramp: &OverLife) -> Option<(f32,
     (weight >= MIN_EMISSION).then_some((mean[0], mean[1], mean[2], weight))
 }
 
+/// fork: P8 — the edge (yd) of the cell a building's lit windows are pooled over. One light per
+/// window would be hundreds for a city and a table full of them; one per building would sit in the
+/// middle of it and light nothing that is near a window. A storey's worth of wall is the scale at
+/// which a row of windows reads as one pool of light on the street below it.
+const WINDOW_CELL: f32 = 8.0;
+/// Glass (square yards) a pool needs before it is worth a light — a single slit of lit glass is a
+/// sprite, not a source.
+const MIN_WINDOW_AREA: f32 = 0.6;
+/// The glass area (square yards) that reads as a "one unit" window pool.
+const REFERENCE_WINDOW_AREA: f32 = 4.0;
+/// How much of a lit window becomes light. Look-dev, calibrated against the derived lampposts: a
+/// window is a soft glow through a pane, a pool on the cobbles well under a lamp's.
+const WINDOW_WEIGHT: f32 = 0.45;
+/// How far in front of the glass the light stands (yd). A light IN the pane lights the wall it is
+/// set into edge-on and the street hardly at all; a yard out, it lights the sill, the wall around
+/// the frame and the ground beneath, which is what a lit window at night does.
+const WINDOW_STANDOFF: f32 = 1.0;
+/// The most window lights one building contributes. Stormwind's city is one WMO with hundreds of
+/// lit panes; past this the biggest pools win and the rest stay sprites.
+pub const MAX_WINDOW_LIGHTS: usize = 48;
+
+/// One pool of lit windows, in the building's own (WoW) model space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowGlow {
+    /// Where the light stands: the glass's area-weighted centre, [`WINDOW_STANDOFF`] out along it.
+    pub pos: [f32; 3],
+    /// Linear RGB, from the material's SIDN colour.
+    pub color: [f32; 3],
+    pub intensity_scale: f32,
+}
+
+/// One batch as the window derivation reads it: its SIDN colour (`None` = not a night-glow
+/// material), whether it belongs to an interior group, and its geometry.
+pub type WindowBatch<'a> = (Option<[u8; 3]>, bool, &'a benilla_formats::RenderSubmesh);
+
+/// fork: P8 — **the light a building's lit windows cast at night.**
+///
+/// A WMO window is a MOMT **SIDN** material: an authored colour the client adds as GL emission,
+/// scaled by the night fraction, so the pane glows after dark. The reference commits no light for
+/// it — the glow never reaches the street — and at Cinematic that is the most conspicuous missing
+/// light in any town at night. This derives one: the glass of every SIDN batch in an EXTERIOR group
+/// (an interior batch's SIDN is dead on its unlit lane, `RenderSubmesh::sidn`) pooled into
+/// [`WINDOW_CELL`] cells, each pool a light at its glass's centre stood a yard out in front of it,
+/// its colour the SIDN colour and its strength its glass area.
+///
+/// The night fraction is NOT applied here: the spawn site tags each light `NightGlow`, and the
+/// packer scales it per frame, so a window's light follows the pane's own glow through dusk.
+pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> Vec<WindowGlow> {
+    #[derive(Default)]
+    struct Pool {
+        area: f32,
+        centre: [f32; 3],
+        normal: [f32; 3],
+        color: [f32; 3],
+    }
+    let mut pools: std::collections::HashMap<[i32; 3], Pool> = std::collections::HashMap::new();
+    for (sidn, interior, geometry) in batches {
+        let Some(rgb) = sidn else { continue };
+        if interior || rgb == [0, 0, 0] {
+            continue;
+        }
+        // SIDN is gamma bytes; the light table is linear.
+        let color = rgb.map(|c| (c as f32 / 255.0).powf(2.2));
+        let pos = &geometry.positions;
+        for tri in geometry.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| pos.get(i as usize).copied());
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else { continue };
+            let [a, b, c] = [a, b, c].map(Vec3::from);
+            let cross = (b - a).cross(c - a);
+            let area = cross.length() * 0.5;
+            if area <= 1e-5 {
+                continue;
+            }
+            // The authored normals say which way the pane faces; the winding may not, so they win
+            // when present.
+            let normal = if geometry.normals.len() == pos.len() {
+                let n: Vec3 = [tri[0], tri[1], tri[2]]
+                    .iter()
+                    .map(|&i| Vec3::from(geometry.normals[i as usize]))
+                    .sum();
+                n.normalize_or_zero()
+            } else {
+                cross / (2.0 * area)
+            };
+            let mid = (a + b + c) / 3.0;
+            let key = (mid / WINDOW_CELL).floor().as_ivec3().to_array();
+            let pool = pools.entry(key).or_default();
+            pool.area += area;
+            for k in 0..3 {
+                pool.centre[k] += mid[k] * area;
+                pool.normal[k] += normal[k] * area;
+                pool.color[k] += color[k] * area;
+            }
+        }
+    }
+    let mut out: Vec<(f32, WindowGlow)> = pools
+        .into_values()
+        .filter(|p| p.area >= MIN_WINDOW_AREA)
+        .map(|p| {
+            let centre = Vec3::from(p.centre) / p.area;
+            // Panes facing opposite ways in one cell (both sides of a thin wall) cancel, and the
+            // light then stays on the glass rather than guessing a side.
+            let facing = Vec3::from(p.normal) / p.area;
+            let out_dir = if facing.length() > 0.3 {
+                facing.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            let color = Vec3::from(p.color) / p.area;
+            let size = (p.area / REFERENCE_WINDOW_AREA).sqrt().clamp(0.4, 1.6);
+            (
+                p.area,
+                WindowGlow {
+                    pos: (centre + out_dir * WINDOW_STANDOFF).to_array(),
+                    color: color.to_array(),
+                    intensity_scale: WINDOW_WEIGHT * size,
+                },
+            )
+        })
+        .collect();
+    // Biggest pools first, so a building over the cap keeps the windows that light the most.
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.truncate(MAX_WINDOW_LIGHTS);
+    out.into_iter().map(|(_, g)| g).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +763,68 @@ mod tests {
         let blazing = ramp([[1.0, 1.0, 1.0, 1.0]; 3], 10.0);
         let e = synthesize(false, [add(&blazing); 8]).unwrap();
         assert!((e.intensity_scale - MAX_INTENSITY).abs() < 1e-5);
+    }
+
+    /// A pane `w`×`h` yards in the wall `x = x0`, facing +X, as one quad.
+    fn pane(x0: f32, y: f32, z: f32, w: f32, h: f32) -> benilla_formats::RenderSubmesh {
+        benilla_formats::RenderSubmesh {
+            positions: vec![[x0, y, z], [x0, y + w, z], [x0, y + w, z + h], [x0, y, z + h]],
+            normals: vec![[1.0, 0.0, 0.0]; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        }
+    }
+
+    /// GOLDEN — **a lit window lights the street in front of it, at night only.** The report:
+    /// "WMOs like streetlamps and windows at night do not emit lights on the cinematic tier". A
+    /// SIDN pane stands one light a yard out in FRONT of the glass (its authored normal's side),
+    /// in its own SIDN colour; a non-SIDN batch and an interior group's SIDN batch derive nothing.
+    #[test]
+    fn a_lit_window_stands_a_light_in_front_of_its_glass() {
+        let glass = pane(10.0, 0.0, 0.0, 2.0, 2.0);
+        let warm = Some([255u8, 200, 120]);
+        let glows = window_glows([(warm, false, &glass)]);
+        assert_eq!(glows.len(), 1, "{glows:?}");
+        let g = glows[0];
+        assert!((g.pos[0] - (10.0 + WINDOW_STANDOFF)).abs() < 1e-4, "stands out in front: {g:?}");
+        assert!((g.pos[1] - 1.0).abs() < 1e-4 && (g.pos[2] - 1.0).abs() < 1e-4, "{g:?}");
+        assert!(g.color[0] > g.color[1] && g.color[1] > g.color[2], "keeps the SIDN hue: {g:?}");
+        assert!(g.intensity_scale > 0.0);
+
+        assert!(window_glows([(None, false, &glass)]).is_empty(), "not a night-glow material");
+        assert!(
+            window_glows([(warm, true, &glass)]).is_empty(),
+            "an interior batch's SIDN is dead"
+        );
+        assert!(
+            window_glows([(Some([0, 0, 0]), false, &glass)]).is_empty(),
+            "a black SIDN colour emits nothing"
+        );
+    }
+
+    /// A row of panes in one storey is ONE pool of light, not one light each — and a building
+    /// with more lit glass than [`MAX_WINDOW_LIGHTS`] pools keeps the biggest.
+    #[test]
+    fn a_buildings_windows_pool_and_are_capped() {
+        let warm = Some([255u8, 200, 120]);
+        let row: Vec<_> = (0..3).map(|i| pane(10.0, 0.5 + i as f32 * 2.2, 1.0, 1.5, 1.5)).collect();
+        let glows = window_glows(row.iter().map(|b| (warm, false, b)));
+        assert_eq!(glows.len(), 1, "one storey of one wall is one pool: {glows:?}");
+
+        let street: Vec<_> = (0..200)
+            .map(|i| pane(0.0, i as f32 * WINDOW_CELL, 0.0, 1.5, 1.5 + (i % 7) as f32 * 0.2))
+            .collect();
+        let glows = window_glows(street.iter().map(|b| (warm, false, b)));
+        assert_eq!(glows.len(), MAX_WINDOW_LIGHTS);
+        // Kept biggest-first: every survivor is at least as bright as the dimmest of them.
+        let weakest = glows.iter().map(|g| g.intensity_scale).fold(f32::INFINITY, f32::min);
+        assert!(glows.iter().all(|g| g.intensity_scale >= weakest));
+    }
+
+    /// A slit of glass too small to matter is a sprite, not a light.
+    #[test]
+    fn a_sliver_of_glass_is_not_a_light() {
+        let slit = pane(0.0, 0.0, 0.0, 0.2, 0.5);
+        assert!(window_glows([(Some([255u8, 255, 255]), false, &slit)]).is_empty());
     }
 }

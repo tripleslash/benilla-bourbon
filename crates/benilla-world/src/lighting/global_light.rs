@@ -152,6 +152,28 @@ pub(super) const MAX_POINT_LIGHTS: usize = 256;
 /// than ~300 yd is sub-pixel and usually fogged, and the cap keeps the per-vertex selection walk
 /// (0285: each unit picks its ≤3 nearest from this table) bounded.
 const POINT_PACK_RADIUS: f32 = 300.0;
+/// fork: P8 — **the modern frame's pack radius**, and the far edge of a smooth distance fade
+/// rather than a hard cut. A modern frame lights every fragment from a grid, not from a unit's three
+/// nearest, so whatever this admits is visible wherever the grid reaches — and an edge here is a
+/// lamp switching on as the player walks toward it. Lights fade out over the last
+/// [`MODERN_PACK_FADE`] yards of it instead, and Cinematic's far grid level covers this plus a
+/// light's own range (`modern::lights`' test pins that).
+pub const MODERN_PACK_RADIUS: f32 = 270.0;
+/// fork: P8 — the width of that fade, in yards inside the radius in force.
+const MODERN_PACK_FADE: f32 = 60.0;
+/// fork: P8 — how fast the radius in force closes in when more lights want the table than it holds
+/// (yd/s), and how fast it opens back out when they no longer do. Shrinking is the urgent
+/// direction: until it has, the cap below is truncating nearest-first again.
+const PACK_SHRINK_RATE: f32 = 150.0;
+const PACK_GROW_RATE: f32 = 40.0;
+
+/// fork: P8 — **a light that only shines at night**: a WMO window's glow, derived from its MOMT
+/// SIDN material (`terrain_stream::spawn`). The packer multiplies its colour by the SIDN night
+/// fraction — the same ramp the window's own emissive texture follows on screen — so the street
+/// under a lit window brightens as the window does at dusk and goes dark with it at dawn.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct NightGlow;
+
 /// fork: P8 — how fast a light ramps into and out of the committed table, in units of fade per
 /// second. ~4 frames at 60 Hz: long enough that no edge reads as a switch, short enough that a
 /// lamp is at full strength by the time the player has finished stepping through the door.
@@ -408,9 +430,13 @@ fn build_light_data(
         &GlobalTransform,
         Option<&LightRooms>,
         Option<&crate::modern::lights::SynthesizedLight>,
+        Option<&NightGlow>,
     )>,
     // fork: P8 — each light's admission fade, keyed by entity. See the gather below.
     mut admit: Local<bevy::platform::collections::HashMap<Entity, f32>>,
+    // fork: P8 — the modern pack radius in force this frame (0 = not yet set). See the gather.
+    mut pack_radius: Local<f32>,
+    mut wanting: Local<Vec<f32>>,
     // The per-frame portal PVS, for the room term below ([`LightRooms`]).
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     // …and the buildings themselves, for the `w` channel's INDOOR test — a light's rooms are group
@@ -506,9 +532,28 @@ fn build_light_data(
     // smoothed by this one mechanism, including ones not yet thought of.
     let dt = time.delta_secs().clamp(0.0, 0.1);
     let step = (ADMIT_FADE_RATE * dt).clamp(0.0, 1.0);
+    // fork: P8 — **a modern frame fades lights out with distance; it never cuts them off.** The
+    // classic table keeps the reference's shape: nearest-first within `POINT_PACK_RADIUS`, which
+    // is all a unit's three-nearest selection ever sees. A modern frame reads the table through a
+    // grid that covers the view, so the table's edge is on screen — and past its capacity, the
+    // lights it dropped were whichever came 257th this frame, blinking in and out as the camera
+    // moved. So in a modern frame the radius is a soft edge ([`MODERN_PACK_FADE`] wide), and when
+    // more lights want in than the table holds, the radius itself closes in (smoothly) until they
+    // fit: the far lights fade out together instead of one at a time.
+    let modern_pack = active.as_ref().is_some_and(|a| a.is_modern());
+    if *pack_radius <= 0.0 {
+        *pack_radius = MODERN_PACK_RADIUS;
+    }
+    let radius = if modern_pack {
+        *pack_radius
+    } else {
+        POINT_PACK_RADIUS
+    };
+    let night = l.sidn_night.clamp(0.0, 1.0);
+    wanting.clear();
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
-        .filter_map(|(entity, pl, gt, rooms, synthesized)| {
+        .filter_map(|(entity, pl, gt, rooms, synthesized, night_glow)| {
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             // The tier gate for DERIVED lights, read where the light is READ rather than where it
@@ -524,8 +569,14 @@ fn build_light_data(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             );
-            let admitted =
-                tier_ok && room_ok && d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS;
+            // A window's glow is a light only at night; by day it is not in the table at all
+            // (rather than in it at zero, holding a slot a lamp could use).
+            let lit = night_glow.is_none() || night > 0.0;
+            let wants = tier_ok && room_ok && lit;
+            if wants && modern_pack && d2 < MODERN_PACK_RADIUS * MODERN_PACK_RADIUS {
+                wanting.push(d2);
+            }
+            let admitted = wants && d2 < radius * radius;
             let fade = admit.entry(entity).or_insert(0.0);
             *fade = if admitted {
                 (*fade + step).min(1.0)
@@ -536,7 +587,17 @@ fn build_light_data(
                 return None;
             }
             let c = pl.color;
-            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade;
+            // The modern soft edge: full strength inside `radius - MODERN_PACK_FADE`, nothing at
+            // `radius`, smoothstepped between — so reaching the edge is a fade over sixty yards of
+            // walking, not a switch.
+            let reach = if modern_pack {
+                let t = ((radius - d2.sqrt()) / MODERN_PACK_FADE).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            } else {
+                1.0
+            };
+            let glow = if night_glow.is_some() { night } else { 1.0 };
+            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade * reach * glow;
             let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
             // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
             let indoors = rooms.is_some_and(|r| {
@@ -551,6 +612,22 @@ fn build_light_data(
         .collect();
     // A despawned light must not keep its ramp: the next entity to reuse that id would inherit it.
     admit.retain(|e, _| lights_q.contains(*e));
+    // fork: P8 — steer the modern radius for next frame: close in until the lights inside it fit
+    // the table, open back out when they do.
+    if modern_pack {
+        let target = if wanting.len() > MAX_POINT_LIGHTS {
+            let (_, nth, _) = wanting.select_nth_unstable_by(MAX_POINT_LIGHTS - 1, f32::total_cmp);
+            nth.sqrt()
+        } else {
+            MODERN_PACK_RADIUS
+        };
+        *pack_radius = if target < *pack_radius {
+            (*pack_radius - PACK_SHRINK_RATE * dt).max(target)
+        } else {
+            (*pack_radius + PACK_GROW_RATE * dt).min(target)
+        }
+        .max(MODERN_PACK_FADE);
+    }
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     // fork: P8 — how many lights actually wanted in. Deriving a light from every glow card made
     // this a real number rather than a formality: past the cap the table keeps the nearest and

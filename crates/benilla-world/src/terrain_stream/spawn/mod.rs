@@ -11,7 +11,7 @@ pub use assemble::{spawn_model_entities, SpawnedModel};
 pub use fx::point_light;
 use fx::{
     emitter_fade, spawn_emissive_light_for, spawn_emitters_for, spawn_lights_for,
-    spawn_ribbons_for, spawn_wmo_lights_for,
+    spawn_ribbons_for, spawn_window_lights_for, spawn_wmo_lights_for,
 };
 
 use std::sync::Arc;
@@ -648,6 +648,8 @@ pub(super) fn spawn_loaded_placements(
                         p.transform,
                         &mut ents,
                     );
+                    // fork: modern lighting (P8) — and, on Cinematic, its lit windows at night.
+                    spawn_window_lights_for(&mut commands, &m.submeshes, p.transform, &mut ents);
                     tag_world_object(&mut commands, &ents, &object);
                     // Resolve the interior props for this instance's doodad set (set 0 + the selected
                     // set), each composed onto the WMO's world transform; their M2s load async.

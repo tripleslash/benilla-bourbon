@@ -18,7 +18,8 @@ mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO inte
 mod sh; // the model SH light-probe coefficient math
 pub use blob::LightBlob;
 pub use global_light::{
-    new_shared_light_buffer, LightOwner, LightRooms, SharedLightBuffer, WorldPointLight,
+    new_shared_light_buffer, LightOwner, LightRooms, NightGlow, SharedLightBuffer, WorldPointLight,
+    MODERN_PACK_RADIUS,
 };
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout itself — row indices, byte sizes, region offsets and the folds that fill them

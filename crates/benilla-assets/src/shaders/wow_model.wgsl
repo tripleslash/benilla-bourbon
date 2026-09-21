@@ -283,12 +283,36 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 // wall. The same rule `static_gx.wgsl` applies to the room's own surfaces, so a chair and the floor
 // it stands on agree.
 fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool) -> vec3<f32> {
-    let g = modern_block.lights;
-    let found = locallight::cell_at(g, p);
-    if (found.y < 1u) {
+    // fork: P8 — the near cell, the far cell, and how far into the seam between the two levels
+    // this fragment stands (`locallight::cell_pair`). Almost every fragment reads one cell; only
+    // the few near cells at the near level's edge read both and cross-fade.
+    let pair = locallight::cell_pair(modern_block.lights, p);
+    if (pair.w < 1u) {
         return vec3<f32>(0.0);
     }
-    let cell = modern_block.light_cells[found.x];
+    let far_w = bitcast<f32>(pair.z);
+    var sum = vec3<f32>(0.0);
+    if (far_w < 1.0) {
+        let near_cell = modern_block.light_cells[pair.x];
+        sum = modern_cell_lights(near_cell, p, nrm, interior, lite) * (1.0 - far_w);
+    }
+    if (far_w > 0.0) {
+        let far_cell = modern_block.light_cells[pair.y];
+        sum = sum + modern_cell_lights(far_cell, p, nrm, interior, lite) * far_w;
+    }
+    return sum;
+}
+
+// One grid cell's lights on one fragment — the walk `modern_local_lights` runs once per cell it
+// reads.
+fn modern_cell_lights(
+    cell: vec4<u32>,
+    p: vec3<f32>,
+    nrm: vec3<f32>,
+    interior: bool,
+    lite: bool,
+) -> vec3<f32> {
+    let g = modern_block.lights;
     let count = locallight::cell_count(cell);
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < count; i = i + 1u) {

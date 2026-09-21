@@ -163,6 +163,46 @@ pub(super) fn spawn_emissive_light_for(
     }
 }
 
+/// fork: modern lighting (P8) — **a building's lit windows, as lights**: one per pool of SIDN glass
+/// ([`crate::modern::lights::emissive::window_glows`]), each tagged
+/// [`crate::lighting::NightGlow`] so the packer scales it by the night fraction and it is out of the
+/// table by day, and [`crate::modern::lights::SynthesizedLight`] so it lights only on Cinematic —
+/// the tier that derives light from what only ever glowed.
+///
+/// Outdoor lights, deliberately (no rooms): they are drawn from exterior groups' glass and light
+/// the street, and the surface lanes' indoor/outdoor test keeps them off the room behind the pane.
+/// They never hold a cube slot (`modern::lights::update_lights`): a window is a soft fill, and a
+/// city has more of them than the atlas has room for lamps.
+pub(super) fn spawn_window_lights_for(
+    commands: &mut Commands,
+    submeshes: &[benilla_assets::ModelSubmesh],
+    transform: Transform,
+    out: &mut Vec<Entity>,
+) {
+    let glows = crate::modern::lights::emissive::window_glows(
+        submeshes
+            .iter()
+            .map(|b| (b.sidn, b.interior, b.geometry.as_ref())),
+    );
+    for glow in glows {
+        let before = out.len();
+        spawn_point_light(
+            commands,
+            transform.transform_point(wow_to_bevy(glow.pos)),
+            glow.color,
+            glow.intensity_scale,
+            None,
+            out,
+        );
+        for e in &out[before..] {
+            commands.entity(*e).insert((
+                crate::modern::lights::SynthesizedLight,
+                crate::lighting::NightGlow,
+            ));
+        }
+    }
+}
+
 /// Spawn a [`WorldPointLight`] for each omni (`type==0`) **WMO MOLT** light at the building's `transform` (the
 /// interior fixture sources — forge fire, inn fireplaces, chapel candles/chandeliers). These radiate onto
 /// the NPCs/doodads near each fixture and onto the building's own walls/floor (decision 0273). Position

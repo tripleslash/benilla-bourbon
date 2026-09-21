@@ -19,7 +19,7 @@ struct LightTable {
 struct LightBlock {
     params: locallight::LightGrid,
     shadow: array<vec4<f32>, 12>,
-    spare: array<vec4<f32>, 15>,
+    spare: array<vec4<f32>, 14>,
     cells: array<vec4<u32>, 55296>,
 }
 
@@ -61,14 +61,26 @@ fn bin_lights(@builtin(global_invocation_id) id: vec3<u32>) {
     if (cell >= total) {
         return;
     }
-    let n = vec3<u32>(p.dims.xyz);
+    // fork: P8 — cells past the near level's are the FAR level's (`locallight::far_cell_at`): the
+    // same binning at a coarser cell, centred on the same camera, so a lamp 200 yd off is in a list
+    // a fragment can read instead of in no list at all.
+    let near_total = locallight::near_cells(p);
+    var n = vec3<u32>(p.dims.xyz);
+    var base = vec3<f32>(p.base.xyz);
+    var size = p.dims.w;
+    var within = cell;
+    if (cell >= near_total) {
+        n = vec3<u32>(locallight::far_dims(p));
+        base = vec3<f32>(locallight::far_base(p));
+        size = locallight::far_size(p);
+        within = cell - near_total;
+    }
     let c = vec3<i32>(
-        i32(cell % n.x),
-        i32((cell / n.x) % n.y),
-        i32(cell / (n.x * n.y)),
+        i32(within % n.x),
+        i32((within / n.x) % n.y),
+        i32(within / (n.x * n.y)),
     );
-    let size = p.dims.w;
-    let lo = (vec3<f32>(p.base.xyz) + vec3<f32>(c)) * size;
+    let lo = (base + vec3<f32>(c)) * size;
     let hi = lo + vec3<f32>(size);
     let mid = 0.5 * (lo + hi);
 

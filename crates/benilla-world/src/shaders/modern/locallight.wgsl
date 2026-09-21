@@ -48,6 +48,11 @@ struct LightGrid {
     // per yard between light and receiver), z = the shade floor (how much of a light a shadow may
     // take away; below 1 the shadow is faint), w = the atlas's first array layer.
     soft: vec4<f32>,
+    // fork: P8 — the FAR level and the atlas's tile use. x = far cells per horizontal axis (0 = the
+    // tier has no far level, and the grid is the near level alone, exactly as before), y = far
+    // cells vertically, z = the far cell's edge as a whole multiple of the near cell's, w = how
+    // much of each atlas tile a cube face is drawn into (1 = all of it).
+    far: vec4<f32>,
 }
 
 // fork: P8 — **the shadowed lights' positions are NOT a member of `LightGrid`**, for exactly the
@@ -77,12 +82,34 @@ fn atlas_live(g: LightGrid) -> bool {
     return (u32(g.base.w) & 2u) != 0u;
 }
 
-// The cell a world point falls in, or `count.y == 0` when the point is outside the grid (which is
-// every point more than the grid's half extent from the camera — nothing there is near a light).
-fn cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
-    if (!grid_live(g)) {
-        return vec2<u32>(0u, 0u);
-    }
+// Cells in the near level — the far level's cells follow them in the block.
+fn near_cells(g: LightGrid) -> u32 {
+    let n = vec3<u32>(g.dims.xyz);
+    return n.x * n.y * n.z;
+}
+
+// fork: P8 — the far level's cells per axis (zero when the tier has none).
+fn far_dims(g: LightGrid) -> vec3<i32> {
+    return vec3<i32>(i32(g.far.x), i32(g.far.y), i32(g.far.x));
+}
+
+// The far level's cell edge in yards.
+fn far_size(g: LightGrid) -> f32 {
+    return g.dims.w * max(g.far.z, 1.0);
+}
+
+// The far level's base cell, derived from the near level's and not sent separately, so the two can
+// never disagree about where the camera is: the near base is `floor(camera / cell) - dims / 2`,
+// which puts the camera's own cell at `base + dims / 2`, and the far level is centred on the far
+// cell that one falls in. The Rust twin is `modern::lights::far_base`.
+fn far_base(g: LightGrid) -> vec3<i32> {
+    let eye = vec3<i32>(g.base.xyz) + vec3<i32>(g.dims.xyz) / 2;
+    let k = max(g.far.z, 1.0);
+    return vec3<i32>(floor(vec3<f32>(eye) / k)) - far_dims(g) / 2;
+}
+
+// The near-level cell a world point falls in, or `.y == 0` when the point is outside it.
+fn near_cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
     let n = vec3<i32>(g.dims.xyz);
     let c = vec3<i32>(floor(p / g.dims.w)) - vec3<i32>(g.base.xyz);
     if (any(c < vec3<i32>(0)) || any(c >= n)) {
@@ -90,6 +117,67 @@ fn cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
     }
     let index = (c.z * n.y + c.y) * n.x + c.x;
     return vec2<u32>(u32(index), 1u);
+}
+
+// The far-level cell a world point falls in (an index into the block, past the near cells), or
+// `.y == 0` when the tier has no far level or the point is outside it too.
+fn far_cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
+    let n = far_dims(g);
+    if (n.x <= 0) {
+        return vec2<u32>(0u, 0u);
+    }
+    let c = vec3<i32>(floor(p / far_size(g))) - far_base(g);
+    if (any(c < vec3<i32>(0)) || any(c >= n)) {
+        return vec2<u32>(0u, 0u);
+    }
+    let index = (c.z * n.y + c.y) * n.x + c.x;
+    return vec2<u32>(near_cells(g) + u32(index), 1u);
+}
+
+// The cell a world point falls in — the near level's where it reaches, else the far level's — or
+// `.y == 0` when the point is outside both (nothing there is near a light).
+fn cell_at(g: LightGrid, p: vec3<f32>) -> vec2<u32> {
+    if (!grid_live(g)) {
+        return vec2<u32>(0u, 0u);
+    }
+    let near = near_cell_at(g, p);
+    if (near.y > 0u) {
+        return near;
+    }
+    return far_cell_at(g, p);
+}
+
+// fork: P8 — **the two cells a fragment reads, and how much of the far one.** `x` = the near cell
+// (or the far one, when the point is past the near level), `y` = the far cell, `z` = the far cell's
+// weight as `f32` bits, `w` = 1 when there is anything to read at all.
+//
+// The far level exists so a lamp lights the street it stands in at 200 yd exactly as it does at
+// 20 — the near level alone ran out at ±72 yd, and everything past it took no local light at all,
+// which read as lamps switching on as the player walked toward them. The two levels hold the same
+// lights under the same falloff, so they agree everywhere a far cell kept every light that reached
+// it; where one overflowed they can differ, and the last `BLEND_CELLS` near cells cross-fade into
+// the far level instead of switching, so the seam is never an edge either.
+const BLEND_CELLS: f32 = 4.0;
+
+fn cell_pair(g: LightGrid, p: vec3<f32>) -> vec4<u32> {
+    if (!grid_live(g)) {
+        return vec4<u32>(0u);
+    }
+    let near = near_cell_at(g, p);
+    let far = far_cell_at(g, p);
+    if (near.y == 0u) {
+        return vec4<u32>(far.x, far.x, bitcast<u32>(0.0), far.y);
+    }
+    if (far.y == 0u) {
+        return vec4<u32>(near.x, near.x, bitcast<u32>(0.0), 1u);
+    }
+    // How deep inside the near level the point is, in near cells, on its tightest axis.
+    let lo = vec3<f32>(g.base.xyz) * g.dims.w;
+    let hi = lo + g.dims.xyz * g.dims.w;
+    let inset = min(p - lo, hi - p) / g.dims.w;
+    let depth = min(inset.x, min(inset.y, inset.z));
+    let w = 1.0 - smoothstep(0.0, BLEND_CELLS, depth);
+    return vec4<u32>(near.x, far.x, bitcast<u32>(w), 1u);
 }
 
 // How many lights a cell holds.
@@ -169,7 +257,14 @@ fn atlas_tile(g: LightGrid, slot: u32, face: u32) -> vec4<f32> {
     let tile = (slot % PER_ATLAS_LAYER) * 6u + face;
     let per = u32(tiles);
     let origin = vec2<f32>(f32(tile % per), f32(tile / per)) / tiles;
-    return vec4<f32>(origin, layer, 1.0 / tiles);
+    return vec4<f32>(origin, layer, tile_use(g) / tiles);
+}
+
+// fork: P8 — how much of its tile a cube face was drawn into (`LightTier::tile_use`): a face drawn
+// at half the tile's edge is a quarter of the depth to render, and its texels are twice as wide.
+// Zero (a block written before this row existed) reads as the whole tile.
+fn tile_use(g: LightGrid) -> f32 {
+    return select(g.far.w, 1.0, g.far.w <= 0.0);
 }
 
 // A Vogel-disc offset — the same spiral the sun's filter uses, so a lamp's penumbra and the sun's
@@ -215,7 +310,9 @@ fn local_visibility(
     // Offset along the normal by a texel of the face, so a lit surface never shadows itself at a
     // grazing angle. One texel is `2 * major / tile` yards across at distance `major`.
     let raw = cube_face(world_pos - light_pos);
-    let tiles = g.misc.w;
+    // Face texels are `shadow_misc.w * tiles / tile_use` of face uv each: a face drawn into part
+    // of its tile has fewer, wider texels, and every texel-sized term below scales with it.
+    let tiles = g.misc.w / tile_use(g);
     let texel_yd = 2.0 * raw.w * (g.shadow_misc.w * tiles);
     let v = (world_pos + normal * texel_yd) - light_pos;
     let ct = cube_face(v);

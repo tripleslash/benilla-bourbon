@@ -128,6 +128,24 @@ pub struct LightTier {
     /// changes what they cost. Cinematic needs it because it is the tier with twelve slots to fill
     /// and a world full of newly-emitting lamps to fill them from.
     pub aggressive_cull: bool,
+    /// fork: P8 — **the far level**: a second, coarser grid around the same camera that holds the
+    /// same lights, read wherever the near grid does not reach. Cells per axis; `x` and `z` must
+    /// agree (the shader carries one horizontal count). [`UVec3::ZERO`] is no far level, which is
+    /// every tier but Cinematic — past the near grid those take no local light, as they always did.
+    pub far_dims: UVec3,
+    /// The far cell's edge as a whole multiple of [`Self::cell`]. Whole, so the far level's base is
+    /// an integer function of the near level's and the two can never disagree about the camera.
+    pub far_step: u32,
+    /// fork: P8 — how much of each atlas tile a cube face is drawn into, per edge. `0.5` renders a
+    /// quarter of the depth, and the wider texels are what the penumbra filter smooths over anyway.
+    pub tile_use: f32,
+    /// fork: P8 — the penumbra opening (face texels of blur per yard of receiver distance, at a
+    /// nominal one-yard emitter). See [`PENUMBRA_OPENING`], which every tier but Cinematic keeps.
+    pub penumbra: f32,
+    /// fork: P8 — the band, in yards inside [`SHADOW_RADIUS`], over which a cube shadow fades with
+    /// the light's distance from the camera. `0` is no fade: a slot is at full strength from the
+    /// frame it finishes ramping in, wherever the light is.
+    pub shadow_fade_yd: f32,
 }
 
 impl LightTier {
@@ -140,10 +158,36 @@ impl LightTier {
         shade: 1.0,
         dynamic_casters: false,
         aggressive_cull: false,
+        far_dims: UVec3::ZERO,
+        far_step: 1,
+        tile_use: 1.0,
+        penumbra: PENUMBRA_OPENING,
+        shadow_fade_yd: 0.0,
     };
 
+    /// Every cell the binning pass fills: the near level's, then the far level's.
     pub fn cells(&self) -> usize {
+        self.near_cells() + (self.far_dims.x * self.far_dims.y * self.far_dims.z) as usize
+    }
+
+    /// The near level's cells.
+    pub fn near_cells(&self) -> usize {
         (self.dims.x * self.dims.y * self.dims.z) as usize
+    }
+
+    /// fork: P8 — the far level's cell edge (yd).
+    pub fn far_cell(&self) -> f32 {
+        self.cell * self.far_step.max(1) as f32
+    }
+
+    /// fork: P8 — how far the far level reaches from the camera (zero when there is none).
+    pub fn far_reach(&self) -> Vec3 {
+        self.far_dims.as_vec3() * self.far_cell() * 0.5
+    }
+
+    /// fork: P8 — how far ANY local light reaches, near level or far.
+    pub fn full_reach(&self) -> Vec3 {
+        self.reach().max(self.far_reach())
     }
 
     /// fork: P8 — **how far this grid reaches from the camera**, in world yards per axis.
@@ -191,27 +235,37 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             shadowed: PER_ATLAS_LAYER,
             ..LightTier::OFF
         },
-        // fork: P8. The grid is the finest a 48³ allocation allows — 3 yd cells reach 144 yd across,
-        // which is a city block, and at Cinematic that block holds every lamp post, every window
-        // candle and every drawn weapon rather than the handful the reference commits. Twelve lights
-        // shadow, over both atlas layers, with a 12-tap Vogel disc and entity casters in the cubes.
+        // fork: P8. Two levels. The NEAR level is 3 yd cells — the resolution that is the whole
+        // reason the row exists, since at Cinematic a city block holds every lamp post, every lit
+        // window and every drawn weapon rather than the handful the reference commits — over
+        // ±60/±30 yd. The FAR level is 18 yd cells over ±324/±144 yd, holding the same lights.
         //
-        // **The reach this buys is the shortest of any tier with a grid** (`LightTier::reach`:
-        // ±72 yd horizontally, ±36 vertically, against Ultra's ±108/±54 and High's ±144/±72),
-        // because the cell allocation is fixed and a finer cell is paid for in reach one for one.
-        // That was briefly changed to 4.5 on the theory that it was behind a report of unlit
-        // braziers; it was not, and the change was reverted rather than left in as a look
-        // regression nobody asked for. The gap is real and recorded by the tests below — it is
-        // just not what that report was about.
+        // The far level is the fix for lamps "popping in" as the player walks up to them. With one
+        // level of 3 yd cells the grid ended at ±72/±36 yd, and past its edge nothing took any
+        // local light at all: a Goldshire street at 80 yd was unlit however many lamps stood in it,
+        // and lit up the moment the grid's edge swept over it. Now a lamp lights its street at any
+        // distance the table packs it (`global_light`, which fades lights out smoothly at the far
+        // end rather than at a hard cap), and the near/far seam cross-fades
+        // (`locallight::cell_pair`), so no distance has an edge.
+        //
+        // The cube shadows are the cheap kind on purpose: static casters only (cached — a settled
+        // street pays nothing a frame), faces drawn into half a tile, a wide 8-tap penumbra and a
+        // shade floor that leaves a shadowed lamp's far side most of its light. They fade out with
+        // distance before a slot is released, so a lamp acquiring or losing its cube never shows.
         LightingQuality::Cinematic => LightTier {
             on: true,
-            dims: UVec3::new(48, 24, 48),
+            dims: UVec3::new(40, 20, 40),
             cell: 3.0,
             shadowed: MAX_SHADOWED,
-            taps: 12,
-            shade: 0.90,
-            dynamic_casters: true,
+            taps: 8,
+            shade: 0.55,
+            dynamic_casters: false,
             aggressive_cull: true,
+            far_dims: UVec3::new(36, 16, 36),
+            far_step: 6,
+            tile_use: 0.5,
+            penumbra: 2.5,
+            shadow_fade_yd: 30.0,
         },
     }
 }
@@ -357,6 +411,9 @@ pub struct ModernLights {
     /// player turned. `None` is a slot no light holds — the atlas tiles for it are cleared, which
     /// reads as "nothing occludes" (reverse-Z clears to the far plane), so a hole is harmless.
     pub shadowed: Vec<Option<HeldSlot>>,
+    /// fork: P8 — the camera this frame's grid is centred on, for the shadows' distance fade
+    /// ([`LightTier::shadow_fade_yd`]).
+    pub eye: Vec3,
 }
 
 impl Default for LightTier {
@@ -376,6 +433,10 @@ pub struct LightParams {
     /// yard of receiver distance), `z` the shade floor (how much of a light a shadow may take),
     /// `w` the atlas's first layer. Named `soft` in the WGSL, where `filter` is a reserved keyword.
     pub soft: Vec4,
+    /// fork: P8 — `x` the far level's horizontal cells, `y` its vertical cells, `z` its cell as a
+    /// multiple of the near cell, `w` the drawn fraction of an atlas tile. `locallight.wgsl`'s
+    /// `LightGrid.far`, taken from the padding that follows the struct.
+    pub far: Vec4,
     pub shadow: [Vec4; MAX_SHADOWED],
     /// The twelve per-light near planes ([`ShadowLight::near`]), four to a row — written into the
     /// first three `spare` rows, which cost nothing: the region was already padded to
@@ -394,6 +455,7 @@ impl LightParams {
         row(self.misc);
         row(self.shadow_misc);
         row(self.soft);
+        row(self.far);
         for s in &self.shadow {
             row(*s);
         }
@@ -437,7 +499,9 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         if let Some(held) = held {
             shadow[slot] = held.light.pos.extend(held.light.range);
             slot_near[slot / 4][slot % 4] = held.light.near;
-            slot_fade[slot / 4][slot % 4] = held.fade.clamp(0.0, 1.0);
+            slot_fade[slot / 4][slot % 4] = (held.fade
+                * shadow_distance_weight(tier, held.light.pos.distance(lights.eye)))
+            .clamp(0.0, 1.0);
         }
     }
     LightParams {
@@ -457,14 +521,52 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         ),
         soft: Vec4::new(
             tier.taps as f32,
-            PENUMBRA_OPENING,
+            tier.penumbra,
             tier.shade,
             crate::modern::shadow::LOCAL_LAYER as f32,
+        ),
+        far: Vec4::new(
+            tier.far_dims.x as f32,
+            tier.far_dims.y as f32,
+            tier.far_step.max(1) as f32,
+            // The fraction actually drawn, in whole texels — the render sets an integral viewport,
+            // and the lookup has to scale by exactly what was rendered.
+            face_px(tier, shadow_map_size) as f32 / (shadow_map_size / ATLAS_TILES).max(1) as f32,
         ),
         shadow,
         slot_near,
         slot_fade,
     }
+}
+
+/// fork: P8 — **how strong a cube shadow is for a light this far from the camera**, 0..1.
+///
+/// A slot is only ever held inside [`SHADOW_RADIUS`], so without this a lamp's shadow is a step
+/// function of distance: absent at 71 yd, present (after a four-frame ramp) at 69. Fading it over
+/// [`LightTier::shadow_fade_yd`] before the radius makes a lamp look the same whether or not it
+/// holds a cube at the moment it is released or taken, which is what keeps the view consistent as
+/// the player walks.
+pub fn shadow_distance_weight(tier: &LightTier, distance: f32) -> f32 {
+    if tier.shadow_fade_yd <= 0.0 {
+        return 1.0;
+    }
+    let t = ((SHADOW_RADIUS - distance) / tier.shadow_fade_yd).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// fork: P8 — the edge, in texels, of the square a cube face is drawn into within its atlas tile
+/// ([`LightTier::tile_use`]). The renderer's viewport and the lookup's uv scale both read this.
+pub fn face_px(tier: &LightTier, shadow_map_size: u32) -> u32 {
+    let tile = shadow_map_size / ATLAS_TILES;
+    ((tile as f32 * tier.tile_use.clamp(0.05, 1.0)).floor() as u32).clamp(1, tile.max(1))
+}
+
+/// fork: P8 — the far level's base cell (the Rust twin of `locallight::far_base`): the far cell the
+/// near level's camera cell falls in, minus half the far level.
+pub fn far_base(tier: &LightTier, near_base: IVec3) -> IVec3 {
+    let eye = near_base + tier.dims.as_ivec3() / 2;
+    let k = tier.far_step.max(1) as f32;
+    (eye.as_vec3() / k).floor().as_ivec3() - tier.far_dims.as_ivec3() / 2
 }
 
 /// The grid's base cell for a camera — deterministic, so a cell that scrolls out is the cell that
@@ -546,6 +648,7 @@ fn update_lights(
         &GlobalTransform,
         Option<&LightRooms>,
         Option<&FixtureRadius>,
+        Has<crate::lighting::NightGlow>,
     )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
@@ -574,7 +677,12 @@ fn update_lights(
     // in the table, so it must not hold an atlas slot either.
     let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
     if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
-        for (light, gt, rooms, fixture) in &lights_q {
+        for (light, gt, rooms, fixture, window) in &lights_q {
+            // A lit window is a soft fill, never a shadow caster: a city has more of them than
+            // the atlas has slots for lamps, and a pane's light has no hard edge to cast.
+            if window {
+                continue;
+            }
             if !crate::wmo_portal::room_admits_light(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
@@ -617,6 +725,7 @@ fn update_lights(
         tier,
         base: grid_base(&tier, cam),
         shadowed: chosen,
+        eye: cam,
     };
 }
 
@@ -761,7 +870,7 @@ mod tests {
         }
         // …and the tier that is new is allowed to cost what it says it costs.
         let cine = light_tier(LightingQuality::Cinematic);
-        assert!(cine.taps > 1 && cine.dynamic_casters && cine.aggressive_cull);
+        assert!(cine.taps > 1 && cine.aggressive_cull);
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
@@ -787,33 +896,104 @@ mod tests {
         assert_eq!(reach(LightingQuality::Medium), Vec3::new(128.0, 64.0, 128.0));
         assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
         assert_eq!(reach(LightingQuality::Ultra), Vec3::new(108.0, 54.0, 108.0));
-        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(72.0, 36.0, 72.0));
+        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(60.0, 30.0, 60.0));
+        // …and past that, Cinematic's far level: 18 yd cells to ±324/±144.
+        assert_eq!(
+            light_tier(LightingQuality::Cinematic).far_reach(),
+            Vec3::new(324.0, 144.0, 324.0)
+        );
+        for q in [
+            LightingQuality::Low,
+            LightingQuality::Medium,
+            LightingQuality::High,
+            LightingQuality::Ultra,
+        ] {
+            assert_eq!(light_tier(q).far_reach(), Vec3::ZERO, "{q:?} has no far level");
+        }
     }
 
-    /// **A standing gap, recorded rather than fixed: the ladder is not monotone.** Ultra
-    /// reaches less far than High, and Cinematic less far than either.
+    /// GOLDEN — **a lamp lights its street at any distance the table packs it.** The report: lights
+    /// "popping into view" as the player walked up to them, where the reference's look the same
+    /// across the whole view distance. The near grid ended at ±72 yd and nothing past it took any
+    /// local light — at Goldshire at midnight all nineteen packed lights sat 82–175 yd from the
+    /// camera and every one of them lit nothing.
     ///
-    /// Same mechanism as the Cinematic defect above and it predates P8 — Ultra's 4.5 yd cell is
-    /// P6's own row, and `light_tier` states in as many words that P8 must leave it alone so an
-    /// Ultra frame costs and looks exactly what it did before Cinematic existed. So this is not
-    /// quietly repaired here; it is pinned, so that the day someone does widen the allocation or
-    /// revisit P6's row, the test says what the answer should become.
+    /// So the far level has to cover every light the table can hold plus that light's own range,
+    /// horizontally; and it has to be a whole multiple of the near cell, or the two levels' bases
+    /// could disagree about which cell the camera is in.
+    #[test]
+    fn cinematics_far_level_covers_every_packed_light_and_its_range() {
+        let t = light_tier(LightingQuality::Cinematic);
+        let lit = crate::lighting::MODERN_PACK_RADIUS + 48.0;
+        assert!(t.far_reach().x >= lit && t.far_reach().z >= lit, "{:?} < {lit}", t.far_reach());
+        assert_eq!(t.far_dims.x, t.far_dims.z, "the shader carries one horizontal count");
+        assert!(t.far_step >= 2, "a far level as fine as the near one is just a bigger near level");
+        // Both levels together fit the one allocation every tier shares.
+        assert!(t.cells() <= CELL_ALLOC, "{} cells", t.cells());
+    }
+
+    /// The far level's base is the near level's, divided down — and it tracks the camera by whole
+    /// far cells, so a cell that scrolls out is the cell that scrolls back in.
+    #[test]
+    fn the_far_level_is_centred_on_the_near_levels_camera_cell() {
+        let t = light_tier(LightingQuality::Cinematic);
+        for cam in [
+            Vec3::new(-9400.0, 60.0, 40.0),
+            Vec3::new(0.5, -3.0, 0.5),
+            Vec3::new(1234.0, 250.0, -8765.0),
+        ] {
+            let near = grid_base(&t, cam);
+            let far = far_base(&t, near);
+            // The camera is inside the far level, near its middle.
+            let c = (cam / t.far_cell()).floor().as_ivec3() - far;
+            let half = t.far_dims.as_ivec3() / 2;
+            assert!((c - half).abs().max_element() <= 1, "{cam}: far cell {c} vs centre {half}");
+        }
+    }
+
+    /// GOLDEN — **a cube shadow fades with distance before its slot is released**, so a lamp does
+    /// not change as it crosses [`SHADOW_RADIUS`]. Full strength close in, zero at the radius, and
+    /// no fade at all on the tiers that do not ask for one.
+    #[test]
+    fn a_shadow_fades_out_before_the_radius_that_releases_it() {
+        let cine = light_tier(LightingQuality::Cinematic);
+        assert_eq!(shadow_distance_weight(&cine, 5.0), 1.0);
+        assert_eq!(shadow_distance_weight(&cine, SHADOW_RADIUS), 0.0);
+        let mid = shadow_distance_weight(&cine, SHADOW_RADIUS - cine.shadow_fade_yd * 0.5);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        let ultra = light_tier(LightingQuality::Ultra);
+        assert_eq!(shadow_distance_weight(&ultra, SHADOW_RADIUS - 1.0), 1.0);
+    }
+
+    /// A face drawn into part of its tile is drawn into whole texels, and a tier that draws the
+    /// whole tile still does.
+    #[test]
+    fn a_face_is_drawn_into_whole_texels_of_its_tile() {
+        let size = crate::modern::shadow::SHADOW_MAP_SIZE;
+        let tile = size / ATLAS_TILES;
+        assert_eq!(face_px(&light_tier(LightingQuality::Ultra), size), tile);
+        let half = face_px(&light_tier(LightingQuality::Cinematic), size);
+        assert!(half < tile && half >= tile / 2 - 1, "{half} of {tile}");
+    }
+
+    /// **A standing gap, recorded rather than fixed: Ultra's near grid reaches less far than
+    /// High's.** Same mechanism as the reach trade above, and it predates P8 — Ultra's 4.5 yd cell
+    /// is P6's own row, and `light_tier` states that P8 must leave it alone. Pinned, so the day
+    /// someone widens the allocation or revisits P6's row, the test says what should change.
     ///
-    /// It is far less harmful than it was: outside the grid, terrain and exterior doodads now keep
-    /// the reference's own three-nearest selection instead of going black (`locallight::inside_grid`
-    /// and its three callers). A WMO surface is what still loses, because the reference gives one
-    /// no point light at all and the grid is its only source.
+    /// Cinematic is no longer part of the gap: its near level is shorter still, but its far level
+    /// reaches past every other tier's grid.
     #[test]
     fn the_reach_ladder_is_not_monotone_and_that_is_known() {
-        let high = light_tier(LightingQuality::High).reach();
-        let ultra = light_tier(LightingQuality::Ultra).reach();
-        let cine = light_tier(LightingQuality::Cinematic).reach();
-        assert!(cine.cmplt(ultra).all(), "Cinematic {cine:?} vs Ultra {ultra:?}");
+        let high = light_tier(LightingQuality::High).full_reach();
+        let ultra = light_tier(LightingQuality::Ultra).full_reach();
+        let cine = light_tier(LightingQuality::Cinematic).full_reach();
+        assert!(cine.cmpge(high).all(), "Cinematic {cine:?} vs High {high:?}");
         assert!(
             ultra.cmplt(high).all(),
             "Ultra now reaches {ultra:?} against High's {high:?}. If that was deliberate, this \
-             test is the one to delete — and `cinematic_never_reaches_less_far_than_ultra` should \
-             probably become a full monotonicity check over the whole ladder.",
+             test is the one to delete — and it should become a full monotonicity check over the \
+             whole ladder.",
         );
     }
 
