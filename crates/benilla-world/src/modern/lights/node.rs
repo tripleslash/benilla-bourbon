@@ -26,7 +26,7 @@ use crate::modern::volumetrics::BLOCK_TAIL_BYTES;
 use crate::modern::ActiveLighting;
 
 /// Where the light grid starts inside the modern storage block. 256-aligned by construction (the
-/// cascades, the froxel tail and the GI parameters in front of it add to exactly 5120), which is
+/// cascades, the froxel tail and the GI parameters in front of it add to exactly 5376), which is
 /// what lets the binning pass bind that region alone as read-write.
 pub const LIGHT_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES + GI_PARAMS_BYTES) as u64;
 

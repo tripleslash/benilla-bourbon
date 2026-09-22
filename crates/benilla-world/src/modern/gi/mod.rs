@@ -47,7 +47,7 @@ pub const MAX_LEVELS: usize = 4;
 /// Size of [`GiParams::std430`] — `probegi.wgsl`'s `GiParams`. Chosen so that the light grid behind
 /// it starts at a 256-byte offset inside the block, which is what lets the binning pass bind it (and
 /// the probe array behind THAT stays 256-aligned for the blend pass).
-pub const GI_PARAMS_BYTES: usize = 13 * 16;
+pub const GI_PARAMS_BYTES: usize = 25 * 16;
 /// Size of one `probegi::GiProbe`.
 pub const PROBE_BYTES: usize = 96;
 
@@ -330,8 +330,9 @@ impl GiParams {
         row(self.ground);
         row(self.misc);
         row(self.interior);
-        // `spare`: P7's grading, and the padding that aligns the light grid behind this block.
-        for _ in 0..2 {
+        // `spare`: P7's grading, and the padding that aligns the light grid behind this block —
+        // 14 rows since the froxel block's room fog pushed it 64 bytes off the 256 grid.
+        for _ in 0..14 {
             row(Vec4::ZERO);
         }
     }
@@ -599,7 +600,7 @@ mod tests {
             + crate::modern::volumetrics::BLOCK_TAIL_BYTES
             + GI_PARAMS_BYTES;
         assert_eq!(lights % 256, 0, "light offset {lights}");
-        assert_eq!(lights, 5120);
+        assert_eq!(lights, 5376);
         let probes = lights + crate::modern::lights::BLOCK_LIGHT_BYTES;
         assert_eq!(probes % 256, 0, "probe offset {probes}");
         let mut clip = Vec::new();
