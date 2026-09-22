@@ -105,6 +105,21 @@ fn probe_index(g: GiParams, c: u32, w: vec3<i32>) -> u32 {
     return u32(inside) + storage_cascade(g, c) * u32(g.params.y);
 }
 
+// The world probe a storage slot currently holds: slot `slot` of cascade `c`'s toroidal grid, placed
+// against that cascade's base. The classify, trace and blend passes all ask this of the same index,
+// so it is written once.
+fn slot_probe(g: GiParams, c: u32, slot: u32) -> vec3<i32> {
+    let s = i32(slot);
+    let n = vec3<i32>(g.dims.xyz);
+    let texel = vec3<i32>(s % n.x, (s / n.x) % n.y, s / (n.x * n.y));
+    let base = vec3<i32>(g.grid[c].xyz);
+    return base + vec3<i32>(
+        wrap(texel.x - base.x, n.x),
+        wrap(texel.y - base.y, n.y),
+        wrap(texel.z - base.z, n.z),
+    );
+}
+
 fn probe_pos(g: GiParams, c: u32, w: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(w) * g.grid[c].w;
 }
@@ -279,6 +294,12 @@ struct GiClip {
     hf_row_z: vec4<f32>,
     // x = enabled, y = the lowest height the map can hold, z = its span (yd), w = its texel count.
     hf: vec4<f32>,
+    // fork: P8b — x = the highest ground the heightfield holds (world Y, yd): the top of every
+    // resident terrain cell's box, so no texel of the map can stand above it. A ray point above it
+    // cannot be under the terrain, so `march` skips the map read there — and a ray climbing above it
+    // past the clipmap can never come down to it, so the far walk ends. Exact, not a shortcut.
+    // yzw spare.
+    bounds: vec4<f32>,
 }
 
 // The terrain's height under a world point, or far below everything when the map does not reach it.
@@ -325,6 +346,12 @@ fn terrain_normal(hf_map: texture_depth_2d, clip: GiClip, p: vec3<f32>) -> vec3<
     return normalize(vec3<f32>(-hx, 2.0 * e, -hz));
 }
 
+// fork: P8b — one toroidal step: a wrapped coordinate moved by exactly one, wrapped again. Equal to
+// `wrap(v, n)` for any `v` in `-1..=n`, which is all a DDA step can produce.
+fn wrap_step(v: i32, n: i32) -> i32 {
+    return select(select(v, v - n, v >= n), v + n, v < 0);
+}
+
 fn voxel_texel(clip: GiClip, lvl: u32, w: vec3<i32>) -> vec3<i32> {
     let n = i32(clip.info.y);
     return vec3<i32>(wrap(w.x, n), wrap(w.y, n), wrap(w.z, n) + i32(lvl) * n);
@@ -354,6 +381,11 @@ fn march(
     // A zero component would make the slab distances infinite; nudge it instead of branching.
     let d = select(dir, vec3<f32>(1e-6), abs(dir) < vec3<f32>(1e-6));
     let stepv = sign(d);
+    // fork: P8b — the step as integers, and the highest ground the terrain map holds
+    // (`GiClip::bounds`): a point above it cannot be under the terrain, so the map is not read there.
+    let istep = vec3<i32>(stepv);
+    let ni = i32(n);
+    let ground_top = clip.bounds.x;
 
     while (lvl < levels && t < reach && budget > 0) {
         let vs = clip.level[lvl].w;
@@ -367,9 +399,14 @@ fn march(
         }
         let tdelta = abs(vec3<f32>(vs) / d);
         var tmax = ((w + max(stepv, vec3<f32>(0.0))) * vs - p) / d;
+        // fork: P8b — the voxel's slot in the level's toroidal texture, wrapped ONCE here and then
+        // carried along with `w`: a DDA step moves one axis by exactly one voxel, so the wrap is a
+        // compare, where `voxel_texel`'s six integer modulos a step were most of the loop's ALU.
+        var wt = voxel_texel(clip, lvl, vec3<i32>(w)) - vec3<i32>(0, 0, i32(lvl) * ni);
+        let layer = i32(lvl) * ni;
         while (budget > 0) {
             budget = budget - 1;
-            let texel = voxel_texel(clip, lvl, vec3<i32>(w));
+            let texel = vec3<i32>(wt.x, wt.y, wt.z + layer);
             let a = textureLoad(vox_albedo, texel, 0);
             if (a.a > 0.5) {
                 let packed = textureLoad(vox_normal, texel, 0);
@@ -383,7 +420,11 @@ fn march(
             // The terrain under this voxel, sampled at the segment's midpoint.
             let seg = min(min(tmax.x, tmax.y), tmax.z);
             let mid = origin + dir * (t + seg * 0.5);
-            let h = terrain_height(hf_map, clip, mid);
+            // Above the highest ground there is nothing to find in the map (`GiClip::bounds`).
+            var h = -1e9;
+            if (mid.y < ground_top) {
+                h = terrain_height(hf_map, clip, mid);
+            }
             if (mid.y < h) {
                 // Bisect the last segment so the hit lands on the surface rather than a step edge.
                 var lo = t;
@@ -408,12 +449,15 @@ fn march(
             if (tmax.x <= tmax.y && tmax.x <= tmax.z) {
                 w.x = w.x + stepv.x;
                 tmax.x = tmax.x + tdelta.x;
+                wt.x = wrap_step(wt.x + istep.x, ni);
             } else if (tmax.y <= tmax.z) {
                 w.y = w.y + stepv.y;
                 tmax.y = tmax.y + tdelta.y;
+                wt.y = wrap_step(wt.y + istep.y, ni);
             } else {
                 w.z = w.z + stepv.z;
                 tmax.z = tmax.z + tdelta.z;
+                wt.z = wrap_step(wt.z + istep.z, ni);
             }
             tmax = tmax - vec3<f32>(seg);
             if (any(w < base) || any(w >= base + n)) {
@@ -428,9 +472,19 @@ fn march(
         var t_far = t;
         let step = max(clip.level[levels - 1u].w, 4.0);
         while (t_far < reach && budget > 0) {
+            // fork: P8b — a ray climbing above the highest ground can never come back down to it,
+            // and past the clipmap the ground is all that is left: it misses, exactly as the rest
+            // of this walk would have found.
+            let at = origin + dir * t_far;
+            if (dir.y >= 0.0 && at.y >= ground_top) {
+                break;
+            }
             budget = budget - 1;
             let q = origin + dir * (t_far + step * 0.5);
-            let h = terrain_height(hf_map, clip, q);
+            var h = -1e9;
+            if (q.y < ground_top) {
+                h = terrain_height(hf_map, clip, q);
+            }
             if (q.y < h) {
                 let hit_pos = origin + dir * t_far;
                 return GiHit(2.0, t_far, hit_pos, vec3<f32>(0.0), terrain_normal(hf_map, clip, hit_pos), 0.0);

@@ -24,33 +24,33 @@ const RESEED_VALIDITY: f32 = 0.2;
 @group(0) @binding(1) var<storage, read> scratch: array<probegi::GiProbe>;
 @group(0) @binding(2) var<storage, read_write> probes: array<probegi::GiProbe>;
 
+// The same work list the trace ran over (`gi_classify.wgsl`), dispatched the same way: only the
+// probes traced this frame are folded in, and every one of them has a fresh scratch entry.
+struct GiWork {
+    count: u32,
+    items: array<u32>,
+}
+@group(0) @binding(3) var<storage, read> work: GiWork;
+
 @compute @workgroup_size(64)
-fn blend_probes(@builtin(global_invocation_id) id: vec3<u32>) {
+fn blend_probes(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(num_workgroups) groups: vec3<u32>,
+) {
     let g = blend.gi;
     if (g.params.x < 0.5) {
         return;
     }
+    // Rows of workgroups, as the trace dispatches them (`gi_classify.wgsl`'s `GROUP_ROW`).
+    let t = id.y * (groups.x * 64u) + id.x;
+    if (t >= work.count) {
+        return;
+    }
+    let idx = work.items[t];
     let per_cascade = u32(g.params.y);
-    let total = per_cascade * u32(g.dims.w);
-    let idx = id.x;
-    if (idx >= total) {
-        return;
-    }
     let fresh = scratch[idx];
-    // 0 = this probe was not traced this frame.
-    if (fresh.sh_y.w < 0.5) {
-        return;
-    }
     let cascade = probegi::logical_cascade(g, idx / per_cascade);
-    let slot = i32(idx % per_cascade);
-    let n = vec3<i32>(g.dims.xyz);
-    let texel = vec3<i32>(slot % n.x, (slot / n.x) % n.y, slot / (n.x * n.y));
-    let base = vec3<i32>(g.grid[cascade].xyz);
-    let w = base + vec3<i32>(
-        probegi::wrap(texel.x - base.x, n.x),
-        probegi::wrap(texel.y - base.y, n.y),
-        probegi::wrap(texel.z - base.z, n.z),
-    );
+    let w = probegi::slot_probe(g, cascade, idx % per_cascade);
 
     let old = probes[idx];
     // 2 = replace (scrolled in, cold, or a cut); otherwise ease toward the new value. A large step

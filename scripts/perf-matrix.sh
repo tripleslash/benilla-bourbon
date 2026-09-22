@@ -27,6 +27,13 @@
 #   scripts/perf-matrix.sh serve              # start the host (remote packs), Ctrl-C to stop
 #   scripts/perf-matrix.sh urls [superscale]  # print the matrix (default superscale 1.0)
 #   scripts/perf-matrix.sh urls 2.0 stormwind # just one zone
+#   scripts/perf-matrix.sh urls 2.0 all 3 0   # every zone at Ultra, at midnight
+#
+# The third and fourth arguments are the lighting tier (0 Low … 4 Cinematic, default 1 Medium) and
+# the clock (minutes past midnight, default 720 noon). `0` lights the windows and every lamp, which
+# is where the emissive-source tiers spend what they spend. `all` (or `-`) as the zone keeps every
+# zone. The tier and clock ride the label (`stormwind-q3-t0-base`), so rows from two sweeps never
+# read as the same configuration.
 #
 # Env: BENILLA_PERF_HOST, BENILLA_PACKS_REMOTE, BENILLA_PERF_FRAMES, BENILLA_PERF_PORT.
 #
@@ -90,6 +97,9 @@ ABLATIONS=(
   "ssao0|&lighting=modern&ssao=0"
   "gi0|&lighting=modern&modern_gi=0"
   "lights0|&lighting=modern&modern_lights=0"
+  # Lights derived from things that only glow (lamps with no M2 light, lit windows, gear): off.
+  # On the tiers that light from them, base minus this is what that lighting costs.
+  "emissive0|&lighting=modern&modern_emissive=0"
   "mirrortier|&lighting=modern&modern_mirrortier=1"
   "water1|&lighting=modern&water_detail=1"
   "water0|&lighting=modern&water_detail=0"
@@ -105,7 +115,10 @@ case "${1:-}" in
   urls)
     scale="${2:-1.0}"
     only="${3:-}"
-    echo "# superscale=$scale frames=$FRAMES — keep superscale FIXED across a zone's sweep."
+    case "$only" in all | -) only="" ;; esac
+    quality="${4:-1}"
+    clock="${5:-720}"
+    echo "# superscale=$scale frames=$FRAMES tier=$quality clock=$clock — keep superscale FIXED across a zone's sweep."
     echo "# Read the console for: PERF_PROBE cfg=<label> … p50_ms= … railed="
     echo "# If railed=yes, raise superscale and redo the whole zone."
     for z in "${ZONES[@]}"; do
@@ -117,7 +130,10 @@ case "${1:-}" in
       [ "$zface" != "-" ] && face="&worldview_face=$zface"
       for a in "${ABLATIONS[@]}"; do
         IFS='|' read -r alabel aq <<<"$a"
-        echo "$HOST/?worldview=1&lightingquality=1&map=$zmap&worldview_at=$zat$face&clock=720&perf=$FRAMES&superscale=$scale&perf_label=$zlabel-$alabel$aq"
+        # `lighting_quality`, not `lightingquality`: the page's keys are the launch env's names
+        # lowercased without `WOW_` (`benilla-app` `webenv::var`), so this is `WOW_LIGHTING_QUALITY`.
+        # The old spelling reached nothing, and every row ran at the platform default (Medium).
+        echo "$HOST/?worldview=1&lighting_quality=$quality&map=$zmap&worldview_at=$zat$face&clock=$clock&perf=$FRAMES&superscale=$scale&perf_label=$zlabel-q$quality-t$clock-$alabel$aq"
       done
     done
     ;;

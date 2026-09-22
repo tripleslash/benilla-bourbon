@@ -5,6 +5,7 @@
 use bevy::app::SubApp;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
 use bevy::render::render_resource::binding_types::{
@@ -35,19 +36,34 @@ const PARAMS_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES) as u64;
 
 #[derive(Resource)]
 struct GiPipelines {
+    classify_layout: BindGroupLayoutDescriptor,
     trace_layout: BindGroupLayoutDescriptor,
     blend_layout: BindGroupLayoutDescriptor,
+    classify: CachedComputePipelineId,
     trace: CachedComputePipelineId,
     blend: CachedComputePipelineId,
 }
+
+/// The trace's dispatch is rows of this many workgroups (`gi_classify.wgsl`'s `GROUP_ROW`): one
+/// axis of a dispatch stops at 65535 workgroups, and a frame listing every probe of Ultra's field at
+/// one a workgroup is 65536 — dropped whole, which left every probe cold for good.
+const GROUP_ROW: u32 = 256;
+/// The indirect dispatch's reset value: rows of [`GROUP_ROW`], none of them yet, `z` one.
+const DISPATCH_RESET: [u32; 3] = [GROUP_ROW, 0, 1];
 
 #[derive(Resource, Default)]
 struct GiFrame {
     uniform: Option<Buffer>,
     scratch: Option<Buffer>,
     scratch_probes: usize,
+    /// The work list `gi_classify.wgsl` packs — a count, then one probe index per listed probe —
+    /// and the indirect dispatch it grows. Both are reset every frame before the passes run.
+    work: Option<Buffer>,
+    dispatch: Option<Buffer>,
+    classify_bind: Option<BindGroup>,
     trace_bind: Option<BindGroup>,
     blend_bind: Option<BindGroup>,
+    /// Workgroups of the classify pass: one thread per probe of the tier.
     groups: u32,
 }
 
@@ -70,6 +86,8 @@ fn init_pipelines(
                 texture_depth_2d(),
                 uniform_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
+                // The work list.
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -80,6 +98,21 @@ fn init_pipelines(
             (
                 uniform_buffer_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
+                storage_buffer_sized(false, None),
+                // The work list.
+                storage_buffer_read_only_sized(false, None),
+            ),
+        ),
+    );
+    // The probe region (read), the trace's parameters, the work list and its dispatch (written).
+    let classify_layout = BindGroupLayoutDescriptor::new(
+        "modern_gi_classify",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only_sized(false, None),
+                uniform_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
             ),
         ),
@@ -98,6 +131,12 @@ fn init_pipelines(
             zero_initialize_workgroup_memory: false,
         })
     };
+    let classify = compute(
+        "modern_gi_classify",
+        &classify_layout,
+        "embedded://benilla_world/shaders/modern/gi_classify.wgsl",
+        "classify_probes",
+    );
     let trace = compute(
         "modern_gi_trace",
         &trace_layout,
@@ -111,8 +150,10 @@ fn init_pipelines(
         "blend_probes",
     );
     commands.insert_resource(GiPipelines {
+        classify_layout,
         trace_layout,
         blend_layout,
+        classify,
         trace,
         blend,
     });
@@ -135,6 +176,7 @@ fn prepare_gi(
     pipeline_cache: Res<PipelineCache>,
     mut frame: ResMut<GiFrame>,
 ) {
+    frame.classify_bind = None;
     frame.trace_bind = None;
     frame.blend_bind = None;
     frame.groups = 0;
@@ -183,7 +225,8 @@ fn prepare_gi(
     else {
         return;
     };
-    if pipeline_cache.get_compute_pipeline(pipes.trace).is_none()
+    if pipeline_cache.get_compute_pipeline(pipes.classify).is_none()
+        || pipeline_cache.get_compute_pipeline(pipes.trace).is_none()
         || pipeline_cache.get_compute_pipeline(pipes.blend).is_none()
     {
         return;
@@ -217,7 +260,53 @@ fn prepare_gi(
     let Some(scratch) = frame.scratch.clone() else {
         return;
     };
+    // The work list holds at most every probe of the allocation, so it is sized once and never
+    // re-created by a tier change; the dispatch is three words. Both are reset here, every frame the
+    // passes run: `write_buffer` lands before the frame's command buffers, so the classify pass
+    // always starts from an empty list.
+    let work = frame
+        .work
+        .get_or_insert_with(|| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some("modern_gi_work"),
+                size: 4 + 4 * super::PROBE_ALLOC as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .clone();
+    let dispatch = frame
+        .dispatch
+        .get_or_insert_with(|| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some("modern_gi_dispatch"),
+                size: 12,
+                usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .clone();
+    queue.write_buffer(&work, 0, &0u32.to_le_bytes());
+    queue.write_buffer(&dispatch, 0, bytemuck::cast_slice(&DISPATCH_RESET));
+    // The probe region alone — the same range the blend pass binds writable.
+    let probe_region = || {
+        BindingResource::Buffer(BufferBinding {
+            buffer: &block.buffer,
+            offset: PROBE_OFFSET,
+            size: Some(std::num::NonZero::new(probe_bytes).expect("probe region is never empty")),
+        })
+    };
 
+    frame.classify_bind = Some(device.create_bind_group(
+        "modern_gi_classify",
+        &pipeline_cache.get_bind_group_layout(&pipes.classify_layout),
+        &BindGroupEntries::sequential((
+            probe_region(),
+            uniform.as_entire_binding(),
+            work.as_entire_binding(),
+            dispatch.as_entire_binding(),
+        )),
+    ));
     frame.trace_bind = Some(device.create_bind_group(
         "modern_gi_trace",
         &pipeline_cache.get_bind_group_layout(&pipes.trace_layout),
@@ -231,6 +320,7 @@ fn prepare_gi(
             &height.1,
             uniform.as_entire_binding(),
             scratch.as_entire_binding(),
+            work.as_entire_binding(),
         )),
     ));
     frame.blend_bind = Some(device.create_bind_group(
@@ -241,11 +331,8 @@ fn prepare_gi(
             scratch.as_entire_binding(),
             // The probe region of the block alone: the rest of it is read-only storage in the same
             // frame's render passes, and a writable binding is exclusive per buffer, not per range.
-            BindingResource::Buffer(BufferBinding {
-                buffer: &block.buffer,
-                offset: PROBE_OFFSET,
-                size: Some(std::num::NonZero::new(probe_bytes).expect("probe region is never empty")),
-            }),
+            probe_region(),
+            work.as_entire_binding(),
         )),
     ));
     frame.groups = (probes as u32).div_ceil(64);
@@ -272,7 +359,12 @@ impl Node for GiTraceNode {
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let frame = world.resource::<GiFrame>();
-        let (Some(trace_bind), Some(blend_bind)) = (&frame.trace_bind, &frame.blend_bind) else {
+        let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
+            &frame.classify_bind,
+            &frame.trace_bind,
+            &frame.blend_bind,
+            &frame.dispatch,
+        ) else {
             return Ok(());
         };
         if frame.groups == 0 {
@@ -280,30 +372,50 @@ impl Node for GiTraceNode {
         }
         let pipes = world.resource::<GiPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let (Some(trace), Some(blend)) = (
+        let (Some(classify), Some(trace), Some(blend)) = (
+            pipeline_cache.get_compute_pipeline(pipes.classify),
             pipeline_cache.get_compute_pipeline(pipes.trace),
             pipeline_cache.get_compute_pipeline(pipes.blend),
         ) else {
             return Ok(());
         };
+        // The journal's `gpu_modern` column, where the device times passes.
+        let diagnostics = render_context.diagnostic_recorder();
         let encoder = render_context.command_encoder();
+        // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
+        // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("modern_gi_classify"),
+                timestamp_writes: None,
+            });
+            let span = diagnostics.pass_span(&mut pass, "modern_gi_classify");
+            pass.set_pipeline(classify);
+            pass.set_bind_group(0, classify_bind, &[]);
+            pass.dispatch_workgroups(frame.groups, 1, 1);
+            span.end(&mut pass);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_gi_trace"),
                 timestamp_writes: None,
             });
+            let span = diagnostics.pass_span(&mut pass, "modern_gi_trace");
             pass.set_pipeline(trace);
             pass.set_bind_group(0, trace_bind, &[]);
-            pass.dispatch_workgroups(frame.groups, 1, 1);
+            pass.dispatch_workgroups_indirect(dispatch, 0);
+            span.end(&mut pass);
         }
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_gi_blend"),
                 timestamp_writes: None,
             });
+            let span = diagnostics.pass_span(&mut pass, "modern_gi_blend");
             pass.set_pipeline(blend);
             pass.set_bind_group(0, blend_bind, &[]);
-            pass.dispatch_workgroups(frame.groups, 1, 1);
+            pass.dispatch_workgroups_indirect(dispatch, 0);
+            span.end(&mut pass);
         }
         Ok(())
     }

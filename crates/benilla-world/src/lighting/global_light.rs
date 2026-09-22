@@ -156,7 +156,7 @@ const POINT_PACK_RADIUS: f32 = 300.0;
 /// rather than a hard cut. A modern frame lights every fragment from a grid, not from a unit's three
 /// nearest, so whatever this admits is visible wherever the grid reaches — and an edge here is a
 /// lamp switching on as the player walks toward it. Lights fade out over the last
-/// [`MODERN_PACK_FADE`] yards of it instead, and Cinematic's far grid level covers this plus a
+/// [`MODERN_PACK_FADE`] yards of it instead, and the emissive tiers' far grid level covers this plus a
 /// light's own range (`modern::lights`' test pins that).
 pub const MODERN_PACK_RADIUS: f32 = 270.0;
 /// fork: P8 — the width of that fade, in yards inside the radius in force.

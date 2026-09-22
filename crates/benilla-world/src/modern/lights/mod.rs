@@ -206,6 +206,36 @@ impl LightTier {
     }
 }
 
+/// fork: P8b — **the emissive tiers' grid**: two levels, shared by every tier that lights from things
+/// that only glow (`LightingQuality::lights_emissive_sources`). The NEAR level is 3 yd cells — the
+/// resolution those tiers need, since a city block then holds every lamp post, every lit window and
+/// every drawn weapon rather than the handful the reference commits — over ±60/±30 yd. The FAR level
+/// is 18 yd cells over ±324/±144 yd, holding the same lights.
+///
+/// The far level is the fix for lamps "popping in" as the player walks up to them. With one level of
+/// 3 yd cells the grid ended at ±72/±36 yd, and past its edge nothing took any local light at all: a
+/// Goldshire street at 80 yd was unlit however many lamps stood in it, and lit up the moment the
+/// grid's edge swept over it. Now a lamp lights its street at any distance the table packs it
+/// (`global_light`, which fades lights out smoothly at the far end rather than at a hard cap), and
+/// the near/far seam cross-fades (`locallight::cell_pair`), so no distance has an edge.
+///
+/// No shadowed lights here: a tier adds its cube slots on top ([`light_tier`]'s Cinematic row).
+pub const EMISSIVE_GRID: LightTier = LightTier {
+    on: true,
+    dims: UVec3::new(40, 20, 40),
+    cell: 3.0,
+    shadowed: 0,
+    taps: 1,
+    shade: 1.0,
+    dynamic_casters: false,
+    aggressive_cull: false,
+    far_dims: UVec3::new(36, 16, 36),
+    far_step: 6,
+    tile_use: 1.0,
+    penumbra: PENUMBRA_OPENING,
+    shadow_fade_yd: 0.0,
+};
+
 /// The plan's cluster tier table, read as world cells. Low keeps P3's ≤3-nearest per-pixel path:
 /// with no probe GI and no volumetrics there is nothing for a richer selection to sit beside.
 pub fn light_tier(quality: LightingQuality) -> LightTier {
@@ -225,47 +255,28 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             shadowed: 4,
             ..LightTier::OFF
         },
-        // Untouched by P8, deliberately: one hardware compare, no penumbra, no shade floor, no
-        // entity casters and no cull — the row P6 shipped, so an Ultra frame costs and looks exactly
-        // what it did before this tier existed.
-        LightingQuality::Ultra => LightTier {
-            on: true,
-            dims: UVec3::new(48, 24, 48),
-            cell: 4.5,
-            shadowed: PER_ATLAS_LAYER,
-            ..LightTier::OFF
-        },
-        // fork: P8. Two levels. The NEAR level is 3 yd cells — the resolution that is the whole
-        // reason the row exists, since at Cinematic a city block holds every lamp post, every lit
-        // window and every drawn weapon rather than the handful the reference commits — over
-        // ±60/±30 yd. The FAR level is 18 yd cells over ±324/±144 yd, holding the same lights.
-        //
-        // The far level is the fix for lamps "popping in" as the player walks up to them. With one
-        // level of 3 yd cells the grid ended at ±72/±36 yd, and past its edge nothing took any
-        // local light at all: a Goldshire street at 80 yd was unlit however many lamps stood in it,
-        // and lit up the moment the grid's edge swept over it. Now a lamp lights its street at any
-        // distance the table packs it (`global_light`, which fades lights out smoothly at the far
-        // end rather than at a hard cap), and the near/far seam cross-fades
-        // (`locallight::cell_pair`), so no distance has an edge.
-        //
-        // The cube shadows are the cheap kind on purpose: static casters only (cached — a settled
-        // street pays nothing a frame), faces drawn into half a tile, a wide 8-tap penumbra and a
-        // shade floor that leaves a shadowed lamp's far side most of its light. They fade out with
-        // distance before a slot is released, so a lamp acquiring or losing its cube never shows.
+        // fork: P8b — Cinematic's lights without a single cube shadow: every lamp, lit window and
+        // glowing weapon emits (the emissive gate is `>= Ultra`), on Cinematic's two-level grid.
+        // P6's six hard-shadowed slots are gone from this row — the user's call: Ultra is "the
+        // lighting part" of Cinematic, and the atlas layer, its static cache and its cube renders
+        // go with the shadows.
+        LightingQuality::Ultra => EMISSIVE_GRID,
+        // fork: P8 — the emissive grid plus a dozen cube shadows, **as cheap as they can be made**
+        // (P8b: the user traded their detail for their cost). One hardware 2×2 compare per lookup —
+        // the penumbra's eight-tap Vogel disc is gone — under a shade floor, so the shadow is faint
+        // rather than soft and its hard edge reads as a soft one; static casters only (cached per
+        // slot — a settled street pays nothing a frame, and a slot change redraws that slot's six
+        // faces alone); faces drawn into half a tile. They fade out with distance before a slot is
+        // released, so a lamp acquiring or losing its cube never shows.
         LightingQuality::Cinematic => LightTier {
-            on: true,
-            dims: UVec3::new(40, 20, 40),
-            cell: 3.0,
             shadowed: MAX_SHADOWED,
-            taps: 8,
+            taps: 1,
             shade: 0.55,
-            dynamic_casters: false,
             aggressive_cull: true,
-            far_dims: UVec3::new(36, 16, 36),
-            far_step: 6,
             tile_use: 0.5,
             penumbra: 2.5,
             shadow_fade_yd: 30.0,
+            ..EMISSIVE_GRID
         },
     }
 }
@@ -649,6 +660,7 @@ fn update_lights(
         Option<&LightRooms>,
         Option<&FixtureRadius>,
         Has<crate::lighting::NightGlow>,
+        Has<SynthesizedLight>,
     )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
@@ -677,10 +689,9 @@ fn update_lights(
     // in the table, so it must not hold an atlas slot either.
     let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
     if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
-        for (light, gt, rooms, fixture, window) in &lights_q {
-            // A lit window is a soft fill, never a shadow caster: a city has more of them than
-            // the atlas has slots for lamps, and a pane's light has no hard edge to cast.
-            if window {
+        let emissive = crate::modern::emissive_lights_on();
+        for (light, gt, rooms, fixture, window, synthesized) in &lights_q {
+            if !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
             if !crate::wmo_portal::room_admits_light(
@@ -727,6 +738,20 @@ fn update_lights(
         shadowed: chosen,
         eye: cam,
     };
+}
+
+/// Can this light hold a cube slot at all, before any ranking or culling?
+///
+/// - **A lit window never does.** It is a soft fill, not a shadow caster: a city has more of them
+///   than the atlas has slots for lamps, and a pane's light has no hard edge to cast.
+/// - **A light this fork derived from a glow ([`SynthesizedLight`]) only does on a tier that lights
+///   from glows** (`emissive`, [`crate::modern::emissive_lights_on`]). Every such light exists on
+///   every tier — the tier gate sits where the table is packed (`global_light`), not where the light
+///   was spawned — so without this a lamppost that emits nothing on High still ranked for High's
+///   four slots: six faces of depth rendered for a light no fragment reads, and an authored lamp
+///   beside it denied the shadow it would have had.
+pub fn shadow_candidate(window: bool, synthesized: bool, emissive: bool) -> bool {
+    !window && (!synthesized || emissive)
 }
 
 /// **Slots are stable.** A light keeps its index for as long as it is still a candidate at all —
@@ -837,44 +862,68 @@ mod tests {
         assert_eq!(PER_ATLAS_LAYER as u32 * 6, ATLAS_TILES * ATLAS_TILES);
     }
 
-    /// fork: P8 — **the no-regression gate.** The tier rows that existed before P8 must be the rows
-    /// they were: one hardware compare, no penumbra, no shade floor, no entity casters in the cubes
-    /// and no cull. Everything P8 costs has to be spent on P8's own tier, and this is what says so —
-    /// a `taps: 2` typed into the Ultra row would otherwise double a lookup every lit fragment in
-    /// every lamp-lit room makes, and nothing in the frame would announce it.
+    /// fork: P8b — **the tier contract** (it replaced P8's "no tier that shipped may cost more"
+    /// gate when Cinematic's lighting moved down to Ultra). Each row's cube shadows are pinned to
+    /// what the tier table says it buys, because none of them announce themselves in the frame: a
+    /// `taps: 8` typed back into Cinematic multiplies a lookup every lamp-lit fragment makes, and a
+    /// `shadowed: 6` on Ultra silently re-allocates an atlas layer and its cache.
+    ///
+    /// - Low and Medium: no cube shadows, no layer.
+    /// - High: P6's row as it shipped — four hard single-tap cubes, one layer natively, none in the
+    ///   browser, no emissive sources.
+    /// - Ultra: lights from glowing things, no cube shadows and no layer anywhere.
+    /// - Cinematic: the same lights plus twelve cubes — one tap each, faint, static casters only.
     #[test]
-    fn p8_costs_nothing_on_the_tiers_that_shipped_before_it() {
-        for q in [
-            LightingQuality::Low,
-            LightingQuality::Medium,
-            LightingQuality::High,
-            LightingQuality::Ultra,
-        ] {
+    fn each_tier_buys_the_shadows_the_table_says() {
+        for q in LightingQuality::ALL {
             let t = light_tier(q);
-            assert_eq!(t.taps, 1, "{q:?} must take P6's single hardware compare");
-            assert_eq!(t.shade, 1.0, "{q:?} must have no shade floor");
-            assert!(!t.dynamic_casters, "{q:?} must keep its fully cached atlas");
-            assert!(!t.aggressive_cull, "{q:?} must choose its lights as it did");
-            assert!(t.shadowed <= PER_ATLAS_LAYER, "{q:?}: one atlas layer at most");
-            // And no tier that shipped may allocate a layer it did not allocate before: one
-            // natively above Medium, none at all in the browser.
-            let want = match (q, cfg!(target_arch = "wasm32")) {
-                (LightingQuality::Low | LightingQuality::Medium, _) | (_, true) => 0,
-                _ => 1,
-            };
-            assert_eq!(
-                crate::modern::shadow::local_shadow_layers(q),
-                want,
-                "{q:?}"
-            );
+            assert_eq!(t.taps, 1, "{q:?}: every tier takes the single hardware compare since P8b");
+            assert!(!t.dynamic_casters, "{q:?}: no tier redraws entities into the atlas");
         }
-        // …and the tier that is new is allowed to cost what it says it costs.
+        for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::Ultra] {
+            assert_eq!(light_tier(q).shadowed, 0, "{q:?} shadows no local light");
+            assert_eq!(crate::modern::shadow::local_shadow_layers(q), 0, "{q:?}");
+        }
+        let high = light_tier(LightingQuality::High);
+        assert_eq!((high.shadowed, high.shade), (4, 1.0), "High is P6's row");
+        assert!(!high.aggressive_cull);
+        assert_eq!(
+            crate::modern::shadow::local_shadow_layers(LightingQuality::High),
+            if cfg!(target_arch = "wasm32") { 0 } else { 1 },
+        );
         let cine = light_tier(LightingQuality::Cinematic);
-        assert!(cine.taps > 1 && cine.aggressive_cull);
+        assert_eq!(cine.shadowed, MAX_SHADOWED);
+        assert!(cine.shade < 1.0 && cine.aggressive_cull, "faint, and culled");
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
         );
+        // Ultra IS Cinematic's lighting: the same grid and the same emissive gate — only the cubes
+        // differ.
+        let ultra = light_tier(LightingQuality::Ultra);
+        assert_eq!(
+            (ultra.dims, ultra.cell, ultra.far_dims, ultra.far_step),
+            (cine.dims, cine.cell, cine.far_dims, cine.far_step)
+        );
+        assert_eq!(
+            LightingQuality::Ultra.lights_emissive_sources(),
+            LightingQuality::Cinematic.lights_emissive_sources()
+        );
+    }
+
+    /// A light derived from a glow may only hold a cube slot on a tier that lights from glows, and a
+    /// lit window never may ([`shadow_candidate`]).
+    #[test]
+    fn only_a_lit_light_can_hold_a_cube() {
+        // An authored lamp, on any tier.
+        assert!(shadow_candidate(false, false, false));
+        assert!(shadow_candidate(false, false, true));
+        // A synthesized lamp: only while emissive lights are on.
+        assert!(!shadow_candidate(false, true, false));
+        assert!(shadow_candidate(false, true, true));
+        // A window: never.
+        assert!(!shadow_candidate(true, false, true));
+        assert!(!shadow_candidate(true, true, true));
     }
 
     /// **What each tier's grid actually reaches**, per axis — the number the tier table never
@@ -895,19 +944,13 @@ mod tests {
         assert_eq!(reach(LightingQuality::Low), Vec3::new(0.5, 0.5, 0.5), "no grid");
         assert_eq!(reach(LightingQuality::Medium), Vec3::new(128.0, 64.0, 128.0));
         assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
-        assert_eq!(reach(LightingQuality::Ultra), Vec3::new(108.0, 54.0, 108.0));
+        assert_eq!(reach(LightingQuality::Ultra), Vec3::new(60.0, 30.0, 60.0));
         assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(60.0, 30.0, 60.0));
-        // …and past that, Cinematic's far level: 18 yd cells to ±324/±144.
-        assert_eq!(
-            light_tier(LightingQuality::Cinematic).far_reach(),
-            Vec3::new(324.0, 144.0, 324.0)
-        );
-        for q in [
-            LightingQuality::Low,
-            LightingQuality::Medium,
-            LightingQuality::High,
-            LightingQuality::Ultra,
-        ] {
+        // …and past that, the emissive tiers' far level: 18 yd cells to ±324/±144.
+        for q in [LightingQuality::Ultra, LightingQuality::Cinematic] {
+            assert_eq!(light_tier(q).far_reach(), Vec3::new(324.0, 144.0, 324.0), "{q:?}");
+        }
+        for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::High] {
             assert_eq!(light_tier(q).far_reach(), Vec3::ZERO, "{q:?} has no far level");
         }
     }
@@ -922,14 +965,20 @@ mod tests {
     /// horizontally; and it has to be a whole multiple of the near cell, or the two levels' bases
     /// could disagree about which cell the camera is in.
     #[test]
-    fn cinematics_far_level_covers_every_packed_light_and_its_range() {
-        let t = light_tier(LightingQuality::Cinematic);
-        let lit = crate::lighting::MODERN_PACK_RADIUS + 48.0;
-        assert!(t.far_reach().x >= lit && t.far_reach().z >= lit, "{:?} < {lit}", t.far_reach());
-        assert_eq!(t.far_dims.x, t.far_dims.z, "the shader carries one horizontal count");
-        assert!(t.far_step >= 2, "a far level as fine as the near one is just a bigger near level");
-        // Both levels together fit the one allocation every tier shares.
-        assert!(t.cells() <= CELL_ALLOC, "{} cells", t.cells());
+    fn the_emissive_tiers_far_level_covers_every_packed_light_and_its_range() {
+        for q in LightingQuality::ALL.into_iter().filter(|q| q.lights_emissive_sources()) {
+            let t = light_tier(q);
+            let lit = crate::lighting::MODERN_PACK_RADIUS + 48.0;
+            assert!(
+                t.far_reach().x >= lit && t.far_reach().z >= lit,
+                "{q:?}: {:?} < {lit}",
+                t.far_reach()
+            );
+            assert_eq!(t.far_dims.x, t.far_dims.z, "the shader carries one horizontal count");
+            assert!(t.far_step >= 2, "a far level as fine as the near one is just a bigger near level");
+            // Both levels together fit the one allocation every tier shares.
+            assert!(t.cells() <= CELL_ALLOC, "{q:?}: {} cells", t.cells());
+        }
     }
 
     /// The far level's base is the near level's, divided down — and it tracks the camera by whole
@@ -961,8 +1010,8 @@ mod tests {
         assert_eq!(shadow_distance_weight(&cine, SHADOW_RADIUS), 0.0);
         let mid = shadow_distance_weight(&cine, SHADOW_RADIUS - cine.shadow_fade_yd * 0.5);
         assert!(mid > 0.0 && mid < 1.0, "{mid}");
-        let ultra = light_tier(LightingQuality::Ultra);
-        assert_eq!(shadow_distance_weight(&ultra, SHADOW_RADIUS - 1.0), 1.0);
+        let high = light_tier(LightingQuality::High);
+        assert_eq!(shadow_distance_weight(&high, SHADOW_RADIUS - 1.0), 1.0);
     }
 
     /// A face drawn into part of its tile is drawn into whole texels, and a tier that draws the
@@ -971,30 +1020,21 @@ mod tests {
     fn a_face_is_drawn_into_whole_texels_of_its_tile() {
         let size = crate::modern::shadow::SHADOW_MAP_SIZE;
         let tile = size / ATLAS_TILES;
-        assert_eq!(face_px(&light_tier(LightingQuality::Ultra), size), tile);
+        assert_eq!(face_px(&light_tier(LightingQuality::High), size), tile);
         let half = face_px(&light_tier(LightingQuality::Cinematic), size);
         assert!(half < tile && half >= tile / 2 - 1, "{half} of {tile}");
     }
 
-    /// **A standing gap, recorded rather than fixed: Ultra's near grid reaches less far than
-    /// High's.** Same mechanism as the reach trade above, and it predates P8 — Ultra's 4.5 yd cell
-    /// is P6's own row, and `light_tier` states that P8 must leave it alone. Pinned, so the day
-    /// someone widens the allocation or revisits P6's row, the test says what should change.
-    ///
-    /// Cinematic is no longer part of the gap: its near level is shorter still, but its far level
-    /// reaches past every other tier's grid.
+    /// **The reach ladder is monotone** — a higher tier's grid lights at least as far out as a lower
+    /// one's, on every axis. It was not: Ultra's 4.5 yd single level (P6) reached less than High's
+    /// 6 yd one, and a test pinned the gap until someone revisited the row. P8b did (Ultra took the
+    /// emissive tiers' two-level grid), and this is the full check that test asked to become.
     #[test]
-    fn the_reach_ladder_is_not_monotone_and_that_is_known() {
-        let high = light_tier(LightingQuality::High).full_reach();
-        let ultra = light_tier(LightingQuality::Ultra).full_reach();
-        let cine = light_tier(LightingQuality::Cinematic).full_reach();
-        assert!(cine.cmpge(high).all(), "Cinematic {cine:?} vs High {high:?}");
-        assert!(
-            ultra.cmplt(high).all(),
-            "Ultra now reaches {ultra:?} against High's {high:?}. If that was deliberate, this \
-             test is the one to delete — and it should become a full monotonicity check over the \
-             whole ladder.",
-        );
+    fn the_reach_ladder_is_monotone() {
+        for pair in LightingQuality::ALL.windows(2) {
+            let (lo, hi) = (light_tier(pair[0]).full_reach(), light_tier(pair[1]).full_reach());
+            assert!(hi.cmpge(lo).all(), "{:?} reaches {hi:?} < {:?}'s {lo:?}", pair[1], pair[0]);
+        }
     }
 
     fn lamp(x: f32) -> ShadowLight {

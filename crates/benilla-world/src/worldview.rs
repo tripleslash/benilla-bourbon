@@ -180,6 +180,13 @@ pub fn run(build: BuildId) -> AppExit {
     // so a divergence between them is no longer possible to write by accident — which is what the
     // hand-kept twin list here was for.
     app.add_plugins(crate::world_plugins::WorldPlugins);
+    // `WOW_GPU_PASSES=1` — bevy's per-pass GPU spans, so the perf probe can print what each pass
+    // cost beside its wall-time line (`perf_probe`'s `PERF_PASSES`). The client registers the same
+    // plugin for its journal; the viewer has no journal, so this is the only way it times a pass.
+    // Needs a device that times inside passes (Vulkan, DX12); elsewhere the line never prints.
+    if crate::launch_env::var("WOW_GPU_PASSES").is_some() {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    }
     stubs(&mut app);
 
     app.add_plugins(plugin);

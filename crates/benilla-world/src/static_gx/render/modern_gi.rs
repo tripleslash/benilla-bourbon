@@ -606,6 +606,20 @@ fn prepare_gi_voxels(
         tier.steps as f32,
         tier.reach,
     );
+    // fork: P8b — the highest ground the map can hold: the top of every resident terrain cell whose
+    // box reaches into its window. Every cell the map draws is one of these (a cell whose mesh is not
+    // resident yet is simply not drawn), so no texel stands above it, and the trace skips the map
+    // for any ray point higher than this (`probegi::march`). The half-yard covers the depth
+    // encoding's rounding.
+    clip.bounds.x = terrain.as_deref().map_or(crate::modern::gi::NO_TERRAIN, |t| {
+        t.cells
+            .iter()
+            .filter(|(_, c, h)| {
+                (c.x - centre.x).abs() <= HEIGHT_HALF + h.x && (c.z - centre.z).abs() <= HEIGHT_HALF + h.z
+            })
+            .map(|(_, c, h)| c.y + h.y + 0.5)
+            .fold(crate::modern::gi::NO_TERRAIN, f32::max)
+    });
     let mut key = 0u64;
     if let Some(t) = terrain.as_deref() {
         use std::hash::{Hash, Hasher};
@@ -713,6 +727,8 @@ impl ViewNode for GiVoxelNode {
         let cache = world.resource::<GxGpuCache>();
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
         let allocator = world.resource::<MeshAllocator>();
+        // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column.
+        let diagnostics = render_context.diagnostic_recorder();
 
         // The terrain heightfield: redrawn only when the terrain or its window changed.
         if state.height_pending {
@@ -732,6 +748,7 @@ impl ViewNode for GiVoxelNode {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                let timing = diagnostics.pass_span(&mut pass, "modern_gi_heightfield");
                 pass.set_bind_group(0, bind, &[state.height_offset]);
                 for (mesh_id, _, _) in terrain.iter().flat_map(|t| t.cells.iter()) {
                     let Some(mesh) = meshes.get(*mesh_id) else {
@@ -764,6 +781,7 @@ impl ViewNode for GiVoxelNode {
                         0..1,
                     );
                 }
+                timing.end(&mut pass);
             }
         }
 
@@ -805,6 +823,7 @@ impl ViewNode for GiVoxelNode {
                     label: Some("modern_gi_voxel_clear"),
                     timestamp_writes: None,
                 });
+                let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxel_clear");
                 pass.set_pipeline(clear);
                 pass.set_bind_group(0, view_bind, &[job.axis[0]]);
                 pass.set_bind_group(1, store_bind, &[]);
@@ -813,6 +832,7 @@ impl ViewNode for GiVoxelNode {
                     (span.y as u32).div_ceil(4),
                     (span.z as u32).div_ceil(4),
                 );
+                timing.end(&mut pass);
             }
             for offset in &job.axis {
                 let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
@@ -829,6 +849,7 @@ impl ViewNode for GiVoxelNode {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
                 pass.set_bind_group(0, view_bind, &[*offset]);
                 pass.set_bind_group(2, store_bind, &[]);
                 for (gpu, draw) in &casters {
@@ -870,6 +891,7 @@ impl ViewNode for GiVoxelNode {
                         );
                     }
                 }
+                timing.end(&mut pass);
             }
         }
         Ok(())

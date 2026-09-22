@@ -210,27 +210,29 @@ fn modern_cell_lights(
         }
         let to_light = pos_range.xyz - p;
         let d = length(to_light);
+        // fork: P8b — past its range a light's window is exactly zero (`locallight::falloff`), so
+        // it adds nothing here and its cube lookup below would be wasted. The binning pass lists a
+        // light in every cell its sphere touches, so much of a listed light's cell lies outside it.
+        if (d >= pos_range.w) {
+            continue;
+        }
         let nl = max(dot(nrm, to_light / max(d, 1e-4)), 0.0);
         if (nl <= 0.0) {
             continue;
         }
         var vis = 1.0;
-        if (!lite) {
-            let slot = locallight::cell_slot(cell, i);
-            // The slot's own near plane, from the first three spare rows — a synthesized light's
-            // is its fixture's radius, so the lantern around it was clipped out of its own cube
-            // rather than casting its frame across the floor.
-            var near = g.shadow_misc.x;
-            if (slot < locallight::MAX_SHADOWED) {
-                // The ROW is loaded to a value before the component is picked. Indexing a vector
-                // component dynamically straight off a storage buffer is not something the backend
-                // will take, and what it costs is the whole module: no entry points, so
-                // `static_gx c0 t0` and every pipeline sharing the module come out invalid and the
-                // screen goes black. A `let` copy of the row indexes fine.
-                let row = modern_block.light_spare[slot / 4u];
-                near = row[slot % 4u];
-            }
-            // The slot's cross-fade rides the next three spare rows, beside its near plane.
+        // fork: P8b — only a light that holds a cube slot has a shadow to look up. The rest (every
+        // light on Ultra, most of them everywhere) skip the slot's two parameter rows and the lookup
+        // call, which would only have returned 1 (`locallight::local_visibility`'s first test).
+        let slot = locallight::cell_slot(cell, i);
+        if (!lite && slot < locallight::MAX_SHADOWED) {
+            // The slot's own near plane and cross-fade, from the block's spare rows (rows 0-2 and
+            // 3-5, four slots a row). A synthesized light's near plane is its fixture's radius, so
+            // a lantern is clipped out of its own cube instead of casting its frame across the
+            // floor. Each ROW is loaded to a value before a component is picked: indexing a vector
+            // component dynamically straight off a storage buffer is not something every backend
+            // takes, and what it costs is the whole module.
+            let row = modern_block.light_spare[slot / 4u];
             let frow = modern_block.light_spare[3u + slot / 4u];
             vis = locallight::local_visibility(
                 modern_shadow_map,
@@ -240,7 +242,7 @@ fn modern_cell_lights(
                 pos_range.xyz,
                 p,
                 nrm,
-                near,
+                row[slot % 4u],
                 frow[slot % 4u],
             );
         }
@@ -629,11 +631,15 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     var modern_gi = vec4<f32>(0.0);
 #ifdef WOW_MODERN
     if ((in.word & WORD_INTERIOR) == 0u) {
-        modern_sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         modern_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0, modern_lite);
-        lit_nl_shadowed = clamp(sunshadow::shade_floor(mix(amb * modern_sky, modern_gi.rgb, modern_gi.w), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+        // The sky map only where the field does not answer whole (`sunshadow::probe_or_sky`); both
+        // blends below take `modern_sky` through that same helper, so 1 is exact for both.
+        if (modern_gi.w < 1.0) {
+            modern_sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
+        }
+        lit_nl_shadowed = clamp(sunshadow::shade_floor(sunshadow::probe_or_sky(amb, modern_sky, modern_gi), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 #endif
     // The order-2 SH basis products over the fragment normal — shared by the exterior
@@ -836,7 +842,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             // fork: modern lighting (FORK.md, P5) — the doodad lobe's own ambient
             // share comes from the probes, scaled to keep the lobe's authored colour balance. This lane
             // is exterior by construction, so `modern_sky` / `modern_gi` were read above.
-            let amb_gi = sunshadow::shade_floor(mix(sun_ambient * modern_sky, modern_gi.rgb, modern_gi.w), sun_ambient);
+            let amb_gi = sunshadow::shade_floor(sunshadow::probe_or_sky(sun_ambient, modern_sky, modern_gi), sun_ambient);
             lit_doodad = clamp(amb_gi + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
         }
 #endif

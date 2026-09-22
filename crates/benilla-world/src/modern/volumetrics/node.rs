@@ -8,6 +8,7 @@ use bevy::ecs::query::QueryItem;
 use bevy::pbr::graph::NodePbr;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
@@ -428,24 +429,30 @@ impl ViewNode for FroxelNode {
             return Ok(());
         };
         let grid = targets.grid;
+        // The journal's `gpu_modern` column, where the device times passes.
+        let diagnostics = render_context.diagnostic_recorder();
         let encoder = render_context.command_encoder();
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_froxel_scatter"),
                 timestamp_writes: None,
             });
+            let span = diagnostics.pass_span(&mut pass, "modern_froxel_scatter");
             pass.set_pipeline(scatter);
             pass.set_bind_group(0, scatter_bind, &[]);
             pass.dispatch_workgroups(grid.x.div_ceil(4), grid.y.div_ceil(4), grid.z.div_ceil(4));
+            span.end(&mut pass);
         }
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_froxel_integrate"),
                 timestamp_writes: None,
             });
+            let span = diagnostics.pass_span(&mut pass, "modern_froxel_integrate");
             pass.set_pipeline(integrate);
             pass.set_bind_group(0, integrate_bind, &[]);
             pass.dispatch_workgroups(grid.x.div_ceil(8), grid.y.div_ceil(8), 1);
+            span.end(&mut pass);
         }
         Ok(())
     }
@@ -514,6 +521,7 @@ impl ViewNode for FogCompositeNode {
                 block.buffer.as_entire_binding(),
             )),
         );
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
             label: Some("modern_fog_composite"),
             color_attachments: &[Some(view_target.get_color_attachment())],
@@ -521,9 +529,11 @@ impl ViewNode for FogCompositeNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "modern_fog_composite");
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[view_offset.offset]);
         pass.draw(0..3, 0..1);
+        span.end(&mut pass);
         Ok(())
     }
 }

@@ -83,11 +83,14 @@ pub enum LightingQuality {
     Low = 0,
     Medium = 1,
     High = 2,
+    /// fork: P8b — lights from things that only glowed, as Cinematic does (every lamp that ships no
+    /// light, every lit window, every glowing weapon), on the two-level light grid that lets them
+    /// light a street at any distance — and no local-light shadows at all: that is the whole of the
+    /// difference to Cinematic, and it is what keeps the extra lights cheap.
     Ultra = 3,
-    /// fork: modern lighting (P8) — Ultra's sun, fog and GI, plus the *local* light work that tier
-    /// is named for: every authored lamp and every glowing weapon is a real light, the strongest
-    /// dozen of them cast soft filtered cube shadows, and entities cast into those cubes. It is
-    /// the one tier where a light source the reference only ever drew as a sprite emits.
+    /// fork: modern lighting (P8) — Ultra's sun, fog, GI and lights, plus a dozen cube shadows for
+    /// the strongest local lights. Since P8b those are the cheap kind: one hardware compare each,
+    /// faint (a shade floor) rather than soft, static casters only.
     Cinematic = 4,
 }
 
@@ -123,13 +126,13 @@ impl LightingQuality {
         Self::Cinematic,
     ];
 
-    /// Is this the tier that lights from authored *emissive* sources — a weapon's enchant glow, a
-    /// brazier that ships with no M2 light — rather than only from the lights the reference
-    /// commits? One predicate, read by the two spawners and by the light grid alike, so the three
-    /// can never disagree about what a Cinematic frame contains
-    /// (`modern::lights::emissive`).
+    /// Does this tier light from authored *emissive* sources — a weapon's enchant glow, a brazier
+    /// that ships with no M2 light, a lit window — rather than only from the lights the reference
+    /// commits? One predicate, read by the table packer, the shadow-slot ranking and the light grid
+    /// alike, so they can never disagree about what a frame contains (`modern::lights::emissive`).
+    /// Ultra and up since P8b; Cinematic alone before it.
     pub fn lights_emissive_sources(self) -> bool {
-        self >= Self::Cinematic
+        self >= Self::Ultra
     }
 
     pub fn as_cvar(self) -> u8 {
@@ -217,9 +220,9 @@ pub fn frame_is_modern() -> bool {
 }
 
 /// Does this session light from authored *emissive* sources — a glowing weapon, a brazier that
-/// ships no M2 light (`modern::lights::emissive`)? True only in a modern session on the Cinematic
-/// tier, and only while the bisect lever allows it (`$WOW_MODERN_EMISSIVE=0`, browser
-/// `?modern_emissive=0`).
+/// ships no M2 light (`modern::lights::emissive`)? True only in a modern session on a tier that
+/// does ([`LightingQuality::lights_emissive_sources`]: Ultra and up), and only while the bisect
+/// lever allows it (`$WOW_MODERN_EMISSIVE=0`, browser `?modern_emissive=0`).
 pub fn emissive_lights_on() -> bool {
     EMISSIVE_LIGHTS.load(Ordering::Relaxed) && emissive_enabled()
 }
@@ -560,9 +563,10 @@ mod tests {
             assert_eq!(LightingQuality::from_cvar(i as f32), *q);
             assert_eq!(q.as_cvar() as usize, i);
         }
-        // Only the top tier lights from things that merely glow; every tier that shipped before P8
-        // still lights from exactly the sources the reference commits.
+        // Ultra and Cinematic light from things that merely glow (P8b); the tiers below still light
+        // from exactly the sources the reference commits.
         assert!(LightingQuality::Cinematic.lights_emissive_sources());
-        assert!(!LightingQuality::Ultra.lights_emissive_sources());
+        assert!(LightingQuality::Ultra.lights_emissive_sources());
+        assert!(!LightingQuality::High.lights_emissive_sources());
     }
 }

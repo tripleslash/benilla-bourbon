@@ -416,6 +416,15 @@ fn shade_floor(ambient: vec3<f32>, open_sky: vec3<f32>) -> vec3<f32> {
     return max(ambient, open_sky * SHADE_FLOOR);
 }
 
+// The exterior ambient before its floor: the probe field over the sky map, by how much of the
+// fragment's probe cell answered (`gi.w`). Where the field answers whole, the sky map's term is
+// multiplied by zero — so the lanes read the 3x3 sky map ([`sky_ambient`]) only when `gi.w < 1`
+// and pass `sky = 1` otherwise, and this returns the field's value exactly there rather than
+// through a `mix` whose arithmetic form a backend is free to pick.
+fn probe_or_sky(amb: vec3<f32>, sky: f32, gi: vec4<f32>) -> vec3<f32> {
+    return select(mix(amb * sky, gi.rgb, gi.w), gi.rgb, gi.w >= 1.0);
+}
+
 fn sky_ambient(
     map: texture_depth_2d_array,
     samp: sampler_comparison,

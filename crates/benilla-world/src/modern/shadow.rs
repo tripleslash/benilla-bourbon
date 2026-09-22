@@ -69,8 +69,10 @@ pub const SHADOW_LAYERS: usize = MAX_CASCADES + 1 + MAX_LOCAL_SHADOW_LAYERS;
 /// player has to go and pick — and which is defined by those layers.
 pub fn local_shadow_layers(quality: LightingQuality) -> usize {
     match quality {
-        LightingQuality::Low | LightingQuality::Medium => 0,
-        LightingQuality::High | LightingQuality::Ultra => {
+        // fork: P8b — Ultra shadows no local light (it is Cinematic's lighting without them), so it
+        // allocates no atlas layer either, natively or in the browser.
+        LightingQuality::Low | LightingQuality::Medium | LightingQuality::Ultra => 0,
+        LightingQuality::High => {
             if cfg!(target_arch = "wasm32") {
                 0
             } else {

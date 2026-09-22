@@ -59,8 +59,10 @@ pub(crate) fn modern_libraries(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_shadow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/terrain_shadow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/entity_shadow.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/depth_fill.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_voxel.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/gi_voxel_clear.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/gi_classify.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/gi_blend.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/light_bin.wgsl");

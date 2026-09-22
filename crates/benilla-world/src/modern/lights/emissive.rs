@@ -1,13 +1,14 @@
 //! **Lights from things that only ever glowed** (fork-owned; `FORK.md` P8).
 //!
-//! Every tier up to Ultra lights from exactly the sources the reference commits: an M2 `type==1`
+//! Every tier up to High lights from exactly the sources the reference commits: an M2 `type==1`
 //! light block, a WMO `MOLT` omni, a torch in an NPC's hand. That is the whole point of those tiers —
 //! "a modern frame lights from exactly the lights a classic frame would, it just stops being limited
 //! to the three nearest".
 //!
-//! Cinematic is the tier that stops being true, on purpose, because **most of the things that look
-//! like lights in 1.12 are not lights**. A weapon's enchant glow is pure particle emitters
-//! (`BlueGlow_Med`: zero render batches, one additive emitter on `Flare.blp`); so are a great many
+//! Ultra and Cinematic (P8b; Cinematic alone before it) are the tiers that stop that being true,
+//! on purpose, because **most of the things that look like lights in 1.12 are not lights**. A
+//! weapon's enchant glow is pure particle emitters (`BlueGlow_Med`: zero render batches, one
+//! additive emitter on `Flare.blp`); so are a great many
 //! braziers, candles, sconces and hearths, which author a flame card and no light block at all. The
 //! reference drew them as sprites over an unlit wall and that was the look. Asked for lamps that
 //! light and swords that glow, there is nothing to switch on — the light has to be *derived* from

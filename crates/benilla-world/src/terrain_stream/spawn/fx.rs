@@ -100,10 +100,10 @@ pub(super) fn spawn_lights_for(
 /// fork: modern lighting (`FORK.md` P8) — **the lamp that is only a flame card.**
 ///
 /// A great many braziers, candles, sconces and hearths author no M2 light at all: the reference drew
-/// their fire as an additive sprite over an unlit wall and that was the look. On the Cinematic tier
-/// they emit, from a light [`crate::modern::lights::emissive`] derives from the very ramp that
-/// sprite is drawn with. Every other tier returns before touching anything, so this is dead weight
-/// in a classic, Low, Medium, High or Ultra session — one atomic load per placement.
+/// their fire as an additive sprite over an unlit wall and that was the look. On the emissive tiers
+/// (Ultra and Cinematic since P8b) they emit, from a light [`crate::modern::lights::emissive`]
+/// derives from the very ramp that sprite is drawn with. The light is spawned on every tier and
+/// gated where the table is packed (`global_light`), so a tier change lights it without a re-stream.
 ///
 /// It is a no-op for a model that authors its own light (that gate is `emissive::synthesize`'s
 /// first line, and the reason it is spelled there rather than here), so the two spawners can never
@@ -166,8 +166,8 @@ pub(super) fn spawn_emissive_light_for(
 /// fork: modern lighting (P8) — **a building's lit windows, as lights**: one per pool of SIDN glass
 /// ([`crate::modern::lights::emissive::window_glows`]), each tagged
 /// [`crate::lighting::NightGlow`] so the packer scales it by the night fraction and it is out of the
-/// table by day, and [`crate::modern::lights::SynthesizedLight`] so it lights only on Cinematic —
-/// the tier that derives light from what only ever glowed.
+/// table by day, and [`crate::modern::lights::SynthesizedLight`] so it lights only on the tiers that
+/// derive light from what only ever glowed (Ultra and Cinematic).
 ///
 /// Outdoor lights, deliberately (no rooms): they are drawn from exterior groups' glass and light
 /// the street, and the surface lanes' indoor/outdoor test keeps them off the room behind the pane.

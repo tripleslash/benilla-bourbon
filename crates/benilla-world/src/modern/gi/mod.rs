@@ -312,7 +312,7 @@ impl GiParams {
 
 /// The CPU mirror of `probegi.wgsl`'s `GiClip` — the voxel clipmap and the terrain heightfield, as
 /// the compute passes address them.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct GiClip {
     pub level: [Vec4; MAX_LEVELS],
     pub info: Vec4,
@@ -320,6 +320,28 @@ pub struct GiClip {
     pub hf_row_y: Vec4,
     pub hf_row_z: Vec4,
     pub hf: Vec4,
+    /// fork: P8b — `x` = the highest ground the heightfield holds (world Y): the top of every
+    /// resident terrain cell's box. `probegi::march` skips the map above it, which is exact because
+    /// no texel can stand higher. [`NO_TERRAIN`] (the default) where there is no terrain at all.
+    pub bounds: Vec4,
+}
+
+/// [`GiClip::bounds`]' `x` with no terrain: below everything, so every ray point is above it and the
+/// (empty) map is never read.
+pub const NO_TERRAIN: f32 = -1.0e9;
+
+impl Default for GiClip {
+    fn default() -> Self {
+        Self {
+            level: [Vec4::ZERO; MAX_LEVELS],
+            info: Vec4::ZERO,
+            hf_row_x: Vec4::ZERO,
+            hf_row_y: Vec4::ZERO,
+            hf_row_z: Vec4::ZERO,
+            hf: Vec4::ZERO,
+            bounds: Vec4::new(NO_TERRAIN, 0.0, 0.0, 0.0),
+        }
+    }
 }
 
 impl GiClip {
@@ -333,6 +355,7 @@ impl GiClip {
         row(self.hf_row_y);
         row(self.hf_row_z);
         row(self.hf);
+        row(self.bounds);
     }
 }
 
@@ -516,7 +539,7 @@ pub fn params(gi: &ModernGi, camera: Vec3, sky: Vec3, debug: f32) -> GiParams {
 
 /// The trace and blend passes' uniform, in one place because both bind it.
 pub fn trace_bytes(gi: &ModernGi, params: &GiParams, clip: &GiClip) -> Vec<u8> {
-    let mut out = Vec::with_capacity(GI_PARAMS_BYTES + 9 * 16 + 6 * 16);
+    let mut out = Vec::with_capacity(GI_PARAMS_BYTES + 10 * 16 + 6 * 16);
     params.std430(&mut out);
     clip.std430(&mut out);
     let mut row = |v: Vec4| out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
@@ -553,11 +576,11 @@ mod tests {
         assert_eq!(probes % 256, 0, "probe offset {probes}");
         let mut clip = Vec::new();
         GiClip::default().std430(&mut clip);
-        assert_eq!(clip.len(), 9 * 16);
+        assert_eq!(clip.len(), 10 * 16);
         let gi = ModernGi::default();
         assert_eq!(
             trace_bytes(&gi, &GiParams::default(), &GiClip::default()).len(),
-            GI_PARAMS_BYTES + 9 * 16 + 6 * 16
+            GI_PARAMS_BYTES + 10 * 16 + 6 * 16
         );
     }
 

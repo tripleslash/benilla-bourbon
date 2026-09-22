@@ -65,7 +65,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other\n";
+                              gpu_other,gpu_modern\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -142,9 +142,14 @@ enum GpuBucket {
     Ui,
     /// Every span this file does not name — counted, never dropped.
     Other,
+    /// fork: the modern lighting model's own passes — every span named `modern_*`: the sun's
+    /// cascades and the cube atlas, the GI voxels, classify, trace and blend, the froxel scatter,
+    /// integrate and composite, the light binning. Last, because the columns only ever grow at
+    /// the end; before it existed they all landed in [`Self::Other`].
+    Modern,
 }
 
-const GPU_BUCKETS: usize = 7;
+const GPU_BUCKETS: usize = 8;
 
 /// Which column a diagnostics path lands in. `None` = not a top-level GPU span: a CPU span, a
 /// non-render diagnostic, or a span nested under another (its parent already carries it).
@@ -158,6 +163,7 @@ fn gpu_bucket(path: &str) -> Option<GpuBucket> {
         "static_gx" => GpuBucket::Static,
         "main_transparent_pass_3d" | "main_transmissive_pass_3d" => GpuBucket::Transparent,
         p if p.starts_with("ffx_glow") => GpuBucket::Glow,
+        p if p.starts_with("modern_") => GpuBucket::Modern,
         "tonemapping" | "upscaling" | "msaa_writeback" | "postprocessing" => GpuBucket::Post,
         "main_opaque_pass_2d" | "main_transparent_pass_2d" | "ui" | "ui_gamma_decode" => {
             GpuBucket::Ui
@@ -545,9 +551,9 @@ mod tests {
         assert_eq!(acc.frames, 2);
         let cols = acc.columns();
         // gpu_ms = (2 + 3 + 0.8 + 4) / 2; opaque (2 + 4) / 2; static 3 / 2; post 0.8 / 2.
-        assert_eq!(cols, ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00");
+        assert_eq!(cols, ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00,0.00");
         // The reset: a second with nothing read writes empty cells, one per column.
-        assert_eq!(acc.columns(), ",,,,,,,,");
+        assert_eq!(acc.columns(), ",,,,,,,,,");
         // And a later frame is still read after the reset.
         push(
             &mut store,
@@ -556,7 +562,7 @@ mod tests {
             1.0,
         );
         acc.fold(&store);
-        assert_eq!(acc.columns(), ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00");
+        assert_eq!(acc.columns(), ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00");
     }
 
     #[test]
@@ -573,7 +579,8 @@ mod tests {
                 "gpu_glow",
                 "gpu_post",
                 "gpu_ui",
-                "gpu_other"
+                "gpu_other",
+                "gpu_modern"
             ]
         );
         // An empty second writes exactly one cell per GPU column.

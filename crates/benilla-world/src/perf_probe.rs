@@ -59,6 +59,13 @@
 //!
 //! So two columns decide whether a row is a measurement at all — `settled=yes` and `railed=no` —
 //! and a row failing either is an instruction to take it again, not a number to put in a table.
+//!
+//! ## Per pass, where the device can say
+//!
+//! With `WOW_GPU_PASSES=1` (native Vulkan or DX12, which time inside passes) a second line,
+//! `PERF_PASSES`, follows each `PERF_PROBE`: the GPU milliseconds per frame of every top-level
+//! render-diagnostics span over the same sample window, costliest first, with the `modern_*`
+//! passes summed as `modern=`. Wall time says a tier got cheaper; this says which pass paid for it.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -212,7 +219,83 @@ struct ProbeRun {
     settled: bool,
     /// Wall frame intervals, ms.
     samples: Vec<f32>,
+    /// Per-pass GPU time over the sample window (`WOW_GPU_PASSES`): ms summed per top-level
+    /// span, the frames those readings covered, and the newest reading already folded.
+    passes: PassSums,
     done: bool,
+}
+
+/// The sample window's per-pass GPU sums, read out of bevy's render diagnostics — the same
+/// `render/<pass>/elapsed_gpu` measurements the client's journal folds, and folded the same way:
+/// only readings newer than the last fold, divided by the frames whose readback actually landed
+/// (the diagnostics resolve a few frames late and drop some when readbacks bunch up).
+#[derive(Default)]
+struct PassSums {
+    ms: std::collections::BTreeMap<String, f64>,
+    frames: u32,
+    seen: Option<bevy::platform::time::Instant>,
+}
+
+impl PassSums {
+    fn fold(&mut self, store: &bevy::diagnostic::DiagnosticsStore) {
+        let mut newest = self.seen;
+        let mut times: Vec<bevy::platform::time::Instant> = Vec::new();
+        for diagnostic in store.iter() {
+            let Some(pass) = diagnostic
+                .path()
+                .as_str()
+                .strip_prefix("render/")
+                .and_then(|p| p.strip_suffix("/elapsed_gpu"))
+                .filter(|p| !p.contains('/'))
+            else {
+                continue;
+            };
+            for m in diagnostic
+                .measurements()
+                .filter(|m| self.seen.is_none_or(|s| m.time > s))
+            {
+                *self.ms.entry(pass.to_string()).or_default() += m.value;
+                if !times.contains(&m.time) {
+                    times.push(m.time);
+                }
+                if newest.is_none_or(|n| m.time > n) {
+                    newest = Some(m.time);
+                }
+            }
+        }
+        self.frames += times.len() as u32;
+        self.seen = newest;
+    }
+
+    /// Skip whatever arrived before sampling began, so the window's sums start clean.
+    fn mark(&mut self, store: &bevy::diagnostic::DiagnosticsStore) {
+        self.fold(store);
+        self.ms.clear();
+        self.frames = 0;
+    }
+
+    /// `pass=ms` per frame, costliest first, and the `modern_*` passes summed as `modern=` —
+    /// the one number the lighting tiers are priced by.
+    fn line(&self) -> Option<String> {
+        if self.frames == 0 {
+            return None;
+        }
+        let n = f64::from(self.frames);
+        let mut rows: Vec<(&String, f64)> = self.ms.iter().map(|(k, v)| (k, *v / n)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let total: f64 = rows.iter().map(|r| r.1).sum();
+        let modern: f64 = rows
+            .iter()
+            .filter(|r| r.0.starts_with("modern_"))
+            .map(|r| r.1)
+            .sum();
+        let each: Vec<String> = rows.iter().map(|(k, v)| format!("{k}={v:.3}")).collect();
+        Some(format!(
+            "gpu_frames={} gpu_ms={total:.3} modern={modern:.3} {}",
+            self.frames,
+            each.join(" ")
+        ))
+    }
 }
 
 pub struct PerfProbePlugin;
@@ -230,6 +313,7 @@ impl Plugin for PerfProbePlugin {
             sampling: false,
             settled: false,
             samples: Vec::with_capacity(want as usize),
+            passes: PassSums::default(),
             done: false,
         })
         // `Startup`, not the plugin body: the primary window does not exist until `WindowPlugin`
@@ -264,6 +348,8 @@ fn sample(
     activity: Option<Res<crate::terrain_stream::StreamActivity>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+    // Present only where something registered bevy's render diagnostics (`WOW_GPU_PASSES`).
+    diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
 ) {
     if run.done {
         return;
@@ -312,6 +398,9 @@ fn sample(
             );
         }
         // The settle frame itself carries the last of the streaming work; never sample it.
+        if let Some(store) = diagnostics.as_deref() {
+            run.passes.mark(store);
+        }
         return;
     }
 
@@ -321,6 +410,9 @@ fn sample(
     // neither is a measurement of this configuration.
     if dt > 0.0 && dt < 1000.0 {
         run.samples.push(dt);
+    }
+    if let Some(store) = diagnostics.as_deref() {
+        run.passes.fold(store);
     }
     if (run.samples.len() as u32) < run.want {
         return;
@@ -333,6 +425,9 @@ fn sample(
         windows.single().ok(),
         adapter.as_deref(),
     );
+    if let Some(line) = run.passes.line() {
+        info!("PERF_PASSES cfg={} {line}", label());
+    }
 }
 
 /// The percentile a sorted sample lands on — nearest-rank, the same convention the journal and the

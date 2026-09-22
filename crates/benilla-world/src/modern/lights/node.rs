@@ -5,6 +5,7 @@
 use bevy::app::SubApp;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
 use bevy::render::render_resource::binding_types::{
@@ -163,15 +164,20 @@ impl Node for LightBinNode {
         else {
             return Ok(());
         };
+        // The journal's `gpu_modern` column (`benilla-app` `perf::journal`), where the device times
+        // passes.
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_light_bin"),
                 timestamp_writes: None,
             });
+        let span = diagnostics.pass_span(&mut pass, "modern_light_bin");
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.dispatch_workgroups(frame.groups, 1, 1);
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -184,5 +190,7 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_render_graph_node::<LightBinNode>(Core3d, LightBinLabel)
         .add_render_graph_edges(Core3d, (LightBinLabel, Node3d::StartMainPass))
         // The atlas slots the cells name are the ones the shadow pass just drew.
-        .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, LightBinLabel);
+        .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, LightBinLabel)
+        // fork: P8b — the froxels take their point lights from this frame's cells.
+        .add_render_graph_edge(Core3d, LightBinLabel, crate::modern::volumetrics::FroxelLabel);
 }

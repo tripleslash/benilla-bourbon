@@ -8,6 +8,7 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
 #import benilla_modern::probegi
+#import benilla_modern::locallight
 
 // The shared light buffer's prefix (`lighting::global_light`): the header rows and the point table,
 // packed nearest-to-camera first.
@@ -66,6 +67,31 @@ fn canopy_cover(p: vec3<f32>) -> f32 {
     open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(0.0, 0.0, CANOPY_REACH));
     open = open + sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, p + vec3<f32>(0.0, 0.0, -CANOPY_REACH));
     return 1.0 - open * 0.25;
+}
+
+// One table light's in-scatter at a froxel: isotropic, the surface lanes' WoW falloff under the same
+// range window, zero past the range.
+fn point_in_scatter(i: u32, p: vec3<f32>) -> vec3<f32> {
+    let pos_range = light_table.points[2u * i];
+    let dl = length(pos_range.xyz - p);
+    if (dl >= pos_range.w) {
+        return vec3<f32>(0.0);
+    }
+    let q = dl / max(pos_range.w, 1e-3);
+    let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+    // +0.5 keeps a froxel inside the flame finite.
+    let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
+    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN);
+}
+
+// Every light one grid cell names, at a froxel.
+fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    let count = locallight::cell_count(cell);
+    for (var i = 0u; i < count; i = i + 1u) {
+        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p);
+    }
+    return sum;
 }
 
 // A per-froxel, per-frame offset in [-0.5, 0.5]: the one-tap shadow lookup then covers the froxel's
@@ -146,19 +172,33 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
     var points = vec3<f32>(0.0);
 
-    // The nearest point lights, isotropic, with the surface lanes' WoW falloff and range window.
-    let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
-    for (var i = 0u; i < count; i = i + 1u) {
-        let pos_range = light_table.points[2u * i];
-        let dl = length(pos_range.xyz - p);
-        if (dl >= pos_range.w) {
-            continue;
+    // The point lights, isotropic, with the surface lanes' WoW falloff and range window.
+    //
+    // fork: P8b — **from the light grid wherever it is live**, not from the first N lights of the
+    // camera-sorted table. That loop cost every froxel N iterations (16, 32 or 64 by tier, over up
+    // to two million froxels), and nearly all of them were lights that could not reach it — and it
+    // could not see a lamp that sat past the camera's N nearest even when the froxel stood in its
+    // pool. The grid already holds, per cell, exactly the lights that reach that cell (the strongest
+    // eight where more do), so a froxel now reads one cell — two in the near/far seam, cross-faded
+    // as the surfaces do (`locallight::cell_pair`) — and the haze over a lamp's pool is lit by the
+    // same lights as the ground under it. Without a grid (`?modern_lights=0`) the old walk stands.
+    let lg = modern_block.lights;
+    if (locallight::grid_live(lg)) {
+        let pair = locallight::cell_pair(lg, p);
+        if (pair.w > 0u) {
+            let far_w = bitcast<f32>(pair.z);
+            if (far_w < 1.0) {
+                points = cell_in_scatter(modern_block.light_cells[pair.x], p) * (1.0 - far_w);
+            }
+            if (far_w > 0.0) {
+                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p) * far_w;
+            }
         }
-        let q = dl / max(pos_range.w, 1e-3);
-        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
-        // +0.5 keeps a froxel inside the flame finite.
-        let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
-        points = points + light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN);
+    } else {
+        let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
+        for (var i = 0u; i < count; i = i + 1u) {
+            points = points + point_in_scatter(i, p);
+        }
     }
 
     var cur = vec4<f32>((lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze, sigma);

@@ -323,15 +323,19 @@ fn local_visibility(
     let inset = g.shadow_misc.z * g.shadow_misc.w * tiles;
     let tile = atlas_tile(g, slot, u32(ct.z));
 
-    // **The single-tap fast path is P6's, verbatim.** A tier that asks for one tap takes one
-    // hardware compare and no spiral, no rotation hash and no blend — the soft path below must not
-    // cost High or Ultra a single instruction, and a `select` would not do: WGSL evaluates both of
-    // its arms, so the Vogel spiral would be computed on every tap of every tier.
+    // **The single-tap fast path is P6's.** A tier that asks for one tap takes one hardware compare
+    // and no spiral, no rotation hash and no blend — the soft path below must not cost it a single
+    // instruction, and a `select` would not do: WGSL evaluates both of its arms, so the Vogel spiral
+    // would be computed on every tap of every tier.
+    //
+    // fork: P8b — it takes the shade floor too, which is what lets Cinematic run on this path: its
+    // shadow stays faint (a lamp's occluded side keeps `1 - soft.z` of it) without the eight taps.
+    // At `soft.z == 1` (High) the floor is `mix(0, 1, one)`, which is `one` exactly — P6's value.
     let taps = max(u32(g.soft.x), 1u);
     if (taps <= 1u) {
         let face_uv = clamp(ct.xy, vec2<f32>(inset), vec2<f32>(1.0 - inset));
         let one = textureSampleCompareLevel(map, samp, tile.xy + face_uv * tile.w, i32(tile.z), depth);
-        return mix(1.0, one, fade);
+        return mix(1.0, mix(1.0 - g.soft.z, 1.0, one), fade);
     }
 
     // The penumbra: a point light stands in for a fixture about a yard across, so the blur grows

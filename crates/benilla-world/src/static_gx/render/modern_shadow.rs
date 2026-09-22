@@ -26,11 +26,13 @@ use benilla_assets::materials::{MODERN_SHADOW_CASCADES, MODERN_SHADOW_MAP};
 use super::*;
 use crate::modern::lights::{ModernLights, ATLAS_TILES, PER_ATLAS_LAYER};
 use crate::modern::shadow::{
-    ModernCascades, ModernEntityCasters, ModernTerrainCasters, LOCAL_LAYER, SHADOW_LAYERS,
-    SHADOW_MAP_SIZE, SKY_LAYER,
+    ModernCascades, ModernEntityCasters, ModernTerrainCasters, LOCAL_LAYER, MAX_CASCADES,
+    SHADOW_LAYERS, SHADOW_MAP_SIZE, SKY_LAYER,
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
-use bevy::render::render_resource::binding_types::{storage_buffer_read_only_sized, texture_2d};
+use bevy::render::render_resource::binding_types::{
+    storage_buffer_read_only_sized, texture_2d, texture_depth_2d,
+};
 use bevy::platform::collections::HashMap as StrideMap;
 
 #[derive(Clone, Copy, ShaderType)]
@@ -43,6 +45,53 @@ struct GxShadowPipelines {
     view_layout: BindGroupLayoutDescriptor,
     opaque: CachedRenderPipelineId,
     cutout: CachedRenderPipelineId,
+    /// fork: P8b — clears one atlas tile by drawing over it (`depth_fill.wgsl`).
+    fill: CachedRenderPipelineId,
+    /// fork: P8b — restores a rectangle of a cascade from the static cache by drawing over it.
+    restore: CachedRenderPipelineId,
+    restore_layout: BindGroupLayoutDescriptor,
+}
+
+/// fork: P8b — how far past an entity caster's cull sphere its depth may still land, in yards, when
+/// sizing the rectangle a restore puts back. The cull sphere already carries the rig margin; this is
+/// slack on top, because a texel an entity wrote outside the rectangle would stay written — a shadow
+/// left behind where the entity stood — until the cascade next re-centres.
+const RESTORE_MARGIN_YD: f32 = 2.0;
+/// …and in texels, for the compare's own footprint.
+const RESTORE_MARGIN_PX: u32 = 2;
+/// fork: P8b — the restore's tile grid per side: a caster marks the tiles its footprint touches, and
+/// the restore draws one quad per run of marked tiles in a row. Without it every caster drew its own
+/// quad, and at Darnassus hundreds of them overlapped — each fragment writing its depth from the
+/// shader, so no early test could drop the repeats — until the "cheap" restore cost 20 ms. With the
+/// mask no texel is written twice and the area stays near the casters' real footprint.
+const RESTORE_TILES: usize = 32;
+
+/// fork: P8b — what each cube-atlas slot's six tiles currently hold, so a stale slot is redrawn
+/// alone. (P6 and P8 keyed the whole LAYER: one light arriving, or a cell streaming in anywhere in
+/// the world, redrew all six lights × six faces of it.)
+#[derive(Default)]
+struct AtlasCache {
+    slots: [AtlasSlot; crate::modern::lights::MAX_SHADOWED],
+}
+
+#[derive(Clone, Copy, Default)]
+struct AtlasSlot {
+    /// The light the caster fingerprint below was taken for ([`atlas_light_key`]; 0 = never).
+    light: u64,
+    /// The global static fingerprint it was taken under — only a change to that re-walks the
+    /// caster list, so a settled frame pays nothing here.
+    world: u64,
+    /// The static casters inside this light's sphere, fingerprinted ([`atlas_casters_key`]). A cell
+    /// streaming in 300 yd away changes the world's fingerprint and not this one, so the slot stays.
+    casters: u64,
+    /// What the six tiles hold: the light and its casters together, or 0 = nothing valid (redraw).
+    drawn: u64,
+}
+
+impl AtlasSlot {
+    fn wanted(&self) -> u64 {
+        (self.light ^ self.casters.rotate_left(29)).max(1)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -121,11 +170,17 @@ struct ModernShadowFrame {
     /// dimensions, but do support copying a subset of layers"), so the tempting
     /// copy-only-the-casters'-rectangle is not expressible. Skipping the layer wholesale is.
     layer_dirty: [std::sync::atomic::AtomicBool; SHADOW_LAYERS],
+    /// fork: P8b — per cascade, one texel rectangle per entity caster last frame issued into it:
+    /// all a restore has to put back. Empty with the layer dirty means "unknown", and the whole
+    /// layer is copied as before.
+    dirty_rects: std::sync::Mutex<[Vec<URect>; MAX_CASCADES]>,
+    /// fork: P8b — per cascade, a view of the static cache's layer for the restore draw.
+    cache_views: Vec<TextureView>,
     offsets: Vec<u32>,
     /// fork: modern lighting (P6) — one caster view per cube face of every shadowed local light,
-    /// and per atlas layer the key it currently holds (0 = redraw).
+    /// and (P8b) per atlas SLOT what its tiles currently hold.
     local_offsets: Vec<u32>,
-    local_keys: [std::sync::atomic::AtomicU64; crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS],
+    atlas: std::sync::Mutex<AtlasCache>,
     bind: Option<BindGroup>,
     count: u32,
 }
@@ -206,11 +261,86 @@ fn init_shadow_pipelines(
         shader: asset_server.load("embedded://benilla_world/shaders/modern/terrain_shadow.wgsl"),
         by_stride: StrideMap::default(),
     });
+    // fork: P8b — the atlas's tile clear: one fullscreen triangle at the far plane, depth only.
+    let fill = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("modern_shadow_tile_fill".into()),
+        layout: vec![],
+        vertex: VertexState {
+            shader: asset_server.load("embedded://benilla_world/shaders/modern/depth_fill.wgsl"),
+            shader_defs: vec![],
+            entry_point: Some("fill_vertex".into()),
+            buffers: vec![],
+        },
+        fragment: None,
+        primitive: PrimitiveState {
+            cull_mode: None,
+            ..default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: CORE_3D_DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Always,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        ..default()
+    });
+    // fork: P8b — the cascade restore: the same triangle, writing the static cache's depth back
+    // under a scissor (`depth_fill.wgsl`'s `restore_fragment`).
+    let restore_layout = BindGroupLayoutDescriptor::new(
+        "modern_shadow_restore",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::VERTEX_FRAGMENT,
+            (texture_depth_2d(), storage_buffer_read_only_sized(false, None)),
+        ),
+    );
+    let fill_shader: Handle<Shader> =
+        asset_server.load("embedded://benilla_world/shaders/modern/depth_fill.wgsl");
+    let restore = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("modern_shadow_restore".into()),
+        layout: vec![restore_layout.clone()],
+        vertex: VertexState {
+            shader: fill_shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("restore_vertex".into()),
+            buffers: vec![],
+        },
+        fragment: Some(FragmentState {
+            shader: fill_shader,
+            shader_defs: vec![],
+            entry_point: Some("restore_fragment".into()),
+            targets: vec![],
+        }),
+        primitive: PrimitiveState {
+            cull_mode: None,
+            ..default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: CORE_3D_DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Always,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        ..default()
+    });
     commands.insert_resource(GxShadowPipelines {
         opaque: pipeline_cache.queue_render_pipeline(make("modern_shadow_static", false)),
         cutout: pipeline_cache.queue_render_pipeline(make("modern_shadow_static_cutout", true)),
+        fill,
+        restore,
+        restore_layout,
         view_layout,
     });
+}
+
+/// fork: P8b — does any tier draw entity casters into the cube atlas? Only then does an atlas layer
+/// need a static copy to be restored from; every tier ships with `dynamic_casters: false`, so the
+/// static cache stops at the cascades.
+fn atlas_restores() -> bool {
+    crate::modern::LightingQuality::ALL
+        .iter()
+        .any(|q| crate::modern::lights::light_tier(*q).dynamic_casters)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,26 +380,56 @@ fn prepare_modern_shadow(
         for key in &frame.cache_keys {
             key.store(0, std::sync::atomic::Ordering::Relaxed);
         }
-        for key in &frame.local_keys {
-            key.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
+        *frame
+            .atlas
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = AtlasCache::default();
+        frame.cache_views.clear();
     }
     frame.texture = Some(image.texture.clone());
     if frame.cache.is_none() {
+        // fork: P8b — the cache holds only the layers anything is ever RESTORED into: the cascades,
+        // whose entity casters are undone each frame. The sky map has no dynamic pass, and the cube
+        // atlas has none on any tier (`LightTier::dynamic_casters`), so a cached copy of either was
+        // 16.8 MB of memory and a 16.8 MB copy per redraw that nothing read back.
+        let layers = if atlas_restores() {
+            image.texture.depth_or_array_layers()
+        } else {
+            image.texture.depth_or_array_layers().min(MAX_CASCADES as u32)
+        };
         frame.cache = Some(device.create_texture(&TextureDescriptor {
             label: Some("modern_shadow_static_cache"),
             size: Extent3d {
                 width: image.texture.width(),
                 height: image.texture.height(),
-                depth_or_array_layers: image.texture.depth_or_array_layers(),
+                depth_or_array_layers: layers,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
-            usage: TextureUsages::COPY_SRC | TextureUsages::COPY_DST,
+            // TEXTURE_BINDING: the restore draw reads it (`depth_fill.wgsl`'s `restore_fragment`).
+            usage: TextureUsages::COPY_SRC | TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         }));
+        frame.cache_views.clear();
+    }
+    if frame.cache_views.is_empty() {
+        if let Some(cache) = frame.cache.as_ref() {
+            let views: Vec<TextureView> = (0..cache.depth_or_array_layers().min(MAX_CASCADES as u32))
+                .map(|layer| {
+                    cache.create_view(&TextureViewDescriptor {
+                        label: Some("modern_shadow_cache_layer"),
+                        dimension: Some(TextureViewDimension::D2),
+                        aspect: TextureAspect::DepthOnly,
+                        base_array_layer: layer,
+                        array_layer_count: Some(1),
+                        ..default()
+                    })
+                })
+                .collect();
+            frame.cache_views = views;
+        }
     }
     if frame.layers.is_empty() {
         // **The texture's OWN depth, not [`SHADOW_LAYERS`].** P8 latched the array's depth to the
@@ -580,6 +740,9 @@ impl ViewNode for GxShadowNode {
         let Some(view_bind) = frame.bind.as_ref() else {
             return Ok(());
         };
+        // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column
+        // (`benilla-app` `perf::journal`) where the device times passes.
+        let diagnostics = render_context.diagnostic_recorder();
         let cascades = world.resource::<ModernCascades>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let ready = world.get_resource::<GxShadowPipelines>().and_then(|pipes| {
@@ -671,7 +834,62 @@ impl ViewNode for GxShadowNode {
             if cached {
                 // Only what the previous frame's entity casters dirtied needs putting back.
                 if frame.layer_dirty[i].swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    copy_layer(render_context.command_encoder(), static_cache, working, i as u32);
+                    // fork: P8b — put back only the rectangles last frame's entities could have
+                    // written, by drawing the cached depth over them. A whole-layer copy (16.8 MB)
+                    // stays the fallback while the rectangles or the restore pipeline are unknown.
+                    let rects = std::mem::take(
+                        &mut frame
+                            .dirty_rects
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)[i],
+                    );
+                    let restore = world.get_resource::<GxShadowPipelines>().and_then(|p| {
+                        Some((pipeline_cache.get_render_pipeline(p.restore)?, &p.restore_layout))
+                    });
+                    match (restore, frame.cache_views.get(i)) {
+                        (Some((restore, layout)), Some(view)) if !rects.is_empty() => {
+                            let data: Vec<[f32; 4]> = rects
+                                .iter()
+                                .map(|r| [r.min.x as f32, r.min.y as f32, r.max.x as f32, r.max.y as f32])
+                                .collect();
+                            let device = render_context.render_device();
+                            let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+                                label: Some("modern_shadow_restore_rects"),
+                                contents: bytemuck::cast_slice(&data),
+                                usage: BufferUsages::STORAGE,
+                            });
+                            let bind = device.create_bind_group(
+                                "modern_shadow_restore",
+                                &pipeline_cache.get_bind_group_layout(layout),
+                                &BindGroupEntries::sequential((view, buffer.as_entire_binding())),
+                            );
+                            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                                label: Some("modern_shadow_restore"),
+                                color_attachments: &[],
+                                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                                    view: layer,
+                                    depth_ops: Some(Operations {
+                                        load: LoadOp::Load,
+                                        store: StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                }),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            let span = diagnostics.pass_span(&mut pass, "modern_shadow_restore");
+                            pass.set_render_pipeline(restore);
+                            pass.set_bind_group(0, &bind, &[]);
+                            pass.draw(0..6, 0..data.len() as u32);
+                            span.end(&mut pass);
+                        }
+                        _ => {
+                            let encoder = render_context.command_encoder();
+                            let span = diagnostics.time_span(encoder, "modern_shadow_restore");
+                            copy_layer(encoder, static_cache, working, i as u32);
+                            span.end(encoder);
+                        }
+                    }
                 }
             } else {
                 // Static pass: clear, then terrain and the static world.
@@ -691,6 +909,7 @@ impl ViewNode for GxShadowNode {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
+                    let span = diagnostics.pass_span(&mut pass, "modern_shadow_static");
                     if active {
                         pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
                         if let (Some(t), Some(tp)) = (terrain, terrain_pipes) {
@@ -771,12 +990,26 @@ impl ViewNode for GxShadowNode {
                             }
                         }
                     }
+                    span.end(&mut pass);
                 }
                 // Either way the layer was just cleared and redrawn, so nothing of the previous
                 // frame's dynamic casters survives in it.
                 frame.layer_dirty[i].store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Some(slot) = frame
+                    .dirty_rects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(i)
+                {
+                    slot.clear();
+                }
                 if active && complete {
-                    copy_layer(render_context.command_encoder(), working, static_cache, i as u32);
+                    // Only a layer something is restored INTO needs a cached copy: the sky map has
+                    // no dynamic pass, so its working layer is its cache (and the static cache no
+                    // longer allocates it — `atlas_restores`).
+                    if !is_sky {
+                        copy_layer(render_context.command_encoder(), working, static_cache, i as u32);
+                    }
                     slot.store(key, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     slot.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -810,15 +1043,26 @@ impl ViewNode for GxShadowNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let span = diagnostics.pass_span(&mut pass, "modern_shadow_dynamic");
             pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
             // Whether anything is actually ISSUED, not whether the list was non-empty: every
             // command is still cascade-culled below, so a far cascade can hold a full draw list
             // and take none of it — and a layer nothing wrote needs no restore next frame.
             let mut drew = false;
+            // fork: P8b — and WHERE: the tiles the issued casters' footprints touch in this layer,
+            // which is all next frame's restore puts back.
+            let mut wrote = [0u32; RESTORE_TILES];
             for cmd in &entities.draws {
                 if outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
                 }
+                let footprint = box_texels(
+                    &clip_from_world,
+                    cmd.center,
+                    Vec3::splat(cmd.radius + RESTORE_MARGIN_YD),
+                    SHADOW_MAP_SIZE,
+                );
+                mark_tiles(&mut wrote, footprint, SHADOW_MAP_SIZE);
                 let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
                     continue;
                 };
@@ -853,8 +1097,17 @@ impl ViewNode for GxShadowNode {
                     }
                 }
             }
+            span.end(&mut pass);
             if drew {
                 frame.layer_dirty[i].store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(slot) = frame
+                    .dirty_rects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(i)
+                {
+                    *slot = tile_runs(&wrote, SHADOW_MAP_SIZE);
+                }
             }
         }
 
@@ -937,6 +1190,17 @@ impl GxShadowNode {
             .then(|| world.get_resource::<EntityShadowFrame>())
             .flatten();
 
+        // fork: P8b — the tile clear that lets one slot be redrawn without the other five. Until it
+        // is compiled, a stale slot redraws its whole layer, which is what every slot change did
+        // before.
+        let fill = world
+            .get_resource::<GxShadowPipelines>()
+            .and_then(|p| pipeline_cache.get_render_pipeline(p.fill));
+        let mut atlas = frame
+            .atlas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         for layer_index in 0..lights.tier.atlas_layers() {
             let slots = layer_index * PER_ATLAS_LAYER
                 ..((layer_index + 1) * PER_ATLAS_LAYER).min(lights.shadowed.len());
@@ -947,12 +1211,28 @@ impl GxShadowNode {
             let Some(view) = frame.layers.get(array_layer) else {
                 continue;
             };
-            let key = local_atlas_key(&lights.shadowed[slots.clone()], static_hash);
-            let slot_key = &frame.local_keys[layer_index];
             let dirty_slot = &frame.layer_dirty[array_layer];
-            let cached = slot_key.load(std::sync::atomic::Ordering::Relaxed) == key;
 
-            if cached {
+            // Which of this layer's slots no longer hold what they should. A slot's caster
+            // fingerprint is re-taken only when its light or the world's static set changed, so a
+            // settled frame is six comparisons here.
+            let mut stale = 0u32;
+            for s in slots.clone() {
+                let held = lights.shadowed[s].map(|h| h.light);
+                let light_key = held.as_ref().map_or(ATLAS_HOLE, atlas_light_key);
+                let slot = &mut atlas.slots[s];
+                if slot.light != light_key || slot.world != static_hash {
+                    slot.casters = held.as_ref().map_or(0, |l| atlas_casters_key(casters, l));
+                    slot.light = light_key;
+                    slot.world = static_hash;
+                }
+                if slot.drawn != slot.wanted() {
+                    stale |= 1 << (s - slots.start);
+                }
+            }
+            let every = (1u32 << slots.len()) - 1;
+
+            if stale == 0 {
                 // Nothing static changed. Put back only what the previous frame's entities dirtied;
                 // a layer nothing drew into still holds pure static depth.
                 if !dynamic {
@@ -967,6 +1247,22 @@ impl GxShadowNode {
                     );
                 }
             } else {
+                // Entities drawn into this layer last frame are undone first, so the slots that are
+                // NOT redrawn below are pure static depth again.
+                if dynamic && dirty_slot.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    copy_layer(
+                        render_context.command_encoder(),
+                        cache,
+                        working,
+                        array_layer as u32,
+                    );
+                }
+                // A whole-layer clear when every slot is stale (a tier change, the first frame) or
+                // the tile clear is not compiled yet; otherwise just the stale slots' tiles.
+                let (redraw, fill) = match fill {
+                    Some(f) if stale != every => (stale, Some(f)),
+                    _ => (every, None),
+                };
                 let complete = self.draw_atlas_statics(
                     render_context,
                     frame,
@@ -979,23 +1275,26 @@ impl GxShadowNode {
                     (opaque, cutout),
                     meshes,
                     allocator,
+                    redraw,
+                    fill,
                 );
-                // The layer was just cleared and redrawn, so no entity of the previous frame
-                // survives in it.
-                dirty_slot.store(false, std::sync::atomic::Ordering::Relaxed);
-                if complete {
+                for s in slots.clone() {
+                    let bit = 1 << (s - slots.start);
+                    if redraw & bit == 0 {
+                        continue;
+                    }
+                    // An incomplete slot (a caster not resident yet) is left marked stale, so it is
+                    // redrawn next frame until it is whole.
+                    let slot = &mut atlas.slots[s];
+                    slot.drawn = if complete & bit != 0 { slot.wanted() } else { 0 };
+                }
+                if dynamic {
                     copy_layer(
                         render_context.command_encoder(),
                         working,
                         cache,
                         array_layer as u32,
                     );
-                    slot_key.store(key, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    slot_key.store(0, std::sync::atomic::Ordering::Relaxed);
-                    // An incomplete static layer must not be restored from a cache that was never
-                    // written; the next frame redraws it whole anyway.
-                    continue;
                 }
             }
 
@@ -1019,9 +1318,14 @@ impl GxShadowNode {
         }
     }
 
-    /// The static half of one atlas layer: clear it, then replay the retained world into each face
-    /// that has anything to see. Returns whether every caster it wanted was resident — an
-    /// incomplete layer is not cached, so it is redrawn until it is whole.
+    /// The static half of one atlas layer: clear the slots named in `redraw`, then replay the
+    /// retained world into each of their faces that has anything to see. Returns, as the same kind
+    /// of mask, the slots whose every caster was resident — an incomplete slot stays stale, so it is
+    /// redrawn until it is whole.
+    ///
+    /// fork: P8b — with a `fill` pipeline only the named slots' tiles are cleared (by drawing over
+    /// them, `depth_fill.wgsl`) and the rest of the layer is loaded untouched; without one the whole
+    /// layer is cleared, and `redraw` must then name every slot.
     #[allow(clippy::too_many_arguments)]
     fn draw_atlas_statics(
         &self,
@@ -1036,17 +1340,24 @@ impl GxShadowNode {
         pipes: (&RenderPipeline, &RenderPipeline),
         meshes: &RenderAssets<RenderMesh>,
         allocator: &MeshAllocator,
-    ) -> bool {
+        redraw: u32,
+        fill: Option<&RenderPipeline>,
+    ) -> u32 {
         let (opaque, cutout) = pipes;
-        let mut complete = true;
+        let mut complete = 0u32;
         let mut near: Vec<&(&GxCellGpu, &GxCellDraw)> = Vec::new();
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("modern_local_shadow"),
             color_attachments: &[],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                 view,
                 depth_ops: Some(Operations {
-                    load: LoadOp::Clear(0.0),
+                    load: if fill.is_some() {
+                        LoadOp::Load
+                    } else {
+                        LoadOp::Clear(0.0)
+                    },
                     store: StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1054,11 +1365,29 @@ impl GxShadowNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "modern_local_shadow");
         for (i, light) in shadowed.iter().enumerate() {
-            // A hole's six tiles keep the clear the pass just laid down, which reads as "nothing
-            // occludes" — exactly what an unheld slot should mean.
-            let Some(light) = light.map(|h| h.light) else { continue };
+            let bit = 1u32 << i;
+            if redraw & bit == 0 {
+                continue;
+            }
             let slot = slot_base + i;
+            // This slot's six tiles back to the far plane. (Without a fill the pass cleared the
+            // whole layer on load.)
+            if let Some(fill) = fill {
+                for face in 0..6usize {
+                    set_atlas_tile(&mut pass, slot, face, (tile.0, tile.0));
+                    pass.set_render_pipeline(fill);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+            // A hole's six tiles keep that clear, which reads as "nothing occludes" — exactly what
+            // an unheld slot should mean.
+            let Some(light) = light.map(|h| h.light) else {
+                complete |= bit;
+                continue;
+            };
+            let mut whole = true;
             // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner test
             // the cascades use flips sign behind the light. A torch reaches a handful of cells, so
             // the six faces share one cheap list, which is then split by face below.
@@ -1074,7 +1403,7 @@ impl GxShadowNode {
             for face in 0..6usize {
                 let t = slot * 6 + face;
                 let Some(&offset) = frame.local_offsets.get(t) else {
-                    complete = false;
+                    whole = false;
                     continue;
                 };
                 // fork: P8 — the per-face cull, and the reason the tile is bound LAZILY: a caster
@@ -1092,14 +1421,14 @@ impl GxShadowNode {
                         continue;
                     }
                     let Some(mesh) = meshes.get(draw.mesh.id()) else {
-                        complete = false;
+                        whole = false;
                         continue;
                     };
                     let (Some(vslice), Some(islice)) = (
                         allocator.mesh_vertex_slice(&draw.mesh.id()),
                         allocator.mesh_index_slice(&draw.mesh.id()),
                     ) else {
-                        complete = false;
+                        whole = false;
                         continue;
                     };
                     let index_format = match &mesh.buffer_info {
@@ -1127,7 +1456,11 @@ impl GxShadowNode {
                     }
                 }
             }
+            if whole {
+                complete |= bit;
+            }
         }
+        span.end(&mut pass);
         complete
     }
 
@@ -1157,6 +1490,7 @@ impl GxShadowNode {
         }
         let mut drew = false;
         let mut near: Vec<&EntityDrawCmd> = Vec::new();
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("modern_local_shadow_dynamic"),
             color_attachments: &[],
@@ -1171,6 +1505,7 @@ impl GxShadowNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_dynamic");
         for (i, light) in shadowed.iter().enumerate() {
             let Some(light) = light.map(|h| h.light) else { continue };
             let slot = slot_base + i;
@@ -1241,6 +1576,7 @@ impl GxShadowNode {
                 }
             }
         }
+        span.end(&mut pass);
         drew
     }
 }
@@ -1293,33 +1629,49 @@ fn face_sees(face: usize, light: Vec3, center: Vec3, radius: f32) -> bool {
     along + slack >= a.abs() && along + slack >= b.abs()
 }
 
-/// One atlas LAYER's key: the shadowed lights it holds, as chosen, plus the static caster
-/// fingerprint. Never 0, which is the "redraw me" value. Per layer and not per atlas since P8, so a
-/// light entering the second layer does not invalidate the first layer's six.
-fn local_atlas_key(
-    shadowed: &[Option<crate::modern::lights::HeldSlot>],
-    static_hash: u64,
-) -> u64 {
+/// An empty atlas slot's light key. Distinct from every real light's (those are forced odd below)
+/// and from 0, "never fingerprinted" — a slot emptying still has to be redrawn, or its tiles keep
+/// the departed light's depth and the next light to take that slot inherits it.
+const ATLAS_HOLE: u64 = 2;
+
+/// fork: P8b — one atlas slot's light, as its six tiles depend on it: where it is, how far it
+/// reaches and its per-light near plane. The FADE is deliberately not in it: it changes every frame
+/// while a slot ramps and the tiles do not depend on it, so keying on it would redraw six faces a
+/// frame for every cross-fade — exactly the cost this cache exists to avoid.
+fn atlas_light_key(light: &crate::modern::lights::ShadowLight) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for light in shadowed {
-        // The hole is hashed too: a slot emptying has to invalidate the layer, or its tiles keep
-        // the departed light's depth and the next light to take that slot inherits it.
-        match light {
-            // The FADE is deliberately not hashed: it changes every frame while a slot ramps and
-            // the tiles do not depend on it, so hashing it would redraw six faces a frame for every
-            // cross-fade — exactly the cost this cache exists to avoid.
-            Some(l) => {
-                1u8.hash(&mut h);
-                l.light.pos.to_array().map(f32::to_bits).hash(&mut h);
-                l.light.range.to_bits().hash(&mut h);
-                l.light.near.to_bits().hash(&mut h);
-            }
-            None => 0u8.hash(&mut h),
+    light.pos.to_array().map(f32::to_bits).hash(&mut h);
+    light.range.to_bits().hash(&mut h);
+    light.near.to_bits().hash(&mut h);
+    h.finish() | 1
+}
+
+/// fork: P8b — the static casters one light's cube can see, fingerprinted: exactly the set
+/// `draw_atlas_statics` replays for it (the same sphere test), each caster hashed the way the
+/// world's own fingerprint hashes it, combined order-independently. This is what lets the world's
+/// static set change — a cell streaming in across the zone — without a lamp redrawing six faces of
+/// geometry it cannot see.
+fn atlas_casters_key(
+    casters: &[(&GxCellGpu, &GxCellDraw)],
+    light: &crate::modern::lights::ShadowLight,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut acc: u64 = 0x2545_f491_4f6c_dd1d;
+    for (gpu, draw) in casters {
+        let center = draw.origin + Vec3::from(draw.aabb.center);
+        let radius = Vec3::from(draw.aabb.half_extents).length();
+        if center.distance(light.pos) > light.range + radius {
+            continue;
         }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        gpu.mesh.hash(&mut h);
+        gpu.killed_applied.hash(&mut h);
+        gpu.runs.len().hash(&mut h);
+        draw.origin.to_array().map(f32::to_bits).hash(&mut h);
+        acc = acc.wrapping_add(h.finish());
     }
-    static_hash.hash(&mut h);
-    h.finish().max(1)
+    acc
 }
 
 /// The cache key of one cascade: its light clip and the static caster fingerprint (never 0).
@@ -1382,6 +1734,81 @@ fn outside_box(clip_from_world: &Mat4, center: Vec3, half: Vec3) -> bool {
     hi.x < -1.0 || lo.x > 1.0 || hi.y < -1.0 || lo.y > 1.0
 }
 
+/// fork: P8b — the texel rectangle a world box covers in a cascade (its light-space footprint, rows
+/// running down as a render target's do), widened by [`RESTORE_MARGIN_PX`] and clamped to the layer.
+/// Depth is not considered: a caster in front of the near plane still writes (the shader pancakes it).
+fn box_texels(clip_from_world: &Mat4, center: Vec3, half: Vec3, size: u32) -> URect {
+    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for i in 0..8u8 {
+        let sign = Vec3::new(
+            if i & 1 == 0 { -1.0 } else { 1.0 },
+            if i & 2 == 0 { -1.0 } else { 1.0 },
+            if i & 4 == 0 { -1.0 } else { 1.0 },
+        );
+        let p = clip_from_world.project_point3(center + half * sign).truncate();
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let lo = lo.clamp(Vec2::splat(-1.0), Vec2::splat(1.0));
+    let hi = hi.clamp(Vec2::splat(-1.0), Vec2::splat(1.0));
+    let s = size as f32;
+    let m = RESTORE_MARGIN_PX as f32;
+    // NDC y up, texel rows down.
+    let x0 = ((lo.x * 0.5 + 0.5) * s - m).floor().clamp(0.0, s);
+    let x1 = ((hi.x * 0.5 + 0.5) * s + m).ceil().clamp(0.0, s);
+    let y0 = ((0.5 - hi.y * 0.5) * s - m).floor().clamp(0.0, s);
+    let y1 = ((0.5 - lo.y * 0.5) * s + m).ceil().clamp(0.0, s);
+    URect::new(x0 as u32, y0 as u32, x1 as u32, y1 as u32)
+}
+
+/// fork: P8b — mark the restore tiles a texel rectangle touches (one bit per tile, a word per row).
+fn mark_tiles(tiles: &mut [u32; RESTORE_TILES], rect: URect, size: u32) {
+    if rect.is_empty() {
+        return;
+    }
+    let tile = (size / RESTORE_TILES as u32).max(1);
+    let last = RESTORE_TILES as u32 - 1;
+    let (x0, x1) = ((rect.min.x / tile).min(last), ((rect.max.x - 1) / tile).min(last));
+    let (y0, y1) = ((rect.min.y / tile).min(last), ((rect.max.y - 1) / tile).min(last));
+    // Bits x0..=x1, built in 64 bits so a full row does not overflow the shift.
+    let bits = (((1u64 << (x1 + 1)) - 1) & !((1u64 << x0) - 1)) as u32;
+    for row in &mut tiles[y0 as usize..=y1 as usize] {
+        *row |= bits;
+    }
+}
+
+/// fork: P8b — the marked tiles as texel rectangles: one per run of set bits in a row, a run that
+/// repeats on the next row extending down instead of starting again. Disjoint by construction.
+fn tile_runs(tiles: &[u32; RESTORE_TILES], size: u32) -> Vec<URect> {
+    let tile = (size / RESTORE_TILES as u32).max(1);
+    let mut out: Vec<URect> = Vec::new();
+    // The runs that ended on the previous row, as (x0, x1, index into `out`).
+    let mut open: Vec<(u32, u32, usize)> = Vec::new();
+    for (y, &row) in tiles.iter().enumerate() {
+        let mut next = Vec::new();
+        let mut bits = row;
+        while bits != 0 {
+            let x0 = bits.trailing_zeros();
+            let run = (bits >> x0).trailing_ones();
+            let x1 = x0 + run;
+            bits &= !((((1u64 << x1) - 1) & !((1u64 << x0) - 1)) as u32);
+            let y1 = (y as u32 + 1) * tile;
+            match open.iter().find(|(a, b, _)| *a == x0 && *b == x1) {
+                Some(&(_, _, i)) => {
+                    out[i].max.y = y1;
+                    next.push((x0, x1, i));
+                }
+                None => {
+                    out.push(URect::new(x0 * tile, y as u32 * tile, x1 * tile, y1));
+                    next.push((x0, x1, out.len() - 1));
+                }
+            }
+        }
+        open = next;
+    }
+    out
+}
+
 /// Wire the pass before the main pass (called from `render::build`).
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
@@ -1404,4 +1831,39 @@ pub(super) fn build(render_app: &mut SubApp) {
             Core3d,
             (NodePbr::LateShadowPass, GxShadowLabel, Node3d::StartMainPass),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The restore's rectangles cover every marked tile exactly once — disjoint, so no texel is
+    /// written twice — and nothing else.
+    #[test]
+    fn restore_runs_cover_the_marked_tiles_once() {
+        let size = SHADOW_MAP_SIZE;
+        let tile = size / RESTORE_TILES as u32;
+        let mut tiles = [0u32; RESTORE_TILES];
+        // A caster in the middle, one across the right edge, and one spanning a whole row.
+        mark_tiles(&mut tiles, URect::new(700, 700, 900, 1000), size);
+        mark_tiles(&mut tiles, URect::new(size - 10, 0, size, 30), size);
+        mark_tiles(&mut tiles, URect::new(0, size - tile, size, size), size);
+        let runs = tile_runs(&tiles, size);
+        let mut covered = [0u32; RESTORE_TILES];
+        for r in &runs {
+            assert_eq!(r.min.x % tile, 0);
+            assert_eq!(r.max.y % tile, 0);
+            for y in r.min.y / tile..r.max.y / tile {
+                for x in r.min.x / tile..r.max.x / tile {
+                    assert_eq!(covered[y as usize] & (1 << x), 0, "tile {x},{y} written twice");
+                    covered[y as usize] |= 1 << x;
+                }
+            }
+        }
+        assert_eq!(covered, tiles, "the runs are exactly the marked tiles");
+        // A caster's footprint always lands inside what is restored.
+        let footprint = URect::new(700, 700, 900, 1000);
+        assert!(runs.iter().any(|r| r.contains(footprint.min)));
+        assert_eq!(tiles[RESTORE_TILES - 1], u32::MAX, "a full row is one run");
+    }
 }
