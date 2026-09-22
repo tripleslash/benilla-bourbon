@@ -91,10 +91,6 @@ const KEEP_FRACTION: f32 = 0.020;
 /// is never switched on or off: it ramps, so admitting or releasing one is invisible. ~4 frames at
 /// 60 Hz.
 const FADE_RATE: f32 = 15.0;
-/// fork: P8 — and how far outside the frustum a light may still sit and keep its cube. Not zero:
-/// a lamp just off the left edge still lights the wall the camera IS looking at, and a hard frustum
-/// test would pop its shadow on and off as the player turned. Measured in the light's own ranges.
-const FRUSTUM_SLACK: f32 = 0.35;
 
 /// What a quality tier bins.
 #[derive(Clone, Copy, Debug, PartialEq)]

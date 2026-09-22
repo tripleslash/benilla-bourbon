@@ -979,7 +979,6 @@ struct Flood<'a> {
     clip_from_world: &'a Mat4,
     world_from_local: &'a Affine3A,
     visible: Vec<bool>,
-    lit: Vec<bool>,
     interior_fog: Vec<bool>,
     /// The **deferred exterior-window worklist** Pass 1 leaves behind — the client's `[0xcbe324]`
     /// records, reset to empty at `0x6b3b51` and filled by the recursion at `0x6b4541`.
@@ -1118,7 +1117,6 @@ fn compute_pvs_traced<T: FloodTrace>(
         clip_from_world,
         world_from_local,
         visible: vec![false; nav.len()],
-        lit: vec![false; nav.len()],
         interior_fog: vec![false; nav.len()],
         windows: Vec::new(),
         portal_pushed: vec![false; model.portal_infos.len()],
