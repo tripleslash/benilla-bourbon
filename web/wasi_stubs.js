@@ -4,7 +4,9 @@
 const EBADF = 8, ENOSYS = 52;
 let mem = null;
 export function bind(memory) { mem = memory; }
-function zero(ptr) { if (mem) new DataView(mem.buffer).setUint32(ptr, 0, true); }
+// `>>> 0`: a wasm `i32` argument arrives signed, and with a 4 GiB memory a pointer past 2 GiB would
+// be a negative offset and a RangeError.
+function zero(ptr) { if (mem) new DataView(mem.buffer).setUint32(ptr >>> 0, 0, true); }
 export function fd_prestat_get() { return EBADF; }
 export function fd_prestat_dir_name() { return EBADF; }
 export function environ_sizes_get(countPtr, sizePtr) { zero(countPtr); zero(sizePtr); return 0; }

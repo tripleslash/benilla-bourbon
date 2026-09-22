@@ -57,8 +57,18 @@ export function installThreads() {
         // An error here means the worker script itself failed to load or threw at top level —
         // a stale `web/dist`, a bad MIME type. The pool cannot be told after the fact (it has
         // already counted this thread), so it comes up one worker short and says so here.
+        //
+        // It is also where a worker's out-of-memory abort surfaces: `rust_oom` traps with a bare
+        // `unreachable` and no panic message (the default alloc-error hook writes to a stderr this
+        // target does not have), so the size of linear memory at that moment is the only evidence
+        // of which it was. At the `--max-memory` ceiling (4096 MiB, `scripts/web-build-threads.sh`)
+        // it is exhaustion; well under it, one absurd allocation.
         worker.onerror = (e) => {
-          console.error(`wenilla: thread worker "${name}" failed —`, e.message || e);
+          const mib = Math.round(memory.buffer.byteLength / 1048576);
+          console.error(
+            `wenilla: thread worker "${name}" failed (linear memory ${mib} MiB) —`,
+            e.message || e,
+          );
         };
         worker.postMessage({ module, memory, ptr, stackSize });
         started += 1;

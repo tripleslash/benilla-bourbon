@@ -716,10 +716,15 @@ pub(crate) fn note_live_pipeline(id: usize, what: &str) {
 /// `par_iter_mut` sweeps run their scopes on. `IoTaskPool` is deliberately absent — it is sized to
 /// zero workers on this target on purpose (`benilla_world::boot`), so printing it would only
 /// invite the reading that something is broken.
+///
+/// `offl=` is the decodes on the pool right now (`benilla_assets::frame_budget::offloads_in_flight`),
+/// capped at four per async worker — 32 at `8/…`. Pinned at the cap beside a climbing `wasm=`
+/// is a burst being held back as designed; climbing `wasm=` with `offl=` low is a leak elsewhere.
 fn worker_threads() -> String {
     let async_compute = bevy::tasks::AsyncComputeTaskPool::try_get().map_or(0, |p| p.thread_num());
     let compute = bevy::tasks::ComputeTaskPool::try_get().map_or(0, |p| p.thread_num());
-    format!("{async_compute}/{compute}")
+    let offl = benilla_assets::frame_budget::offloads_in_flight();
+    format!("{async_compute}/{compute} offl={offl}")
 }
 
 fn signed(v: i64) -> String {

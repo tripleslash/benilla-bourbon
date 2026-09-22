@@ -33,11 +33,23 @@
 # ## --max-memory is a real decision, not a formality
 #
 # Shared memory must declare a maximum at link time, the engine reserves that much address space up
-# front, and it can never grow past it. 2 GiB is the starting point because the corpus does NOT live
-# in linear memory: `benilla_formats::webpack::resident` keeps all 3.3 GiB of decoded pack body on
-# the JS heap precisely so that wasm's 32-bit address space stays the renderer's. If a session ever
-# hits the ceiling the symptom is an allocation failure, not a slowdown — raise it here, and re-read
-# that module's header before concluding the ceiling is the problem.
+# front, and it can never grow past it. The corpus does NOT live in linear memory:
+# `benilla_formats::webpack::resident` keeps all 3.3 GiB of decoded pack body on the JS heap
+# precisely so that wasm's 32-bit address space stays the renderer's.
+#
+# **4 GiB — 65536 pages, the whole wasm32 address space — and it was 2 GiB until a session hit it.**
+# World entry and a fast run across the map aborted every async-compute worker at once with a bare
+# `RuntimeError: unreachable`; the frames under the trap were `rust_oom` ← `RawVec::handle_error` ←
+# `grow_amortized`, i.e. a `Vec` that could not grow because the arena was at its ceiling. The
+# out-of-memory abort never reaches a panic hook, which is why it arrives with no message
+# (`web/threads.js` now prints linear memory beside a worker failure for exactly this). The ceiling
+# was not the whole story — `benilla_assets::frame_budget::offload` had no bound on decodes in
+# flight, and now does — so a session near this limit again is a leak or a new burst, not a reason
+# to reach for a bigger number: there is none. Reserving it costs address space only, not memory.
+#
+# Past 2 GiB a pointer's top bit is set, so any JS that takes one as a signed `i32` sees it negative.
+# The wasm-bindgen glue already writes `ptr >>> 0` everywhere; the hand-written imports must too
+# (`web/wasi_stubs.js`), and Rust hands pointers to the page as `f64::from(u32)`, never as `i32`.
 #
 # ## The verification at the end is not optional
 #
@@ -57,7 +69,7 @@ export CARGO_UNSTABLE_BUILD_STD="std,panic_abort"
 export WASI_SDK="${WASI_SDK:-$PWD/tools/wasi-sdk}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/threads}"
 
-MAX_MEMORY="${BENILLA_MAX_MEMORY:-2147483648}"
+MAX_MEMORY="${BENILLA_MAX_MEMORY:-4294967296}"
 # `--shared-memory` and `--import-memory` are BOTH required and rustc supplies NEITHER. Measured on
 # the 2026-09-06 spike, which passed only `--max-memory`: the module came out `flags=0x01
 # shared=no` with a DEFINED memory, and both halves of that are fatal. An unshared memory is an

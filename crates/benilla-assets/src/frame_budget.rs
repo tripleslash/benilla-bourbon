@@ -244,7 +244,9 @@ where
         // which is the property the await did not have. A decode is not on this frame's critical
         // path — that is the premise of the whole module — so a frame of latency buys nothing
         // back and is not worth a cleverer wait.
-        let mut task = bevy::tasks::AsyncComputeTaskPool::get().spawn_pooled(async move { work() });
+        let pool = bevy::tasks::AsyncComputeTaskPool::get();
+        let _permit = in_flight::acquire(lane, pool.thread_num()).await;
+        let mut task = pool.spawn_pooled(async move { work() });
         loop {
             if let Some(done) =
                 bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(&mut task))
@@ -256,6 +258,90 @@ where
     }
     let _slot = slot_in(lane).await;
     work()
+}
+
+/// How many [`offload`]s may be handed to the pool at once, and the permit that counts one.
+///
+/// **Without a bound, a streaming burst aborted every worker in the tab.** `offload` used to spawn
+/// the moment a loader reached it, so world entry — or a fast run across the map — put several
+/// hundred decodes on the pool together. Every one of them lives in the one shared linear memory:
+/// its captured input while it waits, the full decoded output (a 1024² BLP is ~5.6 MB of RGBA with
+/// mips) once a worker has run it, and that output stays put until the page's next poll collects
+/// it. Eight workers producing faster than the page drained took the arena to its `--max-memory`
+/// ceiling, and the next `Vec` to grow on each worker hit `rust_oom` — a bare
+/// `RuntimeError: unreachable` per thread, no message (`web/threads.js` has why).
+///
+/// So a loader now waits for a permit before spawning. [`PER_WORKER`] per worker keeps every worker
+/// fed through the frame of latency a completion takes to be collected, and bounds the decoded
+/// output in flight to a few dozen assets instead of the whole backlog. The inputs of loaders
+/// waiting here still sit in memory — they were read before `offload` was called — but those are
+/// the compressed bytes, a fraction of what a decode turns them into.
+///
+/// **Geometry keeps a reserve.** Art may take at most `cap - workers` permits, so however deep the
+/// texture backlog, a tile, WMO or M2 decode — the collider under the player — always finds one of
+/// the last `workers` free. That is the lane guarantee of this module carried over to the pool,
+/// which as the `offload` doc says is otherwise FIFO.
+///
+/// A counter rather than a queue: every waiter re-checks on the next frame (the same tick the
+/// finished tasks are collected on, and what frees their permits), so there is no wake list to keep
+/// and nothing to leak if a loader is dropped mid-wait — the permit is a guard, and a dropped
+/// loader drops its `Task` and its permit together.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+mod in_flight {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::Lane;
+
+    /// Permits per pool worker. Two would do if a finished task were collected the instant it
+    /// finished; it is collected on the page's next frame, so a worker that finishes early in a
+    /// frame needs more queued behind it to stay busy until then.
+    pub const PER_WORKER: usize = 4;
+
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct Permit;
+
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Wait (a frame at a time) until `lane` may have a permit with `workers` pool threads.
+    pub async fn acquire(lane: Lane, workers: usize) -> Permit {
+        let workers = workers.max(1);
+        let cap = match lane {
+            Lane::Geometry => workers * PER_WORKER,
+            Lane::Art => workers * (PER_WORKER - 1),
+        };
+        loop {
+            // A CAS loop rather than `fetch_update`, which nightly — the threads build's toolchain —
+            // deprecates under a name stable does not have yet.
+            let mut n = IN_FLIGHT.load(Ordering::Acquire);
+            while n < cap {
+                match IN_FLIGHT.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire)
+                {
+                    Ok(_) => return Permit,
+                    Err(now) => n = now,
+                }
+            }
+            super::wasm::next_frame().await;
+        }
+    }
+
+    /// Permits held right now — what `benilla_app::webdiag` can print beside linear memory.
+    pub fn held() -> usize {
+        IN_FLIGHT.load(Ordering::Relaxed)
+    }
+}
+
+/// Offloaded decodes handed to the pool and not yet collected by the page. Zero on every build
+/// that does not offload.
+pub fn offloads_in_flight() -> usize {
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    return in_flight::held();
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+    return 0;
 }
 
 /// Resets the budget once per frame, in [`First`] — before any system that could raise it for a
