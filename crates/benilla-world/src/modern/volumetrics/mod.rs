@@ -40,7 +40,7 @@ mod node;
 pub(crate) use node::FroxelLabel;
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 14 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 18 * 16;
 /// The cloud-shadow grid's cells per side.
 pub const CLOUD_CELLS: usize = 32;
 /// Everything this module writes behind the cascades in the modern storage block.
@@ -144,6 +144,10 @@ pub struct FroxelFog {
     pub proj: Vec4,
     pub screen: Vec4,
     pub wind: Vec4,
+    pub room: Vec4,
+    pub room_media: Vec4,
+    pub room_ambient: Vec4,
+    pub room_sun: Vec4,
 }
 
 impl FroxelFog {
@@ -166,6 +170,10 @@ impl FroxelFog {
             self.proj,
             self.screen,
             self.wind,
+            self.room,
+            self.room_media,
+            self.room_ambient,
+            self.room_sun,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -357,6 +365,7 @@ fn update_volume(
     time: Res<Time>,
     underwater: Option<Res<crate::liquid::Underwater>>,
     crossfade: Option<Res<crate::lighting::WmoCrossfade>>,
+    room_extent: Option<Res<crate::wmo_portal::CameraRoomExtent>>,
     clouds: Option<Res<crate::clouds::CloudCoverage>>,
     debug: Option<Res<crate::dev_state::DebugState>>,
     wdl: Option<Res<crate::wdl::WdlStreamer>>,
@@ -387,20 +396,24 @@ fn update_volume(
     let forward = camera.forward().as_vec3();
     let to_light = (-l.sun_dir).normalize_or(Vec3::Y);
 
-    // The interior fog triple equals the scene's while the camera is outside, and crossfades to the
-    // room's MFOG inside — the medium follows it.
-    let media = media::solve(&media::MediaInputs {
-        fog_color: l.wmo_fog_color,
-        fog_start: l.wmo_fog_start,
-        fog_end: l.wmo_fog_end,
+    // **The open air and the room, solved apart.** The scene's fog is the air outside; the
+    // building's MFOG is the air in the room the camera stands in, and `room_w` (the classic 4 s
+    // crossfade) says how much of one the camera is breathing. They stay apart all the way to the
+    // shader because a room's medium reaches only as far as the room does ([`CameraRoomExtent`]):
+    // one blended medium is what wrapped the city seen from Orgrimmar's gate hall in 292 yd of the
+    // building's teal.
+    let shared = |fog_color: [f32; 3], fog_start: f32, fog_end: f32, interior: f32| media::MediaInputs {
+        fog_color,
+        fog_start,
+        fog_end,
         zone_fog_end: l.zone_fog_end,
         // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
         ambient: super::night_floor(l.ambient, l.sidn_night),
         // The key's horizon fade (a set moon scatters nothing into the haze).
         diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
         storm: l.storm_bcc,
-        underwater: underwater.is_some_and(|u| u.0.any()),
-        interior: crossfade.map_or(0.0, |c| c.t()),
+        underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
+        interior,
         haze: look.0.haze,
         forward: look.0.forward,
         key_scatter: look.0.key_scatter,
@@ -408,7 +421,14 @@ fn update_volume(
         fog_tint: look.0.fog_tint,
         fog_falloff: look.0.fog_falloff,
         fog_clear: look.0.fog_clear,
-    });
+    };
+    let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
+    let room_w = crossfade.map_or(0.0, |c| c.t());
+    // The room's sphere (`None` = the camera is not in one): its medium is solved whole, and the
+    // weight alone rides the crossfade.
+    let room = room_extent.and_then(|r| r.0).filter(|(_, radius)| *radius > 0.0);
+    let room_media = (room_w > 1e-3)
+        .then(|| media::solve(&shared(l.wmo_fog_color, l.wmo_fog_start, l.wmo_fog_end, 1.0)));
 
     // The height falloff's reference is the regional ground — the coarse WDL heights around the
     // camera, never above the camera itself — eased over ~2 s, so the fog lies in the valleys and a
@@ -504,6 +524,26 @@ fn update_volume(
         ),
         screen: Vec4::new(light_uv.x, light_uv.y, on_screen, tier.point_lights as f32),
         wind: wind.extend(shaft_key.z),
+        // The room the camera stands in, and its own medium — `room.w` 0 (no room, or none solved)
+        // switches the whole lane off in the shader.
+        room: match (room, &room_media) {
+            (Some((centre, radius)), Some(_)) => centre.extend(radius),
+            _ => Vec4::ZERO,
+        },
+        room_media: Vec4::new(
+            room_media.map_or(0.0, |m| m.density),
+            room_w,
+            0.0,
+            0.0,
+        ),
+        room_ambient: room_media
+            .map(|m| Vec3::from(m.ambient_in) * Vec3::from(look.0.haze_tint))
+            .unwrap_or_default()
+            .extend(0.0),
+        room_sun: room_media
+            .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.glow))
+            .unwrap_or_default()
+            .extend(0.0),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -610,7 +650,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 416);
+        assert_eq!(FOG_BYTES, 480);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!((crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16, 0);
         // The mode lane the render world patches is `alloc.w`.

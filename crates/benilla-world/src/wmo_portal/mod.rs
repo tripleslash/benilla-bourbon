@@ -39,7 +39,7 @@ mod room_vis;
 mod seed;
 
 use fog::select_wmo_fog;
-pub use fog::{CameraWmoFog, WmoFogTarget};
+pub use fog::{CameraRoomExtent, CameraWmoFog, WmoFogTarget};
 pub use interior::{
     indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, LightAttach,
     INTERIOR_PROBE_HEIGHT,
@@ -398,6 +398,7 @@ impl Plugin for WmoPortalPlugin {
         .init_resource::<PlayerWmoRoom>()
         .init_resource::<CurrentAreaInterior>()
         .init_resource::<CameraWmoFog>()
+        .init_resource::<CameraRoomExtent>()
         .init_resource::<CameraInteriorClaim>()
         .init_resource::<ExteriorWindows>()
         .init_resource::<WmoCullProbe>()
@@ -434,6 +435,7 @@ fn compute_wmo_pvs(
     adt_tiles: Res<Assets<AdtTile>>,
     mut probe: ResMut<WmoCullProbe>,
     mut camera_fog: ResMut<CameraWmoFog>,
+    mut camera_room: ResMut<CameraRoomExtent>,
     mut camera_claim: ResMut<CameraInteriorClaim>,
     mut camera_windows: ResMut<ExteriorWindows>,
 ) {
@@ -471,6 +473,9 @@ fn compute_wmo_pvs(
     // flood runs anyway (see [`fog`]); the first placement whose seed claims a TRUE INTERIOR
     // group wins both.
     let mut fog_target: Option<WmoFogTarget> = None;
+    // fork: modern lighting — the claiming room's world sphere, beside its fog (see
+    // [`CameraRoomExtent`]).
+    let mut room_extent: Option<(Vec3, f32)> = None;
     let mut claim: Option<InteriorClaim> = None;
     // `None` here = the driver's outside leg (no containing map object): one full-screen walk.
     let mut windows: Option<Vec<Rect>> = None;
@@ -600,6 +605,17 @@ fn compute_wmo_pvs(
                                 .filter(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
                         })
                         .and_then(|n| select_wmo_fog(&model.fogs, n.fog_indices, eye_local));
+                    // fork: modern lighting — how far the room's own air reaches, for the
+                    // medium ([`CameraRoomExtent`]): the camera group's MOGI box as a world
+                    // sphere. A placement is a rotation and a translation, so the box's
+                    // half-diagonal is its radius unchanged.
+                    room_extent = model.group_nav.get(gi).map(|n| {
+                        let box_local = group_aabb(n);
+                        (
+                            world_from_local.transform_point3(Vec3::from(box_local.center)),
+                            Vec3::from(box_local.half_extents).length(),
+                        )
+                    });
                     claim = Some(InteriorClaim {
                         room: WmoRoom {
                             instance: entity,
@@ -654,6 +670,9 @@ fn compute_wmo_pvs(
     }
     if camera_fog.0 != fog_target {
         camera_fog.0 = fog_target;
+    }
+    if camera_room.0 != room_extent {
+        camera_room.0 = room_extent;
     }
     if camera_claim.0 != claim {
         camera_claim.0 = claim;

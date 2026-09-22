@@ -121,7 +121,12 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
     let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
     let density = froxelfog::height_density(f, p.y);
-    let sigma_fog = f.media.x * froxelfog::fog_clear(f, d) * wisps * density;
+    // fork: modern lighting — a room's medium reaches as far as the room does (`froxelfog::room`):
+    // inside its walls the froxel breathes the building's MFOG (uniform, no near-clear range), and
+    // past them the zone's own air, so a doorway's view is fogged by what is on the far side of it.
+    let room = froxelfog::room_weight(f, p);
+    let open_fog = f.media.x * froxelfog::fog_clear(f, d) * density;
+    let sigma_fog = mix(open_fog, f.room_media.x, room) * wisps;
     // Under a canopy the air is thick with dust and damp: the haze gets denser and scatters the key
     // much harder there, so the light through a gap in the leaves reads as a beam. The cover is the
     // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
@@ -167,7 +172,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let phase = froxelfog::dual_phase(f, mu);
-    let lum_fog = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
+    let lum_fog = mix(
+        f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis),
+        f.room_ambient.rgb * sky_term + f.room_sun.rgb * (phase * sun_vis),
+        room,
+    );
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
     var points = vec3<f32>(0.0);

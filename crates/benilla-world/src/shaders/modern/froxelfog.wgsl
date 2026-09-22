@@ -47,6 +47,48 @@ struct FroxelFog {
     screen: vec4<f32>,
     // xyz = noise scroll (yd); w = shaft key radiance (b).
     wind: vec4<f32>,
+    // fork: modern lighting — THE ROOM THE CAMERA STANDS IN. xyz = the centre of its MOGI box in
+    // world space, w = its radius (yd); w = 0 means the camera is in no room and the whole lane is
+    // off. A room's MFOG is a room-scale wall (`volumetrics::media` spends WALL_TAU over the
+    // record's own end, uniformly and with no near-clear range), and a room's air ends at its
+    // walls: blended into one medium it followed the view out of the doorway, and Orgrimmar's gate
+    // hall — a 30 yd tunnel carrying a 292 yd record — wrapped the city in the building's teal.
+    room: vec4<f32>,
+    // x = the room medium's extinction (1/yd, uniform); y = its weight (the classic 4 s interior
+    // crossfade); zw unused.
+    room_media: vec4<f32>,
+    // rgb = the room's ambient in-scatter radiance; w unused.
+    room_ambient: vec4<f32>,
+    // rgb = the room's key-light in-scatter radiance; w unused.
+    room_sun: vec4<f32>,
+}
+
+// Yards over which the room's medium fades out at its own bound, so a doorway is a soft edge in the
+// air rather than a sphere the eye can find.
+const ROOM_EDGE: f32 = 8.0;
+
+// How much of the air at world point `p` is the room's own (0 = the open air's, 1 = all the room's).
+fn room_weight(f: FroxelFog, p: vec3<f32>) -> f32 {
+    if (f.room.w <= 0.0) {
+        return 0.0;
+    }
+    let edge = max(f.room.w - ROOM_EDGE, 0.0);
+    return f.room_media.y * (1.0 - smoothstep(edge, f.room.w, distance(p, f.room.xyz)));
+}
+
+// How far along `dir` the camera's own room reaches (yd, 0 = no room, or the camera is outside it):
+// the far root of the ray against the room's sphere.
+fn room_reach(f: FroxelFog, dir: vec3<f32>) -> f32 {
+    if (f.room.w <= 0.0) {
+        return 0.0;
+    }
+    let oc = f.camera.xyz - f.room.xyz;
+    let b = dot(oc, dir);
+    let disc = b * b - (dot(oc, oc) - f.room.w * f.room.w);
+    if (disc <= 0.0) {
+        return 0.0;
+    }
+    return max(sqrt(disc) - b, 0.0);
 }
 
 const MODE_ANALYTIC: f32 = 1.0;
@@ -152,12 +194,25 @@ fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32)
     // Planar depth grows linearly along the ray, so the fog start is a fixed fraction of it.
     let d = max(view_depth(f, p), 1e-3);
     let t_fog = max(t, clamp(0.9 * f.media.w / d, 0.0, 1.0));
-    let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y);
+    let dir = ray / len;
+    let phase = dual_phase(f, dot(dir, f.sun_dir.xyz));
+    // The room's share of THIS ray: the air the camera is breathing, as far as the room's walls.
+    // Beyond them the open air takes over, which is why the two are integrated one after the other
+    // instead of mixed — the fog over a city seen from a doorway is the city's, not the doorway's.
+    let room_len = clamp(room_reach(f, dir), 0.0, len) * (1.0 - t);
+    let room_w = f.room_media.y * select(0.0, 1.0, f.room.w > 0.0);
+    let room_tau = f.room_media.x * room_len * room_w;
+    let room_tr = exp(-room_tau);
+    let room_lum = f.room_ambient.rgb + f.room_sun.rgb * (phase * key_share);
+    // The open air keeps the ray the room did not take.
+    let open_share = max(1.0 - (room_len / len) * room_w, 0.0);
+    let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y) * open_share;
     let haze_tau = f.medium.x * len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
     let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
     let tr = exp(-(fog_tau + haze_tau + far_tau));
-    let lum = f.ambient.rgb + f.sun.rgb * (dual_phase(f, dot(ray / len, f.sun_dir.xyz)) * key_share);
-    return vec4<f32>(lum * (1.0 - tr), tr);
+    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share);
+    // Front to back: the room, then everything past it.
+    return vec4<f32>(room_lum * (1.0 - room_tr) + room_tr * lum * (1.0 - tr), room_tr * tr);
 }
 
 // Where a world point falls in the froxel grid: xy = screen uv, z = slice coordinate, w = 1 when inside

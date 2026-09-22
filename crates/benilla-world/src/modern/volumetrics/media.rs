@@ -101,7 +101,12 @@ pub struct Media {
 
 pub fn solve(i: &MediaInputs) -> Media {
     let decode = |c: [f32; 3]| c.map(crate::modern::srgb_to_linear);
-    let fog = decode([0, 1, 2].map(|c| i.fog_color[c] * i.fog_tint[c]));
+    // The zone's fog tint is calibrated on the zone's own `Light.dbc` fog, so it fades out with the
+    // room's: Durotar's (green x2.6, the amber its grey fog wants) on Orgrimmar's teal MFOG record
+    // was most of what made the gate hall green.
+    let fog = decode([0, 1, 2].map(|c| {
+        i.fog_color[c] * (1.0 + (i.fog_tint[c] - 1.0) * (1.0 - i.interior.clamp(0.0, 1.0)))
+    }));
     let ambient = decode(i.ambient);
     let key = decode(i.diffuse);
     let storm = i.storm.clamp(0.0, 1.0);
@@ -327,5 +332,31 @@ mod tests {
         let m = solve(&i);
         assert_eq!(m.inv_height, 0.0);
         assert!((m.density - WALL_TAU / (350.0 - 87.5)).abs() < 1e-5);
+    }
+
+    /// The zone's fog tint belongs to the zone's own `Light.dbc` fog, not to a building's authored
+    /// MFOG: Orgrimmar's gate hall wore Durotar's tint (green x2.6, which its grey fog wants as
+    /// amber) over the WMO's teal record, and the hall went green. The tint fades out with the
+    /// room's fog and is untouched in the open air.
+    #[test]
+    fn a_rooms_own_fog_does_not_take_the_zones_tint() {
+        let tint = [1.7, 2.6, 1.8];
+        let teal = [15.0 / 255.0, 52.0 / 255.0, 53.0 / 255.0];
+        let colour = |interior: f32| {
+            let mut i = elwynn_noon();
+            i.fog_color = teal;
+            i.fog_tint = tint;
+            i.interior = interior;
+            let m = solve(&i);
+            [0, 1, 2].map(|c| m.ambient_in[c] + m.key_in[c] * REFERENCE_PHASE)
+        };
+        let room = colour(1.0);
+        let target = teal.map(crate::modern::srgb_to_linear);
+        for c in 0..3 {
+            assert!((room[c] - target[c]).abs() < 1e-4, "channel {c}: {} vs {}", room[c], target[c]);
+        }
+        // In the open the tint still does its work — the green lift is the whole point of the row.
+        let open = colour(0.0);
+        assert!(open[1] > room[1] * 2.0, "open {:?} vs room {:?}", open, room);
     }
 }

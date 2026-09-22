@@ -217,8 +217,32 @@ pub const GROUND_ALBEDO: Vec3 = Vec3::new(0.40, 0.37, 0.31);
 pub const SKY_GRADIENT: f32 = 0.3;
 /// A probe most of whose rays leave surfaces by their back sits inside geometry.
 const BACKFACE_LIMIT: f32 = 0.35;
-/// Steady-frame history weight (the plan's 0.9); a large change eases faster (`gi_blend.wgsl`).
-const HISTORY: f32 = 0.9;
+/// **How long a steady probe takes to settle** (seconds, one time constant) — the ease `gi_blend`
+/// applies on a quiet frame, expressed as a TIME rather than a per-update weight (a large change
+/// still eases faster, and a reseed replaces outright).
+///
+/// A probe's update is a few dozen rays under a rotation that turns every frame, so its estimate is
+/// noisy by construction and the ease is what averages that noise away. The weight has to be read
+/// against the tier's update PERIOD to mean anything: at a flat 0.9, Cinematic's probes (period 4)
+/// settled in 40 frames and Medium's (period 12) in 120, and what the eye got either way was the
+/// residue — a few percent of the noise, live, on every surface. Parked in Orgrimmar's gate hall the
+/// distant city measured 0.81% of pixels moving frame to frame with `benilla-visual flicker`, in
+/// runs the hotspot verdict called ONE SURFACE, re-lit; at this time constant it is 0.16%, against
+/// a GI-off floor of 0.07% (the residue there is the torch flames, which are supposed to move).
+///
+/// It is long on purpose, and it is only the QUIET path: a probe whose estimate really moves still
+/// eases in a few updates (`gi_blend`'s change term), a scrolled or cold one is replaced outright,
+/// and a teleport cuts the whole field. What settles slowly is the last few percent of the noise,
+/// which is exactly what was glimmering.
+const SETTLE_SECS: f32 = 2.2;
+
+/// The steady-frame history weight for a tier updating every `period` frames at `dt`: the ease that
+/// settles in [`SETTLE_SECS`] whatever the tier and the frame rate. Clamped so a stalled frame (a
+/// streaming hitch, a breakpoint) cannot throw the whole field away.
+fn history_weight(dt: f32, period: u32) -> f32 {
+    let update = (dt * period.max(1) as f32).clamp(1e-3, SETTLE_SECS);
+    (-update / SETTLE_SECS).exp().clamp(0.0, 0.99)
+}
 /// Sampling bias along the receiver's normal, in probe spacings.
 const NORMAL_BIAS: f32 = 0.35;
 
@@ -257,6 +281,8 @@ pub struct ModernGi {
     pub open_mean: f32,
     /// This frame's ray rotation.
     pub rot: Mat3,
+    /// This frame's steady-probe history weight ([`history_weight`]).
+    pub history: f32,
     /// P6: the claiming building's `MOHD.ambColor`, decoded, scaled into the shared light's units —
     /// what an interior probe's escaped rays see instead of the sky.
     pub interior_ambient: Vec3,
@@ -272,6 +298,7 @@ impl Default for ModernGi {
             frame: 0,
             cut: true,
             gain: 1.0,
+            history: 0.9,
             open_mean: 0.0,
             rot: Mat3::IDENTITY,
             interior_ambient: Vec3::ZERO,
@@ -493,6 +520,7 @@ fn update_gi(
         gain: gi_gain(),
         open_mean,
         rot,
+        history: history_weight(time.delta_secs(), tier.period),
         interior_ambient,
     };
 }
@@ -544,7 +572,7 @@ pub fn trace_bytes(gi: &ModernGi, params: &GiParams, clip: &GiClip) -> Vec<u8> {
     clip.std430(&mut out);
     let mut row = |v: Vec4| out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
     row(gi.camera.extend(if gi.cut { 1.0 } else { 0.0 }));
-    row(gi.forward.extend(HISTORY));
+    row(gi.forward.extend(gi.history));
     row(gi.rot.row(0).extend(0.0));
     row(gi.rot.row(1).extend(0.0));
     row(gi.rot.row(2).extend(0.0));

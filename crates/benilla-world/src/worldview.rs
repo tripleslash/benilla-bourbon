@@ -397,32 +397,55 @@ fn cycle_lighting_tier(
     info!("worldview: lighting tier -> {next:?}");
 }
 
-/// The one-shot frame writer behind `WOW_WORLDVIEW_SHOT` — fires once, then gives the screenshot
-/// observer a couple of seconds to reach the disk before exiting (the write is asynchronous; an
-/// immediate exit is how a "clean run" ends with no PNG, decision 0743).
+/// The frame writer behind `WOW_WORLDVIEW_SHOT` — fires, then gives the screenshot observer a
+/// couple of seconds to reach the disk before exiting (the write is asynchronous; an immediate exit
+/// is how a "clean run" ends with no PNG, decision 0743).
+///
+/// **`WOW_WORLDVIEW_SHOT_COUNT=<n>` makes it a burst** — `n` frames written as `<stem>-000.png`,
+/// `<stem>-001.png`, … , spaced by `WOW_WORLDVIEW_SHOT_EVERY` seconds (**default 0 = one per
+/// frame**, i.e. adjacent frames). One shot still writes the bare path, so every existing
+/// invocation is unchanged. This is the client burst's twin (`capture::live_shot`,
+/// `WOW_LIVE_SHOT_COUNT`) for the engine binary, and it exists for the same reason: **a flicker is
+/// a temporal artefact and a single frame cannot show one** (decision 0653). The viewer parks its
+/// own camera, so a burst from it is already the still subject the arithmetic wants —
+/// `benilla-visual flicker <dir>` collapses it to the envelope of what would not hold still, and
+/// the lit pixels are the defect.
 fn shoot_and_exit(
     time: Res<Time>,
     mut commands: Commands,
-    mut fired_at: Local<Option<f32>>,
+    mut shots: Local<(u32, Option<f32>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let at = std::env::var("WOW_WORLDVIEW_SHOT_AT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20.0);
-    match *fired_at {
-        None if time.elapsed_secs() >= at => {
-            let path = std::env::var("WOW_WORLDVIEW_SHOT").unwrap_or_default();
-            info!("worldview: writing {path}");
-            commands
-                .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
-                .observe(bevy::render::view::screenshot::save_to_disk(path));
-            *fired_at = Some(time.elapsed_secs());
-        }
-        Some(t) if time.elapsed_secs() >= t + 2.0 => {
-            exit.write(AppExit::Success);
-        }
-        _ => {}
+    let knob = |k: &str, d: f32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let at = knob("WOW_WORLDVIEW_SHOT_AT", 20.0);
+    let every = knob("WOW_WORLDVIEW_SHOT_EVERY", 0.0);
+    let count = knob("WOW_WORLDVIEW_SHOT_COUNT", 1.0).max(1.0) as u32;
+    let now = time.elapsed_secs();
+    let (taken, last) = *shots;
+    // Every frame of the burst is written the same way; only the name changes with `count`.
+    if taken < count && last.is_none_or(|t| now >= t + every) && now >= at {
+        let stem = std::env::var("WOW_WORLDVIEW_SHOT").unwrap_or_default();
+        let path = if count > 1 {
+            let (base, ext) = stem.rsplit_once('.').unwrap_or((stem.as_str(), "png"));
+            format!("{base}-{taken:03}.{ext}")
+        } else {
+            stem
+        };
+        info!("worldview: writing {path}");
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(path));
+        *shots = (taken + 1, Some(now));
+        return;
+    }
+    // The observer writes asynchronously, so the last shot gets the same grace the single one had.
+    if taken >= count && last.is_some_and(|t| now >= t + 2.0) {
+        exit.write(AppExit::Success);
     }
 }
 
