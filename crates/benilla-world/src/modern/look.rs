@@ -60,18 +60,55 @@ pub struct ZoneLook {
     pub saturation: f32,
     pub vignette: f32,
     pub toe: f32,
+    /// A multiplier on the key light's colour, per channel — for a zone whose authored sun is a hue
+    /// the reference grade does not carry (Durotar's noon sun is a deep orange where the reference
+    /// shot's is near white).
+    pub key_tint: [f32; 3],
 }
 
 impl ZoneLook {
-    /// Every zone without a row: the P3 balance, a light haze.
+    /// Every zone without a row: the WoW Forever calibration, a light haze.
     pub const NEUTRAL: Self = Self {
+        // The Forever calibration is the default everywhere — fitted region by region (dry sand, the
+        // shallows, mid-river, the sky) against the WoW Forever shot of the Southfury orc bridge at
+        // noon (`worldview_pose=477,-3804,26,158,-5`, `clock=720`). A clean cyan sky (`sky_tint` cuts
+        // the authored stops' red), a pale haze toward the horizon (`fog_tint` lifts the authored
+        // fog colour off its mauve), a near-white sun on muted ground (`key_tint` whitens the
+        // authored key; the lower key and exposure keep the ground under the sky as Forever does),
+        // a light shaft haze that lifts the middle distance, and a soft grade. The scene stays crisp
+        // out to 450 yd, with the dense ground fog beyond. Zone rows override the colour.
+        //
+        // It replaces the earlier default, fitted to a dusk Durotar gate shot, whose amber — a green
+        // fog tint, a sky with its blue cut, a hard grade — read lime and harsh at midday.
+        key: 0.72,
+        fill: 0.9,
+        exposure: 0.56,
+        haze: 0.0008,
+        forward: 0.7,
+        key_scatter: 0.6,
+        glow: [1.0, 1.0, 1.0],
+        haze_tint: [1.0, 1.0, 1.0],
+        fog_reach: 0.5,
+        fog_tint: [1.9, 2.5, 2.25],
+        fog_falloff: 70.0,
+        sky_tint: [0.62, 1.0, 1.25],
+        silhouette: 0.55,
+        fog_clear: 450.0,
+        shafts: 0.3,
+        contrast: 1.1,
+        saturation: 0.95,
+        vignette: 0.15,
+        toe: 1.0,
+        key_tint: [0.95, 1.03, 1.2],
+    };
+
+    /// The default before the Forever calibration — what the rows fitted to their own reference
+    /// shots (Teldrassil, Ashenvale, Darkshore, Mulgore, …) were tuned on, and still build on, so
+    /// moving the default did not re-tint zones that were already calibrated: a row's unset fields
+    /// are part of its calibration.
+    pub const PRE_FOREVER: Self = Self {
         key: 1.0,
         fill: 1.0,
-        // The Durotar calibration (the modern client's gate shot) is the default everywhere: a crisp
-        // scene out to 450 yd, a dense ground fog that hugs the terrain (so distant ranges stand as
-        // silhouette layers over bright haze at their feet), and a cinematic grade (eased off the gate
-        // shot's darker one for everyday play). Zone rows
-        // override the colour.
         exposure: 1.1,
         haze: 0.0002,
         forward: 0.7,
@@ -89,6 +126,7 @@ impl ZoneLook {
         saturation: 0.86,
         vignette: 0.3,
         toe: 1.03,
+        key_tint: [1.0, 1.0, 1.0],
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -113,6 +151,7 @@ impl ZoneLook {
             saturation: m(self.saturation, to.saturation),
             vignette: m(self.vignette, to.vignette),
             toe: m(self.toe, to.toe),
+            key_tint: [0, 1, 2].map(|i| m(self.key_tint[i], to.key_tint[i])),
         }
     }
 
@@ -138,6 +177,7 @@ impl ZoneLook {
                     && d(self.haze_tint[i], other.haze_tint[i])
                     && d(self.fog_tint[i], other.fog_tint[i])
                     && d(self.sky_tint[i], other.sky_tint[i])
+                    && d(self.key_tint[i], other.key_tint[i])
             })
     }
 }
@@ -145,12 +185,12 @@ impl ZoneLook {
 /// The look table, by `AreaTable.dbc` zone id.
 const ZONES: &[(u32, ZoneLook)] = &[
     // Teldrassil: dense purple canopy haze, a strong forward glow through the openings.
-    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.08, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::NEUTRAL }),
+    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.08, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::PRE_FOREVER }),
     // Darnassus: Teldrassil's light, a little clearer. Its plazas are open sky, so the canopy boost the
     // forest's beams ride on does not reach them: the shaft gain carries the city's own.
-    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, shafts: 0.6, ..ZoneLook::NEUTRAL }),
+    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, shafts: 0.6, ..ZoneLook::PRE_FOREVER }),
     // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
-    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, shafts: 1.5, ..ZoneLook::NEUTRAL }),
+    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, shafts: 1.5, ..ZoneLook::PRE_FOREVER }),
     // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.
     (148, ZoneLook {
         key: 1.05,
@@ -161,21 +201,14 @@ const ZONES: &[(u32, ZoneLook)] = &[
         key_scatter: 0.95,
         glow: [1.0, 0.56, 0.42],
         haze_tint: [0.92, 0.74, 0.74],
-        ..ZoneLook::NEUTRAL
+        ..ZoneLook::PRE_FOREVER
     }),
-    // Durotar: the calibration zone for the defaults above (the gate shot, `worldview_pose=930,-4440,85,
-    // -5,9` at 17:30); its amber colour and darker grade are its own.
-    (14, ZoneLook {
-        fog_tint: [1.7, 2.6, 1.8],
-        sky_tint: [1.05, 1.15, 0.8],
-        // The gate shot's own darker grade (the defaults ease it for everyday play).
-        exposure: 0.95,
-        contrast: 1.2,
-        saturation: 0.82,
-        vignette: 0.4,
-        toe: 1.2,
-        ..ZoneLook::NEUTRAL
-    }),
+    // Durotar: the calibration zone for the defaults above (the Forever Southfury bridge shot), so
+    // its row IS the default — kept as a row so the zone's own tuning has a home.
+    (14, ZoneLook::NEUTRAL),
+    // The Barrens: the far bank of the same shot, and the Ratchet docks in Forever's coastal shot —
+    // the default look, as a row of its own for the same reason.
+    (17, ZoneLook::NEUTRAL),
     // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the
     // bluffs crisp out to their far rises (checked against the modern client's Thunder Bluff sunset,
     // `worldview_pose=-1635,75,198,13,-3`, 19:00).
@@ -193,27 +226,20 @@ const ZONES: &[(u32, ZoneLook)] = &[
         silhouette: 0.75,
         fog_clear: 400.0,
         shafts: 0.3,
-        ..ZoneLook::NEUTRAL
+        ..ZoneLook::PRE_FOREVER
     }),
     // Elwynn Forest: treeline shafts at dusk.
-    (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0024, forward: 0.72, key_scatter: 0.7, ..ZoneLook::NEUTRAL }),
+    (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0024, forward: 0.72, key_scatter: 0.7, ..ZoneLook::PRE_FOREVER }),
     // Duskwood: gloom — a weak key, a darker exposure.
-    (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0030, forward: 0.6, key_scatter: 0.45, ..ZoneLook::NEUTRAL }),
+    (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0030, forward: 0.6, key_scatter: 0.45, ..ZoneLook::PRE_FOREVER }),
     // Felwood: a sickly canopy.
-    (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0036, forward: 0.65, key_scatter: 0.6, ..ZoneLook::NEUTRAL }),
+    (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0036, forward: 0.65, key_scatter: 0.6, ..ZoneLook::PRE_FOREVER }),
     // Stormwind City: a light street haze, enough for the sun to fall between the rooftops as beams —
     // a city has no canopy boost, so the shaft gain stands in for it (the streets are open sky).
-    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0018, forward: 0.7, key_scatter: 0.6, shafts: 0.6, ..ZoneLook::NEUTRAL }),
+    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0018, forward: 0.7, key_scatter: 0.6, shafts: 0.6, ..ZoneLook::PRE_FOREVER }),
     // Orgrimmar: Durotar's colour and grade, with the dusty canyon haze the plains around it do not
     // need — the canyon walls and the spiked roofs are what cut the beams.
     (1637, ZoneLook {
-        fog_tint: [1.7, 2.6, 1.8],
-        sky_tint: [1.05, 1.15, 0.8],
-        exposure: 0.95,
-        contrast: 1.2,
-        saturation: 0.82,
-        vignette: 0.4,
-        toe: 1.2,
         haze: 0.0018,
         glow: [1.25, 0.95, 0.75],
         key_scatter: 0.7,
@@ -222,7 +248,7 @@ const ZONES: &[(u32, ZoneLook)] = &[
     }),
     // Ironforge: an interior city, so its haze stays thin.
 
-    (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0009, forward: 0.6, key_scatter: 0.4, ..ZoneLook::NEUTRAL }),
+    (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0009, forward: 0.6, key_scatter: 0.4, ..ZoneLook::PRE_FOREVER }),
 ];
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
@@ -252,6 +278,7 @@ static FILL: AtomicU32 = AtomicU32::new(ONE_BITS);
 static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SKY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
+static KEY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SILHOUETTE: AtomicU32 = AtomicU32::new(0x3f33_3333); // 0.7
 static GRADE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
@@ -273,6 +300,12 @@ pub fn fog_tint() -> [f32; 3] {
 /// The zone look's gamma multiplier on the sky dome's stops (1 in classic).
 pub fn sky_tint() -> [f32; 3] {
     [0, 1, 2].map(|i| f32::from_bits(SKY_TINT[i].load(Ordering::Relaxed)))
+}
+
+/// The zone look's per-channel multiplier on the key light's colour (the shared light's diffuse
+/// row; 1 in classic, where the row is never tinted).
+pub fn key_tint() -> [f32; 3] {
+    [0, 1, 2].map(|i| f32::from_bits(KEY_TINT[i].load(Ordering::Relaxed)))
 }
 
 /// The key and fill gains for the shared light's rows (1, 1 in a classic session).
@@ -300,6 +333,7 @@ fn publish(look: ZoneLook) {
     for i in 0..3 {
         FOG_TINT[i].store(look.fog_tint[i].to_bits(), Ordering::Relaxed);
         SKY_TINT[i].store(look.sky_tint[i].to_bits(), Ordering::Relaxed);
+        KEY_TINT[i].store(look.key_tint[i].to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -337,7 +371,8 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
-/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe`. An empty or unparsable entry keeps the zone's value.
+/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
+/// key_tint r,g,b`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -372,6 +407,9 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.saturation, 24);
     set(&mut look.vignette, 25);
     set(&mut look.toe, 26);
+    for c in 0..3 {
+        set(&mut look.key_tint[c], 27 + c);
+    }
     look
 }
 

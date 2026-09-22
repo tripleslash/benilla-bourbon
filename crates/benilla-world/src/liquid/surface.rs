@@ -761,6 +761,7 @@ pub(super) fn setup_liquid(
                     magma_scales: cata_magma_scales(kind),
                     magma_params: cata_magma_params(kind),
                     magma_color: cata_magma_color(kind),
+                    optics: cata_optics(kind),
                     light_buf: world_assets.shared_light.clone(),
                     modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
                     modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
@@ -839,6 +840,23 @@ fn cata_magma_color(kind: LiquidKind) -> Vec4 {
     match kind {
         LiquidKind::Slime => Vec4::new(0.04, 0.09, 0.03, 1.0),
         _ => Vec4::new(0.10, 0.028, 0.012, 1.0),
+    }
+}
+
+/// fork: modern lighting — the water's optics on the modern lane: absorption per yard of water
+/// crossed (r, g, b); `w` is reserved.
+///
+/// Red goes first, which cools a sandy bed as the water deepens and leaves the channel the zone's
+/// deep colour. The values are read off the reference shots rather than off a textbook: a river bank
+/// there keeps ~0.94 of its red under the first yard of water, and the bed still shows mid-channel,
+/// so a river is clear — most of the blue in open water is the sky, through the Fresnel term. Magma
+/// and slime are opaque and never reach the modern water lane.
+fn cata_optics(kind: LiquidKind) -> Vec4 {
+    match kind {
+        LiquidKind::Ocean => Vec4::new(0.08, 0.04, 0.032, 0.0),
+        LiquidKind::Rapids => Vec4::new(0.09, 0.045, 0.036, 0.0),
+        LiquidKind::Magma | LiquidKind::Slime => Vec4::ZERO,
+        _ => Vec4::new(0.07, 0.035, 0.03, 0.0),
     }
 }
 

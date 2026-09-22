@@ -779,6 +779,10 @@ pub struct LiquidCataExt {
     /// reads zero. The cold crust under the layers, not a tint over them.
     #[uniform(102)]
     pub magma_color: Vec4,
+    /// fork: modern lighting — the water's optics on the modern lane: `xyz` = absorption per yard of
+    /// water crossed (r, g, b), `w` reserved. The classic lanes never read it.
+    #[uniform(102)]
+    pub optics: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its

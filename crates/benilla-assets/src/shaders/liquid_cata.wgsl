@@ -141,6 +141,9 @@ struct LiquidParams {
     magma_params: vec4<f32>,
     // ProcMagma: the base colour under every layer (the reference's c17.rgb).
     magma_color: vec4<f32>,
+    // fork: modern lighting — xyz = absorption per yard of water (r, g, b) (`modern_water`);
+    // w = reserved.
+    optics: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -542,6 +545,65 @@ fn magma(in: VsOut) -> vec4<f32> {
     return vec4<f32>(apply_fog(rgb, in.world_position.xyz), 1.0);
 }
 
+// fork: modern lighting — the waterline: the water (yd along the view ray) the reflection takes to
+// come in, so a surface meets its bank as the bed seen through nothing rather than as a drawn edge.
+const MODERN_SHORE_FADE: f32 = 1.0;
+// fork: modern lighting — the surf on the modern lane: a soft bright band along the waterline, the
+// reference shot's (a faint lift at its peak, fading out over under a yard of water, no sheet detail
+// in it). `WIDTH` scales the classic foam depth; `MOTTLE` is the sheet's frequency when it is read
+// only to keep the band from being a uniform stripe — low enough that magnification blurs it.
+const MODERN_FOAM_GAIN: f32 = 0.04;
+const MODERN_FOAM_WIDTH: f32 = 1.6;
+const MODERN_FOAM_MOTTLE: f32 = 0.04;
+// fork: modern lighting — water's reflectance head-on (index 1.33).
+const WATER_F0: f32 = 0.02;
+
+/// fork: modern lighting — **the water surface as an interface**, above the water, in linear
+/// radiance. Replaces the classic COMBINE on the modern lane — not its reflection, which arrives
+/// here as `refl` exactly as the classic lane reads it (the planar mirror on its short bent ray, the
+/// trace over it on the flattened normal), so the mirror keeps its smooth, unbroken look. Three of
+/// the combine's terms stood between the frame and water that reads as water:
+///
+/// * the body was the swatch painted over the refraction at the swatch's own opacity — 0.5 at the
+///   waterline for a river — so every shore ended on a half-opaque edge, and a zone whose shallow
+///   row is brown (the Southfury's is 124, 91, 70) read as milky tea;
+/// * its depth was the MCLQ vertex byte, which saturates at ~5 yd and knows nothing of the bed;
+/// * the reflection was pulled 60 % back to that body and capped at 0.6, so the most any reflected
+///   picture reached the screen was ~24 % — where water at a grazing angle reflects ~80 %.
+///
+/// Here the bed is attenuated per channel over the water actually in front of it (the depth copy
+/// knows exactly how much), converging on the zone's DEEP colour under the surface's light — the
+/// same colour the classic swatch reaches at depth, so each zone keeps its water and the clock
+/// keeps moving it. The shallow row and the opacity ramp have no place in it: shallow water shows
+/// its bed. The reflection goes over that at Schlick's Fresnel.
+fn modern_water(
+    in: VsOut,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    refract_uv: vec2<f32>,
+    frag_view_z: f32,
+    deep: vec3<f32>,
+    lit: vec3<f32>,
+    refl: vec3<f32>,
+) -> vec3<f32> {
+    // `scene_depth` is planar view depth, so the bed's distance along this pixel's ray scales off
+    // the surface's by the same ratio. The light that lit the bed crossed the column on its way
+    // down as well, so the vertical depth is added once more.
+    let bed_z = scene_depth_at(refract_uv);
+    let path = max(bed_z - frag_view_z, 0.0) * length(in.view_vec) / max(frag_view_z, 0.001);
+    let column = path * clamp(-v.y, 0.0, 1.0);
+    let trans = exp(-w.optics.xyz * min(path + column, 1000.0));
+    let bed = textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb;
+    let scatter = colorspace::srgb_to_linear(deep * lit);
+    let under = bed * trans + scatter * (vec3<f32>(1.0) - trans);
+
+    // Schlick, faded in over the first few inches of water, so the surface meets the bank as the bed
+    // rather than as a line of reflection laid along it.
+    let cos_i = clamp(dot(-v, n), 0.0, 1.0);
+    let fres = (WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - cos_i, 5.0)) * smoothstep(0.0, MODERN_SHORE_FADE, path);
+    return mix(under, refl, fres);
+}
+
 fn fragment_classic(in: VsOut) -> vec4<f32> {
     // HARD FAR-CLIP WALL — the same one terrain, the models and `liquid.wgsl` take.
     let frag_view_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
@@ -709,9 +771,20 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         art_samp,
         in.foam_uv.zw + n.zx * w.foam_params.w,
     ).rgb;
-    let foam = (foam_a + foam_b) * (shore * w.foam_params.z * detail_blend * n.y);
+    var foam = (foam_a + foam_b) * (shore * w.foam_params.z * detail_blend * n.y);
 
     let below = w.path.y > 0.5;
+    // fork: modern lighting — above the water on a modern frame the combine is `modern_water`'s.
+    let modern_above = modern && !below;
+    if (modern_above) {
+        // fork: modern lighting — the surf as a soft band rather than the sheet's broken water: the
+        // same column mask, `MODERN_FOAM_WIDTH` times as wide, lit like the surface it sits on, and
+        // mottled only by the sheet read at a frequency its texels magnify into blur.
+        let soft_t = clamp(column * slant / (foam_depth * MODERN_FOAM_WIDTH), 0.0, 1.0);
+        let band = 1.0 - soft_t * soft_t * (3.0 - 2.0 * soft_t);
+        let mottle = textureSampleLevel(foam_tex, art_samp, in.foam_uv.xy * MODERN_FOAM_MOTTLE, 0.0).r;
+        foam = water_lit * (band * MODERN_FOAM_GAIN * (0.6 + 0.8 * mottle) * detail_blend);
+    }
     var rgb: vec3<f32>;
     if (below) {
         // ---- ProcWaterBelow perm 0 -------------------------------------------------------------
@@ -844,10 +917,20 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
         // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
         var reflected = mix(base, hit, validity);
-        // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
-        // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
-        reflected = mix(reflected, body, 0.6);
-        rgb = mix(refracted, reflected, fres2 * 0.5 + 0.1);
+        if (modern_above) {
+            // fork: modern lighting — the same reflection, over `modern_water`'s bed and body at
+            // Schlick's weight instead of the two steps below. Linear out, re-encoded so the
+            // wrapper's decode hands it back unchanged.
+            rgb = colorspace::linear_to_srgb(modern_water(
+                in, n, v, refract_uv, frag_view_z, swatch(1.0).rgb, water_lit,
+                colorspace::srgb_to_linear(reflected),
+            ));
+        } else {
+            // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
+            // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
+            reflected = mix(reflected, body, 0.6);
+            rgb = mix(refracted, reflected, fres2 * 0.5 + 0.1);
+        }
     }
 
     // The sun's broad glare on the surface, modulated by the body so it cannot brighten water that
@@ -859,18 +942,25 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // fills the pixel block straight off the light record: `c2` ambient, `c3` diffuse, `c4` specular
     // with the Blinn exponent in `.w`. Running both terms off the specular row made the broad sun
     // track on the water take a colour the sun itself never has at that hour.
-    let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
-    rgb += glare * wow_light.light_diffuse.rgb * body * water_sun;
-    // Below the surface the specular is weighted by the Fresnel square TWICE and by the swatch's
-    // opacity — `ProcWaterBelow` spends `MULR R1.xyz, R1, R3.w` (fres²·ramp.a) and then
-    // `MULR R1.xyz, R1, R2.w` (fres² again) where `ProcWaterAbove` spends one `MULR R1.xyz, R1,
-    // R1.w`. From underneath the sheen is the sun read back down through the water, so it dims with
-    // how much water is in the way and survives only at the shallowest grazing angle.
-    let spec_weight = select(fres2, fres2 * fres2 * ramp.a, below);
-    rgb += w.shade_params.z * spec_color * spec_weight * water_sun;
+    //
+    // fork: modern lighting — neither is on `modern_water`'s surface: the glare is the body colour
+    // lit a second time (the brown wash over a Durotar river at noon), and the specular's sheen floor
+    // is a flat lift at every grazing angle that the Fresnel reflection now carries for real. The sun
+    // itself is the glint below.
+    if (!modern_above) {
+        let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
+        rgb += glare * wow_light.light_diffuse.rgb * body * water_sun;
+        // Below the surface the specular is weighted by the Fresnel square TWICE and by the swatch's
+        // opacity — `ProcWaterBelow` spends `MULR R1.xyz, R1, R3.w` (fres²·ramp.a) and then
+        // `MULR R1.xyz, R1, R2.w` (fres² again) where `ProcWaterAbove` spends one `MULR R1.xyz, R1,
+        // R1.w`. From underneath the sheen is the sun read back down through the water, so it dims
+        // with how much water is in the way and survives only at the shallowest grazing angle.
+        let spec_weight = select(fres2, fres2 * fres2 * ramp.a, below);
+        rgb += w.shade_params.z * spec_color * spec_weight * water_sun;
+    }
     // fork: modern lighting — the sun's glitter path: a tight HDR lobe on the reflected ray over a
     // broad sheen, only where the sun reaches the surface. Added in linear by the wrapper.
-    if (modern && !below && to_light.y > -0.05) {
+    if (modern_above && to_light.y > -0.05) {
         let rv = reflect(v, n);
         let sd = clamp(dot(rv, to_light), 0.0, 1.0);
         // Warmed by the zone's scatter colour (the froxel key in-scatter, normalised), so a dawn
