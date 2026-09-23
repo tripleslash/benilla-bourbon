@@ -843,8 +843,9 @@ fn cata_magma_color(kind: LiquidKind) -> Vec4 {
     }
 }
 
-/// fork: modern lighting — the water's optics on the modern lane: absorption per yard of water
-/// crossed (r, g, b); `w` is reserved.
+/// fork: modern lighting — the water's optics on the Modern (Experimental) tier: absorption per yard
+/// of water crossed (r, g, b). `w` starts at 0 (plain Modern); [`sync_water_tier`] raises it on
+/// `waterDetail 3`.
 ///
 /// Red goes first, which cools a sandy bed as the water deepens and leaves the channel the zone's
 /// deep colour. The values are read off the reference shots rather than off a textbook: a river bank
@@ -1343,5 +1344,26 @@ pub(super) fn sync_below_water(
     let flag = if below { 1.0 } else { 0.0 };
     for (_, material) in materials.iter_mut() {
         material.extension.path.y = flag;
+    }
+}
+
+/// fork: modern lighting — tell the cata materials whether the water runs the Modern
+/// (Experimental) combine (`optics.w`). Modern and Experimental are the same material, mirror and
+/// cost, so a move between them is one uniform on the shared materials rather than the component
+/// swap [`apply_water_detail`] makes between renderers.
+///
+/// Value-watched for the same reason as [`apply_water_detail`].
+pub(super) fn sync_water_tier(
+    detail: Res<WaterDetail>,
+    mut materials: ResMut<Assets<LiquidCataMaterial>>,
+    mut last: Local<Option<bool>>,
+) {
+    let experimental = detail.is_experimental();
+    if last.replace(experimental) == Some(experimental) {
+        return;
+    }
+    let flag = if experimental { 1.0 } else { 0.0 };
+    for (_, material) in materials.iter_mut() {
+        material.extension.optics.w = flag;
     }
 }

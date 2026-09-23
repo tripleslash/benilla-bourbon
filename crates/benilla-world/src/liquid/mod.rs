@@ -143,6 +143,9 @@ pub(crate) use surface::{
 /// implement. Leaving the gap rather than renumbering means a medium tier can land later without
 /// re-teaching the options page, the config files players already have, or this type.
 ///
+/// fork: `1` is taken since by the SSR-only cata tier ([`WATER_DETAIL_SSR`]) and `3` by the
+/// experimental modern combine ([`WATER_DETAIL_EXPERIMENTAL`]).
+///
 /// Cata is the default. `$WOW_WATER_DETAIL` overrides for a session.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WaterDetail(pub u8);
@@ -156,6 +159,13 @@ pub const WATER_DETAIL_LEGACY: u8 = 0;
 pub const WATER_DETAIL_SSR: u8 = 1;
 /// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
 pub const WATER_DETAIL_CATA: u8 = 2;
+/// fork: modern lighting — the Cataclysm renderer, mirror and all, whose above-water combine on a
+/// modern frame is the physically based one (`liquid_cata.wgsl`'s `modern_water`: the bed through
+/// Beer–Lambert absorption, the reflection at Schlick's Fresnel, a soft surf band) instead of the
+/// reference's. "Modern (Experimental)" on the options page. A classic frame draws it exactly as
+/// [`WATER_DETAIL_CATA`]. It takes the slot after the reference's highest tier rather than one of
+/// its numbers, so `2` keeps meaning the reference's water.
+pub const WATER_DETAIL_EXPERIMENTAL: u8 = 3;
 
 impl WaterDetail {
     /// Is this the Cataclysm renderer? Written as "not legacy" rather than "== 2" so that a medium
@@ -166,19 +176,27 @@ impl WaterDetail {
 
     /// Clamp an arbitrary cvar value onto a tier this build actually has. Anything that is not a
     /// known tier reads as cata, which is the default and the better-looking answer; a player who
-    /// hand-edits `waterDetail 7` into their config gets water, not a black lake.
+    /// hand-edits `waterDetail 7` into their config gets water, not a black lake — and not the
+    /// experimental tier, which only a `3` asks for.
     pub fn from_cvar(v: f32) -> Self {
         if v <= 0.0 {
             WaterDetail(WATER_DETAIL_LEGACY)
         } else if v < 1.5 {
             WaterDetail(WATER_DETAIL_SSR)
+        } else if (2.5..3.5).contains(&v) {
+            WaterDetail(WATER_DETAIL_EXPERIMENTAL)
         } else {
             WaterDetail(WATER_DETAIL_CATA)
         }
     }
 
-    /// Does the cata water get its planar mirror render? Only the full tier does; the SSR tier
-    /// reflects through the screen-space trace alone.
+    /// Does the water run the Modern (Experimental) combine ([`WATER_DETAIL_EXPERIMENTAL`])?
+    pub fn is_experimental(self) -> bool {
+        self.0 == WATER_DETAIL_EXPERIMENTAL
+    }
+
+    /// Does the cata water get its planar mirror render? Only the full tiers do (cata and the
+    /// experimental tier above it); the SSR tier reflects through the screen-space trace alone.
     pub fn has_planar_reflection(self) -> bool {
         self.0 >= WATER_DETAIL_CATA
     }
@@ -264,6 +282,7 @@ impl Plugin for LiquidPlugin {
                 Update,
                 (
                     surface::sync_below_water.after(SubmersionVerdict),
+                    surface::sync_water_tier,
                     screen::resize_targets,
                 ),
             )

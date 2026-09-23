@@ -142,7 +142,8 @@ struct LiquidParams {
     // ProcMagma: the base colour under every layer (the reference's c17.rgb).
     magma_color: vec4<f32>,
     // fork: modern lighting — xyz = absorption per yard of water (r, g, b) (`modern_water`);
-    // w = reserved.
+    // w = the Modern (Experimental) water tier (`waterDetail 3`): 1 runs `modern_water`, 0 keeps
+    // the classic combine on a modern frame too.
     optics: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
@@ -548,10 +549,10 @@ fn magma(in: VsOut) -> vec4<f32> {
 // fork: modern lighting — the waterline: the water (yd along the view ray) the reflection takes to
 // come in, so a surface meets its bank as the bed seen through nothing rather than as a drawn edge.
 const MODERN_SHORE_FADE: f32 = 1.0;
-// fork: modern lighting — the surf on the modern lane: a soft bright band along the waterline, the
-// reference shot's (a faint lift at its peak, fading out over under a yard of water, no sheet detail
-// in it). `WIDTH` scales the classic foam depth; `MOTTLE` is the sheet's frequency when it is read
-// only to keep the band from being a uniform stripe — low enough that magnification blurs it.
+// fork: modern lighting — the surf on the experimental tier: a soft bright band along the waterline,
+// the reference shot's (a faint lift at its peak, fading out over under a yard of water, no sheet
+// detail in it). `WIDTH` scales the classic foam depth; `MOTTLE` is the sheet's frequency when it is
+// read only to keep the band from being a uniform stripe — low enough that magnification blurs it.
 const MODERN_FOAM_GAIN: f32 = 0.04;
 const MODERN_FOAM_WIDTH: f32 = 1.6;
 const MODERN_FOAM_MOTTLE: f32 = 0.04;
@@ -559,7 +560,8 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 const WATER_F0: f32 = 0.02;
 
 /// fork: modern lighting — **the water surface as an interface**, above the water, in linear
-/// radiance. Replaces the classic COMBINE on the modern lane — not its reflection, which arrives
+/// radiance. Replaces the classic COMBINE on a modern frame at the Modern (Experimental) water tier
+/// (`waterDetail 3`, `w.optics.w`; plain Modern keeps the combine) — not its reflection, which arrives
 /// here as `refl` exactly as the classic lane reads it (the planar mirror on its short bent ray, the
 /// trace over it on the flattened normal), so the mirror keeps its smooth, unbroken look. Three of
 /// the combine's terms stood between the frame and water that reads as water:
@@ -774,9 +776,11 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     var foam = (foam_a + foam_b) * (shore * w.foam_params.z * detail_blend * n.y);
 
     let below = w.path.y > 0.5;
-    // fork: modern lighting — above the water on a modern frame the combine is `modern_water`'s.
     let modern_above = modern && !below;
-    if (modern_above) {
+    // fork: modern lighting — above the water on a modern frame at the Modern (Experimental) tier
+    // the combine is `modern_water`'s.
+    let experimental = modern_above && w.optics.w > 0.5;
+    if (experimental) {
         // fork: modern lighting — the surf as a soft band rather than the sheet's broken water: the
         // same column mask, `MODERN_FOAM_WIDTH` times as wide, lit like the surface it sits on, and
         // mottled only by the sheet read at a frequency its texels magnify into blur.
@@ -917,7 +921,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
         // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
         var reflected = mix(base, hit, validity);
-        if (modern_above) {
+        if (experimental) {
             // fork: modern lighting — the same reflection, over `modern_water`'s bed and body at
             // Schlick's weight instead of the two steps below. Linear out, re-encoded so the
             // wrapper's decode hands it back unchanged.
@@ -943,11 +947,11 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // with the Blinn exponent in `.w`. Running both terms off the specular row made the broad sun
     // track on the water take a colour the sun itself never has at that hour.
     //
-    // fork: modern lighting — neither is on `modern_water`'s surface: the glare is the body colour
-    // lit a second time (the brown wash over a Durotar river at noon), and the specular's sheen floor
-    // is a flat lift at every grazing angle that the Fresnel reflection now carries for real. The sun
-    // itself is the glint below.
-    if (!modern_above) {
+    // fork: modern lighting — neither is on `modern_water`'s surface (the experimental tier): the
+    // glare is the body colour lit a second time (the brown wash over a Durotar river at noon), and
+    // the specular's sheen floor is a flat lift at every grazing angle that the Fresnel reflection
+    // carries for real there. The sun itself is the glint below.
+    if (!experimental) {
         let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
         rgb += glare * wow_light.light_diffuse.rgb * body * water_sun;
         // Below the surface the specular is weighted by the Fresnel square TWICE and by the swatch's

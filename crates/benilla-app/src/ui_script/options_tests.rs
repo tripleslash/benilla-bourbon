@@ -1376,12 +1376,13 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
         "reading the table on select must not write it back"
     );
 
-    // Three entries: the medium tier is the fork's SSR-only modern water (no planar mirror).
+    // Four entries: the medium tier is the fork's SSR-only modern water (no planar mirror), and
+    // the fork's experimental modern combine sits on the tier above the reference's highest.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
     assert_eq!(
         s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
-        3.0
+        4.0
     );
 
     // Picking Modern writes "2" — the reference's tier number, not a boolean.
@@ -1398,9 +1399,22 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     );
     assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
 
-    // Picking Modern (SSR) writes the medium tier's "1".
+    // Picking Modern (Experimental) writes "3", the slot above the reference's tiers.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("waterDetail".to_string(), "3".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Modern (Experimental)"
+    );
+
+    // Picking Modern (SSR) writes the medium tier's "1".
+    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
+    s.run("DropDownList1Button3:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("waterDetail".to_string(), "1".to_string())]
@@ -1408,7 +1422,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
 
     // Defaults comes back to Modern, this row's default being the newer behaviour.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
-    s.run("DropDownList1Button3:Click()").unwrap();
+    s.run("DropDownList1Button4:Click()").unwrap();
     let _ = s.take_cvar_changes();
     s.run("BenillaOptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(

@@ -1214,7 +1214,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // benilla implements 0 (its 1.12.1 renderer, `liquid.wgsl`) and 2 (`liquid_cata.wgsl`), and
     // deliberately leaves the 1 slot EMPTY rather than renumbering to a dense 0/1 — a medium tier
     // is a real thing that could land later, and it should land on its own number instead of
-    // shifting a value players already have in `config.toml`.
+    // shifting a value players already have in `config.toml`. (fork: 1 is since the SSR-only cata
+    // tier, and 3 the experimental modern combine — `liquid::WATER_DETAIL_EXPERIMENTAL`.)
     //
     // **Registered at 2**, so cata water is what the client looks like out of the box. That is a
     // benilla choice, not a reference default (1.12.1 has no such CVar at all: its water is the
@@ -2902,6 +2903,15 @@ mod tests {
         assert!(!res::<WaterDetail>(&app).has_planar_reflection());
         apply(&mut app, "waterdetail", "2");
         assert!(res::<WaterDetail>(&app).has_planar_reflection());
+        assert!(!res::<WaterDetail>(&app).is_experimental());
+        // `3` is the fork's experimental modern combine: the full tier, mirror and all. Only a 3
+        // asks for it — an out-of-range value still reads as plain cata.
+        apply(&mut app, "waterDetail", "3");
+        assert!(res::<WaterDetail>(&app).is_experimental());
+        assert!(res::<WaterDetail>(&app).has_planar_reflection());
+        apply(&mut app, "waterDetail", "7");
+        assert!(res::<WaterDetail>(&app).is_cata());
+        assert!(!res::<WaterDetail>(&app).is_experimental());
         apply(&mut app, "waterDetail", "-3");
         assert!(!res::<WaterDetail>(&app).is_cata());
         // The fork's shadow switch and lighting pair.

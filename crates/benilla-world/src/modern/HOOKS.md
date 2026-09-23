@@ -139,6 +139,10 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-app/src/entities/item_glow.rs` | `attach_item_glows` accumulates the glow models' emitters across the visual's slots and spawns one `WorldPointLight` child of the item root | P8 |
 | `benilla-app/src/cvars.rs`, `assets/ui/OptionsFrame.xml` | `lightingQuality` reaches 4; a "Cinematic" dropdown row and the tooltip paragraph for it | P8 |
 | `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_MODERN_EMISSIVE` (`?modern_emissive=0`) | P8 |
+| `liquid_cata.wgsl` | `LiquidParams.optics` (xyz = absorption per yard, w = the experimental tier); `modern_water` (the bed through Beer–Lambert toward the DEEP row, the unchanged reflection at Schlick's Fresnel), the soft surf band, and the glare/sheen skip — all under `experimental` (modern frame, above water, `optics.w`), so plain Modern keeps the reference's combine | water tier |
+| `benilla-assets/src/materials.rs` | `LiquidCataExt.optics` | water tier |
+| `benilla-world/src/liquid/{mod,surface}.rs` | `WATER_DETAIL_EXPERIMENTAL` (= 3); `from_cvar` maps [2.5, 3.5) to it; `WaterDetail::is_experimental`; `cata_optics`; `sync_water_tier` (`Update`) flips `optics.w` on the shared cata materials | water tier |
+| `benilla-app/assets/ui/OptionsFrame.xml`, `src/cvars.rs`, `ui_script/options_tests.rs` | Water Detail gains "Modern (Experimental)" = `3` (four entries) and a tooltip paragraph; the `waterDetail 3` assertions | water tier |
 
 ## Planned hooks (not yet landed)
 

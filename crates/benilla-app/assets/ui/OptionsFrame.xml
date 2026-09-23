@@ -824,6 +824,8 @@
             "Which water the world is drawn with.\n\n"
             .. "Modern adds surface waves, a reflection of the sky and shoreline, and lets you "
             .. "see through the surface to the bottom. Classic is the original flat, tinted water.\n\n"
+            .. "Modern (Experimental) is Modern with a work-in-progress surface under Modern lighting: "
+            .. "clear shallows that show the bed, and a reflection that strengthens toward the horizon.\n\n"
             .. "Modern (SSR) skips the second, mirrored render of the world and reflects only what "
             .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
             .. "Modern water costs additional GPU time."
@@ -3244,8 +3246,13 @@
                                                 -- "Modern (SSR)" is tier 1: the same modern water
                                                 -- without its planar mirror render, reflecting
                                                 -- through the screen-space trace alone.
+                                                -- "Modern (Experimental)" is tier 3: Modern with
+                                                -- the fork's physically based surface under Modern
+                                                -- lighting (the bed through the water, a Fresnel
+                                                -- reflection) in place of the reference's combine.
                                                 OptionsDropdownRow_Setup(self, {
                                                     { text = "Modern", value = "2" },
+                                                    { text = "Modern (Experimental)", value = "3" },
                                                     { text = "Modern (SSR)", value = "1" },
                                                     { text = "Classic", value = "0" },
                                                 })

@@ -780,7 +780,9 @@ pub struct LiquidCataExt {
     #[uniform(102)]
     pub magma_color: Vec4,
     /// fork: modern lighting — the water's optics on the modern lane: `xyz` = absorption per yard of
-    /// water crossed (r, g, b), `w` reserved. The classic lanes never read it.
+    /// water crossed (r, g, b), `w` = **the Modern (Experimental) water tier** (`waterDetail 3`),
+    /// which alone runs the shader's `modern_water` combine; `liquid`'s `sync_water_tier` flips it
+    /// with the setting. The classic lanes never read it.
     #[uniform(102)]
     pub optics: Vec4,
 
