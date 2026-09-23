@@ -165,16 +165,22 @@ fn tick_clouds(
     } else {
         cov.kernel.tick(time.delta_secs(), density, &frame)
     };
-    if changed {
+    // fork: modern lighting (FORK.md) — the kernel writes gamma bytes; a linear
+    // frame samples them through an sRGB view so cloud.wgsl emits linear. The model is live, so a
+    // flip re-uploads on its own frame rather than waiting for the coverage to move.
+    let format = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
+    } else {
+        bevy::render::render_resource::TextureFormat::Rgba8Unorm
+    };
+    let reformat = clock.as_ref().is_some_and(|layer| {
+        images
+            .get(&layer.image)
+            .is_some_and(|i| i.texture_descriptor.format != format)
+    });
+    if changed || reformat {
         if let Some(layer) = clock.as_ref() {
             if let Some(image) = images.get_mut(&layer.image) {
-                // fork: modern lighting (FORK.md) — the kernel writes gamma bytes;
-                // a linear frame samples them through an sRGB view so cloud.wgsl emits linear.
-                let format = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
-                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
-                } else {
-                    bevy::render::render_resource::TextureFormat::Rgba8Unorm
-                };
                 if image.texture_descriptor.format != format {
                     image.texture_descriptor.format = format;
                 }

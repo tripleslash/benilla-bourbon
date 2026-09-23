@@ -215,9 +215,11 @@ function clampTier(n) {
 }
 
 /// Hand the tier's render scale to the client, through the same `window.__wenilla_env` object a
-/// hosting page uses for credentials (`benilla_app::webenv`). Session-only by construction: the
-/// client marks an env-supplied `renderScale` `env_overridden` and never writes it to
-/// `config.toml` (`cvars::load_config`), so a recovery cannot pin itself into saved settings.
+/// hosting page uses for credentials (`benilla_app::webenv`), under its own key
+/// (`gpu_render_scale`, `cvars::apply_gpu_tier`). A fallback, not an override: it applies only
+/// while the player has no render scale of their own saved, is never written to `config.toml`, and
+/// the player's own Render Scale choice takes the setting back — so a recovery can neither pin
+/// itself into saved settings nor lock the player out of the slider.
 ///
 /// An explicit `?render_scale=` wins — it is somebody measuring on purpose, and a recovery tier
 /// must not silently outrank a person at the keyboard.
@@ -225,7 +227,9 @@ function publishTier(state, query) {
   const scale = TIERS[state.tier].renderScale;
   if (!scale || query.get('render_scale') !== null) return;
   const env = (window.__wenilla_env = window.__wenilla_env || {});
-  if (env.render_scale === undefined) env.render_scale = scale;
+  if (env.render_scale === undefined && env.gpu_render_scale === undefined) {
+    env.gpu_render_scale = scale;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

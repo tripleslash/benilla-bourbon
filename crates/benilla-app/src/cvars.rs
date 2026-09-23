@@ -1200,7 +1200,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `lightingQuality` — the modern tier, 0 low … 4 cinematic; Medium in the browser, High
     // natively. Cinematic (P8) is the local-light tier: every authored lamp and every glowing
     // weapon emits, twelve of them cast soft cube shadows, and entities cast into those cubes.
-    // `lightingModel` latches at world entry; `lightingQuality` applies to the next frame.
+    // Both apply to the next frame in the world.
     // `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` override session-only.
     ours(
         "lightingModel",
@@ -1398,6 +1398,9 @@ pub(crate) struct Cvars {
     /// it is a fact about the *machine* (the render adapter's backend), which is nobody's setting
     /// to persist.
     session_owned: HashSet<String>,
+    /// The session-owned rows a player's own write takes back (fork: web build) — see
+    /// [`Self::fallback_for_session`]. Always a subset of `session_owned`.
+    yielding: HashSet<String>,
     /// Accepted moves not yet triggered — flushed by [`sync_cvars`] every frame, synchronously by
     /// the boot load and the session-edge fold, and by any caller that wants its observers to
     /// have run before its own dependents ([`Cvars::take_events`]).
@@ -1417,6 +1420,7 @@ impl Default for Cvars {
             index: HashMap::with_capacity(REGISTERED.len()),
             file: BTreeMap::new(),
             session_owned: HashSet::new(),
+            yielding: HashSet::new(),
             events: Vec::new(),
             outbox: Vec::new(),
             dirty: false,
@@ -1536,7 +1540,16 @@ impl Cvars {
                 SetOutcome::Unchanged // the stage cleared: the boundary has nothing to do
             };
         }
+        // A player's write takes a yielding row back: from here on it is theirs and is saved.
+        let key = row.name.to_ascii_lowercase();
+        let reclaimed = from_vm && self.yielding.remove(&key);
+        if reclaimed {
+            self.session_owned.remove(&key);
+        }
         if row.value == value {
+            if reclaimed {
+                self.touch();
+            }
             return SetOutcome::Unchanged;
         }
         let old = std::mem::replace(&mut row.value, value.to_string());
@@ -1683,6 +1696,26 @@ impl Cvars {
         });
         self.outbox.push((row.name.clone(), value.to_string()));
         true
+    }
+
+    /// **A value for the session only where the player has none** (fork: web build) — the page's
+    /// GPU recovery tier. It applies like [`Self::override_for_session`] (session-owned, never
+    /// saved), but only when the file holds no value of the player's own, and the player's next
+    /// write through the VM takes the row back ([`Self::write`]), so a scale chosen in the Graphics
+    /// page is applied, saved, and outranks the tier on every later load. Returns whether the row
+    /// moved.
+    pub(crate) fn fallback_for_session(&mut self, name: &str, value: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        if self.session_owned.contains(&key)
+            || self.file.keys().any(|k| k.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        let moved = self.override_for_session(name, value);
+        if self.session_owned.contains(&key) {
+            self.yielding.insert(key);
+        }
+        moved
     }
 
     /// An addon's `RegisterCVar` (decision 1195), reported by the VM: a row of its own, starting
@@ -2043,6 +2076,7 @@ fn load_config(world: &mut World) {
             StoredConfig::Table(table) => cvars.load_file(table),
         }
         apply_query_overrides(&mut cvars);
+        apply_gpu_tier(&mut cvars);
         cvars.take_events()
     };
     for event in events {
@@ -2102,6 +2136,18 @@ fn apply_query_overrides(cvars: &mut Cvars) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_query_overrides(_cvars: &mut Cvars) {}
+
+/// fork: web build — the render scale `web/gpu.js` steps down to after the GPU device was lost
+/// (`__wenilla_env.gpu_render_scale`). A fallback, not an override: a render scale the player
+/// saved wins, and one they set in the Graphics page is theirs from that write on.
+fn apply_gpu_tier(cvars: &mut Cvars) {
+    let Some(value) = crate::webenv::var("WOW_GPU_RENDER_SCALE") else {
+        return;
+    };
+    if cvars.fallback_for_session("renderScale", &value) {
+        info!("config: renderScale = {value} from the GPU recovery tier (until you set one)");
+    }
+}
 
 /// What the one read of `config.toml` found.
 enum StoredConfig {
@@ -3970,6 +4016,57 @@ mod tests {
         cvars.load_file(BTreeMap::from([("farclip".to_string(), "500".to_string())]));
         assert_eq!(cvars.get("farclip"), Some("1000"));
         assert!(cvars.is_session_owned("FARCLIP"));
+    }
+
+    /// fork: web build — **the GPU recovery tier's render scale is a fallback the player can take
+    /// back.** It applies only where the file holds no render scale, is never saved, and the
+    /// player's own write (the Graphics page's slider, through the VM) makes the row theirs again,
+    /// so it is saved and outranks the tier from the next load on. Before this the tier arrived as
+    /// an env override: the saved value was ignored and every in-game change was lost on reload.
+    #[test]
+    fn the_gpu_tier_render_scale_yields_to_the_player() {
+        let mut cvars = Cvars::default();
+        cvars.load_file(BTreeMap::new());
+        assert!(cvars.fallback_for_session("renderScale", "0.55"));
+        assert_eq!(cvars.get("renderScale"), Some("0.55"));
+        assert!(cvars.has_events(), "the knob hears the tier");
+        cvars.take_events();
+        assert!(
+            !cvars.compose().contains_key("renderScale"),
+            "a recovery never pins itself into the file"
+        );
+
+        // The player moves the slider: applied, and theirs.
+        assert_eq!(cvars.set_from_vm("renderScale", "1"), SetOutcome::Changed);
+        assert!(!cvars.is_session_owned("renderScale"));
+        cvars.set_from_vm("renderScale", "0.8");
+        assert_eq!(
+            cvars.compose().get("renderScale").map(String::as_str),
+            Some("0.8")
+        );
+
+        // A saved render scale outranks the tier on the next load.
+        let mut next = Cvars::default();
+        next.load_file(BTreeMap::from([(
+            "renderScale".to_string(),
+            "0.8".to_string(),
+        )]));
+        assert!(!next.fallback_for_session("renderScale", "0.55"));
+        assert_eq!(next.get("renderScale"), Some("0.8"));
+        assert!(!next.is_session_owned("renderScale"));
+
+        // A player who picks the tier's own value still takes the row back, and it is saved.
+        let mut same = Cvars::default();
+        same.load_file(BTreeMap::new());
+        same.fallback_for_session("renderScale", "0.55");
+        assert_eq!(
+            same.set_from_vm("renderScale", "0.55"),
+            SetOutcome::Unchanged
+        );
+        assert_eq!(
+            same.compose().get("renderScale").map(String::as_str),
+            Some("0.55")
+        );
     }
 
     /// **The loaded file reaches a knob synchronously, before anything ordered after

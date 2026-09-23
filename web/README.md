@@ -371,8 +371,9 @@ whole of its security: two ports, one loopback address.
     and the wasm in the HTTP cache, so a restart is seconds. Each tier caps the canvas's backing
     store to a pixel budget — the same transform, now with the committed box *smaller* than the
     viewport, which is "render at 1080p on a 4K panel" — and hands the client a lower `renderScale`
-    through `__wenilla_env`, session-only, so a recovery never writes itself into the player's saved
-    settings. Tier 0 is untouched: the budget is the price of a device that has actually hung, not
+    through `__wenilla_env` (`gpu_render_scale`) as a fallback: it never writes itself into the
+    player's saved settings, a saved render scale outranks it, and moving the Render Scale slider
+    takes the setting back. Tier 0 is untouched: the budget is the price of a device that has actually hung, not
     a default. A fourth loss inside ten minutes stops auto-reloading and gives the player a button
     and the driver's own message, because a reload loop is worse than an honest error. A burst of
     `GPUInternalError`s — the device in trouble but still alive — takes the budget down one rung

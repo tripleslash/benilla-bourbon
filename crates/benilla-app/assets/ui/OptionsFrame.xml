@@ -434,7 +434,7 @@
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
-            .. "smooths edges at the cost of frame rate. Applies when you click Apply."
+            .. "smooths edges at the cost of frame rate."
 
         -- Enable Sound in Background: 1.12 has no checkbox; silenced sounds keep running.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
@@ -494,14 +494,13 @@
             .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
             .. "Modern water costs additional GPU time."
 
-        -- fork: the modern lighting model (FORK.md). The MODEL latches when the
-        -- world is entered, so a change shows the next time the world loads; the TIER applies to
-        -- the next frame, so the dropdown previews it under the open options window.
+        -- fork: the modern lighting model (FORK.md). The MODEL and the TIER both
+        -- apply to the next frame, so either dropdown previews under the open options window.
         BENILLA_TOOLTIP_LIGHTING_MODEL =
             "How the world is lit.\n\n"
             .. "Modern adds real-time sun shadows from every object, light shafts through fog and "
             .. "foliage, bounced light and HDR bloom. Classic is the original baked lighting.\n\n"
-            .. "Takes effect the next time the world loads. Modern costs additional GPU time."
+            .. "Takes effect immediately. Modern costs additional GPU time."
 
         BENILLA_TOOLTIP_LIGHTING_QUALITY =
             "The detail of Modern lighting: shadow range and resolution, light shaft resolution and "
@@ -913,7 +912,14 @@
                 -- Two decimals, trailing zeros stripped, so a value at its default compares
                 -- equal as a string and stays out of the config file.
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
-                if row.deferred then
+                if row.onRelease then
+                    -- Shown at once, stored when the handle is let go (OptionsSlider_OnMouseUp).
+                    if str == OptionsRow_Get(row) then
+                        row.pending = nil
+                    else
+                        row.pending = str
+                    end
+                elseif row.deferred then
                     -- Era CommitFlag.Apply: shown at once, stored on Apply. A pending equal to
                     -- the committed value is dropped, as the era's IsModified does.
                     if str == OptionsRow_Get(row) then
@@ -925,6 +931,19 @@
                 else
                     OptionsRow_Set(row, str)
                 end
+            end
+        end
+
+        -- The release commit of an onRelease row: the value the handle was let go at.
+        function OptionsSlider_OnMouseUp(slider)
+            OptionsRow_CommitRelease(slider:GetParent():GetParent())
+        end
+
+        function OptionsRow_CommitRelease(row)
+            if row.onRelease and row.pending then
+                local v = row.pending
+                row.pending = nil
+                OptionsRow_Set(row, v)
             end
         end
 
@@ -1120,12 +1139,15 @@
             OptionsApply_Update()
         end
 
-        -- Hiding discards pending edits (the era's WipeModifiedTable on hide).
+        -- Hiding discards pending edits (the era's WipeModifiedTable on hide). An onRelease row's
+        -- is a drag whose release never arrived (the pointer left the window), so it commits.
         function OptionsPage_DiscardPending()
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
                 local base = "BenillaOptionsFrameContainerBody" .. key
                 for _, rkey in ipairs(rows) do
-                    getglobal(base .. rkey).pending = nil
+                    local row = getglobal(base .. rkey)
+                    OptionsRow_CommitRelease(row)
+                    row.pending = nil
                 end
             end
             OptionsApply_Update()
@@ -1348,6 +1370,7 @@
                         </ThumbTexture>
                         <Scripts>
                             <OnValueChanged>OptionsSlider_OnValueChanged(this, arg1)</OnValueChanged>
+                            <OnMouseUp>OptionsSlider_OnMouseUp(this)</OnMouseUp>
                             <OnEnter>OptionsRow_Hover(this:GetParent():GetParent(), 1)</OnEnter>
                             <OnLeave>OptionsRow_Hover(this:GetParent():GetParent(), nil)</OnLeave>
                         </Scripts>
@@ -2029,9 +2052,11 @@
                                                 OptionsSliderRow_Setup(self, OptionsFrameSliders[1].minValue,
                                                     OptionsFrameSliders[1].maxValue,
                                                     OptionsFrameSliders[1].valueStep)
-                                                -- Era CommitFlag.Apply (Graphics.lua l.684): a
-                                                -- live write would rescale the slider mid-drag.
-                                                self.deferred = 1
+                                                -- fork: stored when the handle is let go, not on
+                                                -- Apply (era CommitFlag.Apply, Graphics.lua
+                                                -- l.684). A live write would rescale the slider
+                                                -- under the cursor mid-drag.
+                                                self.onRelease = 1
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowFarclip" inherits="OptionsSliderRowTemplate">
@@ -2289,13 +2314,12 @@
                                             <Scripts><OnLoad>
                                                 -- Deviation: benilla's own row (the reference draws
                                                 -- to the backbuffer), and no Multisampling row,
-                                                -- which misses alpha-tested cutouts. Deferred: a
-                                                -- live write rebuilds the world render target on
-                                                -- every drag tick.
+                                                -- which misses alpha-tested cutouts. fork: live,
+                                                -- like every Graphics row: each 5% step rebuilds
+                                                -- the world render target once.
                                                 OptionsRow_OnLoad(self, "renderScale", "Render Scale",
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 OptionsSliderRow_Setup(self, 0.5, 2.0, 0.05)
-                                                self.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

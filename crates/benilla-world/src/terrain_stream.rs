@@ -14,9 +14,9 @@
 //! [`CurrentMap`]/[`MapCatalogRes`] ([`crate::world_map`]); the clutter catalog + build lifecycle from
 //! [`crate::clutter::ClutterPlugin`].
 
+use bevy::platform::time::Instant;
 use std::collections::HashMap;
 use std::time::Duration;
-use bevy::platform::time::Instant;
 
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
 use benilla_assets::{AdtTile, M2Model, WdtIndex, WmoModel};
@@ -1546,19 +1546,23 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
 /// VALUE, not `is_changed()`, because the predicate is "the density moved" and not "the resource
 /// moved": `ClutterConfig` also carries the detail-doodad cutout, whose console command would
 /// otherwise re-scatter every loaded tile. First sight only arms.
+///
+/// fork: a lighting-model flip re-scatters too — a modern tuft drops the baked MCSH tint
+/// (`clutter::scatter_tile_clutter`), and the model is live in the world.
 fn rescatter_clutter(
     mut commands: Commands,
     mut streamer: ResMut<TerrainStreamer>,
     adts: Res<Assets<AdtTile>>,
     clutter: Option<Res<GroundClutter>>,
     cfg: Res<ClutterConfig>,
-    mut last: Local<Option<f32>>,
+    mut last: Local<Option<(f32, bool)>>,
 ) {
-    let prev = last.replace(cfg.density);
+    let now = (cfg.density, crate::modern::frame_is_modern());
+    let prev = last.replace(now);
     let (Some(prev), Some(clutter)) = (prev, clutter) else {
         return;
     };
-    if prev == cfg.density {
+    if prev == now {
         return;
     }
     let mut n = 0;

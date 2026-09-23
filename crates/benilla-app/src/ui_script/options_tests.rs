@@ -1444,7 +1444,8 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button4:Click()").unwrap();
     let _ = s.take_cvar_changes();
-    s.run("BenillaOptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
             .unwrap(),
@@ -1843,12 +1844,11 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The uiScale row DEFERS (0961, era CommitFlag.Apply transcribed): moves snap to the 1.12
-/// 0.01 grid and update the readout, but the CVar does not move — the Apply button appears
-/// instead, commits the pending value on click, and disappears. Dragging back onto the
-/// committed value clears the pending without a commit (era's IsModified).
+/// fork: the uiScale row COMMITS ON RELEASE, with no Apply button: moves snap to the 1.12 0.01
+/// grid and update the readout, the CVar moves when the handle is let go (the slider's
+/// `OnMouseUp`), once, at the last value. Letting go on the committed value writes nothing.
 #[test]
-fn the_ui_scale_slider_defers_to_the_apply_button() {
+fn the_ui_scale_slider_commits_when_the_handle_is_let_go() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -1858,16 +1858,17 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
+    let slider = "BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider";
     assert!(
-        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        s.eval::<bool>(&format!("return {slider}:GetScript('OnMouseUp') ~= nil"))
             .unwrap(),
-        "no pending edit, no Apply button"
+        "the release is wired on the slider itself"
     );
+    let release = format!("OptionsSlider_OnMouseUp({slider})");
 
-    // Off-grid 0.787 snaps to 0.79 and the readout follows — but NOTHING queues; the Apply
-    // button exists now (era shows and enables it together).
-    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.787)")
-        .unwrap();
+    // Off-grid 0.787 snaps to 0.79 and the readout follows — nothing queues mid-drag, and no
+    // Apply button appears.
+    s.run(&format!("{slider}:SetValue(0.787)")).unwrap();
     assert_eq!(
         s.eval::<String>(
             "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
@@ -1875,48 +1876,32 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
         .unwrap(),
         "79%"
     );
+    s.run(&format!("{slider}:SetValue(0.8)")).unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
-        "a deferred row must not write the CVar on the move"
+        "the UI must not rescale under the cursor mid-drag"
     );
-    assert!(s
+    assert!(!s
         .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsEnabled() ~= 0")
-        .unwrap());
 
-    // A second move re-stages the pending value — still nothing queues (0989: the steppers
-    // are gone; a drag's SetValue is the remaining move).
-    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
-        .unwrap();
-    assert!(s.take_cvar_changes().is_empty());
-
-    // Apply commits the LAST pending value, once, and the button goes away.
-    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
+    // The release commits the LAST value, once.
+    s.run(&release).unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("uiScale".to_string(), "0.8".to_string())]
     );
-    assert!(!s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
-
-    // A move away arms Apply; dragging back onto the committed value disarms it.
-    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.79)")
-        .unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
-    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
-        .unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
+    s.run(&release).unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
-        "arming and disarming never touched the CVar"
+        "a second release has nothing to commit"
     );
+
+    // A drag that ends back on the committed value writes nothing.
+    s.run(&format!("{slider}:SetValue(0.79)")).unwrap();
+    s.run(&format!("{slider}:SetValue(0.8)")).unwrap();
+    s.run(&release).unwrap();
+    assert!(s.take_cvar_changes().is_empty());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1928,17 +1913,15 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
 ///
 /// - **It reads the CVar and shows a percentage.** 1.0 must render as "100%", because the whole
 ///   point of the row is that the number in front of the player means something without a manual.
-/// - **It is DEFERRED.** Committing live would rebuild the world's render target on every drag
-///   tick — tens of megabytes, thirty times across one sweep of the handle. Staging to Apply makes
-///   that exactly one rebuild. (`uiScale` above it defers for a different reason; the flag is the
-///   same.)
+/// - **It is LIVE** (fork): every move writes the CVar and the world re-renders at it, like every
+///   other Graphics row. The 5% grid bounds the rebuilds to one per step.
 /// - **It is not mute.** Every other tooltip on this window resolves an `OPTION_TOOLTIP_*` out of
 ///   1.12's GlobalStrings, and a benilla row with no counterpart there has so far gone silent (the
 ///   nameplate pair). This one carries a description under a `BENILLA_` prefix — the reference's
 ///   namespace stays the reference's — because the dial's first reviewer said outright that they
 ///   could not tell what it did.
 #[test]
-fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
+fn the_render_scale_row_shows_a_percentage_and_writes_live() {
     benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("renderScale", "1");
@@ -1976,7 +1959,7 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
         .unwrap());
     let _ = s.take_cvar_changes();
 
-    // The move stages and shows Apply; it does NOT rebuild the render target.
+    // The move writes the CVar at once, and raises no Apply button.
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:SetValue(0.75)")
         .unwrap();
     assert_eq!(
@@ -1986,16 +1969,6 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
         .unwrap(),
         "75%"
     );
-    assert!(
-        s.take_cvar_changes().is_empty(),
-        "a deferred row must not write the CVar on the move"
-    );
-    assert!(s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
-
-    // Apply commits once.
-    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("renderScale".to_string(), "0.75".to_string())]
@@ -2006,11 +1979,11 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Pending edits are PANEL-wide like era's modified table: they survive a category switch
-/// (the row redisplays the pending value on return, era's GetValue-returns-pending) and die
-/// only when the window hides — the reopened window reads the committed truth.
+/// A uiScale drag whose release never arrives (the pointer walked off the window, which drops the
+/// capture without an `OnMouseUp`) still commits: closing the window stores the value the slider
+/// shows rather than discarding it, and the reopened window reads it back.
 #[test]
-fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
+fn an_unreleased_ui_scale_drag_commits_when_the_window_closes() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -2018,15 +1991,14 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
         .unwrap();
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
         .unwrap();
-    let _ = s.take_cvar_changes();
+    assert!(s.take_cvar_changes().is_empty());
 
-    // Off to Audio: the Apply button stays (the pending edit is not page-scoped)…
-    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
-        .unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
-    // …and back: the slider shows the PENDING value, not the committed one.
+    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("uiScale".to_string(), "0.7".to_string())]
+    );
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
@@ -2035,26 +2007,6 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
         )
         .unwrap(),
         "70%"
-    );
-
-    // Hide discards (the era confirm dialog is cut): the reopened window reads the truth.
-    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
-    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
-    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
-        .unwrap();
-    assert_eq!(
-        s.eval::<String>(
-            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
-        )
-        .unwrap(),
-        "90%"
-    );
-    assert!(!s
-        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-        .unwrap());
-    assert!(
-        s.take_cvar_changes().is_empty(),
-        "the whole pending lifecycle never wrote the CVar"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -2770,7 +2722,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ("BENILLA_TOOLTIP_INDIRECT_LIGHT", "GraphicsRowIndirectLight"),
             ("BENILLA_TOOLTIP_WATER_DETAIL", "GraphicsRowWaterDetail"),
             ("BENILLA_TOOLTIP_LIGHTING_MODEL", "GraphicsRowLightingModel"),
-            ("BENILLA_TOOLTIP_LIGHTING_QUALITY", "GraphicsRowLightingQuality"),
+            (
+                "BENILLA_TOOLTIP_LIGHTING_QUALITY",
+                "GraphicsRowLightingQuality",
+            ),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
