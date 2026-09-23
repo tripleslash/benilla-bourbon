@@ -78,7 +78,7 @@ const NIGHT_HAZE: f32 = 0.0025;
 /// character against each other (Ashenvale still hazier than Durotar) but none of them fogs the
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
-const HAZE_SCALE: f32 = 0.5;
+const HAZE_SCALE: f32 = 0.67;
 const SHAFT_SCALE: f32 = 0.67;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
