@@ -92,6 +92,19 @@ fn storage_cascade(g: GiParams, c: u32) -> u32 {
 }
 
 // The inverse: which cascade a storage block holds.
+// fork: **the most probes one frame may trace** — the steady state's own share, `total / period`.
+// A frame in which every probe is due — the first after entering the world (every probe cold, the
+// clipmap already full of the city that streamed in behind the loading cover) — used to list the
+// whole field for ONE dispatch: 65536 probes x 64 rays of up to 160 DDA steps on Cinematic, seconds
+// of GPU on a laptop, and Windows resets the driver past two (`DXGI_ERROR_DEVICE_HUNG`, the browser
+// build's world-entry crash). Capped, a cold field fills over `period` frames and no frame's trace
+// costs more than every steady frame's already does. `gi_classify` lists no more than this, and the
+// trace and the blend read no further.
+fn listed_cap(g: GiParams) -> u32 {
+    let total = u32(g.params.y) * u32(g.dims.w);
+    return max(total / max(u32(g.misc.y), 1u), 1u);
+}
+
 fn logical_cascade(g: GiParams, s: u32) -> u32 {
     if (!interior_grid(g)) {
         return s;

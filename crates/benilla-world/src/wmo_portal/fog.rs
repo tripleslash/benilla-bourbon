@@ -46,6 +46,10 @@ pub struct CameraWmoFog(pub Option<WmoFogTarget>);
 /// Orgrimmar's gate hall is a 30 yd tunnel carrying a 292 yd fog record, so the city framed by its
 /// mouth wore three quarters of a wall of the building's teal until the medium knew where the room
 /// stopped. In a sealed room every surface is inside the sphere, and nothing changes.
+///
+/// It is the sphere of the group whose MFOG engaged (a true interior), never the in-group's as
+/// such: an exterior-lit courtyard claims the camera without a fog, and Orgrimmar's entry canyon is
+/// a 170 yd sphere that carried the tunnel's teal over the whole city while it faded out.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
 pub struct CameraRoomExtent(pub Option<(Vec3, f32)>);
 

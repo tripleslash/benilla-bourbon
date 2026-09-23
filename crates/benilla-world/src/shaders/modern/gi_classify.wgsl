@@ -72,13 +72,20 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     // The trace's own four reasons, verbatim (`gi_trace.wgsl` documents each).
     let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
     let cold = previous.depth.w < 0.5;
-    let reset = trace.cam.w > 0.5;
     let period = max(u32(g.misc.y), 1u);
     let scheduled = ((idx * 7u + u32(g.misc.z)) % period) == 0u;
-    if (!scrolled && !cold && !reset && !scheduled) {
+    // fork: a cut is no longer a reason to list a probe — it lists the whole field at once. The CPU
+    // holds the cut for `period` frames instead (`gi::update_gi`), and the trace REPLACES every
+    // probe it takes during that window, so each probe's scheduled turn in it is its reset.
+    if (!scrolled && !cold && !scheduled) {
         return;
     }
     let slot = atomicAdd(&work.count, 1u);
+    // fork: past the frame's cap (`probegi::listed_cap`) a probe waits: still cold or scrolled next
+    // frame, so it is listed again, and the ones listed this frame are not.
+    if (slot >= probegi::listed_cap(g)) {
+        return;
+    }
     work.items[slot] = idx;
     // The trace spends one workgroup per `group_probes(rays)` listed probes — one lane per ray
     // (`gi_trace.wgsl`, whose arithmetic this repeats) — so every that-many-th probe listed adds a

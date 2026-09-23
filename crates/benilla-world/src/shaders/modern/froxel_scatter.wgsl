@@ -46,12 +46,21 @@ const SHAFT_ISOTROPIC: f32 = 0.5;
 const CANOPY_HAZE: f32 = 1.5;
 const CANOPY_SHAFT: f32 = 1.0;
 // Point lights' in-scatter against their surface lighting.
-const POINT_GAIN: f32 = 1.0;
-// fork: a lamp's glow in the haze leans toward the eye: smoke and dust scatter forward, which is what
-// makes a brazier seen through the night air stand in a halo rather than a flat tint. The share of a
-// Henyey-Greenstein lobe of `POINT_G` mixed over the isotropic term (1 = isotropic on its own).
+const POINT_GAIN: f32 = 0.35;
+// fork: a lamp's glow in the haze leans a little toward the eye (smoke scatters forward): the share
+// of a Henyey-Greenstein lobe of `POINT_G` mixed over the isotropic term.
 const POINT_G: f32 = 0.5;
-const POINT_FORWARD: f32 = 0.6;
+const POINT_FORWARD: f32 = 0.3;
+// fork: **the glow sits at the flame.** A light's in-scatter keeps `POINT_FAR_SHARE` of itself past
+// its halo and all of it within `POINT_HALO_YD` of the source, so a brazier stands in a small bright
+// halo while a street of lit windows (each a light, 48 yd of range) no longer fills the air around
+// the camera with a grey glow.
+const POINT_HALO_YD: f32 = 4.0;
+const POINT_FAR_SHARE: f32 = 0.35;
+// fork: the night air's near clear (yd of planar depth): none of it nearer than `NEAR`, all of it past
+// `FAR`. The street the player stands in stays clear; the distance layers into haze.
+const NIGHT_CLEAR_NEAR: f32 = 30.0;
+const NIGHT_CLEAR_FAR: f32 = 150.0;
 
 // The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
 // medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
@@ -93,7 +102,8 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
     let g2 = POINT_G * POINT_G;
     let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
     let phase = mix(1.0, hg, POINT_FORWARD);
-    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase);
+    let halo = mix(POINT_FAR_SHARE, 1.0, exp(-dl / POINT_HALO_YD));
+    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase * halo);
 }
 
 // Every light one grid cell names, at a froxel.
@@ -144,7 +154,8 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
     // beam has open sky straight above it by definition.
     let cover = canopy_cover(p);
-    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover);
+    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover)
+        + f.room_media.z * density * smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d);
     let sigma = sigma_fog + sigma_haze;
 
     // In-scatter.

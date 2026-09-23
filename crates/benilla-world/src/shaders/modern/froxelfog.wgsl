@@ -83,6 +83,11 @@ fn room_reach(f: FroxelFog, dir: vec3<f32>) -> f32 {
         return 0.0;
     }
     let oc = f.camera.xyz - f.room.xyz;
+    // fork: a room the camera has just left keeps its fading air (`volumetrics::fading_room`); the
+    // path from outside it is the open air's, not the room's far root.
+    if (dot(oc, oc) >= f.room.w * f.room.w) {
+        return 0.0;
+    }
     let b = dot(oc, dir);
     let disc = b * b - (dot(oc, oc) - f.room.w * f.room.w);
     if (disc <= 0.0) {
@@ -207,7 +212,9 @@ fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32)
     // The open air keeps the ray the room did not take.
     let open_share = max(1.0 - (room_len / len) * room_w, 0.0);
     let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y) * open_share;
-    let haze_tau = f.medium.x * len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
+    // fork: plus the night air (`room_media.z`), whose near clear is long over this far out.
+    let haze_tau = (f.medium.x + f.room_media.z) * len * (1.0 - t)
+        * height_average(f, f.camera.y + ray.y * t, p.y);
     let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
     let tr = exp(-(fog_tau + haze_tau + far_tau));
     let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share);

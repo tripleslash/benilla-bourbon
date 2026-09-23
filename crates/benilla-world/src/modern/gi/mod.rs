@@ -79,7 +79,11 @@ pub struct GiTier {
     /// Probe spacing (yd) per cascade.
     pub spacing: [f32; MAX_CASCADES],
     pub rays: u32,
-    /// Frames between a probe's traces.
+    /// Frames between a probe's traces. The trace's cost is `rays / period` of the field a frame,
+    /// and `probegi::listed_cap` holds a moving camera's frames to the same share. fork: every tier
+    /// runs 3x its P6 period (Medium 12, High 8, Ultra 6, Cinematic 4), a third of the trace for a
+    /// field that settles over 3x as long (`SETTLE_SECS`). Keep it coprime with 7 —
+    /// `gi_classify.wgsl`'s schedule is `(idx * 7 + frame) % period`.
     pub period: u32,
     pub levels: usize,
     /// Voxel size (yd) per clipmap level.
@@ -148,7 +152,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 3,
             spacing: [4.0, 12.0, 36.0, 0.0, 0.0],
             rays: 24,
-            period: 12,
+            period: 36,
             levels: 3,
             voxel: [1.5, 4.0, 12.0, 0.0],
             voxels: 64,
@@ -163,7 +167,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 3,
             spacing: [3.0, 9.0, 27.0, 0.0, 0.0],
             rays: 32,
-            period: 8,
+            period: 24,
             levels: 4,
             voxel: [1.0, 3.0, 8.0, 16.0],
             voxels: 96,
@@ -178,7 +182,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 4,
             spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
             rays: 48,
-            period: 6,
+            period: 18,
             levels: 4,
             voxel: [0.75, 2.25, 6.0, 12.0],
             voxels: 96,
@@ -189,7 +193,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
         },
         // fork: P8 — Ultra's grids (`MAX_CASCADES` is 5 and Ultra's 4 + the interior sub-grid
         // already fills it, and the probe pool is allocated at one size for every tier), traced
-        // harder: 64 rays on a 4-frame period. The bounce matters more here than on any other tier
+        // harder: 64 rays, on the shortest period. The bounce matters more here than on any other tier
         // because Cinematic is the tier where a room's only light may be the hearth it bounces.
         LightingQuality::Cinematic => GiTier {
             on: true,
@@ -197,7 +201,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 4,
             spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
             rays: 64,
-            period: 4,
+            period: 12,
             levels: 4,
             voxel: [0.75, 2.25, 6.0, 12.0],
             voxels: 96,
@@ -234,7 +238,11 @@ const BACKFACE_LIMIT: f32 = 0.35;
 /// eases in a few updates (`gi_blend`'s change term), a scrolled or cold one is replaced outright,
 /// and a teleport cuts the whole field. What settles slowly is the last few percent of the noise,
 /// which is exactly what was glimmering.
-const SETTLE_SECS: f32 = 2.2;
+///
+/// fork: 3x the 2.2 s the flicker numbers above were measured at, because every tier's period went
+/// 3x with it. What averages the noise away is the number of updates per time constant, so the two
+/// move together: the same residue for a third of the trace.
+const SETTLE_SECS: f32 = 6.6;
 
 /// The steady-frame history weight for a tier updating every `period` frames at `dt`: the ease that
 /// settles in [`SETTLE_SECS`] whatever the tier and the frame rate. Clamped so a stalled frame (a
@@ -410,6 +418,10 @@ struct GiHistory {
     /// claim has disagreed with it (s).
     room: Option<Entity>,
     disagree: f32,
+    /// fork: frames the current cut is still held for — a tier's `period`, so every probe's
+    /// scheduled turn inside it replaces the probe rather than blending (the trace lists at most
+    /// `probegi::listed_cap` probes a frame, so a cut can no longer replace the field in one).
+    cut_frames: u32,
 }
 
 /// How long the camera's interior claim must hold before the 1.5 yd sub-grid appears (s)…
@@ -491,7 +503,11 @@ fn update_gi(
     let cam = camera.translation();
     // The interior sub-grid coming or going is not a cut: it is stored behind the exterior ladder
     // (`probegi::storage_cascade`), so every exterior probe keeps its slot and its history.
-    let cut = hist.camera.is_none_or(|p| p.distance(cam) > 60.0) || hist.tier != Some(base_tier);
+    if hist.camera.is_none_or(|p| p.distance(cam) > 60.0) || hist.tier != Some(base_tier) {
+        hist.cut_frames = tier.period.max(1);
+    }
+    let cut = hist.cut_frames > 0;
+    hist.cut_frames = hist.cut_frames.saturating_sub(1);
     hist.camera = Some(cam);
     hist.tier = Some(base_tier);
     hist.frame = hist.frame.wrapping_add(1);
@@ -644,6 +660,9 @@ mod tests {
                 }
                 let coarsest = t.voxel[t.levels - 1] * t.voxels as f32;
                 assert!(coarsest >= t.cascade_extent(t.cascades - 1).x * 0.3, "{q:?}");
+                // `gi_classify.wgsl` schedules `(idx * 7 + frame) % period`: a period sharing a
+                // factor with 7 would leave some probes never due.
+                assert!(t.period % 7 != 0, "{q:?}: period {}", t.period);
             }
         }
         assert!(!gi_tier(LightingQuality::Low).on);

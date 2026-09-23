@@ -611,16 +611,23 @@ fn compute_wmo_pvs(
                         })
                         .and_then(|n| select_wmo_fog(&model.fogs, n.fog_indices, eye_local));
                     // fork: modern lighting — how far the room's own air reaches, for the
-                    // medium ([`CameraRoomExtent`]): the camera group's MOGI box as a world
-                    // sphere. A placement is a rotation and a translation, so the box's
-                    // half-diagonal is its radius unchanged.
-                    room_extent = model.group_nav.get(gi).map(|n| {
-                        let box_local = group_aabb(n);
-                        (
-                            world_from_local.transform_point3(Vec3::from(box_local.center)),
-                            Vec3::from(box_local.half_extents).length(),
-                        )
-                    });
+                    // medium ([`CameraRoomExtent`]): the MOGI box of the group whose fog just
+                    // engaged, as a world sphere, and nothing when none did. Never the in-group
+                    // as such: an exterior-lit courtyard claims the camera without carrying a
+                    // fog, and Orgrimmar's entry canyon (g133, `0x0a841`) is a 170 yd sphere —
+                    // stepping out of the gate tunnel spread the tunnel's teal over the whole
+                    // city for the 4 s fade-out. A placement is a rotation and a translation,
+                    // so the box's half-diagonal is its radius unchanged.
+                    room_extent = fog_target
+                        .and(fog_room(&model.group_nav, [Some(gi), tap.across]))
+                        .and_then(|g| model.group_nav.get(g))
+                        .map(|n| {
+                            let box_local = group_aabb(n);
+                            (
+                                world_from_local.transform_point3(Vec3::from(box_local.center)),
+                                Vec3::from(box_local.half_extents).length(),
+                            )
+                        });
                     claim = Some(InteriorClaim {
                         room: WmoRoom {
                             instance: entity,
@@ -1290,6 +1297,16 @@ fn group_aabb(nav: &WmoGroupNav) -> Aabb {
     Aabb::from_min_max(a.min(b), a.max(b))
 }
 
+/// fork: modern lighting — the group of the camera's containing set (the down-ray's in-group,
+/// then its across-portal partner) whose MFOG the interior fog engages: the first TRUE interior,
+/// `flags & (EXTERIOR | EXTERIOR_LIT) == 0` — the conjunct the fog target is selected under.
+fn fog_room(nav: &[WmoGroupNav], seeds: [Option<usize>; 2]) -> Option<usize> {
+    seeds.into_iter().flatten().find(|&g| {
+        nav.get(g)
+            .is_some_and(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
+    })
+}
+
 /// The portal's polygon vertices (WoW model space), or `None` if the span is out of range or
 /// degenerate (< 3 vertices).
 fn portal_poly<'a>(
@@ -1546,6 +1563,45 @@ mod tests {
         assert!(
             !opens_a_window(&nav, 99),
             "an out-of-range group is no window"
+        );
+    }
+
+    /// **A room's air is the room whose fog engaged, never an exterior-lit courtyard's.** The flag
+    /// values are Orgrimmar's own (`ogrimmar.wmo`): g006, the gate tunnel's last segment
+    /// (`0x0a805`, a true interior carrying the building's teal MFOG), opens through a doorway
+    /// portal onto g133, the entry canyon (`0x0a841`, exterior-lit, a 170 yd box reaching the
+    /// Valley of Strength). The modern medium took the courtyard's sphere for the tunnel's fog, and
+    /// the whole city fogged over for the 4 s fade-out whenever the camera stepped out.
+    #[test]
+    fn only_a_true_interior_carries_the_rooms_air() {
+        let g = |flags: u32| WmoGroupNav {
+            flags,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: 0xf,
+        };
+        let (tunnel, canyon, outside) = (0, 1, 2);
+        let nav = [g(0x0a805), g(0x0a841), g(0x08009)];
+        assert_eq!(fog_room(&nav, [Some(tunnel), None]), Some(tunnel));
+        assert_eq!(
+            fog_room(&nav, [Some(canyon), None]),
+            None,
+            "the canyon claims the camera but carries no room"
+        );
+        assert_eq!(
+            fog_room(&nav, [Some(canyon), Some(tunnel)]),
+            Some(tunnel),
+            "on a crossing into the tunnel the room is the tunnel, not the courtyard"
+        );
+        assert_eq!(fog_room(&nav, [Some(outside), None]), None);
+        assert_eq!(
+            fog_room(&nav, [Some(99), None]),
+            None,
+            "an unknown group is no room"
         );
     }
 

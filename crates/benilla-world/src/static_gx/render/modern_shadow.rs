@@ -223,7 +223,10 @@ struct ModernShadowFrame {
     cache_views: Vec<TextureView>,
     /// fork: per layer, the static cache's layer as a depth ATTACHMENT — the lamp atlas's static
     /// phase draws a slot's faces straight into the cache, and the working layer takes a copy.
+    /// Empty unless [`atlas_restores`].
     cache_targets: Vec<TextureView>,
+    /// fork: whether the cache was made for [`atlas_restores`] (all layers, a render attachment).
+    cache_restores: bool,
     offsets: Vec<u32>,
     /// fork: modern lighting (P6) — one caster view per cube face of every shadowed local light,
     /// and (P8b) per atlas SLOT what its tiles currently hold.
@@ -382,13 +385,12 @@ fn init_shadow_pipelines(
     });
 }
 
-/// fork: P8b — does any tier draw entity casters into the cube atlas? Only then does an atlas layer
-/// need a static copy to be restored from. Every tier that shadows a lamp does since the atlas split
-/// into a static phase (drawn once, into the cache) and a pruned dynamic one (drawn over a copy).
-fn atlas_restores() -> bool {
-    crate::modern::LightingQuality::ALL
-        .iter()
-        .any(|q| crate::modern::lights::light_tier(*q).dynamic_casters)
+/// fork: does THIS session's tier run the lamp atlas's dynamic phase? Only then does an atlas layer
+/// need a static copy to restore from, and only then is the static cache a render attachment (the
+/// static phase draws into it). Anything else keeps the cache exactly as the cascades need it:
+/// their layers alone, copy and sample only.
+fn atlas_restores(lights: Option<&ModernLights>) -> bool {
+    lights.is_some_and(|l| l.tier.dynamic_casters && !l.shadowed.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,12 +442,29 @@ fn prepare_modern_shadow(
         }
     }
     frame.texture = Some(image.texture.clone());
+    // fork: the cache's shape follows the live tier; a tier change across the dynamic phase makes
+    // a new one (the cascades' keys go with it, so they redraw into it once).
+    let restores = atlas_restores(lights.as_deref());
+    if frame.cache.is_some() && frame.cache_restores != restores {
+        frame.cache = None;
+        for key in &frame.cache_keys {
+            key.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        *frame
+            .atlas
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = AtlasCache::default();
+        for slot in 0..crate::modern::lights::MAX_SHADOWED {
+            crate::modern::lights::publish_built(slot, 0);
+        }
+    }
+    frame.cache_restores = restores;
     if frame.cache.is_none() {
         // fork: P8b — the cache holds only the layers anything is ever RESTORED into: the cascades,
         // whose entity casters are undone each frame. The sky map has no dynamic pass, and the cube
         // atlas has none on any tier (`LightTier::dynamic_casters`), so a cached copy of either was
         // 16.8 MB of memory and a 16.8 MB copy per redraw that nothing read back.
-        let layers = if atlas_restores() {
+        let layers = if restores {
             image.texture.depth_or_array_layers()
         } else {
             image.texture.depth_or_array_layers().min(MAX_CASCADES as u32)
@@ -462,17 +481,21 @@ fn prepare_modern_shadow(
             dimension: TextureDimension::D2,
             format: TextureFormat::Depth32Float,
             // TEXTURE_BINDING: the restore draw reads it (`depth_fill.wgsl`'s `restore_fragment`).
-            // RENDER_ATTACHMENT: the lamp atlas's static phase draws into it.
-            usage: TextureUsages::COPY_SRC
-                | TextureUsages::COPY_DST
-                | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::RENDER_ATTACHMENT,
+            // RENDER_ATTACHMENT only for the lamp atlas's static phase, which draws into it.
+            usage: if restores {
+                TextureUsages::COPY_SRC
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::RENDER_ATTACHMENT
+            } else {
+                TextureUsages::COPY_SRC | TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING
+            },
             view_formats: &[],
         }));
         frame.cache_views.clear();
         frame.cache_targets.clear();
     }
-    if frame.cache_targets.is_empty() {
+    if frame.cache_targets.is_empty() && restores {
         if let Some(cache) = frame.cache.as_ref() {
             let targets: Vec<TextureView> = (0..cache.depth_or_array_layers())
                 .map(|layer| {

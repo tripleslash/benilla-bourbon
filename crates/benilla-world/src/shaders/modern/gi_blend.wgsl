@@ -43,7 +43,8 @@ fn blend_probes(
     }
     // Rows of workgroups, as the trace dispatches them (`gi_classify.wgsl`'s `GROUP_ROW`).
     let t = id.y * (groups.x * 64u) + id.x;
-    if (t >= work.count) {
+    // fork: no further than the classify pass's cap (`probegi::listed_cap`).
+    if (t >= min(work.count, probegi::listed_cap(g))) {
         return;
     }
     let idx = work.items[t];

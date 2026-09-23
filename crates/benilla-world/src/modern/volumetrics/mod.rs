@@ -63,13 +63,23 @@ const CLOUD_CELL_YD: f32 = 24.0;
 const CLOUD_HEIGHT: f32 = 350.0;
 /// Scatter history weight on a steady frame (was the plan's 0.9: beams shimmered with the jitter).
 const HISTORY_WEIGHT: f32 = 0.95;
-/// fork: **the night air** — shaft-haze extinction (1/yd) added in every zone overnight (scaled by
-/// the SIDN night fraction). A night city is a volume of smoke and dust that its fires light from
-/// inside: the streets fade into a dim haze at a few hundred yards, and every brazier and lantern
-/// stands in a glow of its own (`froxel_scatter.wgsl`'s point in-scatter). Without it a clear night
-/// was a vacuum, the lamps lit the ground and nothing between. By day it is zero, so the zones
-/// calibrated against daylight shots keep their air.
+/// fork: **the night air** — haze extinction (1/yd) added in every zone overnight (scaled by the
+/// SIDN night fraction), so a night city fades into a dim haze with distance instead of being a
+/// vacuum. It is the DISTANCE's haze and not the street's: `froxel_scatter.wgsl` clears it within
+/// `NIGHT_CLEAR_NEAR` yards of the camera and ramps it in by `NIGHT_CLEAR_FAR`, so what the player
+/// stands among stays clear and only the far city layers into it. By day it is zero, so the zones
+/// calibrated against daylight shots keep their air. It rides `room_media.z`, apart from the
+/// zone's own shaft haze, because that one must reach the camera (a beam starts at the eye).
 const NIGHT_HAZE: f32 = 0.0025;
+/// fork: **the air is as faint by day as it is at midnight.** The zone rows' shaft haze was fitted
+/// to reference shots, and in play the daylight lit it into a veil — Goldshire at dusk sat in an
+/// orange wash, while the same air under the moon read as the faint haze the user wants at every
+/// hour. Every row's haze extinction and shaft gain are scaled by these, so the zones keep their
+/// character against each other (Ashenvale still hazier than Durotar) but none of them fogs the
+/// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
+/// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
+const HAZE_SCALE: f32 = 0.5;
+const SHAFT_SCALE: f32 = 0.67;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FogMode {
@@ -349,6 +359,8 @@ struct VolumeHistory {
     frame: u32,
     reference_height: Option<f32>,
     log_timer: f32,
+    /// The room whose air is still fading ([`fading_room`]).
+    room: Option<(Vec3, f32)>,
 }
 
 /// The `i`-th element of the Halton sequence in `base`.
@@ -386,6 +398,7 @@ fn update_volume(
             *out = ModernVolume::default();
         }
         hist.prev_clip = None;
+        hist.room = None;
         return;
     }
     let Some((camera, projection)) = cameras.iter().next() else {
@@ -421,7 +434,7 @@ fn update_volume(
         storm: l.storm_bcc,
         underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
         interior,
-        haze: look.0.haze + NIGHT_HAZE * l.sidn_night.clamp(0.0, 1.0),
+        haze: look.0.haze * HAZE_SCALE,
         forward: look.0.forward,
         key_scatter: look.0.key_scatter,
         fog_reach: look.0.fog_reach,
@@ -433,7 +446,11 @@ fn update_volume(
     let room_w = crossfade.map_or(0.0, |c| c.t());
     // The room's sphere (`None` = the camera is not in one): its medium is solved whole, and the
     // weight alone rides the crossfade.
-    let room = room_extent.and_then(|r| r.0).filter(|(_, radius)| *radius > 0.0);
+    let room = fading_room(
+        &mut hist.room,
+        room_extent.and_then(|r| r.0).filter(|(_, radius)| *radius > 0.0),
+        room_w,
+    );
     let room_media = (room_w > 1e-3)
         .then(|| media::solve(&shared(l.wmo_fog_color, l.wmo_fog_start, l.wmo_fog_end, 1.0)));
 
@@ -460,9 +477,10 @@ fn update_volume(
         if hist.log_timer <= 0.0 {
             hist.log_timer = 2.0;
             info!(
-                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?}",
+                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2}",
                 media.density, media.near_clear, reference_height, media.key_in, media.ambient_in,
-                l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color
+                l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color,
+                room, room_w
             );
         }
     }
@@ -540,7 +558,8 @@ fn update_volume(
         room_media: Vec4::new(
             room_media.map_or(0.0, |m| m.density),
             room_w,
-            0.0,
+            // fork: the night air's own extinction (see `NIGHT_HAZE`).
+            NIGHT_HAZE * l.sidn_night.clamp(0.0, 1.0),
             0.0,
         ),
         room_ambient: room_media
@@ -564,12 +583,31 @@ fn update_volume(
     out.block.extend_from_slice(bytemuck::cast_slice(&cloud));
 }
 
+/// fork: **the room the camera just left keeps its air until the crossfade has spent it.**
+/// [`CameraRoomExtent`](crate::wmo_portal::CameraRoomExtent) goes `None` at the doorway while the
+/// classic 4 s crossfade still holds `room_w` of that room's fog, and dropping the sphere there
+/// snapped the tunnel's teal out of the air in front of Orgrimmar's gate in one frame. The last
+/// room is latched instead — `WmoCrossfade`'s staged triple latches on exit for the same reason —
+/// so the fog of a hall fades inside the hall. A room the camera stands in always replaces it.
+fn fading_room(
+    latched: &mut Option<(Vec3, f32)>,
+    now: Option<(Vec3, f32)>,
+    room_w: f32,
+) -> Option<(Vec3, f32)> {
+    if now.is_some() {
+        *latched = now;
+    } else if room_w <= 1e-3 {
+        *latched = None;
+    }
+    *latched
+}
+
 /// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded) times the zone's
 /// key scattering, glow and shaft gain — not the medium's key term, which is normalized to the fog
 /// colour and would tint every beam with the zone's fog hue.
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
     let horizon = super::sun_arc::key_horizon();
-    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * horizon;
+    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
     Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
 }
 
@@ -694,6 +732,17 @@ mod tests {
         let night = Vec3::new(0.3, -0.5, 0.1).normalize();
         let _ = cloud_grid(None, Vec3::ZERO, night, 0.5, &mut grid);
         assert!(grid.iter().all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn a_room_left_behind_keeps_its_air_while_it_fades() {
+        let (a, b) = ((Vec3::new(1.0, 2.0, 3.0), 31.0), (Vec3::new(-5.0, 0.0, 9.0), 12.0));
+        let mut latched = None;
+        assert_eq!(fading_room(&mut latched, Some(a), 0.2), Some(a), "entering");
+        assert_eq!(fading_room(&mut latched, None, 0.75), Some(a), "leaving: the air stays in the room");
+        assert_eq!(fading_room(&mut latched, Some(b), 0.75), Some(b), "a new room replaces it");
+        assert_eq!(fading_room(&mut latched, None, 0.0), None, "spent");
+        assert_eq!(fading_room(&mut latched, None, 0.5), None, "nothing to hold");
     }
 
     #[test]

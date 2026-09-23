@@ -147,6 +147,8 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/static_gx/render/modern_shadow.rs` | the lamp atlas is two phases per slot: static faces drawn once into the static cache after `ATLAS_SETTLE_FRAMES` of stillness (`lights::publish_built` tells the main world), and a pruned dynamic phase (entity casters within `lights::DYNAMIC_REACH`, the light's host excluded) restored and redrawn only when `same_casters` fails; the cache is a render attachment; `EntityDrawCmd` carries `tight` and `pose` | lamp shadows |
 | `benilla-world/src/modern/shadow.rs` | `EntityCaster::tight` (the part's bound without the rig margin) | lamp shadows |
 | `benilla-world/src/lighting/global_light.rs` | `MODERN_LOCAL_GAIN` (1.3) on every packed local light in a modern frame | lamp shadows |
+| `benilla-world/src/wmo_portal/fog.rs` | `CameraRoomExtent` (the room the camera stands in, as a world sphere), re-exported from `wmo_portal/mod.rs` | P4 fix |
+| `benilla-world/src/wmo_portal/mod.rs` | `compute_wmo_pvs` writes `CameraRoomExtent` beside `CameraWmoFog`: the sphere of `fog_room` (the true interior whose MFOG engaged), `None` wherever the fog target is — never an exterior-lit courtyard's | P4 fix |
 
 ## Planned hooks (not yet landed)
 

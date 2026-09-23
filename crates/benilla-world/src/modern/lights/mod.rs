@@ -309,6 +309,52 @@ pub fn lights_enabled() -> bool {
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_LIGHTS").as_deref() != Some("0"))
 }
 
+/// fork: the lamp-shadow bisect levers, read once — each overrides one row of the tier this session
+/// runs, so a report from the browser can be narrowed to one piece without a rebuild:
+/// `$WOW_LAMP_DYNAMIC=0` (`?lamp_dynamic=0`) drops the dynamic phase (the static faces then draw
+/// straight into the working layer, as before it existed), `$WOW_LAMP_TAPS=<n>` sets the filter's
+/// taps (1 = the single hardware compare), `$WOW_LAMP_TILE=<f>` the drawn fraction of a tile, and
+/// `$WOW_LAMP_SHADOWED=<n>` caps the shadowed lamps (0 = none).
+fn lamp_levers(mut tier: LightTier) -> LightTier {
+    #[derive(Clone, Copy, Default)]
+    struct Levers {
+        dynamic: Option<bool>,
+        taps: Option<u32>,
+        tile: Option<f32>,
+        shadowed: Option<usize>,
+    }
+    static CELL: std::sync::OnceLock<Levers> = std::sync::OnceLock::new();
+    let l = *CELL.get_or_init(|| {
+        let var = |k: &str| crate::launch_env::var(k).map(|v| v.trim().to_string());
+        let levers = Levers {
+            dynamic: var("WOW_LAMP_DYNAMIC").map(|v| v != "0"),
+            taps: var("WOW_LAMP_TAPS").and_then(|v| v.parse().ok()),
+            tile: var("WOW_LAMP_TILE").and_then(|v| v.parse().ok()),
+            shadowed: var("WOW_LAMP_SHADOWED").and_then(|v| v.parse().ok()),
+        };
+        if levers.dynamic.is_some() || levers.taps.is_some() || levers.tile.is_some() || levers.shadowed.is_some() {
+            info!(
+                "modern lights: lamp levers — dynamic {:?}, taps {:?}, tile {:?}, shadowed {:?}",
+                levers.dynamic, levers.taps, levers.tile, levers.shadowed
+            );
+        }
+        levers
+    });
+    if let Some(d) = l.dynamic {
+        tier.dynamic_casters &= d;
+    }
+    if let Some(t) = l.taps {
+        tier.taps = t.clamp(1, 12);
+    }
+    if let Some(t) = l.tile {
+        tier.tile_use = t.clamp(0.05, 1.0);
+    }
+    if let Some(n) = l.shadowed {
+        tier.shadowed = tier.shadowed.min(n);
+    }
+    tier
+}
+
 /// fork: P8 — **the cull**: is this light worth six faces of depth?
 ///
 /// **The metric is the light's solid angle at the eye, and it does not depend on where the camera
@@ -821,7 +867,7 @@ fn update_lights(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
-    let tier = light_tier(active.quality);
+    let tier = lamp_levers(light_tier(active.quality));
     if !active.is_modern() || !tier.on || !lights_enabled() {
         if out.on {
             *out = ModernLights::default();

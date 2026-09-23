@@ -205,7 +205,9 @@ fn trace_probes(
     // `gi_classify.wgsl` already decided every listed probe is due (scrolled in, never traced, a
     // cut, or its turn in the period). A lane past the list, or past this group's probes, does no
     // work — but it still reaches every barrier.
-    let busy = slot < per_group && item < work.count;
+    // fork: the list holds at most `listed_cap` probes; the count may run past it (the classify pass
+    // counts every due probe before it drops the excess).
+    let busy = slot < per_group && item < min(work.count, probegi::listed_cap(trace.gi));
 
     var idx = 0u;
     var cascade = 0u;

@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 34] = [
+    const SEEDED: [&str; 38] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -271,6 +271,12 @@ fn seed_launch_env() {
         // fork: P8 — the Cinematic tier's emissive-source lever (`?modern_emissive=0`): the A/B for
         // "is this lamp's light authored, or did we derive it".
         "WOW_MODERN_EMISSIVE",
+        // fork: the lamp-shadow bisect levers (`modern::lights::lamp_levers`): `?lamp_dynamic=0`,
+        // `?lamp_taps=1`, `?lamp_tile=0.5`, `?lamp_shadowed=0`.
+        "WOW_LAMP_DYNAMIC",
+        "WOW_LAMP_TAPS",
+        "WOW_LAMP_TILE",
+        "WOW_LAMP_SHADOWED",
         "WOW_MODERN_MIRRORTIER",
         "WOW_MODERN_CASTERREACH",
         "WOW_WORLDVIEW_FACE",
