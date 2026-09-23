@@ -9,10 +9,10 @@
 </div>
 
 > [!IMPORTANT]
-> **Issues and pull requests are closed here.** benilla is a solo project developed in a private
-> tree; this repo is its export, published as squashed snapshots, so a PR here has nothing to land
-> on. The best way to contribute is to join the [Discord](https://discord.gg/wJSJx467G4) and report
-> the bugs you find. Questions and ideas are welcome in the same place.
+> **Issues are off, and pull requests are not open yet.** [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
+> says what will get in when they are. Until then, the way to contribute is to join the
+> [Discord](https://discord.gg/wJSJx467G4) and report the bugs you find. Questions and ideas are
+> welcome in the same place.
 
 ## wenilla — this fork: benilla in a browser tab
 
@@ -70,7 +70,7 @@ and no bundled game assets.
   modes from slow fall to roots, a follow camera with collision, boats, zeppelins and taxi flights.
 - **Networking:** SRP6 auth through world-session crypto, the object mirror into the ECS, and live
   wire coverage from movement and chat through spells, party, quests, mail, trade, vendors, bank,
-  loot, the auction house and PvP honor.
+  loot, the auction house, PvP honor and battlegrounds.
 - **UI:** a from-scratch FrameXML + Lua engine that runs the client's own stock interface off
   your install's patch chain, from the login and character screens through the full HUD, the
   classic windows (guild, macros and key bindings included), chat, nameplates, floating combat
@@ -87,10 +87,8 @@ benilla is done when a 1.12.1 player can do everything here that they could in t
 client, it looks and feels the same, and it runs from a download on Windows, Linux and macOS.
 No dates; the order is what is likely, not a promise.
 
-- Battlegrounds, then the long tail of small features that separates a working client from a
-  finished one.
+- The long tail of small features that separates a working client from a finished one.
 - Addons, options and performance, ongoing.
-- The no-brainer fixes from VanillaFixes, SuperWoW and the like.
 - Playable downloads for Windows, Linux and macOS. Linux first.
 
 Not planned: other expansions or client versions, Warden (anticheat).
@@ -98,8 +96,10 @@ Not planned: other expansions or client versions, Warden (anticheat).
 ## Running it
 
 You need a **1.12.1 (build 5875) client install** for game data, a vanilla server to connect to,
-and stable Rust. Any 1.12.1 core works; [vmangos](https://github.com/vmangos/core) is what
-development runs against, and cMaNGOS and the rest speak the same protocol.
+stable Rust and a C compiler (the Lua is built from source; on macOS the Xcode command line
+tools, on Linux the ALSA and udev development packages). Any 1.12.1 core works;
+[vmangos](https://github.com/vmangos/core) is what development runs against, and cMaNGOS and
+the rest speak the same protocol.
 
 ```sh
 WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla

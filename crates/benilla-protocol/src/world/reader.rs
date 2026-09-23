@@ -6,9 +6,8 @@ use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// Read half of a split [`WorldSession`](super::WorldSession) — owns the read half of the
-/// connection + the decrypter. Lives on the network thread (native) or in the sequencer task
-/// (web), streaming decoded [`crate::SessionEvent`]s (via [`Self::poll_async`]).
+/// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half and the
+/// decrypter. Lives on the network thread (native) or in the sequencer task (web).
 pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
@@ -33,13 +32,8 @@ impl WorldReader {
         futures_lite::future::block_on(self.poll_async())
     }
 
-    /// Read one packet and decode it into a [`crate::Poll`]: the typed [`crate::SessionEvent`]s it
-    /// produced, or [`crate::Poll::Skipped`] for an unparseable one. Errors only on a real socket
-    /// failure (disconnect). The running world model lives in the ECS — the reader is stateless,
-    /// turning bytes into events and nothing more.
-    ///
-    /// `recv_packet` reads the whole body into a buffer before parsing, so a parse error leaves the
-    /// stream aligned — we skip that packet rather than tear down the session.
+    /// Read one packet and decode it into a [`crate::Poll`]; errors only when the socket fails. The
+    /// whole body is read before parsing, so an unparseable packet is skipped, the stream aligned.
     pub async fn poll_async(&mut self) -> Result<crate::Poll> {
         let mut header = [0u8; 4];
         if let Err(e) = self.reader.read_exact_async(&mut header).await {
@@ -59,9 +53,6 @@ impl WorldReader {
                 events: crate::decode(packet),
                 tail,
             }),
-            // Include the raw body (capped) so an unparseable packet can be decoded by hand — a parse
-            // bug is otherwise invisible past "failed to fill whole buffer". The opcode rides
-            // separately so the net thread can feed the app's dropped-packet tally.
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
                 reason: format!(
@@ -74,8 +65,7 @@ impl WorldReader {
     }
 }
 
-/// Space-separated hex of the first `max` bytes of `body` (with a `…` when truncated) — the diagnostic
-/// tail on a [`crate::Poll::Skipped`] reason so an unparseable packet's layout can be decoded by hand.
+/// Hex of the first `max` bytes of `body`, `…` when truncated, for decoding a packet by hand.
 fn hex_preview(body: &[u8], max: usize) -> String {
     use std::fmt::Write;
     let mut s = String::new();
