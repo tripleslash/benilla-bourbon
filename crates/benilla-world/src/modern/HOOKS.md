@@ -147,6 +147,12 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/static_gx/render/modern_shadow.rs` | the lamp atlas is two phases per slot: static faces drawn once into the static cache after `ATLAS_SETTLE_FRAMES` of stillness (`lights::publish_built` tells the main world), and a pruned dynamic phase (entity casters within `lights::DYNAMIC_REACH`, the light's host excluded) restored and redrawn only when `same_casters` fails; the cache is a render attachment; `EntityDrawCmd` carries `tight` and `pose` | lamp shadows |
 | `benilla-world/src/modern/shadow.rs` | `EntityCaster::tight` (the part's bound without the rig margin) | lamp shadows |
 | `benilla-world/src/lighting/global_light.rs` | `MODERN_LOCAL_GAIN` (1.3) on every packed local light in a modern frame | lamp shadows |
+| `benilla-world/src/static_gx/render/modern_shadow.rs` | the lamp atlas's dynamic phase restores and redraws per FACE (`dirty_faces` / `settle_drawn`), and `DYN_MOVE_YD`/`DYN_TURN` drop to float noise (0.02) so a walking body's lamp shadow keeps up | pkuzic port |
+| `benilla-world/src/lighting/{flicker.rs,global_light.rs,mod.rs}` | `FlameFlicker` folded into the packed colour in `build_light_data` (intensity + blue), `$WOW_FIRE_FLICKER`; `SpellFxLight` packed only when the modern grid is on | pkuzic port |
+| `benilla-world/src/terrain_stream/spawn/fx.rs` | `spawn_point_light` takes the light's `FlameFlicker` (authored warm lights, emitter-derived flames) | pkuzic port |
+| `benilla-app/src/entities/{carried_light,wmo_props}.rs`, `attach/mod.rs` | carried, transport and GameObject-emissive lights carry `FlameFlicker` | pkuzic port |
+| `benilla-formats/src/spell_light.rs`, `benilla-app/src/entities/spell_fx/light.rs` | spell lights: the school rules, and `SpellLight`'s envelope/budget spawned from `spell_fx` (Kit), `missile.rs` (Missile) and `dest_fx.rs` (Burst); registered beside `advance_fx_anim` in `entities.rs` | pkuzic port |
+| `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_FIRE_FLICKER` (`?fire_flicker=`) and `WOW_SPELL_LIGHT` (`?spell_light=0`) | pkuzic port |
 | `benilla-world/src/wmo_portal/fog.rs` | `CameraRoomExtent` (the room the camera stands in, as a world sphere), re-exported from `wmo_portal/mod.rs` | P4 fix |
 | `benilla-world/src/wmo_portal/mod.rs` | `compute_wmo_pvs` writes `CameraRoomExtent` beside `CameraWmoFog`: the sphere of `fog_room` (the true interior whose MFOG engaged), `None` wherever the fog target is — never an exterior-lit courtyard's | P4 fix |
 

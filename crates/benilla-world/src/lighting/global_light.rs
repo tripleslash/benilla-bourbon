@@ -179,6 +179,14 @@ const MODERN_LOCAL_GAIN: f32 = 1.3;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct NightGlow;
 
+/// fork: **the light a luminous spell throws** — a Fireball's core, a Fire Nova's flash, a holy
+/// blessing (`benilla_formats::spell_light`, spawned and enveloped by the app's spell-effect lanes).
+/// Packed only on the modern tiers that bin lights into a grid (Medium and up): the classic
+/// three-nearest lane has three slots per vertex, and a volley of spells would push the torches
+/// out of them. Never a shadow caster — it moves and it is gone in a second.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct SpellFxLight;
+
 /// fork: P8 — how fast a light ramps into and out of the committed table, in units of fade per
 /// second. ~4 frames at 60 Hz: long enough that no edge reads as a switch, short enough that a
 /// lamp is at full strength by the time the player has finished stepping through the door.
@@ -436,6 +444,10 @@ fn build_light_data(
         Option<&LightRooms>,
         Option<&crate::modern::lights::SynthesizedLight>,
         Option<&NightGlow>,
+        // fork: the flame flicker ([`super::FlameFlicker`]) — folded into the committed colour
+        // here and nowhere else, so no other reader of the light's intensity sees it.
+        Option<&super::FlameFlicker>,
+        Has<SpellFxLight>,
     )>,
     // fork: P8 — each light's admission fade, keyed by entity. See the gather below.
     mut admit: Local<bevy::platform::collections::HashMap<Entity, f32>>,
@@ -557,17 +569,27 @@ fn build_light_data(
         POINT_PACK_RADIUS
     };
     let night = l.sidn_night.clamp(0.0, 1.0);
+    // fork: the flicker's clock and gain — absolute time, so the waveform is frame-rate independent.
+    let flicker_t = time.elapsed_secs_wrapped();
+    let flicker_gain = super::flicker::flicker_gain();
+    // fork: spell lights ride only a frame whose lights are binned into the modern grid.
+    let spell_tier = active.as_ref().is_some_and(|a| {
+        a.is_modern()
+            && crate::modern::lights::light_tier(a.quality).on
+            && crate::modern::lights::lights_enabled()
+    });
     wanting.clear();
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
-        .filter_map(|(entity, pl, gt, rooms, synthesized, night_glow)| {
+        .filter_map(|(entity, pl, gt, rooms, synthesized, night_glow, flame, spell)| {
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             // The tier gate for DERIVED lights, read where the light is READ rather than where it
             // was spawned: a lamppost's light entity always exists, and whether it reaches the
             // table is this frame's question — so a doodad that streamed in before the lighting
             // latched is not left permanently dark.
-            let tier_ok = synthesized.is_none() || crate::modern::emissive_lights_on();
+            let tier_ok = (synthesized.is_none() || crate::modern::emissive_lights_on())
+                && (!spell || spell_tier);
             // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
             // visibility test bolted onto a faithful gather: the reference's register walk has no
             // such term either, it simply never has a culled room's torch to register. Ungated for
@@ -605,8 +627,16 @@ fn build_light_data(
             };
             let glow = if night_glow.is_some() { night } else { 1.0 };
             let gain = if modern_pack { MODERN_LOCAL_GAIN } else { 1.0 };
-            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade * reach * glow * gain;
-            let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
+            let flick = flame.map_or(super::flicker::FlickerMod::STEADY, |f| {
+                f.at(flicker_t, flicker_gain)
+            });
+            let s = pl.intensity / (4.0 * std::f32::consts::PI)
+                * *fade
+                * reach
+                * glow
+                * gain
+                * flick.intensity;
+            let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * flick.blue]);
             // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
             let indoors = rooms.is_some_and(|r| {
                 portals

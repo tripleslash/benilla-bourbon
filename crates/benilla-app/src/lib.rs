@@ -251,7 +251,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 38] = [
+    const SEEDED: [&str; 40] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -277,6 +277,11 @@ fn seed_launch_env() {
         "WOW_LAMP_TAPS",
         "WOW_LAMP_TILE",
         "WOW_LAMP_SHADOWED",
+        // fork: the flame flicker's gain (`?fire_flicker=0` steady, `1` default, `2` doubled —
+        // `lighting::flicker`) and the spell-light kill switch (`?spell_light=0`,
+        // `entities::spell_fx::light`).
+        "WOW_FIRE_FLICKER",
+        "WOW_SPELL_LIGHT",
         "WOW_MODERN_MIRRORTIER",
         "WOW_MODERN_CASTERREACH",
         "WOW_WORLDVIEW_FACE",

@@ -1096,6 +1096,17 @@ pub(super) fn attach_entity_visuals(
                                     Visibility::default(),
                                 ))
                                 .id();
+                            // fork: a server-spawned brazier burns like a staked one.
+                            if let Some(flicker) = benilla_world::lighting::flame_flicker(
+                                e.flame,
+                                true,
+                                e.color,
+                                0.0,
+                                Vec3::from(local)
+                                    + Vec3::splat((entity.to_bits() % 4096) as f32),
+                            ) {
+                                commands.entity(light).insert(flicker);
+                            }
                             commands.entity(entity).add_child(light);
                         }
                     }

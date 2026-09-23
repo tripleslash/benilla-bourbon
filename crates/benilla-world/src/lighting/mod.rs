@@ -12,14 +12,17 @@ use benilla_formats::{LightCatalog, LiquidKind};
 
 mod blob; // the off-world light-blob builder (booth studio, body pane, glue scene)
 mod daynight; // the two sun directions + day/night interp + the dawn/dusk warp curve
+mod flicker; // fork: the flame flicker folded into the packed point table (ported from pkuzic)
 mod global_light; // the one shared global-light storage buffer (replaces the per-material push)
 mod prop_probes; // the per-instance interior-prop SH probe table (slot ↔ MeshTag payload)
 mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO interior-fog crossfade
 mod sh; // the model SH light-probe coefficient math
 pub use blob::LightBlob;
+pub(crate) use flicker::is_warm;
+pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
 pub use global_light::{
-    new_shared_light_buffer, LightOwner, LightRooms, NightGlow, SharedLightBuffer, WorldPointLight,
-    MODERN_PACK_RADIUS,
+    new_shared_light_buffer, LightOwner, LightRooms, NightGlow, SharedLightBuffer, SpellFxLight,
+    WorldPointLight, MODERN_PACK_RADIUS,
 };
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout itself — row indices, byte sizes, region offsets and the folds that fill them

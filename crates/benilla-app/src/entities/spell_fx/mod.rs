@@ -61,6 +61,12 @@
 //! keeps playing unconditionally where the client gates it on no-visual-attached.
 
 mod lifecycle;
+// fork: the light a luminous effect throws (fire / holy / fel) and its envelope — ported from
+// pkuzic's benilla-lighting.
+mod light;
+pub(crate) use light::{
+    advance_spell_lights, budget_spell_lights, spawn_spell_light, SpellLightMode, SPELL_BURST_SPAN,
+};
 
 use std::collections::HashMap;
 
@@ -1153,6 +1159,16 @@ pub(super) fn attach_spell_fx(
                 &ibps,
                 &mut palettes,
                 None, // an attach-point kit effect opens on its model's own `Stand`
+            );
+            // fork: and the light it throws, if its school is a luminous one — up on the ramp,
+            // held for the aura's life, out when `FxDecay` lands. The unit's room gates it.
+            spawn_spell_light(
+                &mut commands,
+                &inst.path,
+                dm,
+                root,
+                Some(unit),
+                SpellLightMode::Kit,
             );
             inst.root = Some(root);
             if !inst.persistent {

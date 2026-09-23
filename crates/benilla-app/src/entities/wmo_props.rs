@@ -481,6 +481,16 @@ pub(super) fn spawn_wmo_gameobject_props(
                             Visibility::default(),
                         ))
                         .id();
+                    // fork: a lantern on a deck flickers like one on a quay.
+                    if let Some(flicker) = benilla_world::lighting::flame_flicker(
+                        None,
+                        false,
+                        l.diffuse_color,
+                        l.diffuse_intensity,
+                        Vec3::from(l.position) + Vec3::splat((entity.to_bits() % 4096) as f32),
+                    ) {
+                        commands.entity(glow).insert(flicker);
+                    }
                     commands.entity(entity).add_child(glow);
                     lights += 1;
                 }

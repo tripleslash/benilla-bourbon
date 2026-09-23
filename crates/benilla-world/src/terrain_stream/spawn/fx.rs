@@ -54,6 +54,9 @@ fn spawn_point_light(
     // a culled room is one the reference never instantiated, so it lights nothing
     // ([`crate::lighting::LightRooms`], decision 0689).
     room: Option<crate::wmo_portal::WmoGroupVis>,
+    // fork: whether this source burns ([`crate::lighting::flame_flicker`]) — inserted once, here, so
+    // the entity's archetype is settled at spawn.
+    flicker: Option<crate::lighting::FlameFlicker>,
     out: &mut Vec<Entity>,
 ) {
     let mut e = commands.spawn((
@@ -62,6 +65,9 @@ fn spawn_point_light(
     ));
     if let Some(room) = room {
         e.insert(crate::lighting::LightRooms(room));
+    }
+    if let Some(flicker) = flicker {
+        e.insert(flicker);
     }
     out.push(e.id());
 }
@@ -92,6 +98,13 @@ pub(super) fn spawn_lights_for(
             l.diffuse_color,
             l.diffuse_intensity,
             room.cloned(),
+            crate::lighting::flame_flicker(
+                None,
+                false,
+                l.diffuse_color,
+                l.diffuse_intensity,
+                world,
+            ),
             out,
         );
     }
@@ -143,12 +156,14 @@ pub(super) fn spawn_emissive_light_for(
         return;
     };
     let before = out.len();
+    let world = transform.transform_point(wow_to_bevy(local));
     spawn_point_light(
         commands,
-        transform.transform_point(wow_to_bevy(local)),
+        world,
         emissive.color,
         emissive.intensity_scale,
         room.cloned(),
+        crate::lighting::flame_flicker(emissive.flame, true, emissive.color, 0.0, world),
         out,
     );
     // How far the fixture reaches around the light it houses, in world yards — the radius whose
@@ -192,6 +207,7 @@ pub(super) fn spawn_window_lights_for(
             glow.color,
             glow.intensity_scale,
             None,
+            None, // a lit window is glass: it glows, it does not burn
             out,
         );
         for e in &out[before..] {
@@ -243,6 +259,7 @@ pub(super) fn spawn_wmo_lights_for(
             instance
                 .filter(|_| !groups.is_empty())
                 .map(|instance| crate::wmo_portal::WmoGroupVis { instance, groups }),
+            crate::lighting::flame_flicker(None, false, l.color, l.intensity, world),
             out,
         );
     }

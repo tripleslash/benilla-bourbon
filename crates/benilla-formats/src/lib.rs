@@ -239,6 +239,8 @@ pub use spell_visual::{
     KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
 };
 mod emit_timing;
+/// fork: which spell effects throw light, and what light (ported from pkuzic's benilla-lighting).
+pub mod spell_light;
 pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};
 mod particles;
 pub use particles::{

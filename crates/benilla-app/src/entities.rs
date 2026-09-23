@@ -921,7 +921,13 @@ impl Plugin for EntitiesPlugin {
                 // instance birth → Hold and arm the reap's Decay. Independent of the event
                 // scan; both only read a player Bevy already advanced in `PreUpdate`, and both
                 // want to run after the attach passes so a fresh instance is covered at once.
-                (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),
+                // fork: and the spell lights' envelopes + budget (`spell_fx::light`), after the
+                // reap has marked its instances so a kit light starts its fade the same frame.
+                (
+                    spell_fx::fire_fx_anim_events,
+                    spell_fx::advance_fx_anim,
+                    (spell_fx::advance_spell_lights, spell_fx::budget_spell_lights).chain(),
+                ),
                 // One nested (unordered) element — the outer tuple is at `chain()`'s
                 // 20-element ceiling. Two independent post-attach touch-ups on a standing
                 // visual: a gear change re-dresses it in place — a re-composited atlas on the

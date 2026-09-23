@@ -76,6 +76,18 @@ pub(super) fn spawn_carried_lights(
                 Visibility::default(),
             ))
             .id();
+        // fork: a held torch burns like a staked one. The seed is the light's model-local spot plus
+        // its body, so two torch-bearers never breathe in step.
+        let seed_at = Vec3::from(local) + Vec3::splat((frame.to_bits() % 4096) as f32);
+        if let Some(flicker) = benilla_world::lighting::flame_flicker(
+            None,
+            false,
+            l.def.diffuse_color,
+            l.def.diffuse_intensity,
+            seed_at,
+        ) {
+            commands.entity(glow).insert(flicker);
+        }
         commands.entity(parent).add_child(glow);
     }
 }

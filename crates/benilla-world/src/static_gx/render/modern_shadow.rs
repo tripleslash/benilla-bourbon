@@ -72,10 +72,38 @@ const RESTORE_TILES: usize = 32;
 #[derive(Default)]
 struct AtlasCache {
     slots: [AtlasSlot; crate::modern::lights::MAX_SHADOWED],
-    /// fork: per slot, the entity casters its working faces were last drawn with — mesh and pose —
-    /// what [`same_casters`] holds this frame's list against.
-    casters_drawn: [Vec<(AssetId<Mesh>, Vec3, Quat)>; crate::modern::lights::MAX_SHADOWED],
+    /// fork: per slot, the entity casters its working faces were last drawn with — what
+    /// [`dirty_faces`] holds this frame's list against.
+    casters_drawn: [Vec<DrawnCaster>; crate::modern::lights::MAX_SHADOWED],
 }
+
+/// fork: one entity caster as a lamp's dynamic phase sees it: which mesh, where it is placed (its
+/// world matrix's translation and rotation), and the bounds [`face_sees`] tests — kept for the
+/// casters a slot was drawn with, so the faces a caster LEAVES are restored as well as the faces it
+/// enters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawnCaster {
+    mesh: AssetId<Mesh>,
+    at: Vec3,
+    turn: Quat,
+    center: Vec3,
+    radius: f32,
+}
+
+impl DrawnCaster {
+    fn of(cmd: &EntityDrawCmd) -> Self {
+        Self {
+            mesh: cmd.mesh,
+            at: cmd.pose.0,
+            turn: cmd.pose.1,
+            center: cmd.center,
+            radius: cmd.radius,
+        }
+    }
+}
+
+/// fork: all six faces of a cube, as a [`dirty_faces`] mask.
+const ALL_FACES: u8 = 0b11_1111;
 
 /// fork: how many frames a slot's wanted content — its light's anchor and the static casters inside
 /// its reach — has to hold still before the slot's static faces are drawn. While a street streams in,
@@ -93,12 +121,16 @@ const DYN_STATIC: u64 = 1;
 /// fork: [`AtlasSlot::dynamic`] — the working tiles hold the static map with the casters in
 /// [`AtlasCache::casters_drawn`] drawn over it.
 const DYN_DRAWN: u64 = 2;
-/// fork: how far a dynamic caster may move (yd) before a lamp's faces are redrawn for it. Under it
-/// the part is jiggling — a lantern's chain, a creature's idle — and its shadow stays where it was
-/// drawn; a step is well past it.
-const DYN_MOVE_YD: f32 = 0.25;
-/// fork: how far it may turn (radians, ~11°) before the same.
-const DYN_TURN: f32 = 0.2;
+/// fork: how far a dynamic caster's placement may move (yd) before a lamp's faces are redrawn for
+/// it — float noise, nothing more. It was a quarter of a yard, which is what made a character's lamp
+/// shadow trail it: a walk redrew the shadow only every few frames, a slow step not until the
+/// quarter-yard was used up, so the shadow stepped along behind the body like a lower frame rate.
+/// Every real movement redraws now; what pays for it is that only the FACES the caster touches are
+/// restored and redrawn ([`dirty_faces`]), not all six. An idle creature's animation does not move
+/// its placement, so it still costs nothing.
+const DYN_MOVE_YD: f32 = 0.02;
+/// fork: how far it may turn (radians, ~1°) before the same — turning on the spot is movement too.
+const DYN_TURN: f32 = 0.02;
 /// fork: an entity part whose own bounds hold the light, and that is no bigger than this (yd), is the
 /// light's HOST — the lantern, the brazier, the fist round the torch — and never shadows it. A
 /// swinging lantern would otherwise cage its own pool, and be a moving caster every frame it swings.
@@ -170,7 +202,7 @@ struct EntityDrawCmd {
     /// fork: [`crate::modern::shadow::EntityCaster::tight`].
     tight: f32,
     /// fork: where the part is placed — its world matrix's translation and rotation. The lamp
-    /// atlas's dynamic phase compares its casters by this ([`same_casters`]), not by `center`: an
+    /// atlas's dynamic phase compares its casters by this ([`dirty_faces`]), not by `center`: an
     /// animated part's bounds are re-fitted as it animates, so a tree swaying beside a lamp moved
     /// its centre every frame while its placement stood still.
     pose: (Vec3, Quat),
@@ -1409,9 +1441,13 @@ impl GxShadowNode {
             };
 
             // ---- The dynamic phase: per slot, only what stands right beside its light. ----------
+            // fork: per slot, a mask of the six FACES to restore and to redraw — only the faces a
+            // caster that arrived, left, moved or turned can be seen in. A body walking past a
+            // wall sconce dirties the one or two faces looking its way, not all six.
             let mut near: Vec<Vec<&EntityDrawCmd>> = vec![Vec::new(); slots.len()];
             let mut keys = [DYN_STATIC; PER_ATLAS_LAYER];
-            let (mut restore_mask, mut draw_mask) = (0u32, 0u32);
+            let mut restore_faces = [0u8; PER_ATLAS_LAYER];
+            let mut draw_faces = [0u8; PER_ATLAS_LAYER];
             let AtlasCache {
                 slots: slot_state,
                 casters_drawn,
@@ -1429,28 +1465,29 @@ impl GxShadowNode {
                     near[i] = dynamic_casters_for(&e.draws, &light);
                 }
                 keys[i] = if near[i].is_empty() { DYN_STATIC } else { DYN_DRAWN };
-                let unchanged = match slot.dynamic {
-                    DYN_STATIC => near[i].is_empty(),
-                    DYN_DRAWN => same_casters(&casters_drawn[s], &near[i]),
-                    _ => false,
+                let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+                let dirty = match slot.dynamic {
+                    DYN_STATIC => dirty_faces(light.pos, &[], &now),
+                    DYN_DRAWN => dirty_faces(light.pos, &casters_drawn[s], &now),
+                    _ => ALL_FACES,
                 };
-                if unchanged {
+                if dirty == 0 {
                     continue;
                 }
                 if slot.dynamic != DYN_STATIC {
-                    restore_mask |= 1 << i;
+                    restore_faces[i] = dirty;
                 }
                 if keys[i] != DYN_STATIC {
-                    draw_mask |= 1 << i;
+                    draw_faces[i] = dirty;
                 }
             }
-            if restore_mask == 0 && draw_mask == 0 {
+            if restore_faces.iter().chain(&draw_faces).all(|&m| m == 0) {
                 continue;
             }
             bevy::log::debug!(
-                "lamp atlas: layer {layer_index} dynamic phase — restore {restore_mask:06b}, draw {draw_mask:06b}"
+                "lamp atlas: layer {layer_index} dynamic phase — restore {restore_faces:?}, draw {draw_faces:?}"
             );
-            if restore_mask != 0 {
+            if restore_faces.iter().any(|&m| m != 0) {
                 match restore {
                     Some((pipeline, layout)) => restore_atlas_slots(
                         render_context,
@@ -1460,27 +1497,26 @@ impl GxShadowNode {
                         cache_view,
                         view,
                         slots.start,
-                        slots.len(),
-                        restore_mask,
+                        &restore_faces[..slots.len()],
                         tile.0,
                     ),
                     None => {
                         // No restore draw yet: the whole layer back, and every slot that has
-                        // entities beside it draws them again.
+                        // entities beside it draws them again, every face.
                         copy_layer(render_context.command_encoder(), cache, working, array_layer as u32);
                         for (i, s) in slots.clone().enumerate() {
                             if crate::modern::lights::built(s) != slot_state[s].light {
                                 continue;
                             }
-                            restore_mask |= 1 << i;
+                            restore_faces[i] = ALL_FACES;
                             if keys[i] != DYN_STATIC {
-                                draw_mask |= 1 << i;
+                                draw_faces[i] = ALL_FACES;
                             }
                         }
                     }
                 }
             }
-            if let (Some(entities), true) = (entities, draw_mask != 0) {
+            if let (Some(entities), true) = (entities, draw_faces.iter().any(|&m| m != 0)) {
                 self.draw_atlas_entities(
                     render_context,
                     frame,
@@ -1490,7 +1526,7 @@ impl GxShadowNode {
                     &lights.shadowed[slots.clone()],
                     &near,
                     slots.start,
-                    draw_mask,
+                    &draw_faces[..slots.len()],
                     tile,
                     pipeline_cache,
                     meshes,
@@ -1498,10 +1534,12 @@ impl GxShadowNode {
                 );
             }
             for (i, s) in slots.clone().enumerate() {
-                if (restore_mask | draw_mask) & (1 << i) != 0 {
+                if restore_faces[i] | draw_faces[i] != 0 {
                     slot_state[s].dynamic = keys[i];
-                    casters_drawn[s].clear();
-                    casters_drawn[s].extend(near[i].iter().map(|c| (c.mesh, c.pose.0, c.pose.1)));
+                    let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+                    let redrawn = if keys[i] == DYN_STATIC { ALL_FACES } else { draw_faces[i] };
+                    let light_pos = lights.shadowed[s].map_or(Vec3::ZERO, |h| h.light.pos);
+                    casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], &now, redrawn);
                 }
             }
         }
@@ -1641,8 +1679,8 @@ impl GxShadowNode {
         complete
     }
 
-    /// fork: the dynamic half — each slot named in `mask` gets its own pruned entity list (`near`,
-    /// from [`dynamic_casters_for`]) drawn over its freshly restored static faces.
+    /// fork: the dynamic half — each slot's faces named in `faces` get its own pruned entity list
+    /// (`near`, from [`dynamic_casters_for`]) drawn over their freshly restored static depth.
     #[allow(clippy::too_many_arguments)]
     fn draw_atlas_entities(
         &self,
@@ -1654,7 +1692,7 @@ impl GxShadowNode {
         shadowed: &[Option<crate::modern::lights::HeldSlot>],
         near: &[Vec<&EntityDrawCmd>],
         slot_base: usize,
-        mask: u32,
+        faces: &[u8],
         tile: (u32, u32),
         pipeline_cache: &PipelineCache,
         meshes: &RenderAssets<RenderMesh>,
@@ -1680,7 +1718,8 @@ impl GxShadowNode {
         });
         let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_dynamic");
         for (i, light) in shadowed.iter().enumerate() {
-            if mask & (1 << i) == 0 {
+            let mask = faces.get(i).copied().unwrap_or(0);
+            if mask == 0 {
                 continue;
             }
             let (Some(light), Some(list)) = (light.map(|h| h.light), near.get(i)) else {
@@ -1688,6 +1727,9 @@ impl GxShadowNode {
             };
             let slot = slot_base + i;
             for face in 0..6usize {
+                if mask & (1 << face) == 0 {
+                    continue;
+                }
                 let t = slot * 6 + face;
                 let Some(&offset) = frame.local_offsets.get(t) else {
                     continue;
@@ -1744,7 +1786,7 @@ impl GxShadowNode {
     }
 }
 
-/// fork: put the six tiles of each slot named in `mask` back from the static cache — the cascade
+/// fork: put the tiles `faces` names (per slot, a mask of its six faces) back from the static cache — the cascade
 /// restore's draw (`depth_fill.wgsl`), one rectangle per tile. wgpu refuses a partial copy of a depth
 /// format, and a whole-layer copy is 16.8 MB to undo one character walking past one lamp.
 #[allow(clippy::too_many_arguments)]
@@ -1756,16 +1798,15 @@ fn restore_atlas_slots(
     cache_view: &TextureView,
     target: &TextureView,
     slot_base: usize,
-    slot_count: usize,
-    mask: u32,
+    faces: &[u8],
     tile: u32,
 ) {
     let mut rects: Vec<[f32; 4]> = Vec::new();
-    for i in 0..slot_count {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
+    for (i, &mask) in faces.iter().enumerate() {
         for face in 0..6usize {
+            if mask & (1 << face) == 0 {
+                continue;
+            }
             let t = ((slot_base + i) % PER_ATLAS_LAYER) * 6 + face;
             let (tx, ty) = (t as u32 % ATLAS_TILES, t as u32 / ATLAS_TILES);
             rects.push([
@@ -1827,28 +1868,81 @@ fn dynamic_casters_for<'a>(draws: &'a [EntityDrawCmd], light: &ShadowLight) -> V
         .collect()
 }
 
-/// fork: are this frame's casters beside a lamp the ones its faces were drawn with — the same parts,
-/// none moved more than [`DYN_MOVE_YD`] or turned more than [`DYN_TURN`] since? A creature idling
-/// beside a lamp, a tree swaying in its bones and a lantern's jiggling ornament all hold, so their
-/// shadows are not redrawn every frame they animate; one that steps or turns, or arrives, or
-/// leaves, does not.
-fn same_casters(drawn: &[(AssetId<Mesh>, Vec3, Quat)], now: &[&EntityDrawCmd]) -> bool {
-    if drawn.len() != now.len() {
-        return false;
-    }
+/// fork: pair each of this frame's casters beside a lamp with the one its faces were drawn with —
+/// the same part, moved no more than [`DYN_MOVE_YD`] and turned no more than [`DYN_TURN`] since.
+/// `None` = no such part: it arrived, or it moved. A creature idling beside a lamp, a tree swaying in
+/// its bones and a lantern's jiggling ornament all pair, so their shadows are not redrawn every frame
+/// they animate. `None` for the whole list when there are too many to pair (a crowd): every face.
+fn match_casters(drawn: &[DrawnCaster], now: &[DrawnCaster]) -> Option<Vec<Option<usize>>> {
     let mut taken = [false; 64];
-    if drawn.len() > taken.len() {
-        return false;
+    if drawn.len() > taken.len() || now.len() > taken.len() {
+        return None;
     }
-    now.iter().all(|cmd| {
-        let found = drawn.iter().enumerate().position(|(k, (mesh, at, turn))| {
-            !taken[k]
-                && *mesh == cmd.mesh
-                && at.distance(cmd.pose.0) <= DYN_MOVE_YD
-                && turn.angle_between(cmd.pose.1) <= DYN_TURN
-        });
-        found.map(|k| taken[k] = true).is_some()
+    Some(
+        now.iter()
+            .map(|c| {
+                let k = drawn.iter().enumerate().position(|(k, d)| {
+                    !taken[k]
+                        && d.mesh == c.mesh
+                        && d.at.distance(c.at) <= DYN_MOVE_YD
+                        && d.turn.angle_between(c.turn) <= DYN_TURN
+                })?;
+                taken[k] = true;
+                Some(k)
+            })
+            .collect(),
+    )
+}
+
+/// fork: the faces of `light`'s cube one caster can be seen in, as a six-bit mask.
+fn faces_of(light: Vec3, c: &DrawnCaster) -> u8 {
+    (0..6usize).fold(0, |m, face| {
+        if face_sees(face, light, c.center, c.radius) { m | 1 << face } else { m }
     })
+}
+
+/// fork: **which faces of a lamp's cube are stale** — the faces a caster that arrived is seen in, the
+/// faces one that left was seen in, and both for one that moved or turned (it is at once a caster
+/// leaving where it was and one arriving where it is). `0` = the working faces are exactly right.
+/// This replaced an all-or-nothing test: a character walking past a sconce redrew all six faces,
+/// which is what forced the old quarter-yard tolerance that made its shadow trail it.
+fn dirty_faces(light: Vec3, drawn: &[DrawnCaster], now: &[DrawnCaster]) -> u8 {
+    let Some(pairs) = match_casters(drawn, now) else {
+        return ALL_FACES;
+    };
+    let mut dirty = 0u8;
+    let mut kept = [false; 64];
+    for (c, pair) in now.iter().zip(&pairs) {
+        match pair {
+            Some(k) => kept[*k] = true,
+            None => dirty |= faces_of(light, c),
+        }
+    }
+    for (k, d) in drawn.iter().enumerate() {
+        if !kept[k] {
+            dirty |= faces_of(light, d);
+        }
+    }
+    dirty
+}
+
+/// fork: what a slot's faces hold once `redrawn` of them have been drawn with `now` — the record
+/// [`dirty_faces`] tests against next frame. A caster whose every face was redrawn is recorded where
+/// it is now; one that paired with a caster already drawn and was NOT fully redrawn keeps the pose it
+/// was drawn at. Recording its new pose anyway would let a part creeping under [`DYN_MOVE_YD`] a frame
+/// drift away from its drawn shadow for as long as some other caster kept dirtying the slot.
+fn settle_drawn(light: Vec3, drawn: &[DrawnCaster], now: &[DrawnCaster], redrawn: u8) -> Vec<DrawnCaster> {
+    let pairs = match_casters(drawn, now);
+    now.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let fully = faces_of(light, c) & !redrawn == 0;
+            match pairs.as_ref().and_then(|p| p[i]) {
+                Some(k) if !fully => drawn[k],
+                _ => *c,
+            }
+        })
+        .collect()
 }
 
 /// Point one render pass at one atlas tile — the viewport and the scissor together, because the
@@ -2122,5 +2216,68 @@ mod tests {
         let footprint = URect::new(700, 700, 900, 1000);
         assert!(runs.iter().any(|r| r.contains(footprint.min)));
         assert_eq!(tiles[RESTORE_TILES - 1], u32::MAX, "a full row is one run");
+    }
+
+    fn body(at: Vec3) -> DrawnCaster {
+        DrawnCaster {
+            mesh: AssetId::default(),
+            at,
+            turn: Quat::IDENTITY,
+            center: at,
+            radius: 0.5,
+        }
+    }
+
+    /// A caster standing still — or jiggling under the float-noise tolerance — dirties nothing.
+    #[test]
+    fn a_caster_that_holds_still_dirties_no_face() {
+        let light = Vec3::ZERO;
+        let b = body(Vec3::new(4.0, 0.0, 0.0));
+        assert_eq!(dirty_faces(light, &[b], &[b]), 0);
+        let jiggle = body(b.at + Vec3::new(0.0, 0.01, 0.0));
+        assert_eq!(dirty_faces(light, &[b], &[DrawnCaster { center: b.center, ..jiggle }]), 0);
+    }
+
+    /// GOLDEN — **a body walking past a lamp redraws its shadow on the step, not a quarter-yard
+    /// later.** The old tolerance was 0.25 yd, which is what made the shadow trail the body.
+    #[test]
+    fn a_small_step_is_redrawn() {
+        let light = Vec3::ZERO;
+        let b = body(Vec3::new(4.0, 0.0, 0.0));
+        let step = body(b.at + Vec3::new(0.0, 0.0, 0.05));
+        assert_ne!(dirty_faces(light, &[b], &[step]), 0, "a 5 cm step is movement");
+        let turned = DrawnCaster { turn: Quat::from_rotation_y(0.05), ..b };
+        assert_ne!(dirty_faces(light, &[b], &[turned]), 0, "and so is turning on the spot");
+    }
+
+    /// Only the faces a caster is seen in are stale: a body on the lamp's +X side dirties the +X
+    /// face alone, and one straddling the +X/+Z edge dirties both of those and nothing else.
+    #[test]
+    fn a_caster_dirties_only_the_faces_it_is_seen_in() {
+        let light = Vec3::ZERO;
+        let arrived = body(Vec3::new(4.0, 0.0, 0.0));
+        assert_eq!(dirty_faces(light, &[], &[arrived]), 1 << 0, "+X only");
+        let corner = body(Vec3::new(4.0, 0.0, 4.0));
+        let m = dirty_faces(light, &[], &[corner]);
+        assert_eq!(m, (1 << 0) | (1 << 4), "+X and +Z, got {m:06b}");
+        // Leaving is as stale as arriving: the faces it WAS seen in need their static depth back.
+        assert_eq!(dirty_faces(light, &[arrived], &[]), 1 << 0);
+        // Moving across the edge dirties where it was and where it is.
+        let moved = body(Vec3::new(0.0, 0.0, 4.0));
+        assert_eq!(dirty_faces(light, &[arrived], &[moved]), (1 << 0) | (1 << 4));
+    }
+
+    /// A caster that paired with its drawn record, but whose faces were not all redrawn this frame
+    /// (another caster dirtied a different face), keeps the pose it was DRAWN at — otherwise a part
+    /// creeping under the tolerance each frame would drift away from its shadow forever.
+    #[test]
+    fn a_caster_not_redrawn_keeps_its_drawn_pose() {
+        let light = Vec3::ZERO;
+        let a = body(Vec3::new(4.0, 0.0, 0.0));
+        let crept = body(a.at + Vec3::new(0.0, 0.015, 0.0));
+        let kept = settle_drawn(light, &[a], &[crept], 1 << 4);
+        assert_eq!(kept, vec![a], "not redrawn: the record stays where the shadow is");
+        let kept = settle_drawn(light, &[a], &[crept], ALL_FACES);
+        assert_eq!(kept, vec![crept], "redrawn: the record follows");
     }
 }

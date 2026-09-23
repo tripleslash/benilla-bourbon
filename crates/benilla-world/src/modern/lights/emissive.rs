@@ -88,6 +88,13 @@ const UNTINTED_LIMIT: f32 = 0.08;
 const GLOW_WEIGHT: f32 = 0.9;
 /// Card half-extent (yd) that reads as a "one unit" glow — a lamppost's corona is about this.
 const REFERENCE_CARD: f32 = 0.5;
+/// fork: the smallest authored particle (yd, the size ramp's peak) that counts as a FLAME rather
+/// than a SPARK — pkuzic's corpus measurement (benilla-lighting `fire_light::MIN_FLAME_SIZE`). The
+/// real candles sit at 0.056–0.069 yd (`GeneralCandelabra01`, `CandelabraTallWall01`); the ember and
+/// exhaust trails that share their additive, unlit look — a zeppelin's cinders, a mount's embers,
+/// the sparks on a flaming helm — sit at 0.019–0.028 and were the whole false-positive population,
+/// each one a table light. The floor goes just under the smallest real candle.
+const MIN_FLAME_SIZE: f32 = 0.04;
 
 /// A synthesized source, in exactly the terms `terrain_stream::point_light` takes: the authored
 /// linear RGB and the intensity scale that multiplies it.
@@ -95,6 +102,11 @@ const REFERENCE_CARD: f32 = 0.5;
 pub struct Emissive {
     pub color: [f32; 3],
     pub intensity_scale: f32,
+    /// fork: the light BURNS — its energy came mostly from particle emitters rather than glow cards,
+    /// and its hue is a warm flame's — and this is the kind of fire it is, filed by its strongest
+    /// emitter's size ([`crate::lighting::FlameKind::from_flame_size`]). `None` for a corona, a
+    /// rune, a pane of glass or a cold magic glow: those do not flicker.
+    pub flame: Option<crate::lighting::FlameKind>,
 }
 
 /// One drawn thing, as the synthesis reads it: how it blends, whether the scene's light multiplies
@@ -139,11 +151,18 @@ pub fn combine<'a>(
     // table slots and three cube-shadow candidates for one hearth. Summed in energy, averaged in hue.
     let mut weight = 0.0f32;
     let mut sum = [0.0f32; 3];
+    // fork: how much of the energy is particles, and the size of the strongest emitter — whether
+    // this light is a flame, and which kind ([`Emissive::flame`]).
+    let (mut particles, mut strongest) = (0.0f32, (0.0f32, 0.0f32));
     for (blend, lit, ramp) in sources {
-        let Some((r, g, b, w)) = emission_of(blend, lit, ramp) else {
+        let Some((r, g, b, w, size)) = emission_of(blend, lit, ramp) else {
             continue;
         };
         weight += w;
+        particles += w;
+        if w > strongest.0 {
+            strongest = (w, size);
+        }
         sum[0] += r * w;
         sum[1] += g * w;
         sum[2] += b * w;
@@ -167,9 +186,13 @@ pub fn combine<'a>(
     if peak <= 0.0 {
         return None;
     }
+    let color = [sum[0] / peak, sum[1] / peak, sum[2] / peak];
+    let flame = (particles * 2.0 > weight && crate::lighting::is_warm(color))
+        .then(|| crate::lighting::FlameKind::from_flame_size(strongest.1));
     Some(Emissive {
-        color: [sum[0] / peak, sum[1] / peak, sum[2] / peak],
+        color,
         intensity_scale: (weight * EMISSION_TO_INTENSITY).min(MAX_INTENSITY),
+        flame,
     })
 }
 
@@ -351,8 +374,8 @@ fn glow_emission(glow: &Glow) -> Option<(f32, f32, f32, f32)> {
     (weight >= MIN_EMISSION).then_some((hue[0], hue[1], hue[2], weight))
 }
 
-/// One source's contribution: `(r, g, b, weight)`, or `None` if it is not emission at all.
-fn emission_of(blend: ParticleBlend, lit: bool, ramp: &OverLife) -> Option<(f32, f32, f32, f32)> {
+/// One source's contribution: `(r, g, b, weight, peak size)`, or `None` if it is not emission at all.
+fn emission_of(blend: ParticleBlend, lit: bool, ramp: &OverLife) -> Option<(f32, f32, f32, f32, f32)> {
     // Additive only. `Add` is what an artist picks to mean "this glows"; `Alpha` is smoke,
     // `AlphaKey` and `Opaque` are chips and debris. None of the three emits.
     if blend != ParticleBlend::Add {
@@ -381,10 +404,14 @@ fn emission_of(blend: ParticleBlend, lit: bool, ramp: &OverLife) -> Option<(f32,
     // Scaled by how big the thing actually is. The size ramp's peak, not its mean: a flame's
     // authored size is what it reaches, and a two-yard hearth is not an inch-high rune.
     let size = ramp.scale.iter().copied().fold(0.0f32, f32::max);
+    // fork: a spark is not a flame ([`MIN_FLAME_SIZE`]) — it trails one, and lights nothing.
+    if size < MIN_FLAME_SIZE {
+        return None;
+    }
     let scale = (size / REFERENCE_SIZE).clamp(0.25, 3.0);
     // The mean alpha carries "how much of its life this thing is actually bright".
     let weight = luminance * scale * (alpha_sum / ramp.color.len() as f32);
-    (weight >= MIN_EMISSION).then_some((mean[0], mean[1], mean[2], weight))
+    (weight >= MIN_EMISSION).then_some((mean[0], mean[1], mean[2], weight, size))
 }
 
 /// fork: P8 — the edge (yd) of the cell a building's lit windows are pooled over. One light per
@@ -678,6 +705,30 @@ mod tests {
         for c in 0..3 {
             assert!((triple.color[c] - single.color[c]).abs() < 1e-4);
         }
+    }
+
+    /// fork: a SPARK is not a flame. The ember and exhaust trails that ride real fires (a zeppelin's
+    /// cinders, a flaming helm's sparks) author 0.02–0.03 yd particles; the smallest real candle
+    /// authors 0.056. Below [`MIN_FLAME_SIZE`] an emitter lights nothing, however bright its ramp.
+    #[test]
+    fn a_spark_is_not_a_light() {
+        let keys = [[1.0, 0.6, 0.2, 1.0]; 3];
+        let (spark, candle) = (ramp(keys, 0.03), ramp(keys, 0.06));
+        assert_eq!(synthesize(false, [add(&spark)]), None);
+        assert!(synthesize(false, [add(&candle)]).is_some());
+    }
+
+    /// fork: a warm light made of particles BURNS, and is filed by its flame's size; a cold one,
+    /// and a corona made of a glow card, does not flicker.
+    #[test]
+    fn only_a_warm_particle_light_is_a_flame() {
+        use crate::lighting::FlameKind;
+        let fire = ramp([[1.0, 0.6, 0.2, 1.0]; 3], 0.6);
+        assert_eq!(synthesize(false, [add(&fire)]).unwrap().flame, Some(FlameKind::Brazier));
+        let cold = ramp([[0.2, 0.4, 1.0, 1.0]; 3], 0.6);
+        assert_eq!(synthesize(false, [add(&cold)]).unwrap().flame, None);
+        let corona = combine(false, [], [card([1.0, 0.6, 0.2, 1.0], 0.5)]).unwrap();
+        assert_eq!(corona.flame, None, "a glow card is glass, not fire");
     }
 
     /// A ramp the eye cannot see is not a light. This is the cap on how many of the corpus's

@@ -109,6 +109,29 @@ const KEEP_FRACTION: f32 = 0.020;
 /// is never switched on or off: it ramps, so admitting or releasing one is invisible. ~4 frames at
 /// 60 Hz.
 const FADE_RATE: f32 = 15.0;
+/// fork: how much stronger (at the camera, [`lamp_score`]) a lamp without a cube has to be than the
+/// weakest one holding a slot before it takes that slot over. Slots used to be sticky outright, so in
+/// Northshire Abbey — forty-odd candelabra a few yards apart — the lamps at the entrance took every
+/// slot on the way in and, the whole building sitting inside [`SHADOW_RADIUS`], never gave one up:
+/// every lamp deeper inside lit with no shadow at all. 1.5 lets a walk into the next room win while
+/// a step sideways between two similar lamps never does.
+const SWAP_RATIO: f32 = 1.5;
+/// fork: at most one contested swap this often (s). A swap is a static cube draw (six face-culled
+/// tiles of retained world), so this is also the ceiling on what contesting can cost.
+const SWAP_COOLDOWN: f32 = 0.5;
+
+/// fork: **what a lamp is worth to the frame** — its luminance through the grid's own falloff
+/// (`locallight::falloff`: `1/(0.7d + 0.03d²)` under `(1 − (d/range)⁴)²`) at the camera's distance.
+/// The ranking used to be `lum / (1 + d)`, which let a bright lamp across the hall outrank the
+/// candle beside the player; ranking by the shader's own curve asks which lamp actually lights
+/// what the camera sees. `d` is floored at half a yard so a camera inside a fixture stays finite.
+pub fn lamp_score(lum: f32, d: f32, range: f32) -> f32 {
+    let d = d.max(0.5);
+    let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+    let q = d / range.max(1e-3);
+    let window = (1.0 - q * q * q * q).clamp(0.0, 1.0);
+    lum * atten * window * window
+}
 
 /// What a quality tier bins.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -426,6 +449,10 @@ pub struct HeldSlot {
     pub light: ShadowLight,
     pub fade: f32,
     pub retiring: bool,
+    /// fork: this slot lost a contest ([`SWAP_RATIO`]) — a far stronger lamp wants its tiles. It
+    /// retires even though its light is still a candidate, so the flag outlives the per-frame
+    /// re-decision of `retiring`.
+    pub evicted: bool,
 }
 
 /// One light that owns six atlas tiles this frame.
@@ -859,11 +886,15 @@ fn update_lights(
         Option<&FixtureRadius>,
         Has<crate::lighting::NightGlow>,
         Has<SynthesizedLight>,
+        // fork: a spell's light never holds a cube — it moves and it is gone in a second.
+        Has<crate::lighting::SpellFxLight>,
     )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
     mut held: Local<Vec<Option<HeldSlot>>>,
     mut sway: Local<(std::collections::HashMap<Entity, Sway>, u32)>,
+    // fork: seconds since the last contested swap ([`SWAP_COOLDOWN`]).
+    mut swap_clock: Local<f32>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
@@ -893,8 +924,8 @@ fn update_lights(
         let (tracks, frame) = &mut *sway;
         *frame = frame.wrapping_add(1);
         let frame = *frame;
-        for (entity, light, gt, rooms, fixture, window, synthesized) in &lights_q {
-            if !shadow_candidate(window, synthesized, emissive) {
+        for (entity, light, gt, rooms, fixture, window, synthesized, spell) in &lights_q {
+            if spell || !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
             if !crate::wmo_portal::room_admits_light(
@@ -921,7 +952,7 @@ fn update_lights(
             // camera stands at, so a bright chandelier two rooms away loses to the candle beside it.
             let lum = light.intensity * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
             ranked.push(Candidate {
-                score: lum / (1.0 + d),
+                score: lamp_score(lum, d, light.range),
                 light: ShadowLight {
                     pos: track.anchor(),
                     range: light.range,
@@ -940,14 +971,15 @@ fn update_lights(
     } else if !sway.0.is_empty() {
         sway.0.clear();
     }
-    // **Sticky.** Re-ranking every frame would reshuffle the atlas as the camera walks, and a
-    // reshuffle redraws all six faces of all six lights — a building's worth of geometry each. A
-    // light that still qualifies keeps its slot until it leaves the radius outright, so a walk
-    // through a lit room pays for the atlas once.
+    // **Sticky, but contestable.** Re-ranking every frame would reshuffle the atlas as the camera
+    // walks, and a reshuffle redraws all six faces of all six lights — a building's worth of geometry
+    // each. A light that still qualifies keeps its slot unless a lamp [`SWAP_RATIO`] stronger wants
+    // it, and at most one such swap happens per [`SWAP_COOLDOWN`], so a walk through a lit room pays
+    // for the atlas once per room rather than once per step.
     let want = tier.shadowed.min(MAX_SHADOWED);
     held.resize(want, None);
     held.truncate(want);
-    assign_slots(&mut held, &ranked, &cull, dt, |slot, light| {
+    assign_slots(&mut held, &ranked, &cull, dt, &mut swap_clock, |slot, light| {
         built(slot) == light.map_key()
     });
     let chosen = held.clone();
@@ -977,8 +1009,10 @@ pub fn shadow_candidate(window: bool, synthesized: bool, emissive: bool) -> bool
 
 /// **Slots are stable.** A light keeps its index for as long as it is still a candidate at all —
 /// still in the table, still admitted by its room, still inside [`SHADOW_RADIUS`], still where it
-/// was (a light that travels is not). Nothing else evicts it: not a better light arriving, and
-/// (since the flicker this caused) not the P8 cull.
+/// was (a light that travels is not). The one other thing that evicts it is a CONTEST: when every
+/// slot is taken, a settled lamp [`SWAP_RATIO`] stronger than the weakest holder retires that holder
+/// (one swap per [`SWAP_COOLDOWN`], `clock` counting up to it). The P8 cull never evicts (since the
+/// flicker that caused).
 ///
 /// The cull's job is to stop a lamp ACQUIRING six faces of depth it cannot pay back, so it is asked
 /// once, when a slot is being filled. Asking it every frame of a light's tenure instead made the
@@ -996,12 +1030,12 @@ fn assign_slots(
     ranked: &[Candidate],
     cull: &Option<ShadowCull>,
     dt: f32,
+    clock: &mut f32,
     built: impl Fn(usize, &ShadowLight) -> bool,
 ) {
-    // 1. Decide which slots are on their way out. A held light retires only when it stops being a
-    //    candidate outright (out of range, room-culled, travelling) or falls below the KEEP
-    //    threshold — never because a better light turned up, and never because the player looked
-    //    away.
+    // 1. Decide which slots are on their way out. A held light retires when it stops being a
+    //    candidate outright (out of range, room-culled, travelling), falls below the KEEP
+    //    threshold, or has lost a contest — never because the player looked away.
     for slot in held.iter_mut() {
         let Some(h) = slot else { continue };
         let found = ranked.iter().find(|c| c.light.id == h.light.id);
@@ -1009,7 +1043,37 @@ fn assign_slots(
             h.light = c.light;
         }
         let still_big_enough = cull.is_none_or(|c| c.still_worth_it(h.light.pos, h.light.range));
-        h.retiring = !(found.is_some() && still_big_enough);
+        h.retiring = h.evicted || !(found.is_some() && still_big_enough);
+    }
+
+    // 1b. The contest. Only when the set is full and settled — a free hole or a slot already on its
+    //     way out means step 3 is about to seat someone anyway — and only against a holder whose
+    //     shadow has fully arrived, so a slot is never taken from a lamp that just got it.
+    *clock += dt;
+    let settled_full = held
+        .iter()
+        .all(|h| h.is_some_and(|h| !h.retiring && h.fade >= 1.0));
+    if *clock >= SWAP_COOLDOWN && settled_full && !held.is_empty() {
+        let score_of = |id: u64| ranked.iter().find(|c| c.light.id == id).map(|c| c.score);
+        let weakest = held
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| h.and_then(|h| score_of(h.light.id)).map(|s| (i, s)))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let challenger = ranked.iter().find(|c| {
+            c.settled
+                && !held.iter().flatten().any(|h| h.light.id == c.light.id)
+                && cull.is_none_or(|k| k.worth_a_cube(c.light.pos, c.light.range))
+        });
+        if let (Some((index, incumbent)), Some(c)) = (weakest, challenger) {
+            if c.score > SWAP_RATIO * incumbent {
+                if let Some(h) = held[index].as_mut() {
+                    h.evicted = true;
+                    h.retiring = true;
+                }
+                *clock = 0.0;
+            }
+        }
     }
 
     // 2. Ramp. A retiring slot fades out and is released only once it reaches zero, so its shadow
@@ -1044,6 +1108,7 @@ fn assign_slots(
             light: c.light,
             fade: 0.0,
             retiring: false,
+            evicted: false,
         });
     }
 }
@@ -1302,7 +1367,7 @@ mod tests {
     /// is temporal now, so a test that wants a steady answer has to let it settle.
     fn settle(held: &mut Vec<Option<HeldSlot>>, ranked: &[Candidate], cull: &Option<ShadowCull>) {
         for _ in 0..30 {
-            assign_slots(held, ranked, cull, 1.0 / 60.0, always);
+            assign_slots(held, ranked, cull, 1.0 / 60.0, &mut 0.0, always);
         }
     }
 
@@ -1350,6 +1415,130 @@ mod tests {
         let d = lamp(30.0);
         settle(&mut held, &ranked(&[a, c, d]), &None);
         assert_eq!(lights_in(&held), vec![Some(a), Some(d), Some(c), None]);
+    }
+
+    fn scored(lamps: &[(ShadowLight, f32)]) -> Vec<Candidate> {
+        let mut out: Vec<Candidate> = lamps
+            .iter()
+            .map(|&(light, score)| Candidate {
+                score,
+                light,
+                settled: true,
+            })
+            .collect();
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out
+    }
+
+    /// Run `secs` of frames at 60 Hz with one persistent swap clock.
+    fn run(held: &mut Vec<Option<HeldSlot>>, ranked: &[Candidate], clock: &mut f32, secs: f32) {
+        for _ in 0..(secs * 60.0).round() as usize {
+            assign_slots(held, ranked, &None, 1.0 / 60.0, clock, always);
+        }
+    }
+
+    /// GOLDEN — **the Northshire Abbey fix.** Every slot held by the lamps at the entrance, the
+    /// player walks on, and a lamp far brighter at the camera than the weakest holder appears. It
+    /// must take that holder's slot — once the holder has faded out — and not before the cooldown.
+    #[test]
+    fn a_much_stronger_lamp_contests_the_weakest_slot() {
+        let (a, b, c) = (lamp(0.0), lamp(10.0), lamp(20.0));
+        let mut held = vec![None; 2];
+        let mut clock = 0.0;
+        run(&mut held, &scored(&[(a, 5.0), (b, 4.0)]), &mut clock, 1.0);
+        assert_eq!(lights_in(&held), vec![Some(a), Some(b)]);
+
+        // `c` walks into view far stronger than `b`, the weaker holder.
+        let now = scored(&[(a, 5.0), (b, 4.0), (c, 10.0)]);
+        run(&mut held, &now, &mut clock, 1.0);
+        assert_eq!(lights_in(&held), vec![Some(a), Some(c)], "c took b's slot, a never moved");
+        assert_eq!(held[1].unwrap().fade, 1.0, "and its shadow has arrived");
+    }
+
+    /// A step sideways between two similar lamps must not trade slots: the challenger has to be
+    /// [`SWAP_RATIO`] stronger, not merely stronger.
+    #[test]
+    fn a_slightly_stronger_lamp_does_not_contest() {
+        let (a, b, c) = (lamp(0.0), lamp(10.0), lamp(20.0));
+        let mut held = vec![None; 2];
+        let mut clock = 0.0;
+        run(&mut held, &scored(&[(a, 5.0), (b, 4.0)]), &mut clock, 1.0);
+        run(&mut held, &scored(&[(a, 5.0), (b, 4.0), (c, 4.0 * 1.2)]), &mut clock, 3.0);
+        assert_eq!(lights_in(&held), vec![Some(a), Some(b)]);
+        assert!(held.iter().flatten().all(|h| !h.retiring));
+    }
+
+    /// At most one contested swap per [`SWAP_COOLDOWN`], however many lamps would win: two slots
+    /// changing at once is two shadows changing at once.
+    #[test]
+    fn contests_are_one_per_cooldown() {
+        let (a, b, c, d) = (lamp(0.0), lamp(10.0), lamp(20.0), lamp(30.0));
+        let mut held = vec![None; 2];
+        let mut clock = 0.0;
+        run(&mut held, &scored(&[(a, 2.0), (b, 1.0)]), &mut clock, 1.0);
+        let now = scored(&[(a, 2.0), (b, 1.0), (c, 10.0), (d, 9.0)]);
+        // A quarter of the cooldown after the first swap was decided, only one holder is leaving.
+        let mut first = None;
+        for frame in 0..120 {
+            assign_slots(&mut held, &now, &None, 1.0 / 60.0, &mut clock, always);
+            let leaving = held.iter().flatten().filter(|h| h.evicted).count();
+            assert!(leaving <= 1, "frame {frame}: {leaving} holders evicted at once");
+            if leaving == 1 && first.is_none() {
+                first = Some(frame);
+            }
+        }
+        assert!(first.is_some(), "the contest happened at all");
+        run(&mut held, &now, &mut clock, 3.0);
+        assert_eq!(
+            lights_in(&held).into_iter().flatten().map(|l| l.id).collect::<std::collections::HashSet<_>>(),
+            [c.id, d.id].into_iter().collect(),
+            "given time, both strong lamps are seated"
+        );
+    }
+
+    /// An evicted slot fades out BEFORE its tiles are handed on — the cross-fade contract holds for
+    /// a contest exactly as for a light leaving the radius.
+    #[test]
+    fn a_contested_slot_fades_out_before_it_is_reused() {
+        let (a, c) = (lamp(0.0), lamp(20.0));
+        let mut held = vec![None; 1];
+        let mut clock = 0.0;
+        run(&mut held, &scored(&[(a, 1.0)]), &mut clock, 1.0);
+        let now = scored(&[(a, 1.0), (c, 10.0)]);
+        let mut saw_fading = false;
+        for _ in 0..60 {
+            assign_slots(&mut held, &now, &None, 1.0 / 60.0, &mut clock, always);
+            match held[0] {
+                Some(h) if h.light == a && h.evicted => {
+                    assert!(h.fade < 1.0 || !saw_fading);
+                    saw_fading = true;
+                }
+                Some(h) if h.light == c => {
+                    assert!(saw_fading, "c was seated before a faded out");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_fading);
+    }
+
+    /// The score is the grid shader's own curve (`locallight::falloff`): pinned at a few distances
+    /// so the two cannot drift apart.
+    #[test]
+    fn the_lamp_score_is_the_shaders_falloff() {
+        let falloff = |d: f32, range: f32| {
+            let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+            let q = d / range;
+            let w = (1.0 - q * q * q * q).clamp(0.0, 1.0);
+            atten * w * w
+        };
+        for d in [1.0, 5.0, 12.0, 19.0] {
+            assert!((lamp_score(2.0, d, 20.0) - 2.0 * falloff(d, 20.0)).abs() < 1e-6, "{d}");
+        }
+        assert_eq!(lamp_score(1.0, 25.0, 20.0), 0.0, "past its range a lamp is worth nothing");
+        assert!(lamp_score(1.0, 0.0, 20.0).is_finite());
+        assert!(lamp_score(1.0, 3.0, 20.0) > lamp_score(4.0, 30.0, 40.0), "near beats bright-far");
     }
 
     fn cull_at(eye: Vec3) -> ShadowCull {
@@ -1428,12 +1617,12 @@ mod tests {
         // Admitted: it takes the slot immediately, and contributes NOTHING on the frame it
         // arrives — a fade of zero reads exactly as "this light has no cube", which is the whole
         // point. The filling happens after the ramp, so its first step lands next frame.
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, always);
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, always);
         let h = held[0].expect("took a slot");
         assert_eq!(h.light, a);
         assert_eq!(h.fade, 0.0, "arrives dark");
 
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, always);
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, always);
         let h = held[0].unwrap();
         assert!(h.fade > 0.0 && h.fade < 1.0, "then ramps: {}", h.fade);
 
@@ -1442,7 +1631,7 @@ mod tests {
 
         // Now it stops being a candidate. It must fade out, and hold its slot while it does —
         // releasing the tiles first would hand a live shadow to whoever took the slot next.
-        assign_slots(&mut held, &[], &None, 1.0 / 60.0, always);
+        assign_slots(&mut held, &[], &None, 1.0 / 60.0, &mut 0.0, always);
         let h = held[0].expect("still holds the slot while fading out");
         assert!(h.retiring && h.fade < 1.0, "{h:?}");
 
@@ -1586,7 +1775,7 @@ mod tests {
         let a = lamp(0.0);
         let mut held = vec![None; 1];
         for _ in 0..30 {
-            assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, |_, _| false);
+            assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, |_, _| false);
         }
         assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((a, 0.0)), "held, but dark");
         settle(&mut held, &ranked(&[a]), &None);
@@ -1597,7 +1786,7 @@ mod tests {
             pos: a.pos + Vec3::new(0.0, 0.1, 0.0),
             ..a
         };
-        assign_slots(&mut held, &ranked(&[moved]), &None, 1.0 / 60.0, |_, _| false);
+        assign_slots(&mut held, &ranked(&[moved]), &None, 1.0 / 60.0, &mut 0.0, |_, _| false);
         assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((moved, 1.0)));
     }
 
