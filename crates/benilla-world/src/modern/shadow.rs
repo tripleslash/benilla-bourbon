@@ -176,6 +176,10 @@ pub struct EntityCaster {
     pub world_from_local: Mat4,
     pub center: Vec3,
     pub radius: f32,
+    /// fork: the part's own bounding sphere about `center`, WITHOUT the rig margin `radius` carries
+    /// for the cascade cull. The lamp atlas's dynamic phase reads it to recognise the model a light
+    /// lives inside (a lantern, a brazier, a torch in a fist), which must not shadow its own light.
+    pub tight: f32,
     pub rig_slot: Option<u32>,
     pub cutout: Option<AssetId<Image>>,
 }
@@ -522,17 +526,17 @@ fn collect_entity_casters(
         // canopy out of the small near cascade whenever its trunk stood outside that cascade's box,
         // so the ground just ahead of the camera lit up under the leaves and the shade came back on
         // a line at the next cascade — a line that walked with the camera.
-        let (center, radius) = match (aabb, rig_slot) {
-            (Some(b), None) => (
-                gt.transform_point(Vec3::from(b.center)),
-                Vec3::from(b.half_extents).length() * scale.max_element(),
-            ),
-            (Some(b), Some(_)) => (
-                gt.transform_point(Vec3::from(b.center)),
-                Vec3::from(b.half_extents).length() * scale.max_element() + RIG_CULL_MARGIN,
-            ),
+        let (center, radius, tight) = match (aabb, rig_slot) {
+            (Some(b), None) => {
+                let r = Vec3::from(b.half_extents).length() * scale.max_element();
+                (gt.transform_point(Vec3::from(b.center)), r, r)
+            }
+            (Some(b), Some(_)) => {
+                let r = Vec3::from(b.half_extents).length() * scale.max_element();
+                (gt.transform_point(Vec3::from(b.center)), r + RIG_CULL_MARGIN, r)
+            }
             // No box at all: a generous sphere round the root.
-            (None, _) => (translation, 4.0),
+            (None, _) => (translation, 4.0, 4.0),
         };
         if !near_cascades(center, radius) {
             continue;
@@ -542,6 +546,7 @@ fn collect_entity_casters(
             world_from_local: gt.to_matrix(),
             center,
             radius,
+            tight,
             rig_slot,
             cutout,
         });

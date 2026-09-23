@@ -34,6 +34,10 @@ struct LightBlock {
 // its index until it leaves the radius — so the nibble this writes still names the same six atlas
 // tiles next frame. It did not always: a compacted set shifted every slot when one light dropped
 // out, and a fragment then shaded against another lamp's shadow.
+//
+// fork: a slot's position is the MIDDLE of its light's sway (a lantern on a swinging bone), and the
+// table carries where the light is this frame — so the match is within the slot's own slack
+// (`ShadowLight::slack`, `spare` rows 6-8), not exact.
 fn shadow_slot(pos: vec3<f32>) -> u32 {
     let n = u32(grid.params.misc.y);
     for (var s = 0u; s < locallight::MAX_SHADOWED; s = s + 1u) {
@@ -46,7 +50,10 @@ fn shadow_slot(pos: vec3<f32>) -> u32 {
             continue;
         }
         let d = grid.shadow[s].xyz - pos;
-        if (dot(d, d) < 1e-4) {
+        // The row is loaded before a component is picked (see the lanes' `light_spare` reads).
+        let row = grid.spare[6u + s / 4u];
+        let slack = max(row[s % 4u], 0.01);
+        if (dot(d, d) < slack * slack) {
             return s;
         }
     }

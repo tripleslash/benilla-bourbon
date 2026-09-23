@@ -46,7 +46,12 @@ const SHAFT_ISOTROPIC: f32 = 0.5;
 const CANOPY_HAZE: f32 = 1.5;
 const CANOPY_SHAFT: f32 = 1.0;
 // Point lights' in-scatter against their surface lighting.
-const POINT_GAIN: f32 = 0.35;
+const POINT_GAIN: f32 = 1.0;
+// fork: a lamp's glow in the haze leans toward the eye: smoke and dust scatter forward, which is what
+// makes a brazier seen through the night air stand in a halo rather than a flat tint. The share of a
+// Henyey-Greenstein lobe of `POINT_G` mixed over the isotropic term (1 = isotropic on its own).
+const POINT_G: f32 = 0.5;
+const POINT_FORWARD: f32 = 0.6;
 
 // The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
 // medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
@@ -69,9 +74,12 @@ fn canopy_cover(p: vec3<f32>) -> f32 {
     return 1.0 - open * 0.25;
 }
 
-// One table light's in-scatter at a froxel: isotropic, the surface lanes' WoW falloff under the same
-// range window, zero past the range.
-fn point_in_scatter(i: u32, p: vec3<f32>) -> vec3<f32> {
+// One table light's in-scatter at a froxel: the surface lanes' WoW falloff under the same range
+// window, zero past the range. `to_eye` is the unit direction from the froxel to the camera.
+//
+// fork: under a forward lobe (`POINT_G`, `POINT_FORWARD`), relative to the isotropic term so the
+// light's total in-scatter is unchanged: brighter looking toward the lamp, dimmer looking away.
+fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
     let pos_range = light_table.points[2u * i];
     let dl = length(pos_range.xyz - p);
     if (dl >= pos_range.w) {
@@ -81,15 +89,19 @@ fn point_in_scatter(i: u32, p: vec3<f32>) -> vec3<f32> {
     let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
     // +0.5 keeps a froxel inside the flame finite.
     let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
-    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN);
+    let mu = dot((p - pos_range.xyz) / max(dl, 1e-3), to_eye);
+    let g2 = POINT_G * POINT_G;
+    let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
+    let phase = mix(1.0, hg, POINT_FORWARD);
+    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase);
 }
 
 // Every light one grid cell names, at a froxel.
-fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>) -> vec3<f32> {
+fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     let count = locallight::cell_count(cell);
     for (var i = 0u; i < count; i = i + 1u) {
-        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p);
+        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p, to_eye);
     }
     return sum;
 }
@@ -192,21 +204,22 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // as the surfaces do (`locallight::cell_pair`) — and the haze over a lamp's pool is lit by the
     // same lights as the ground under it. Without a grid (`?modern_lights=0`) the old walk stands.
     let lg = modern_block.lights;
+    let to_eye = normalize(f.camera.xyz - p);
     if (locallight::grid_live(lg)) {
         let pair = locallight::cell_pair(lg, p);
         if (pair.w > 0u) {
             let far_w = bitcast<f32>(pair.z);
             if (far_w < 1.0) {
-                points = cell_in_scatter(modern_block.light_cells[pair.x], p) * (1.0 - far_w);
+                points = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye) * (1.0 - far_w);
             }
             if (far_w > 0.0) {
-                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p) * far_w;
+                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye) * far_w;
             }
         }
     } else {
         let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
         for (var i = 0u; i < count; i = i + 1u) {
-            points = points + point_in_scatter(i, p);
+            points = points + point_in_scatter(i, p, to_eye);
         }
     }
 

@@ -143,6 +143,10 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-assets/src/materials.rs` | `LiquidCataExt.optics` | water tier |
 | `benilla-world/src/liquid/{mod,surface}.rs` | `WATER_DETAIL_EXPERIMENTAL` (= 3); `from_cvar` maps [2.5, 3.5) to it; `WaterDetail::is_experimental`; `cata_optics`; `sync_water_tier` (`Update`) flips `optics.w` on the shared cata materials | water tier |
 | `benilla-app/assets/ui/OptionsFrame.xml`, `src/cvars.rs`, `ui_script/options_tests.rs` | Water Detail gains "Modern (Experimental)" = `3` (four entries) and a tooltip paragraph; the `waterDetail 3` assertions | water tier |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `modern_cell_lights` looks a shadowed light up from its slot's anchor (`modern_block.light_shadow[slot].xyz`, the middle of the light's sway, where its cube was rendered) instead of the table's live position | lamp shadows |
+| `benilla-world/src/static_gx/render/modern_shadow.rs` | the lamp atlas is two phases per slot: static faces drawn once into the static cache after `ATLAS_SETTLE_FRAMES` of stillness (`lights::publish_built` tells the main world), and a pruned dynamic phase (entity casters within `lights::DYNAMIC_REACH`, the light's host excluded) restored and redrawn only when `same_casters` fails; the cache is a render attachment; `EntityDrawCmd` carries `tight` and `pose` | lamp shadows |
+| `benilla-world/src/modern/shadow.rs` | `EntityCaster::tight` (the part's bound without the rig margin) | lamp shadows |
+| `benilla-world/src/lighting/global_light.rs` | `MODERN_LOCAL_GAIN` (1.3) on every packed local light in a modern frame | lamp shadows |
 
 ## Planned hooks (not yet landed)
 

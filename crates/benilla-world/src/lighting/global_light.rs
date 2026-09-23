@@ -167,6 +167,11 @@ const MODERN_PACK_FADE: f32 = 60.0;
 const PACK_SHRINK_RATE: f32 = 150.0;
 const PACK_GROW_RATE: f32 = 40.0;
 
+/// fork: the modern lane's gain on every local light. Its surfaces are lit in linear HDR under a
+/// tonemap, a probe field and a night haze, where the reference's committed intensities read a little
+/// weak: a brazier lit its own bowl and not the square around it. The classic lane never takes it.
+const MODERN_LOCAL_GAIN: f32 = 1.3;
+
 /// fork: P8 — **a light that only shines at night**: a WMO window's glow, derived from its MOMT
 /// SIDN material (`terrain_stream::spawn`). The packer multiplies its colour by the SIDN night
 /// fraction — the same ramp the window's own emissive texture follows on screen — so the street
@@ -599,7 +604,8 @@ fn build_light_data(
                 1.0
             };
             let glow = if night_glow.is_some() { night } else { 1.0 };
-            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade * reach * glow;
+            let gain = if modern_pack { MODERN_LOCAL_GAIN } else { 1.0 };
+            let s = pl.intensity / (4.0 * std::f32::consts::PI) * *fade * reach * glow * gain;
             let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s]);
             // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
             let indoors = rooms.is_some_and(|r| {

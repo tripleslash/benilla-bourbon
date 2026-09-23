@@ -22,6 +22,14 @@ const PER_ATLAS_LAYER: u32 = 6u;
 // Filter taps the soft path can take. The tier asks for at most this many
 // (`benilla_world::modern::lights::LightTier::taps`); the loop is bounded here so it unrolls.
 const MAX_TAPS: u32 = 12u;
+// fork: the soft path's blocker search — raw depth reads around the receiver that find how far the
+// occluder stands from the light, which is what sizes the penumbra.
+const BLOCKER_TAPS: u32 = 6u;
+// fork: the widest penumbra (and blocker search) the soft path opens, in face texels. Past it the
+// taps would reach across the face into the next tile's inset.
+const MAX_PENUMBRA_TEXELS: f32 = 12.0;
+// fork: the narrowest, so a contact shadow still takes the hardware 2x2 of a texel.
+const MIN_PENUMBRA_TEXELS: f32 = 1.0;
 
 // The grid's parameters — the part a lane copies by value, so it is kept small for the same reason
 // `sunshadow::ModernCascades` is (160 B, ten rows). The cells themselves are a separate member of
@@ -44,9 +52,9 @@ struct LightGrid {
     shadow_misc: vec4<f32>,
     // fork: P8 — the soft filter. Named `soft` because `filter` is a WGSL RESERVED KEYWORD: naga
     // rejects it as a struct member, and the only thing that says so is the composer.
-    // x = taps (1 = P6's single hardware compare), y = the penumbra opening (face-uv texels of blur
-    // per yard between light and receiver), z = the shade floor (how much of a light a shadow may
-    // take away; below 1 the shadow is faint), w = the atlas's first array layer.
+    // x = taps (1 = P6's single hardware compare), y = the emitter radius the penumbra opens from
+    // (yd), z = the shade floor (how much of a light a shadow may take away; below 1 the shadow is
+    // faint), w = the atlas's first array layer.
     soft: vec4<f32>,
     // fork: P8 — the FAR level and the atlas's tile use. x = far cells per horizontal axis (0 = the
     // tier has no far level, and the grid is the near level alone, exactly as before), y = far
@@ -281,11 +289,13 @@ fn vogel_offset(index: u32, count: u32, rotation: f32) -> vec2<f32> {
 // no tiles of its own — is fully lit by definition, which is what the tier table means by "the rest
 // of the lights are unshadowed".
 //
-// fork: P8 — the lookup is a Vogel disc of `soft.x` taps whose radius opens with the receiver's
-// distance from the light, and the result is lifted by the tier's shade floor, so the shadow is
-// soft and faint rather than a hard silhouette. At `taps == 1` this is byte-for-byte P6's single
-// hardware compare (the loop runs once at zero radius and the floor is 1), which is what keeps High
-// and Ultra where they were.
+// fork: the lookup is a blocker search and then a Vogel disc of `soft.x` taps whose radius is the
+// penumbra a flame of `soft.y` yards would cast — contact-hardening, crisp where the occluder
+// touches the receiver — lifted by the tier's shade floor. At `taps == 1` it is P6's single hardware
+// compare under the floor.
+//
+// `light_pos` is the slot's ANCHOR (`light_shadow[slot]`), where its cube was rendered — the middle
+// of a swaying light's sway, not where the light is this frame.
 fn local_visibility(
     map: texture_depth_2d_array,
     samp: sampler_comparison,
@@ -338,23 +348,52 @@ fn local_visibility(
         return mix(1.0, mix(1.0 - g.soft.z, 1.0, one), fade);
     }
 
-    // The penumbra: a point light stands in for a fixture about a yard across, so the blur grows
-    // with how far the receiver is from it — a wall the lamp nearly touches has a crisp shadow, the
-    // floor across the room a wide one. In face uv, one yard at distance `major` is `0.5 / major`,
-    // so the opening is already normalised by the perspective and only the distance remains.
-    let spread = g.soft.y * g.shadow_misc.w * tiles * clamp(ct.w * 0.25, 0.35, 4.0);
+    // fork: **the penumbra of a finite emitter**, contact-hardening. A point light stands in for a
+    // flame about `soft.y` yards across, so the blur at the receiver is that radius scaled by how far
+    // the receiver stands behind its occluder: `radius × (receiver − blocker) / blocker`. A chair leg
+    // where it meets the floor is crisp and its shadow softens along its length, which is what makes
+    // a lamp's shadow read as a lamp's and not as a blurred stencil.
+    //
+    // The blocker's distance comes from a few raw depth reads around the receiver (the stored depth
+    // is `near / major`, so a read turns straight back into yards along the face's axis). No blocker
+    // among them is a lit receiver, and the filter is skipped.
+    let texel_uv = g.shadow_misc.w * tiles;
+    let dims = vec2<f32>(textureDimensions(map));
+    let search = MAX_PENUMBRA_TEXELS * texel_uv;
     // Rotate the disc per fragment, from the receiver's own position: a fixed spiral banded every
-    // lit floor with twelve visible arms.
+    // lit floor with visible arms.
     //
     // **Wrapped before it is hashed, and that is not cosmetic.** A WoW world coordinate runs to
     // ±17066, and hashing it raw put `dot` up around 1.3e6 — where an f32 ulp is about an eighth,
     // so `fract` collapsed to a handful of distinct values and the whole disc took the same few
-    // rotations across large patches of floor. Twelve taps in lockstep are not noise, they are a
-    // pattern, and the pool of light under a lamp came out structured instead of smooth. Taking
-    // the fraction first keeps the hash's input inside [0,1) with precision to spare, and wrapping
-    // every ten yards is invisible in a rotation.
+    // rotations across large patches of floor. Taking the fraction first keeps the hash's input
+    // inside [0,1) with precision to spare, and wrapping every ten yards is invisible in a rotation.
     let wrapped = fract(world_pos * 0.1);
     let rotation = fract(dot(wrapped, vec3<f32>(12.9898, 78.233, 37.719))) * 6.2831853;
+    var blocker = 0.0;
+    var blockers = 0.0;
+    for (var i = 0u; i < BLOCKER_TAPS; i = i + 1u) {
+        let offset = vogel_offset(i, BLOCKER_TAPS, rotation + 1.3) * search;
+        let face_uv = clamp(ct.xy + offset, vec2<f32>(inset), vec2<f32>(1.0 - inset));
+        let texel = vec2<i32>((tile.xy + face_uv * tile.w) * dims);
+        let stored = textureLoad(map, texel, i32(tile.z), 0);
+        // Reverse-Z: a stored depth above the receiver's is nearer the light.
+        if (stored > depth) {
+            blocker = blocker + near / max(stored, 1e-6);
+            blockers = blockers + 1.0;
+        }
+    }
+    if (blockers <= 0.0) {
+        return 1.0;
+    }
+    let occluder = max(blocker / blockers, near);
+    let penumbra_yd = g.soft.y * max(ct.w - occluder, 0.0) / occluder;
+    // A yard at distance `major` is `0.5 / major` of face uv.
+    let spread = clamp(
+        penumbra_yd * 0.5 / max(ct.w, 1e-3),
+        MIN_PENUMBRA_TEXELS * texel_uv,
+        MAX_PENUMBRA_TEXELS * texel_uv,
+    );
 
     var lit = 0.0;
     var taken = 0u;

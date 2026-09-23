@@ -213,7 +213,7 @@ fn modern_cell_lights(
                 modern_shadow_samp,
                 g,
                 slot,
-                pos_range.xyz,
+                modern_block.light_shadow[slot].xyz,
                 p,
                 nrm,
                 row[slot % 4u],

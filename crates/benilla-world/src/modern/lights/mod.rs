@@ -74,11 +74,29 @@ const CUBE_BIAS_YD: f32 = 0.12;
 const TILE_INSET_TEXELS: f32 = 2.0;
 /// How near the camera a light has to be to be worth a cube.
 const SHADOW_RADIUS: f32 = 70.0;
-/// fork: P8 — how fast a cube's penumbra opens: face-uv texels of blur per yard between the light
-/// and the receiver, at a nominal one-yard emitter. A brazier is about that wide; a sword's glow is
-/// narrower and a chandelier wider, but the light table carries no emitter size, so one opening
-/// stands for all of them and the tier's tap count decides how smooth it reads.
-const PENUMBRA_OPENING: f32 = 0.9;
+/// fork: the lamp shadows' emitter — the radius, in yards, of the flame a point light stands in for.
+/// The filter (`locallight::local_visibility`) opens the penumbra from it by the ratio a finite
+/// emitter gives: `radius × (receiver − blocker) / blocker`, so a chair leg standing on the floor
+/// casts a crisp contact and softens with height, the way a lantern's shadow does. A sconce's flame
+/// is about this size; the light table carries no emitter size, so one radius stands for all of them.
+const EMITTER_RADIUS: f32 = 0.35;
+/// fork: how far a lamp's cube reaches for DYNAMIC casters (characters, creatures, GameObjects), in
+/// yards from the light. Only what is very close to a lamp throws a shadow worth redrawing six faces
+/// for when it moves; a creature across the square is left to the sun.
+pub const DYNAMIC_REACH: f32 = 8.0;
+/// fork: a light whose position sweeps a box larger than this (yd, on any axis) is MOVING — a torch
+/// carried down the street — and gets no cached cube; its box restarts where it is now. Below it the
+/// light only sways (a hanging lantern, a flame bone's idle), and its cube is built once from the
+/// middle of the sway.
+const SWAY_LIMIT: f32 = 1.5;
+/// fork: growth of a light's swept box below this (yd) is float noise, not motion.
+const SWAY_NOISE: f32 = 0.02;
+/// fork: how long a light's swept box has to hold, in seconds, before its cube is built. A swaying
+/// lantern has shown its whole swing by then; a placed lamp simply waits out its streaming.
+const SETTLE_SECS: f32 = 1.0;
+/// fork: the binning pass's match tolerance on top of a light's sway (yd) — a live light is matched to
+/// its slot anywhere inside its swept box plus this.
+const MATCH_SLACK: f32 = 0.05;
 /// fork: P8 — the aggressive cull's screen test: a light whose lit sphere subtends less than this
 /// fraction of the viewport's height gets no cube, however bright it is. A lamp 60 yd off across a
 /// square is a dozen pixels of shading; six faces of depth for it is the cost of a building.
@@ -113,9 +131,11 @@ pub struct LightTier {
     /// glowing sword is the extreme case the user named: its shadow should be *there* and should
     /// not be a silhouette.
     pub shade: f32,
-    /// fork: P8 — do entity casters (characters, creatures, the weapon in a hand) draw into the
-    /// cube atlas? Costs the atlas its full cache: the layer must be restored and redrawn each
-    /// frame, the same deal the cascades already make.
+    /// fork: do entity casters (characters, creatures, GameObjects) draw into the cube atlas? They
+    /// are the atlas's second, DYNAMIC phase: a slot's static map is built once into the static
+    /// cache, and only the casters within [`DYNAMIC_REACH`] of its light are drawn over a copy of it
+    /// — per slot, and only on a frame that set actually changed. A lamp nobody walks past redraws
+    /// nothing.
     pub dynamic_casters: bool,
     /// fork: P8 — run the geometric cull ([`ShadowCull`]) over the candidates for an atlas slot.
     ///
@@ -135,8 +155,8 @@ pub struct LightTier {
     /// fork: P8 — how much of each atlas tile a cube face is drawn into, per edge. `0.5` renders a
     /// quarter of the depth, and the wider texels are what the penumbra filter smooths over anyway.
     pub tile_use: f32,
-    /// fork: P8 — the penumbra opening (face texels of blur per yard of receiver distance, at a
-    /// nominal one-yard emitter). See [`PENUMBRA_OPENING`], which every tier but Cinematic keeps.
+    /// fork: the emitter radius the soft filter opens its penumbra from (yd). See
+    /// [`EMITTER_RADIUS`].
     pub penumbra: f32,
     /// fork: P8 — the band, in yards inside [`SHADOW_RADIUS`], over which a cube shadow fades with
     /// the light's distance from the camera. `0` is no fade: a slot is at full strength from the
@@ -157,7 +177,7 @@ impl LightTier {
         far_dims: UVec3::ZERO,
         far_step: 1,
         tile_use: 1.0,
-        penumbra: PENUMBRA_OPENING,
+        penumbra: EMITTER_RADIUS,
         shadow_fade_yd: 0.0,
     };
 
@@ -228,7 +248,7 @@ pub const EMISSIVE_GRID: LightTier = LightTier {
     far_dims: UVec3::new(36, 16, 36),
     far_step: 6,
     tile_use: 1.0,
-    penumbra: PENUMBRA_OPENING,
+    penumbra: EMITTER_RADIUS,
     shadow_fade_yd: 0.0,
 };
 
@@ -244,11 +264,16 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
             shadowed: 0,
             ..LightTier::OFF
         },
+        // fork: four soft cubes — the contact-hardening filter at eight taps — built once over the
+        // static world, with the characters and creatures right beside a lamp drawn over them.
         LightingQuality::High => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
             cell: 6.0,
             shadowed: 4,
+            taps: 8,
+            shade: 0.9,
+            dynamic_casters: true,
             ..LightTier::OFF
         },
         // fork: P8b — Cinematic's lights without a single cube shadow: every lamp, lit window and
@@ -257,20 +282,21 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
         // lighting part" of Cinematic, and the atlas layer, its static cache and its cube renders
         // go with the shadows.
         LightingQuality::Ultra => EMISSIVE_GRID,
-        // fork: P8 — the emissive grid plus a dozen cube shadows, **as cheap as they can be made**
-        // (P8b: the user traded their detail for their cost). One hardware 2×2 compare per lookup —
-        // the penumbra's eight-tap Vogel disc is gone — under a shade floor, so the shadow is faint
-        // rather than soft and its hard edge reads as a soft one; static casters only (cached per
-        // slot — a settled street pays nothing a frame, and a slot change redraws that slot's six
-        // faces alone); faces drawn into half a tile. They fade out with distance before a slot is
-        // released, so a lamp acquiring or losing its cube never shows.
+        // fork: the emissive grid plus a dozen cube shadows that look like a lamp's. The render is
+        // what used to cost: every face is now drawn ONCE, when the lamp and the static world around
+        // it have settled (cached per slot; a settled street pays nothing a frame), and the moving
+        // things right beside a lamp are a second, pruned pass over a copy of that — so the faces
+        // take the whole tile again, and the budget P8b spent on the render goes to the lookup: a
+        // blocker search and a twelve-tap disc, soft where the occluder is far from the floor and
+        // crisp where it touches it. They fade out with distance before a slot is released, so a
+        // lamp acquiring or losing its cube never shows.
         LightingQuality::Cinematic => LightTier {
             shadowed: MAX_SHADOWED,
-            taps: 1,
-            shade: 0.55,
+            taps: 12,
+            shade: 0.9,
+            dynamic_casters: true,
             aggressive_cull: true,
-            tile_use: 0.5,
-            penumbra: 2.5,
+            tile_use: 1.0,
             shadow_fade_yd: 30.0,
             ..EMISSIVE_GRID
         },
@@ -378,6 +404,51 @@ pub struct ShadowLight {
     /// and everything beyond it still shadow normally. This is also what makes a shadowed lamp and
     /// an unshadowed one look alike, which is the property the distance behaviour depends on.
     pub near: f32,
+    /// fork: **which light this is** — its entity's bits. A slot follows a light by identity, not by
+    /// where it stands: a lantern on a swinging bone is somewhere new every frame, and matching on
+    /// position made it lose its slot to itself each frame and redraw six faces doing so.
+    pub id: u64,
+    /// fork: how far the live light strays from [`Self::pos`] (yd) — half its swept box plus
+    /// [`MATCH_SLACK`]. `pos` is the MIDDLE of a sway (the cube is rendered from there, once), so
+    /// the binning pass matches the table's live position to this slot within this radius.
+    pub slack: f32,
+}
+
+impl ShadowLight {
+    /// fork: what a slot's six faces depend on — where the cube is rendered from, how far it
+    /// reaches and its near plane. Not the fade (it ramps every frame and the faces do not change)
+    /// and not the slack (a matching tolerance, never rendered). The render world keys its cache on
+    /// this and publishes it back through [`publish_built`], so the two halves agree on what
+    /// "built" means.
+    pub fn map_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.pos.to_array().map(f32::to_bits).hash(&mut h);
+        self.range.to_bits().hash(&mut h);
+        self.near.to_bits().hash(&mut h);
+        h.finish() | 1
+    }
+}
+
+/// fork: render → main — the [`ShadowLight::map_key`] whose static faces each atlas slot holds
+/// (0 = none). A slot's shadow is only allowed to fade in once its own faces are drawn, so a lamp
+/// whose surroundings are still streaming in is simply unshadowed rather than shadowed by an empty
+/// or half-built map.
+static SLOT_BUILT: [std::sync::atomic::AtomicU64; MAX_SHADOWED] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; MAX_SHADOWED];
+
+/// fork: the render world's report that `slot`'s static faces now hold the light keyed `key`.
+pub fn publish_built(slot: usize, key: u64) {
+    if let Some(s) = SLOT_BUILT.get(slot) {
+        s.store(key, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// fork: the key `slot`'s static faces were last built for (0 = none).
+pub fn built(slot: usize) -> u64 {
+    SLOT_BUILT
+        .get(slot)
+        .map_or(0, |s| s.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// How far a synthesized light's own fixture reaches, in yards — the radius whose geometry must be
@@ -436,8 +507,8 @@ pub struct LightParams {
     pub base: Vec4,
     pub misc: Vec4,
     pub shadow_misc: Vec4,
-    /// fork: P8 — the soft-shadow filter: `x` taps, `y` the penumbra opening (texels of face uv per
-    /// yard of receiver distance), `z` the shade floor (how much of a light a shadow may take),
+    /// fork: P8 — the soft-shadow filter: `x` taps, `y` the emitter radius the penumbra opens from
+    /// (yd, [`EMITTER_RADIUS`]), `z` the shade floor (how much of a light a shadow may take),
     /// `w` the atlas's first layer. Named `soft` in the WGSL, where `filter` is a reserved keyword.
     pub soft: Vec4,
     /// fork: P8 — `x` the far level's horizontal cells, `y` its vertical cells, `z` its cell as a
@@ -451,6 +522,9 @@ pub struct LightParams {
     pub slot_near: [Vec4; MAX_SHADOWED / 4],
     /// The twelve per-slot cross-fades — the next three `spare` rows, still inside the padding.
     pub slot_fade: [Vec4; MAX_SHADOWED / 4],
+    /// fork: the twelve per-slot match radii ([`ShadowLight::slack`]) — `spare` rows 6-8, read by
+    /// `light_bin.wgsl`'s `shadow_slot`.
+    pub slot_slack: [Vec4; MAX_SHADOWED / 4],
 }
 
 impl LightParams {
@@ -470,6 +544,9 @@ impl LightParams {
             row(*s);
         }
         for s in &self.slot_fade {
+            row(*s);
+        }
+        for s in &self.slot_slack {
             row(*s);
         }
         // `spare`: P7's per-zone local-light grading, and the padding that keeps the GI block's
@@ -502,10 +579,12 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     // ramping in or out is indistinguishable from one that was never there; the shader mixes the
     // lookup toward full visibility by it.
     let mut slot_fade = [Vec4::ZERO; MAX_SHADOWED / 4];
+    let mut slot_slack = [Vec4::splat(MATCH_SLACK); MAX_SHADOWED / 4];
     for (slot, held) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
         if let Some(held) = held {
             shadow[slot] = held.light.pos.extend(held.light.range);
             slot_near[slot / 4][slot % 4] = held.light.near;
+            slot_slack[slot / 4][slot % 4] = held.light.slack.max(MATCH_SLACK);
             slot_fade[slot / 4][slot % 4] = (held.fade
                 * shadow_distance_weight(tier, held.light.pos.distance(lights.eye)))
             .clamp(0.0, 1.0);
@@ -543,6 +622,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         shadow,
         slot_near,
         slot_fade,
+        slot_slack,
     }
 }
 
@@ -645,12 +725,88 @@ pub(super) fn plugin(app: &mut App) {
     }
 }
 
+/// fork: one light's recent motion — the box its position has swept since it last jumped. See
+/// [`SWAY_LIMIT`]: a light that stays inside a small box only SWAYS (a lantern on a swinging bone),
+/// and its cube is built once, from the middle of the box, when the box has stopped growing.
+#[derive(Clone, Copy, Debug)]
+struct Sway {
+    lo: Vec3,
+    hi: Vec3,
+    /// Seconds since the box last grew (or restarted).
+    still: f32,
+    /// Seconds since the box last restarted — how long the light has been anywhere near here.
+    here: f32,
+    /// The frame this light was last seen on, so a despawned light's entry is dropped.
+    seen: u32,
+}
+
+impl Sway {
+    fn new(pos: Vec3, frame: u32) -> Self {
+        Self {
+            lo: pos,
+            hi: pos,
+            still: 0.0,
+            here: 0.0,
+            seen: frame,
+        }
+    }
+
+    /// Take this frame's position. A box that would grow past [`SWAY_LIMIT`] restarts here: the
+    /// light is travelling, and a cube built anywhere along the way would be wrong everywhere else.
+    fn step(&mut self, pos: Vec3, dt: f32, frame: u32) {
+        self.seen = frame;
+        let (lo, hi) = (self.lo.min(pos), self.hi.max(pos));
+        if (hi - lo).max_element() > SWAY_LIMIT {
+            *self = Self::new(pos, frame);
+            return;
+        }
+        let grew = (self.lo - lo).max_element().max((hi - self.hi).max_element()) > SWAY_NOISE;
+        self.lo = lo;
+        self.hi = hi;
+        self.here += dt;
+        self.still = if grew { 0.0 } else { self.still + dt };
+    }
+
+    /// The middle of the sway — where the cube is rendered from.
+    fn anchor(&self) -> Vec3 {
+        (self.lo + self.hi) * 0.5
+    }
+
+    /// How far the live light strays from [`Self::anchor`].
+    fn reach(&self) -> f32 {
+        (self.hi - self.lo).length() * 0.5
+    }
+
+    /// Has the light stayed near here long enough to hold a slot at all? A light that keeps
+    /// restarting its box is moving, and gives up any slot it held.
+    fn resident(&self) -> bool {
+        self.here >= SETTLE_SECS
+    }
+
+    /// Has the box held still long enough for its cube to be built (or rebuilt)?
+    fn settled(&self) -> bool {
+        self.still >= SETTLE_SECS
+    }
+}
+
+/// fork: one light that could hold (or keep) an atlas slot this frame.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    score: f32,
+    light: ShadowLight,
+    /// Its sway has settled, so its cube can be built: only a settled light is ADMITTED to a slot,
+    /// and only a settled light's anchor is taken over by the slot it already holds.
+    settled: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_lights(
     active: Res<ActiveLighting>,
     // fork: P8 — the camera's `Projection` as well as its transform: the aggressive cull needs the
     // frustum and the vertical field of view to answer "is this lamp worth six faces of depth".
     cameras: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
     lights_q: Query<(
+        Entity,
         &WorldPointLight,
         &GlobalTransform,
         Option<&LightRooms>,
@@ -661,6 +817,7 @@ fn update_lights(
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
     mut held: Local<Vec<Option<HeldSlot>>>,
+    mut sway: Local<(std::collections::HashMap<Entity, Sway>, u32)>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
@@ -669,6 +826,7 @@ fn update_lights(
         if out.on {
             *out = ModernLights::default();
             held.clear();
+            sway.0.clear();
         }
         return;
     }
@@ -683,10 +841,13 @@ fn update_lights(
     // The shadowed set: the strongest few lights near the camera, under the same room gate the
     // packed table itself runs (`global_light::build_light_data`) — a torch in a culled room is not
     // in the table, so it must not hold an atlas slot either.
-    let mut ranked: Vec<(f32, ShadowLight)> = Vec::new();
+    let mut ranked: Vec<Candidate> = Vec::new();
     if crate::modern::shadow::local_shadow_layers(active.quality) > 0 && tier.shadowed > 0 {
         let emissive = crate::modern::emissive_lights_on();
-        for (light, gt, rooms, fixture, window, synthesized) in &lights_q {
+        let (tracks, frame) = &mut *sway;
+        *frame = frame.wrapping_add(1);
+        let frame = *frame;
+        for (entity, light, gt, rooms, fixture, window, synthesized) in &lights_q {
             if !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
@@ -701,21 +862,37 @@ fn update_lights(
             if d > SHADOW_RADIUS || light.range <= 0.0 {
                 continue;
             }
+            // fork: where this light has been lately. A placed lamp's box is a point; a lantern on
+            // a swinging bone sweeps a small one, and its cube is rendered from the middle of it.
+            let track = tracks
+                .entry(entity)
+                .and_modify(|t| t.step(pos, dt, frame))
+                .or_insert_with(|| Sway::new(pos, frame));
+            if !track.resident() {
+                continue;
+            }
             // The light's reach as the frame sees it: its authored energy over the distance the
             // camera stands at, so a bright chandelier two rooms away loses to the candle beside it.
             let lum = light.intensity * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
-            ranked.push((
-                lum / (1.0 + d),
-                ShadowLight {
-                    pos,
+            ranked.push(Candidate {
+                score: lum / (1.0 + d),
+                light: ShadowLight {
+                    pos: track.anchor(),
                     range: light.range,
                     // Clear the fixture, with a margin — a card's extent is the glow, and the iron
                     // around it sits a little outside that.
                     near: fixture.map_or(CUBE_NEAR, |f| CUBE_NEAR.max(f.0 * FIXTURE_CLEARANCE)),
+                    id: entity.to_bits(),
+                    slack: track.reach() + MATCH_SLACK,
                 },
-            ));
+                settled: track.settled(),
+            });
         }
-        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // A light that left the radius (or the world) starts its settling over when it comes back.
+        tracks.retain(|_, t| t.seen == frame);
+        ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+    } else if !sway.0.is_empty() {
+        sway.0.clear();
     }
     // **Sticky.** Re-ranking every frame would reshuffle the atlas as the camera walks, and a
     // reshuffle redraws all six faces of all six lights — a building's worth of geometry each. A
@@ -724,7 +901,9 @@ fn update_lights(
     let want = tier.shadowed.min(MAX_SHADOWED);
     held.resize(want, None);
     held.truncate(want);
-    assign_slots(&mut held, &ranked, &cull, dt);
+    assign_slots(&mut held, &ranked, &cull, dt, |slot, light| {
+        built(slot) == light.map_key()
+    });
     let chosen = held.clone();
 
     *out = ModernLights {
@@ -751,8 +930,9 @@ pub fn shadow_candidate(window: bool, synthesized: bool, emissive: bool) -> bool
 }
 
 /// **Slots are stable.** A light keeps its index for as long as it is still a candidate at all —
-/// still in the table, still admitted by its room, still inside [`SHADOW_RADIUS`]. Nothing else
-/// evicts it: not a better light arriving, and (since the flicker this caused) not the P8 cull.
+/// still in the table, still admitted by its room, still inside [`SHADOW_RADIUS`], still where it
+/// was (a light that travels is not). Nothing else evicts it: not a better light arriving, and
+/// (since the flicker this caused) not the P8 cull.
 ///
 /// The cull's job is to stop a lamp ACQUIRING six faces of depth it cannot pay back, so it is asked
 /// once, when a slot is being filled. Asking it every frame of a light's tenure instead made the
@@ -761,51 +941,61 @@ pub fn shadow_candidate(window: bool, synthesized: bool, emissive: bool) -> bool
 /// through a nibble the binning pass wrote, every reshuffle pointed live fragments at another
 /// lamp's shadow. In a room with several lamps that reads as the scene flipping between lit and
 /// pitch black as the player turns, which is exactly what it did.
+///
+/// fork: a slot follows its light by IDENTITY ([`ShadowLight::id`]) and takes over the light's
+/// settled anchor; and a new slot only fades in once `built` says its static faces are drawn — until
+/// then the lamp is simply unshadowed, which is exactly what a fade of zero reads as.
 fn assign_slots(
     held: &mut [Option<HeldSlot>],
-    ranked: &[(f32, ShadowLight)],
+    ranked: &[Candidate],
     cull: &Option<ShadowCull>,
     dt: f32,
+    built: impl Fn(usize, &ShadowLight) -> bool,
 ) {
     // 1. Decide which slots are on their way out. A held light retires only when it stops being a
-    //    candidate outright (out of range, room-culled) or falls below the KEEP threshold — never
-    //    because a better light turned up, and never because the player looked away.
+    //    candidate outright (out of range, room-culled, travelling) or falls below the KEEP
+    //    threshold — never because a better light turned up, and never because the player looked
+    //    away.
     for slot in held.iter_mut() {
         let Some(h) = slot else { continue };
-        let still_a_candidate = ranked.iter().any(|(_, c)| *c == h.light);
+        let found = ranked.iter().find(|c| c.light.id == h.light.id);
+        if let Some(c) = found.filter(|c| c.settled) {
+            h.light = c.light;
+        }
         let still_big_enough = cull.is_none_or(|c| c.still_worth_it(h.light.pos, h.light.range));
-        h.retiring = !(still_a_candidate && still_big_enough);
+        h.retiring = !(found.is_some() && still_big_enough);
     }
 
     // 2. Ramp. A retiring slot fades out and is released only once it reaches zero, so its shadow
-    //    is already gone by the time the tiles are handed to someone else.
+    //    is already gone by the time the tiles are handed to someone else. A new one waits at zero
+    //    for its faces; one already showing keeps showing while a moved anchor is redrawn.
     let step = (FADE_RATE * dt).clamp(0.0, 1.0);
-    for slot in held.iter_mut() {
+    for (index, slot) in held.iter_mut().enumerate() {
         let Some(h) = slot else { continue };
         if h.retiring {
             h.fade -= step;
             if h.fade <= 0.0 {
                 *slot = None;
             }
-        } else {
+        } else if h.fade > 0.0 || built(index, &h.light) {
             h.fade = (h.fade + step).min(1.0);
         }
     }
 
-    // 3. Fill the free slots, strongest candidate first, and only with lights the cull admits at
-    //    the strict threshold. A new slot starts at zero fade and ramps in.
-    for (_, candidate) in ranked
+    // 3. Fill the free slots, strongest settled candidate first, and only with lights the cull
+    //    admits at the strict threshold. A new slot starts at zero fade.
+    for c in ranked
         .iter()
-        .filter(|(_, c)| cull.is_none_or(|k| k.worth_a_cube(c.pos, c.range)))
+        .filter(|c| c.settled && cull.is_none_or(|k| k.worth_a_cube(c.light.pos, c.light.range)))
     {
-        if held.iter().flatten().any(|h| h.light == *candidate) {
+        if held.iter().flatten().any(|h| h.light.id == c.light.id) {
             continue;
         }
         let Some(hole) = held.iter().position(Option::is_none) else {
             break;
         };
         held[hole] = Some(HeldSlot {
-            light: *candidate,
+            light: c.light,
             fade: 0.0,
             retiring: false,
         });
@@ -858,38 +1048,44 @@ mod tests {
         assert_eq!(PER_ATLAS_LAYER as u32 * 6, ATLAS_TILES * ATLAS_TILES);
     }
 
-    /// fork: P8b — **the tier contract** (it replaced P8's "no tier that shipped may cost more"
-    /// gate when Cinematic's lighting moved down to Ultra). Each row's cube shadows are pinned to
-    /// what the tier table says it buys, because none of them announce themselves in the frame: a
-    /// `taps: 8` typed back into Cinematic multiplies a lookup every lamp-lit fragment makes, and a
-    /// `shadowed: 6` on Ultra silently re-allocates an atlas layer and its cache.
+    /// fork: **the tier contract.** Each row's cube shadows are pinned to what the tier table says
+    /// it buys, because none of them announce themselves in the frame: a tap count multiplies a
+    /// lookup every lamp-lit fragment makes, and a `shadowed: 6` on Ultra silently re-allocates an
+    /// atlas layer and its cache.
     ///
     /// - Low and Medium: no cube shadows, no layer.
-    /// - High: P6's row as it shipped — four hard single-tap cubes, one layer natively, none in the
-    ///   browser, no emissive sources.
+    /// - High: four soft cubes (eight taps), one layer natively, none in the browser, no emissive
+    ///   sources.
     /// - Ultra: lights from glowing things, no cube shadows and no layer anywhere.
-    /// - Cinematic: the same lights plus twelve cubes — one tap each, faint, static casters only.
+    /// - Cinematic: the same lights plus twelve soft cubes (twelve taps).
+    ///
+    /// Every tier that shadows a lamp builds its faces once over the static world and draws only
+    /// the moving things near the lamp over them (`dynamic_casters`) — the render stopped being
+    /// the cost, which is what paid for the taps.
     #[test]
     fn each_tier_buys_the_shadows_the_table_says() {
         for q in LightingQuality::ALL {
             let t = light_tier(q);
-            assert_eq!(t.taps, 1, "{q:?}: every tier takes the single hardware compare since P8b");
-            assert!(!t.dynamic_casters, "{q:?}: no tier redraws entities into the atlas");
+            assert_eq!(
+                t.dynamic_casters,
+                t.shadowed > 0,
+                "{q:?}: every tier with cubes takes the pruned dynamic phase, and only those"
+            );
         }
         for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::Ultra] {
             assert_eq!(light_tier(q).shadowed, 0, "{q:?} shadows no local light");
             assert_eq!(crate::modern::shadow::local_shadow_layers(q), 0, "{q:?}");
         }
         let high = light_tier(LightingQuality::High);
-        assert_eq!((high.shadowed, high.shade), (4, 1.0), "High is P6's row");
+        assert_eq!((high.shadowed, high.taps), (4, 8), "High: four soft cubes");
         assert!(!high.aggressive_cull);
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::High),
             if cfg!(target_arch = "wasm32") { 0 } else { 1 },
         );
         let cine = light_tier(LightingQuality::Cinematic);
-        assert_eq!(cine.shadowed, MAX_SHADOWED);
-        assert!(cine.shade < 1.0 && cine.aggressive_cull, "faint, and culled");
+        assert_eq!((cine.shadowed, cine.taps), (MAX_SHADOWED, 12));
+        assert!(cine.shade < 1.0 && cine.aggressive_cull, "a lamp's shadow, not a hole, and culled");
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
@@ -1017,7 +1213,14 @@ mod tests {
         let size = crate::modern::shadow::SHADOW_MAP_SIZE;
         let tile = size / ATLAS_TILES;
         assert_eq!(face_px(&light_tier(LightingQuality::High), size), tile);
-        let half = face_px(&light_tier(LightingQuality::Cinematic), size);
+        assert_eq!(face_px(&light_tier(LightingQuality::Cinematic), size), tile);
+        let half = face_px(
+            &LightTier {
+                tile_use: 0.5,
+                ..light_tier(LightingQuality::Cinematic)
+            },
+            size,
+        );
         assert!(half < tile && half >= tile / 2 - 1, "{half} of {tile}");
     }
 
@@ -1038,14 +1241,22 @@ mod tests {
             pos: Vec3::new(x, 0.0, 0.0),
             range: 20.0,
             near: CUBE_NEAR,
+            id: 1000 + x as u64,
+            slack: MATCH_SLACK,
         }
+    }
+
+    /// Every slot's faces count as built — the render world's half, for the tests that are about
+    /// something else.
+    fn always(_: usize, _: &ShadowLight) -> bool {
+        true
     }
 
     /// Settle the fades: enough frames that everything ramping has reached its end. Shadow state
     /// is temporal now, so a test that wants a steady answer has to let it settle.
-    fn settle(held: &mut Vec<Option<HeldSlot>>, ranked: &[(f32, ShadowLight)], cull: &Option<ShadowCull>) {
+    fn settle(held: &mut Vec<Option<HeldSlot>>, ranked: &[Candidate], cull: &Option<ShadowCull>) {
         for _ in 0..30 {
-            assign_slots(held, ranked, cull, 1.0 / 60.0);
+            assign_slots(held, ranked, cull, 1.0 / 60.0, always);
         }
     }
 
@@ -1054,11 +1265,15 @@ mod tests {
         held.iter().map(|h| h.map(|h| h.light)).collect()
     }
 
-    fn ranked(lamps: &[ShadowLight]) -> Vec<(f32, ShadowLight)> {
+    fn ranked(lamps: &[ShadowLight]) -> Vec<Candidate> {
         lamps
             .iter()
             .enumerate()
-            .map(|(i, l)| (100.0 - i as f32, *l))
+            .map(|(i, l)| Candidate {
+                score: 100.0 - i as f32,
+                light: *l,
+                settled: true,
+            })
             .collect()
     }
 
@@ -1145,6 +1360,8 @@ mod tests {
             pos: Vec3::new(0.0, 0.0, -(d_admit * 1.05)),
             range,
             near: CUBE_NEAR,
+            id: 1,
+            slack: MATCH_SLACK,
         };
         assert!(!cull.worth_a_cube(outside.pos, outside.range), "not admitted");
         assert!(
@@ -1165,12 +1382,12 @@ mod tests {
         // Admitted: it takes the slot immediately, and contributes NOTHING on the frame it
         // arrives — a fade of zero reads exactly as "this light has no cube", which is the whole
         // point. The filling happens after the ramp, so its first step lands next frame.
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0);
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, always);
         let h = held[0].expect("took a slot");
         assert_eq!(h.light, a);
         assert_eq!(h.fade, 0.0, "arrives dark");
 
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0);
+        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, always);
         let h = held[0].unwrap();
         assert!(h.fade > 0.0 && h.fade < 1.0, "then ramps: {}", h.fade);
 
@@ -1179,7 +1396,7 @@ mod tests {
 
         // Now it stops being a candidate. It must fade out, and hold its slot while it does —
         // releasing the tiles first would hand a live shadow to whoever took the slot next.
-        assign_slots(&mut held, &[], &None, 1.0 / 60.0);
+        assign_slots(&mut held, &[], &None, 1.0 / 60.0, always);
         let h = held[0].expect("still holds the slot while fading out");
         assert!(h.retiring && h.fade < 1.0, "{h:?}");
 
@@ -1311,6 +1528,77 @@ mod tests {
             assert!((ndc.z - CUBE_NEAR / major).abs() < 1e-5, "face {face}: {ndc}");
             // Inside the face, never off it.
             assert!(uv.min_element() >= -1e-5 && uv.max_element() <= 1.0 + 1e-5, "{uv}");
+        }
+    }
+
+    /// GOLDEN — **a lamp's shadow waits for its faces.** The render world builds a slot's static
+    /// faces only once the lamp and the world around it have settled, so a slot can be held for a
+    /// while before there is anything in its tiles. Until the render world says they are built, the
+    /// slot stays at zero fade — an unshadowed lamp, not one shadowed by an empty or half-drawn map.
+    #[test]
+    fn a_new_slot_waits_for_its_faces_before_it_fades_in() {
+        let a = lamp(0.0);
+        let mut held = vec![None; 1];
+        for _ in 0..30 {
+            assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, |_, _| false);
+        }
+        assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((a, 0.0)), "held, but dark");
+        settle(&mut held, &ranked(&[a]), &None);
+        assert_eq!(held[0].unwrap().fade, 1.0, "fades in once built");
+        // A settled anchor moving (a re-anchored sway) keeps showing the old faces while the new
+        // ones are drawn, rather than blinking out.
+        let moved = ShadowLight {
+            pos: a.pos + Vec3::new(0.0, 0.1, 0.0),
+            ..a
+        };
+        assign_slots(&mut held, &ranked(&[moved]), &None, 1.0 / 60.0, |_, _| false);
+        assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((moved, 1.0)));
+    }
+
+    /// GOLDEN — **a slot follows its light, not a position.** A lantern on a swinging bone is
+    /// somewhere new every frame; matched on position it lost its slot to itself each frame, and
+    /// each loss redrew six faces. An unsettled frame of the same light keeps the slot and its
+    /// anchor; only a settled one moves the anchor.
+    #[test]
+    fn a_swaying_light_keeps_its_slot_and_its_anchor() {
+        let a = lamp(0.0);
+        let mut held = vec![None; 2];
+        settle(&mut held, &ranked(&[a]), &None);
+        let swung = Candidate {
+            score: 1.0,
+            light: ShadowLight {
+                pos: a.pos + Vec3::new(0.3, 0.0, 0.0),
+                ..a
+            },
+            settled: false,
+        };
+        settle(&mut held, &[swung], &None);
+        let h = held[0].expect("still held");
+        assert!(!h.retiring && h.fade == 1.0, "{h:?}");
+        assert_eq!(h.light.pos, a.pos, "an unsettled sway does not move the anchor");
+        assert_eq!(held[1], None, "and never takes a second slot");
+    }
+
+    /// GOLDEN — **the cube is rendered from the middle of a sway.** A light swinging on a bone
+    /// sweeps a small box; once the box stops growing the anchor is its centre, and the slack
+    /// covers every position the live light takes so the binning pass still matches it.
+    #[test]
+    fn a_sways_anchor_is_its_middle_and_a_travelling_light_is_not_settled() {
+        let dt = 1.0 / 60.0;
+        let mut t = Sway::new(Vec3::ZERO, 0);
+        for f in 1..240u32 {
+            let x = 0.4 * (f as f32 * dt * std::f32::consts::TAU).sin();
+            t.step(Vec3::new(x, 0.0, 0.0), dt, f);
+        }
+        assert!(t.resident() && t.settled(), "{t:?}");
+        assert!(t.anchor().length() < 0.01, "the middle of a ±0.4 swing: {}", t.anchor());
+        assert!(t.reach() >= 0.39 && t.reach() <= 0.41, "{}", t.reach());
+
+        // A torch carried down the street keeps restarting its box, so it never settles.
+        let mut walk = Sway::new(Vec3::ZERO, 0);
+        for f in 1..600u32 {
+            walk.step(Vec3::new(f as f32 * dt * 3.0, 0.0, 0.0), dt, f);
+            assert!(!walk.settled(), "frame {f}: a walking light is never settled");
         }
     }
 

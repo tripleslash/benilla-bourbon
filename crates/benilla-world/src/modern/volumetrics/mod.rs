@@ -63,6 +63,13 @@ const CLOUD_CELL_YD: f32 = 24.0;
 const CLOUD_HEIGHT: f32 = 350.0;
 /// Scatter history weight on a steady frame (was the plan's 0.9: beams shimmered with the jitter).
 const HISTORY_WEIGHT: f32 = 0.95;
+/// fork: **the night air** — shaft-haze extinction (1/yd) added in every zone overnight (scaled by
+/// the SIDN night fraction). A night city is a volume of smoke and dust that its fires light from
+/// inside: the streets fade into a dim haze at a few hundred yards, and every brazier and lantern
+/// stands in a glow of its own (`froxel_scatter.wgsl`'s point in-scatter). Without it a clear night
+/// was a vacuum, the lamps lit the ground and nothing between. By day it is zero, so the zones
+/// calibrated against daylight shots keep their air.
+const NIGHT_HAZE: f32 = 0.0025;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FogMode {
@@ -414,7 +421,7 @@ fn update_volume(
         storm: l.storm_bcc,
         underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
         interior,
-        haze: look.0.haze,
+        haze: look.0.haze + NIGHT_HAZE * l.sidn_night.clamp(0.0, 1.0),
         forward: look.0.forward,
         key_scatter: look.0.key_scatter,
         fog_reach: look.0.fog_reach,
