@@ -785,6 +785,22 @@ pub struct LiquidCataExt {
     /// with the setting. The classic lanes never read it.
     #[uniform(102)]
     pub optics: Vec4,
+    /// fork: modern lighting — the Modern (Experimental) tier's stylised clear water, in the shader's
+    /// `modern_water`: `x` = how far the bed is filtered toward the water's hue (the DEEP row), `y` =
+    /// the depth in yards that filter takes to come in, `z` = the head-on reflectance Schlick starts
+    /// from, `w` = how much of the reflection is pulled to the body. Per kind from `liquid`'s
+    /// `cata_water_look`, overridable live through `$WOW_WATER_LOOK`. The classic lanes never read it.
+    #[uniform(102)]
+    pub look_a: Vec4,
+    /// fork: modern lighting — the same tier's calm: `x` = the wind swell a river or lake keeps (the
+    /// sea always keeps all of it), `y` = the swell left over water with no depth under it, `z` = the
+    /// refraction's bend per yard of water crossed, `w` = the sun glitter spike's gain.
+    #[uniform(102)]
+    pub look_b: Vec4,
+    /// fork: modern lighting — the same tier's Fresnel: `x` = the reflectance at grazing (the curve's
+    /// cap; `look_a.z` is its head-on floor), `y` = the power of its climb along `1 − cos`. `zw` spare.
+    #[uniform(102)]
+    pub look_c: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its

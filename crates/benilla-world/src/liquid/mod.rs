@@ -159,12 +159,14 @@ pub const WATER_DETAIL_LEGACY: u8 = 0;
 pub const WATER_DETAIL_SSR: u8 = 1;
 /// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
 pub const WATER_DETAIL_CATA: u8 = 2;
-/// fork: modern lighting — the Cataclysm renderer, mirror and all, whose above-water combine on a
-/// modern frame is the physically based one (`liquid_cata.wgsl`'s `modern_water`: the bed through
-/// Beer–Lambert absorption, the reflection at Schlick's Fresnel, a soft surf band) instead of the
-/// reference's. "Modern (Experimental)" on the options page. A classic frame draws it exactly as
-/// [`WATER_DETAIL_CATA`]. It takes the slot after the reference's highest tier rather than one of
-/// its numbers, so `2` keeps meaning the reference's water.
+/// fork: modern lighting — the Cataclysm renderer, mirror and all, whose above-water combine is
+/// the fork's stylised clear water (`liquid_cata.wgsl`'s `modern_water`, tuned against WoW Forever's
+/// rivers) instead of the reference's: the bed seen through the water and filtered toward its hue,
+/// Beer–Lambert toward the zone's deep colour, a calm surface whose refraction scales with the
+/// water crossed, and a soft, capped reflection. "Modern (Experimental)" on the options page, under
+/// either lighting model; a modern frame adds its wind sea, cascades and glitter. It takes the slot
+/// after the reference's highest tier rather than one of its numbers, so `2` keeps meaning the
+/// reference's water.
 pub const WATER_DETAIL_EXPERIMENTAL: u8 = 3;
 
 impl WaterDetail {
@@ -330,6 +332,12 @@ impl Plugin for LiquidPlugin {
                     .after(query::detect_submersion)
                     .in_set(SubmersionVerdict),
             );
+        }
+        // fork: modern lighting — the water look's live override (see [`surface::sync_water_look`])
+        // likewise exists only in a session launched with it: a production run carries neither the
+        // system nor its per-frame read of the knob.
+        if crate::launch_env::var("WOW_WATER_LOOK").is_some() {
+            app.add_systems(Update, surface::sync_water_look);
         }
         // The underwater drift cloud — the one thing in this subsystem that RENDERS because the
         // eye is submerged, rather than answering where the liquid is (see the layout note above).

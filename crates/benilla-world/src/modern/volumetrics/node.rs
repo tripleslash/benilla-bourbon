@@ -408,12 +408,9 @@ impl ViewNode for FroxelNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        fog_view: QueryItem<'w, '_, Self::ViewQuery>,
+        _fog_view: QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        if fog_view.mirror {
-            return Ok(());
-        }
         let targets = world.resource::<FroxelTargets>();
         let (true, Some(scatter_bind), Some(integrate_bind)) =
             (targets.ready, &targets.scatter_bind, &targets.integrate_bind)

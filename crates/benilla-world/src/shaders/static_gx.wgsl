@@ -529,7 +529,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // entity path removes (the first capture A/B lit every back-facing canopy card from the
     // wrong side — the felwood heatmap's bright clusters).
     let n_lit = wow_normalize(in.world_normal);
-    // fork: modern lighting — the water mirror shades its cheaper tier (`sunshadow::mirror_view`).
+    // fork: modern lighting — the water mirror takes none of the modern lanes
+    // (`sunshadow::mirror_view`): no cascades, cloud shadow, probe field, sky map or light grid — the
+    // plain ambient and N·L, and an interior keeps its bake. See `terrain.wgsl` for why.
 #ifdef WOW_MODERN
     let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
 #else
@@ -545,7 +547,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // that three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
     // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
     // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
-    if (locallight::grid_live(modern_block.lights)) {
+    if (locallight::grid_live(modern_block.lights) && !modern_lite) {
         point_lit_px = modern_local_lights(
             in.world_position.xyz,
             n_lit,
@@ -557,7 +559,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,
     // which is the plan's tier split: Low traces no probes and keeps the bake and `prop_probes`.
 #ifdef WOW_MODERN
-    let modern_interior = modern_block.gi.params.x > 0.5;
+    let modern_interior = modern_block.gi.params.x > 0.5 && !modern_lite;
 #else
     let modern_interior = false;
 #endif
@@ -596,7 +598,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     }
     // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades.
 #ifdef WOW_MODERN
-    if ((in.word & WORD_INTERIOR) == 0u) {
+    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite) {
         let mview_z = (view.view_from_world * in.world_position).z;
         world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite);
         // fork: modern lighting (FORK.md, P4) — cloud shadows.
@@ -630,7 +632,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     var modern_sky = 1.0;
     var modern_gi = vec4<f32>(0.0);
 #ifdef WOW_MODERN
-    if ((in.word & WORD_INTERIOR) == 0u) {
+    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite) {
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         modern_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0, modern_lite);

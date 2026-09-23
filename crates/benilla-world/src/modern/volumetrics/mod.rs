@@ -220,12 +220,12 @@ impl Default for ModernVolume {
     }
 }
 
-/// The views the fog composite runs on: the world camera, and the water mirror (`mirror`), which
-/// runs no compute of its own.
+/// The view the fog composite runs on: the world camera. **Not the water mirror** — it renders the
+/// plain lighting and nothing of the modern frame (`sunshadow::mirror_view`): a sky pixel under its
+/// oblique near plane does not read as sky to the composite, which fogged the mirror's whole sky to
+/// the horizon haze, and the composite was a full-screen pass over a buffer the waves then blur.
 #[derive(Component, Clone, Copy, ExtractComponent)]
-pub struct ModernFogView {
-    pub mirror: bool,
-}
+pub struct ModernFogView;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ModernVolume>()
@@ -318,20 +318,12 @@ fn resize_volume_image(
     info!("modern fog: volume {want} allocated, {touched} materials rebound");
 }
 
-#[allow(clippy::type_complexity)]
 fn mark_fog_views(
     mut commands: Commands,
-    cams: Query<
-        (Entity, Has<LiquidReflectionCamera>),
-        (
-            Or<(With<WorldCamera>, With<LiquidReflectionCamera>)>,
-            With<Camera3d>,
-            Without<ModernFogView>,
-        ),
-    >,
+    cams: Query<Entity, (With<WorldCamera>, With<Camera3d>, Without<ModernFogView>)>,
 ) {
-    for (entity, mirror) in &cams {
-        commands.entity(entity).insert(ModernFogView { mirror });
+    for entity in &cams {
+        commands.entity(entity).insert(ModernFogView);
     }
 }
 

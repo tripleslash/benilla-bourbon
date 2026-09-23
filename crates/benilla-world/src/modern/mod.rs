@@ -261,8 +261,9 @@ pub fn shadow_debug_mode() -> u8 {
     })
 }
 
-/// Dev A/B (`$WOW_MODERN_MIRRORTIER=1`, browser `?modern_mirrortier=1`): every view shades the water
-/// mirror's cheaper tier (`sunshadow::mirror_view`), so the two tiers compare on the main frame.
+/// Dev A/B (`$WOW_MODERN_MIRRORTIER=1`, browser `?modern_mirrortier=1`): every view shades as the water
+/// mirror does (`sunshadow::mirror_view`) — the plain ambient and N·L, none of the modern lanes — so
+/// what the mirror costs and shows compares on the main frame.
 pub fn mirror_tier_everywhere() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_MIRRORTIER").as_deref() == Some("1"))

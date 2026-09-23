@@ -542,11 +542,14 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
 #endif
     var primary = in.primary;
 #ifdef WOW_MODERN
-    {
+    // The water mirror takes none of this (`sunshadow::mirror_view`): it keeps the Gouraud primary —
+    // ambient, the sun's N·L and the three nearest lights, per vertex — with no cascades, cloud
+    // shadow, probe field, sky map or light grid. A reflection is bent and blurred by the waves; the
+    // second render of the whole world is what the frame pays for, so it pays for the plain one.
+    let lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
+    if (!lite) {
         let mview_z = (view.view_from_world * in.world_position).z;
         let mn = normalize(in.world_normal);
-        // The water mirror shades its cheaper tier (`sunshadow::mirror_view`).
-        let lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
         world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
         // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);

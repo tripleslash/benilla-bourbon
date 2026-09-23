@@ -1309,9 +1309,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The gate is the probe field itself (`gi.params.x`), which is exactly the tier split the plan
     // asked for: Low traces no probes, so Low keeps the bake and its `prop_probes`.
 #ifdef WOW_MODERN
-    // The water mirror shades its cheaper tier (`sunshadow::mirror_view`).
+    // The water mirror takes none of the modern lanes (`sunshadow::mirror_view`): no cascades,
+    // cloud shadow, probe field, sky map, light grid or foliage transmission — the plain ambient and
+    // N·L, and an interior keeps its bake. A reflection is bent and blurred by the waves; the second
+    // render of the whole world is what the frame pays for, so it pays for the plain one.
     let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-    let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5;
+    let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5 && !modern_lite;
     var lit_modern_room = vec3<f32>(0.0);
     if (modern_interior && is_interior && !is_rig) {
         let rn = wow_normalize(in.world_normal);
@@ -1433,7 +1436,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // every lane (units included); a shadowed fragment keeps only its ambient.
 #ifdef WOW_MODERN
     let modern_frame = wow_light.point_count.y > 0.5;
-    if (modern_frame) {
+    if (modern_frame && !modern_lite) {
         let mview_z = (view.view_from_world * in.world_position).z;
         var shadow_p = in.world_position.xyz;
 #ifdef WOW_RIG_SKIN
@@ -1468,7 +1471,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // ALPHA_MODE_RESERVED_BITS (7<<29) == ALPHA_MODE_MASK (1<<29).
 #ifdef WOW_MODERN
     let foliage_flags = pbr_input.material.flags;
-    let is_foliage = wow_light.point_count.y > 0.5 && !is_interior && !is_rig
+    let is_foliage = wow_light.point_count.y > 0.5 && !is_interior && !is_rig && !modern_lite
         && (foliage_flags & (1u << 4u)) != 0u
         && (foliage_flags & (7u << 29u)) == (1u << 29u);
     var foliage_light = vec3<f32>(0.0);
@@ -1487,7 +1490,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // fork: modern lighting (FORK.md, P3) — modern exterior: ambient under the sky-occlusion map.
 #ifdef WOW_MODERN
     var lit_with_shadow_sky = lit_with_shadow_base;
-    if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig) {
+    if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig && !modern_lite) {
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, modern_lite);
@@ -1554,7 +1557,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // reference's three-nearest selection where it is live, and it reaches the lanes the reference
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
     // in a modern frame, because the bake that used to stand in for them is gone.
-    if (locallight::grid_live(modern_block.lights) && !is_rig) {
+    if (locallight::grid_live(modern_block.lights) && !is_rig && !modern_lite) {
         point_diffuse = modern_local_lights(
             in.world_position.xyz,
             wow_normalize(in.world_normal),

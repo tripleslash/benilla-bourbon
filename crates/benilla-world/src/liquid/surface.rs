@@ -762,6 +762,9 @@ pub(super) fn setup_liquid(
                     magma_params: cata_magma_params(kind),
                     magma_color: cata_magma_color(kind),
                     optics: cata_optics(kind),
+                    look_a: cata_water_look(kind)[0],
+                    look_b: cata_water_look(kind)[1],
+                    look_c: cata_water_look(kind)[2],
                     light_buf: world_assets.shared_light.clone(),
                     modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
                     modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
@@ -858,6 +861,42 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
         LiquidKind::Rapids => Vec4::new(0.09, 0.045, 0.036, 0.0),
         LiquidKind::Magma | LiquidKind::Slime => Vec4::ZERO,
         _ => Vec4::new(0.07, 0.035, 0.03, 0.0),
+    }
+}
+
+/// fork: modern lighting — the Modern (Experimental) tier's look, the target being WoW Forever's
+/// water: a clear bed that takes the water's hue from the first inches, the bank's shadows carried
+/// across it, a calm surface and a sky in it that never turns to chrome. `[look_a, look_b, look_c]`
+/// on the material:
+///
+/// * `look_a` = (bed filter, its onset depth in yd, head-on reflectance, reflection pulled to the body);
+/// * `look_b` = (wind swell a river keeps, swell over no depth, refraction bend per yd, glitter spike);
+/// * `look_c` = (reflectance at grazing, the power of the climb to it, spare, spare).
+///
+/// The Fresnel is the reference combine's shape (`0.1 + 0.5 · fres²`) rather than water's: a floor
+/// that keeps the sky in a river looked down on, and a cap that stops the water toward the horizon
+/// becoming a solid sheet. Rapids keep more of their chop in the shallows (white water is the point
+/// of them) and the sea keeps its whole wind sea whatever `look_b.x` says. Magma and slime never
+/// reach the lane.
+fn cata_water_look(kind: LiquidKind) -> [Vec4; 3] {
+    let fresnel = Vec4::new(0.35, 2.0, 0.0, 0.0);
+    match kind {
+        LiquidKind::Ocean => [
+            Vec4::new(0.35, 1.0, 0.08, 0.3),
+            Vec4::new(1.0, 0.5, 0.25, 0.4),
+            fresnel,
+        ],
+        LiquidKind::Rapids => [
+            Vec4::new(0.5, 0.6, 0.08, 0.3),
+            Vec4::new(0.35, 0.6, 0.25, 0.25),
+            fresnel,
+        ],
+        LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 3],
+        _ => [
+            Vec4::new(0.5, 0.6, 0.08, 0.3),
+            Vec4::new(0.35, 0.25, 0.25, 0.25),
+            fresnel,
+        ],
     }
 }
 
@@ -1366,4 +1405,50 @@ pub(super) fn sync_water_tier(
     for (_, material) in materials.iter_mut() {
         material.extension.optics.w = flag;
     }
+}
+
+/// fork: modern lighting — the live override of the Modern (Experimental) tier's look
+/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to ten comma-separated values over
+/// [`cata_water_look`]'s lanes in order — `bed_filter, filter_depth, reflect_f0, reflect_body,
+/// wind_keep, shallow_keep, refract_bend, glint_spike, reflect_grazing, fresnel_power`. An empty or unparsable entry keeps the kind's
+/// own value, so `,,0.3` moves only the reflection. For calibrating against a reference shot without
+/// a rebuild; the settled numbers belong in [`cata_water_look`].
+///
+/// Registered only when the session is launched with the knob set (`liquid`'s plugin), so a production
+/// run pays nothing for it; within such a session it is value-watched on the string, and the
+/// materials (and so their bind groups) are touched only on the frame it changes.
+pub(super) fn sync_water_look(
+    assets: Option<Res<LiquidAssets>>,
+    mut materials: ResMut<Assets<LiquidCataMaterial>>,
+    mut last: Local<Option<String>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    let now = crate::launch_env::live_var("WOW_WATER_LOOK").unwrap_or_default();
+    // The first sight of an empty knob needs nothing: the materials were built with the defaults.
+    if last.as_deref().unwrap_or("") == now {
+        *last = Some(now);
+        return;
+    }
+    let over: Vec<Option<f32>> = now.split(',').map(|p| p.trim().parse().ok()).collect();
+    for (key, entry) in &assets.materials {
+        if key.kind.is_fullbright() {
+            continue;
+        }
+        let Some(material) = materials.get_mut(&entry.cata) else {
+            continue;
+        };
+        let mut look = cata_water_look(key.kind);
+        for (i, v) in over.iter().enumerate().take(10) {
+            if let Some(v) = v {
+                look[i / 4][i % 4] = *v;
+            }
+        }
+        material.extension.look_a = look[0];
+        material.extension.look_b = look[1];
+        material.extension.look_c = look[2];
+    }
+    info!("liquid: water look {now:?}");
+    *last = Some(now);
 }

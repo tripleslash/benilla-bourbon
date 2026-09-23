@@ -201,7 +201,16 @@ pub(super) struct RippleStd430 {
     prev: [f32; 4],
     stamp_count: [f32; 4],
     stamps: [[f32; 4]; MAX_STAMPS],
+    /// fork: modern lighting — the sky dome's five gradient stops (zenith → 1.8°) and its horizon
+    /// colour ([`crate::sky::dome_stops`]), for the water's sky reflection wherever the mirror has
+    /// no picture. On this buffer because it is the water's own and already rewritten every frame:
+    /// the tail costs 96 bytes of an upload that happens anyway, and no binding. `liquid_ripple.wgsl`
+    /// declares the struct only up to `stamps`, which a larger buffer binds against.
+    sky: [[f32; 4]; SKY_ROWS],
 }
+
+/// The sky rows at the blob's tail: the dome's five stops and its fog/horizon colour.
+const SKY_ROWS: usize = 6;
 
 impl Default for RippleStd430 {
     fn default() -> Self {
@@ -211,7 +220,24 @@ impl Default for RippleStd430 {
             prev: [0.0; 4],
             stamp_count: [0.0; 4],
             stamps: [[0.0; 4]; MAX_STAMPS],
+            sky: [[0.0; 4]; SKY_ROWS],
         }
+    }
+}
+
+/// fork: modern lighting — copy the sky dome's stops into the blob's sky rows, so the water can
+/// reflect the sky that is drawn when the mirror has nothing (not rendered yet, or about another
+/// plane). One small copy a frame into a blob that is uploaded every frame regardless.
+pub(super) fn pack_sky_rows(
+    light: Option<Res<crate::lighting::WowLighting>>,
+    mut data: ResMut<RippleData>,
+) {
+    let Some(light) = light else {
+        return;
+    };
+    let (sky, fog) = crate::sky::dome_stops(&light);
+    for (row, stop) in data.0.sky.iter_mut().zip(sky.iter().chain(std::iter::once(&fog))) {
+        *row = stop.to_array();
     }
 }
 
@@ -759,7 +785,8 @@ pub(super) fn register(app: &mut App) {
         .add_systems(
             Update,
             (advance_clock, collect_stamps, pack_ripple_data).chain(),
-        );
+        )
+        .add_systems(Update, pack_sky_rows);
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -788,6 +815,21 @@ mod tests {
     use benilla_formats::LiquidKind;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
+
+    /// The blob's layout is copied by hand into both shaders that bind it, and `liquid_cata.wgsl`
+    /// reads the sky rows PAST the stamp array — so a stamp count that drifts in one copy shifts the
+    /// water's sky reflection onto stamp data with no error anywhere. Pin all three copies.
+    #[test]
+    fn both_shaders_declare_the_blob_this_packs() {
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let step = include_str!("../shaders/liquid_ripple.wgsl");
+        let stamps = format!("stamps: array<vec4<f32>, {MAX_STAMPS}>");
+        assert!(cata.contains(&stamps), "liquid_cata.wgsl must declare `{stamps}`");
+        let sky = format!("sky: array<vec4<f32>, {SKY_ROWS}>");
+        assert!(cata.contains(&sky), "liquid_cata.wgsl must declare `{sky}`");
+        let count = format!("const MAX_STAMPS: u32 = {MAX_STAMPS}u;");
+        assert!(step.contains(&count), "liquid_ripple.wgsl must declare `{count}`");
+    }
 
     /// One flat 20-yd-square wet cell at `z`, WoW `x`/`y` in `[0, 20]`.
     fn pool(source: LiquidSource, z: f32) -> WaterChunkInfo {

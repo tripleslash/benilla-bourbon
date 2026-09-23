@@ -61,9 +61,10 @@ struct ModernCascades {
 }
 
 // **Is this fragment being drawn for the water mirror** (`liquid::reflect`)? The mirror renders the
-// whole scene a second time, into a downscaled buffer the waves then bend and blur, so it takes the
-// helpers' reflection tier: one shadow tap for five, one sky tap for nine, one probe cascade without
-// visibility, local lights without their cube shadows.
+// whole scene a second time, into a buffer the waves then bend and blur, so it runs none of the
+// modern lanes: terrain, the models and the retained statics skip their cascades, cloud shadow, probe
+// field, sky map and light grid for it and keep the plain ambient and N·L (and the fog composite does
+// not run on it at all). The helpers' `lite` arms below are what it took before that.
 //
 // No view flag reaches a material, so the eye's HEIGHT answers: the mirror camera always hangs at
 // least `MIN_EYE_HEIGHT` (0.5 yd) under the plane it mirrors about, and runs only while the world
