@@ -2074,8 +2074,9 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
 }
 
 /// Defaults on the Graphics page: uiScale back to its registered default (0.9) and farclip to
-/// its (350), the rows following, ONLY the moved values queuing — and a pending uiScale edit
-/// dies with it (the default write supersedes what Apply would have committed).
+/// its (fork: 1000, the modern look's horizon — `cvars`' row), the rows following, ONLY the moved
+/// values queuing — and a pending uiScale edit dies with it (the default write supersedes what
+/// Apply would have committed).
 #[test]
 fn defaults_resets_the_graphics_page_to_registered_defaults() {
     let mut s = audio_harness();
@@ -2098,7 +2099,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         "{changes:?}"
     );
     assert!(
-        changes.contains(&("farclip".to_string(), "350".to_string())),
+        changes.contains(&("farclip".to_string(), "1000".to_string())),
         "{changes:?}"
     );
     assert_eq!(
@@ -2106,19 +2107,18 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         2,
         "only the default writes queue — never the dead pending: {changes:?}"
     );
-    // **357, not 350, and that is the reference's ladder rather than a rounding slip.** The row
+    // **777, not 1000, and that is the reference's ladder rather than a rounding slip.** The row
     // is the reference's own farclip slider — `minValue = OPTIONS_FARCLIP_MIN (177)`,
     // `maxValue = OPTIONS_FARCLIP_MAX (777)`, `valueStep = (max − min)/10` — so its ten stops are
-    // 177, 237, 297, **357**, …, 777, and `SetValue` snaps onto them (2133). The registered
-    // default is 350 (1804: the reference's own `CVar::Register` value), which is not a stop, so
-    // seeding the slider from it lands on 357. 1.12 does exactly this and nobody can see it,
-    // because its option sliders print no number; ours prints one, so the ladder shows.
+    // 177, 237, 297, 357, …, **777**, and `SetValue` snaps onto them (2133). The reference
+    // registers 350 (1804); this fork registers 1000 (the modern look's horizon), past the
+    // slider's top, so seeding the slider from it lands on 777 while the CVar keeps 1000.
     assert_eq!(
         s.eval::<String>(
             "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "357"
+        "777"
     );
     assert_eq!(
         s.eval::<String>(
