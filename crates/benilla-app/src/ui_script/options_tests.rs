@@ -1226,9 +1226,8 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
 
 /// **The indirect-lighting pair** — the AO half and the colour-bleed half of one screen-space
 /// gather (`benilla_world::ssilvb`), as two independent rows because a player wants to move them
-/// apart. Both read the CVar table on select and read out as a percent; both are LIVE rather than
-/// deferred, because nothing is reallocated by a move and a look slider a player cannot see under
-/// the handle is a slider they set blind.
+/// apart. Both read the CVar table on select and read out as a percent; both stage to Apply like
+/// every Graphics row (fork).
 ///
 /// The part worth pinning is **exact zero**: that is the value the render node checks to skip the
 /// pass whole and the value the shader's own no-op arm tests, so a row that could only get near it
@@ -1284,9 +1283,14 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
         "reading the table on select must not write it back"
     );
 
-    // Zero is reachable, is what the readout says, and — the row being live — reaches the CVar on
-    // the move rather than at Apply.
+    // Zero is reachable and is what the readout says; like every Graphics row (fork) it stages,
+    // and reaches the CVar at Apply.
     s.run(&format!("{GI}ControlSlider:SetValue(0)")).unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("ssgiStrength".to_string(), "0".to_string())]
@@ -1295,11 +1299,6 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
         s.eval::<String>(&format!("return {GI}ControlValue:GetText()"))
             .unwrap(),
         "0%"
-    );
-    assert!(
-        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
-            .unwrap(),
-        "a live row stages nothing, so no Apply button"
     );
     // The two halves are independent: turning colour bleed off left occlusion where it was.
     assert_eq!(
@@ -1313,13 +1312,11 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
 /// The **Use updated character models** row — the Graphics page's one content switch, and the
 /// only row on it whose effect is not visible until the next start.
 ///
-/// Two things worth holding, and the second is the reason this test exists at all. The box writes
-/// `hdCharacterModels` on the click like any ordinary checkbox — there is no Apply staging, because
-/// there is nothing live to apply to (a chain decides its mounts when it opens). And it must NOT be
-/// marked `deferred`: a row that stages to Apply and then commits to nothing is a row that silently
-/// loses the player's click, which is exactly the failure a "restart required" setting invites.
+/// The box stages to Apply like every Graphics row (fork), and Apply must actually WRITE
+/// `hdCharacterModels`: nothing downstream acts on it this session (a chain decides its mounts
+/// when it opens), so a stage that committed to nothing would silently lose the player's click.
 #[test]
-fn the_updated_character_models_box_writes_its_cvar_on_the_click() {
+fn the_updated_character_models_box_writes_its_cvar_at_apply() {
     benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowHdModels";
     let mut s = audio_harness();
@@ -1342,14 +1339,9 @@ fn the_updated_character_models_box_writes_its_cvar_on_the_click() {
         s.take_cvar_changes().is_empty(),
         "reading the value on show must not write it back"
     );
-    // Not staged: the click IS the write. Nothing downstream can act on it this session, so there
-    // is no Apply for it to wait behind.
-    assert!(
-        !s.eval::<bool>(&format!("return {ROW}.deferred and true or false"))
-            .unwrap(),
-        "a restart-required row must not stage to Apply — there is nothing to commit"
-    );
     s.run(&format!("{ROW}Check:Click()")).unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("hdCharacterModels".to_string(), "1".to_string())]
@@ -1405,12 +1397,13 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
         4.0
     );
 
-    // Picking Modern writes "2" — the reference's tier number, not a boolean.
+    // Picking Modern stages "2" — the reference's tier number, not a boolean — and Apply writes it.
     s.run("DropDownList1Button1:Click()").unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("waterDetail".to_string(), "2".to_string())],
-        "the row writes the reference's tier number on click, not on Apply"
+        vec![("waterDetail".to_string(), "2".to_string())]
     );
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
@@ -1422,6 +1415,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     // Picking Modern (Experimental) writes "3", the slot above the reference's tiers.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("waterDetail".to_string(), "3".to_string())]
@@ -1435,6 +1429,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     // Picking Modern (SSR) writes the medium tier's "1".
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button3:Click()").unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("waterDetail".to_string(), "1".to_string())]
@@ -1443,6 +1438,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     // Defaults comes back to Modern, this row's default being the newer behaviour.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button4:Click()").unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     let _ = s.take_cvar_changes();
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
@@ -1460,9 +1456,9 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
 /// unreachable in a player build (the HUD is `#[cfg(feature = "dev")]`) and to be a setting rather
 /// than an instrument in the first place.
 ///
-/// The row is deliberately **not** deferred, unlike the UI Scale slider above it: the reference's
-/// row carries `gxRestart = 1` because its device could not swap the presentation interval live,
-/// and wgpu can — so the click commits, like every other checkbox here.
+/// It stages to Apply like every Graphics row (fork). The reference's row carries `gxRestart = 1`
+/// because its device could not swap the presentation interval live; wgpu can, so Apply's write
+/// takes effect at once.
 #[test]
 fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     benilla_formats::wow_data_or_skip!();
@@ -1488,19 +1484,21 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     );
     let _ = s.take_cvar_changes();
 
-    // A click commits immediately — nothing stages it behind Apply.
+    // A click stages; Apply commits.
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
         .unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("gxVSync".to_string(), "1".to_string())],
-        "the checkbox writes the cvar on click, not on Apply"
+        vec![("gxVSync".to_string(), "1".to_string())]
     );
 
     // Defaults walks it back to the registered "1" — which `cvars::tests` welds to
     // `VideoConfig::default()`, and `video::tests` welds in turn to the window's boot mode.
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
         .unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     let _ = s.take_cvar_changes();
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
@@ -1562,6 +1560,7 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
     ] {
         s.run(&format!("{ROW}ControlSlider:SetValue({slider})"))
             .unwrap();
+        s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
         assert_eq!(
             s.take_cvar_changes(),
             vec![("gamma".to_string(), cvar.to_string())],
@@ -1628,6 +1627,7 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
 
     // A drag to the top stop: the write queues and the readout names it.
     s.run(&format!("{ROW}ControlSlider:SetValue(2)")).unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("WorldDetail".to_string(), "2".to_string())]
@@ -1645,6 +1645,7 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
             .unwrap(),
         "Medium"
     );
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
 
     // An out-of-range value (an env A/B: the hermetic capture's clutter-off session seeds "-1")
     // displays the NEAREST stop — 0959's out-of-range law — and writes nothing back.
@@ -1844,11 +1845,12 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// fork: the uiScale row COMMITS ON RELEASE, with no Apply button: moves snap to the 1.12 0.01
-/// grid and update the readout, the CVar moves when the handle is let go (the slider's
-/// `OnMouseUp`), once, at the last value. Letting go on the committed value writes nothing.
+/// The uiScale row DEFERS (0961, era CommitFlag.Apply transcribed): moves snap to the 1.12
+/// 0.01 grid and update the readout, but the CVar does not move — the Apply button appears
+/// instead, commits the pending value on click, and disappears. Dragging back onto the
+/// committed value clears the pending without a commit (era's IsModified).
 #[test]
-fn the_ui_scale_slider_commits_when_the_handle_is_let_go() {
+fn the_ui_scale_slider_defers_to_the_apply_button() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -1858,17 +1860,16 @@ fn the_ui_scale_slider_commits_when_the_handle_is_let_go() {
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
-    let slider = "BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider";
     assert!(
-        s.eval::<bool>(&format!("return {slider}:GetScript('OnMouseUp') ~= nil"))
+        !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
             .unwrap(),
-        "the release is wired on the slider itself"
+        "no pending edit, no Apply button"
     );
-    let release = format!("OptionsSlider_OnMouseUp({slider})");
 
-    // Off-grid 0.787 snaps to 0.79 and the readout follows — nothing queues mid-drag, and no
-    // Apply button appears.
-    s.run(&format!("{slider}:SetValue(0.787)")).unwrap();
+    // Off-grid 0.787 snaps to 0.79 and the readout follows — but NOTHING queues; the Apply
+    // button exists now (era shows and enables it together).
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.787)")
+        .unwrap();
     assert_eq!(
         s.eval::<String>(
             "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
@@ -1876,32 +1877,48 @@ fn the_ui_scale_slider_commits_when_the_handle_is_let_go() {
         .unwrap(),
         "79%"
     );
-    s.run(&format!("{slider}:SetValue(0.8)")).unwrap();
     assert!(
         s.take_cvar_changes().is_empty(),
-        "the UI must not rescale under the cursor mid-drag"
+        "a deferred row must not write the CVar on the move"
+    );
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsEnabled() ~= 0")
+        .unwrap());
+
+    // A second move re-stages the pending value — still nothing queues (0989: the steppers
+    // are gone; a drag's SetValue is the remaining move).
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
+        .unwrap();
+    assert!(s.take_cvar_changes().is_empty());
+
+    // Apply commits the LAST pending value, once, and the button goes away.
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("uiScale".to_string(), "0.8".to_string())]
     );
     assert!(!s
         .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
         .unwrap());
 
-    // The release commits the LAST value, once.
-    s.run(&release).unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("uiScale".to_string(), "0.8".to_string())]
-    );
-    s.run(&release).unwrap();
+    // A move away arms Apply; dragging back onto the committed value disarms it.
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.79)")
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
     assert!(
         s.take_cvar_changes().is_empty(),
-        "a second release has nothing to commit"
+        "arming and disarming never touched the CVar"
     );
-
-    // A drag that ends back on the committed value writes nothing.
-    s.run(&format!("{slider}:SetValue(0.79)")).unwrap();
-    s.run(&format!("{slider}:SetValue(0.8)")).unwrap();
-    s.run(&release).unwrap();
-    assert!(s.take_cvar_changes().is_empty());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1913,15 +1930,17 @@ fn the_ui_scale_slider_commits_when_the_handle_is_let_go() {
 ///
 /// - **It reads the CVar and shows a percentage.** 1.0 must render as "100%", because the whole
 ///   point of the row is that the number in front of the player means something without a manual.
-/// - **It is LIVE** (fork): every move writes the CVar and the world re-renders at it, like every
-///   other Graphics row. The 5% grid bounds the rebuilds to one per step.
+/// - **It is DEFERRED.** Committing live would rebuild the world's render target on every drag
+///   tick — tens of megabytes, thirty times across one sweep of the handle. Staging to Apply makes
+///   that exactly one rebuild. (`uiScale` above it defers for a different reason; the flag is the
+///   same.)
 /// - **It is not mute.** Every other tooltip on this window resolves an `OPTION_TOOLTIP_*` out of
 ///   1.12's GlobalStrings, and a benilla row with no counterpart there has so far gone silent (the
 ///   nameplate pair). This one carries a description under a `BENILLA_` prefix — the reference's
 ///   namespace stays the reference's — because the dial's first reviewer said outright that they
 ///   could not tell what it did.
 #[test]
-fn the_render_scale_row_shows_a_percentage_and_writes_live() {
+fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("renderScale", "1");
@@ -1959,7 +1978,7 @@ fn the_render_scale_row_shows_a_percentage_and_writes_live() {
         .unwrap());
     let _ = s.take_cvar_changes();
 
-    // The move writes the CVar at once, and raises no Apply button.
+    // The move stages and shows Apply; it does NOT rebuild the render target.
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:SetValue(0.75)")
         .unwrap();
     assert_eq!(
@@ -1969,6 +1988,16 @@ fn the_render_scale_row_shows_a_percentage_and_writes_live() {
         .unwrap(),
         "75%"
     );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a deferred row must not write the CVar on the move"
+    );
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+
+    // Apply commits once.
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("renderScale".to_string(), "0.75".to_string())]
@@ -1979,11 +2008,11 @@ fn the_render_scale_row_shows_a_percentage_and_writes_live() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// A uiScale drag whose release never arrives (the pointer walked off the window, which drops the
-/// capture without an `OnMouseUp`) still commits: closing the window stores the value the slider
-/// shows rather than discarding it, and the reopened window reads it back.
+/// Pending edits are PANEL-wide like era's modified table: they survive a category switch
+/// (the row redisplays the pending value on return, era's GetValue-returns-pending) and die
+/// only when the window hides — the reopened window reads the committed truth.
 #[test]
-fn an_unreleased_ui_scale_drag_commits_when_the_window_closes() {
+fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -1991,14 +2020,15 @@ fn an_unreleased_ui_scale_drag_commits_when_the_window_closes() {
         .unwrap();
     s.run("BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
         .unwrap();
-    assert!(s.take_cvar_changes().is_empty());
+    let _ = s.take_cvar_changes();
 
-    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("uiScale".to_string(), "0.7".to_string())]
-    );
-    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    // Off to Audio: the Apply button stays (the pending edit is not page-scoped)…
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    // …and back: the slider shows the PENDING value, not the committed one.
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
@@ -2008,15 +2038,35 @@ fn an_unreleased_ui_scale_drag_commits_when_the_window_closes() {
         .unwrap(),
         "70%"
     );
+
+    // Hide discards (the era confirm dialog is cut): the reopened window reads the truth.
+    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+        )
+        .unwrap(),
+        "90%"
+    );
+    assert!(!s
+        .eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "the whole pending lifecycle never wrote the CVar"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The Terrain Distance slider (1513) is a LIVE row, unlike uiScale: a move snaps to the 1.12
-/// panel grid — 177+n·60, ANCHORED AT THE MINIMUM, so 300 lands on 297, not the multiple-of-60
-/// 300 — writes the CVar on the move as a clean short string, and raises no Apply button. The
-/// write is what moves the far-clip wall and the residency window together.
+/// The Terrain Distance slider (1513): a move snaps to the 1.12 panel grid — 177+n·60, ANCHORED
+/// AT THE MINIMUM, so 300 lands on 297, not the multiple-of-60 300 — and stages to Apply like every
+/// Graphics row (fork), which writes the CVar as a clean short string. The write is what moves the
+/// far-clip wall and the residency window together.
 #[test]
-fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
+fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_at_apply() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -2041,6 +2091,8 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
         .unwrap(),
         "297"
     );
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("farclip".to_string(), "297".to_string())]
@@ -2048,7 +2100,7 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
     assert!(
         !s.eval::<bool>("return BenillaOptionsFrameApplyButton:IsVisible()")
             .unwrap(),
-        "a live row stages nothing"
+        "nothing left to apply"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -434,7 +434,7 @@
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
-            .. "smooths edges at the cost of frame rate."
+            .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
         -- Enable Sound in Background: 1.12 has no checkbox; silenced sounds keep running.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
@@ -495,12 +495,12 @@
             .. "Modern water costs additional GPU time."
 
         -- fork: the modern lighting model (FORK.md). The MODEL and the TIER both
-        -- apply to the next frame, so either dropdown previews under the open options window.
+        -- apply on the frame Apply commits them, like every Graphics row.
         BENILLA_TOOLTIP_LIGHTING_MODEL =
             "How the world is lit.\n\n"
             .. "Modern adds real-time sun shadows from every object, light shafts through fog and "
             .. "foliage, bounced light and HDR bloom. Classic is the original baked lighting.\n\n"
-            .. "Takes effect immediately. Modern costs additional GPU time."
+            .. "Applies when you click Apply. Modern costs additional GPU time."
 
         BENILLA_TOOLTIP_LIGHTING_QUALITY =
             "The detail of Modern lighting: shadow range and resolution, light shaft resolution and "
@@ -508,7 +508,7 @@
             .. "Ultra and Cinematic additionally light the world from things that only ever glowed - "
             .. "lamps, braziers and candles that carry no light of their own, lit windows at night, "
             .. "and enchanted weapons. Cinematic also gives a dozen of those lights faint shadows.\n\n"
-            .. "Has no effect on Classic lighting. Takes effect immediately."
+            .. "Has no effect on Classic lighting. Applies when you click Apply."
 
         -- Brightness: 1.12's GAMMA text points at gray-bar art this page does not have.
         BENILLA_TOOLTIP_BRIGHTNESS =
@@ -668,7 +668,7 @@
             OptionsRow_WritePartner(row, value)
             -- fork: the `gx*` rows are LATCHED since upstream's registry (2303): a `SetCVar` on
             -- one only stages, and nothing moves until `RestartGx()` — the stock video window's
-            -- Okay. This window commits on the click, so it asks for the commit on the click too;
+            -- Okay. This window commits a row in one step, so it asks for the commit there too;
             -- without it the Vertical Sync box would stage a value the session never applies.
             if string.sub(row.cvar, 1, 2) == "gx" then
                 RestartGx()
@@ -776,7 +776,11 @@
         function OptionsDropdownEntry_OnClick()
             local dd = UIDropDownMenu_GetCurrentDropDown()
             local row = dd:GetParent()
-            OptionsRow_Set(row, this.value)
+            if OptionsRow_IsDeferred(row) then
+                OptionsRow_Stage(row, this.value)
+            else
+                OptionsRow_Set(row, this.value)
+            end
             OptionsDropdown_ShowValue(row)
         end
 
@@ -785,7 +789,7 @@
         -- off-grid value shows the nearest entry and is not written back.
         function OptionsDropdown_ShowValue(row)
             local dd = getglobal(row:GetName() .. "Dropdown")
-            local v = OptionsRow_Get(row)
+            local v = OptionsRow_Shown(row)
             local match
             for _, e in ipairs(row.entries) do
                 -- `alt`: 1.12's camera dropdown writes "3" for Never, which the nearest-value
@@ -882,10 +886,12 @@
             -- An inverted row (Sticky Targeting, Disable Spam Filter) writes the opposite.
             local on = checked
             if row.invert then on = not on end
-            if on then
-                OptionsRow_Set(row, "1")
+            local v = "0"
+            if on then v = "1" end
+            if OptionsRow_IsDeferred(row) then
+                OptionsRow_Stage(row, v)
             else
-                OptionsRow_Set(row, "0")
+                OptionsRow_Set(row, v)
             end
             OptionsPage_UpdateDependencies(BenillaOptionsFrame.selectedCategory)
         end
@@ -912,39 +918,35 @@
                 -- Two decimals, trailing zeros stripped, so a value at its default compares
                 -- equal as a string and stays out of the config file.
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
-                if row.onRelease then
-                    -- Shown at once, stored when the handle is let go (OptionsSlider_OnMouseUp).
-                    if str == OptionsRow_Get(row) then
-                        row.pending = nil
-                    else
-                        row.pending = str
-                    end
-                elseif row.deferred then
-                    -- Era CommitFlag.Apply: shown at once, stored on Apply. A pending equal to
-                    -- the committed value is dropped, as the era's IsModified does.
-                    if str == OptionsRow_Get(row) then
-                        row.pending = nil
-                    else
-                        row.pending = str
-                    end
-                    OptionsApply_Update()
+                if OptionsRow_IsDeferred(row) then
+                    OptionsRow_Stage(row, str)
                 else
                     OptionsRow_Set(row, str)
                 end
             end
         end
 
-        -- The release commit of an onRelease row: the value the handle was let go at.
-        function OptionsSlider_OnMouseUp(slider)
-            OptionsRow_CommitRelease(slider:GetParent():GetParent())
+        -- fork: every Graphics row stages to Apply (era CommitFlag.Apply), whatever its control;
+        -- elsewhere only a row marked `deferred` does.
+        function OptionsRow_IsDeferred(row)
+            return row.deferred
+                or row:GetParent():GetName() == "BenillaOptionsFrameContainerBodyGraphics"
         end
 
-        function OptionsRow_CommitRelease(row)
-            if row.onRelease and row.pending then
-                local v = row.pending
+        -- Era CommitFlag.Apply: shown at once, stored on Apply. A pending equal to the committed
+        -- value is dropped, as the era's IsModified does.
+        function OptionsRow_Stage(row, value)
+            if value == OptionsRow_Get(row) then
                 row.pending = nil
-                OptionsRow_Set(row, v)
+            else
+                row.pending = value
             end
+            OptionsApply_Update()
+        end
+
+        -- What the row shows: a staged value first, as the era's GetValue returns it.
+        function OptionsRow_Shown(row)
+            return row.pending or OptionsRow_Get(row)
         end
 
         function OptionsPage_Refresh(key)
@@ -957,10 +959,10 @@
                     -- An inverted row checks on "0" (UIOptionsFrame.lua's GAMEFIELD_DESELECT arm).
                     if row.invert then
                         local checked
-                        if OptionsRow_Get(row) == "0" then checked = 1 end
+                        if OptionsRow_Shown(row) == "0" then checked = 1 end
                         box:SetChecked(checked)
                     else
-                        box:SetChecked(OptionsRow_Get(row))
+                        box:SetChecked(OptionsRow_Shown(row))
                     end
                 elseif row.entries then
                     OptionsDropdown_ShowValue(row)
@@ -1139,15 +1141,12 @@
             OptionsApply_Update()
         end
 
-        -- Hiding discards pending edits (the era's WipeModifiedTable on hide). An onRelease row's
-        -- is a drag whose release never arrived (the pointer left the window), so it commits.
+        -- Hiding discards pending edits (the era's WipeModifiedTable on hide).
         function OptionsPage_DiscardPending()
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
                 local base = "BenillaOptionsFrameContainerBody" .. key
                 for _, rkey in ipairs(rows) do
-                    local row = getglobal(base .. rkey)
-                    OptionsRow_CommitRelease(row)
-                    row.pending = nil
+                    getglobal(base .. rkey).pending = nil
                 end
             end
             OptionsApply_Update()
@@ -1370,7 +1369,6 @@
                         </ThumbTexture>
                         <Scripts>
                             <OnValueChanged>OptionsSlider_OnValueChanged(this, arg1)</OnValueChanged>
-                            <OnMouseUp>OptionsSlider_OnMouseUp(this)</OnMouseUp>
                             <OnEnter>OptionsRow_Hover(this:GetParent():GetParent(), 1)</OnEnter>
                             <OnLeave>OptionsRow_Hover(this:GetParent():GetParent(), nil)</OnLeave>
                         </Scripts>
@@ -2052,11 +2050,9 @@
                                                 OptionsSliderRow_Setup(self, OptionsFrameSliders[1].minValue,
                                                     OptionsFrameSliders[1].maxValue,
                                                     OptionsFrameSliders[1].valueStep)
-                                                -- fork: stored when the handle is let go, not on
-                                                -- Apply (era CommitFlag.Apply, Graphics.lua
-                                                -- l.684). A live write would rescale the slider
-                                                -- under the cursor mid-drag.
-                                                self.onRelease = 1
+                                                -- Era CommitFlag.Apply (Graphics.lua l.684): a
+                                                -- live write would rescale the slider mid-drag.
+                                                self.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowFarclip" inherits="OptionsSliderRowTemplate">
@@ -2133,9 +2129,9 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- 1.12's Video Options checkbox 5. Not deferred
-                                                -- despite its gxRestart = 1: the present mode
-                                                -- changes live.
+                                                -- 1.12's Video Options checkbox 5. Staged to Apply
+                                                -- like the page; the present mode then changes
+                                                -- live despite its gxRestart = 1.
                                                 OptionsRow_OnLoad(self, "gxVSync", "Vertical Sync",
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
@@ -2164,25 +2160,20 @@
                                                 -- in the browser) and this box is whether the
                                                 -- chain mounts it.
                                                 --
-                                                -- RESTART, not deferred, and the distinction
-                                                -- matters. `deferred` stages a value to the Apply
-                                                -- button, which then commits it live; there is no
-                                                -- live commit here to reach. A chain decides its
-                                                -- mounts when it OPENS, the client holds two open
-                                                -- chains, and every model, skin and DBC already
-                                                -- loaded came out of them. So the box writes the
-                                                -- CVar on the click like any other, and the next
-                                                -- start is what reads it
-                                                -- (cvars::boot_cvar, the way gxWindow is read).
+                                                -- RESTART: Apply writes the CVar like every row
+                                                -- on the page, but there is no live commit to
+                                                -- reach. A chain decides its mounts when it
+                                                -- OPENS, the client holds two open chains, and
+                                                -- every model, skin and DBC already loaded came
+                                                -- out of them, so the next start is what reads
+                                                -- it (cvars::boot_cvar, the way gxWindow is read).
                                                 --
-                                                -- So the row carries NO flag of its own,
-                                                -- and deliberately not an inert one: the
-                                                -- page reads `deferred` and nothing else,
-                                                -- and a `restart = 1` no code consults is
-                                                -- a promise of machinery that is not
-                                                -- there. The tooltip carries the fact, in
-                                                -- as many words, which is where a player
-                                                -- looks before clicking rather than after.
+                                                -- So the row carries NO flag of its own, and
+                                                -- deliberately not an inert one: a `restart = 1`
+                                                -- no code consults is a promise of machinery that
+                                                -- is not there. The tooltip carries the fact, in
+                                                -- as many words, which is where a player looks
+                                                -- before clicking rather than after.
                                                 OptionsRow_OnLoad(self, "hdCharacterModels",
                                                     "Use updated character models",
                                                     "BENILLA_TOOLTIP_HD_MODELS")
@@ -2205,12 +2196,9 @@
                                                 -- exaggerated term while tuning; this is what a
                                                 -- player should be offered.
                                                 --
-                                                -- NOT deferred, unlike Render Scale: nothing is
-                                                -- reallocated by a move -- the render node reads
-                                                -- the strength each frame -- so the handle
-                                                -- previews live, which is the whole value of a
-                                                -- look slider. Staging this one to Apply would
-                                                -- make a player set it blind.
+                                                -- fork: staged to Apply like every Graphics row
+                                                -- (the maintainer's call); the render node reads
+                                                -- the strength each frame from then on.
                                                 OptionsRow_OnLoad(self, "ssaoStrength", "Ambient Occlusion",
                                                     "BENILLA_TOOLTIP_AMBIENT_OCCLUSION")
                                                 OptionsSliderRow_Setup(self, 0, 1.0, 0.05)
@@ -2314,12 +2302,13 @@
                                             <Scripts><OnLoad>
                                                 -- Deviation: benilla's own row (the reference draws
                                                 -- to the backbuffer), and no Multisampling row,
-                                                -- which misses alpha-tested cutouts. fork: live,
-                                                -- like every Graphics row: each 5% step rebuilds
-                                                -- the world render target once.
+                                                -- which misses alpha-tested cutouts. Deferred: a
+                                                -- live write rebuilds the world render target on
+                                                -- every drag tick.
                                                 OptionsRow_OnLoad(self, "renderScale", "Render Scale",
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 OptionsSliderRow_Setup(self, 0.5, 2.0, 0.05)
+                                                self.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
