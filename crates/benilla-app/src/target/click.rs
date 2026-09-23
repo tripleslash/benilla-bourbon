@@ -73,7 +73,7 @@ pub(super) fn world_right_click_payload(
 pub(super) fn select_on_plate_click(
     mut plate: ResMut<crate::vplates::PlateClicks>,
     press: Res<PressPick>,
-    ground: Res<crate::ui_action::SpellTargeting>,
+    ground: Res<crate::spell::SpellTargeting>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     self_q: Query<(&Guid, Has<Engaged>), With<SelfPlayer>>,
@@ -140,7 +140,7 @@ pub(super) fn select_on_click(
     self_q: Query<(&Guid, Has<Engaged>), With<SelfPlayer>>,
     payload_held: Res<crate::ui_script::CursorPayloadHeld>,
     mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
-    ground: Res<crate::ui_action::SpellTargeting>,
+    ground: Res<crate::spell::SpellTargeting>,
     click_cfg: Res<ClickConfig>,
     // The clicked unit's descriptor — `0x493540`'s `IsSelectable` gate reads it inside
     // [`scan::commit`]. Read live rather than latched with the press pick: the reference resolves
@@ -681,7 +681,7 @@ pub(super) fn act_on_right_click(
                         .spells
                         .as_ref()
                         .and_then(|s| s.catalog.get(spell_id));
-                    if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                    if crate::spell::validator::cast_mounted_refusal(self_mounted, def) {
                         debug!("right-click corpse insignia: refused locally — mounted (0x39)");
                         cast_errors.push_local(spell_id, 0x39);
                     } else {
@@ -841,7 +841,7 @@ pub(super) fn act_on_right_click(
                         .spells
                         .as_ref()
                         .and_then(|s| s.catalog.get(spell_id));
-                    if crate::ui_action::cast_mounted_refusal(self_mounted, def) {
+                    if crate::spell::validator::cast_mounted_refusal(self_mounted, def) {
                         debug!("right-click skin: refused locally — mounted (0x39)");
                         cast_errors.push_local(spell_id, 0x39);
                     } else {
@@ -910,7 +910,7 @@ pub(super) fn act_on_right_click(
                 .and_then(|item| {
                     let slot0 = u8::try_from(item.slot.saturating_sub(1)).unwrap_or(0);
                     self_store.and_then(|s| {
-                        crate::ui_items::slot_guid(&s.0, item.bag, slot0, &go_inputs.items)
+                        crate::ui_items::slot_guid(&s.0, item.bag, slot0, &go_inputs.objects)
                     })
                 });
             let Some(arm) = service_arm(npc_flags, service.quest.status(guid)) else {
@@ -1067,7 +1067,7 @@ pub(crate) fn resolve_go_action(
         inputs.spells.as_deref(),
         inputs.skill_lines.as_ref().map(|s| &s.catalog),
         me_store,
-        &inputs.items,
+        &inputs.objects,
         facts,
         &mut matched,
     );
@@ -1118,7 +1118,7 @@ pub(crate) fn resolve_go_action(
     };
     let Some((bag_index, slot, key_guid)) = crate::ui_items::find_item(
         &store.0,
-        &inputs.items,
+        &inputs.objects,
         key_entry,
         crate::ui_items::ItemSearch::default(),
     ) else {
@@ -2175,10 +2175,10 @@ mod tests {
             let mut world = World::new();
             world.insert_resource(NetCommands(tx));
             world.init_resource::<InspectMode>();
-            world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-            world.init_resource::<crate::ui_action::AutoRepeatActive>();
+            world.init_resource::<crate::spell::QueuedMeleeSpell>();
+            world.init_resource::<crate::spell::AutoRepeatActive>();
             world.init_resource::<crate::ui_script::CursorPayloadHeld>();
-            world.init_resource::<crate::ui_action::SpellTargeting>();
+            world.init_resource::<crate::spell::SpellTargeting>();
             world.init_resource::<ClickConfig>();
             world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
             world.init_resource::<Messages<crate::player::StandStateRequest>>();
@@ -2261,8 +2261,8 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<crate::ui_party::GroupState>();
         world.init_resource::<crate::net::GuidIndex>();
@@ -2352,13 +2352,14 @@ mod tests {
         world.init_resource::<Messages<WorldRightClick>>();
         world.init_resource::<PressPick>();
         world.init_resource::<Selection>();
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::creature_anim::GestureQueue>();
         world.init_resource::<crate::go_templates::GameObjectTemplates>();
         world.init_resource::<crate::items::Items>();
+        world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::ui_action::PlayerActions>();
         world.init_resource::<crate::ui_action::LearnedAbilities>();
         world.init_resource::<crate::ui_quest::QuestGiver>();

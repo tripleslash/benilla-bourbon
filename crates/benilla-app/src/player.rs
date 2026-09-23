@@ -41,6 +41,7 @@ use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::schedule::WorldStage;
 
 mod arc;
+mod net;
 // Writing the frame onto the body we drive — pose, MovementState, the counter-twist gap.
 mod body_pose;
 pub(crate) mod camera;
@@ -207,9 +208,9 @@ pub(crate) const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
 /// `UnitDefines.h:511`; the client reads it as `shr reg,0x14; test rl,1` — wow-re counted 20
 /// independent sites of that idiom with no shared gate, `unit-flags-movement-gates.md` §4).
 ///
-/// Beside its neighbour for the same reason that one is here: two readers today that have nothing
-/// to do with each other — `SetStandState`'s own guard #3 and the idle handler's auto-AFK gate —
-/// and a bit that is spelled out twice is a bit that eventually drifts.
+/// Beside its neighbour for the same reason that one is here: readers that have nothing to do with
+/// each other — `SetStandState`'s own guard #3, the idle handler's auto-AFK gate and `UnitOnTaxi`
+/// — and a bit that is spelled out more than once is a bit that eventually drifts.
 pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
 
 /// Ask for a **stand state** — the client's `SetStandState(newState)` (`0x5ed430`: send
@@ -227,6 +228,15 @@ pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
 /// The state values are `UnitStandStateType`: 0 STAND · 1 SIT · 3 SLEEP · 8 KNEEL.
 #[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
 pub(crate) struct StandStateRequest {
+    pub(crate) state: u8,
+}
+
+/// The server's own stand state for OUR body (`SMSG_STANDSTATE_UPDATE` — the eat/drink sit, the
+/// stand on damage; decision 2339). Applied by [`posture`] through the same local setter the
+/// volunteered change uses, with no refusal gate and no packet back — the reference's `0x603e50`
+/// → `0x6127b0`. Written by [`net`], read in `control`.
+#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
+pub(crate) struct ServerStandState {
     pub(crate) state: u8,
 }
 
@@ -301,6 +311,7 @@ pub(crate) struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         follow::plugin(app);
         camera_saved::plugin(app);
         camera_view::plugin(app);
@@ -379,6 +390,8 @@ impl Plugin for PlayerPlugin {
         // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
         // executor, like the sheath queue).
         .add_message::<StandStateRequest>()
+        // The server's own stand state for our body (decision 2339), written by [`net`].
+        .add_message::<ServerStandState>()
         // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
         // Before `control` so the frame that applies the teleport is the frame that takes
         // third-person control back — `control` reads `detached` after this has cleared it.

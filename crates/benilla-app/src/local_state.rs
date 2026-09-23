@@ -352,13 +352,22 @@ pub(crate) fn fps_journal_path() -> Option<PathBuf> {
     }
 }
 
-/// Make an arbitrary realm/character name safe as one path component: anything outside
-/// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
+/// Make an arbitrary realm/character name safe as one path component: anything that is not a
+/// letter or digit becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.
+///
+/// **Letters are any script's, kept as they are** — the reference names its per-character folder
+/// with the raw name (`WTF/Account/<ACC>/<REALM>/<CHAR>/`). This was ASCII-only, which folded every
+/// other letter to `_`: vmangos accepts extended-Latin, Cyrillic and East-Asian names by default
+/// (`StrictPlayerNames = 0`), so `Zoë` and `Zoé` — or any two Cyrillic names of one length — shared
+/// one set of macros, bindings, addon state and SavedVariables, and each login saved over the
+/// other's. A character name is letters only (vmangos `isValidString`), so keeping every letter
+/// makes the token one-to-one for them; an ASCII name maps exactly as before, so no existing file
+/// moves.
 fn file_token(s: &str) -> String {
     let t: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     if t.is_empty() {
         "unknown".into()
@@ -371,12 +380,21 @@ fn file_token(s: &str) -> String {
 /// a crash mid-write leaves the old file intact, never a truncated one. The one write path for
 /// every resident of the folder.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// [`write_atomic`] for a resident that is bytes, not text — the saved-variables files, which
+/// carry a Lua byte string's bytes as they are.
+///
+/// fork: on the page the store holds text, so bytes that are not UTF-8 are kept losslessly by
+/// [`web_store::set_bytes`] and handed back as the same bytes by [`read`].
+pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(target_arch = "wasm32")]
     {
         // Metered (see [`write_meter`]): on the page this call is a **synchronous**
         // `localStorage.setItem` on the frame's own thread, and every byte of it is spent there.
         let t0 = bevy::platform::time::Instant::now();
-        let r = web_store::set(path, contents);
+        let r = web_store::set_bytes(path, contents);
         write_meter::record(
             path,
             contents.len(),
@@ -437,14 +455,14 @@ pub(crate) mod write_meter {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_atomic_fs(path: &Path, contents: &str) -> std::io::Result<()> {
+fn write_atomic_fs(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(contents)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
@@ -461,10 +479,11 @@ pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
 }
 
 /// [`read_to_string`] for the residents read as bytes (the addon enable state decodes its own
-/// encoding); on the page the store holds text, so the bytes are its UTF-8.
+/// encoding, and the saved-variables files carry a Lua byte string's bytes as they are); on the
+/// page the store holds text, and [`web_store::get_bytes`] undoes [`web_store::set_bytes`].
 pub(crate) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
     #[cfg(target_arch = "wasm32")]
-    return web_store::get(path).map(String::into_bytes);
+    return web_store::get_bytes(path);
     #[cfg(not(target_arch = "wasm32"))]
     std::fs::read(path)
 }
@@ -518,6 +537,47 @@ mod web_store {
             .remove_item(&key(path))
             .map_err(|_| Error::new(ErrorKind::Other, "localStorage remove failed"))
     }
+
+    /// Store bytes ([`super::bytes_as_text`]).
+    pub(super) fn set_bytes(path: &Path, contents: &[u8]) -> Result<()> {
+        set(path, &super::bytes_as_text(contents))
+    }
+
+    /// The bytes [`set_bytes`] stored, or the UTF-8 of a text entry ([`super::text_as_bytes`]).
+    pub(super) fn get_bytes(path: &Path) -> Result<Vec<u8>> {
+        get(path).map(super::text_as_bytes)
+    }
+}
+
+/// fork: marks a page-store entry whose bytes are not UTF-8: every byte after it is one `char` of
+/// the same value (Latin-1), so the store's string round-trips them exactly. A NUL and a word no
+/// text resident begins with, so it can never be mistaken for one.
+#[cfg(any(target_arch = "wasm32", test))]
+const BYTES_MARK: &str = "\u{0}benilla-bytes\u{0}";
+
+/// fork: bytes as the page store's text. UTF-8 is stored as the text it is — exactly what a text
+/// write would have stored, so every entry from before the saved-variables files became bytes
+/// still reads back; anything else is [`BYTES_MARK`] and a Latin-1 spelling.
+#[cfg(any(target_arch = "wasm32", test))]
+fn bytes_as_text(contents: &[u8]) -> std::borrow::Cow<'_, str> {
+    match std::str::from_utf8(contents) {
+        Ok(text) => std::borrow::Cow::Borrowed(text),
+        Err(_) => {
+            let mut text = String::with_capacity(BYTES_MARK.len() + contents.len() * 2);
+            text.push_str(BYTES_MARK);
+            text.extend(contents.iter().map(|&b| char::from(b)));
+            std::borrow::Cow::Owned(text)
+        }
+    }
+}
+
+/// fork: the inverse of [`bytes_as_text`].
+#[cfg(any(target_arch = "wasm32", test))]
+fn text_as_bytes(text: String) -> Vec<u8> {
+    match text.strip_prefix(BYTES_MARK) {
+        Some(latin1) => latin1.chars().map(|c| c as u32 as u8).collect(),
+        None => text.into_bytes(),
+    }
 }
 
 /// Shared test plumbing for anything that toggles the persistence env vars: `std::env::set_var`
@@ -553,8 +613,43 @@ pub(crate) mod test_env {
 
 #[cfg(test)]
 mod tests {
+    /// fork: the page store keeps a saved-variables file's bytes EXACTLY — a Lua byte string need
+    /// not be UTF-8, and the store holds text — while a text file stays the text it always was.
+    #[test]
+    fn the_page_store_round_trips_bytes_and_leaves_text_alone() {
+        let text = "SV = { name = \"Zoë\" }\n";
+        assert_eq!(super::bytes_as_text(text.as_bytes()), text, "UTF-8 is stored as itself");
+        assert_eq!(super::text_as_bytes(text.to_string()), text.as_bytes());
+        let raw: Vec<u8> = (0u8..=255).chain([0xff, 0xfe, 0x00, 0x80]).collect();
+        let stored = super::bytes_as_text(&raw).into_owned();
+        assert!(stored.starts_with(super::BYTES_MARK));
+        assert_eq!(super::text_as_bytes(stored), raw, "every byte value comes back");
+    }
+
     use super::test_env::{EnvGuard, ENV_LOCK};
     use super::*;
+
+    /// **Two characters never share a file.** Every per-character resident keys on this token, so
+    /// a collision is one character's macros, bindings and SavedVariables loaded and then saved
+    /// over by another. ASCII names — every file already on disk — keep their exact paths.
+    #[test]
+    fn distinct_names_never_share_a_token() {
+        assert_ne!(file_token("Вася"), file_token("Петя"));
+        assert_ne!(file_token("Zoë"), file_token("Zoé"));
+        assert_eq!(file_token("Zoë"), "Zoë");
+        assert_eq!(file_token("Onehunter"), "Onehunter");
+        assert_eq!(file_token("Hydraxian Waterlords"), "Hydraxian_Waterlords");
+        assert_eq!(
+            file_token("a/b\\c:d"),
+            "a_b_c_d",
+            "separators never survive"
+        );
+        assert_eq!(
+            file_token("realm-name"),
+            "realm_name",
+            "the key's own `-` stays unforgeable"
+        );
+    }
 
     /// The residents' layout, exercised through the override — which is the *only* step of
     /// [`home`] whose answer a test can state, since the other two are the machine's project

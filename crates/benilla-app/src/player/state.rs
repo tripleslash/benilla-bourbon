@@ -836,9 +836,11 @@ pub(crate) struct Player {
     /// right-drag — into a mid-cast "you moved". Decision 0907; the reconcile lives in
     /// [`super::movement_net::stream_self_movement`].
     pub(super) last_pos: [f32; 3],
-    /// The stand state we last volunteered (`CMSG_STANDSTATECHANGE`) whose echo into our
-    /// `UNIT_FIELD_BYTES_1` hasn't landed yet — the local commit (the client's `SetStandState`
-    /// `0x6127b0` applies immediately *and* sends; decision 0080c). `None` = at the echoed value.
+    /// The stand state we last committed locally — volunteered (`CMSG_STANDSTATECHANGE`) or the
+    /// server's own (`SMSG_STANDSTATE_UPDATE`, 2339) — whose echo into our `UNIT_FIELD_BYTES_1`
+    /// hasn't landed yet: the reference's predicted cache `[player+0x1d68]`, written by the
+    /// setter's local half `0x6127b0`, which sends nothing itself (the volunteer path `0x5ed430`
+    /// sends first, then calls it; decisions 0080c, 2339). `None` = at the echoed value.
     pub(super) stand_pending: Option<u8>,
     /// **Settling after a teleport/summon/login**: the streamed world (terrain *and* its WMO
     /// buildings + colliders) arrives over several frames, so the collision under the destination
@@ -874,6 +876,11 @@ pub(crate) struct Player {
     /// judgement and pushes [`Player::settle_deadline`] forward, so the timeout budget measures
     /// time waiting for the *destination's* world (decisions 0710 + 0737).
     pub(crate) world_stale: bool,
+    /// The pitch the login seize seats the camera at — the saved pose's `cameraPitch` when
+    /// [`super::camera_saved`] restored one for this session, else the shipped opening pitch. Set
+    /// by the pose load, read once by the seize: the seize used to seat its own constant over the
+    /// restored value, so the pitch half of the remembered pose never survived a login.
+    pub(super) login_pitch: Option<f32>,
     /// A same-map teleport landed: the server relocated the mover, so any in-progress self
     /// server-ride (charge/taxi) is **void** — vmangos teleports at ITS flight end (its own spline
     /// finishes ~latency before ours) and its spline-done handler ignores acks while the teleport
@@ -1337,8 +1344,9 @@ impl Player {
     }
 
     /// A server-authored spline currently owns the avatar (Charge/knockback/taxi — the
-    /// [`super::server_ride`] state). For instruments (the taxi probe watches the flight run) and
-    /// the UI's `UnitOnTaxi` feed.
+    /// [`super::server_ride`] state). For instruments (the taxi probe watches the flight run).
+    /// **Not** `UnitOnTaxi` — a fear or a charge is a server ride too; that verb reads
+    /// [`crate::player::UNIT_FLAG_TAXI_FLIGHT`] off the descriptor (`0x517a86`).
     pub(crate) fn server_riding(&self) -> bool {
         self.server_riding
     }

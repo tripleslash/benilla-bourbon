@@ -20,7 +20,7 @@ use benilla_ui::strings::Arg;
 
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::target::{
     go_is_nearest, ring_reaction, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
@@ -45,7 +45,7 @@ impl Plugin for UiTooltipPlugin {
 /// law: the worn set (law §3.6's equipped-item test), the bags (§3.8's reagent possession, and
 /// the item-name cache the reagent names come from), the current form, and the bind point `$z`
 /// substitutes against.
-struct ViewCtx<'a> {
+struct ViewCtx<'a, 'w, 's> {
     home_area: Option<&'a str>,
     form: u8,
     store: Option<&'a ObjectStore>,
@@ -56,12 +56,15 @@ struct ViewCtx<'a> {
     /// arm resolves `[caster+0xc48]` itself, so this cell moves with the mob you are swinging at
     /// and falls back to doubling the caster's own reach when nothing is engaged.
     attack_target_reach: Option<f32>,
+    /// The one object index (2334) — what the possession cells resolve an instance guid
+    /// through: the worn-item line's search and each reagent's carried count.
+    objects: &'a Objects<'w, 's>,
     items: &'a mut Items,
     commands: &'a NetCommands,
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
     /// The talent spell-modifier tables — the cost cell shows the RESOLVED cost, which since
-    /// `SPELLMOD_COST` landed means the modified one (`crate::ui_action::usable::power_cost`).
-    spell_mods: &'a crate::spell_mods::SpellModifiers,
+    /// `SPELLMOD_COST` landed means the modified one (`crate::spell::usable::power_cost`).
+    spell_mods: &'a crate::spell::SpellModifiers,
     /// The VM's own `GlobalStrings.lua` (decision 2045) — every cell this builder composes is a
     /// key, and this is where they resolve. `text` is the `%d`-filling twin the `$`-engine's
     /// keyed tokens take (`benilla_formats::TokenContext::text`).
@@ -121,7 +124,7 @@ fn spell_tooltip_view(
     // HAPPINESS_COST has no GlobalStrings entry and no 5875 player spell reaches powerType 4;
     // the unit word is a dead arm kept for the array's shape.
     let resolved_cost = vctx.store.map_or(d.mana_cost, |s| {
-        crate::ui_action::usable::power_cost(d, s, vctx.spell_mods)
+        crate::spell::usable::power_cost(d, s, vctx.spell_mods)
     });
     let cost = {
         // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
@@ -303,7 +306,7 @@ fn spell_tooltip_view(
     // spell must be passive. The percentages are already percents on the wire.
     let chance = chance_line(d, vctx.store);
     let item_met = vctx.store.is_none_or(|s| {
-        crate::ui_action::usable::equipped_item_fits(d, s, vctx.items, vctx.commands)
+        crate::spell::usable::equipped_item_fits(d, s, vctx.objects, vctx.items, vctx.commands)
     });
     // Reagents (law §3.8): the named slots, `count > 1` suffixed, a slot the player is short of
     // wrapped in the builder's inline red. A reagent whose item template hasn't streamed yet is
@@ -325,7 +328,7 @@ fn spell_tooltip_view(
                 name
             };
             let short = vctx.store.is_some_and(|s| {
-                count_of(&s.0, vctx.items, entry, InventoryScope::CARRIED) < count
+                count_of(&s.0, vctx.objects, entry, InventoryScope::CARRIED) < count
             });
             parts.push(if short {
                 format!("|cffff2020{text}|r")
@@ -435,7 +438,9 @@ fn feed_spell_tooltips(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     // Who the player is auto-attacking, if anyone — the melee range cell's second reach.
     engaged_q: Query<&crate::creature_anim::Engaged, With<SelfPlayer>>,
-    guids: Res<crate::net::GuidIndex>,
+    // The object lookup (2334) — the guid index the engaged-target reach resolves through,
+    // plus the bag walk each watched reagent's carried count takes.
+    objects: Objects,
     home_bind: Option<Res<crate::net::HomeBind>>,
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
     mut items: ResMut<Items>,
@@ -444,7 +449,7 @@ fn feed_spell_tooltips(
     // spell-modifier tables the cost cell resolves through.
     lookups: (
         Option<Res<crate::ui_items::ItemSubClasses>>,
-        Res<crate::spell_mods::SpellModifiers>,
+        Res<crate::spell::SpellModifiers>,
     ),
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,
@@ -564,9 +569,8 @@ fn feed_spell_tooltips(
     let attack_target_reach = engaged_q
         .single()
         .ok()
-        .and_then(|e| guids.0.get(&e.0))
-        .and_then(|&e| stores.get(e).ok())
-        .map(|s| s.0.unit_combat_reach());
+        .and_then(|e| objects.object(e.0))
+        .map(|f| f.unit_combat_reach());
     let reaches = (
         self_store.map(|s| s.0.unit_combat_reach().to_bits()),
         attack_target_reach.map(f32::to_bits),
@@ -589,7 +593,7 @@ fn feed_spell_tooltips(
         .map(|entry| {
             let named = items.template(entry, 0, &commands).is_some();
             let owned = self_store.map_or(0, |s| {
-                count_of(&s.0, &items, entry, InventoryScope::CARRIED)
+                count_of(&s.0, &objects, entry, InventoryScope::CARRIED)
             });
             (entry, (owned, named))
         })
@@ -611,6 +615,7 @@ fn feed_spell_tooltips(
             store: self_store,
             combat_reach: self_store.map_or(1.5, |s| s.0.unit_combat_reach()),
             attack_target_reach,
+            objects: &objects,
             items: &mut items,
             commands: &commands,
             sub_classes: sub_classes.as_deref().map(|c| &c.0),
@@ -629,7 +634,7 @@ fn feed_spell_tooltips(
                         {
                             let named = vctx.items.template(entry, 0, vctx.commands).is_some();
                             let owned = vctx.store.map_or(0, |s| {
-                                count_of(&s.0, vctx.items, entry, InventoryScope::CARRIED)
+                                count_of(&s.0, vctx.objects, entry, InventoryScope::CARRIED)
                             });
                             slot.insert((owned, named));
                         }
@@ -755,7 +760,9 @@ fn drive_mouseover_tooltip(
     // The hovered UNIT's snapshot (a hovered non-unit resolves no store here).
     let unit = hovered.target.zip(hovered.guid).and_then(|(entity, guid)| {
         let store = stores.get(entity).ok()?;
-        let name = names.resolve(guid, &commands).map(str::to_string);
+        let name = names
+            .resolve_unit(guid, Some(store), &commands)
+            .map(str::to_string);
         let reaction = ring_reaction(
             rx.factions.as_deref(),
             &rx.reputations,
@@ -989,7 +996,7 @@ fn drive_mouseover_tooltip(
                     go_inputs.spells.as_deref(),
                     go_inputs.skill_lines.as_ref().map(|s| &s.catalog),
                     self_store,
-                    &go_inputs.items,
+                    &go_inputs.objects,
                     facts,
                     &mut matched,
                 )

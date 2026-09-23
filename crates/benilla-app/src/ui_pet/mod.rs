@@ -41,14 +41,15 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::PetSpells;
 
-use crate::cooldowns::Cooldowns;
 use crate::net::{GuidIndex, ObjectStore};
+use crate::spell::Cooldowns;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod bar;
 mod drain;
 mod menu;
+mod net;
 mod unit;
 
 use bar::feed_pet_bar;
@@ -64,6 +65,8 @@ mod tests;
 ///
 /// `spells.pet_guid == 0` is "there is no pet bar", and it is the single test: the teardown packet
 /// carries exactly that and nothing else.
+///
+/// The session end resets it the same way (`net::on_session_end`): a dropped socket sends no teardown.
 #[derive(Resource, Default)]
 pub(crate) struct PetBar {
     /// The last `SMSG_PET_SPELLS` in full, with `SMSG_PET_MODE`'s state edits folded in.
@@ -139,6 +142,7 @@ pub(crate) struct UiPetPlugin;
 
 impl Plugin for UiPetPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetBar>().add_systems(
             Update,
             (

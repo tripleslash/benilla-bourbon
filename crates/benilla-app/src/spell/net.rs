@@ -1,7 +1,9 @@
-//! Spell-book/action-bar + cast-lifecycle arm bodies for [`super::apply_net_updates`]'s dispatch
-//! match — one of the largest arm families, split out on its own (the decision 0099/0107 precast →
-//! resolve pipeline). Each `pub(super)` fn here is exactly one arm's body; the match at the call
-//! site stays the dispatcher, one call per arm.
+//! The spell's packet handlers (in the net handler table since 2324, moved out of the drain's
+//! spells arm file) — the spell book and the action bar, the cast lifecycle (the decision
+//! 0099/0107 precast → resolve pipeline), the cooldowns, the channels, the aura durations and the
+//! spell modifiers. The lifecycle *state* these fold into is this module's since decision
+//! 2328 ([`super::inflight`], [`super::cooldowns`], [`super::mods`]); the handlers reach it,
+//! and the windows' stores they also touch, through [`Lifecycle`] and [`Scene`].
 
 use std::time::Duration;
 
@@ -12,19 +14,466 @@ use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
-use crate::cooldowns::Cooldowns;
+use super::cast_target::CastTargeting;
+use super::{
+    ActiveChannel, AutoRepeatActive, CastCommit, CastLadder, Cooldowns, PendingCast,
+    QueuedMeleeSpell,
+};
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
-use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
+use crate::ui_action::{CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
-use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
+use crate::ui_cast::{CastBarEdge, CastBarFeed};
 use crate::ui_spellbook::LearnedInTab;
 
-use super::super::{GuidIndex, ObjectStore, SelfGuid};
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::ecs::system::SystemParam;
+
+use crate::net::{GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid, SelfPlayer};
+
+/// Register the spell's handlers — called from [`super::SpellPlugin`].
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::SpellBook, on_spell_book)
+        .net_handler(K::ActionButtons, on_action_buttons)
+        .net_handler(K::SpellLearned, on_spell_learned)
+        .net_handler(K::SpellRemoved, on_spell_removed)
+        .net_handler(K::SpellSuperceded, on_spell_superceded)
+        .net_handler(K::CastResult, on_cast_result)
+        .net_handler(K::SpellStart, on_spell_start)
+        .net_handler(K::SpellGo, on_spell_go)
+        .net_handler(K::SpellChainTargets, on_spell_chain_targets)
+        .net_handler(K::SpellFailedOther, on_spell_failed_other)
+        .net_handler(K::SpellDelayed, on_spell_delayed)
+        .net_handler(K::CancelAutoRepeat, on_cancel_auto_repeat)
+        .net_handler(K::SpellCooldowns, on_cooldown_packet)
+        .net_handler(K::CooldownEvent, on_cooldown_packet)
+        .net_handler(K::ClearCooldown, on_cooldown_packet)
+        .net_handler(K::CooldownCheat, on_cooldown_packet)
+        .net_handler(K::ItemCooldown, on_item_cooldown)
+        .net_handler(K::ChannelStart, on_channel)
+        .net_handler(K::ChannelUpdate, on_channel)
+        .net_handler(K::AuraDuration, on_aura_duration)
+        .net_handler(K::SpellModifier, on_spell_modifier);
+}
+
+/// The cast lifecycle's state and catalogs, as one parameter — what every handler here folds
+/// its packet into. The in-flight slot, the cooldowns and the modifiers are the spell's own
+/// (2328); the action store, the spellbook's learned-tab list, the aura durations and the pet
+/// bar are their windows', written here because the packet is the spell's. The cast reply's
+/// handler is the exception — it casts, so it takes the ladder instead ([`on_cast_result`]).
+#[derive(SystemParam)]
+pub(crate) struct Lifecycle<'w> {
+    self_guid: Res<'w, SelfGuid>,
+    index: Res<'w, GuidIndex>,
+    spells: Option<Res<'w, Spells>>,
+    net: Res<'w, NetCommands>,
+    actions: ResMut<'w, PlayerActions>,
+    learned_in_tab: ResMut<'w, LearnedInTab>,
+    cast_bar: ResMut<'w, CastBarFeed>,
+    pending: ResMut<'w, PendingCast>,
+    queued_melee: ResMut<'w, QueuedMeleeSpell>,
+    cooldowns: ResMut<'w, Cooldowns>,
+    auto_repeat: ResMut<'w, AutoRepeatActive>,
+    channel: ResMut<'w, ActiveChannel>,
+    aura_durations: ResMut<'w, AuraDurations>,
+    spell_mods: ResMut<'w, crate::spell::SpellModifiers>,
+    pet_bar: ResMut<'w, crate::ui_pet::PetBar>,
+    /// The PlayAnimation call-order counter: every animation-bearing message stamps `next()`,
+    /// in packet order.
+    play_seq: ResMut<'w, crate::creature_anim::PlaySeq>,
+}
+
+/// The scene a cast lands in — the streamed units, the item store, and the animation, text and
+/// loot sinks a resolve writes.
+#[derive(SystemParam)]
+pub(crate) struct Scene<'w, 's> {
+    commands: Commands<'w, 's>,
+    casting: Query<'w, 's, &'static Casting>,
+    engaged_self: Query<'w, 's, (), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
+    stores: Query<'w, 's, &'static mut ObjectStore>,
+    items: ResMut<'w, crate::items::Items>,
+    loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
+    damage_text: Res<'w, crate::combat_text::DamageTextGates>,
+    cast_events: MessageWriter<'w, CastEvent>,
+    go_targets: MessageWriter<'w, SpellGoTargets>,
+    text: MessageWriter<'w, crate::combat_text::CombatTextSpawn>,
+    go_lid: MessageWriter<'w, crate::go_anim::GoLidOpen>,
+    sheaths: MessageWriter<'w, crate::creature_anim::SheathRequest>,
+}
+
+/// The spell-book/action-bar pair → the action store the UI feed reads (`crate::ui_action`),
+/// sent once at login (and the bar again on server-side edits).
+fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellBook {
+        spell_ids,
+        cooldowns,
+    } = ev
+    {
+        spell_book(spell_ids, cooldowns, &mut l.actions, &mut l.cooldowns);
+    }
+}
+
+fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::ActionButtons { buttons } = ev {
+        action_buttons(buttons, &mut l.actions);
+    }
+}
+
+fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+    if let SessionEvent::SpellLearned { spell_id } = ev {
+        learned_spell(
+            spell_id,
+            &mut l.actions,
+            l.spells.as_deref(),
+            &mut errors,
+            &mut l.learned_in_tab,
+        );
+    }
+}
+
+fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+    if let SessionEvent::SpellRemoved { spell_id } = ev {
+        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &mut errors);
+    }
+}
+
+fn on_spell_superceded(
+    In(ev): In<SessionEvent>,
+    mut l: Lifecycle,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::SpellSuperceded {
+        old_spell_id,
+        new_spell_id,
+    } = ev
+    {
+        superceded_spell(
+            old_spell_id,
+            new_spell_id,
+            &mut l.actions,
+            l.spells.as_deref(),
+            &mut errors,
+            &mut l.learned_in_tab,
+        );
+    }
+}
+
+/// What `HandleCastResult` reaches beyond the ladder — the reply's own scene.
+#[derive(SystemParam)]
+pub(crate) struct Reply<'w, 's> {
+    self_guid: Res<'w, SelfGuid>,
+    index: Res<'w, GuidIndex>,
+    cast_bar: ResMut<'w, CastBarFeed>,
+    casting: Query<'w, 's, &'static Casting>,
+    cast_events: MessageWriter<'w, CastEvent>,
+    play_seq: ResMut<'w, crate::creature_anim::PlaySeq>,
+}
+
+/// `HandleCastResult 0x6e7330` — the one handler that *casts*. A reply whose spell names a
+/// `modalNextSpell` (column 38) chains it through the ladder in the same call, the reference's
+/// `0x6e74aa call 0x6e5a90` → `TryCast` (decision 2330): so this handler takes [`CastLadder`]
+/// and [`CastTargeting`] where the others take [`Lifecycle`] — the five spell-state fields the
+/// two would share are the ladder's — and reaches the rest through [`Reply`]. Before 2330 the
+/// chain was an outbox a `ui_action` drain emptied after the input pass; now the chained cast
+/// arms the in-flight slot before the next packet is handled, as in the reference.
+///
+/// The chained cast goes out at the **null target guid** — `0x6e74a6 push ebx; push ebx` with
+/// `ebx = 0` — so it binds through the ordinary target walk (`ArmCast 0x6e5250`: main-hand item
+/// bit, then the explicit guid, then the current selection), which is what
+/// [`CastTargeting::context`] hands the ladder when no guid is passed. And it takes **every
+/// rung**: the reference chains through `0x6e5a90` → `TryCast 0x6e4b60`, the same entry a button
+/// press uses, so a chained Auto Shot is range-checked, form-checked and GCD-checked exactly like
+/// a pressed one, and refuses with the same red line.
+fn on_cast_result(
+    In(ev): In<SessionEvent>,
+    mut ladder: CastLadder,
+    targeting: CastTargeting,
+    mut r: Reply,
+) {
+    if let SessionEvent::CastResult {
+        spell_id,
+        success,
+        reason,
+        arg,
+    } = ev
+    {
+        let chained = cast_result(
+            spell_id,
+            success,
+            reason,
+            arg,
+            &mut ladder.ecs,
+            &r.self_guid,
+            &r.index,
+            &mut ladder.cast_errors,
+            &r.casting,
+            &mut r.cast_events,
+            &mut r.cast_bar,
+            &mut ladder.pending,
+            &mut ladder.queued_melee,
+            &mut ladder.cooldowns,
+            &mut ladder.auto_repeat,
+            ladder.spells.as_deref(),
+            &ladder.commands,
+            r.play_seq.next(),
+        );
+        if let Some(next) = chained {
+            let ctx = targeting.context();
+            ladder.send(next, &ctx, CastCommit::Spell);
+        }
+    }
+}
+
+fn on_spell_start(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellStart {
+        caster,
+        spell_id,
+        cast_flags,
+        cast_time_ms,
+        target,
+        ammo_display_id,
+    } = ev
+    {
+        spell_start(
+            caster,
+            spell_id,
+            cast_flags,
+            cast_time_ms,
+            target,
+            ammo_display_id,
+            &mut sc.commands,
+            &l.index,
+            &mut sc.cast_events,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+            l.spells.as_deref(),
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellGo {
+        caster,
+        spell_id,
+        cast_flags,
+        hits,
+        misses,
+        target,
+        go_target,
+        dest,
+        ammo_display_id,
+        item_caster,
+    } = ev
+    {
+        let engaged = !sc.engaged_self.is_empty();
+        spell_go(
+            caster,
+            spell_id,
+            cast_flags,
+            hits,
+            misses,
+            target,
+            go_target,
+            dest,
+            ammo_display_id,
+            item_caster,
+            &mut sc.commands,
+            &l.index,
+            &sc.casting,
+            &mut sc.cast_events,
+            &mut sc.go_targets,
+            &l.self_guid,
+            &sc.stores,
+            &mut l.cast_bar,
+            &mut l.pending,
+            &mut l.queued_melee,
+            &mut sc.text,
+            *sc.damage_text,
+            &mut sc.go_lid,
+            &mut sc.loot_latch,
+            (
+                &mut l.cooldowns,
+                l.spells.as_deref(),
+                &mut sc.items,
+                &l.net,
+                &mut l.pet_bar,
+            ),
+            (&mut l.auto_repeat, &mut sc.sheaths, engaged),
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_chain_targets(In(ev): In<SessionEvent>, l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellChainTargets {
+        caster,
+        spell_id,
+        targets,
+    } = ev
+    {
+        spell_chain_targets(caster, spell_id, targets, &mut sc.commands, &l.index);
+    }
+}
+
+fn on_spell_failed_other(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellFailedOther { caster, spell_id } = ev {
+        spell_failed_other(
+            caster,
+            spell_id,
+            &mut sc.commands,
+            &l.index,
+            &sc.casting,
+            &mut sc.cast_events,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+            &mut l.queued_melee,
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_delayed(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellDelayed { caster, delay_ms } = ev {
+        spell_delayed(
+            caster,
+            delay_ms,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+        );
+    }
+}
+
+fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::CancelAutoRepeat = ev {
+        cancel_auto_repeat(
+            &mut l.auto_repeat,
+            &l.self_guid,
+            &l.index,
+            &mut sc.commands,
+            &l.net,
+        );
+    }
+}
+
+/// The four cooldown packets, each resolved once through [`addressed_store`] — ours or the
+/// pet's, by the caster guid.
+fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    let Lifecycle {
+        self_guid,
+        spells,
+        cooldowns,
+        pet_bar,
+        ..
+    } = &mut l;
+    match ev {
+        SessionEvent::SpellCooldowns {
+            caster,
+            cooldowns: pairs,
+        } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                spell_cooldowns(caster, pairs, spells.as_deref(), store);
+            }
+        }
+        SessionEvent::CooldownEvent { spell_id, caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                cooldown_event(spell_id, caster, store);
+            }
+        }
+        SessionEvent::ClearCooldown { spell_id, caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                clear_cooldown(spell_id, caster, store);
+            }
+        }
+        SessionEvent::CooldownCheat { caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                cooldown_cheat(caster, store);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn on_item_cooldown(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
+    if let SessionEvent::ItemCooldown {
+        item_guid,
+        spell_id,
+    } = ev
+    {
+        item_cooldown(item_guid, spell_id, &l.index, &sc.stores, &mut l.cooldowns);
+    }
+}
+
+fn on_channel(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    match ev {
+        SessionEvent::ChannelStart {
+            spell_id,
+            duration_ms,
+        } => channel_start(spell_id, duration_ms, &mut l.channel, &mut l.cast_bar),
+        SessionEvent::ChannelUpdate { remaining_ms } => {
+            channel_update(remaining_ms, &mut l.channel, &mut l.cast_bar)
+        }
+        _ => {}
+    }
+}
+
+fn on_aura_duration(In(ev): In<SessionEvent>, mut l: Lifecycle, real_clock: Res<Time<Real>>) {
+    if let SessionEvent::AuraDuration { slot, remaining_ms } = ev {
+        aura_duration(
+            slot,
+            remaining_ms,
+            &mut l.aura_durations,
+            real_clock.elapsed_secs_f64(),
+        );
+    }
+}
+
+fn on_spell_modifier(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellModifier {
+        flat,
+        mask_bit,
+        op,
+        value,
+    } = ev
+    {
+        set_spell_modifier(flat, mask_bit, op, value, &mut l.spell_mods);
+    }
+}
+
+/// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
+///
+/// All four of them (`SMSG_SPELL_COOLDOWN`, `_COOLDOWN_EVENT`, `_CLEAR_COOLDOWN`,
+/// `_COOLDOWN_CHEAT`) carry a caster guid, and until the pet bar existed all four answered it the
+/// same way: "is it us? then apply, else drop" — four copies of a self-only assumption, each
+/// inside its own arm. Since the server sends a pet's cooldowns on the pet's guid, that
+/// assumption silently discarded every one of them. Resolving the guid ONCE, here, is what let the
+/// pet bar sweep for real without a second copy of any arm; it also matches the reference, whose
+/// `SMSG_COOLDOWN_CHEAT` handler wipes "the self/pet cooldown list" off exactly this test.
+///
+/// `None` = a guid we hold no store for (another player's pet, a stale packet): dropped, as the
+/// client drops an unknown guid.
+fn addressed_store<'a>(
+    caster: u64,
+    self_guid: &SelfGuid,
+    player: &'a mut crate::spell::Cooldowns,
+    pet: &'a mut crate::ui_pet::PetBar,
+) -> Option<&'a mut crate::spell::Cooldowns> {
+    if self_guid.0 == Some(caster) {
+        Some(player)
+    } else if pet.has_bar() && pet.spells.pet_guid == caster {
+        Some(&mut pet.cooldowns)
+    } else {
+        None
+    }
+}
 
 /// The player's spell book (`SMSG_INITIAL_SPELLS`, once at login) → the action store the UI feed
 /// reads (`crate::ui_action`), plus the active-cooldown list → the cooldown store (the wire
 /// carries *remaining* ms — [`Cooldowns::seed_initial`]'s law).
-pub(super) fn spell_book(
+fn spell_book(
     spell_ids: Vec<u32>,
     initial_cooldowns: Vec<SpellCooldown>,
     actions: &mut PlayerActions,
@@ -45,7 +494,7 @@ pub(super) fn spell_book(
 
 /// The player's saved action bar (`SMSG_ACTION_BUTTONS`, once at login, and again on server-side
 /// edits) → the action store the UI feed reads.
-pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerActions) {
+fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerActions) {
     debug!("net: action bar — {} occupied slots", buttons.len());
     actions.buttons = buttons.into_iter().map(|b| (b.slot, b)).collect();
     actions.dirty = true;
@@ -59,7 +508,7 @@ pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerAct
 /// It also **announces the learn in chat**, which is the reference's own tail on this packet and
 /// not a nicety: `0x5e61c0` -> `AddSpell(id, slot, 1, 1)` -> the registrar `0x4b25b0` with its
 /// announce flag set (decision 2243, [`announce_learn`]).
-pub(super) fn learned_spell(
+fn learned_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
@@ -123,7 +572,7 @@ fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKe
 /// [`crate::ui_action::LearnedAbilities`] re-derives off the same change (the reference's own
 /// unlearn write site, `0x4b2c50`). What happens to a **bar button** still pointing at the removed
 /// spell is a separate law this arm deliberately does not invent — see 1584's scope note.
-pub(super) fn removed_spell(
+fn removed_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
@@ -162,7 +611,7 @@ fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiError
 /// *here* as well would be a second, weaker copy of that law — weaker because this packet doesn't
 /// arrive at all when the rank was gained while the character was loading (vmangos suppresses it
 /// with `IsInWorld()`), which is exactly the case that shipped a dead rank-1 button.
-pub(super) fn superceded_spell(
+fn superceded_spell(
     old_spell_id: u32,
     new_spell_id: u32,
     actions: &mut PlayerActions,
@@ -184,7 +633,7 @@ pub(super) fn superceded_spell(
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
-pub(super) fn cast_result(
+fn cast_result(
     spell_id: u32,
     success: bool,
     reason: Option<u8>,
@@ -202,10 +651,8 @@ pub(super) fn cast_result(
     auto_repeat: &mut AutoRepeatActive,
     spells: Option<&Spells>,
     net: &crate::net::NetCommands,
-    // The `modalNextSpell` chain's outbox (`0x6e74aa`) — filled here, sent by the one cast path.
-    chain: &mut crate::ui_action::ChainCasts,
     seq: u64,
-) {
+) -> Option<u32> {
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
     // **Is this the reply to the cast we have outstanding?** (`0x6e7408 cmp ecx,[0xceca88]`.) Read
     // BEFORE either arm touches the guard, because both the failure arm's clear below and the
@@ -323,6 +770,10 @@ pub(super) fn cast_result(
     //   sting while Auto Shot is already running must NOT re-cast it, or every special shot would
     //   restart the repeat and reset its swing timer. We have no pending-record to refresh, so the
     //   equal branch is simply "send nothing" — the same observable.
+    //
+    // The chained spell is this function's **return**: `on_cast_result` hands it to the ladder
+    // in the same call (`0x6e74aa call 0x6e5a90`), so the chained cast takes every rung a press
+    // takes and arms the in-flight slot before the next packet is handled (decision 2330).
     if in_flight {
         pending.clear_if(spell_id);
         if let Some(next) = spells
@@ -331,14 +782,15 @@ pub(super) fn cast_result(
             .filter(|&next| next != 0 && Some(next) != auto_repeat.0)
         {
             debug!("net: cast result {spell_id} chains modalNextSpell {next}");
-            chain.0.push(next);
+            return Some(next);
         }
     }
+    None
 }
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
 /// — the precast trigger the phase-2 casting animation loop builds on (decision 0099 phase 1).
-pub(super) fn spell_start(
+fn spell_start(
     caster: u64,
     spell_id: u32,
     cast_flags: u16,
@@ -454,7 +906,7 @@ const GO_TYPE_CHEST: i32 = 3;
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
 /// visually from the same Speed column (decision 0099 phase 4: the target lists go out as
 /// [`SpellGoTargets`] for the router's instant-impact/missile branch).
-pub(super) fn spell_go(
+fn spell_go(
     caster: u64,
     spell_id: u32,
     cast_flags: u16,
@@ -495,7 +947,7 @@ pub(super) fn spell_go(
     // The GO-deferred melee auto-attack start's write set (`0x6e83c0`, the arm below), plus the
     // attack lock it gates on: our server-echoed `Engaged`, the ref's `[player+0xc48]`.
     attack_ctx: (
-        &mut crate::ui_action::AutoRepeatActive,
+        &mut crate::spell::AutoRepeatActive,
         &mut MessageWriter<crate::creature_anim::SheathRequest>,
         bool,
     ),
@@ -595,7 +1047,7 @@ pub(super) fn spell_go(
 
         // **The GO-deferred melee auto-attack start** (`HandleSpellGo 0x6e7a70` @ `0x6e83c0`,
         // wow-re `combat-feel-law.md` §A3; bytes re-read for decision 1593). This is the exact
-        // complement of the send-time tail in [`crate::ui_action::cast_send`]: a spell carrying
+        // complement of the send-time tail in [`crate::spell::cast_send`]: a spell carrying
         // `AttributesEx2 & 0x100000` has its optimistic start *suppressed* there and armed here
         // instead, so the swing begins only once the server confirms the strike landed. That is
         // the whole 5875 stealth-opener class — Backstab, Garrote, Ambush, Cheap Shot, Shred,
@@ -652,7 +1104,8 @@ pub(super) fn spell_go(
                 stores.get(*e).ok()?.0.unit_ranged_attack_time()
             })
             .unwrap_or(0);
-        match item_caster.and_then(|g| items.object(g)?.object_entry()) {
+        // The item's entry off its own store — an item is an object in the index (2334).
+        match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
             Some(entry) => {
                 let use_spell = items
                     .template(entry, 0, net_commands)
@@ -727,15 +1180,16 @@ pub(super) fn spell_go(
     // is spell-GOLD. The three CVar gates come with it — they are read inside `0x607140`, which
     // every word path calls, so `CombatDamage 0` silences these words too.
     if !misses.is_empty() && display.is_none_or(|d| d.speed == 0.0) {
-        if let Some(color) = super::combat_log::classify_source(caster, index, self_guid, stores)
-            .and_then(|source| {
-                crate::combat_text::damage_color(
-                    text_gates,
-                    source,
-                    crate::combat_text::melee_styled(display),
-                )
-            })
-        {
+        if let Some(color) = crate::combat_log::text::classify_source(
+            caster, index, self_guid, stores,
+        )
+        .and_then(|source| {
+            crate::combat_text::damage_color(
+                text_gates,
+                source,
+                crate::combat_text::melee_styled(display),
+            )
+        }) {
             for &(guid, code) in &misses {
                 let anchor_guid = if code == 11 { caster } else { guid };
                 if self_guid.0 == Some(anchor_guid) {
@@ -808,7 +1262,7 @@ pub(super) fn spell_go(
 
 /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
 /// `Casting` state seam the same as [`spell_go`].
-pub(super) fn spell_failed_other(
+fn spell_failed_other(
     caster: u64,
     spell_id: u32,
     commands: &mut Commands,
@@ -860,7 +1314,7 @@ pub(super) fn spell_failed_other(
 /// `startTime`/`maxValue` shift — the spark jumps back and the bar keeps running), so a hit no
 /// longer lets the bar finish early while the real cast runs on (decision 0256). Self-only on the
 /// wire, but the caster guid is on the packet — gate on it like every other own-cast edge.
-pub(super) fn spell_delayed(
+fn spell_delayed(
     caster: u64,
     delay_ms: u32,
     self_guid: &SelfGuid,
@@ -900,7 +1354,7 @@ pub(super) fn spell_delayed(
 /// `InterruptSpell(CURRENT_AUTOREPEAT_SPELL)` → `SendAutoRepeatCancel`). Movement does NOT
 /// (`_UpdateAutoRepeatSpell` interrupts only Category 351, the wand, when moving) — Auto Shot
 /// stays armed across a run, exactly like vanilla.
-pub(super) fn cancel_auto_repeat(
+fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
     index: &GuidIndex,
@@ -966,7 +1420,7 @@ fn pet_go_cooldown(
 /// own list). **Which unit's store** it lands in is the caller's decision
 /// ([`super::addressed_store`]): the four cooldown packets all carry a caster guid, and resolving
 /// it in one place is what let the pet bar have real cooldowns without a second copy of this arm.
-pub(super) fn spell_cooldowns(
+fn spell_cooldowns(
     caster: u64,
     pairs: Vec<(u32, u32)>,
     spells: Option<&Spells>,
@@ -985,27 +1439,33 @@ pub(super) fn spell_cooldowns(
 
 /// `SMSG_ITEM_COOLDOWN` (`0x6e95d0`) — the fixed 30 s use cooldown, keyed on the item instance's
 /// template entry (the client resolves the guid to its item record the same way).
-pub(super) fn item_cooldown(
+fn item_cooldown(
     item_guid: u64,
     spell_id: u32,
-    items: &crate::items::Items,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
     cooldowns: &mut Cooldowns,
 ) {
     debug!("net: item cooldown — item {item_guid:#x} spell {spell_id}");
-    if let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) {
+    let entry = index
+        .0
+        .get(&item_guid)
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.object_entry());
+    if let Some(entry) = entry {
         cooldowns.apply_wire_item_cooldown(entry, spell_id, Instant::now());
     }
 }
 
 /// `SMSG_COOLDOWN_EVENT` (`0x6e9670` → `0x6e3050(force=0)`) — start an on-hold cooldown's parked
 /// timers now (Stealth ends, Feign Death drops). Store chosen by [`super::addressed_store`].
-pub(super) fn cooldown_event(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
+fn cooldown_event(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown event — spell {spell_id} on {caster:#x}");
     cooldowns.cooldown_event(spell_id, Instant::now());
 }
 
 /// `SMSG_CLEAR_COOLDOWN` (`0x6e9670` → `0x6e3050(force=1)`) — remove the spell's record outright.
-pub(super) fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
+fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: clear cooldown — spell {spell_id} on {caster:#x}");
     cooldowns.clear_spell(spell_id);
 }
@@ -1013,14 +1473,14 @@ pub(super) fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldow
 /// `SMSG_COOLDOWN_CHEAT` (`0x6e9730` → `0x6e9700`) — the GM reset wipes the whole list. The
 /// reference's own handler wipes "the self/pet cooldown list" on a guid match, which is exactly
 /// what routing through [`super::addressed_store`] now reproduces.
-pub(super) fn cooldown_cheat(caster: u64, cooldowns: &mut Cooldowns) {
+fn cooldown_cheat(caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown cheat (wipe) for {caster:#x}");
     cooldowns.wipe();
 }
 
 /// `MSG_CHANNEL_START` — self-only on the wire (no guid), so it goes straight to the cast bar; the
 /// channel *animation* state rides the unit-field pair instead (decision 0137).
-pub(super) fn channel_start(
+fn channel_start(
     spell_id: u32,
     duration_ms: u32,
     channel: &mut ActiveChannel,
@@ -1034,11 +1494,7 @@ pub(super) fn channel_start(
 }
 
 /// `MSG_CHANNEL_UPDATE` — the running channel's remaining time (`0` is its stop edge).
-pub(super) fn channel_update(
-    remaining_ms: u32,
-    channel: &mut ActiveChannel,
-    feed: &mut CastBarFeed,
-) {
+fn channel_update(remaining_ms: u32, channel: &mut ActiveChannel, feed: &mut CastBarFeed) {
     channel.update(remaining_ms, Instant::now());
     feed.0.push(CastBarEdge::ChannelUpdate { remaining_ms });
 }
@@ -1046,12 +1502,7 @@ pub(super) fn channel_update(
 /// `SMSG_UPDATE_AURA_DURATION` — one of our own auras' remaining time (decisions 0255/0257), keyed
 /// by raw slot and stamped with the receive time. The `ui_aura` feed joins it to the aura in that
 /// slot by arrival order; it arrives *before* the descriptor delta that names the slot.
-pub(super) fn aura_duration(
-    slot: u8,
-    remaining_ms: u32,
-    durations: &mut AuraDurations,
-    now_secs: f64,
-) {
+fn aura_duration(slot: u8, remaining_ms: u32, durations: &mut AuraDurations, now_secs: f64) {
     durations.set(slot, remaining_ms, now_secs);
 }
 
@@ -1060,14 +1511,14 @@ pub(super) fn aura_duration(
 /// single store: the server sends the absolute value of that `(family bit, op)` pair, never a
 /// delta, so there is nothing to accumulate and nothing to invalidate.
 ///
-/// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
+/// The out-of-range refusal lives on the store ([`crate::spell::SpellModifiers::set`], which
 /// documents why it is ours and not the reference's).
-pub(super) fn set_spell_modifier(
+fn set_spell_modifier(
     flat: bool,
     mask_bit: u8,
     op: u8,
     value: i32,
-    mods: &mut crate::spell_mods::SpellModifiers,
+    mods: &mut crate::spell::SpellModifiers,
 ) {
     mods.set(flat, mask_bit, op, value);
 }
@@ -1106,7 +1557,7 @@ fn fill_chain_hops(
 /// its GO handler), which is how a non-channeled chain spell draws at all. vmangos sends this one
 /// only for channelled spells (`Spell::SendChannelStart`), so on this server it is the drains'
 /// and Mind Flay's producer, and the GO leg is every other chain spell's.
-pub(super) fn spell_chain_targets(
+fn spell_chain_targets(
     caster: u64,
     spell_id: u32,
     targets: Vec<u64>,
@@ -1391,7 +1842,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1470,7 +1921,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -1684,7 +2135,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1760,7 +2211,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -1853,7 +2304,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1922,7 +2373,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -1988,7 +2439,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -2068,7 +2519,7 @@ mod tests {
                             &mut pet_bar,
                         ),
                         (
-                            &mut crate::ui_action::AutoRepeatActive::default(),
+                            &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
                             false,
                         ),
@@ -2119,7 +2570,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<AutoRepeatActive>();
 
         let self_e = app
@@ -2173,7 +2624,6 @@ mod tests {
                             &mut auto_repeat,
                             None,
                             &net,
-                            &mut crate::ui_action::ChainCasts::default(),
                             1,
                         );
                     },
@@ -2401,7 +2851,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2478,7 +2928,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 engaged,
                             ),
@@ -2578,7 +3028,8 @@ mod tests {
         };
 
         // One CAST_RESULT for `spell_id`, with `in_flight` armed as the outstanding cast and
-        // `running` as the live auto-repeat. Returns (what got queued, is the guard still armed).
+        // `running` as the live auto-repeat. Returns (what the reply chains, is the guard still
+        // armed).
         let fire = |spell_id: u32, success: bool, in_flight: Option<u32>, running: Option<u32>| {
             let mut app = App::new();
             app.add_message::<CastEvent>()
@@ -2591,9 +3042,8 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
-                .init_resource::<AutoRepeatActive>()
-                .init_resource::<crate::ui_action::ChainCasts>();
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<AutoRepeatActive>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
@@ -2611,7 +3061,8 @@ mod tests {
             }
             let (tx, _rx) = crossbeam_channel::unbounded();
             let cat = spells();
-            app.world_mut()
+            let chained = app
+                .world_mut()
                 .run_system_once(
                     move |mut commands: Commands,
                           self_guid: Res<SelfGuid>,
@@ -2623,8 +3074,7 @@ mod tests {
                           mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut cooldowns: ResMut<Cooldowns>,
-                          mut auto_repeat: ResMut<AutoRepeatActive>,
-                          mut chain: ResMut<crate::ui_action::ChainCasts>| {
+                          mut auto_repeat: ResMut<AutoRepeatActive>| {
                         let net = crate::net::NetCommands(tx.clone());
                         cast_result(
                             spell_id,
@@ -2644,52 +3094,46 @@ mod tests {
                             &mut auto_repeat,
                             Some(&cat),
                             &net,
-                            &mut chain,
                             1,
-                        );
+                        )
                     },
                 )
                 .unwrap();
-            let queued = app
-                .world()
-                .resource::<crate::ui_action::ChainCasts>()
-                .0
-                .clone();
             let still_armed = app
                 .world()
                 .resource::<PendingCast>()
                 .in_flight(Instant::now());
-            (queued, still_armed)
+            (chained, still_armed)
         };
 
         // The ordinary case: the sting lands, and Auto Shot follows by itself.
         assert_eq!(
             fire(SERPENT_STING, true, Some(SERPENT_STING), None),
-            (vec![AUTO_SHOT], false),
+            (Some(AUTO_SHOT), false),
             "a successful sting chains Auto Shot, and clears the in-flight guard first"
         );
         // And a failed one does too — both results converge on the same block.
         assert_eq!(
             fire(SERPENT_STING, false, Some(SERPENT_STING), None).0,
-            vec![AUTO_SHOT],
+            Some(AUTO_SHOT),
             "a FAILED sting chains it as well (`0x6e735a jne` → the same `0x6e73eb`)"
         );
         // Already shooting: re-arm, never re-cast.
         assert_eq!(
             fire(SERPENT_STING, true, Some(SERPENT_STING), Some(AUTO_SHOT)).0,
-            Vec::<u32>::new(),
+            None,
             "Auto Shot already running: the equal branch sends nothing"
         );
         // Auto Shot's own replies terminate the chain.
         assert_eq!(
             fire(AUTO_SHOT, true, Some(AUTO_SHOT), Some(AUTO_SHOT)).0,
-            Vec::<u32>::new(),
+            None,
             "Auto Shot's own column 38 is 0 — no second hop"
         );
         // Not our in-flight cast (a proc's result, a stale reply): not ours to chain from.
         assert_eq!(
             fire(SERPENT_STING, true, Some(133), None).0,
-            Vec::<u32>::new(),
+            None,
             "a reply for a spell we do not have in flight chains nothing"
         );
     }

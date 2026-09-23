@@ -33,7 +33,9 @@ tracy = ["bevy/trace_tracy"]
 # Opt-in Chrome-trace profiling: `cargo run --features trace_chrome` writes a `trace-<ts>.json` of
 # every system's per-run span next to the working dir. Tracy's offline twin — it needs no GUI and no
 # live capture, so a per-system cost question is answerable from a terminal (and from a run someone
-# else recorded). Aggregate it with `scripts/tracesum.py`.
+# else recorded). Its readers: `scripts/tracesum.py` (per-span totals), `scripts/framecost.py`
+# (the per-frame cost ledger, 0718) and `scripts/tracebands.py` (a window band-mapped into
+# replaceable units, 1413/1414).
 trace_chrome = ["bevy/trace_chrome"]
 # Browser render backend, forwarded from `wenilla` (see benilla-world's note on why the world
 # needs WebGPU).
@@ -175,11 +177,6 @@ serde_json = "1"
 # the browser reaches the reader through `benilla-formats`, not from here.
 benilla-pack = { path = "../benilla-pack" }
 benilla-mpq = { path = "../benilla-mpq" }
-
-# The WMO portal-cull audit's raw-face instruments (`WOW_PIN_COL`): the pin probe compares the
-# filtered walking-collision set against the group file's FULL face list with per-face MOPY flags,
-# which only the raw parser exposes — benilla-formats' gathers are exactly the filtered views.
-benilla-wmo = { path = "../benilla-wmo" }
 
 # Linux/BSD: the Wayland clipboard (decision 0702). We build with bevy's `wayland` feature, so on a
 # Wayland session winit gives us a native Wayland window and `arboard` — X11-only without its

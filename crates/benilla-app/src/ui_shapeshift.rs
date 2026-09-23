@@ -21,7 +21,7 @@
 //!   MOD_SHAPESHIFT spell, the 48-slot aura scan for a force-admitted one ([`form_active`]).
 //! - **isCastable**: the active form reads hardcoded-castable; otherwise the usability predicate
 //!   `0x6e3d60` — the SAME full walk the action bar's `IsUsableAction` runs
-//!   ([`crate::ui_action::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
+//!   ([`crate::spell::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
 //!   states, the power gate).
 //! - **cooldown**: the form spell's own spell/category read ([`Cooldowns::info`]).
 //! - **Click** (`CastShapeshiftForm`): the ACTIVE form CANCELS (`CMSG_CANCEL_AURA`) — unless
@@ -64,11 +64,12 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ShapeshiftFormView, UiScript};
 
-use crate::cooldowns::Cooldowns;
 use crate::items::Items;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, Reputations, SelfPlayer};
+use crate::spell::Cooldowns;
+use crate::spell::{cast_target, usable, CastCommit, CastLadder};
 use crate::target::Selection;
-use crate::ui_action::{cast_target, usable, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -233,14 +234,16 @@ fn feed_shapeshift_bar(
     cooldowns: Res<Cooldowns>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     selection: Res<Selection>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the guid index the selection resolves through, plus the bag
+    // walk behind each form's reagent leg. One param, not two.
+    objects: Objects,
     units: Query<&ObjectStore, Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<Reputations>,
     items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
-    spell_mods: Res<crate::spell_mods::SpellModifiers>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -260,8 +263,8 @@ fn feed_shapeshift_bar(
     // action feed's own ctx.
     let target_store = selection
         .guid
-        .and_then(|g| index.0.get(&g))
-        .and_then(|&e| units.get(e).ok());
+        .and_then(|g| objects.entity(g))
+        .and_then(|e| units.get(e).ok());
 
     // Admission + order (module docs).
     let mut rows: Vec<(u32, &benilla_formats::SpellDisplay)> = actions
@@ -286,7 +289,7 @@ fn feed_shapeshift_bar(
 
     // The bags walked once for every form's reagent leg (see `feed_action_state`).
     let carried = store
-        .map(|s| crate::ui_items::carried_counts(&s.0, &items))
+        .map(|s| crate::ui_items::carried_counts(&s.0, &objects))
         .unwrap_or_default();
     let fresh: Vec<ShapeshiftFormView> = rows
         .into_iter()
@@ -305,7 +308,7 @@ fn feed_shapeshift_bar(
                         carried: &carried,
                         spell_mods: &spell_mods,
                     };
-                    usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
+                    usable::spell_usable(id, d, &spells, &ctx, &objects, &items, &commands).0
                 });
             let texture = form_texture(d, active);
             let cooldown = cooldowns

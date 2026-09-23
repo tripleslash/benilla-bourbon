@@ -32,6 +32,7 @@ use bevy::prelude::*;
 
 use benilla_formats::{SpellFocusCatalog, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM};
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use benilla_ui::script::{
     TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
 };
@@ -39,8 +40,9 @@ use benilla_ui::script::{
 use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
@@ -54,7 +56,10 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 pub(crate) struct TradeSkillOpens(pub(crate) Vec<u32>);
 
 /// The open crafting book: the skill line whose recipes the window shows. `None` = closed.
-/// Client-local state — no wire owns it (0437).
+/// Client-local state — no wire owns it (0437). Cleared by the Lua close and by the session end
+/// ([`on_session_end`]): a logout installs a fresh VM without running the old one's `OnHide`, so
+/// the close alone never comes, and the next login's feed would fire `TRADE_SKILL_SHOW` into the
+/// new character's UI.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSkillOpen {
     pub(crate) line: Option<u32>,
@@ -62,7 +67,8 @@ pub(crate) struct TradeSkillOpen {
 
 /// The Create/Create All repeat machine (TU-D, byte-confirmed — decision 0446):
 /// `DoTradeSkill(spell, n)` latches `n`, casts once, and each of our own `SMSG_SPELL_GO`s for
-/// that spell decrements and re-casts until dry; any cast failure or a window close stops it cold.
+/// that spell decrements and re-casts until dry; any cast failure, a window close or the session
+/// end ([`on_session_end`]) stops it cold.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSkillRepeat {
     pub(crate) spell_id: u32,
@@ -86,6 +92,7 @@ pub(crate) struct UiTradeSkillPlugin;
 
 impl Plugin for UiTradeSkillPlugin {
     fn build(&self, app: &mut App) {
+        app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<TradeSkillOpens>()
             .init_resource::<TradeSkillOpen>()
             .init_resource::<TradeSkillRepeat>()
@@ -102,6 +109,20 @@ impl Plugin for UiTradeSkillPlugin {
                 ),
             );
     }
+}
+
+/// The book and its repeat die with the session — a listener on the session end (a second handler
+/// on the kind, after the bridge's own teardown). Queued opener casts go too: they were the old
+/// character's.
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut opens: ResMut<TradeSkillOpens>,
+    mut open: ResMut<TradeSkillOpen>,
+    mut repeat: ResMut<TradeSkillRepeat>,
+) {
+    opens.0.clear();
+    open.line = None;
+    repeat.clear();
 }
 
 fn load_spell_focus(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
@@ -250,9 +271,10 @@ fn resolve_recipe(
     icons: Option<&ItemDisplays>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
-    cooldowns: &crate::cooldowns::Cooldowns,
+    cooldowns: &crate::spell::Cooldowns,
     now: Instant,
 ) -> Option<TradeSkillRecipe> {
     let d = spells.catalog.get(spell_id)?;
@@ -262,7 +284,7 @@ fn resolve_recipe(
     let mut reagents = Vec::new();
     let mut num_available = u32::MAX;
     for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-        let have = count_of(&store.0, items, entry, InventoryScope::CARRIED);
+        let have = count_of(&store.0, objects, entry, InventoryScope::CARRIED);
         let (name, icon) = match items.template(entry, 0, commands) {
             Some(t) => (Some(t.name.clone()), item_icon(icons, t.display_info_id)),
             None => (None, None),
@@ -337,7 +359,7 @@ fn resolve_recipe(
         }
     }
     for &t in d.totems.iter().filter(|&&t| t != 0) {
-        let have = count_of(&store.0, items, t, InventoryScope::CARRIED) > 0;
+        let have = count_of(&store.0, objects, t, InventoryScope::CARRIED) > 0;
         if let Some(info) = items.template(t, 0, commands) {
             tools.push((info.name.clone(), have));
         }
@@ -376,9 +398,10 @@ fn feed_trade_skill(
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
     repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
 ) {
     let Some(mut script) = script else {
@@ -417,6 +440,7 @@ fn feed_trade_skill(
                     icons.as_deref(),
                     subclasses.as_deref(),
                     store,
+                    &objects,
                     &items,
                     &commands,
                     &cooldowns,
@@ -634,5 +658,34 @@ mod tests {
         // The template landed but ItemDisplayInfo is unresolved — still nil, still not "SPELL".
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
         assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
+    }
+
+    /// **The book and its repeat die with the session.** Both are client-local and only the Lua
+    /// close cleared them — but a logout installs a fresh VM without running the old one's
+    /// `OnHide`, so the close never comes: the next login's feed saw `None → Some` and fired
+    /// `TRADE_SKILL_SHOW` into the new character's UI, and a latched "Create All" re-cast on that
+    /// character's first own `SMSG_SPELL_GO` of the same id. Driven through the real registration.
+    #[test]
+    fn the_session_end_closes_the_book_and_drops_the_repeat() {
+        let mut app = App::new();
+        app.add_plugins(UiTradeSkillPlugin);
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
+        {
+            let mut repeat = app.world_mut().resource_mut::<TradeSkillRepeat>();
+            repeat.spell_id = 3915;
+            repeat.remaining = 4;
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        assert_eq!(app.world().resource::<TradeSkillOpen>().line, None);
+        let repeat = app.world().resource::<TradeSkillRepeat>();
+        assert_eq!((repeat.spell_id, repeat.remaining), (0, 0));
     }
 }

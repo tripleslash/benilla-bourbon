@@ -19,7 +19,7 @@
 //! (slot 2 is never read), max with candidate-1 winning ties/NaN. **Out of range forces the
 //! radius to 0.0** — the decal shrinks to the 1.3888889 default *and* turns red. `r == 0` (no
 //! radius rows — a dest spell with no area) also draws at the default. Spell-mod op 6
-//! (SPELLMOD_RADIUS) is not folded in: the tables are live ([`crate::spell_mods`]), this consumer
+//! (SPELLMOD_RADIUS) is not folded in: the tables are live (`crate::spell::mods`), this consumer
 //! is not wired to them (the same residual as the range gate, 0792).
 //!
 //! **States**: in range → Acceptable at `r`; out of range → Unacceptable at the default size;
@@ -35,8 +35,9 @@
 use bevy::prelude::*;
 
 use crate::net::{ObjectStore, SelfPlayer};
+use crate::spell::{ground_cast_radius, SpellTargeting, TargetingWants};
 use crate::target::{PickOcclusion, WorldCursor};
-use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells, TargetingWants};
+use crate::ui_action::Spells;
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::particles::buffer::EffectVertex;
 use benilla_world::view::WorldCamera;
@@ -211,7 +212,7 @@ pub(super) fn push_reticle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_action::CastCommit;
+    use crate::spell::CastCommit;
     use avian3d::prelude::Collider;
     use benilla_world::collision::GroundDecalSurface;
     use bevy::ecs::system::RunSystemOnce;

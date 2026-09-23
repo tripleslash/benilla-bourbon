@@ -166,14 +166,13 @@ pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 140.0;
 /// — player-settable through **either** registered CVar over this one field, [`ClutterConfig::frill_density`]
 /// being the conversion: `WorldDetail` (the panel's stop, 0/1/2 → ×1/×2/×3) or `frillDensity` (the
 /// reference's own cells-per-chunk, 1..256), both arms in `benilla-app`'s `cvars`;
-/// `scale` resizes each doodad model; `alpha_ref` is the alpha-test cutout threshold
+/// `alpha_ref` is the alpha-test cutout threshold
 /// ([`DETAIL_DOODAD_ALPHA_REF`]); `fade_far` is the clutter draw-distance horizon (yd,
 /// [`DETAIL_DOODAD_FADE_FAR`]; fade starts at 0.75×). Initial values from `$WOW_CLUTTER_DENSITY` /
-/// `$WOW_CLUTTER_SCALE` / `$WOW_CLUTTER_ALPHA` / `$WOW_CLUTTER_FADE`; `density 0` disables clutter.
+/// `$WOW_CLUTTER_ALPHA` / `$WOW_CLUTTER_FADE`; `density 0` disables clutter.
 #[derive(Resource, Clone, Copy)]
 pub struct ClutterConfig {
     pub density: f32,
-    pub scale: f32,
     pub alpha_ref: f32,
     pub fade_far: f32,
 }
@@ -225,7 +224,6 @@ impl Default for ClutterConfig {
             // rather than left to the row because this literal and the CVar's registered default
             // are the same fact spelled twice, welded by `cvars::tests`.
             density: env("WOW_CLUTTER_DENSITY").unwrap_or(3.0).max(0.0),
-            scale: env("WOW_CLUTTER_SCALE").unwrap_or(1.0).max(0.01),
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)
                 .clamp(0.0, 1.0),
@@ -416,7 +414,6 @@ pub(crate) fn scatter_tile_clutter(
 fn build_chunk_clutter(
     chunk_entity: Entity,
     models: &[(String, Vec<ShadedPlacement>)],
-    scale: f32,
     alpha_ref: f32,
     fade_far: f32,
     geometry: &mut ClutterGeometry,
@@ -451,8 +448,8 @@ fn build_chunk_clutter(
                 let base = positions.len() as u32;
                 let origin = wow_to_bevy(d.position);
                 let rot = Quat::from_rotation_y(d.yaw);
-                // Per-instance scale (client's random [0.9,1.1]) × the debug-panel size multiplier.
-                let inst_scale = scale * d.scale;
+                // Per-instance scale (the client's random [0.9,1.1]).
+                let inst_scale = d.scale;
                 // MCSH tint per placement — same value on every vertex of THIS instance, so all
                 // tris of one grass clump share the lit/shadowed colour. The shader multiplies
                 // `texture × vertex_color` in gamma space (the faithful MODULATE 1×).
@@ -640,7 +637,6 @@ pub(crate) fn stream_chunk_clutter(
         let built = build_chunk_clutter(
             ent,
             &cc.models,
-            cfg.scale,
             cfg.alpha_ref,
             cfg.fade_far,
             &mut geometry,

@@ -30,7 +30,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{CursorPayload, UiScript};
 
-use super::cast_send::{CastCommit, TargetedBind};
+use crate::spell::{CastCommit, TargetedBind};
 
 /// `0x6ea1e0` — is this unit a pet *I* can feed? All three gates, in the reference's order. Any
 /// miss is a silent refusal (see the module docs), so this returns a plain bool rather than a
@@ -74,7 +74,7 @@ pub(crate) fn drop_item_on_unit(
     learned: Res<super::LearnedAbilities>,
     press: Res<crate::target::PressPick>,
     mut clicks: MessageReader<benilla_world::interact::WorldClick>,
-    mut ladder: super::CastLadder,
+    mut ladder: crate::spell::CastLadder,
 ) {
     let Some(mut script) = script else {
         clicks.clear();
@@ -127,7 +127,7 @@ pub(crate) fn drop_item_on_unit(
         };
         let slot0 = u8::try_from(held.slot.saturating_sub(1)).unwrap_or(0);
         let Some(item_guid) =
-            crate::ui_items::slot_guid(&self_store.0, held.bag, slot0, &ladder.items)
+            crate::ui_items::slot_guid(&self_store.0, held.bag, slot0, &ladder.objects)
         else {
             continue; // the slot emptied under us — silent, as every refusal here is
         };

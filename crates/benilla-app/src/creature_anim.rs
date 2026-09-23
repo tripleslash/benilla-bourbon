@@ -217,7 +217,7 @@ pub(crate) struct Engaged(pub(crate) u64);
 /// clear `0x6ea113`), reached from the cast-result fail of the cached spell, the button
 /// re-press toggle, melee attack-start, target death, the wand-only new-cast handoff, and
 /// `SMSG_CANCEL_AUTO_REPEAT` — which vmangos DOES send (corrected 2026-08-05; see
-/// [`crate::net::apply::spells::cancel_auto_repeat`]), so against a live server that packet, not
+/// `crate::spell::net`'s `cancel_auto_repeat`), so against a live server that packet, not
 /// a local death watcher, is what ends a volley whose target dies (wow-re
 /// `nocked-ammo-cancel.md`).
 #[derive(Component)]
@@ -310,7 +310,7 @@ pub(crate) fn drive_nock_latch(
 /// live callers.
 pub(crate) fn cancel_auto_repeat_local(
     entity: Option<Entity>,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
 ) {
@@ -335,7 +335,7 @@ pub(crate) fn cancel_auto_repeat_local(
 /// `Attributes & 0x404` and hands it to `CancelCast 0x6e4940(dl=1, reason 0x1c)`, whose casting arm
 /// sends `CMSG_CANCEL_CAST 0x12f` naming it and then pops the slot through `0x6e4ad0`.
 ///
-/// This is the un-queue [`crate::ui_cast::QueuedMeleeSpell`] names as its real clear path, and it
+/// This is the un-queue [`crate::spell::QueuedMeleeSpell`] names as its real clear path, and it
 /// is why a Raptor Strike ring goes dark the moment Auto Shot starts (the auto-repeat arm inside
 /// the cast commit calls straight into here, `0x6e5976`, guarded by nothing but "the caster is the
 /// active player").
@@ -346,12 +346,12 @@ pub(crate) fn cancel_auto_repeat_local(
 /// are deliberately unmodelled, neither with a benilla reader: `[+0xc50]` ("locally initiated, not
 /// server-confirmed") and `[+0xc54]` ("stop sent, awaiting the echo") — the latter's sole reader
 /// image-wide is `0x5eccda`, inside `Attack 0x5ecb70`, which no benilla cast path enters while
-/// engaged (see [`crate::ui_action::cast_send`]'s tail). The two ratio legs `0x5ecac0` runs before
+/// engaged (see [`crate::spell::cast_send`]'s tail). The two ratio legs `0x5ecac0` runs before
 /// the stop are `TriggerTutorial(0xa)` / `(0xb)` — the low-health / low-mana popups, not audio and
 /// not part of this seam.
 pub(crate) fn stop_attack_local(
     engaged: bool,
-    queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
+    queued_melee: &mut crate::spell::QueuedMeleeSpell,
     net: &crate::net::NetCommands,
 ) {
     if !engaged {
@@ -395,7 +395,7 @@ pub(crate) fn start_attack_local(
     target: u64,
     engaged: bool,
     stop_in_flight: bool,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     sheath: &mut MessageWriter<SheathRequest>,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
@@ -447,8 +447,8 @@ pub(crate) fn toggle_attack_local(
     entity: Entity,
     target: u64,
     engaged: bool,
-    queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    queued_melee: &mut crate::spell::QueuedMeleeSpell,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     sheath: &mut MessageWriter<SheathRequest>,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
@@ -476,13 +476,13 @@ pub(crate) fn toggle_attack_local(
 /// The targeting side needs exactly this: `target::scan`'s `commit` runs the reference's
 /// stop → select → re-swing law (`SetSelection 0x493540`'s own `0x493a08 call 0x5ecac0` and
 /// `0x4938c8 call 0x5ecb70`), so every selection writer that can fire it has to carry both seams'
-/// inputs. [`crate::ui_action::cast_send::CastLadder`] already carries them field by field for the
+/// inputs. [`crate::spell::cast_send::CastLadder`] already carries them field by field for the
 /// cast path and calls the free functions directly.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct AttackSeam<'w, 's> {
     pub(crate) net: Res<'w, crate::net::NetCommands>,
-    pub(crate) queued_melee: ResMut<'w, crate::ui_cast::QueuedMeleeSpell>,
-    pub(crate) auto_repeat: ResMut<'w, crate::ui_action::AutoRepeatActive>,
+    pub(crate) queued_melee: ResMut<'w, crate::spell::QueuedMeleeSpell>,
+    pub(crate) auto_repeat: ResMut<'w, crate::spell::AutoRepeatActive>,
     pub(crate) sheath: MessageWriter<'w, SheathRequest>,
     pub(crate) ecs: Commands<'w, 's>,
     /// Our own entity — the sheath snap's and the auto-repeat cancel's subject.
@@ -847,6 +847,7 @@ pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, Sw
 /// one-shots ([`EmoteAnim`]) and kit sounds ([`spell_visual::SpellKitSound`]).
 mod blood;
 mod env_damage;
+pub(crate) mod net;
 pub(crate) mod spell_visual;
 use blood::{blood_spurts, load_blood_tables};
 use env_damage::{hard_landing_dust, load_env_damage_table};
@@ -1165,6 +1166,7 @@ pub(crate) struct CreatureAnimPlugin;
 
 impl Plugin for CreatureAnimPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         twist::plugin(app);
         lod::plugin(app);
         breath::register(app);
@@ -1356,13 +1358,13 @@ mod attack_stand_tests {
         // A dead-letter net channel: the send is `let _ = …` and no packet is under test here.
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_resource(crate::ui_action::AutoRepeatActive(None));
+        app.insert_resource(crate::spell::AutoRepeatActive(None));
 
         let me = app.world_mut().spawn_empty().id();
         app.add_systems(
             Update,
             move |mut commands: Commands,
-                  mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
+                  mut auto_repeat: ResMut<crate::spell::AutoRepeatActive>,
                   mut sheath: MessageWriter<SheathRequest>,
                   net: Res<crate::net::NetCommands>| {
                 start_attack_local(

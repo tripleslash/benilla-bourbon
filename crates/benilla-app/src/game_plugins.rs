@@ -130,6 +130,9 @@ impl PluginGroup for GamePlugins {
             // Streamed world entities: cube assets + display catalogs at startup, sync each frame.
             .add(EntitiesPlugin)
             // Creature animation: pick Stand/Walk/Run from each creature's movement state each frame (Milestone C).
+            // The combat log — every combat packet's chat line and floating number, one handler each
+            // (decision 2323); ahead of the animation layer, whose two shared kinds run second.
+            .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
             // The unit blob shadow: the dark ground oval under every unit, sized from the playing
             // animation's box (the byte-verified law — wow-re unit-blob-shadow RE), on the same
@@ -269,11 +272,6 @@ impl PluginGroup for GamePlugins {
             // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
             // attack target stands and no swing lands.
             .add(crate::swing_refusal::SwingRefusalPlugin)
-            // The talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`): the wire
-            // fills them, world-enter clears them, and `usable::power_cost` reads op 14 out of
-            // them. Beside the swing refusal because both are the same shape — a small wire-fed
-            // store with a world-entry reset — and neither has a feed of its own.
-            .add(crate::spell_mods::SpellModsPlugin)
             // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
             // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
             // server-asked question whose only wire answer is yes — and here for that reason.
@@ -323,6 +321,11 @@ impl PluginGroup for GamePlugins {
             // feed, whose shape it shares (intents in, a booth look out).
             .add(crate::ui_dressup::DressUpUiPlugin)
             .add(UiActionPlugin)
+            // The spell (2265 §A7's owner): the cast lifecycle's state — the pending cast, the queued
+            // strike, the running channel, the auto-repeat key, the chain outbox — its local cancel,
+            // the cooldown store, the talent modifier tables and the packet handlers (decisions 2324,
+            // 2328). After UiActionPlugin, whose feeds and cast ladder read the state through it.
+            .add(crate::spell::SpellPlugin)
             // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
             // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and
             // drains the right-click cancels. After UiActionPlugin (shares its `Spells` catalog).
@@ -351,7 +354,7 @@ impl PluginGroup for GamePlugins {
             // The stance/shapeshift bar feed (wow-re shapeshift-bar-api.md): builds the form list from
             // PlayerActions.spells per the byte-verified admission/order, drives the stock shapeshift bar through
             // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
-            // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
+            // UiActionPlugin (shares `Spells`) and SpellPlugin (the `usable` walk, the cast tail).
             .add(UiShapeshiftPlugin)
             // The pet action bar (decision 0982) — the stance bar's mirror image: server-authoritative,
             // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
@@ -545,14 +548,37 @@ pub(crate) mod schedule_tests {
         }
     }
 
+    /// Which graph a census reads (decision 2337).
+    ///
+    /// Bevy's build inserts an `ApplyDeferred` barrier between a system with commands and its
+    /// dependents, and it **shares one barrier per "distance"** (the number of barriers between
+    /// a node and the schedule's start — `auto_insert_apply_deferred.rs`, `get_sync_point`).
+    /// Two systems that share a barrier are ordered *through* it, so a pair the graph never
+    /// declared reads as ordered — and one edge added anywhere upstream re-homes whole groups
+    /// onto a different barrier and moves pairs among systems the edit never touched (2333's
+    /// five-out-six-in). Measured on this tree the day it was named: 2,888 actionable pairs
+    /// with the barriers, 5,063 without — the barriers were hiding 43% of the undeclared
+    /// orders behind their accidental placement.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum SyncPoints {
+        /// The schedule as it actually runs, barriers included — what an executor census
+        /// wants, since a barrier really is a wave boundary.
+        Built,
+        /// The **declared** graph only: no auto-inserted barriers, so "no path between two
+        /// systems" means exactly "nobody declared an order", and the count is a function of
+        /// the edges alone. What a ratchet on undeclared orders must read.
+        Declared,
+    }
+
     /// Take the census of one schedule. Initializing it runs every system's param setup, and
     /// at least one of those inserts `Schedules` itself, so this goes through bevy's own
     /// take-out-initialize-put-back rather than a `resource_scope` on that resource.
-    pub(crate) fn census(app: &mut App, label: impl ScheduleLabel) -> Census {
+    pub(crate) fn census(app: &mut App, label: impl ScheduleLabel, sync: SyncPoints) -> Census {
         let label = label.intern();
         app.world_mut().schedule_scope(label, |world, schedule| {
             schedule.set_build_settings(ScheduleBuildSettings {
                 ambiguity_detection: LogLevel::Warn,
+                auto_insert_apply_deferred: sync == SyncPoints::Built,
                 ..default()
             });
             // The systems' access is filled by `initialize`, which the build below would run
@@ -732,13 +758,13 @@ pub(crate) mod schedule_tests {
     ///   writers commute, and a drain's order against a writer is one frame of latency, never
     ///   a loss. (2283's ten pairs were all this shape: a new verb drain against its siblings
     ///   over the chat and error sinks.)
-    /// - **An exclusive edge** — a pair bevy reports with NO component list: one side is a
-    ///   build-inserted `ApplyDeferred` sync point or an exclusive system, which conflicts on
-    ///   `World` itself. Its order against a system it shares nothing with is immaterial by
-    ///   construction (the build already placed the barrier after the commands it flushes and
-    ///   before their dependents), and there is nothing to declare it against. Until 2304 an
-    ///   empty list read as "VM only" vacuously, so that class rose and fell with the barrier
-    ///   count; now it is named.
+    /// - **Not an exclusive edge.** A pair bevy reports with NO component list has an exclusive
+    ///   system on one side (`bevy_ecs` `node.rs:625`: it reports every unordered pair with an
+    ///   exclusive system and never reads its access). 2304 explained that class as the
+    ///   build's barriers; the ratchet reads the declared graph since 2337, which has none, so
+    ///   what it held was only the hand-written exclusive systems — the net drain, whose 143
+    ///   unordered partners read this frame's packets or the last frame's by coin, and
+    ///   `finish_colliders`. Those are undeclared orders like any other: actionable (2343).
     /// - **A random stream** — `SoundKits`, which every sound system holds to play a kit: a
     ///   decode cache, a per-kit last-variation memory and one xorshift stream. Any
     ///   interleaving of draws is a valid draw, and that is the reference's own contract for
@@ -833,8 +859,10 @@ pub(crate) mod schedule_tests {
 
         /// Which class explains this pair — `None` if it is actionable.
         pub fn class_of(&self, what: &[ComponentId]) -> Option<&'static str> {
+            // An exclusive system on one side: bevy cannot see its access, so nothing here can
+            // argue the pair away (see the doc above: not an exclusive edge).
             if what.is_empty() {
-                return Some("exclusive");
+                return None;
             }
             if !what.iter().all(|id| self.explains(*id)) {
                 return None;
@@ -870,11 +898,13 @@ pub(crate) mod schedule_tests {
     }
 
     /// `PostUpdate`, 181 systems: `GlobalTransform` and the particle `EffectQuads` are most of it.
+    /// **371 (decision 2337)** — the declared-graph count, re-measured beside `Update`'s when
+    /// the census stopped reading bevy's barriers as orders (see the ledger below).
     ///
-    /// **353 (fork: benilla-bourbon, merge of upstream edec5b22)** — upstream's 351 was measured on a
-    /// tree without this fork's systems; the merged tree measures two more. Not yet read pair by
+    /// **375 (fork: benilla-bourbon, merge of upstream dd196298)** — upstream's 371 was measured on a
+    /// tree without this fork's systems; the merged tree measures four more. Not yet read pair by
     /// pair — a fork-side follow-up, like the `Update` ceiling below.
-    const POST_UPDATE_CEILING: usize = 353;
+    const POST_UPDATE_CEILING: usize = 375;
     const POST_UPDATE_SLACK: usize = 20;
     /// The **actionable** pairs in `Update` — two systems with conflicting access and no
     /// declared order, where [`Classes`] explains none of what they share, so the executor
@@ -958,19 +988,54 @@ pub(crate) mod schedule_tests {
     /// the row behind it is, and it is written by whoever owns it. A scene is also built **once**,
     /// the frame its model asset lands, against a reaper that fires only when a tile dies.
     ///
+    /// **2,886 (decision 2330)** — read off the dump on the tree that lands, after the
+    /// `modalNextSpell` outbox's drain retired: `drain_chain_casts` held the whole cast ladder
+    /// (`CastLadder`'s fourteen parameters and `CastTargeting`'s ten) with no declared order
+    /// against anything but `UiInput`, and the cast reply's handler now casts the chain itself,
+    /// as a one-shot outside the schedule. The three targeting systems the same record moved
+    /// from `UiActionPlugin` to `SpellPlugin` kept their orders and their sets.
+    ///
+    /// **2,888 (decision 2333)** — the trainer feed became the state re-evaluator's host and
+    /// reads the pet bar, the player's descriptor and its field edges. Read off the dump on the
+    /// tree that lands: undeclared, the feed met six systems; `.after(UnitFeed)` (the shape the
+    /// demo unit feed already takes) declares five of them, and the one it keeps —
+    /// `entities::evict_display_caches` — is the pair every feed that reads `ItemDisplays` has
+    /// (42 on this tree). So the feed's own count went 6 → 1, and the total went 2,887 → 2,888:
+    /// diffing the two dumps, the edge **re-partitioned** the census — five pairs among unrelated
+    /// systems (`cinematic::*` against `ui_logout::drain_logout`, `arm_loot_fx` against the
+    /// party/social drains, …) left the actionable list and six others (`resolve_equipment`
+    /// against `drain_guild`, `emit_minimap` against `drain_quest`, …) entered it, none of them
+    /// touching anything this record touched. That is the instrument moving under an edge, not
+    /// a new undeclared order; 2333 hands it to this ratchet's owner (2287) as a finding. The
+    /// number is the dump's, not a sum.
+    ///
+    /// **5,063 (decision 2337)** — not a raise: a re-measurement. Until here the census read
+    /// the *built* schedule, barriers included, and bevy shares one `ApplyDeferred` barrier per
+    /// distance from the schedule's start — so 2,175 pairs (43%) were "ordered" only through a
+    /// barrier the build happened to place between them, and moved whenever an edge anywhere
+    /// upstream re-homed a group onto another barrier: that is 2333's five-out-six-in, and it is
+    /// the one build step that can make a pair *enter* when an edge is added. The ratchet reads
+    /// the declared graph now ([`SyncPoints::Declared`]); this is the same tree's count with the
+    /// barriers gone, checked by removing one declared edge and watching exactly its five pairs
+    /// return and nothing else move. The dump prints each pair in canonical order since the same
+    /// record, so two dumps diff by text. The number is the dump's, not a sum.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
+    /// **5,608 (decision 2343)** — not a raise: a re-measurement. The 556 pairs with an
+    /// exclusive system on one side were read as "explained" by a class argued for the build's
+    /// barriers, which the declared graph (2337) no longer has; 413 are `finish_colliders`', 143
+    /// the net drain's. Same tree, the class dropped, nothing else moved: 5,052 + 556.
+    /// **5,554 (decision 2345)** — lowered: the TAB scan stopped reading `Visibility` (the draw
+    /// election's verdict), which ended its pairs with every `Visibility` writer.
     ///
-    /// **3,148 (fork: benilla-bourbon, merge of upstream edec5b22)** — upstream's 2,975 plus this
-    /// fork's own systems, which upstream's measurement never saw: the modern lighting model, the
-    /// Cataclysm liquid path's reflection camera and ripple clock, SSILVB, the character shadow
-    /// map, and the web build's writer pump and stutter probe. Read off the dump rather than
-    /// assumed: 222 of the 3,148 pairs name a module this fork added, and without them the count
-    /// sits under upstream's ceiling. Most are camera/transform readers against the reflection
-    /// camera sync and `blob_shadow::update_shadows` (which the fork gates on `worldShadows`) —
-    /// orders worth declaring as a fork-side follow-up rather than inside a merge.
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_148;
+    /// **5,801 (fork: benilla-bourbon, merge of upstream dd196298)** — upstream's 5,554 plus the 247
+    /// pairs this fork's own systems add under the declared-graph count: the modern lighting model,
+    /// the Cataclysm liquid path's reflection camera and ripple clock, SSILVB, the character shadow
+    /// map, and the web build's writer pump and stutter probe. Measured on the merged tree, not
+    /// assumed; declaring those orders is a fork-side follow-up, not a merge's.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_801;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -995,8 +1060,10 @@ pub(crate) mod schedule_tests {
     #[test]
     fn the_schedules_have_no_more_undeclared_orders_than_the_ceilings_say() {
         let mut app = headless_client();
-        let update = census(&mut app, Update);
-        let post = census(&mut app, PostUpdate);
+        // The declared graph, not the built one: a barrier bevy placed is not an order anyone
+        // declared, and it moves under unrelated edits (2337; see [`SyncPoints`]).
+        let update = census(&mut app, Update, SyncPoints::Declared);
+        let post = census(&mut app, PostUpdate, SyncPoints::Declared);
         let mut explained: BTreeMap<&str, usize> = BTreeMap::new();
         let mut actionable = Vec::new();
         for (a, b, what) in &update.conflicts {
@@ -1025,10 +1092,17 @@ pub(crate) mod schedule_tests {
             let mut rows: Vec<String> = actionable
                 .iter()
                 .map(|(a, b, what)| {
+                    // Canonical order within the pair: bevy reports (a, b) in whichever order
+                    // its walk met them, and a diff of two dumps must not see that as movement.
+                    let (x, y) = if update.name(*a) <= update.name(*b) {
+                        (*a, *b)
+                    } else {
+                        (*b, *a)
+                    };
                     format!(
                         "  {}  <->  {}\n      on {}",
-                        update.name(*a),
-                        update.name(*b),
+                        update.name(x),
+                        update.name(y),
                         what.iter()
                             .map(|id| update.component(*id))
                             .collect::<Vec<_>>()
@@ -1160,10 +1234,15 @@ pub(crate) mod schedule_tests {
     /// The structural half of 2265 §A3's executor question — is the prize of collapsing the VM
     /// (and the audio layer) to one `Send` owner correctness only, or correctness plus
     /// parallelism? Prints the serial depth of `Update` today and under each collapse.
+    ///
+    /// An instrument, not a gate: it asserts nothing, so it can only fail by panicking inside the
+    /// census, and it boots a headless client to print four numbers. Ignored for the same reason
+    /// `reference_ui`'s chain reports are (2331); run it by hand when the A3 question is live.
     #[test]
+    #[ignore = "instrument: run by hand (2265 §A3's executor census) — cargo test -p benilla-app --lib concurrency_census -- --ignored --nocapture"]
     fn concurrency_census() {
         let mut app = headless_client();
-        let c = census(&mut app, Update);
+        let c = census(&mut app, Update, SyncPoints::Built);
         let holds = |k: SystemKey, pick: &dyn Fn(ComponentId) -> bool| {
             c.conflicts
                 .iter()
@@ -1254,7 +1333,7 @@ pub(crate) mod schedule_tests {
     #[test]
     fn every_vm_holder_in_update_declares_its_side_of_the_tick() {
         let mut app = headless_client();
-        let c = census(&mut app, Update);
+        let c = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&c) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
@@ -1398,7 +1477,7 @@ pub(crate) mod schedule_tests {
          "`seen_generation` is a `VmMemo`: a new VM reads `None`, rebuilds and re-fires UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
          "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the boot VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
-        ("death.rs", "feed_death", Because::MemoLatched,
+        ("death/mod.rs", "feed_death", Because::MemoLatched,
          "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo makes the first snapshot an edge and re-announces a held offer, confirm and corpse range"),
         ("screenshot.rs", "ask_for_captures", Because::FilledByVm,
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),
@@ -1524,14 +1603,14 @@ pub(crate) mod schedule_tests {
             }
         }
         let mut app = headless_client();
-        let update = census(&mut app, Update);
+        let update = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&update) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
             );
             return;
         }
-        let post = census(&mut app, PostUpdate);
+        let post = census(&mut app, PostUpdate, SyncPoints::Built);
         let by_name: HashMap<&str, &SystemInfo> = update
             .systems
             .values()

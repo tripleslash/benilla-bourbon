@@ -14,7 +14,7 @@ use super::{
     action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
-    progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
+    pose, progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
     trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
     CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
@@ -42,10 +42,12 @@ fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPack
 /// packet, but silence here is what cost days: an unhandled inner opcode has to be loud. Only the
 /// `MSG_MOVE_*` relays vmangos routes through `ObjectViewersMovementDeliverer` can appear, and we
 /// model all of them (`the_batch_carries_every_relayed_move_opcode`).
-fn read_compressed_moves(r: &mut impl Read) -> io::Result<Vec<ServerPacket>> {
+fn read_compressed_moves(r: &mut &[u8]) -> io::Result<Vec<ServerPacket>> {
     let uncompressed = read_u32_le(r)? as usize;
     let mut buf = Vec::with_capacity(uncompressed.min(64 * 1024));
-    flate2::read::ZlibDecoder::new(r).read_to_end(&mut buf)?;
+    // `bufread`, not `read`: see the compressed update object's arm — the cursor must stop at
+    // the stream's end for the tail to see what follows it.
+    flate2::bufread::ZlibDecoder::new(r).read_to_end(&mut buf)?;
     let mut rest = buf.as_slice();
     let mut packets = Vec::new();
     while !rest.is_empty() {
@@ -353,7 +355,12 @@ fn parse_server_body(
             // as unconsumed — 803 bytes on the decode-length instrument's first live login
             // (2266 §B1). The tail that means drift here is the inflated stream's, reported
             // through `inner_tail`.
-            let mut decoder = flate2::read::ZlibDecoder::new(&mut r);
+            //
+            // And through `bufread`, not `read` (2343): `read::ZlibDecoder` wraps its source in a
+            // 32 KiB buffer and fills it from the slice, so the outer cursor always ended at the
+            // BODY's end and a byte after the zlib stream could never show as a tail. The
+            // `bufread` decoder reads the slice as its own buffer and consumes exactly the stream.
+            let mut decoder = flate2::bufread::ZlibDecoder::new(&mut r);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed)?;
             drop(decoder);
@@ -1322,6 +1329,16 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
+        // Decision 2339's three — the ones vmangos sends that the reference answers.
+        opcode::SMSG_OPEN_CONTAINER => ServerPacket::OpenContainer {
+            item: items::read_open_container(&mut r)?,
+        },
+        opcode::SMSG_INSPECT => ServerPacket::Inspect {
+            guid: items::read_inspect(&mut r)?,
+        },
+        opcode::SMSG_STANDSTATE_UPDATE => ServerPacket::StandStateUpdate {
+            state: pose::read_stand_state_update(&mut r)?,
+        },
         // Both fishing verdicts are empty-bodied (the opcode IS the message).
         opcode::SMSG_FISH_NOT_HOOKED => ServerPacket::FishNotHooked,
         opcode::SMSG_FISH_ESCAPED => ServerPacket::FishEscaped,
@@ -1775,6 +1792,17 @@ mod tests {
             parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body(&longer))
                 .expect("a trailing inflated byte is not a failure");
         assert_eq!(tail, 1, "the inflated stream's leftover is the tail");
+
+        // A byte AFTER the zlib stream, in the packet body: the outer tail (2343). The `read`
+        // decoder's 32 KiB buffer swallowed it and this read 0.
+        let mut outer = body(&empty);
+        outer.extend([0xAB, 0xCD]);
+        let (_, tail) = parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &outer)
+            .expect("bytes after the stream are not a failure");
+        assert_eq!(
+            tail, 2,
+            "the body's bytes after the zlib stream are the tail"
+        );
     }
 
     /// An unknown opcode consumes nothing by definition; reporting its whole body as a tail would

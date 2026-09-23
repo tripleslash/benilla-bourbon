@@ -989,12 +989,13 @@ pub(super) fn drain_chat_input(
                         // `LeaveChannelByName` (`0x4a0000` → `0x49ee70`): the VM composed a
                         // shortcut or passed a custom name; a number names a confirmed slot here
                         // or the call is a no-op. The mask clear is this path's and no other's
-                        // (decisions 2120, 2144).
+                        // (decisions 2120, 2144), and so is the custom re-join list's.
                         let Some(name) = channels.leave_target(&name) else {
                             continue;
                         };
                         manual_join_or_leave(&channels, &mut script, &name);
                         channels.note_zone_channel_left(&name);
+                        channels.note_custom_channel_left(&name);
                         ClientCommand::LeaveChannel { name }
                     }
                     C::List { name } => ClientCommand::ChannelList { name },
@@ -1674,7 +1675,7 @@ pub(super) fn drain_addon_chat_sends(
 /// construction — it never reaches a chat frame, which is the entire point of `LANG_ADDON` — so
 /// without a line here a broadcast that went out and one that never happened look identical from
 /// our own logs, which is exactly how a silently-discarded wire body survives (method.md's rule
-/// that new wire bodies are proved, not assumed). `net::apply::chat` already writes inbound addon
+/// that new wire bodies are proved, not assumed). `ui_chat::net` already writes inbound addon
 /// traffic to the `addon` trace tag; this writes the outbound half to the same tag, so
 /// `WOW_MOVE_TRACE=<path> WOW_MOVE_TRACE_TAGS=addon` on a live run is the whole conversation in
 /// one file, in order.

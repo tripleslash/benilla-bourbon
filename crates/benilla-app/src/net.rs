@@ -23,6 +23,7 @@ use benilla_protocol::{
     messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,
     SpeedKind, TransportPose,
 };
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 
@@ -32,6 +33,10 @@ mod apply;
 pub(crate) mod handlers;
 pub(crate) mod io;
 mod motion;
+mod objects;
+pub(crate) use objects::tear_down;
+mod session;
+mod world;
 
 pub(crate) use apply::apply_net_updates;
 use apply::tag_self_player;
@@ -113,6 +118,12 @@ impl Plugin for NetPlugin {
             Update,
             publish_world_time.in_set(benilla_world::schedule::WorldStage::Net),
         );
+        // The bridge's own handlers (decision 2325): the world feed it forwards, the name cache it
+        // initialises.
+        world::register(app);
+        session::register(app);
+        objects::register(app);
+        crate::names::net::register(app);
         app.insert_resource(NetEvents(handles.events))
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
@@ -640,11 +651,48 @@ pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>
 #[derive(Resource)]
 pub(crate) struct LoginAbandon(pub(crate) std::sync::Arc<std::sync::atomic::AtomicU64>);
 
-/// guid → spawned ECS entity, for O(1) lookup on move/remove. Maintained solely by
-/// [`apply_net_updates`]; read-only to everyone else (the merchant range-close resolves its vendor
-/// through it).
+/// guid → spawned ECS entity, for O(1) lookup on move/remove — every kind, items and containers
+/// included since decision 2334 (the reference's one `ClntObjMgr` index). Maintained solely by
+/// the object layer's handlers (`net::objects`); read-only to everyone else, through [`Objects`]
+/// or directly.
 #[derive(Resource, Default)]
 pub(crate) struct GuidIndex(pub(crate) HashMap<u64, Entity>);
+
+/// **The object manager's guid lookup** — `ClntObjMgrObjectPtr 0x468460`'s shape: a guid to its
+/// descriptor store, whatever the kind. The one read-only parameter a helper that resolves guids
+/// takes (the inventory walkers resolve item guids off the player's slot arrays through it,
+/// decision 2334), and an item's countdown cells beside its fields (2340); the handlers write
+/// both through their own mutable queries.
+#[derive(SystemParam)]
+pub(crate) struct Objects<'w, 's> {
+    index: Res<'w, GuidIndex>,
+    stores: Query<'w, 's, &'static ObjectStore>,
+    countdowns: Query<'w, 's, &'static crate::items::Countdowns>,
+}
+
+impl Objects<'_, '_> {
+    /// The entity behind a guid, if streamed.
+    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+        self.index.0.get(&guid).copied()
+    }
+
+    /// A streamed object's merged descriptor fields.
+    pub(crate) fn object(&self, guid: u64) -> Option<&ObjectFields> {
+        self.index
+            .0
+            .get(&guid)
+            .and_then(|&e| self.stores.get(e).ok())
+            .map(|s| &s.0)
+    }
+
+    /// An item object's countdown cells — `None` for a guid that is not a held item.
+    pub(crate) fn countdowns(&self, guid: u64) -> Option<&crate::items::Countdowns> {
+        self.index
+            .0
+            .get(&guid)
+            .and_then(|&e| self.countdowns.get(e).ok())
+    }
+}
 
 /// Our own player's guid, once the IO thread reports we're in the world. Used to tag
 /// [`SelfPlayer`], and read by the combat-text emitters' source-ownership classifier
@@ -1964,13 +2012,12 @@ pub(crate) enum ClientCommand {
     //    several refusals (a zero bid/duration, an unaffordable bid, a cancel whose cut can't be
     //    paid, a list request while one is in flight) come back as NO packet at all. ──────────
     //
-    //    Each variant carries `#[allow(dead_code)]`: decision 1511 P0 is the WIRE, and the
-    //    auction window that will construct these is a later phase. The allow is per-variant
-    //    rather than on the enum so a genuinely dead command elsewhere still surfaces, and each
-    //    one comes off the moment its caller lands.
+    //    Every one of these is constructed by `crate::ui_auction`. 1511 P0 landed the wire
+    //    first, under a per-variant `#[allow(dead_code)]` that was to come off the moment its
+    //    caller landed; the window came and the allows stayed, so rustc could no longer judge
+    //    them. A stale allow is a lie the compiler cannot catch — none here, by design.
     /// Greet an auctioneer (`MSG_AUCTION_HELLO`, one guid) — the two-way opcode whose *reply*
     /// (an `AuctionHello` event, carrying the `AuctionHouse.dbc` house id) opens the window.
-    #[allow(dead_code)]
     AuctionHello {
         auctioneer: u64,
     },
@@ -1978,7 +2025,6 @@ pub(crate) enum ClientCommand {
     /// reads them, with `benilla_protocol::messages::auction_filter`'s sentinels for the unset
     /// ones. **No sort rides the wire** — sorting the page is ours. `list_from` pages by 50.
     /// Answered by `SMSG_AUCTION_LIST_RESULT` (an `AuctionListResult` event).
-    #[allow(dead_code)]
     AuctionListItems {
         auctioneer: u64,
         list_from: u32,
@@ -1992,7 +2038,6 @@ pub(crate) enum ClientCommand {
         usable: u8,
     },
     /// Ask the Auctions tab page (`CMSG_AUCTION_LIST_OWNER_ITEMS`) — our own listings.
-    #[allow(dead_code)]
     AuctionListOwnerItems {
         auctioneer: u64,
         list_from: u32,
@@ -2000,7 +2045,6 @@ pub(crate) enum ClientCommand {
     /// Ask the Bid tab page (`CMSG_AUCTION_LIST_BIDDER_ITEMS`). `auction_ids` is a **refresh
     /// set**, not a filter: those rows are emitted first, then every auction we currently hold the
     /// bid on. Empty for a plain page.
-    #[allow(dead_code)]
     AuctionListBidderItems {
         auctioneer: u64,
         list_from: u32,
@@ -2008,7 +2052,6 @@ pub(crate) enum ClientCommand {
     },
     /// List an item for auction (`CMSG_AUCTION_SELL_ITEM`) — the Create Auction pane.
     /// `etime_minutes` must be 120, 480 or 1440; the deposit leaves the purse immediately.
-    #[allow(dead_code)]
     AuctionSellItem {
         auctioneer: u64,
         item_guid: u64,
@@ -2018,7 +2061,6 @@ pub(crate) enum ClientCommand {
     },
     /// Bid on — or buy out — an auction (`CMSG_AUCTION_PLACE_BID`). One verb for both: a `price`
     /// at or above a nonzero buyout *is* the buyout, inferred server-side.
-    #[allow(dead_code)]
     AuctionPlaceBid {
         auctioneer: u64,
         auction_id: u32,
@@ -2026,7 +2068,6 @@ pub(crate) enum ClientCommand {
     },
     /// Cancel one of our own auctions (`CMSG_AUCTION_REMOVE_ITEM`). The deposit is forfeit, and a
     /// cancel on an auction that already has a bid costs the 5% cut out of pocket.
-    #[allow(dead_code)]
     AuctionRemoveItem {
         auctioneer: u64,
         auction_id: u32,
@@ -2285,7 +2326,7 @@ pub(crate) enum ClientCommand {
     ///
     /// **Sent from exactly two edges, both the reference's** (decision 1640, wow-re
     /// `ui/scratch/party-oor-stats-and-portrait-law.md` §2): the moment a member's object leaves
-    /// the object manager (`net::apply::group::member_deactivated`), and the GROUP_LIST seat of a
+    /// the object manager (`ui_party::net::member_deactivated`), and the GROUP_LIST seat of a
     /// member new to the roster whose object we do not hold (`seat_new_records`). There is no
     /// timer and no Lua binding — a periodic poll would be ours, not the client's.
     RequestPartyMemberStats {
@@ -2510,7 +2551,6 @@ pub(crate) enum ClientCommand {
     //    be treated as applied at the send.
     /// Ask a petitioner NPC for its charter list (`CMSG_PETITION_SHOWLIST`). The gossip row pushes
     /// the same answer unasked, so this is the direct re-open, not the only way in.
-    #[allow(dead_code)]
     PetitionShowList {
         npc: u64,
     },

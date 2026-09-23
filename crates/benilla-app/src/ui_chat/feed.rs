@@ -704,6 +704,9 @@ pub(super) fn deliver(
         // (decision 2120). Outside the slot claim below because it is not about slots — a
         // re-confirmation of a channel we already number still owns the bit.
         channels.note_zone_channel_joined(&event.channel);
+        // …and a custom channel's confirmed join is what enters the durable re-join list the
+        // chat cache writes (`ChannelState::custom`), the same "server agreed" edge.
+        channels.note_custom_channel_joined(&event.channel);
         // …and the slot the walk RENAMED is already numbered, so the claim below skips it — but
         // its state still has to come back to `Joined`, or the next notice on that row reads as
         // another rename. A no-op for a channel we hold no slot for, which is the claim's case.
@@ -1257,7 +1260,12 @@ pub(super) fn feed_chat(
                     if guid == 0 {
                         continue;
                     }
-                    match super::combat::object_name(guid, &names, &commands) {
+                    match super::combat::object_name(
+                        guid,
+                        guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
+                        &names,
+                        &commands,
+                    ) {
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
                         None => wait = true,
@@ -1278,7 +1286,12 @@ pub(super) fn feed_chat(
                         }
                     }
                     super::combat::Named::Unit(guid) => {
-                        match super::combat::object_name(guid, &names, &commands) {
+                        match super::combat::object_name(
+                            guid,
+                            guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
+                            &names,
+                            &commands,
+                        ) {
                             Some(name) => line.fills.named = name,
                             None => wait = true,
                         }
@@ -1365,7 +1378,7 @@ fn needs_name(chat_type: u8) -> bool {
 /// the net apply pass fills, and it is delivered as the event rather than a return value, because
 /// that is how the API answers — `RequestTimePlayed()` itself returns nothing.
 ///
-/// **This does NOT replace the chat breakdown beside it.** `net::apply::chat::played_time` prints
+/// **This does NOT replace the chat breakdown beside it.** `ui_chat::net::played_time` prints
 /// the TIME_PLAYED_TOTAL/LEVEL lines because we do not ship `ChatFrame_DisplayTimePlayed`, which is
 /// what the reference's own `TIME_PLAYED_MSG` handler does. The two are the reference's two
 /// consumers of one packet, not a doubling: an addon that registers the event does its own thing

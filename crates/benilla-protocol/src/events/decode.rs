@@ -45,8 +45,12 @@ fn spell_caster(item_or_caster: u64, caster_slot: u64) -> u64 {
     }
 }
 
-/// Decode one server packet into zero or more [`SessionEvent`]s. Pure: no I/O, no state. Packets the
-/// client doesn't model yield an empty list.
+/// Decode one server packet into zero or more [`SessionEvent`]s. Pure: no I/O, no state.
+///
+/// **Exhaustive on purpose** (decision 2331): every `ServerPacket` variant is named here, so a
+/// parse arm that grows a variant nobody decodes is a compile error at this match, never a silent
+/// no-op. The 2026-09 opcode-coverage audit found the old `_ => Vec::new()` catch-all unreachable —
+/// every produced variant was consumed — which is exactly the state a wildcard cannot keep.
 pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
     match packet {
         ServerPacket::UpdateObject { objects } => decode_objects(objects),
@@ -214,6 +218,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 bag_slot,
             }]
         }
+        // Reason 0 is `EQUIP_ERR_OK`: vmangos's `Player::SendEquipError` sends the one-byte body
+        // for it too (`Player.cpp:11688`), and there is no failure to show.
+        ServerPacket::InventoryChangeFailure { .. } => Vec::new(),
         ServerPacket::AttackStart { attacker, victim } => {
             vec![SessionEvent::AttackStart { attacker, victim }]
         }
@@ -944,6 +951,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::GameObjectDespawnAnim { guid } => {
             vec![SessionEvent::GameObjectDespawnAnim { guid }]
         }
+        ServerPacket::OpenContainer { item } => vec![SessionEvent::OpenContainer { item }],
+        ServerPacket::StandStateUpdate { state } => {
+            vec![SessionEvent::StandStateUpdate { state }]
+        }
+        // Deliberately nothing: the reference's `0x5e7d70` reads the echoed guid into a stack local
+        // and discards it — no global, no field, no event — and the inspect window paints off the
+        // target's `PLAYER_VISIBLE_ITEM_*` fields without waiting (decision 0631; byte-confirmed by
+        // wow-re's round for 2339). Parsed so the wire stays in step and no tally calls it dropped.
+        ServerPacket::Inspect { .. } => Vec::new(),
         ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
         ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
         // The keepalive echo: the io layer matches the sequence against its ping clock to compute
@@ -1118,12 +1134,19 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }],
         // An opcode with NO parse arm at all — surface it so the app can tally the coverage gap
         // (the debug panel's dropped-opcode instrument); the silent fall-through hid whole wire
-        // families. Parsed-but-unmodelled packets (the `_` below) stay deliberate no-ops.
+        // families.
         ServerPacket::Other { opcode } => vec![SessionEvent::PacketDropped {
             opcode,
             unparseable: false,
         }],
-        _ => Vec::new(),
+        // The handshake-only five: `world::session` consumes them before the world loop ever
+        // hands a packet here (auth, character create/delete, the addon-info reply). Named, not
+        // wildcarded — see the function doc.
+        ServerPacket::AuthChallenge { .. }
+        | ServerPacket::AuthResponse { .. }
+        | ServerPacket::CharCreate { .. }
+        | ServerPacket::CharDelete { .. }
+        | ServerPacket::AddonInfo { .. } => Vec::new(),
     }
 }
 

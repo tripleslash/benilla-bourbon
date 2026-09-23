@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use benilla_assets::LockRecover;
 use benilla_ui::script::UiScript;
 
+use super::manifest::silenced_ui_load;
 use super::{
     load_font_registry, load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock,
     UiKeyboardCapture,
@@ -481,6 +482,12 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         match stage {
             EntryStage::Armed => {
                 let (identity, roster, version_check) = entry_prepare(world, &mut script);
+                // fork: upstream's load-edge sound bracket ([`silenced_ui_load`]), held open across
+                // the slices: pushed here, before the first file, and popped at `Finish` after the
+                // saved variables and `PLAYER_LOGIN`. The depth lives on the VM, which is parked
+                // between frames, so every file in between loads silent exactly as the one-shot
+                // path's does.
+                script.push_sound_suppression();
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
                 let files = Addon::builtin().toc.files;
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
@@ -559,6 +566,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     .remove_resource::<PendingEntryUiLoad>()
                     .unwrap_or_default();
                 entry_finish(world, &mut script, pending.identity.clone());
+                script.pop_sound_suppression();
                 world.insert_non_send_resource(script);
                 arm_leaving_world(world);
                 // The standing instrument for this edge: the one number that says whether the
@@ -944,8 +952,14 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         return;
     };
     let (identity, roster, version_check) = entry_prepare(world, &mut script);
-    let _ = load_ingame_ui(&mut script, identity.as_ref(), &roster, version_check);
-    entry_finish(world, &mut script, identity);
+    // **The whole load edge is silent** — the TOC walk, every addon, the saved variables and
+    // `PLAYER_LOGIN`, the span `0x48fbf0` brackets itself across (`0x48fbfa` → `0x49016d`); see
+    // [`silenced_ui_load`]. fork: the sliced load ([`run_pending_entry_load`]) holds the same
+    // bracket open across its frames instead.
+    silenced_ui_load(&mut script, |script| {
+        let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
+        entry_finish(world, script, identity);
+    });
     world.insert_non_send_resource(script);
     arm_leaving_world(world);
 }
@@ -1229,7 +1243,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // that lands in an engine-side store that survives), before the VM is replaced. The next
     // VM's registration seeds from what this writes ([`crate::cvars`]'s saved base).
     crate::cvars::fold_dying_vm_cvars(world);
-    // The chat cache, on the same terms and for the same reason (decision NNNN): it composes the
+    // The chat cache, on the same terms and for the same reason (decision 2184): it composes the
     // player's file out of the DYING VM, and `/reload` never crosses the `OnExit(InWorld)` edge
     // its flush used to hang on — so a window moved in the last second before a reload was
     // written nowhere and re-read stale from disk.
@@ -1678,7 +1692,7 @@ mod tests {
         // …and the pair every `Instant`→`GetTime` conversion runs through moved with it: a
         // 10-minute cooldown armed 30 s before the rebuild still derives its real start.
         let clock = world.resource::<UiClock>();
-        let armed = crate::cooldowns::CooldownInfo {
+        let armed = crate::spell::cooldowns::CooldownInfo {
             start: startup + Duration::from_secs(60),
             remaining_ms: 570_000,
             duration_ms: 600_000,

@@ -37,6 +37,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod net;
 // Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
 // it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
 //
@@ -493,13 +494,14 @@ fn load_materials(mut commands: Commands, assets: Option<Res<benilla_assets::Wor
 /// object not streamed, and a template still in flight (asked once, answered next frame).
 pub(super) fn worn_chest_material(
     store: Option<&crate::net::ObjectStore>,
+    objects: &crate::net::Objects,
     items: &crate::items::Items,
     net: &crate::net::NetCommands,
 ) -> Option<u32> {
     /// Index 4 of the inv-slot array — `0x62fa50`/`0x62fb86` read the fifth 8-byte guid.
     const EQUIPMENT_SLOT_CHEST: u8 = 4;
     let guid = store?.0.player_inv_slot(EQUIPMENT_SLOT_CHEST)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     Some(items.held(entry, net)?.material)
 }
 
@@ -566,6 +568,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
 
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(on_cvar);
         // Who gets sound: a run a human launched, and only that. The default posture is audible
         // (decision 1026 — `SoundConfig::muted` starts false), so the silence has to be opt-in by

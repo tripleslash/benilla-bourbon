@@ -849,7 +849,6 @@ fn stream_terrain(
     // wall moves this with it.
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
-    let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
     // **Tell the warm queue where terrain is being streamed from** — the web target's fetch order
     // (`benilla_formats::web::warm_priority`). The queue sees names and nothing else, so without
@@ -1075,7 +1074,7 @@ fn stream_terrain(
                 layer_array: adt.layer_array.clone(),
                 alpha_array: adt.alpha_array.clone(),
                 shadow_array: adt.shadow_array.clone(),
-                params: Vec4::new(tiling, 0.0, 0.0, 0.0),
+                params: Vec4::new(benilla_formats::TERRAIN_LAYER_TILES, 0.0, 0.0, 0.0),
                 light_buf: shared_light.0.clone(),
             },
         });

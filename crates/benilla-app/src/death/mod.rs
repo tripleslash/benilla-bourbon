@@ -14,9 +14,11 @@ use bevy::prelude::*;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfGuid, SelfPlayer};
 use crate::ui_action::Spells;
 use crate::ui_script::{UiFeed, UiInput};
+
+pub(crate) mod net;
 
 /// Where our corpse is — the `MSG_CORPSE_QUERY` answer (decision 0308 §5). Raw WoW coords.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,6 +65,12 @@ pub(crate) struct DeathNet {
     pub(crate) corpse: Option<CorpsePoint>,
     /// A pending resurrection offer; cleared when answered or when the popup times out.
     pub(crate) resurrect: Option<ResurrectOffer>,
+    /// Bumped on every `SMSG_RESURRECT_REQUEST` — the offer announces per MESSAGE (wow-re
+    /// death-ui.md §8: handler `0x5e7bc0` signals per arrival through `0x5ded50`), not per
+    /// `Some`-edge. `resurrect` is only cleared by an Accept/Decline, and the stock UI can hide
+    /// the popup without either (PLAYER_UNGHOST's `StaticPopup_Hide` runs no `OnCancel`), so an
+    /// edge latch there swallowed every later offer for the session.
+    pub(crate) resurrect_generation: u32,
     /// Our streamed corpse OBJECT's guid (a TYPEID_CORPSE create whose `CORPSE_FIELD_OWNER` is
     /// us) — what `CMSG_RECLAIM_CORPSE` carries, like the real client. `None` until the corpse
     /// streams into range (vmangos ignores the guid's content, so a 0 send still reclaims —
@@ -139,9 +147,9 @@ struct DeathAnnounced {
     /// range events through the latch (the client's own re-announce, death-ui.md §4), so the
     /// RECOVER_CORPSE popup re-shows with the new delay.
     reclaim_generation: u32,
-    /// The pending resurrect offer has been announced to the UI (`RESURRECT_REQUEST` fired) —
-    /// held back while a player-caster's name is still resolving through the name cache.
-    offer_announced: bool,
+    /// The [`DeathNet::resurrect_generation`] this VM was last told about (`RESURRECT_REQUEST`
+    /// fired) — held back while a player-caster's name is still resolving through the name cache.
+    offer_generation: u32,
     /// The [`DeathNet::confirm_generation`] this latch last announced — a fresh
     /// `SMSG_SPIRIT_HEALER_CONFIRM` re-fires `CONFIRM_XP_LOSS` through the latch (decision 1068;
     /// the reclaim-latch pattern above). The old Some-edge latch here was B80's deadlock: it
@@ -189,7 +197,9 @@ fn feed_death(
     mut feed: ResMut<DeathFeedState>,
     names: Res<crate::names::NameCache>,
     net: Res<NetCommands>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the spirit healer's entity, and the bag walk the self-res
+    // item leg takes.
+    objects: Objects,
     transforms: Query<&Transform>,
     map: Option<Res<benilla_world::world_map::CurrentMap>>,
     status: Res<crate::net::NetStatus>,
@@ -231,10 +241,9 @@ fn feed_death(
         .reclaim_at
         .map_or(0.0, |at| (at - now).max(0.0) as f32);
     let spirit_healer_in_range = death_net.spirit_healer.is_some_and(|npc| {
-        index
-            .0
-            .get(&npc)
-            .and_then(|&e| transforms.get(e).ok())
+        objects
+            .entity(npc)
+            .and_then(|e| transforms.get(e).ok())
             .is_some_and(|t| {
                 t.translation.distance_squared(self_t.translation) <= SPIRIT_HEALER_RANGE_SQ
             })
@@ -259,7 +268,7 @@ fn feed_death(
         // `HasSoulstone()` — see [`resolve_self_res`] for the three gates and their order. Not a
         // per-frame inventory walk in general: the dead gate is first, so while alive this is one
         // health read, and while dead-unreleased the walk only runs on a zero field.
-        self_res_label: resolve_self_res(&store.0, &items, spells.as_deref(), &net)
+        self_res_label: resolve_self_res(&store.0, &objects, &items, spells.as_deref(), &net)
             .map(|r| r.label().to_owned()),
     });
 
@@ -321,22 +330,16 @@ fn feed_death(
     }
 
     // ── The offer/confirm announcements (edge-fired, name-gated) ───────────────────────────────
-    match &death_net.resurrect {
-        Some(offer) if !memo.offer_announced => {
-            // A player caster's wire name is empty — resolve through the ask-once name cache and
-            // hold the popup until it lands (the ref popup formats "%s wants to resurrect you").
-            let name = if offer.name.is_empty() {
-                names.resolve(offer.caster, &net).map(str::to_owned)
-            } else {
-                Some(offer.name.clone())
-            };
-            if let Some(name) = name {
-                memo.offer_announced = true;
-                script.fire_event("RESURRECT_REQUEST", vec![ScriptValue::Str(name)]);
-            }
+    if let Some(name) = offer_announcement(memo, &death_net, dead || ghost, |offer| {
+        // A player caster's wire name is empty — resolve through the ask-once name cache and
+        // hold the popup until it lands (the ref popup formats "%s wants to resurrect you").
+        if offer.name.is_empty() {
+            names.resolve(offer.caster, &net).map(str::to_owned)
+        } else {
+            Some(offer.name.clone())
         }
-        None => memo.offer_announced = false,
-        _ => {}
+    }) {
+        script.fire_event("RESURRECT_REQUEST", vec![ScriptValue::Str(name)]);
     }
     // The confirm is message-fired, not state-edged (decision 1068): each SMSG bumps the
     // generation, so asking the healer again after a Cancel brings the dialog back.
@@ -470,6 +473,7 @@ impl SelfRes {
 /// the lookup fires answers within a frame or two and the next resolve sees it.
 fn resolve_self_res(
     store: &benilla_protocol::ObjectFields,
+    objects: &Objects,
     items: &crate::items::Items,
     spells: Option<&Spells>,
     commands: &NetCommands,
@@ -483,12 +487,15 @@ fn resolve_self_res(
             .map_or_else(|| "UNKNOWN".to_owned(), |d| d.name.clone());
         return Some(SelfRes::Spell { spell, label });
     }
-    // Collected first, then judged: the template lookup needs `items` mutably (it is ask-once,
-    // so a miss fires the query) while the walk holds it immutably — `has_key`'s own idiom.
-    let slots =
-        crate::ui_items::collect_inventory(store, items, crate::ui_items::InventoryScope::DEFAULT);
+    // Collected first, then judged — `has_key`'s own idiom: the walk reads the object index,
+    // the judging reads the ask-once template cache beside it.
+    let slots = crate::ui_items::collect_inventory(
+        store,
+        objects,
+        crate::ui_items::InventoryScope::DEFAULT,
+    );
     slots.into_iter().find_map(|(bag_index, slot, guid)| {
-        let entry = items.object(guid)?.object_entry()?;
+        let entry = objects.object(guid)?.object_entry()?;
         let t = items.template(entry, guid, commands)?;
         let self_res = t.spells.iter().any(|sp| {
             sp.trigger == 0
@@ -580,8 +587,8 @@ fn drain_death(
     script: Option<NonSendMut<UiScript>>,
     mut death_net: ResMut<DeathNet>,
     net: Res<NetCommands>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The soulstone leg is a real arm-290 caller in the reference's own census (wow-re
     // `bind-confirm-law.md`: 290 ← UseSoulstone · UseInventoryItem · UseAction · UseContainerItem),
@@ -628,6 +635,7 @@ fn drain_death(
                 match store.as_ref().and_then(|store| {
                     resolve_self_res(
                         store,
+                        &ladder.objects,
                         &ladder.items,
                         ladder.spells.as_deref(),
                         &ladder.commands,
@@ -713,6 +721,7 @@ pub(crate) struct DeathPlugin;
 
 impl Plugin for DeathPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<DeathNet>()
             .init_resource::<DeathFeedState>()
             .add_systems(
@@ -729,10 +738,85 @@ impl Plugin for DeathPlugin {
     }
 }
 
+/// The name `RESURRECT_REQUEST` should fire with this frame, if it should — and the latch
+/// advanced when it does.
+///
+/// Per message, gated on the dead predicate: `0x5ded50` fires only while `0x605f30` holds (health
+/// ≤ 0 or the ghost flag — `dead_or_ghost`), so a stale offer never reaches a living player's UI,
+/// even through a fresh VM after a `/reload`. A caster whose name is still resolving holds the
+/// announcement without consuming it.
+fn offer_announcement(
+    memo: &mut DeathAnnounced,
+    death_net: &DeathNet,
+    dead_or_ghost: bool,
+    name_of: impl FnOnce(&ResurrectOffer) -> Option<String>,
+) -> Option<String> {
+    if !dead_or_ghost || memo.offer_generation == death_net.resurrect_generation {
+        return None;
+    }
+    let name = name_of(death_net.resurrect.as_ref()?)?;
+    memo.offer_generation = death_net.resurrect_generation;
+    Some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    fn offer(caster: u64, name: &str) -> ResurrectOffer {
+        ResurrectOffer {
+            caster,
+            name: name.into(),
+            sickness: false,
+            has_timer: true,
+        }
+    }
+
+    /// **An offer the UI hid without answering must not swallow the next one.** PLAYER_UNGHOST
+    /// hides the RESURRECT popups with `StaticPopup_Hide`, which runs no `OnCancel`, so no
+    /// Decline clears `resurrect`; the next death's `SMSG_RESURRECT_REQUEST` must still announce.
+    /// And a stale offer must never reach the UI of a living player (a `/reload` after the res).
+    #[test]
+    fn every_resurrect_message_announces_while_dead_and_never_while_alive() {
+        let mut net = DeathNet::default();
+        let mut memo = DeathAnnounced::default();
+        let name = |o: &ResurrectOffer| Some(o.name.clone());
+
+        net.resurrect = Some(offer(1, "Pone"));
+        net.resurrect_generation += 1;
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Pone")
+        );
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name),
+            None,
+            "once per message"
+        );
+
+        // Ran back instead: alive, the popup hidden, the offer never answered. A /reload now
+        // (a fresh VM memo) must not show "Pone wants to resurrect you" to a living player.
+        let mut reloaded = DeathAnnounced::default();
+        assert_eq!(offer_announcement(&mut reloaded, &net, false, name), None);
+
+        // Dead again, a new priest offers.
+        net.resurrect = Some(offer(2, "Ptwo"));
+        net.resurrect_generation += 1;
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Ptwo"),
+            "the second offer announces"
+        );
+
+        // A name still resolving holds the announcement without consuming it.
+        net.resurrect_generation += 1;
+        assert_eq!(offer_announcement(&mut memo, &net, true, |_| None), None);
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Ptwo")
+        );
+    }
 
     /// **The world scope dies with the session, and only with the session** (decision 1732).
     ///
@@ -838,6 +922,9 @@ mod self_res_tests {
     fn the_dead_gate_precedes_the_field() {
         let (net, _rx) = commands();
         let items = Items::default();
+        // Nothing streamed: the spell leg answers before the inventory walk is reached (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let spells = catalog([(REINCARNATION, named("Reincarnation", [94, 0, 0]))]);
 
         let alive = ObjectFields::from_pairs(&[
@@ -846,7 +933,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&alive, &items, Some(&spells), &net),
+            resolve_self_res(&alive, &objects, &items, Some(&spells), &net),
             None,
             "alive with a self-res owed: nil"
         );
@@ -859,7 +946,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&ghost, &items, Some(&spells), &net),
+            resolve_self_res(&ghost, &objects, &items, Some(&spells), &net),
             None,
             "a released ghost still holds the field, and still answers nil"
         );
@@ -870,7 +957,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&dead, &items, Some(&spells), &net),
+            resolve_self_res(&dead, &objects, &items, Some(&spells), &net),
             Some(SelfRes::Spell {
                 spell: REINCARNATION,
                 label: "Reincarnation".into(),
@@ -884,11 +971,13 @@ mod self_res_tests {
     fn an_unresolvable_spell_id_reads_unknown_not_nil() {
         let (net, _rx) = commands();
         let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let dead =
             ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0), (F_SELF_RES, 999_999)]);
         for spells in [None, Some(catalog([]))] {
             assert_eq!(
-                resolve_self_res(&dead, &items, spells.as_ref(), &net),
+                resolve_self_res(&dead, &objects, &items, spells.as_ref(), &net),
                 Some(SelfRes::Spell {
                     spell: 999_999,
                     label: "UNKNOWN".into(),
@@ -907,6 +996,7 @@ mod self_res_tests {
     fn a_zero_field_falls_through_to_a_carried_item() {
         let (net, _rx) = commands();
         let mut items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
 
         let item = |name: &str, spells: Vec<ItemSpellEntry>| ItemInfo {
             spells,
@@ -929,8 +1019,9 @@ mod self_res_tests {
             Some(item("Ankh of Reincarnation", vec![block(3026, 0)])),
         );
         for (guid, entry) in [(0xA0_u64, 10_u32), (0xA1, 11), (0xA2, 12)] {
-            items.insert_object(guid, ObjectFields::from_pairs(&[(3, entry)]));
+            objs.spawn(guid, ObjectFields::from_pairs(&[(3, entry)]));
         }
+        let objects = objs.get();
         let spells = catalog([
             (
                 3026,
@@ -948,7 +1039,7 @@ mod self_res_tests {
         }
         let dead = ObjectFields::from_pairs(&pairs);
 
-        match resolve_self_res(&dead, &items, Some(&spells), &net) {
+        match resolve_self_res(&dead, &objects, &items, Some(&spells), &net) {
             Some(SelfRes::Item { entry, label, .. }) => {
                 assert_eq!(
                     entry, 12,
@@ -961,6 +1052,9 @@ mod self_res_tests {
 
         // Take it away and the answer is nil again — not "UNKNOWN", which is the spell leg's.
         let bare = ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0)]);
-        assert_eq!(resolve_self_res(&bare, &items, Some(&spells), &net), None);
+        assert_eq!(
+            resolve_self_res(&bare, &objects, &items, Some(&spells), &net),
+            None
+        );
     }
 }
