@@ -794,6 +794,7 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// - `launch_env::seed` and `launch_env::set_live_reader` — the browser has no process
 ///   environment, so the client hands the engine the page's query keys (`webenv`) through the one
 ///   door the engine reads its launch knobs from. Native passes nothing through them.
+///
 /// And the entity lane's lights (fork, lighting P8), opened then and written down at the 2338 merge:
 ///
 /// - `lighting::LightOwner`, `modern::lights::SynthesizedLight`, `modern::lights::FixtureRadius`
