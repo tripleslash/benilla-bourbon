@@ -112,8 +112,8 @@
 //!    right plane for an ocean and badly wrong for anything else — mirroring a mountain lake about
 //!    `z = 0` reflects a slab of world from hundreds of yards below it — and, worse for the bug
 //!    above, clipping at `z = 0` for a lake at `z = 200` clips nothing that lake can see. So the
-//!    plane is the height of the water the eye is over, resolved through the same per-subject
-//!    liquid query everything else asks.
+//!    plane is the real buffer's: the closest drawn liquid the eye is above
+//!    ([`closest_reflection_height`]).
 //! 3. **A height guard in the shader.** One mirrored render is about one height, and a surface at
 //!    some other height would wear a picture of the world reflected about someone else's
 //!    waterline. `liquid_cata.wgsl` fades the mirror out over `MIRROR_PLANE_FADE_START..END` yards
@@ -125,6 +125,7 @@
 //! Guards 2 and 3 are this port's, not the reference's, and they exist because this renders **one**
 //! mirror per frame where the reference re-renders per instance group.
 
+use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -134,8 +135,6 @@ use bevy::render::view::Hdr;
 use super::screen::LiquidScreenTargets;
 use super::{Underwater, WaterDetail};
 use crate::view::WorldCamera;
-use crate::world_point::{Subject, WorldPoint};
-use benilla_assets::coords::bevy_to_wow;
 use benilla_assets::materials::LiquidCataMaterial;
 
 /// **The mirror plane this frame, and whether it is usable** — the reference's
@@ -145,7 +144,7 @@ use benilla_assets::materials::LiquidCataMaterial;
 /// tracked closest height for the real one. Sea level is the right plane for an ocean and the wrong
 /// one for everything else, and "the wrong plane" is not a subtle error: mirroring a mountain lake
 /// about `z = 0` reflects a slab of world from four hundred yards below it onto the surface. So the
-/// plane here is the height of the water the eye is actually over, and [`plane`] is published to
+/// plane here is the closest drawn water the eye is above, and [`plane`] is published to
 /// the shader so a surface at some *other* height can fade the mirror out rather than wear a
 /// picture that was never about it.
 #[derive(Resource, Default, Clone, Copy)]
@@ -316,10 +315,12 @@ fn sync_reflection_camera(
     detail: Res<WaterDetail>,
     underwater: Res<Underwater>,
     targets: Option<Res<LiquidScreenTargets>>,
-    world: WorldPoint,
     view: Res<crate::view::ViewDistance>,
     time: Res<Time>,
-    liquids: Query<&GlobalTransform, With<super::surface::LiquidSurface>>,
+    liquids: Query<
+        (&GlobalTransform, Option<&Aabb>, &ViewVisibility),
+        With<super::surface::LiquidSurface>,
+    >,
     mut plane_out: ResMut<ReflectionPlane>,
     mut water_seen_at: Local<f32>,
     mut held: Local<f32>,
@@ -341,15 +342,17 @@ fn sync_reflection_camera(
         return;
     };
 
-    // **The plane, and it is the water the eye is over — not sea level.** `water_surface_at` is the
-    // same per-subject query every other liquid consumer asks, so an interior pool answers for a
-    // camera inside its building and the ADT's MCLQ answers outdoors. Where the eye is over no
-    // water at all the last plane is HELD rather than snapped to zero: stepping off a shore would
-    // otherwise move the mirror four hundred yards in one frame, and the height guard in the shader
-    // already fades a surface that disagrees with the plane. Zero is only the value before the eye
-    // has ever been over water.
+    // **The plane is the closest drawn water the eye is above — not sea level**
+    // ([`closest_reflection_height`]). Where no water is drawn the last plane is HELD rather than
+    // snapped to zero, and the height guard in the shader fades a surface that disagrees with it.
+    // Zero is only the value before any water has been drawn.
     let eye = world_pose.translation();
-    let plane = match world.water_surface_at(Subject::Eye, bevy_to_wow(eye)) {
+    let boxes = || {
+        liquids
+            .iter()
+            .filter_map(|(gt, aabb, seen)| aabb.map(|a| (world_box(gt, a), seen.get())))
+    };
+    let plane = match closest_reflection_height(eye, boxes()) {
         Some(surface) => {
             *held = surface;
             surface
@@ -366,10 +369,15 @@ fn sync_reflection_camera(
     // reach the frame however the camera turns, and drops it only where the streamer is holding no
     // liquid at all. `RELEASE_SECS` then keeps it a moment longer, so a shoreline at the edge of
     // the radius cannot toggle a whole scene pass on and off frame to frame.
+    // The box, not the transform: an ADT surface's transform is IDENTITY (MCLQ is absolute), so its
+    // translation is the world origin and every open-world lake read as out of reach.
     let reach = view.farclip + WATER_REACH_MARGIN;
-    let near_water = liquids
-        .iter()
-        .any(|t| t.translation().distance_squared(eye) <= reach * reach);
+    let near_water = boxes().any(|((centre, half), _)| {
+        ((eye - centre).abs() - half)
+            .max(Vec3::ZERO)
+            .length_squared()
+            <= reach * reach
+    });
     if near_water {
         *water_seen_at = time.elapsed_secs();
     }
@@ -438,6 +446,31 @@ fn sync_reflection_camera(
     if let Projection::Perspective(perspective) = &mut *projection {
         perspective.near_clip_plane = view_space_clip_plane(&want, plane);
     }
+}
+
+/// A surface's world-space box: centre and half extents.
+fn world_box(gt: &GlobalTransform, aabb: &Aabb) -> (Vec3, Vec3) {
+    let m = gt.affine();
+    let centre = m.transform_point3a(aabb.center);
+    let half = m.matrix3.abs() * aabb.half_extents;
+    (centre.into(), half.into())
+}
+
+/// `Liquid::RendererDraw`'s tracked instance: of the liquid drawn this frame, the one whose centre is
+/// closest to the camera and whose plane the camera is above; its height is the mirror's plane
+/// (`GetClosestReflectionHeight`). `None` while no such water is drawn.
+///
+/// Not "the water under the eye": a camera on the shore of Lake Nazferiti is over grass, so that rule
+/// held a stale plane and the shader's height guard faded the whole lake to the trace.
+fn closest_reflection_height(
+    eye: Vec3,
+    surfaces: impl Iterator<Item = ((Vec3, Vec3), bool)>,
+) -> Option<f32> {
+    surfaces
+        .filter(|((centre, _), drawn)| *drawn && eye.y > centre.y)
+        .map(|((centre, _), _)| (centre.distance_squared(eye), centre.y))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, height)| height)
 }
 
 /// The mirrored pose of `world` about the horizontal plane `y = plane`.
@@ -711,6 +744,47 @@ mod tests {
             !marker.primary,
             "the mirror is not the view the retained pass takes its pipeline key from"
         );
+    }
+
+    /// **The reported bug: a camera on a lake's shore got no mirror.** It is over grass, so the
+    /// plane must come from the closest drawn water it is above — not from what is under it, and
+    /// never from water it is not above or that is not drawn.
+    #[test]
+    fn the_plane_is_the_closest_drawn_water_the_eye_is_above() {
+        let eye = Vec3::new(0.0, 40.0, 0.0);
+        let flat = |x: f32, y: f32| (Vec3::new(x, y, 0.0), Vec3::new(16.7, 0.0, 16.7));
+        let surfaces = [
+            (flat(30.0, 33.0), true), // the lake beside the shore
+            (flat(90.0, 0.0), true),  // the sea, farther out
+            (flat(10.0, 60.0), true), // a pool on a cliff above the eye
+            (flat(5.0, 38.0), false), // culled this frame
+        ];
+        assert_eq!(
+            closest_reflection_height(eye, surfaces.into_iter()),
+            Some(33.0)
+        );
+        assert_eq!(closest_reflection_height(eye, std::iter::empty()), None);
+    }
+
+    /// An ADT surface's transform is IDENTITY (MCLQ is absolute), so its world box is its mesh box
+    /// — not a point at the world origin.
+    #[test]
+    fn an_identity_surface_is_placed_by_its_mesh_box() {
+        let aabb = Aabb::from_min_max(
+            Vec3::new(9000.0, 30.0, -200.0),
+            Vec3::new(9033.3, 31.0, -166.7),
+        );
+        let (centre, half) = world_box(&GlobalTransform::IDENTITY, &aabb);
+        assert!((centre - Vec3::new(9016.65, 30.5, -183.35)).length() < 1e-2);
+        assert!((half - Vec3::new(16.65, 0.5, 16.65)).length() < 1e-2);
+        let turned = GlobalTransform::from(Transform::from_rotation(Quat::from_rotation_y(
+            std::f32::consts::FRAC_PI_2,
+        )));
+        let (_, half) = world_box(
+            &turned,
+            &Aabb::from_min_max(Vec3::ZERO, Vec3::new(4.0, 1.0, 2.0)),
+        );
+        assert!((half - Vec3::new(1.0, 0.5, 2.0)).length() < 1e-4);
     }
 
     /// The layer this crate claims must not be the one app layer it can name. The rest of the
