@@ -478,8 +478,8 @@ pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> V
         // SIDN is gamma bytes; the light table is linear.
         let color = rgb.map(|c| (c as f32 / 255.0).powf(2.2));
         let pos = &geometry.positions;
-        for tri in geometry.indices.chunks_exact(3) {
-            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| pos.get(i as usize).copied());
+        for &[ia, ib, ic] in geometry.indices.as_chunks::<3>().0 {
+            let [a, b, c] = [ia, ib, ic].map(|i| pos.get(i as usize).copied());
             let (Some(a), Some(b), Some(c)) = (a, b, c) else { continue };
             let [a, b, c] = [a, b, c].map(Vec3::from);
             let cross = (b - a).cross(c - a);
@@ -490,7 +490,7 @@ pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> V
             // The authored normals say which way the pane faces; the winding may not, so they win
             // when present.
             let normal = if geometry.normals.len() == pos.len() {
-                let n: Vec3 = [tri[0], tri[1], tri[2]]
+                let n: Vec3 = [ia, ib, ic]
                     .iter()
                     .map(|&i| Vec3::from(geometry.normals[i as usize]))
                     .sum();
@@ -767,9 +767,9 @@ mod tests {
     #[test]
     fn an_untinted_card_takes_the_warm_stand_in() {
         let white = combine(false, [], [card([1.0, 1.0, 1.0, 1.0], REFERENCE_CARD)]).unwrap();
-        for c in 0..3 {
+        for (got, want) in white.color.iter().zip(UNTINTED_GLOW) {
             assert!(
-                (white.color[c] - UNTINTED_GLOW[c]).abs() < 1e-4,
+                (got - want).abs() < 1e-4,
                 "{:?} vs {UNTINTED_GLOW:?}",
                 white.color
             );

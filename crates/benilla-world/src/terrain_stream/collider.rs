@@ -181,7 +181,7 @@ pub(super) fn finish_colliders(
         // overshoot it buys back is at most a stride of the *cheapest* attaches, which is what
         // this loop is made of once the expensive part (the build) has already happened
         // off-thread.
-        if attached % stride == 0 && Instant::now() >= deadline {
+        if attached.is_multiple_of(stride) && Instant::now() >= deadline {
             break;
         }
     }

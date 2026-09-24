@@ -238,7 +238,7 @@ impl WdlFile {
     /// meet without a crack. A coarser step leaves T-junctions against a finer neighbour, so it hangs a
     /// `skirt`-yard curtain straight down from every border edge to cover them.
     pub fn tile_mesh_coarse(&self, tile_x: u32, tile_y: u32, step: usize, skirt: f32) -> Option<WdlTileMesh> {
-        if tile_x >= 64 || tile_y >= 64 || step == 0 || INNER_EDGE % step != 0 {
+        if tile_x >= 64 || tile_y >= 64 || step == 0 || !INNER_EDGE.is_multiple_of(step) {
             return None;
         }
         let tile = self.tiles[tile_index(tile_x, tile_y)].as_ref()?;
@@ -269,7 +269,6 @@ impl WdlFile {
         }
         if step > 1 && skirt > 0.0 {
             let border: Vec<u32> = (0..e)
-                .map(|c| c)
                 .chain((1..e).map(|r| r * e + e - 1))
                 .chain((0..e - 1).rev().map(|c| (e - 1) * e + c))
                 .chain((1..e - 1).rev().map(|r| r * e))

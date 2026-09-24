@@ -183,6 +183,7 @@ impl Plugin for WorldShadowPlugin {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn update_world_shadow(
     state: Res<State<ClientState>>,
     video: Res<VideoConfig>,
@@ -399,7 +400,7 @@ fn update_world_shadow(
 /// Filtering single indices out of a `TriangleList` shifts every subsequent index by one and
 /// rewires the rest of the submesh into garbage triangles.
 fn append_triangles(source: &[u32], vertex_count: u32, base: u32, indices: &mut Vec<u32>) {
-    for triangle in source.chunks_exact(3) {
+    for triangle in source.as_chunks::<3>().0 {
         if triangle.iter().all(|index| *index < vertex_count) {
             indices.extend(triangle.iter().map(|index| base + *index));
         }
@@ -438,6 +439,7 @@ fn empty_shadow_mesh() -> Mesh {
     mesh
 }
 
+#[allow(clippy::type_complexity)]
 fn collect_world_geometry(
     parts: &Query<
         (
@@ -541,7 +543,7 @@ fn append_skinned(
         let (Some(joints), Some(weights)) = (pick.0.joints.get(index), pick.0.weights.get(index))
         else {
             let fallback = palette
-                .get(0)
+                .first()
                 .map(|matrix| matrix.transform_point3(wow_to_bevy(*position)))
                 .unwrap_or(Vec3::ZERO);
             positions.push(fallback.to_array());

@@ -494,7 +494,6 @@ fn report(world: &mut World) {
     d.next_growth = now + GROWTH_SECS;
     let base = d.baseline.clone().expect("baseline set above");
     let since = now;
-    drop(d);
     growers(world, &base, &counts, since);
 }
 

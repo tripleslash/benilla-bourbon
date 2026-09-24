@@ -17,8 +17,8 @@
 //! if (!v29 && instance->settings[+0x24] == 2) v29 = 2;
 //! ```
 //!
-//! and `CMaterialWater::RenderAbove` indexes the container by `depthFmt + 2·v29 + 6·dynDisplMapCnt
-//! + 2·(9·depthMode − 9)`. So mode 0 (perms 0/1) is the default arm, mode 1 (perms 2/3) is the
+//! and `CMaterialWater::RenderAbove` indexes the container by
+//! `depthFmt + 2·v29 + 6·dynDisplMapCnt + 2·(9·depthMode − 9)`. So mode 0 (perms 0/1) is the default arm, mode 1 (perms 2/3) is the
 //! `waterDetail > 2` tier with the *real* buffer, and mode 2 (perms 4/5) is a minority arm gated on
 //! one liquid class. The sampler census of the shipped `ProcWaterAbove.bls` separates them cleanly:
 //! mode 0 reads `{0,1,2,3,5,6}`, mode 1 `{0,1,2,5,6}`, mode 2 `{0,2,3,5,6}` — mode 0 is the only one
@@ -310,7 +310,7 @@ const RELEASE_SECS: f32 = 1.0;
 /// no fragment would sample, because the only liquid in the session was one the player walked past
 /// ten minutes ago. That is the single largest thing in the frame with nothing at all to show for
 /// it.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_reflection_camera(
     detail: Res<WaterDetail>,
     underwater: Res<Underwater>,
@@ -417,7 +417,7 @@ fn sync_reflection_camera(
     // `ClearColorConfig` nor `Projection` implements `PartialEq`, and both are one component on
     // one entity that nothing else watches for changes (the `scene_still` gate in
     // `model_render::visibility` reads the WORLD camera's).
-    camera.clear_color = world_camera.clear_color.clone();
+    camera.clear_color = world_camera.clear_color;
     *projection = world_projection.clone();
 
     // The mirror about `y = plane`. A DIRECTION reflects the same whatever the plane's height —
@@ -575,15 +575,17 @@ mod tests {
     /// way this optimization is allowed to be wrong and must not be.
     #[test]
     fn the_water_reach_margin_clears_a_whole_chunk() {
-        assert!(
-            super::WATER_REACH_MARGIN >= benilla_formats::CHUNK_SIZE,
-            "a surface's origin can be a chunk away from the part of it that is on screen"
-        );
-        assert!(
-            super::RELEASE_SECS > 0.0,
-            "without a release delay a shoreline at the edge of the radius toggles a whole scene \
-             pass on and off frame to frame"
-        );
+        const {
+            assert!(
+                super::WATER_REACH_MARGIN >= benilla_formats::CHUNK_SIZE,
+                "a surface's origin can be a chunk away from the part of it that is on screen"
+            );
+            assert!(
+                super::RELEASE_SECS > 0.0,
+                "without a release delay a shoreline at the edge of the radius toggles a whole \
+                 scene pass on and off frame to frame"
+            );
+        }
     }
 
     use super::*;

@@ -30,7 +30,7 @@ const HANDOFF_ELEVATION: f32 = -2.0 * PI / 180.0;
 /// horizon. Without it a moon that had already set still lit the night almost horizontally —
 /// through mountain ranges no cascade holds, and as a dawn-like glow in the haze.
 const KEY_FULL_ELEVATION: f32 = 8.0 * PI / 180.0;
-const KEY_ZERO_ELEVATION: f32 = -1.0 * PI / 180.0;
+const KEY_ZERO_ELEVATION: f32 = -PI / 180.0;
 
 static KEY_HORIZON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
 

@@ -542,7 +542,7 @@ fn compute_wmo_pvs(
             &world_from_local,
             &mut (&mut tap, &mut log),
         );
-        let lit = lighting_reach(&model, eye_local, terrain_local);
+        let lit = lighting_reach(model, eye_local, terrain_local);
         if inst.bypass_change_detection().lit != lit {
             inst.bypass_change_detection().lit = lit;
             inst.set_changed();

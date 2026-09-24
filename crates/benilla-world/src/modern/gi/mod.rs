@@ -514,7 +514,7 @@ fn update_gi(
 
     // The ray set turns a little every frame, so the estimate's own bias averages out over the
     // probe's history rather than baking a fixed 24-direction pattern into the field.
-    let a = hist.frame as f32 * 0.61803398;
+    let a = hist.frame as f32 * 0.618_034;
     let rot = Mat3::from_euler(EulerRot::YXZ, a * 6.2831855, (a * 3.883222).sin() * 0.8, a * 2.3999632);
 
     // What a probe under nothing reads: half the sky's own mean, half what the ground bounces back.
@@ -662,7 +662,7 @@ mod tests {
                 assert!(coarsest >= t.cascade_extent(t.cascades - 1).x * 0.3, "{q:?}");
                 // `gi_classify.wgsl` schedules `(idx * 7 + frame) % period`: a period sharing a
                 // factor with 7 would leave some probes never due.
-                assert!(t.period % 7 != 0, "{q:?}: period {}", t.period);
+                assert!(!t.period.is_multiple_of(7), "{q:?}: period {}", t.period);
             }
         }
         assert!(!gi_tier(LightingQuality::Low).on);

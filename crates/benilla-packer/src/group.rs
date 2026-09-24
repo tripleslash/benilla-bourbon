@@ -58,12 +58,12 @@ pub fn label_of(
     if lower.starts_with("sound\\") || lower.starts_with("speech\\") {
         return format!("snd/{}", head(&parts, 2));
     }
-    if let Some(root) = parts.first() {
-        match *root {
-            "character" | "creature" | "item" | "spells" | "tileset" | "textures" | "world"
-            | "environments" | "particles" => return format!("art/{}", head(&parts, 2)),
-            _ => {}
-        }
+    if let Some(
+        "character" | "creature" | "item" | "spells" | "tileset" | "textures" | "world"
+        | "environments" | "particles",
+    ) = parts.first().copied()
+    {
+        return format!("art/{}", head(&parts, 2));
     }
     format!(
         "misc/{}",

@@ -380,6 +380,9 @@ fn scan_dbc(chain: &Chain, entries: &[Entry]) {
 /// failure from one the RGBA path does not know. A sample rather than all of them because the
 /// question is "does this decoder know these formats", which a few hundred files settle, and
 /// decoding 3 GiB to re-settle it costs minutes.
+/// One decoded texture: its format, width, height and decoded byte count.
+type BlpScan = (String, u32, u32, usize);
+
 fn scan_blp(chain: &Chain, entries: &[Entry], sample: usize) {
     let blps: Vec<&Entry> = entries
         .iter()
@@ -397,7 +400,7 @@ fn scan_blp(chain: &Chain, entries: &[Entry], sample: usize) {
     };
     let picked: Vec<&&Entry> = blps.iter().step_by(step.max(1)).collect();
     println!("\nBLP scan ({} of {} textures):", picked.len(), blps.len());
-    let results: Vec<(String, Result<(String, u32, u32, usize), String>)> = picked
+    let results: Vec<(String, Result<BlpScan, String>)> = picked
         .par_iter()
         .map(|e| {
             let decoded = chain

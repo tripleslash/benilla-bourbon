@@ -242,14 +242,8 @@ pub(super) fn pack_sky_rows(
 }
 
 /// The per-frame blob, extracted to the render world for upload.
-#[derive(Resource, Clone, Copy, ExtractResource)]
+#[derive(Resource, Clone, Copy, Default, ExtractResource)]
 pub(super) struct RippleData(RippleStd430);
-
-impl Default for RippleData {
-    fn default() -> Self {
-        Self(RippleStd430::default())
-    }
-}
 
 /// The buffer every liquid material binds, written in place each frame.
 ///

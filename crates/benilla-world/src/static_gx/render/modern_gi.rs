@@ -240,12 +240,14 @@ fn height_clip(center: Vec3) -> (Mat4, GiClip) {
         Vec4::new(rows[0].z, rows[1].z, rows[2].z, rows[3].z),
         Vec4::new(rows[0].w, rows[1].w, rows[2].w, rows[3].w),
     );
-    let mut out = GiClip::default();
-    // uv, not ndc: the map is read with `textureLoad`, which takes texels.
-    out.hf_row_x = Vec4::new(0.5 / h, 0.0, 0.0, 0.5 - 0.5 * center.x / h);
-    out.hf_row_y = Vec4::new(0.0, 0.0, 0.5 / h, 0.5 - 0.5 * center.z / h);
-    out.hf_row_z = rows[2];
-    out.hf = Vec4::new(1.0, y_min, span, HEIGHT_SIZE as f32);
+    let out = GiClip {
+        // uv, not ndc: the map is read with `textureLoad`, which takes texels.
+        hf_row_x: Vec4::new(0.5 / h, 0.0, 0.0, 0.5 - 0.5 * center.x / h),
+        hf_row_y: Vec4::new(0.0, 0.0, 0.5 / h, 0.5 - 0.5 * center.z / h),
+        hf_row_z: rows[2],
+        hf: Vec4::new(1.0, y_min, span, HEIGHT_SIZE as f32),
+        ..GiClip::default()
+    };
     (clip, out)
 }
 

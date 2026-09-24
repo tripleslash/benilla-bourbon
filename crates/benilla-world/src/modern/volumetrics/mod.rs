@@ -321,6 +321,7 @@ fn resize_volume_image(
     info!("modern fog: volume {want} allocated, {touched} materials rebound");
 }
 
+#[allow(clippy::type_complexity)]
 fn mark_fog_views(
     mut commands: Commands,
     cams: Query<Entity, (With<WorldCamera>, With<Camera3d>, Without<ModernFogView>)>,
@@ -370,7 +371,7 @@ fn halton(mut i: u32, base: u32) -> f32 {
     r
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_volume(
     active: Res<ActiveLighting>,
     lighting: Res<WowLighting>,

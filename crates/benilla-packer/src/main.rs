@@ -266,7 +266,7 @@ fn extract(a: ExtractArgs) -> Result<()> {
         std::fs::write(&path, &data).with_context(|| format!("writing {}", path.display()))?;
         written += 1;
         bytes += data.len() as u64;
-        if written % 1000 == 0 {
+        if written.is_multiple_of(1000) {
             eprintln!("  {written}/{}", entries.len());
         }
     }
@@ -437,7 +437,7 @@ fn build(a: BuildArgs) -> Result<()> {
                 .write_to(&a.out)
                 .map_err(|e| anyhow::anyhow!("writing pack {i}: {e}"))?;
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 250 == 0 {
+            if n.is_multiple_of(250) {
                 eprintln!("  {n}/{total} packs");
             }
             Ok(rec)
@@ -548,7 +548,7 @@ fn verify(a: VerifyArgs) -> Result<()> {
                 );
             }
             let n = checked.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 1000 == 0 {
+            if n.is_multiple_of(1000) {
                 eprint!("\r  verified {n}");
             }
             Ok(())

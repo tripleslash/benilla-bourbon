@@ -872,7 +872,7 @@ struct Candidate {
     settled: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_lights(
     active: Res<ActiveLighting>,
     // fork: P8 — the camera's `Projection` as well as its transform: the aggressive cull needs the
@@ -1365,7 +1365,7 @@ mod tests {
 
     /// Settle the fades: enough frames that everything ramping has reached its end. Shadow state
     /// is temporal now, so a test that wants a steady answer has to let it settle.
-    fn settle(held: &mut Vec<Option<HeldSlot>>, ranked: &[Candidate], cull: &Option<ShadowCull>) {
+    fn settle(held: &mut [Option<HeldSlot>], ranked: &[Candidate], cull: &Option<ShadowCull>) {
         for _ in 0..30 {
             assign_slots(held, ranked, cull, 1.0 / 60.0, &mut 0.0, always);
         }
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     /// Run `secs` of frames at 60 Hz with one persistent swap clock.
-    fn run(held: &mut Vec<Option<HeldSlot>>, ranked: &[Candidate], clock: &mut f32, secs: f32) {
+    fn run(held: &mut [Option<HeldSlot>], ranked: &[Candidate], clock: &mut f32, secs: f32) {
         for _ in 0..(secs * 60.0).round() as usize {
             assign_slots(held, ranked, &None, 1.0 / 60.0, clock, always);
         }
@@ -1583,10 +1583,12 @@ mod tests {
     /// below `KEEP_FRACTION`, and the gap between them is what stops the chatter.
     #[test]
     fn a_light_at_the_threshold_does_not_chatter() {
-        assert!(
-            KEEP_FRACTION < ADMIT_FRACTION,
-            "the keep threshold must be the looser one"
-        );
+        const {
+            assert!(
+                KEEP_FRACTION < ADMIT_FRACTION,
+                "the keep threshold must be the looser one"
+            );
+        }
         // Placed exactly where it would just fail to be admitted fresh...
         let range = 12.0;
         let d_admit = range / (ADMIT_FRACTION * cull_at(Vec3::ZERO).tan_half_fov);

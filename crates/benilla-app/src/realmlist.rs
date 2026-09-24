@@ -201,6 +201,21 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
         .map(|_| &s[prefix.len()..])
 }
 
+/// The address dialed when nothing has configured one: [`DEFAULT_REALMLIST`] natively; on the
+/// page — a site whose `config.json` names no `realmlist`, which is how the checked-in one
+/// ships — the gateway's host, or the origin that served the page
+/// (see `crate::webenv::default_wow_host`).
+fn default_realmlist() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::webenv::default_wow_host()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DEFAULT_REALMLIST.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,20 +328,5 @@ mod tests {
         };
         r.set("logon.example.org");
         assert_eq!(r.address(), "logon.example.org");
-    }
-}
-
-/// The address dialed when nothing has configured one: [`DEFAULT_REALMLIST`] natively; on the
-/// page — a site whose `config.json` names no `realmlist`, which is how the checked-in one
-/// ships — the gateway's host, or the origin that served the page
-/// (see `crate::webenv::default_wow_host`).
-fn default_realmlist() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::webenv::default_wow_host()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DEFAULT_REALMLIST.to_string()
     }
 }

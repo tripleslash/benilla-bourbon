@@ -561,10 +561,10 @@ pub(super) fn build_char_skin_materials(
                     key.emblem,
                     key.tabard_preview,
                 )?;
-                // `fold`, not `all`: every path must be ASKED, because asking is what starts
+                // A full pass, not `all`: every path must be ASKED, because asking is what starts
                 // the warm. A short-circuit would warm the first missing one and leave the rest
                 // for the next frame to discover, one round trip at a time.
-                let ready = plan.paths().fold(true, |acc, p| chain.ready(p) && acc);
+                let ready = plan.paths().filter(|p| !chain.ready(p)).count() == 0;
                 if !ready {
                     return defer();
                 }

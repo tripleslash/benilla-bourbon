@@ -350,7 +350,6 @@ pub fn is_spell_light_path(path: &str) -> bool {
 ///
 /// One light per model, for the reason the flame route gives: a Fireball authors four emitters and
 /// every one of them that passed would stack a full light on the same spot.
-
 pub fn synthesize_spell_light<'a>(
     path: &str,
     emitters: impl IntoIterator<Item = &'a ParticleEmitterDef>,

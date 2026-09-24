@@ -172,6 +172,61 @@ fn decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// `WOW_HOST`'s fallback when unset — `net/io.rs`'s `NetConfig::from_env` calls this instead of
+/// hard-coding a default, so it stays a one-line swap there (`var("WOW_HOST").unwrap_or_else(…)`)
+/// no matter what the right default is per platform.
+///
+/// Native: `localhost`, decision 0539's original default, unchanged.
+///
+/// Web: **the gateway's hostname when one is configured, and the page's own only otherwise.** This
+/// used to be unconditionally the page's hostname, on the premise that "the web host proxies to the
+/// realm beside it" — true of `wenilla-host`, which serves the bundle and the `/ws/{port}` proxy
+/// from one process, and false the moment the static tree moves to a static host and the gateway is a
+/// box somewhere else. On such a site the page's hostname is a static host edge with no realmd behind it,
+/// so defaulting to it would put every first-time visitor's login on an address that cannot answer.
+///
+/// The `ws` base is the honest source: it is the endpoint the client will actually dial, so the
+/// realm it reaches is on that host by construction. This is only the **fallback**, for a page
+/// whose `config.json` names no `realmlist` at all — which is how the checked-in one ships, so a
+/// local `wenilla-host --www web/dist` still dials the origin that served it. `?host=` and
+/// `config.json`'s own `realmlist` both win over it (`Realmlist`, `cvars::load_config`).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn default_wow_host() -> String {
+    if let Some(host) = ws_base().as_deref().and_then(host_of_ws_base) {
+        return host.to_string();
+    }
+    web_sys::window()
+        .and_then(|w| w.location().hostname().ok())
+        .unwrap_or_else(|| "localhost".into())
+}
+
+/// The WebSocket gateway base (`wss://host[:port]`), in precedence order: `?ws=` /
+/// `window.__wenilla_env.ws`, then `/config.json`'s `ws`. `None` = the page's own origin, which
+/// is `benilla_protocol::transport::web`'s own default and today's `wenilla-host` behaviour.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn ws_base() -> Option<String> {
+    var("WOW_WS").or_else(|| config("ws"))
+}
+
+/// `wss://gw.example.org:8443` -> `gw.example.org`. Pure string math, so it is unit-tested here
+/// rather than only exercised in a browser; a base that does not parse yields `None` and the caller
+/// falls back, because a malformed config value must not be worse than an absent one.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn host_of_ws_base(base: &str) -> Option<&str> {
+    let rest = base
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base)
+        .trim_end_matches('/');
+    let host = rest.split(['/', '?']).next()?;
+    // Strip the port, but leave a bracketed IPv6 literal alone — its colons are part of the address.
+    let host = match host.strip_prefix('[') {
+        Some(_) => host.split(']').next().map(|h| &h[1..])?,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then_some(host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{host_of_ws_base, lookup};
@@ -228,64 +283,4 @@ mod tests {
         assert_eq!(host_of_ws_base(""), None);
         assert_eq!(host_of_ws_base("wss://"), None);
     }
-}
-
-/// `WOW_HOST`'s fallback when unset — `net/io.rs`'s `NetConfig::from_env` calls this instead of
-/// hard-coding a default, so it stays a one-line swap there (`var("WOW_HOST").unwrap_or_else(…)`)
-/// no matter what the right default is per platform.
-///
-/// Native: `localhost`, decision 0539's original default, unchanged.
-///
-/// Web: **the gateway's hostname when one is configured, and the page's own only otherwise.** This
-/// used to be unconditionally the page's hostname, on the premise that "the web host proxies to the
-/// realm beside it" — true of `wenilla-host`, which serves the bundle and the `/ws/{port}` proxy
-/// from one process, and false the moment the static tree moves to a static host and the gateway is a
-/// box somewhere else. On such a site the page's hostname is a static host edge with no realmd behind it,
-/// so defaulting to it would put every first-time visitor's login on an address that cannot answer.
-///
-/// The `ws` base is the honest source: it is the endpoint the client will actually dial, so the
-/// realm it reaches is on that host by construction. This is only the **fallback**, for a page
-/// whose `config.json` names no `realmlist` at all — which is how the checked-in one ships, so a
-/// local `wenilla-host --www web/dist` still dials the origin that served it. `?host=` and
-/// `config.json`'s own `realmlist` both win over it (`Realmlist`, `cvars::load_config`).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn default_wow_host() -> String {
-    "localhost".into()
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn default_wow_host() -> String {
-    if let Some(host) = ws_base().as_deref().and_then(host_of_ws_base) {
-        return host.to_string();
-    }
-    web_sys::window()
-        .and_then(|w| w.location().hostname().ok())
-        .unwrap_or_else(|| "localhost".into())
-}
-
-/// The WebSocket gateway base (`wss://host[:port]`), in precedence order: `?ws=` /
-/// `window.__wenilla_env.ws`, then `/config.json`'s `ws`. `None` = the page's own origin, which
-/// is `benilla_protocol::transport::web`'s own default and today's `wenilla-host` behaviour.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn ws_base() -> Option<String> {
-    var("WOW_WS").or_else(|| config("ws"))
-}
-
-/// `wss://gw.example.org:8443` -> `gw.example.org`. Pure string math, so it is unit-tested here
-/// rather than only exercised in a browser; a base that does not parse yields `None` and the caller
-/// falls back, because a malformed config value must not be worse than an absent one.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn host_of_ws_base(base: &str) -> Option<&str> {
-    let rest = base
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(base)
-        .trim_end_matches('/');
-    let host = rest.split(['/', '?']).next()?;
-    // Strip the port, but leave a bracketed IPv6 literal alone — its colons are part of the address.
-    let host = match host.strip_prefix('[') {
-        Some(_) => host.split(']').next().map(|h| &h[1..])?,
-        None => host.split(':').next()?,
-    };
-    (!host.is_empty()).then_some(host)
 }

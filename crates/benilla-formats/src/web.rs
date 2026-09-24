@@ -220,165 +220,6 @@ pub const PRIORITY_GEOMETRY: u8 = 3;
 /// Everything else. See [`warm_priority`].
 pub const PRIORITY_NORMAL: u8 = 4;
 
-#[cfg(test)]
-mod priority_tests {
-    use super::*;
-
-    /// The published focus is one global, and these tests set it — so they run under one lock
-    /// rather than against each other. (`cargo test` threads a module's tests in parallel by
-    /// default; two of these racing would be a flake that only ever shows up in CI.)
-    static FOCUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Run `body` with a focus published, and leave nothing behind for the next test.
-    fn with_focus<T>(map: &str, tile: (i32, i32), lean: (i32, i32), body: impl FnOnce() -> T) -> T {
-        let _guard = FOCUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_terrain_focus(map, tile, lean);
-        let out = body();
-        clear_terrain_focus();
-        out
-    }
-
-    /// The lane order itself: every tier is distinct, terrain outranks model art, and the whole
-    /// terrain ladder sits *inside* the collision lane — the range `packs.js` reserves slots
-    /// against with one `priority <= PRIORITY_GEOMETRY` test.
-    #[test]
-    fn the_ladder_is_ordered_and_terrain_is_inside_the_collision_lane() {
-        const {
-            assert!(PRIORITY_TERRAIN_FOCUS < PRIORITY_TERRAIN_NEAR);
-            assert!(PRIORITY_TERRAIN_NEAR < PRIORITY_TERRAIN);
-            assert!(PRIORITY_TERRAIN < PRIORITY_GEOMETRY);
-            assert!(PRIORITY_GEOMETRY < PRIORITY_NORMAL);
-        }
-    }
-
-    /// The families that carry collision geometry or model bounds are the collision lane, and
-    /// nothing else is. The one worth pinning is the WMO **group** file — it is where the collider
-    /// faces actually live, and it is the easy one to miss, since it is `..._014.wmo` rather than
-    /// an extension of its own.
-    #[test]
-    fn geometry_names_outrank_everything_else() {
-        for name in [
-            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind.WMO",
-            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind_014.wmo",
-            r"Creature\Wolf\Wolf.m2",
-        ] {
-            assert_eq!(warm_priority(name), PRIORITY_GEOMETRY, "{name}");
-        }
-        for name in [
-            r"Sound\Ambience\Forest.wav",
-            r"DBFilesClient\Spell.dbc",
-            r"Interface\FrameXML\UIParent.lua",
-            // No extension at all, and a dotted directory holding one — neither is a geometry name,
-            // and the second is the one a naive "text after the last dot" would get wrong.
-            "listfile",
-            r"Interface\v1.2\readme",
-            // A directory whose name merely *starts* with the tileset tree's is not that tree.
-            r"TilesetExtras\Elwynn\Grass.blp",
-        ] {
-            assert_eq!(warm_priority(name), PRIORITY_NORMAL, "{name}");
-        }
-    }
-
-    /// Terrain outranks the model art, and the map's index outranks the tiles it unblocks.
-    #[test]
-    fn terrain_outranks_the_art_standing_on_it() {
-        assert_eq!(
-            warm_priority(r"World\Maps\Azeroth\Azeroth.wdt"),
-            PRIORITY_TERRAIN_FOCUS
-        );
-        assert_eq!(
-            warm_priority(r"World\Maps\Azeroth\Azeroth.wdl"),
-            PRIORITY_TERRAIN
-        );
-        // A layer texture gates the tile asset that owns it, so it is terrain and not art — in
-        // both the authored spelling and the lowercased forward-slash one `AdtLoader` asks with.
-        for name in [
-            r"Tileset\Elwynn\ElwynnGrass01.blp",
-            "tileset/elwynn/elwynngrass01.blp",
-        ] {
-            assert_eq!(warm_priority(name), PRIORITY_TERRAIN, "{name}");
-        }
-        // With no focus published, every tile is the plain terrain tier — better than the art it
-        // holds up, and no claim about a distance nobody has stated.
-        assert_eq!(
-            warm_priority(r"World\Maps\Azeroth\Azeroth_32_48.adt"),
-            PRIORITY_TERRAIN
-        );
-    }
-
-    /// **The tiers this whole change exists for**: the tile under the focus and the one the body
-    /// is nearest to stepping onto go first, the other seven neighbours next, and the rest of the
-    /// residency window behind them.
-    #[test]
-    fn the_focus_tile_and_the_one_being_approached_go_first() {
-        with_focus("Azeroth", (32, 48), (33, 48), || {
-            let p = |t: &str| warm_priority(&format!(r"World\Maps\Azeroth\{t}.adt"));
-            assert_eq!(p("Azeroth_32_48"), PRIORITY_TERRAIN_FOCUS);
-            assert_eq!(p("Azeroth_33_48"), PRIORITY_TERRAIN_FOCUS);
-            // The other seven of the eight neighbours, corners included.
-            assert_eq!(p("Azeroth_31_48"), PRIORITY_TERRAIN_NEAR);
-            assert_eq!(p("Azeroth_33_49"), PRIORITY_TERRAIN_NEAR);
-            assert_eq!(p("Azeroth_31_47"), PRIORITY_TERRAIN_NEAR);
-            // Two tiles out — inside the residency window at 777 farclip, still terrain, and
-            // behind the neighbourhood.
-            assert_eq!(p("Azeroth_34_48"), PRIORITY_TERRAIN);
-            assert_eq!(p("Azeroth_32_50"), PRIORITY_TERRAIN);
-            // Still ahead of the buildings standing on any of them.
-            assert!(PRIORITY_TERRAIN < warm_priority(r"World\wmo\a\b.wmo"));
-        });
-    }
-
-    /// A tile of a *different* map never borrows this map's neighbourhood — the case a worldport
-    /// puts on the wire for a few frames, where the two maps' 64×64 grids name the same squares.
-    #[test]
-    fn another_maps_tiles_do_not_ride_this_maps_focus() {
-        with_focus("Azeroth", (32, 48), (33, 48), || {
-            assert_eq!(
-                warm_priority(r"World\Maps\Kalimdor\Kalimdor_32_48.adt"),
-                PRIORITY_TERRAIN
-            );
-            // Case is the container's business, not the caller's: the streamer's URL is authored
-            // however the DBC spelled the directory.
-            assert_eq!(
-                warm_priority("world/maps/azeroth/AZEROTH_32_48.adt"),
-                PRIORITY_TERRAIN_FOCUS
-            );
-        });
-    }
-
-    /// A tile name that will not parse falls back **down** the ladder, never up: an unrecognised
-    /// name must not outrank the tile the body is standing on.
-    #[test]
-    fn an_unparseable_tile_name_falls_back_to_the_plain_terrain_tier() {
-        with_focus("Azeroth", (32, 48), (33, 48), || {
-            for name in [
-                r"World\Maps\Azeroth\Azeroth_32.adt",
-                r"World\Maps\Azeroth\Azeroth_x_48.adt",
-                r"World\Maps\Azeroth\.adt",
-            ] {
-                assert!(
-                    warm_priority(name) >= PRIORITY_TERRAIN,
-                    "{name} must not outrank the focus tile"
-                );
-            }
-            // A loud extension is still this map's tile, though — the container's case rules are
-            // not the caller's problem.
-            assert_eq!(warm_priority("Azeroth_32_48.ADT"), PRIORITY_TERRAIN_FOCUS);
-        });
-    }
-
-    /// A released world publishes nothing, and the tiers go quiet with it.
-    #[test]
-    fn clearing_the_focus_returns_every_tile_to_the_plain_tier() {
-        with_focus("Azeroth", (32, 48), (33, 48), || {});
-        assert_eq!(terrain_focus(), None);
-        assert_eq!(
-            warm_priority(r"World\Maps\Azeroth\Azeroth_32_48.adt"),
-            PRIORITY_TERRAIN
-        );
-    }
-}
-
 /// Percent-encode `name` exactly like JavaScript's `encodeURIComponent`: the unreserved set is
 /// `A-Za-z0-9-_.!~*'()`; every other byte, including `\` (chain names are internally
 /// backslash-separated), becomes `%XX` uppercase-hex. This is the client half of the Data URL
@@ -616,3 +457,162 @@ mod wasm {
 pub use wasm::{
     console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base, trace, trace_hd,
 };
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    /// The published focus is one global, and these tests set it — so they run under one lock
+    /// rather than against each other. (`cargo test` threads a module's tests in parallel by
+    /// default; two of these racing would be a flake that only ever shows up in CI.)
+    static FOCUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with a focus published, and leave nothing behind for the next test.
+    fn with_focus<T>(map: &str, tile: (i32, i32), lean: (i32, i32), body: impl FnOnce() -> T) -> T {
+        let _guard = FOCUS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_terrain_focus(map, tile, lean);
+        let out = body();
+        clear_terrain_focus();
+        out
+    }
+
+    /// The lane order itself: every tier is distinct, terrain outranks model art, and the whole
+    /// terrain ladder sits *inside* the collision lane — the range `packs.js` reserves slots
+    /// against with one `priority <= PRIORITY_GEOMETRY` test.
+    #[test]
+    fn the_ladder_is_ordered_and_terrain_is_inside_the_collision_lane() {
+        const {
+            assert!(PRIORITY_TERRAIN_FOCUS < PRIORITY_TERRAIN_NEAR);
+            assert!(PRIORITY_TERRAIN_NEAR < PRIORITY_TERRAIN);
+            assert!(PRIORITY_TERRAIN < PRIORITY_GEOMETRY);
+            assert!(PRIORITY_GEOMETRY < PRIORITY_NORMAL);
+        }
+    }
+
+    /// The families that carry collision geometry or model bounds are the collision lane, and
+    /// nothing else is. The one worth pinning is the WMO **group** file — it is where the collider
+    /// faces actually live, and it is the easy one to miss, since it is `..._014.wmo` rather than
+    /// an extension of its own.
+    #[test]
+    fn geometry_names_outrank_everything_else() {
+        for name in [
+            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind.WMO",
+            r"World\wmo\Azeroth\Buildings\Stormwind\Stormwind_014.wmo",
+            r"Creature\Wolf\Wolf.m2",
+        ] {
+            assert_eq!(warm_priority(name), PRIORITY_GEOMETRY, "{name}");
+        }
+        for name in [
+            r"Sound\Ambience\Forest.wav",
+            r"DBFilesClient\Spell.dbc",
+            r"Interface\FrameXML\UIParent.lua",
+            // No extension at all, and a dotted directory holding one — neither is a geometry name,
+            // and the second is the one a naive "text after the last dot" would get wrong.
+            "listfile",
+            r"Interface\v1.2\readme",
+            // A directory whose name merely *starts* with the tileset tree's is not that tree.
+            r"TilesetExtras\Elwynn\Grass.blp",
+        ] {
+            assert_eq!(warm_priority(name), PRIORITY_NORMAL, "{name}");
+        }
+    }
+
+    /// Terrain outranks the model art, and the map's index outranks the tiles it unblocks.
+    #[test]
+    fn terrain_outranks_the_art_standing_on_it() {
+        assert_eq!(
+            warm_priority(r"World\Maps\Azeroth\Azeroth.wdt"),
+            PRIORITY_TERRAIN_FOCUS
+        );
+        assert_eq!(
+            warm_priority(r"World\Maps\Azeroth\Azeroth.wdl"),
+            PRIORITY_TERRAIN
+        );
+        // A layer texture gates the tile asset that owns it, so it is terrain and not art — in
+        // both the authored spelling and the lowercased forward-slash one `AdtLoader` asks with.
+        for name in [
+            r"Tileset\Elwynn\ElwynnGrass01.blp",
+            "tileset/elwynn/elwynngrass01.blp",
+        ] {
+            assert_eq!(warm_priority(name), PRIORITY_TERRAIN, "{name}");
+        }
+        // With no focus published, every tile is the plain terrain tier — better than the art it
+        // holds up, and no claim about a distance nobody has stated.
+        assert_eq!(
+            warm_priority(r"World\Maps\Azeroth\Azeroth_32_48.adt"),
+            PRIORITY_TERRAIN
+        );
+    }
+
+    /// **The tiers this whole change exists for**: the tile under the focus and the one the body
+    /// is nearest to stepping onto go first, the other seven neighbours next, and the rest of the
+    /// residency window behind them.
+    #[test]
+    fn the_focus_tile_and_the_one_being_approached_go_first() {
+        with_focus("Azeroth", (32, 48), (33, 48), || {
+            let p = |t: &str| warm_priority(&format!(r"World\Maps\Azeroth\{t}.adt"));
+            assert_eq!(p("Azeroth_32_48"), PRIORITY_TERRAIN_FOCUS);
+            assert_eq!(p("Azeroth_33_48"), PRIORITY_TERRAIN_FOCUS);
+            // The other seven of the eight neighbours, corners included.
+            assert_eq!(p("Azeroth_31_48"), PRIORITY_TERRAIN_NEAR);
+            assert_eq!(p("Azeroth_33_49"), PRIORITY_TERRAIN_NEAR);
+            assert_eq!(p("Azeroth_31_47"), PRIORITY_TERRAIN_NEAR);
+            // Two tiles out — inside the residency window at 777 farclip, still terrain, and
+            // behind the neighbourhood.
+            assert_eq!(p("Azeroth_34_48"), PRIORITY_TERRAIN);
+            assert_eq!(p("Azeroth_32_50"), PRIORITY_TERRAIN);
+            // Still ahead of the buildings standing on any of them.
+            assert!(PRIORITY_TERRAIN < warm_priority(r"World\wmo\a\b.wmo"));
+        });
+    }
+
+    /// A tile of a *different* map never borrows this map's neighbourhood — the case a worldport
+    /// puts on the wire for a few frames, where the two maps' 64×64 grids name the same squares.
+    #[test]
+    fn another_maps_tiles_do_not_ride_this_maps_focus() {
+        with_focus("Azeroth", (32, 48), (33, 48), || {
+            assert_eq!(
+                warm_priority(r"World\Maps\Kalimdor\Kalimdor_32_48.adt"),
+                PRIORITY_TERRAIN
+            );
+            // Case is the container's business, not the caller's: the streamer's URL is authored
+            // however the DBC spelled the directory.
+            assert_eq!(
+                warm_priority("world/maps/azeroth/AZEROTH_32_48.adt"),
+                PRIORITY_TERRAIN_FOCUS
+            );
+        });
+    }
+
+    /// A tile name that will not parse falls back **down** the ladder, never up: an unrecognised
+    /// name must not outrank the tile the body is standing on.
+    #[test]
+    fn an_unparseable_tile_name_falls_back_to_the_plain_terrain_tier() {
+        with_focus("Azeroth", (32, 48), (33, 48), || {
+            for name in [
+                r"World\Maps\Azeroth\Azeroth_32.adt",
+                r"World\Maps\Azeroth\Azeroth_x_48.adt",
+                r"World\Maps\Azeroth\.adt",
+            ] {
+                assert!(
+                    warm_priority(name) >= PRIORITY_TERRAIN,
+                    "{name} must not outrank the focus tile"
+                );
+            }
+            // A loud extension is still this map's tile, though — the container's case rules are
+            // not the caller's problem.
+            assert_eq!(warm_priority("Azeroth_32_48.ADT"), PRIORITY_TERRAIN_FOCUS);
+        });
+    }
+
+    /// A released world publishes nothing, and the tiers go quiet with it.
+    #[test]
+    fn clearing_the_focus_returns_every_tile_to_the_plain_tier() {
+        with_focus("Azeroth", (32, 48), (33, 48), || {});
+        assert_eq!(terrain_focus(), None);
+        assert_eq!(
+            warm_priority(r"World\Maps\Azeroth\Azeroth_32_48.adt"),
+            PRIORITY_TERRAIN
+        );
+    }
+}

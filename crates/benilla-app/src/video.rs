@@ -267,6 +267,7 @@ pub(crate) struct VideoPlugin;
 /// `cvar/scratch/graphics-cost-cvar-census.md` §2), landing on the resources they drive. Each
 /// arm writes only its own resource, so a `ViewDistance` change is `farclip` moving and nothing
 /// else; the clamps are each row's own, stated beside it.
+#[allow(clippy::type_complexity)]
 pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut cfg: ResMut<VideoConfig>,
