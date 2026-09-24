@@ -67,52 +67,17 @@ pub struct ZoneLook {
 }
 
 impl ZoneLook {
-    /// Every zone without a row: the WoW Forever calibration, a light haze.
+    /// fork: **Elwynn's look, in every zone.** The Elwynn Forest calibration (treeline shafts at dusk)
+    /// is the one look: every zone gets its shaft haze, key-to-fill and grade, so Stranglethorn's
+    /// jungle, Durotar, the Barrens and Mulgore carry the same light cones Elwynn does. A zone that
+    /// needs its own tuning takes a row in [`ZONES`] built on this.
     pub const NEUTRAL: Self = Self {
-        // The Forever calibration is the default everywhere — fitted region by region (dry sand, the
-        // shallows, mid-river, the sky) against the WoW Forever shot of the Southfury orc bridge at
-        // noon (`worldview_pose=477,-3804,26,158,-5`, `clock=720`). A clean cyan sky (`sky_tint` cuts
-        // the authored stops' red), a pale haze toward the horizon (`fog_tint` lifts the authored
-        // fog colour off its mauve), a near-white sun on muted ground (`key_tint` whitens the
-        // authored key; the lower key and exposure keep the ground under the sky as Forever does),
-        // a light shaft haze that lifts the middle distance, and a soft grade. The scene stays crisp
-        // out to 450 yd, with the dense ground fog beyond. Zone rows override the colour.
-        //
-        // It replaces the earlier default, fitted to a dusk Durotar gate shot, whose amber — a green
-        // fog tint, a sky with its blue cut, a hard grade — read lime and harsh at midday.
-        key: 0.72,
+        key: 1.1,
         fill: 0.9,
-        exposure: 0.56,
-        haze: 0.0008,
-        forward: 0.7,
-        key_scatter: 0.6,
-        glow: [1.0, 1.0, 1.0],
-        haze_tint: [1.0, 1.0, 1.0],
-        fog_reach: 0.5,
-        fog_tint: [1.9, 2.5, 2.25],
-        fog_falloff: 70.0,
-        sky_tint: [0.62, 1.0, 1.25],
-        silhouette: 0.55,
-        fog_clear: 450.0,
-        shafts: 0.3,
-        contrast: 1.1,
-        saturation: 0.95,
-        vignette: 0.15,
-        toe: 1.0,
-        key_tint: [0.95, 1.03, 1.2],
-    };
-
-    /// The default before the Forever calibration — what the rows fitted to their own reference
-    /// shots (Teldrassil, Ashenvale, Darkshore, Mulgore, …) were tuned on, and still build on, so
-    /// moving the default did not re-tint zones that were already calibrated: a row's unset fields
-    /// are part of its calibration.
-    pub const PRE_FOREVER: Self = Self {
-        key: 1.0,
-        fill: 1.0,
-        exposure: 1.1,
-        haze: 0.0002,
-        forward: 0.7,
-        key_scatter: 0.6,
+        exposure: 1.0,
+        haze: 0.0024,
+        forward: 0.72,
+        key_scatter: 0.7,
         glow: [1.0, 1.0, 1.0],
         haze_tint: [1.0, 1.0, 1.0],
         fog_reach: 0.5,
@@ -182,74 +147,8 @@ impl ZoneLook {
     }
 }
 
-/// The look table, by `AreaTable.dbc` zone id.
-const ZONES: &[(u32, ZoneLook)] = &[
-    // Teldrassil: dense purple canopy haze, a strong forward glow through the openings.
-    (141, ZoneLook { key: 1.1, fill: 0.92, exposure: 1.08, haze: 0.0030, forward: 0.78, key_scatter: 0.85, ..ZoneLook::PRE_FOREVER }),
-    // Darnassus: Teldrassil's light, a little clearer. Its plazas are open sky, so the canopy boost the
-    // forest's beams ride on does not reach them: the shaft gain carries the city's own.
-    (1657, ZoneLook { key: 1.1, fill: 0.95, exposure: 1.0, haze: 0.0026, forward: 0.75, key_scatter: 0.75, shafts: 0.6, ..ZoneLook::PRE_FOREVER }),
-    // Ashenvale: cyan-teal volumetric haze and deep contrast under the trees.
-    (331, ZoneLook { key: 1.15, fill: 0.88, exposure: 1.0, haze: 0.0039, forward: 0.68, key_scatter: 0.75, shafts: 1.5, ..ZoneLook::PRE_FOREVER }),
-    // Darkshore: pink forward-scatter toward a low sun over dense coastal fog.
-    (148, ZoneLook {
-        key: 1.05,
-        fill: 0.95,
-        exposure: 1.0,
-        haze: 0.0028,
-        forward: 0.82,
-        key_scatter: 0.95,
-        glow: [1.0, 0.56, 0.42],
-        haze_tint: [0.92, 0.74, 0.74],
-        ..ZoneLook::PRE_FOREVER
-    }),
-    // Durotar: the calibration zone for the defaults above (the Forever Southfury bridge shot), so
-    // its row IS the default — kept as a row so the zone's own tuning has a home.
-    (14, ZoneLook::NEUTRAL),
-    // The Barrens: the far bank of the same shot, and the Ratchet docks in Forever's coastal shot —
-    // the default look, as a row of its own for the same reason.
-    (17, ZoneLook::NEUTRAL),
-    // Mulgore: warm plains haze, a peach band on the horizon at dusk behind the tan mesa layers, and the
-    // bluffs crisp out to their far rises (checked against the modern client's Thunder Bluff sunset,
-    // `worldview_pose=-1635,75,198,13,-3`, 19:00).
-    (215, ZoneLook {
-        exposure: 1.05,
-        haze: 0.0004,
-        glow: [1.4, 0.85, 0.6],
-        haze_tint: [1.1, 0.85, 0.8],
-        // Mulgore's authored daytime fog end is short (~890 yd): at reach 1 the plains past the clear
-        // range went milky by noon.
-        fog_reach: 1.6,
-        fog_tint: [2.3, 1.25, 0.85],
-        fog_falloff: 70.0,
-        sky_tint: [0.85, 1.0, 1.25],
-        silhouette: 0.75,
-        fog_clear: 400.0,
-        shafts: 0.3,
-        ..ZoneLook::PRE_FOREVER
-    }),
-    // Elwynn Forest: treeline shafts at dusk.
-    (12, ZoneLook { key: 1.1, fill: 0.9, exposure: 1.0, haze: 0.0024, forward: 0.72, key_scatter: 0.7, ..ZoneLook::PRE_FOREVER }),
-    // Duskwood: gloom — a weak key, a darker exposure.
-    (10, ZoneLook { key: 1.0, fill: 0.95, exposure: 0.95, haze: 0.0030, forward: 0.6, key_scatter: 0.45, ..ZoneLook::PRE_FOREVER }),
-    // Felwood: a sickly canopy.
-    (361, ZoneLook { key: 1.1, fill: 0.88, exposure: 1.0, haze: 0.0036, forward: 0.65, key_scatter: 0.6, ..ZoneLook::PRE_FOREVER }),
-    // Stormwind City: a light street haze, enough for the sun to fall between the rooftops as beams —
-    // a city has no canopy boost, so the shaft gain stands in for it (the streets are open sky).
-    (1519, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0018, forward: 0.7, key_scatter: 0.6, shafts: 0.6, ..ZoneLook::PRE_FOREVER }),
-    // Orgrimmar: Durotar's colour and grade, with the dusty canyon haze the plains around it do not
-    // need — the canyon walls and the spiked roofs are what cut the beams.
-    (1637, ZoneLook {
-        haze: 0.0018,
-        glow: [1.25, 0.95, 0.75],
-        key_scatter: 0.7,
-        shafts: 0.6,
-        ..ZoneLook::NEUTRAL
-    }),
-    // Ironforge: an interior city, so its haze stays thin.
-
-    (1537, ZoneLook { key: 1.0, fill: 1.0, exposure: 1.0, haze: 0.0009, forward: 0.6, key_scatter: 0.4, ..ZoneLook::PRE_FOREVER }),
-];
+/// The look table, by `AreaTable.dbc` zone id: empty, so every zone takes [`ZoneLook::NEUTRAL`].
+const ZONES: &[(u32, ZoneLook)] = &[];
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
     ZONES
@@ -491,8 +390,20 @@ mod tests {
     #[test]
     fn an_unlisted_zone_is_neutral_and_looks_cross_fade() {
         assert_eq!(look_for_zone(999_999), ZoneLook::NEUTRAL);
-        let teldrassil = look_for_zone(141);
-        let half = ZoneLook::NEUTRAL.lerp(teldrassil, 0.5);
-        assert!((half.haze - (ZoneLook::NEUTRAL.haze + teldrassil.haze) / 2.0).abs() < 1e-6);
+        let hazier = ZoneLook {
+            haze: 0.004,
+            ..ZoneLook::NEUTRAL
+        };
+        let half = ZoneLook::NEUTRAL.lerp(hazier, 0.5);
+        assert!((half.haze - (ZoneLook::NEUTRAL.haze + hazier.haze) / 2.0).abs() < 1e-6);
+    }
+
+    /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,
+    /// Orgrimmar 1637, the Barrens 17, Mulgore 215).
+    #[test]
+    fn every_zone_wears_elwynns_look() {
+        for zone in [12, 33, 14, 1637, 17, 215] {
+            assert_eq!(look_for_zone(zone), ZoneLook::NEUTRAL, "zone {zone}");
+        }
     }
 }
