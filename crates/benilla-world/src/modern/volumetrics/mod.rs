@@ -79,7 +79,7 @@ const NIGHT_HAZE: f32 = 0.0025;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
-const SHAFT_SCALE: f32 = 0.67;
+const SHAFT_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FogMode {
