@@ -1219,8 +1219,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // session-only.
     ours(
         "waterDetail",
-        "2",
-        "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below) and keeps 1.12.1's renderer on tier 0",
+        "3",
+        "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below), ships the fork's Modern (Experimental) tier 3 by default, and keeps 1.12.1's renderer on tier 0",
     ),
     // **`hdCharacterModels` — the updated-character-model layer, ON by default.**
     //
@@ -2936,7 +2936,7 @@ mod tests {
         // to the engine's tier constant the same way.
         assert_eq!(
             d["waterDetail"],
-            f32::from(benilla_world::liquid::WATER_DETAIL_CATA)
+            f32::from(benilla_world::liquid::WATER_DETAIL_EXPERIMENTAL)
         );
         assert_eq!(d["ssaoStrength"], AO_DEFAULT);
         assert_eq!(d["ssgiStrength"], GI_DEFAULT);

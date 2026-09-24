@@ -145,7 +145,7 @@ pub(crate) use surface::{
 /// fork: `1` is taken since by the SSR-only cata tier ([`WATER_DETAIL_SSR`]) and `3` by the
 /// experimental modern combine ([`WATER_DETAIL_EXPERIMENTAL`]).
 ///
-/// Cata is the default. `$WOW_WATER_DETAIL` overrides for a session.
+/// fork: Modern (Experimental) is the default. `$WOW_WATER_DETAIL` overrides for a session.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WaterDetail(pub u8);
 
@@ -207,7 +207,7 @@ impl Default for WaterDetail {
     fn default() -> Self {
         match crate::launch_env::var("WOW_WATER_DETAIL").and_then(|v| v.parse::<f32>().ok()) {
             Some(v) => Self::from_cvar(v),
-            None => WaterDetail(WATER_DETAIL_CATA),
+            None => WaterDetail(WATER_DETAIL_EXPERIMENTAL),
         }
     }
 }
