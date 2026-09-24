@@ -1435,7 +1435,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
         vec![("waterDetail".to_string(), "1".to_string())]
     );
 
-    // Defaults comes back to Modern, this row's default being the newer behaviour.
+    // Defaults comes back to Modern (Experimental), this row's default.
     s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
     s.run("DropDownList1Button4:Click()").unwrap();
     s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
@@ -1445,7 +1445,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
             .unwrap(),
-        "Modern"
+        "Modern (Experimental)"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
