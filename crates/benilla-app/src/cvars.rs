@@ -1196,20 +1196,20 @@ pub(crate) const REGISTERED: &[Registered] = &[
          split across two rows only so a player can move them apart",
     ),
     // ── fork-owned block: modern lighting (FORK.md) ──
-    // `lightingModel` — 0 classic (upstream's 1.12.1 reproduction, the default), 1 modern.
-    // `lightingQuality` — the modern tier, 0 low … 4 cinematic; Medium in the browser, High
-    // natively. Cinematic (P8) is the local-light tier: every authored lamp and every glowing
+    // `lightingModel` — 0 classic (upstream's 1.12.1 reproduction), 1 modern (the default).
+    // `lightingQuality` — the modern tier, 0 low … 4 cinematic (the default, on every platform).
+    // Cinematic (P8) is the local-light tier: every authored lamp and every glowing
     // weapon emits, twelve of them cast soft cube shadows, and entities cast into those cubes.
     // Both apply to the next frame in the world.
     // `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` override session-only.
     ours(
         "lightingModel",
-        "0",
+        "1",
         "the fork's own — the reference has one lighting model; this selects the parallel one",
     ),
     ours(
         "lightingQuality",
-        if cfg!(target_arch = "wasm32") { "1" } else { "2" },
+        "4",
         "the fork's own — the modern model's quality tier",
     ),
     // ── end fork-owned block ──
@@ -1399,8 +1399,12 @@ pub(crate) struct Cvars {
     /// to persist.
     session_owned: HashSet<String>,
     /// The session-owned rows a player's own write takes back (fork: web build) — see
-    /// [`Self::fallback_for_session`]. Always a subset of `session_owned`.
-    yielding: HashSet<String>,
+    /// [`Self::fallback_for_session`] and [`Self::cap_for_session`] — each with the value it
+    /// displaced, which [`Self::release_fallbacks`] restores. Keys are a subset of `session_owned`.
+    yielding: HashMap<String, String>,
+    /// A player's write moved a [`GRAPHICS_CVARS`] row since [`sync_cvars`] last looked (fork: web
+    /// build) — the Graphics page's Apply or Defaults, which retires the GPU recovery tier.
+    graphics_applied: bool,
     /// Accepted moves not yet triggered — flushed by [`sync_cvars`] every frame, synchronously by
     /// the boot load and the session-edge fold, and by any caller that wants its observers to
     /// have run before its own dependents ([`Cvars::take_events`]).
@@ -1420,7 +1424,8 @@ impl Default for Cvars {
             index: HashMap::with_capacity(REGISTERED.len()),
             file: BTreeMap::new(),
             session_owned: HashSet::new(),
-            yielding: HashSet::new(),
+            yielding: HashMap::new(),
+            graphics_applied: false,
             events: Vec::new(),
             outbox: Vec::new(),
             dirty: false,
@@ -1542,7 +1547,7 @@ impl Cvars {
         }
         // A player's write takes a yielding row back: from here on it is theirs and is saved.
         let key = row.name.to_ascii_lowercase();
-        let reclaimed = from_vm && self.yielding.remove(&key);
+        let reclaimed = from_vm && self.yielding.remove(&key).is_some();
         if reclaimed {
             self.session_owned.remove(&key);
         }
@@ -1575,7 +1580,18 @@ impl Cvars {
 
     /// A write the VM's mirror already made — drained from its change queue.
     pub(crate) fn set_from_vm(&mut self, name: &str, value: &str) -> SetOutcome {
-        self.write(name, value, true)
+        let outcome = self.write(name, value, true);
+        if matches!(outcome, SetOutcome::Changed | SetOutcome::Staged)
+            && GRAPHICS_CVARS.iter().any(|c| c.eq_ignore_ascii_case(name))
+        {
+            self.graphics_applied = true;
+        }
+        outcome
+    }
+
+    /// Whether a player's write moved a Graphics row since the last call — and clear it.
+    pub(crate) fn take_graphics_applied(&mut self) -> bool {
+        std::mem::take(&mut self.graphics_applied)
     }
 
     /// **The table follows a value the engine already applied** — a mirror, not a write: the
@@ -1711,9 +1727,66 @@ impl Cvars {
         {
             return false;
         }
+        self.yield_for_session(name, value)
+    }
+
+    /// **A ceiling for the session only** (fork: web build) — the GPU recovery tier's lighting
+    /// quality. Unlike [`Self::fallback_for_session`] it holds a saved value down as well: a tier
+    /// is the machine's evidence, and a saved Cinematic is exactly what it must not reload into.
+    /// A row already at or under the ceiling, or owned by a lever, is left alone. Session-owned
+    /// and never saved (the file keeps the player's value), and taken back by the player's own
+    /// write, or restored by [`Self::release_fallbacks`]. Returns whether the row moved.
+    pub(crate) fn cap_for_session(&mut self, name: &str, cap: &str) -> bool {
+        if self.is_session_owned(name) {
+            return false;
+        }
+        let (Some(current), Ok(ceiling)) = (self.num(name), cap.trim().parse::<f32>()) else {
+            return false;
+        };
+        if current <= ceiling {
+            return false;
+        }
+        self.yield_for_session(name, cap)
+    }
+
+    /// The shared half of the two: take the row for the session, remembering what it displaced.
+    fn yield_for_session(&mut self, name: &str, value: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        let Some(prior) = self.get(name).map(str::to_string) else {
+            warn!("cvar {name}: not registered — session value ignored");
+            return false;
+        };
         let moved = self.override_for_session(name, value);
         if self.session_owned.contains(&key) {
-            self.yielding.insert(key);
+            self.yielding.insert(key, prior);
+        }
+        moved
+    }
+
+    /// **Every row the recovery tier still holds, back to the player** (fork: web build): each
+    /// leaves the session's hands and returns to the value it displaced — the registered default
+    /// under a fallback, the saved or default value under a cap — which is what a load without the
+    /// tier gives. The observers hear the move. Returns how many rows moved.
+    pub(crate) fn release_fallbacks(&mut self) -> usize {
+        let mut moved = 0;
+        for (key, prior) in std::mem::take(&mut self.yielding) {
+            self.session_owned.remove(&key);
+            let Some(&i) = self.index.get(&key) else {
+                continue;
+            };
+            let row = &mut self.rows[i];
+            row.pending = None;
+            if row.value == prior {
+                continue;
+            }
+            let old = std::mem::replace(&mut row.value, prior.clone());
+            self.events.push(CvarChanged {
+                name: row.name.clone(),
+                old,
+                new: prior.clone(),
+            });
+            self.outbox.push((row.name.clone(), prior));
+            moved += 1;
         }
         moved
     }
@@ -2137,15 +2210,52 @@ fn apply_query_overrides(cvars: &mut Cvars) {
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_query_overrides(_cvars: &mut Cvars) {}
 
-/// fork: web build — the render scale `web/gpu.js` steps down to after the GPU device was lost
-/// (`__wenilla_env.gpu_render_scale`). A fallback, not an override: a render scale the player
-/// saved wins, and one they set in the Graphics page is theirs from that write on.
+/// fork: web build — what `web/gpu.js` steps down to after the GPU device was lost. The render
+/// scale (`__wenilla_env.gpu_render_scale`) is a fallback, so a render scale the player saved
+/// wins; the lighting quality (`gpu_lighting_quality`) is a ceiling, so it holds a saved Cinematic
+/// down too. Both are this session's only, either is the player's again from their own write to
+/// it, and any Graphics Apply retires both ([`release_gpu_tier`]).
 fn apply_gpu_tier(cvars: &mut Cvars) {
-    let Some(value) = crate::webenv::var("WOW_GPU_RENDER_SCALE") else {
-        return;
-    };
-    if cvars.fallback_for_session("renderScale", &value) {
-        info!("config: renderScale = {value} from the GPU recovery tier (until you set one)");
+    if let Some(value) = crate::webenv::var("WOW_GPU_RENDER_SCALE") {
+        if cvars.fallback_for_session("renderScale", &value) {
+            info!("config: renderScale = {value} from the GPU recovery tier (until you set one)");
+        }
+    }
+    if let Some(value) = crate::webenv::var("WOW_GPU_LIGHTING_QUALITY") {
+        if cvars.cap_for_session("lightingQuality", &value) {
+            info!("config: lightingQuality capped at {value} by the GPU recovery tier");
+        }
+    }
+}
+
+/// fork: web build — the CVars the Graphics page writes: its CVar rows, and `gamma` behind
+/// Brightness's `SetGamma`. A player's write to any of them is "applied new graphics settings",
+/// which is what retires `web/gpu.js`'s recovery tier.
+pub(crate) const GRAPHICS_CVARS: &[&str] = &[
+    "uiScale",
+    "farclip",
+    "WorldDetail",
+    "gamma",
+    "weatherDensity",
+    "gxVSync",
+    "worldShadows",
+    "hdCharacterModels",
+    "ssaoStrength",
+    "ssgiStrength",
+    "waterDetail",
+    "lightingModel",
+    "lightingQuality",
+    "renderScale",
+];
+
+/// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
+/// is over: the page persists tier 0 and lifts its pixel budget now ([`crate::webgpu`]), and a
+/// render scale the tier still holds returns to the player's default. Without it a single device
+/// loss held the lower tier until it decayed, storage was cleared, or `?gputier=0`.
+fn release_gpu_tier(cvars: &mut Cvars) {
+    let released = cvars.release_fallbacks();
+    if crate::webgpu::settings_applied() || released > 0 {
+        info!("config: Graphics settings applied — GPU recovery tier cleared");
     }
 }
 
@@ -2272,6 +2382,11 @@ pub(crate) fn sync_cvars(
         if cvars.get("gxApi") != Some(backend) {
             cvars.own_for_session("gxApi", Some(backend));
         }
+    }
+    // A Graphics write drained last frame (or folded at a session edge) retires the recovery
+    // tier; its render-scale move flushes with this frame's events below.
+    if cvars.take_graphics_applied() {
+        release_gpu_tier(&mut cvars);
     }
     let Some(mut script) = script else {
         // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
@@ -2836,6 +2951,15 @@ mod tests {
         );
         assert_eq!(d["ssaoStrength"], AO_DEFAULT);
         assert_eq!(d["ssgiStrength"], GI_DEFAULT);
+        // The lighting pair welds to the engine's shipped model and tier: Modern at Cinematic.
+        assert_eq!(
+            d["lightingModel"],
+            f32::from(LightingModel::default().as_cvar())
+        );
+        assert_eq!(
+            d["lightingQuality"],
+            f32::from(LightingQuality::DEFAULT.as_cvar())
+        );
     }
 
     /// **Every arm, through the registry and its observers.** The old central `apply_to_knobs`
@@ -2982,6 +3106,8 @@ mod tests {
         // The fork's shadow switch and lighting pair.
         apply(&mut app, "worldShadows", "0");
         assert!(!res::<VideoConfig>(&app).world_shadows);
+        apply(&mut app, "lightingModel", "0");
+        assert_eq!(res::<LightingSettings>(&app).model, LightingModel::Classic);
         apply(&mut app, "lightingModel", "1");
         assert_eq!(
             res::<LightingSettings>(&app).model,
@@ -3478,8 +3604,8 @@ mod tests {
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
             // WaterDetail::default() $WOW_WATER_DETAIL.
             .insert_resource(LightingSettings {
-                model: LightingModel::Classic,
-                quality: LightingQuality::PLATFORM_DEFAULT,
+                model: LightingModel::default(),
+                quality: LightingQuality::DEFAULT,
             })
             .insert_resource(IndirectLighting {
                 ao: AO_DEFAULT,
@@ -4067,6 +4193,127 @@ mod tests {
             same.compose().get("renderScale").map(String::as_str),
             Some("0.55")
         );
+    }
+
+    /// fork: web build — **any Graphics Apply retires the recovery tier**, not only a Render
+    /// Scale move: the player's write to another Graphics row is flagged, and releasing the
+    /// fallback returns the render scale to its default, heard by the knob and never saved. A
+    /// write elsewhere, or a host write, is not the player applying Graphics settings.
+    #[test]
+    fn a_graphics_apply_releases_the_gpu_tier() {
+        let mut cvars = Cvars::default();
+        cvars.load_file(BTreeMap::new());
+        cvars.fallback_for_session("renderScale", "0.55");
+        cvars.take_events();
+
+        cvars.set("farclip", "300");
+        cvars.set_from_vm("MasterVolume", "0.5");
+        assert!(!cvars.take_graphics_applied());
+
+        assert_eq!(
+            cvars.set_from_vm("lightingQuality", "2"),
+            SetOutcome::Changed
+        );
+        assert!(cvars.take_graphics_applied());
+        assert!(!cvars.take_graphics_applied(), "an edge, not a state");
+
+        assert_eq!(cvars.release_fallbacks(), 1);
+        let default = cvars.default_of("renderScale").unwrap().to_string();
+        assert_eq!(cvars.get("renderScale"), Some(default.as_str()));
+        assert!(!cvars.is_session_owned("renderScale"));
+        assert!(cvars
+            .take_events()
+            .iter()
+            .any(|e| e.name == "renderScale" && e.new == default));
+        assert!(!cvars.compose().contains_key("renderScale"));
+        assert_eq!(cvars.release_fallbacks(), 0, "released once");
+
+        // The released row is the player's again: their next write is simply saved.
+        assert_eq!(cvars.set_from_vm("renderScale", "0.8"), SetOutcome::Changed);
+        assert_eq!(
+            cvars.compose().get("renderScale").map(String::as_str),
+            Some("0.8")
+        );
+
+        // A latched gx row stages on the write and still counts: its Okay commits it.
+        let mut gx = Cvars::default();
+        gx.load_file(BTreeMap::new());
+        let flipped = if gx.flag("gxVSync") == Some(true) {
+            "0"
+        } else {
+            "1"
+        };
+        gx.set_from_vm("gxVSync", flipped);
+        assert!(gx.take_graphics_applied());
+    }
+
+    /// fork: web build — **the recovery tier caps the lighting quality, saved value or not.** A
+    /// fallback would let a saved Cinematic reload straight back into the hang; the cap holds it
+    /// down for the session, never writes itself into the file, and a Graphics Apply restores
+    /// exactly what it displaced. A quality already under the cap, or a lever's, is left alone.
+    #[test]
+    fn the_gpu_tier_caps_the_lighting_quality() {
+        // The shipped default, capped and restored.
+        let mut fresh = Cvars::default();
+        fresh.load_file(BTreeMap::new());
+        assert!(fresh.cap_for_session("lightingQuality", "1"));
+        assert_eq!(fresh.get("lightingQuality"), Some("1"));
+        assert!(fresh
+            .take_events()
+            .iter()
+            .any(|e| e.name == "lightingQuality"));
+        assert!(!fresh.compose().contains_key("lightingQuality"));
+        assert_eq!(fresh.release_fallbacks(), 1);
+        assert_eq!(
+            fresh.get("lightingQuality"),
+            fresh.default_of("lightingQuality")
+        );
+
+        // A saved quality above the cap is held down, and the file keeps it.
+        let saved = || BTreeMap::from([("lightingQuality".to_string(), "3".to_string())]);
+        let mut cvars = Cvars::default();
+        cvars.load_file(saved());
+        assert!(cvars.cap_for_session("lightingQuality", "0"));
+        assert_eq!(cvars.get("lightingQuality"), Some("0"));
+        assert_eq!(
+            cvars.compose().get("lightingQuality").map(String::as_str),
+            Some("3")
+        );
+        cvars.set_from_vm("farclip", "300");
+        assert!(cvars.take_graphics_applied());
+        assert_eq!(cvars.release_fallbacks(), 1);
+        assert_eq!(cvars.get("lightingQuality"), Some("3"));
+        assert!(!cvars.is_session_owned("lightingQuality"));
+
+        // The player's own pick under the tier is theirs, and saved.
+        let mut pick = Cvars::default();
+        pick.load_file(saved());
+        pick.cap_for_session("lightingQuality", "0");
+        assert_eq!(
+            pick.set_from_vm("lightingQuality", "1"),
+            SetOutcome::Changed
+        );
+        assert_eq!(pick.release_fallbacks(), 0);
+        assert_eq!(
+            pick.compose().get("lightingQuality").map(String::as_str),
+            Some("1")
+        );
+
+        // Already under the cap: nothing moves, and nothing is held.
+        let mut low = Cvars::default();
+        low.load_file(BTreeMap::from([(
+            "lightingQuality".to_string(),
+            "1".to_string(),
+        )]));
+        assert!(!low.cap_for_session("lightingQuality", "2"));
+        assert!(!low.is_session_owned("lightingQuality"));
+
+        // A lever (`?lightingquality=`, `$WOW_LIGHTING_QUALITY`) outranks the tier.
+        let mut lever = Cvars::default();
+        lever.override_for_session("lightingQuality", "4");
+        lever.load_file(BTreeMap::new());
+        assert!(!lever.cap_for_session("lightingQuality", "0"));
+        assert_eq!(lever.get("lightingQuality"), Some("4"));
     }
 
     /// **The loaded file reaches a knob synchronously, before anything ordered after

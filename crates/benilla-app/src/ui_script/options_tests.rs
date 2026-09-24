@@ -2166,6 +2166,32 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// fork: web build — `cvars::GRAPHICS_CVARS`, the writes that retire the GPU recovery tier, is
+/// exactly what the Graphics page writes: each CVar row's own, and `gamma` behind Brightness's
+/// `SetGamma`. A row added to the page and not to the list would apply without clearing the tier.
+#[test]
+fn the_gpu_tier_graphics_list_is_the_graphics_page() {
+    benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    let written: String = s
+        .eval(
+            "local t = {} \
+             for _, k in ipairs(OPTIONS_PAGE_ROWS.Graphics) do \
+                 local r = getglobal('BenillaOptionsFrameContainerBodyGraphics' .. k) \
+                 if r.cvar then table.insert(t, r.cvar) \
+                 elseif r.setFunc == SetGamma then table.insert(t, 'gamma') \
+                 else table.insert(t, '?' .. k) end \
+             end \
+             return table.concat(t, ',')",
+        )
+        .unwrap();
+    let mut page: Vec<&str> = written.split(',').collect();
+    page.sort_unstable();
+    let mut listed = crate::cvars::GRAPHICS_CVARS.to_vec();
+    listed.sort_unstable();
+    assert_eq!(page, listed);
+}
+
 /// Controls is the DEFAULT page and has rows since 0961: opening the window lands on it with
 /// Defaults armed, and the rows read the table — Sticky Targeting INVERTED (checked when
 /// `deselectOnClick` is "0", the 1.12 interface panel's own arm), the plain flags direct.

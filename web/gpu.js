@@ -69,16 +69,19 @@ const MAX_AXIS = 8192;
 // `renderScale` is the client's own `renderScale` CVar (`benilla_app::world_backdrop::RenderScale`),
 // which shrinks the 3D and leaves the interface at full resolution — so the two compose: the budget
 // takes the whole frame down a step, the render scale takes the world down a further one.
+// `lightingQuality` is a ceiling on the client's `lightingQuality` CVar (0 low … 4 cinematic, the
+// shipped default): Cinematic's cube shadows and Ultra's glow lights are the heaviest passes in a
+// modern frame, and a smaller frame alone does not take them off a device that has already hung.
 //
 // **Tier 0 is genuinely untouched**, and that is deliberate. A budget applied to everyone would
 // quietly soften a 4K display for a machine that has never had a problem, to fix something that
 // machine does not have. The governor's coalescing is free and universal; the budget is the price
 // of a device that has actually hung.
 const TIERS = [
-  { name: 'full', budget: Infinity, renderScale: null },
-  { name: 'reduced', budget: 2300000, renderScale: '0.85' }, // ~1080p worth of pixels
-  { name: 'safe', budget: 1300000, renderScale: '0.7' }, //     ~900p
-  { name: 'minimal', budget: 950000, renderScale: '0.55' }, //  ~720p
+  { name: 'full', budget: Infinity, renderScale: null, lightingQuality: null },
+  { name: 'reduced', budget: 2300000, renderScale: '0.85', lightingQuality: '2' }, // ~1080p, High
+  { name: 'safe', budget: 1300000, renderScale: '0.7', lightingQuality: '1' }, //     ~900p, Medium
+  { name: 'minimal', budget: 950000, renderScale: '0.55', lightingQuality: '0' }, //  ~720p, Low
 ];
 
 const STORE_KEY = 'wenilla.gpu';
@@ -113,9 +116,9 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
   publishTier(state, query);
   const governor = installResizeGovernor(canvas, state);
   installDeviceWatchdog(canvas, state, governor);
-  // The diagnostic seam, deliberately not a control surface: a pasted console line is how a
-  // session on somebody else's machine gets read, and nothing else on the page can imply which
-  // tier that session actually ran at.
+  // The diagnostic seam: a pasted console line is how a session on somebody else's machine gets
+  // read, and nothing else on the page can imply which tier that session actually ran at. Its one
+  // control is `reset()`, which the client calls when the player applies Graphics settings.
   window.__wenilla_gpu = {
     get tier() {
       return state.tier;
@@ -137,6 +140,13 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
     simulateLoss(message = 'simulated device loss') {
       onDeviceLost(canvas, state, { reason: 'unknown', message });
     },
+    /// The one call the client itself makes (`benilla_app::webgpu::settings_applied`): the player
+    /// applied Graphics settings of their own, so the recovery tier is retired — persisted as
+    /// tier 0 and the budget lifted now, without a reload. A tier pinned by `?gputier=` stays: it
+    /// is somebody measuring on purpose. Returns whether a tier was cleared.
+    reset() {
+      return resetTier(state, governor);
+    },
   };
   // Silent at tier 0 — this page keeps the console for errors and `[diag]` lines. Above it,
   // something already went wrong on this machine and the reason the picture is softer than it was
@@ -147,7 +157,7 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
       : 'set explicitly';
     console.info(
       `wenilla: graphics recovery tier ${state.tier} (${TIERS[state.tier].name}) — ${why}. ` +
-        'Clear it with ?gputier=0.'
+        'Applying Graphics settings in the game clears it, as does ?gputier=0.'
     );
   }
   return window.__wenilla_gpu;
@@ -165,7 +175,14 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
 /// third-party context), and a client that refused to boot for want of a quality setting would be
 /// a worse bug than the one this module is fixing.
 function loadState(query) {
-  const state = { tier: 0, losses: [], lastStepDown: 0, leaving: false, internal: [] };
+  const state = {
+    tier: 0,
+    losses: [],
+    lastStepDown: 0,
+    leaving: false,
+    internal: [],
+    pinned: false,
+  };
   let stored = null;
   try {
     stored = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
@@ -189,6 +206,7 @@ function loadState(query) {
   // tier's budget alone, for pricing one specific resolution.
   const pinned = query.get('gputier');
   if (pinned !== null && pinned !== '') {
+    state.pinned = true;
     state.tier = clampTier(Number(pinned));
     if (state.tier === 0) state.losses = [];
     saveState(state);
@@ -210,6 +228,25 @@ function saveState(state) {
   }
 }
 
+/// The player chose their own Graphics settings: the ladder's guess about this machine is spent.
+/// Without this a single bad afternoon held the lower tier until three days passed, the browser's
+/// storage was cleared, or somebody knew to type `?gputier=0`.
+function resetTier(state, governor) {
+  if (state.pinned || (state.tier === 0 && state.losses.length === 0)) return false;
+  const was = state.tier;
+  state.tier = 0;
+  state.losses = [];
+  state.internal = [];
+  saveState(state);
+  governor.recommit();
+  if (was > 0) {
+    console.info(
+      `wenilla: graphics settings applied — recovery tier ${was} (${TIERS[was].name}) cleared.`
+    );
+  }
+  return was > 0;
+}
+
 function clampTier(n) {
   return Number.isFinite(n) ? Math.min(TIERS.length - 1, Math.max(0, Math.trunc(n))) : 0;
 }
@@ -223,12 +260,19 @@ function clampTier(n) {
 ///
 /// An explicit `?render_scale=` wins — it is somebody measuring on purpose, and a recovery tier
 /// must not silently outrank a person at the keyboard.
+///
+/// The lighting quality rides beside it (`gpu_lighting_quality`) as a ceiling rather than a
+/// fallback: it holds a saved quality down too, is never saved either, and the next Graphics Apply
+/// lifts it. A `?lightingquality=` or `$WOW_LIGHTING_QUALITY` lever outranks it on the client side.
 function publishTier(state, query) {
-  const scale = TIERS[state.tier].renderScale;
-  if (!scale || query.get('render_scale') !== null) return;
+  const tier = TIERS[state.tier];
   const env = (window.__wenilla_env = window.__wenilla_env || {});
+  if (tier.lightingQuality && env.gpu_lighting_quality === undefined) {
+    env.gpu_lighting_quality = tier.lightingQuality;
+  }
+  if (!tier.renderScale || query.get('render_scale') !== null) return;
   if (env.render_scale === undefined && env.gpu_render_scale === undefined) {
-    env.gpu_render_scale = scale;
+    env.gpu_render_scale = tier.renderScale;
   }
 }
 
@@ -480,7 +524,8 @@ function onUncapturedError(state, governor, e) {
   console.warn(
     `wenilla: ${INTERNAL_ERRORS} device errors in ${INTERNAL_WINDOW_MS / 1000}s — ` +
       `dropping to graphics tier ${state.tier} (${TIERS[state.tier].name}) to keep the driver ` +
-      'alive. The pixel budget applies now; the render scale follows on the next reload.'
+      'alive. The pixel budget applies now; the render scale and lighting cap follow on the next ' +
+        'reload.'
   );
   governor.recommit();
 }

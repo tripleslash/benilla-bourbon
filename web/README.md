@@ -373,11 +373,15 @@ whole of its security: two ports, one loopback address.
     viewport, which is "render at 1080p on a 4K panel" — and hands the client a lower `renderScale`
     through `__wenilla_env` (`gpu_render_scale`) as a fallback: it never writes itself into the
     player's saved settings, a saved render scale outranks it, and moving the Render Scale slider
-    takes the setting back. Tier 0 is untouched: the budget is the price of a device that has actually hung, not
+    takes the setting back. Each tier also caps `lightingQuality` (High, Medium, Low down the
+    ladder) through `gpu_lighting_quality` — a ceiling, so it holds a saved Cinematic down as well,
+    and is never saved either. Tier 0 is untouched: the budget is the price of a device that has actually hung, not
     a default. A fourth loss inside ten minutes stops auto-reloading and gives the player a button
     and the driver's own message, because a reload loop is worse than an honest error. A burst of
     `GPUInternalError`s — the device in trouble but still alive — takes the budget down one rung
-    live, without a reload. A tier nobody has needed for three days walks itself back up.
+    live, without a reload. A tier nobody has needed for three days walks itself back up, and
+    one the player overrules goes at once: applying Graphics settings in the game calls
+    `__wenilla_gpu.reset()`, which persists tier 0, lifts the budget and hands the render scale and lighting quality back.
   - `?gputier=N` pins a tier (`0` clears one), `?gpubudget=<megapixels>` overrides its budget alone,
     and `window.__wenilla_gpu` reports the tier and the backing-store size a session actually ran
     at — which is the one thing no other line in a pasted console log can imply. It also carries

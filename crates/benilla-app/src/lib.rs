@@ -232,6 +232,7 @@ pub mod webenv;
 // features --features webgpu`) — it is the web build's own instrument, and gating it behind the
 // feature that compiles the desktop instrument stack out is what would make it unshippable.
 mod webdiag;
+mod webgpu;
 mod webprogress;
 // Web Worker threads for the browser build's task pools — the platform half of the forked
 // `bevy_tasks`'s thread-spawner hook. Inert on every other target, and inert on a browser build

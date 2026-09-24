@@ -1,7 +1,7 @@
 //! **Modern lighting** — the fork's parallel lighting model (`FORK.md`).
 //!
 //! Everything under this module is fork-owned and runs *beside* upstream's classic lanes, never in
-//! place of them: `lightingModel = 0` (classic, the default) leaves every frame byte-identical to a
+//! place of them: `lightingModel = 0` (classic) leaves every frame byte-identical to a
 //! build without this module. The hook points it needs inside upstream-owned files are listed in
 //! `HOOKS.md` next to this file, so an upstream merge can be checked against them.
 //!
@@ -44,9 +44,9 @@ pub const MODERN_EXPOSURE: f32 = 1.0;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LightingModel {
     /// Upstream's 1.12.1 reproduction: gamma lane, baked shadows, linear fog.
-    #[default]
     Classic,
-    /// Linear HDR, all-caster shadows, probe GI, froxel volumetrics.
+    /// Linear HDR, all-caster shadows, probe GI, froxel volumetrics. The fork's shipped model.
+    #[default]
     Modern,
 }
 
@@ -95,17 +95,14 @@ pub enum LightingQuality {
 }
 
 impl LightingQuality {
-    /// Medium in the browser, High natively — the plan's budget split.
-    pub const PLATFORM_DEFAULT: Self = if cfg!(target_arch = "wasm32") {
-        Self::Medium
-    } else {
-        Self::High
-    };
+    /// The shipped tier, on every platform: Cinematic. A browser that cannot carry it steps the
+    /// pixel budget down through `web/gpu.js`'s recovery ladder, or the player picks a lower tier.
+    pub const DEFAULT: Self = Self::Cinematic;
 
-    /// Rounded and clamped into the tier range; a non-number reads as the platform default.
+    /// Rounded and clamped into the tier range; a non-number reads as the default.
     pub fn from_cvar(v: f32) -> Self {
         if !v.is_finite() {
-            return Self::PLATFORM_DEFAULT;
+            return Self::DEFAULT;
         }
         match v.round().clamp(0.0, 4.0) as u8 {
             0 => Self::Low,
@@ -157,10 +154,7 @@ impl Default for LightingSettings {
             .unwrap_or_default();
         let quality = crate::launch_env::var("WOW_LIGHTING_QUALITY")
             .and_then(|v| v.trim().parse::<f32>().ok())
-            .map_or(
-                LightingQuality::PLATFORM_DEFAULT,
-                LightingQuality::from_cvar,
-            );
+            .map_or(LightingQuality::DEFAULT, LightingQuality::from_cvar);
         Self { model, quality }
     }
 }
@@ -193,7 +187,7 @@ impl Default for ActiveLighting {
     fn default() -> Self {
         Self {
             model: LightingModel::Classic,
-            quality: LightingQuality::PLATFORM_DEFAULT,
+            quality: LightingQuality::DEFAULT,
         }
     }
 }
@@ -529,8 +523,7 @@ mod tests {
         for _ in 0..8 {
             app.update();
         }
-        // Exactly one: the world entry itself. (The very first frame writes nothing — a classic
-        // session at the platform default is what the resource already holds.)
+        // Exactly one: the world entry itself.
         assert_eq!(refits(&app), 1);
 
         app.world_mut().resource_mut::<LightingSettings>().quality = LightingQuality::Ultra;
@@ -584,7 +577,7 @@ mod tests {
         assert_eq!(LightingQuality::from_cvar(99.0), LightingQuality::Cinematic);
         assert_eq!(
             LightingQuality::from_cvar(f32::NAN),
-            LightingQuality::PLATFORM_DEFAULT
+            LightingQuality::DEFAULT
         );
         // `ALL` is what every tier table sweeps, so it has to hold every tier and hold them in
         // order — a row added to the enum and left out of here would silently stop being checked.
