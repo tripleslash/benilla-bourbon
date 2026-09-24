@@ -1080,10 +1080,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
          that field is 1 on both fallback rows an unlisted modern GPU can reach — measured on the \
          reference's own `Logs/gx.log` (`videoID: 170`)",
     ),
-    // `anisotropic` registers `"1"` — off — and here the registrar's string IS the answer: it is
-    // **not** one of `hwDetect`'s sixteen (scan of `[0x639a60, 0x639b80)`: sixteen record-pointer
-    // reads, `0xc7f2e4` absent), so nothing overwrites it on any path.
-    same("anisotropic", "1"),
+    // `anisotropic` registers `"1"` (off) and `hwDetect` never sets it (`0xc7f2e4` is absent from
+    // `[0x639a60, 0x639b80)`).
+    deviates(
+        "anisotropic",
+        "16",
+        "1",
+        "maintainer's call, reversing 1642: at mode 4 an oblique surface takes the mip of its long \
+         axis and smears; 16x anisotropy costs nothing measurable on a current GPU",
+    ),
     // **Weather Intensity** — the video panel's slider 9 (`OptionsFrame.lua:29`,
     // `func = "weatherDensity"`, a real CVar name rather than an engine binding), and the nearest
     // of 2177 §10's named-not-done: benilla has had the feature since 0310 and only the switch was
@@ -3554,10 +3559,10 @@ mod tests {
             })
             .insert_resource(MsaaSetting { samples: 1 })
             // Literal for the same reason (1642): TexFilterSetting::default() reads
-            // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
+            // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645, and the `anisotropic` row).
             .insert_resource(benilla_assets::TexFilterSetting {
                 trilinear: true,
-                aniso: 1,
+                aniso: 16,
             })
             // The device menu the Video dropdown reads. A real-shaped list, not empty: these
             // tests exercise `GetCurrentMultisampleFormat`'s lookup, which needs rows to find.

@@ -256,8 +256,7 @@ pub(crate) fn layer_array_image(size: u32, layer_count: u32, packed: PackedLayer
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = mip_count;
     image.data_order = TextureDataOrder::LayerMajor;
-    // As in the reference, ground filtering comes from the process globals (`crate::tex_filter`):
-    // trilinear with anisotropy off on a fresh install (`hwDetect`).
+    // As in the reference, ground filtering comes from the process globals (`crate::tex_filter`).
     let filter = crate::tex_filter::tex_filter();
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
