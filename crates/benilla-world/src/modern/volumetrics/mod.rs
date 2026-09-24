@@ -469,10 +469,10 @@ fn update_volume(
         if hist.log_timer <= 0.0 {
             hist.log_timer = 2.0;
             info!(
-                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2}",
+                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2} room_density {:.5} wmo_fog {:.0}..{:.0}",
                 media.density, media.near_clear, reference_height, media.key_in, media.ambient_in,
                 l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color,
-                room, room_w
+                room, room_w, room_media.map_or(0.0, |m| m.density), l.wmo_fog_start, l.wmo_fog_end
             );
         }
     }

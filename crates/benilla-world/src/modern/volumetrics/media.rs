@@ -50,6 +50,10 @@ const MAX_ALBEDO: f32 = 16.0;
 pub const MAX_FOG_SATURATION: f32 = 0.3;
 /// Nor its brightest channel (gamma) this.
 pub const MAX_FOG_LEVEL: f32 = 0.78;
+/// fork: **a room's air is never a wall.** The most extinction (1/yd) a building's MFOG is solved to:
+/// [`WALL_TAU`] over a cavern's short record put the Cleft of Shadows in a purple wall inside 50 yd.
+/// At this cap 50 yd keeps 86 % of the scene and 100 yd 74 %. Underwater keeps its wall.
+pub const ROOM_MAX_DENSITY: f32 = 0.003;
 
 /// What one frame's media is solved from. Colours are the authored gamma values.
 #[derive(Clone, Copy, Debug)]
@@ -138,7 +142,11 @@ pub fn solve(i: &MediaInputs) -> Media {
     let open_start = if i.fog_end > 1e-3 { i.fog_start / i.fog_end * open_end } else { 0.0 };
     let open_span = (open_end - open_start.max(0.0)).max(MIN_SPAN);
     let open_density = FAR_TAU / (open_span * i.fog_reach.max(0.05));
-    let wall_density = WALL_TAU / wall_span;
+    let wall_density = if i.underwater {
+        WALL_TAU / wall_span
+    } else {
+        (WALL_TAU / wall_span).min(ROOM_MAX_DENSITY)
+    };
     let walled = if i.underwater { 1.0 } else { interior };
     let density = open_density + (wall_density - open_density) * walled;
     let near_clear = (open_start + (i.fog_start - open_start) * walled)
@@ -361,7 +369,21 @@ mod tests {
         i.interior = 1.0;
         let m = solve(&i);
         assert_eq!(m.inv_height, 0.0);
-        assert!((m.density - WALL_TAU / (350.0 - 87.5)).abs() < 1e-5);
+        assert!((m.density - ROOM_MAX_DENSITY).abs() < 1e-6);
+    }
+
+    /// A cavern's short MFOG record (the Cleft of Shadows) must not solve to a wall: the room keeps
+    /// most of the scene at 50 yd, while underwater keeps its wall on the same record.
+    #[test]
+    fn a_rooms_air_is_never_a_wall() {
+        let mut i = elwynn_noon();
+        i.interior = 1.0;
+        i.fog_start = 0.0;
+        i.fog_end = 60.0;
+        let room = solve(&i);
+        assert!((-room.density * 50.0).exp() > 0.85, "{}", room.density);
+        i.underwater = true;
+        assert!((solve(&i).density - WALL_TAU / 60.0).abs() < 1e-5);
     }
 
     /// The zone's fog tint belongs to the zone's own `Light.dbc` fog, not to a building's authored
