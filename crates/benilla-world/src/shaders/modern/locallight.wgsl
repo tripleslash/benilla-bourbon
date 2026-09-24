@@ -207,9 +207,11 @@ fn cell_slot(cell: vec4<u32>, i: u32) -> u32 {
 
 // The WoW point falloff `1/(0.7d + 0.03d^2)` under a smooth window that reaches zero at the light's
 // range — the same curve P3 gave the per-pixel `point_light_eval`, so a light's look does not change
-// when the grid takes over its selection.
+// when the grid takes over its selection. fork: `+ CORE` softens the pool under the light: bare, a
+// lantern held a yard off the floor painted a hot spot there at ~1.2x its colour.
+const CORE: f32 = 0.8;
 fn falloff(d: f32, range: f32) -> f32 {
-    let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+    let atten = 1.0 / (0.7 * d + 0.03 * d * d + CORE);
     let q = d / max(range, 1e-3);
     let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
     return atten * window * window;

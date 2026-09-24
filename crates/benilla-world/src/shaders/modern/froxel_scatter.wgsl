@@ -60,6 +60,14 @@ const POINT_FAR_SHARE: f32 = 0.35;
 // fork: at the flame a light scatters this many times its far-field share into the haze, so a torch
 // or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps).
 const POINT_HALO_GAIN: f32 = 4.0;
+// fork: **a room's air stays clear.** Inside a building (the room weight) a light keeps
+// `ROOM_POINT_FAR_SHARE` past its halo, its halo shrinks to `ROOM_POINT_HALO_YD` at
+// `ROOM_POINT_HALO_GAIN`, and the open air's shaft haze keeps `ROOM_HAZE_SHARE`: an inn's dozen
+// candles each filling their range, over the zone's haze, put a grey veil on the whole common room.
+const ROOM_POINT_FAR_SHARE: f32 = 0.0;
+const ROOM_POINT_HALO_YD: f32 = 1.5;
+const ROOM_POINT_HALO_GAIN: f32 = 1.5;
+const ROOM_HAZE_SHARE: f32 = 0.15;
 // fork: the night air keeps `NIGHT_NEAR_SHARE` of itself at the camera, ramping to all of it between
 // `NIGHT_CLEAR_NEAR` and `NIGHT_CLEAR_FAR` yards of planar depth: the street stays readable, the
 // distance layers into the haze, and the lamps beside the player still have air to light.
@@ -93,7 +101,7 @@ fn canopy_cover(p: vec3<f32>) -> f32 {
 //
 // fork: under a forward lobe (`POINT_G`, `POINT_FORWARD`), relative to the isotropic term so the
 // light's total in-scatter is unchanged: brighter looking toward the lamp, dimmer looking away.
-fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
+fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32) -> vec3<f32> {
     let pos_range = light_table.points[2u * i];
     let dl = length(pos_range.xyz - p);
     if (dl >= pos_range.w) {
@@ -107,16 +115,21 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
     let g2 = POINT_G * POINT_G;
     let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
     let phase = mix(1.0, hg, POINT_FORWARD);
-    let halo = mix(POINT_FAR_SHARE, POINT_HALO_GAIN, exp(-dl / POINT_HALO_YD));
+    let halo_yd = mix(POINT_HALO_YD, ROOM_POINT_HALO_YD, room);
+    let halo = mix(
+        mix(POINT_FAR_SHARE, ROOM_POINT_FAR_SHARE, room),
+        mix(POINT_HALO_GAIN, ROOM_POINT_HALO_GAIN, room),
+        exp(-dl / halo_yd),
+    );
     return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase * halo);
 }
 
 // Every light one grid cell names, at a froxel.
-fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
+fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     let count = locallight::cell_count(cell);
     for (var i = 0u; i < count; i = i + 1u) {
-        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p, to_eye);
+        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room);
     }
     return sum;
 }
@@ -159,7 +172,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
     // beam has open sky straight above it by definition.
     let cover = canopy_cover(p);
-    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover);
+    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover) * mix(1.0, ROOM_HAZE_SHARE, room);
     let sigma_night = f.room_media.z * density
         * mix(NIGHT_NEAR_SHARE, 1.0, smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d));
     let sigma = sigma_fog + sigma_haze + sigma_night;
@@ -227,16 +240,16 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         if (pair.w > 0u) {
             let far_w = bitcast<f32>(pair.z);
             if (far_w < 1.0) {
-                points = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye) * (1.0 - far_w);
+                points = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room) * (1.0 - far_w);
             }
             if (far_w > 0.0) {
-                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye) * far_w;
+                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room) * far_w;
             }
         }
     } else {
         let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
         for (var i = 0u; i < count; i = i + 1u) {
-            points = points + point_in_scatter(i, p, to_eye);
+            points = points + point_in_scatter(i, p, to_eye, room);
         }
     }
 

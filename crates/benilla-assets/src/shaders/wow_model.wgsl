@@ -979,7 +979,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // fork: modern lighting (FORK.md, P6) — an interior MODD prop reads the room
     // the same way its walls do; its folded `prop_probes` slot survives on Low alone (and on the
     // booth lane below, whose light is entirely its authored rig).
-    let lit_m2_room = select(lit_m2_interior, lit_modern_room, modern_interior);
+    // It keeps its classic light as a floor, as the walls do (`MODERN_BAKE_FLOOR`), or a prop goes
+    // dark against a lit wall.
+    let lit_m2_room = select(
+        lit_m2_interior,
+        max(lit_modern_room, lit_m2_interior * MODERN_BAKE_FLOOR),
+        modern_interior,
+    );
     let lit_interior = select(lit_m2_room, lit_wmo_interior, is_wmo);
     // AUTHORED-RIG lane (`ShadeSel::Rig`, sun_scale.x = 2.0 — the glue create booth, decision
     // 0429): the lit value is the probe-slot SH eval — the scene M2's ambient + directional

@@ -120,14 +120,17 @@ const SWAP_RATIO: f32 = 1.5;
 /// tiles of retained world), so this is also the ceiling on what contesting can cost.
 const SWAP_COOLDOWN: f32 = 0.5;
 
+/// The softened core of the modern light falloff: `locallight.wgsl`'s `CORE`; move them together.
+pub const FALLOFF_CORE: f32 = 0.8;
+
 /// fork: **what a lamp is worth to the frame** — its luminance through the grid's own falloff
-/// (`locallight::falloff`: `1/(0.7d + 0.03d²)` under `(1 − (d/range)⁴)²`) at the camera's distance.
+/// (`locallight::falloff`: `1/(0.7d + 0.03d² + CORE)` under `(1 − (d/range)⁴)²`) at the camera's distance.
 /// The ranking used to be `lum / (1 + d)`, which let a bright lamp across the hall outrank the
 /// candle beside the player; ranking by the shader's own curve asks which lamp actually lights
 /// what the camera sees. `d` is floored at half a yard so a camera inside a fixture stays finite.
 pub fn lamp_score(lum: f32, d: f32, range: f32) -> f32 {
     let d = d.max(0.5);
-    let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+    let atten = 1.0 / (0.7 * d + 0.03 * d * d + FALLOFF_CORE);
     let q = d / range.max(1e-3);
     let window = (1.0 - q * q * q * q).clamp(0.0, 1.0);
     lum * atten * window * window
@@ -1605,7 +1608,7 @@ mod tests {
     #[test]
     fn the_lamp_score_is_the_shaders_falloff() {
         let falloff = |d: f32, range: f32| {
-            let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+            let atten = 1.0 / (0.7 * d + 0.03 * d * d + FALLOFF_CORE);
             let q = d / range;
             let w = (1.0 - q * q * q * q).clamp(0.0, 1.0);
             atten * w * w

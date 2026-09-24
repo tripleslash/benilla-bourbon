@@ -147,8 +147,23 @@ impl ZoneLook {
     }
 }
 
-/// The look table, by `AreaTable.dbc` zone id: empty, so every zone takes [`ZoneLook::NEUTRAL`].
-const ZONES: &[(u32, ZoneLook)] = &[];
+/// `AreaTable.dbc`'s Duskwood.
+const DUSKWOOD: u32 = 10;
+
+/// The look table, by `AreaTable.dbc` zone id; an unlisted zone takes [`ZoneLook::NEUTRAL`].
+const ZONES: &[(u32, ZoneLook)] = &[(
+    DUSKWOOD,
+    // Duskwood is eerie at noon: a weak sun under a dimmed, greyer sky, the fill held so the
+    // key-to-fill ratio stays in band. Exposure is untouched, so its buildings keep their own light.
+    ZoneLook {
+        key: 0.6,
+        fill: 0.8,
+        sky_tint: [0.7, 0.72, 0.78],
+        saturation: 0.72,
+        contrast: 1.18,
+        ..ZoneLook::NEUTRAL
+    },
+)];
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
     ZONES
@@ -407,6 +422,13 @@ mod tests {
         };
         let half = ZoneLook::NEUTRAL.lerp(hazier, 0.5);
         assert!((half.haze - (ZoneLook::NEUTRAL.haze + hazier.haze) / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn duskwoods_day_is_darker_than_elwynns() {
+        let d = look_for_zone(DUSKWOOD);
+        assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
+        assert_eq!(d.exposure, ZoneLook::NEUTRAL.exposure);
     }
 
     /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,

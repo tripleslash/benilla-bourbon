@@ -743,8 +743,13 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             vec3<f32>(1.0),
         );
         // fork: modern lighting (FORK.md, P6) — an interior MODD prop reads the
-        // room the way its walls do; the folded `prop_probes` slot survives on Low alone.
-        let lit_prop_room = select(lit_prop, lit_modern_room, modern_interior);
+        // room the way its walls do; the folded `prop_probes` slot survives on Low alone. It keeps
+        // its classic light as a floor, as the walls do (`MODERN_BAKE_FLOOR`).
+        let lit_prop_room = select(
+            lit_prop,
+            max(lit_modern_room, lit_prop * MODERN_BAKE_FLOOR),
+            modern_interior,
+        );
         let primary = clamp(lit_prop_room + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
         rgb = folded * primary;
     } else {
