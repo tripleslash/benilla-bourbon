@@ -70,6 +70,9 @@ const MODERN_MOCV_EMISSIVE: f32 = 2.0;
 const MODERN_SIDN_GAIN: f32 = 2.5;
 const MODERN_SIDN_DAY: f32 = 0.35;
 const MODERN_ROOM_FLOOR: f32 = 0.30;
+// fork: a modern interior surface keeps at least this share of its classic light (the batch class's
+// bake, MOCV included); `static_gx.wgsl` carries the same number.
+const MODERN_BAKE_FLOOR: f32 = 0.9;
 
 // The shared global light (lighting::global_light): ONE storage buffer every material reads, updated
 // once/frame in place — replaces the per-material light/fog uniforms the old apply_wow_lighting re-pushed
@@ -932,6 +935,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let modern_interior = false;
     let lit_modern_room = vec3<f32>(0.0);
 #endif
+    // The classic interior light by batch class, before MOCV: what a modern room is floored on.
+    var bake_interior = vec3<f32>(1.0);
+    if (m.tint.w > 1.5) {
+        bake_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
+    } else if (m.tint.w < 0.5) {
+        bake_interior = lit_int_base;
+    }
     var lit_wmo_interior = vec3<f32>(1.0);
     if (modern_interior) {
         // Every batch class takes the same light now: INT is no longer "unlit, the bake IS the
@@ -1209,7 +1219,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             if (m.tint.w > 0.5 && m.tint.w < 1.5) {
                 emissive = emissive + vec3<f32>(MODERN_MOCV_EMISSIVE * trans_a);
             }
-            let lit_sum = select(vc, vec3<f32>(1.0), drop_mocv) * (lit_with_shadow + point_diffuse);
+            let lit_sum = max(
+                select(vc, vec3<f32>(1.0), drop_mocv) * (lit_with_shadow + point_diffuse),
+                vc * bake_interior * MODERN_BAKE_FLOOR,
+            );
             primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
         }
         let tex_rgb = base.rgb / max(vc, vec3<f32>(1.0 / 255.0));

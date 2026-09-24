@@ -30,6 +30,10 @@ const MODERN_MOCV_EMISSIVE: f32 = 2.0;
 const MODERN_SIDN_GAIN: f32 = 2.5;
 const MODERN_SIDN_DAY: f32 = 0.35;
 const MODERN_ROOM_FLOOR: f32 = 0.30;
+// fork: a modern interior surface keeps at least this share of its classic light (the batch class's
+// bake, MOCV included): the probe field alone left the Cleft of Shadows and the Drag near black
+// where the reference's bake lights the rock.
+const MODERN_BAKE_FLOOR: f32 = 0.9;
 
 // Prefix of lighting::global_light's buffer; field order in sync with it and wow_model.wgsl.
 struct WowLight {
@@ -630,6 +634,13 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // (the bake IS the room's light), TRANS = the per-vertex MOCV-alpha lit↔bake lerp,
         // EXT = plain lit_nl. Exterior groups take lit_nl at sun-scale 1 (prog 198/VS 151 —
         // no terrain shade, no SH lobe).
+        // The classic interior light by batch class, before MOCV: what a modern room is floored on.
+        var bake_interior = vec3<f32>(1.0);
+        if (class_trans) {
+            bake_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
+        } else if (!class_int) {
+            bake_interior = lit_int_base;
+        }
         var lit_wmo_interior = vec3<f32>(1.0);
         if (modern_interior) {
             // fork: modern lighting (P6) — every batch class takes the room's own light: INT is no
@@ -688,7 +699,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             if (class_int && has_vc) {
                 emissive = emissive + vec3<f32>(MODERN_MOCV_EMISSIVE * trans_a);
             }
-            let lit_sum = select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px);
+            let lit_sum = max(
+                select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px),
+                vc.rgb * bake_interior * MODERN_BAKE_FLOOR,
+            );
             primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
         }
         // The entity algebra EXACTLY: bevy pre-folds vc into base and the shader divides it
