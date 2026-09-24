@@ -11,9 +11,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use benilla_formats::{
-    geoset_shown, Chain, CharacterGeosets, EquipGeosets, UNMANAGED_GEOSET_BASE,
-};
+use benilla_formats::{geoset_shown, Chain, CharacterGeosets, EquipGeosets, UNMANAGED_GEOSET_BASE};
 
 /// Every `.m2` under `Character\` in the chain as it stands, with the geoset ids it authors.
 fn bodies(chain: &mut Chain) -> Vec<(String, BTreeSet<u16>)> {

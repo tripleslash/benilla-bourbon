@@ -228,7 +228,12 @@ pub(super) fn plugin(app: &mut App) {
         // P2a's PostUpdate system broke classic too). `Last` still sees propagated transforms.
         .add_systems(
             Last,
-            (fit_shadow_map, update_cascades, collect_terrain_casters, collect_entity_casters),
+            (
+                fit_shadow_map,
+                update_cascades,
+                collect_terrain_casters,
+                collect_entity_casters,
+            ),
         );
 }
 
@@ -309,7 +314,11 @@ fn fit_shadow_map(
         return;
     }
     *fitted = Some((modern, layers));
-    let size = if modern { SHADOW_MAP_SIZE } else { CLASSIC_SHADOW_MAP_SIZE };
+    let size = if modern {
+        SHADOW_MAP_SIZE
+    } else {
+        CLASSIC_SHADOW_MAP_SIZE
+    };
     let current = images.get(MODERN_SHADOW_MAP.id()).map(|i| {
         (
             i.texture_descriptor.size.width,
@@ -435,7 +444,9 @@ fn update_cascades(
     let mirror_plane = if super::mirror_tier_everywhere() {
         -NO_MIRROR_PLANE
     } else {
-        mirror.and_then(|m| m.live_plane()).unwrap_or(NO_MIRROR_PLANE)
+        mirror
+            .and_then(|m| m.live_plane())
+            .unwrap_or(NO_MIRROR_PLANE)
     };
     next.sky_params = [1.0, sky.texel_world, sky.depth_bias * 4.0, mirror_plane];
     *out = next;
@@ -456,7 +467,8 @@ fn collect_terrain_casters(
     out.cells.clear();
     for (mesh, aabb, gt) in &cells {
         let center = gt.transform_point(Vec3::from(aabb.center));
-        out.cells.push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+        out.cells
+            .push((mesh.id(), center, Vec3::from(aabb.half_extents)));
     }
 }
 
@@ -494,7 +506,12 @@ fn collect_entity_casters(
     let Some(cam) = cameras.iter().next().map(GlobalTransform::translation) else {
         return;
     };
-    let reach_radius = cascade_splits(active.quality).last().copied().unwrap_or(0.0) * CASCADE_MARGIN * 1.2;
+    let reach_radius = cascade_splits(active.quality)
+        .last()
+        .copied()
+        .unwrap_or(0.0)
+        * CASCADE_MARGIN
+        * 1.2;
     let to_light = (-lighting.sun_dir).normalize_or(Vec3::Y);
     let ray_len = caster_reach();
     let near_cascades = |center: Vec3, radius: f32| {
@@ -533,7 +550,11 @@ fn collect_entity_casters(
             }
             (Some(b), Some(_)) => {
                 let r = Vec3::from(b.half_extents).length() * scale.max_element();
-                (gt.transform_point(Vec3::from(b.center)), r + RIG_CULL_MARGIN, r)
+                (
+                    gt.transform_point(Vec3::from(b.center)),
+                    r + RIG_CULL_MARGIN,
+                    r,
+                )
             }
             // No box at all: a generous sphere round the root.
             (None, _) => (translation, 4.0, 4.0),
@@ -574,7 +595,13 @@ pub fn fit_cascade(
 }
 
 /// The bounding sphere of the view-frustum slice `[near, far]` (radius rounded up to whole yards).
-pub fn slice_sphere(world_from_view: Mat4, fov_y: f32, aspect: f32, near: f32, far: f32) -> (Vec3, f32) {
+pub fn slice_sphere(
+    world_from_view: Mat4,
+    fov_y: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+) -> (Vec3, f32) {
     let tan = (fov_y * 0.5).tan();
     let mut corners = [Vec3::ZERO; 8];
     let mut k = 0;
@@ -601,7 +628,11 @@ pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> C
     let light_rot = Mat4::look_to_rh(Vec3::ZERO, dir, up);
     let texel = 2.0 * radius / size as f32;
     let c = light_rot.transform_point3(center);
-    let snapped = Vec3::new((c.x / texel).floor() * texel, (c.y / texel).floor() * texel, c.z);
+    let snapped = Vec3::new(
+        (c.x / texel).floor() * texel,
+        (c.y / texel).floor() * texel,
+        c.z,
+    );
     let light_view = Mat4::from_translation(-snapped) * light_rot;
     // Reverse-Z: the plane `CASTER_REACH` beyond the sphere toward the sun maps to 1, the sphere's
     // far side to 0.

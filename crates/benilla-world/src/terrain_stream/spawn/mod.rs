@@ -14,8 +14,8 @@ use fx::{
     spawn_ribbons_for, spawn_window_lights_for, spawn_wmo_lights_for,
 };
 
-use std::sync::Arc;
 use bevy::platform::time::Instant;
+use std::sync::Arc;
 
 use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
 use benilla_assets::{AdtTile, DoodadBase, M2Model, WmoModel};

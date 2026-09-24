@@ -45,6 +45,7 @@
 //! resize here publishes fresh `AssetId`s and re-points every liquid material, which is cheap
 //! because there are only ever a couple of dozen of them.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
@@ -52,7 +53,6 @@ use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerD
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::asset::RenderAssetUsages;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
@@ -62,12 +62,12 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::RenderContext;
-use bevy::shader::ShaderDefVal;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::shader::ShaderDefVal;
 
 use crate::view::WorldCamera;
 
@@ -232,10 +232,9 @@ pub(crate) fn resize_targets(
     mut materials: ResMut<Assets<benilla_assets::materials::LiquidCataMaterial>>,
     windows: Query<&Window>,
 ) {
-    let (Some(mut targets), Some(size)) = (
-        targets,
-        windows.iter().next().map(|w| w.physical_size()),
-    ) else {
+    let (Some(mut targets), Some(size)) =
+        (targets, windows.iter().next().map(|w| w.physical_size()))
+    else {
         return;
     };
     if size.x == 0 || size.y == 0 || size == targets.size {
@@ -308,7 +307,12 @@ fn specialize_pipelines(
         if pipelines.variants.contains_key(&samples) {
             continue;
         }
-        let variant = build_variant(&pipelines.shader, &fullscreen_shader, &pipeline_cache, samples);
+        let variant = build_variant(
+            &pipelines.shader,
+            &fullscreen_shader,
+            &pipeline_cache,
+            samples,
+        );
         pipelines.variants.insert(samples, variant);
     }
 }
@@ -497,20 +501,21 @@ impl ViewNode for LiquidScreenNode {
             ),
         ];
         for (label, pipeline, group, dst) in passes {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_render_pass(&RenderPassDescriptor {
-                    label: Some(label),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: dst,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: Operations::default(),
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_render_pass(&RenderPassDescriptor {
+                        label: Some(label),
+                        color_attachments: &[Some(RenderPassColorAttachment {
+                            view: dst,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: Operations::default(),
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, group, &[view_offset.offset]);
             pass.draw(0..3, 0..1);

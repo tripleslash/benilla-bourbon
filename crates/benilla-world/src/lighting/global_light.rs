@@ -483,13 +483,21 @@ fn build_light_data(
     fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
     // fork: modern lighting (FORK.md) — the zone look's fog tint (1 in classic).
     let (fog_tint, silhouette) = if active.as_ref().is_some_and(|a| a.is_modern()) {
-        (crate::modern::look::fog_tint(), crate::modern::look::silhouette())
+        (
+            crate::modern::look::fog_tint(),
+            crate::modern::look::silhouette(),
+        )
     } else {
         ([1.0; 3], 0.0)
     };
     let rows = &mut fresh.rows;
     rows[3] = [l.spec[0], l.spec[1], l.spec[2], 20.0]; // 3 light_spec (w=terrain shininess 20)
-    rows[4] = [l.fog_color[0] * fog_tint[0], l.fog_color[1] * fog_tint[1], l.fog_color[2] * fog_tint[2], fog_enable]; // 4 fog_color (w=enable)
+    rows[4] = [
+        l.fog_color[0] * fog_tint[0],
+        l.fog_color[1] * fog_tint[1],
+        l.fog_color[2] * fog_tint[2],
+        fog_enable,
+    ]; // 4 fog_color (w=enable)
     rows[5] = [l.fog_start, l.fog_end, silhouette, farclip]; // 5 fog_params (z = modern WDL silhouette; w=farclip)
     rows[13] = [rs[0], rs[1], rs[2], rsa]; // 13 water river shallow (w=alpha)
     rows[14] = [rd[0], rd[1], rd[2], rda]; // 14 water river deep
@@ -581,72 +589,74 @@ fn build_light_data(
     wanting.clear();
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
         .iter()
-        .filter_map(|(entity, pl, gt, rooms, synthesized, night_glow, flame, spell)| {
-            let p = gt.translation();
-            let d2 = p.distance_squared(cam_pos);
-            // The tier gate for DERIVED lights, read where the light is READ rather than where it
-            // was spawned: a lamppost's light entity always exists, and whether it reaches the
-            // table is this frame's question — so a doodad that streamed in before the lighting
-            // latched is not left permanently dark.
-            let tier_ok = (synthesized.is_none() || crate::modern::emissive_lights_on())
-                && (!spell || spell_tier);
-            // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
-            // visibility test bolted onto a faithful gather: the reference's register walk has no
-            // such term either, it simply never has a culled room's torch to register. Ungated for
-            // every light that names no rooms, which is every light outside a building.
-            let room_ok = crate::wmo_portal::room_admits_light(
-                rooms.map(|r| &r.0),
-                rooms.and_then(|r| portals.get(r.0.instance).ok()),
-            );
-            // A window's glow is a light only at night; by day it is not in the table at all
-            // (rather than in it at zero, holding a slot a lamp could use).
-            let lit = night_glow.is_none() || night > 0.0;
-            let wants = tier_ok && room_ok && lit;
-            if wants && modern_pack && d2 < MODERN_PACK_RADIUS * MODERN_PACK_RADIUS {
-                wanting.push(d2);
-            }
-            let admitted = wants && d2 < radius * radius;
-            let fade = admit.entry(entity).or_insert(0.0);
-            *fade = if admitted {
-                (*fade + step).min(1.0)
-            } else {
-                (*fade - step).max(0.0)
-            };
-            if *fade <= 0.0 {
-                return None;
-            }
-            let c = pl.color;
-            // The modern soft edge: full strength inside `radius - MODERN_PACK_FADE`, nothing at
-            // `radius`, smoothstepped between — so reaching the edge is a fade over sixty yards of
-            // walking, not a switch.
-            let reach = if modern_pack {
-                let t = ((radius - d2.sqrt()) / MODERN_PACK_FADE).clamp(0.0, 1.0);
-                t * t * (3.0 - 2.0 * t)
-            } else {
-                1.0
-            };
-            let glow = if night_glow.is_some() { night } else { 1.0 };
-            let gain = if modern_pack { MODERN_LOCAL_GAIN } else { 1.0 };
-            let flick = flame.map_or(super::flicker::FlickerMod::STEADY, |f| {
-                f.at(flicker_t, flicker_gain)
-            });
-            let s = pl.intensity / (4.0 * std::f32::consts::PI)
-                * *fade
-                * reach
-                * glow
-                * gain
-                * flick.intensity;
-            let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * flick.blue]);
-            // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
-            let indoors = rooms.is_some_and(|r| {
-                portals
-                    .get(r.0.instance)
-                    .ok()
-                    .and_then(|inst| wmos.as_ref()?.get(&inst.handle))
-                    .is_some_and(|model| crate::wmo_portal::rooms_are_indoor(&r.0, model))
-            });
-            Some((d2, p, pl.range, rgb, indoors))
-        })
+        .filter_map(
+            |(entity, pl, gt, rooms, synthesized, night_glow, flame, spell)| {
+                let p = gt.translation();
+                let d2 = p.distance_squared(cam_pos);
+                // The tier gate for DERIVED lights, read where the light is READ rather than where it
+                // was spawned: a lamppost's light entity always exists, and whether it reaches the
+                // table is this frame's question — so a doodad that streamed in before the lighting
+                // latched is not left permanently dark.
+                let tier_ok = (synthesized.is_none() || crate::modern::emissive_lights_on())
+                    && (!spell || spell_tier);
+                // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
+                // visibility test bolted onto a faithful gather: the reference's register walk has no
+                // such term either, it simply never has a culled room's torch to register. Ungated for
+                // every light that names no rooms, which is every light outside a building.
+                let room_ok = crate::wmo_portal::room_admits_light(
+                    rooms.map(|r| &r.0),
+                    rooms.and_then(|r| portals.get(r.0.instance).ok()),
+                );
+                // A window's glow is a light only at night; by day it is not in the table at all
+                // (rather than in it at zero, holding a slot a lamp could use).
+                let lit = night_glow.is_none() || night > 0.0;
+                let wants = tier_ok && room_ok && lit;
+                if wants && modern_pack && d2 < MODERN_PACK_RADIUS * MODERN_PACK_RADIUS {
+                    wanting.push(d2);
+                }
+                let admitted = wants && d2 < radius * radius;
+                let fade = admit.entry(entity).or_insert(0.0);
+                *fade = if admitted {
+                    (*fade + step).min(1.0)
+                } else {
+                    (*fade - step).max(0.0)
+                };
+                if *fade <= 0.0 {
+                    return None;
+                }
+                let c = pl.color;
+                // The modern soft edge: full strength inside `radius - MODERN_PACK_FADE`, nothing at
+                // `radius`, smoothstepped between — so reaching the edge is a fade over sixty yards of
+                // walking, not a switch.
+                let reach = if modern_pack {
+                    let t = ((radius - d2.sqrt()) / MODERN_PACK_FADE).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                } else {
+                    1.0
+                };
+                let glow = if night_glow.is_some() { night } else { 1.0 };
+                let gain = if modern_pack { MODERN_LOCAL_GAIN } else { 1.0 };
+                let flick = flame.map_or(super::flicker::FlickerMod::STEADY, |f| {
+                    f.at(flicker_t, flicker_gain)
+                });
+                let s = pl.intensity / (4.0 * std::f32::consts::PI)
+                    * *fade
+                    * reach
+                    * glow
+                    * gain
+                    * flick.intensity;
+                let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * flick.blue]);
+                // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
+                let indoors = rooms.is_some_and(|r| {
+                    portals
+                        .get(r.0.instance)
+                        .ok()
+                        .and_then(|inst| wmos.as_ref()?.get(&inst.handle))
+                        .is_some_and(|model| crate::wmo_portal::rooms_are_indoor(&r.0, model))
+                });
+                Some((d2, p, pl.range, rgb, indoors))
+            },
+        )
         .collect();
     // A despawned light must not keep its ramp: the next entity to reuse that id would inherit it.
     admit.retain(|e, _| lights_q.contains(*e));
@@ -682,7 +692,11 @@ fn build_light_data(
             );
         }
     }
-    let modern = if active.is_some_and(|a| a.is_modern()) { 1.0 } else { 0.0 };
+    let modern = if active.is_some_and(|a| a.is_modern()) {
+        1.0
+    } else {
+        0.0
+    };
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
     for (i, (_, p, range, rgb, indoors)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
@@ -722,11 +736,7 @@ fn build_light_data(
     // `benilla_app::webenv` seeds the page's `WOW_*` query params into it before the app is built.
     static POINTS_DUMP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if let Some(mode) = POINTS_DUMP.get_or_init(|| crate::launch_env::var("WOW_POINTS_DUMP")) {
-        let every = if mode == "frame" {
-            0.0
-        } else {
-            1.0
-        };
+        let every = if mode == "frame" { 0.0 } else { 1.0 };
         let now = time.elapsed_secs_f64();
         if now - *last_dump >= every {
             *last_dump = now;
@@ -863,7 +873,11 @@ mod tests {
         let light = app
             .world_mut()
             .spawn((
-                WorldPointLight { color: [1.0; 3], intensity: 1.0, range: 10.0 },
+                WorldPointLight {
+                    color: [1.0; 3],
+                    intensity: 1.0,
+                    range: 10.0,
+                },
                 LightOwner(bone),
                 ChildOf(bone),
             ))

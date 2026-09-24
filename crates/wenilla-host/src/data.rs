@@ -196,7 +196,9 @@ async fn take_trace(State(log): State<Arc<ReadLog>>, body: String) -> Response {
     // set" and there is no reason to make someone kill the host to see it — or to risk losing a
     // capture to a hard kill that never runs the graceful path. Cheap: a few hundred names.
     match log.write() {
-        Ok(total) => tracing::info!(posted = count, total, path = %log.path().display(), "boot trace written"),
+        Ok(total) => {
+            tracing::info!(posted = count, total, path = %log.path().display(), "boot trace written")
+        }
         Err(e) => tracing::error!(error = %e, "boot trace received but could not be written"),
     }
     StatusCode::NO_CONTENT.into_response()
@@ -241,7 +243,10 @@ async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Respo
                     (header::CONTENT_TYPE, "application/octet-stream"),
                     // `private`: the bytes are the operator's game files — cacheable by the player's
                     // browser (they never change under one name), never by a shared cache.
-                    (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
+                    (
+                        header::CACHE_CONTROL,
+                        "private, max-age=31536000, immutable",
+                    ),
                 ],
                 body,
             )
@@ -272,7 +277,11 @@ async fn index(State(state): State<DataState>) -> Response {
             // prefetches it at character select so that read is a cache hit. A day, not the
             // files' year: the list changes when an operator adds a patch archive, and a stale
             // index would make the client believe those files absent until it expires.
-            ([(header::CACHE_CONTROL, "private, max-age=86400")], Json(names)).into_response()
+            (
+                [(header::CACHE_CONTROL, "private, max-age=86400")],
+                Json(names),
+            )
+                .into_response()
         }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "chain list failed");

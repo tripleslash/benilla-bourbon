@@ -233,10 +233,10 @@ impl PackStore {
             },
             None if resident::can_warm(self.key(at.pack_id)) => {
                 resident::prefetch(
-                self.key(at.pack_id),
-                &self.pack_url(at.pack_id),
-                warm_priority(name),
-            );
+                    self.key(at.pack_id),
+                    &self.pack_url(at.pack_id),
+                    warm_priority(name),
+                );
                 TryRead::Pending
             }
             // Nothing here can warm this pack — no decode worker on this page, or this one has
@@ -267,14 +267,15 @@ impl PackStore {
         let Some((at, _)) = self.locate(name) else {
             return true;
         };
-        if resident::is_resident(self.key(at.pack_id)) || !resident::can_warm(self.key(at.pack_id)) {
+        if resident::is_resident(self.key(at.pack_id)) || !resident::can_warm(self.key(at.pack_id))
+        {
             return true;
         }
         resident::prefetch(
-                self.key(at.pack_id),
-                &self.pack_url(at.pack_id),
-                warm_priority(name),
-            );
+            self.key(at.pack_id),
+            &self.pack_url(at.pack_id),
+            warm_priority(name),
+        );
         false
     }
 
@@ -292,10 +293,10 @@ impl PackStore {
             return;
         }
         resident::prefetch(
-                self.key(at.pack_id),
-                &self.pack_url(at.pack_id),
-                warm_priority(name),
-            );
+            self.key(at.pack_id),
+            &self.pack_url(at.pack_id),
+            warm_priority(name),
+        );
     }
 
     /// Read a blob without blocking — the Bevy `AssetReader` lane (`benilla-assets`), which is
@@ -323,7 +324,8 @@ impl PackStore {
             &self.pack_url(at.pack_id),
             warm_priority(name),
         )
-        .await {
+        .await
+        {
             if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
                 return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
             }

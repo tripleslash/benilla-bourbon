@@ -21,7 +21,9 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::storage::GpuShaderStorageBuffer;
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{
+    Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+};
 use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
 
@@ -61,7 +63,11 @@ struct FroxelTargets {
     ready: bool,
 }
 
-fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>, pipeline_cache: Res<PipelineCache>) {
+fn init_pipelines(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
     let scatter_layout = BindGroupLayoutDescriptor::new(
         "modern_froxel_scatter",
         &BindGroupLayoutEntries::sequential(
@@ -89,7 +95,10 @@ fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>, pipeli
             ),
         ),
     );
-    let compute = |label: &'static str, layout: &BindGroupLayoutDescriptor, path: &'static str, entry: &'static str| {
+    let compute = |label: &'static str,
+                   layout: &BindGroupLayoutDescriptor,
+                   path: &'static str,
+                   entry: &'static str| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(label.into()),
             layout: vec![layout.clone()],
@@ -117,7 +126,8 @@ fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>, pipeli
         integrate_layout,
         scatter,
         integrate,
-        composite_shader: asset_server.load("embedded://benilla_world/shaders/modern/fog_composite.wgsl"),
+        composite_shader: asset_server
+            .load("embedded://benilla_world/shaders/modern/fog_composite.wgsl"),
         composites: HashMap::default(),
     });
 }
@@ -125,7 +135,11 @@ fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>, pipeli
 /// A tileable 3D value noise, two octaves, as R8 bytes.
 pub(super) fn tileable_noise(n: u32) -> Vec<u8> {
     fn lattice(x: i32, y: i32, z: i32, period: i32) -> f32 {
-        let (x, y, z) = (x.rem_euclid(period), y.rem_euclid(period), z.rem_euclid(period));
+        let (x, y, z) = (
+            x.rem_euclid(period),
+            y.rem_euclid(period),
+            z.rem_euclid(period),
+        );
         let mut h = (x as u32).wrapping_mul(0x9e37_79b1)
             ^ (y as u32).wrapping_mul(0x85eb_ca77)
             ^ (z as u32).wrapping_mul(0xc2b2_ae3d);
@@ -166,7 +180,11 @@ pub(super) fn tileable_noise(n: u32) -> Vec<u8> {
     out
 }
 
-fn volume_texture(device: &RenderDevice, label: &'static str, grid: UVec3) -> (Texture, TextureView) {
+fn volume_texture(
+    device: &RenderDevice,
+    label: &'static str,
+    grid: UVec3,
+) -> (Texture, TextureView) {
     let texture = device.create_texture(&TextureDescriptor {
         label: Some(label),
         size: Extent3d {
@@ -223,7 +241,9 @@ fn prepare_froxels(
                 && integrated.size.height >= grid.y
                 && integrated.size.depth_or_array_layers >= grid.z;
             let compiled = pipeline_cache.get_compute_pipeline(pipes.scatter).is_some()
-                && pipeline_cache.get_compute_pipeline(pipes.integrate).is_some();
+                && pipeline_cache
+                    .get_compute_pipeline(pipes.integrate)
+                    .is_some();
             if allocated && compiled && grid.min_element() > 0 {
                 if targets.grid != grid || targets.scatter.len() != 2 {
                     targets.scatter = vec![
@@ -412,9 +432,11 @@ impl ViewNode for FroxelNode {
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let targets = world.resource::<FroxelTargets>();
-        let (true, Some(scatter_bind), Some(integrate_bind)) =
-            (targets.ready, &targets.scatter_bind, &targets.integrate_bind)
-        else {
+        let (true, Some(scatter_bind), Some(integrate_bind)) = (
+            targets.ready,
+            &targets.scatter_bind,
+            &targets.integrate_bind,
+        ) else {
             return Ok(());
         };
         let pipes = world.resource::<FroxelPipelines>();
@@ -477,14 +499,24 @@ impl ViewNode for FogCompositeNode {
         (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        if !world.get_resource::<ActiveLighting>().is_some_and(|a| a.is_modern()) {
+        if !world
+            .get_resource::<ActiveLighting>()
+            .is_some_and(|a| a.is_modern())
+        {
             return Ok(());
         }
-        if world.get_resource::<ModernVolume>().is_none_or(|v| v.mode == FogMode::Off) {
+        if world
+            .get_resource::<ModernVolume>()
+            .is_none_or(|v| v.mode == FogMode::Off)
+        {
             return Ok(());
         }
         // Armed a frame after the latch (a reallocation); binding it earlier is a validation error.
-        if !depth.texture.usage().contains(TextureUsages::TEXTURE_BINDING) {
+        if !depth
+            .texture
+            .usage()
+            .contains(TextureUsages::TEXTURE_BINDING)
+        {
             return Ok(());
         }
         let pipes = world.resource::<FroxelPipelines>();
@@ -498,7 +530,10 @@ impl ViewNode for FogCompositeNode {
         let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
             return Ok(());
         };
-        let Some(volume) = world.resource::<RenderAssets<GpuImage>>().get(MODERN_FOG_VOLUME.id()) else {
+        let Some(volume) = world
+            .resource::<RenderAssets<GpuImage>>()
+            .get(MODERN_FOG_VOLUME.id())
+        else {
             return Ok(());
         };
         let Some(block) = world
@@ -519,13 +554,15 @@ impl ViewNode for FogCompositeNode {
             )),
         );
         let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
-            label: Some("modern_fog_composite"),
-            color_attachments: &[Some(view_target.get_color_attachment())],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
+        let mut pass = render_context
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some("modern_fog_composite"),
+                color_attachments: &[Some(view_target.get_color_attachment())],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
         let span = diagnostics.pass_span(&mut pass, "modern_fog_composite");
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[view_offset.offset]);
@@ -556,7 +593,11 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_render_graph_node::<ViewNodeRunner<FogCompositeNode>>(Core3d, FogCompositeLabel)
         .add_render_graph_edges(
             Core3d,
-            (Node3d::MainOpaquePass, FogCompositeLabel, Node3d::MainTransparentPass),
+            (
+                Node3d::MainOpaquePass,
+                FogCompositeLabel,
+                Node3d::MainTransparentPass,
+            ),
         )
         .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, FogCompositeLabel)
         .add_render_graph_edge(Core3d, crate::ssilvb::SsilvbLabel, FogCompositeLabel)
@@ -572,12 +613,20 @@ mod tests {
         let n = NOISE_SIZE;
         let noise = tileable_noise(n);
         assert_eq!(noise.len(), (n * n * n) as usize);
-        let (lo, hi) = noise.iter().fold((255u8, 0u8), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        let (lo, hi) = noise
+            .iter()
+            .fold((255u8, 0u8), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
         assert!(hi - lo > 100, "range {lo}..{hi}");
         // The last texel of a row and the first of the next period differ like any neighbours do.
         let at = |x: u32, y: u32, z: u32| i32::from(noise[((z * n + y) * n + x) as usize]);
-        let worst = (0..n).map(|y| (at(n - 1, y, 3) - at(0, y, 3)).abs()).max().unwrap();
-        let typical = (0..n).map(|y| (at(5, y, 3) - at(6, y, 3)).abs()).max().unwrap();
+        let worst = (0..n)
+            .map(|y| (at(n - 1, y, 3) - at(0, y, 3)).abs())
+            .max()
+            .unwrap();
+        let typical = (0..n)
+            .map(|y| (at(5, y, 3) - at(6, y, 3)).abs())
+            .max()
+            .unwrap();
         assert!(worst <= typical.max(8) * 2, "seam {worst} vs {typical}");
     }
 }

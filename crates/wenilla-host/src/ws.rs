@@ -238,12 +238,24 @@ mod tests {
     /// is dropped on purpose: the socket's port is the path's, which is allowlisted.
     #[test]
     fn a_client_host_keeps_its_name_and_loses_its_port() {
-        assert_eq!(dialable_host("logon.example.org"), Some("logon.example.org"));
-        assert_eq!(dialable_host("  logon.example.org  "), Some("logon.example.org"));
-        assert_eq!(dialable_host("logon.example.org:3724"), Some("logon.example.org"));
+        assert_eq!(
+            dialable_host("logon.example.org"),
+            Some("logon.example.org")
+        );
+        assert_eq!(
+            dialable_host("  logon.example.org  "),
+            Some("logon.example.org")
+        );
+        assert_eq!(
+            dialable_host("logon.example.org:3724"),
+            Some("logon.example.org")
+        );
         assert_eq!(dialable_host("127.0.0.1:8085"), Some("127.0.0.1"));
         // `host_port`'s tolerance: a suffix that is not a port was never a port.
-        assert_eq!(dialable_host("logon.example.org:nope"), Some("logon.example.org:nope"));
+        assert_eq!(
+            dialable_host("logon.example.org:nope"),
+            Some("logon.example.org:nope")
+        );
         // Two or more colons is an IPv6 literal, which keeps its own colons.
         assert_eq!(dialable_host("::1"), Some("::1"));
         assert_eq!(dialable_host("fe80::1"), Some("fe80::1"));

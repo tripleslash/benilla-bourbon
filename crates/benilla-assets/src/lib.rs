@@ -126,11 +126,10 @@ impl AssetReader for MpqAssetReader {
         if !self.chain.contains(internal) {
             return Err(AssetReaderError::NotFound(path.to_path_buf()));
         }
-        let bytes = self
-            .chain
-            .read_async(internal)
-            .await
-            .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))?;
+        let bytes =
+            self.chain.read_async(internal).await.map_err(|e| {
+                AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}"))))
+            })?;
         Ok(VecReader::new(bytes))
     }
 

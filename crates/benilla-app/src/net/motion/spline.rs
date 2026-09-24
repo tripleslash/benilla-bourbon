@@ -2,9 +2,9 @@
 //! goes with it ([`ground_clamp_creatures`]) — the creature half of [`super`]'s motion model
 //! (decisions 0052/0059/0097).
 
+use bevy::platform::time::Instant;
 use std::sync::OnceLock;
 use std::time::Duration;
-use bevy::platform::time::Instant;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind};

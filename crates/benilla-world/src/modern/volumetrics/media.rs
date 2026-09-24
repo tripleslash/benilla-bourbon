@@ -139,7 +139,11 @@ pub fn solve(i: &MediaInputs) -> Media {
     // The open air calibrates on the zone's own end; a room (and the water) on the pushed wall.
     let wall_span = (i.fog_end - i.fog_start.max(0.0)).max(MIN_SPAN);
     let open_end = i.zone_fog_end.max(i.fog_end);
-    let open_start = if i.fog_end > 1e-3 { i.fog_start / i.fog_end * open_end } else { 0.0 };
+    let open_start = if i.fog_end > 1e-3 {
+        i.fog_start / i.fog_end * open_end
+    } else {
+        0.0
+    };
     let open_span = (open_end - open_start.max(0.0)).max(MIN_SPAN);
     let open_density = FAR_TAU / (open_span * i.fog_reach.max(0.05));
     let wall_density = if i.underwater {
@@ -264,11 +268,20 @@ mod tests {
         let m = solve(&i);
         let target = subtle(i.fog_color).map(crate::modern::srgb_to_linear);
         let far = |phase: f32| [0, 1, 2].map(|c| m.ambient_in[c] + m.key_in[c] * phase);
-        assert!(delta_e(far(REFERENCE_PHASE), target) < 0.5, "{:?} vs {target:?}", far(REFERENCE_PHASE));
+        assert!(
+            delta_e(far(REFERENCE_PHASE), target) < 0.5,
+            "{:?} vs {target:?}",
+            far(REFERENCE_PHASE)
+        );
         // Side-on through the dual lobe (μ = 0): 0.7 · hg(0.75) + 0.3 · hg(−0.2).
         let hg = |g: f32, mu: f32| (1.0 - g * g) / (1.0 + g * g - 2.0 * g * mu).powf(1.5);
-        let side = m.forward_share * hg(FORWARD_G, 0.0) + (1.0 - m.forward_share) * hg(BACKWARD_G, 0.0);
-        assert!(delta_e(far(side), target) < 5.0, "ΔE {}", delta_e(far(side), target));
+        let side =
+            m.forward_share * hg(FORWARD_G, 0.0) + (1.0 - m.forward_share) * hg(BACKWARD_G, 0.0);
+        assert!(
+            delta_e(far(side), target) < 5.0,
+            "ΔE {}",
+            delta_e(far(side), target)
+        );
     }
 
     /// The open air calibrates on the zone's end, not the farclip wall: a lowered view distance does
@@ -280,11 +293,19 @@ mod tests {
         short.fog_start = 44.25;
         short.fog_end = 177.0;
         let (a, b) = (solve(&i), solve(&short));
-        assert!((a.density - b.density).abs() < 1e-6, "{} vs {}", a.density, b.density);
+        assert!(
+            (a.density - b.density).abs() < 1e-6,
+            "{} vs {}",
+            a.density,
+            b.density
+        );
         assert!((a.near_clear - b.near_clear).abs() < 1e-3);
         let span = 500.0 - 125.0;
         assert!((a.density * span - FAR_TAU).abs() < 1e-4);
-        assert!((-a.density * span).exp() > 0.15, "the zone end must still show the scene");
+        assert!(
+            (-a.density * span).exp() > 0.15,
+            "the zone end must still show the scene"
+        );
     }
 
     #[test]
@@ -350,7 +371,10 @@ mod tests {
             let sum = m.ambient_in[c] + m.key_in[c] * REFERENCE_PHASE;
             assert!(m.ambient_in[c] >= sum * SHADED_SHARE - 1e-6, "channel {c}");
             let target = crate::modern::srgb_to_linear(subtle(i.fog_color)[c]);
-            assert!((sum - target).abs() < 1e-4, "channel {c}: {sum} vs {target}");
+            assert!(
+                (sum - target).abs() < 1e-4,
+                "channel {c}: {sum} vs {target}"
+            );
         }
     }
 
@@ -360,7 +384,11 @@ mod tests {
         i.ambient = [0.0, 0.0, 0.0];
         i.diffuse = [0.0, 0.0, 0.0];
         let m = solve(&i);
-        assert!(m.ambient_in.iter().chain(&m.key_in).all(|v| v.is_finite() && *v == 0.0));
+        assert!(m
+            .ambient_in
+            .iter()
+            .chain(&m.key_in)
+            .all(|v| v.is_finite() && *v == 0.0));
     }
 
     #[test]
@@ -405,10 +433,20 @@ mod tests {
         let room = colour(1.0);
         let target = subtle(teal).map(crate::modern::srgb_to_linear);
         for c in 0..3 {
-            assert!((room[c] - target[c]).abs() < 1e-4, "channel {c}: {} vs {}", room[c], target[c]);
+            assert!(
+                (room[c] - target[c]).abs() < 1e-4,
+                "channel {c}: {} vs {}",
+                room[c],
+                target[c]
+            );
         }
         // In the open the tint still does its work — the green lift is the whole point of the row.
         let open = colour(0.0);
-        assert!(open[1] > room[1] * 2.0, "open {:?} vs room {:?}", open, room);
+        assert!(
+            open[1] > room[1] * 2.0,
+            "open {:?} vs room {:?}",
+            open,
+            room
+        );
     }
 }

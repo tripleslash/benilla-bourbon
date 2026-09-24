@@ -17,8 +17,8 @@
 //! picker CPU-skins its vertices (`target::hover`), and it is built only for lanes that rig —
 //! which retires the loader's old always-built, mostly-unused twin (the 0019 deferral).
 
-use std::collections::HashMap;
 use bevy::platform::time::Instant;
+use std::collections::HashMap;
 
 use benilla_assets::{
     submesh_to_skinned_mesh, submesh_to_static_mesh, M2Model, ModelSubmesh, WmoModel,

@@ -252,11 +252,19 @@ fn stream_wdl(
     // pours through). What bounds the band on the near side is the shader's near plane, never the
     // streamed set, so this cannot toggle against the detailed streaming radius — a constant backdrop.
     let modern = crate::modern::frame_is_modern();
-    let radius = if modern { WDL_RADIUS_MODERN } else { WDL_RADIUS };
+    let radius = if modern {
+        WDL_RADIUS_MODERN
+    } else {
+        WDL_RADIUS
+    };
     let (ctx, cty) = benilla_formats::world_to_tile(center[0], center[1]);
     let lod_of = |c: (u32, u32)| {
         if modern {
-            modern_lod((c.0 as i32 - ctx as i32).unsigned_abs().max((c.1 as i32 - cty as i32).unsigned_abs()))
+            modern_lod(
+                (c.0 as i32 - ctx as i32)
+                    .unsigned_abs()
+                    .max((c.1 as i32 - cty as i32).unsigned_abs()),
+            )
         } else {
             0
         }
@@ -281,14 +289,20 @@ fn stream_wdl(
         .into_iter()
         .filter(|c| !streamer.loaded.contains_key(c))
         .collect();
-    missing.sort_by_key(|c| (c.0 as i32 - ctx as i32).abs().max((c.1 as i32 - cty as i32).abs()));
+    missing.sort_by_key(|c| {
+        (c.0 as i32 - ctx as i32)
+            .abs()
+            .max((c.1 as i32 - cty as i32).abs())
+    });
     missing.truncate(WDL_LOADS_PER_FRAME);
     for coords in missing {
         let lod = lod_of(coords);
         let tile = if lod == 0 {
             streamer.wdl.tile_mesh(coords.0, coords.1)
         } else {
-            streamer.wdl.tile_mesh_coarse(coords.0, coords.1, lod, WDL_SKIRT)
+            streamer
+                .wdl
+                .tile_mesh_coarse(coords.0, coords.1, lod, WDL_SKIRT)
         };
         let Some(tile) = tile else {
             continue;

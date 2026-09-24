@@ -329,7 +329,12 @@ fn sync_reflection_camera(
         (With<WorldCamera>, Without<LiquidReflectionCamera>),
     >,
     mut mirror: Query<
-        (&mut Transform, &mut Projection, &mut Camera, &mut RenderTarget),
+        (
+            &mut Transform,
+            &mut Projection,
+            &mut Camera,
+            &mut RenderTarget,
+        ),
         (With<LiquidReflectionCamera>, Without<WorldCamera>),
     >,
 ) {
@@ -547,22 +552,22 @@ pub(super) fn register(app: &mut App) {
             keep_unmirrored_on_the_world_camera.after(super::surface::setup_liquid),
         )
         .add_systems(
-        Update,
-        (
-            // The world camera can spawn after `Startup` (the fallback free-fly path spawns a
-            // different one), so both the layer patch and the spawn stay in `Update`. Both are
-            // guarded, so the steady frame is one query and a compare.
-            keep_unmirrored_on_the_world_camera,
-            spawn_reflection_camera,
-            sync_reflection_camera,
-            sync_reflection_flag,
-        )
-            .chain()
-            // AFTER the submersion verdict: the mirror stands down while the eye is under water,
-            // and a frame-old verdict would show one frame of the above-water mirror through the
-            // surface on every dive.
-            .after(super::SubmersionVerdict),
-    );
+            Update,
+            (
+                // The world camera can spawn after `Startup` (the fallback free-fly path spawns a
+                // different one), so both the layer patch and the spawn stay in `Update`. Both are
+                // guarded, so the steady frame is one query and a compare.
+                keep_unmirrored_on_the_world_camera,
+                spawn_reflection_camera,
+                sync_reflection_camera,
+                sync_reflection_flag,
+            )
+                .chain()
+                // AFTER the submersion verdict: the mirror stands down while the eye is under water,
+                // and a frame-old verdict would show one frame of the above-water mirror through the
+                // surface on every dive.
+                .after(super::SubmersionVerdict),
+        );
 }
 
 #[cfg(test)]
@@ -605,9 +610,8 @@ mod tests {
             far: 1000.0,
             near_clip_plane: view_space_clip_plane(pose, plane),
         };
-        let clip = projection.get_clip_from_view()
-            * pose.to_matrix().inverse()
-            * world_point.extend(1.0);
+        let clip =
+            projection.get_clip_from_view() * pose.to_matrix().inverse() * world_point.extend(1.0);
         clip.z >= 0.0 && clip.z <= clip.w
     }
 

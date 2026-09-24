@@ -33,8 +33,18 @@ const UPSCALE_FACTOR: u32 = 2;
 /// the two tiles the underwear section dresses, one per texture column (RF-0062's group→cell map: the
 /// group-3 handler `0x4772f0` takes underwear cell `cc+0x20c`, the group-5 handler `0x4773a0` takes
 /// `cc+0x208`, and `0x478790` builds those two from the sectionType-4 row's `TextureName[1]`/`[0]`).
-const TILE_G8: Tile = (0, 160 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 32 * UPSCALE_FACTOR);
-const TILE_G9: Tile = (0, 192 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR);
+const TILE_G8: Tile = (
+    0,
+    160 * UPSCALE_FACTOR,
+    128 * UPSCALE_FACTOR,
+    32 * UPSCALE_FACTOR,
+);
+const TILE_G9: Tile = (
+    0,
+    192 * UPSCALE_FACTOR,
+    128 * UPSCALE_FACTOR,
+    64 * UPSCALE_FACTOR,
+);
 // The underwear's two tiles ARE two of the equipment tiles — the composite reaches them through
 // `EQUIP_TILES` so there is one transcription of the rects, and these names exist for the tests,
 // which read far better naming the group than indexing the array.
@@ -69,14 +79,49 @@ const UNDERWEAR_TILES: [(usize, usize, i8); 2] = [
 /// [`TILE_G3`] and g5 == [`TILE_G5`] — equipment TorsoUpper/LegUpper share the underwear's two tiles;
 /// underwear blits first, so it sits under.
 const EQUIP_TILES: [Tile; 8] = [
-    (0, 0, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR),     // g0 ArmUpper
-    (0, 64 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR),    // g1 ArmLower
-    (0, 128 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 32 * UPSCALE_FACTOR),   // g2 Hand
-    (128 * UPSCALE_FACTOR, 0, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR),   // g3 TorsoUpper
-    (128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 32 * UPSCALE_FACTOR),  // g4 TorsoLower
-    (128 * UPSCALE_FACTOR, 96 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR),  // g5 LegUpper
-    (128 * UPSCALE_FACTOR, 160 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR), // g6 LegLower
-    (128 * UPSCALE_FACTOR, 224 * UPSCALE_FACTOR, 128 * UPSCALE_FACTOR, 32 * UPSCALE_FACTOR), // g7 Foot
+    (0, 0, 128 * UPSCALE_FACTOR, 64 * UPSCALE_FACTOR), // g0 ArmUpper
+    (
+        0,
+        64 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        64 * UPSCALE_FACTOR,
+    ), // g1 ArmLower
+    (
+        0,
+        128 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        32 * UPSCALE_FACTOR,
+    ), // g2 Hand
+    (
+        128 * UPSCALE_FACTOR,
+        0,
+        128 * UPSCALE_FACTOR,
+        64 * UPSCALE_FACTOR,
+    ), // g3 TorsoUpper
+    (
+        128 * UPSCALE_FACTOR,
+        64 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        32 * UPSCALE_FACTOR,
+    ), // g4 TorsoLower
+    (
+        128 * UPSCALE_FACTOR,
+        96 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        64 * UPSCALE_FACTOR,
+    ), // g5 LegUpper
+    (
+        128 * UPSCALE_FACTOR,
+        160 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        64 * UPSCALE_FACTOR,
+    ), // g6 LegLower
+    (
+        128 * UPSCALE_FACTOR,
+        224 * UPSCALE_FACTOR,
+        128 * UPSCALE_FACTOR,
+        32 * UPSCALE_FACTOR,
+    ), // g7 Foot
 ];
 
 /// The `Item\TextureComponents\` region directory per layer/column (decision 0074; empirically

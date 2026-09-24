@@ -43,12 +43,12 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::shader::ShaderDefVal;
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::shader::ShaderDefVal;
 
 use crate::view::WorldCamera;
 
@@ -250,8 +250,12 @@ fn specialize_pipelines(
         if pipelines.variants.contains_key(&samples) {
             continue;
         }
-        let variant =
-            build_variant(&pipelines.shader, &fullscreen_shader, &pipeline_cache, samples);
+        let variant = build_variant(
+            &pipelines.shader,
+            &fullscreen_shader,
+            &pipeline_cache,
+            samples,
+        );
         pipelines.variants.insert(samples, variant);
     }
 }
@@ -286,10 +290,7 @@ fn build_variant(
     );
     let layout_composite = BindGroupLayoutDescriptor::new(
         "ssilvb_composite_layout",
-        &BindGroupLayoutEntries::with_indices(
-            ShaderStages::FRAGMENT,
-            ((2, term()), (3, params())),
-        ),
+        &BindGroupLayoutEntries::with_indices(ShaderStages::FRAGMENT, ((2, term()), (3, params()))),
     );
     let defs: Vec<ShaderDefVal> = if ms {
         vec!["SSILVB_MSAA".into()]
@@ -435,8 +436,9 @@ fn prepare_textures(
         let b = tex("ssilvb_gather_b");
         // `TextureCache::get` must be called every frame to keep these alive, but it hands the same
         // textures back while the viewport holds — so only a genuine resize rebuilds the component.
-        if existing.is_some_and(|t| t.a.texture.id() == a.texture.id() && t.b.texture.id() == b.texture.id())
-        {
+        if existing.is_some_and(|t| {
+            t.a.texture.id() == a.texture.id() && t.b.texture.id() == b.texture.id()
+        }) {
             continue;
         }
         let params = render_device.create_buffer(&BufferDescriptor {
@@ -445,7 +447,9 @@ fn prepare_textures(
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        commands.entity(entity).insert(SsilvbTextures { a, b, params });
+        commands
+            .entity(entity)
+            .insert(SsilvbTextures { a, b, params });
     }
 }
 
@@ -467,7 +471,11 @@ impl ViewNode for SsilvbNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, depth, view_offset, textures, msaa, _marker): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_target, depth, view_offset, textures, msaa, _marker): QueryItem<
+            'w,
+            '_,
+            Self::ViewQuery,
+        >,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let lighting = *world.resource::<IndirectLighting>();

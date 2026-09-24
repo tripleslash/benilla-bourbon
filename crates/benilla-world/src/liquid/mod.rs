@@ -103,11 +103,11 @@ use benilla_assets::AssetSet;
 mod art;
 mod drift;
 mod query;
+#[cfg(test)]
+mod real_data;
 mod reflect;
 mod ripple;
 mod screen;
-#[cfg(test)]
-mod real_data;
 mod spatial;
 mod surface; // the against-real-client-files tests — they span both halves
 
@@ -206,9 +206,7 @@ impl WaterDetail {
 
 impl Default for WaterDetail {
     fn default() -> Self {
-        match crate::launch_env::var("WOW_WATER_DETAIL")
-            .and_then(|v| v.parse::<f32>().ok())
-        {
+        match crate::launch_env::var("WOW_WATER_DETAIL").and_then(|v| v.parse::<f32>().ok()) {
             Some(v) => Self::from_cvar(v),
             None => WaterDetail(WATER_DETAIL_CATA),
         }

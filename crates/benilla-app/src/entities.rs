@@ -926,7 +926,11 @@ impl Plugin for EntitiesPlugin {
                 (
                     spell_fx::fire_fx_anim_events,
                     spell_fx::advance_fx_anim,
-                    (spell_fx::advance_spell_lights, spell_fx::budget_spell_lights).chain(),
+                    (
+                        spell_fx::advance_spell_lights,
+                        spell_fx::budget_spell_lights,
+                    )
+                        .chain(),
                 ),
                 // One nested (unordered) element — the outer tuple is at `chain()`'s
                 // 20-element ceiling. Two independent post-attach touch-ups on a standing

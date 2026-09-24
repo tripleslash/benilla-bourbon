@@ -125,14 +125,35 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
         // No cloud shadows on any tier: the cloud layer is a dome that travels with the camera, so its
         // shadows slid over the ground with the player — dark patches drifting ahead of every step.
         LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.0, 0.0),
-        LightingQuality::High => (FogMode::Froxel, UVec3::new(160, 90, 64), 450.0, 16, 0.0, 0.0),
+        LightingQuality::High => (
+            FogMode::Froxel,
+            UVec3::new(160, 90, 64),
+            450.0,
+            16,
+            0.0,
+            0.0,
+        ),
         // fork: P8b — the point-light count is only the fallback walk's now (`?modern_lights=0`): with
         // the light grid live a froxel reads the lights of its own cell (`froxel_scatter.wgsl`).
         // Ultra lights from glowing things as Cinematic does, so it takes Cinematic's count.
-        LightingQuality::Ultra => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 64, 0.0, 0.0),
+        LightingQuality::Ultra => (
+            FogMode::Froxel,
+            UVec3::new(192, 108, 96),
+            600.0,
+            64,
+            0.0,
+            0.0,
+        ),
         // fork: P8 — the same grid as Ultra (the volume is allocated once at the platform's largest,
         // so a finer one would need a bigger allocation on every tier).
-        LightingQuality::Cinematic => (FogMode::Froxel, UVec3::new(192, 108, 96), 600.0, 64, 0.0, 0.0),
+        LightingQuality::Cinematic => (
+            FogMode::Froxel,
+            UVec3::new(192, 108, 96),
+            600.0,
+            64,
+            0.0,
+            0.0,
+        ),
     };
     FroxelTier {
         mode,
@@ -172,7 +193,11 @@ pub struct FroxelFog {
 
 impl FroxelFog {
     pub fn std430(&self, out: &mut Vec<u8>) {
-        for m in [self.clip_from_world, self.world_from_clip, self.prev_clip_from_world] {
+        for m in [
+            self.clip_from_world,
+            self.world_from_clip,
+            self.prev_clip_from_world,
+        ] {
             out.extend_from_slice(bytemuck::cast_slice(&m.to_cols_array()));
         }
         for v in [
@@ -266,7 +291,8 @@ fn volume_image(size: UVec3) -> Image {
         RenderAssetUsages::RENDER_WORLD,
     );
     // The integrate pass writes it as storage; every lane samples it filtered.
-    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         label: Some("modern_fog_volume".into()),
         address_mode_u: ImageAddressMode::ClampToEdge,
@@ -376,7 +402,10 @@ fn update_volume(
     active: Res<ActiveLighting>,
     lighting: Res<WowLighting>,
     look: Res<super::look::ActiveLook>,
-    cameras: Query<(&GlobalTransform, &Projection), (With<WorldCamera>, Without<LiquidReflectionCamera>)>,
+    cameras: Query<
+        (&GlobalTransform, &Projection),
+        (With<WorldCamera>, Without<LiquidReflectionCamera>),
+    >,
     time: Res<Time>,
     underwater: Option<Res<crate::liquid::Underwater>>,
     crossfade: Option<Res<crate::lighting::WmoCrossfade>>,
@@ -418,37 +447,46 @@ fn update_volume(
     // shader because a room's medium reaches only as far as the room does ([`CameraRoomExtent`]):
     // one blended medium is what wrapped the city seen from Orgrimmar's gate hall in 292 yd of the
     // building's teal.
-    let shared = |fog_color: [f32; 3], fog_start: f32, fog_end: f32, interior: f32| media::MediaInputs {
-        fog_color,
-        fog_start,
-        fog_end,
-        zone_fog_end: l.zone_fog_end,
-        // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
-        ambient: super::night_floor(l.ambient, l.sidn_night),
-        // The key's horizon fade (a set moon scatters nothing into the haze).
-        diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
-        storm: l.storm_bcc,
-        underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
-        interior,
-        haze: look.0.haze * HAZE_SCALE,
-        forward: look.0.forward,
-        key_scatter: look.0.key_scatter,
-        fog_reach: look.0.fog_reach,
-        fog_tint: look.0.fog_tint,
-        fog_falloff: look.0.fog_falloff,
-        fog_clear: look.0.fog_clear,
-    };
+    let shared =
+        |fog_color: [f32; 3], fog_start: f32, fog_end: f32, interior: f32| media::MediaInputs {
+            fog_color,
+            fog_start,
+            fog_end,
+            zone_fog_end: l.zone_fog_end,
+            // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
+            ambient: super::night_floor(l.ambient, l.sidn_night),
+            // The key's horizon fade (a set moon scatters nothing into the haze).
+            diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
+            storm: l.storm_bcc,
+            underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
+            interior,
+            haze: look.0.haze * HAZE_SCALE,
+            forward: look.0.forward,
+            key_scatter: look.0.key_scatter,
+            fog_reach: look.0.fog_reach,
+            fog_tint: look.0.fog_tint,
+            fog_falloff: look.0.fog_falloff,
+            fog_clear: look.0.fog_clear,
+        };
     let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
     let room_w = crossfade.map_or(0.0, |c| c.t());
     // The room's sphere (`None` = the camera is not in one): its medium is solved whole, and the
     // weight alone rides the crossfade.
     let room = fading_room(
         &mut hist.room,
-        room_extent.and_then(|r| r.0).filter(|(_, radius)| *radius > 0.0),
+        room_extent
+            .and_then(|r| r.0)
+            .filter(|(_, radius)| *radius > 0.0),
         room_w,
     );
-    let room_media = (room_w > 1e-3)
-        .then(|| media::solve(&shared(l.wmo_fog_color, l.wmo_fog_start, l.wmo_fog_end, 1.0)));
+    let room_media = (room_w > 1e-3).then(|| {
+        media::solve(&shared(
+            l.wmo_fog_color,
+            l.wmo_fog_start,
+            l.wmo_fog_end,
+            1.0,
+        ))
+    });
 
     // The height falloff's reference is the regional ground — the coarse WDL heights around the
     // camera, never above the camera itself — eased over ~2 s, so the fog lies in the valleys and a
@@ -507,7 +545,13 @@ fn update_volume(
     };
 
     let mut cloud = [1.0f32; CLOUD_CELLS * CLOUD_CELLS];
-    let cloud_place = cloud_grid(clouds.as_deref(), cam, to_light, tier.cloud_shadow, &mut cloud);
+    let cloud_place = cloud_grid(
+        clouds.as_deref(),
+        cam,
+        to_light,
+        tier.cloud_shadow,
+        &mut cloud,
+    );
     let seconds = time.elapsed_secs_wrapped();
     // The noise tiles every 48 yd, so its scroll wraps there seamlessly.
     let wind = (Vec3::new(0.9, 0.04, 0.35) * seconds).map(|v| v.rem_euclid(48.0));
@@ -520,7 +564,12 @@ fn update_volume(
         view_row: view_from_world.row(2),
         grid: grid.as_vec3().extend(tier.range),
         alloc: VOLUME_ALLOC.as_vec3().extend(tier.mode.as_f32()),
-        media: Vec4::new(media.density, media.inv_height, reference_height, media.near_clear),
+        media: Vec4::new(
+            media.density,
+            media.inv_height,
+            reference_height,
+            media.near_clear,
+        ),
         medium: Vec4::new(
             media.haze,
             media.noise,
@@ -663,7 +712,8 @@ fn cloud_grid(
     out: &mut [f32; CLOUD_CELLS * CLOUD_CELLS],
 ) -> Vec4 {
     let half = CLOUD_CELL_YD * (CLOUD_CELLS / 2) as f32;
-    let origin = (Vec2::new(cam.x, cam.z) / CLOUD_CELL_YD).floor() * CLOUD_CELL_YD - Vec2::splat(half);
+    let origin =
+        (Vec2::new(cam.x, cam.z) / CLOUD_CELL_YD).floor() * CLOUD_CELL_YD - Vec2::splat(half);
     let day = smoothstep(0.02, 0.2, to_light.y);
     let Some(clouds) = clouds.filter(|_| strength > 0.0 && day > 0.0) else {
         out.fill(1.0);
@@ -696,13 +746,19 @@ mod tests {
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
         assert_eq!(FOG_BYTES, 480);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
-        assert_eq!((crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16, 0);
+        assert_eq!(
+            (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,
+            0
+        );
         // The mode lane the render world patches is `alloc.w`.
         let mut fog = FroxelFog::default();
         fog.alloc.w = 2.0;
         let mut bytes = Vec::new();
         fog.std430(&mut bytes);
-        assert_eq!(bytemuck::pod_read_unaligned::<f32>(&bytes[MODE_OFFSET..MODE_OFFSET + 4]), 2.0);
+        assert_eq!(
+            bytemuck::pod_read_unaligned::<f32>(&bytes[MODE_OFFSET..MODE_OFFSET + 4]),
+            2.0
+        );
     }
 
     #[test]
@@ -712,7 +768,10 @@ mod tests {
             assert!(t.grid.cmple(VOLUME_ALLOC).all(), "{q:?}");
         }
         assert_eq!(froxel_tier(LightingQuality::Low).mode, FogMode::Analytic);
-        assert_eq!(froxel_tier(LightingQuality::Medium).grid, UVec3::new(96, 54, 48));
+        assert_eq!(
+            froxel_tier(LightingQuality::Medium).grid,
+            UVec3::new(96, 54, 48)
+        );
     }
 
     #[test]
@@ -735,13 +794,28 @@ mod tests {
 
     #[test]
     fn a_room_left_behind_keeps_its_air_while_it_fades() {
-        let (a, b) = ((Vec3::new(1.0, 2.0, 3.0), 31.0), (Vec3::new(-5.0, 0.0, 9.0), 12.0));
+        let (a, b) = (
+            (Vec3::new(1.0, 2.0, 3.0), 31.0),
+            (Vec3::new(-5.0, 0.0, 9.0), 12.0),
+        );
         let mut latched = None;
         assert_eq!(fading_room(&mut latched, Some(a), 0.2), Some(a), "entering");
-        assert_eq!(fading_room(&mut latched, None, 0.75), Some(a), "leaving: the air stays in the room");
-        assert_eq!(fading_room(&mut latched, Some(b), 0.75), Some(b), "a new room replaces it");
+        assert_eq!(
+            fading_room(&mut latched, None, 0.75),
+            Some(a),
+            "leaving: the air stays in the room"
+        );
+        assert_eq!(
+            fading_room(&mut latched, Some(b), 0.75),
+            Some(b),
+            "a new room replaces it"
+        );
         assert_eq!(fading_room(&mut latched, None, 0.0), None, "spent");
-        assert_eq!(fading_room(&mut latched, None, 0.5), None, "nothing to hold");
+        assert_eq!(
+            fading_room(&mut latched, None, 0.5),
+            None,
+            "nothing to hold"
+        );
     }
 
     #[test]

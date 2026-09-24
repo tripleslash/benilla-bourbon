@@ -224,9 +224,15 @@ pub fn exposure() -> f32 {
 fn publish(look: ZoneLook) {
     KEY.store(look.key.to_bits(), Ordering::Relaxed);
     FILL.store(look.fill.to_bits(), Ordering::Relaxed);
-    EXPOSURE.store((super::MODERN_EXPOSURE * look.exposure).to_bits(), Ordering::Relaxed);
+    EXPOSURE.store(
+        (super::MODERN_EXPOSURE * look.exposure).to_bits(),
+        Ordering::Relaxed,
+    );
     SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
-    for (i, v) in [look.contrast, look.saturation, look.vignette, look.toe].into_iter().enumerate() {
+    for (i, v) in [look.contrast, look.saturation, look.vignette, look.toe]
+        .into_iter()
+        .enumerate()
+    {
         GRADE[i].store(v.to_bits(), Ordering::Relaxed);
     }
     for i in 0..3 {
@@ -314,7 +320,9 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
 
 fn pinned_zone() -> Option<u32> {
     static CELL: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_ZONE").and_then(|v| v.trim().parse().ok()))
+    *CELL.get_or_init(|| {
+        crate::launch_env::var("WOW_MODERN_ZONE").and_then(|v| v.trim().parse().ok())
+    })
 }
 
 /// Seconds between the no-avatar terrain probes.
@@ -356,7 +364,10 @@ fn update_look(
         (id, None) => id,
         (None, _) => None,
     };
-    let target = apply_override(zone.map_or(ZoneLook::NEUTRAL, look_for_zone), &look_override());
+    let target = apply_override(
+        zone.map_or(ZoneLook::NEUTRAL, look_for_zone),
+        &look_override(),
+    );
     let next = look.0.lerp(target, (time.delta_secs() / 2.0).min(1.0));
     let next = if next.close_to(target) { target } else { next };
     if next != look.0 {

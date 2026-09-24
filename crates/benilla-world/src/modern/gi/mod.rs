@@ -462,7 +462,11 @@ fn update_gi(
     let raw = claim.as_ref().and_then(|c| c.0).map(|c| c.room.instance);
     if raw.is_some() != hist.room.is_some() {
         hist.disagree += time.delta_secs();
-        let limit = if raw.is_some() { INTERIOR_ENTER_SECS } else { INTERIOR_LEAVE_SECS };
+        let limit = if raw.is_some() {
+            INTERIOR_ENTER_SECS
+        } else {
+            INTERIOR_LEAVE_SECS
+        };
         if hist.disagree >= limit {
             hist.room = raw;
             hist.disagree = 0.0;
@@ -515,7 +519,12 @@ fn update_gi(
     // The ray set turns a little every frame, so the estimate's own bias averages out over the
     // probe's history rather than baking a fixed 24-direction pattern into the field.
     let a = hist.frame as f32 * 0.618_034;
-    let rot = Mat3::from_euler(EulerRot::YXZ, a * 6.2831855, (a * 3.883222).sin() * 0.8, a * 2.3999632);
+    let rot = Mat3::from_euler(
+        EulerRot::YXZ,
+        a * 6.2831855,
+        (a * 3.883222).sin() * 0.8,
+        a * 2.3999632,
+    );
 
     // What a probe under nothing reads: half the sky's own mean, half what the ground bounces back.
     let ambient = Vec3::from(lighting.ambient);
@@ -569,12 +578,7 @@ pub fn params(gi: &ModernGi, camera: Vec3, sky: Vec3, debug: f32) -> GiParams {
         dims: tier.dims.as_vec3().extend(tier.cascades as f32),
         sky: sky.extend(gi.open_mean),
         ground: GROUND_ALBEDO.extend(SKY_GRADIENT),
-        misc: Vec4::new(
-            tier.rays as f32,
-            tier.period as f32,
-            gi.frame as f32,
-            debug,
-        ),
+        misc: Vec4::new(tier.rays as f32, tier.period as f32, gi.frame as f32, debug),
         // fork: modern lighting (P6) — the interior sub-grid's ambient and the two sampling bits.
         interior: gi.interior_ambient.extend(f32::from(
             u8::from(tier.interior) | (u8::from(tier.chebyshev) << 1),
@@ -648,9 +652,16 @@ mod tests {
             assert!(inside.cascades <= MAX_CASCADES, "{q:?}");
             assert!(inside.probes() <= PROBE_ALLOC, "{q:?}: {}", inside.probes());
             if t.on {
-                assert!(inside.interior && inside.spacing[0] == INTERIOR_SPACING, "{q:?}");
+                assert!(
+                    inside.interior && inside.spacing[0] == INTERIOR_SPACING,
+                    "{q:?}"
+                );
                 // The exterior ladder is intact behind it.
-                assert_eq!(inside.spacing[1..=t.cascades], t.spacing[..t.cascades], "{q:?}");
+                assert_eq!(
+                    inside.spacing[1..=t.cascades],
+                    t.spacing[..t.cascades],
+                    "{q:?}"
+                );
             }
             if t.on {
                 // Every cascade reaches past the one inside it, and the coarsest clipmap level
@@ -659,7 +670,10 @@ mod tests {
                     assert!(t.spacing[c] > t.spacing[c - 1], "{q:?}");
                 }
                 let coarsest = t.voxel[t.levels - 1] * t.voxels as f32;
-                assert!(coarsest >= t.cascade_extent(t.cascades - 1).x * 0.3, "{q:?}");
+                assert!(
+                    coarsest >= t.cascade_extent(t.cascades - 1).x * 0.3,
+                    "{q:?}"
+                );
                 // `gi_classify.wgsl` schedules `(idx * 7 + frame) % period`: a period sharing a
                 // factor with 7 would leave some probes never due.
                 assert!(!t.period.is_multiple_of(7), "{q:?}: period {}", t.period);
@@ -708,7 +722,10 @@ mod tests {
             );
             // A wall sees half the sky and (here) nothing bouncing back: dimmer, which is the point.
             let side = dc + sh[0];
-            assert!(side.x > 0.3 && side.x < 0.75, "{rays} rays: a wall reads {side}");
+            assert!(
+                side.x > 0.3 && side.x < 0.75,
+                "{rays} rays: a wall reads {side}"
+            );
         }
         // A uniform field round-trips exactly, whatever the ray count: no direction is favoured.
         let (dc, sh) = open_field_probe(32, 0.0);

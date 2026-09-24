@@ -58,9 +58,9 @@ use bevy::render::render_resource::{
     VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::storage::GpuShaderStorageBuffer; // fork: modern lighting (FORK.md, P4)
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
-use bevy::render::storage::GpuShaderStorageBuffer; // fork: modern lighting (FORK.md, P4)
 use bevy::render::view::{
     ExtractedView, Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
@@ -261,7 +261,8 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
                 // fork: modern lighting (FORK.md, P4) — the froxel fog, sampled per
                 // vertex: the modern block (its parameters), the integrated volume, its sampler.
                 storage_buffer_read_only_sized(false, None).visibility(ShaderStages::VERTEX),
-                texture_3d(TextureSampleType::Float { filterable: true }).visibility(ShaderStages::VERTEX),
+                texture_3d(TextureSampleType::Float { filterable: true })
+                    .visibility(ShaderStages::VERTEX),
                 sampler(SamplerBindingType::Filtering).visibility(ShaderStages::VERTEX),
             ),
         ),

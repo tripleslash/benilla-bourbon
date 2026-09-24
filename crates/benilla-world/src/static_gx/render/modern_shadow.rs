@@ -30,10 +30,10 @@ use crate::modern::shadow::{
     SHADOW_LAYERS, SHADOW_MAP_SIZE, SKY_LAYER,
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::platform::collections::HashMap as StrideMap;
 use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, texture_2d, texture_depth_2d,
 };
-use bevy::platform::collections::HashMap as StrideMap;
 
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
@@ -314,7 +314,10 @@ fn init_shadow_pipelines(
         view_layout: view_layout.clone(),
         draw_layout: BindGroupLayoutDescriptor::new(
             "modern_shadow_entity_draw",
-            &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<EntityDraw>(true)),
+            &BindGroupLayoutEntries::single(
+                ShaderStages::VERTEX,
+                uniform_buffer::<EntityDraw>(true),
+            ),
         ),
         skin_layout: BindGroupLayoutDescriptor::new(
             "modern_shadow_entity_skin",
@@ -374,7 +377,10 @@ fn init_shadow_pipelines(
         "modern_shadow_restore",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
-            (texture_depth_2d(), storage_buffer_read_only_sized(false, None)),
+            (
+                texture_depth_2d(),
+                storage_buffer_read_only_sized(false, None),
+            ),
         ),
     );
     let fill_shader: Handle<Shader> =
@@ -456,7 +462,11 @@ fn prepare_modern_shadow(
     };
     // The array is re-created when the lighting latch re-sizes it (`modern::shadow::fit_shadow_map`):
     // every view, the static cache and every cached layer key belong to the old texture.
-    if frame.texture.as_ref().is_some_and(|t| t.id() != image.texture.id()) {
+    if frame
+        .texture
+        .as_ref()
+        .is_some_and(|t| t.id() != image.texture.id())
+    {
         frame.layers.clear();
         frame.cache = None;
         for key in &frame.cache_keys {
@@ -499,7 +509,10 @@ fn prepare_modern_shadow(
         let layers = if restores {
             image.texture.depth_or_array_layers()
         } else {
-            image.texture.depth_or_array_layers().min(MAX_CASCADES as u32)
+            image
+                .texture
+                .depth_or_array_layers()
+                .min(MAX_CASCADES as u32)
         };
         frame.cache = Some(device.create_texture(&TextureDescriptor {
             label: Some("modern_shadow_static_cache"),
@@ -608,10 +621,9 @@ fn prepare_modern_shadow(
         for light in &lights.shadowed {
             // A hole still gets its six offsets, so a slot's tiles are always at `slot * 6 + face`
             // however many lights are actually held — the identity the receivers' nibble depends on.
-            let (pos, near) = light.map_or(
-                (Vec3::ZERO, crate::modern::lights::CUBE_NEAR),
-                |h| (h.light.pos, h.light.near),
-            );
+            let (pos, near) = light.map_or((Vec3::ZERO, crate::modern::lights::CUBE_NEAR), |h| {
+                (h.light.pos, h.light.near)
+            });
             for face in 0..6 {
                 let clip_from_world = crate::modern::lights::cube_face_clip(pos, face, near);
                 frame
@@ -718,7 +730,9 @@ fn prepare_entity_shadows(
             continue;
         };
         let skinned = part.rig_slot.is_some();
-        let cut_image = part.cutout.and_then(|id| images.get(id).map(|gpu| (id, gpu)));
+        let cut_image = part
+            .cutout
+            .and_then(|id| images.get(id).map(|gpu| (id, gpu)));
         let mut cutout = cut_image.is_some();
         let key = (mesh.layout.clone(), skinned, cutout);
         let pipeline = match pipes.by_key.get(&key) {
@@ -737,7 +751,11 @@ fn prepare_entity_shadows(
                         let mut defs: Vec<ShaderDefVal> = Vec::new();
                         let mut layout = vec![
                             pipes.view_layout.clone(),
-                            if skinned { pipes.skin_layout.clone() } else { pipes.draw_layout.clone() },
+                            if skinned {
+                                pipes.skin_layout.clone()
+                            } else {
+                                pipes.draw_layout.clone()
+                            },
                         ];
                         if skinned {
                             defs.push("SKINNED".into());
@@ -781,7 +799,10 @@ fn prepare_entity_shadows(
                     // A cutout part without UVs casts opaque; anything else missing is skipped.
                     Err(_) if cutout => {
                         cutout = false;
-                        pipes.by_key.get(&(mesh.layout.clone(), skinned, false)).copied()
+                        pipes
+                            .by_key
+                            .get(&(mesh.layout.clone(), skinned, false))
+                            .copied()
                     }
                     Err(_) => None,
                 }
@@ -821,7 +842,8 @@ fn prepare_entity_shadows(
             radius: part.radius,
             tight: part.tight,
             pose: {
-                let (_, rotation, translation) = part.world_from_local.to_scale_rotation_translation();
+                let (_, rotation, translation) =
+                    part.world_from_local.to_scale_rotation_translation();
                 (translation, rotation)
             },
         });
@@ -937,7 +959,8 @@ impl ViewNode for GxShadowNode {
             }
             acc
         };
-        let (Some(working), Some(static_cache)) = (frame.texture.as_ref(), frame.cache.as_ref()) else {
+        let (Some(working), Some(static_cache)) = (frame.texture.as_ref(), frame.cache.as_ref())
+        else {
             return Ok(());
         };
 
@@ -963,7 +986,8 @@ impl ViewNode for GxShadowNode {
                 0
             };
             let slot = &frame.cache_keys[i];
-            let cached = active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
+            let cached =
+                active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
 
             if cached {
                 // Only what the previous frame's entity casters dirtied needs putting back.
@@ -978,13 +1002,23 @@ impl ViewNode for GxShadowNode {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)[i],
                     );
                     let restore = world.get_resource::<GxShadowPipelines>().and_then(|p| {
-                        Some((pipeline_cache.get_render_pipeline(p.restore)?, &p.restore_layout))
+                        Some((
+                            pipeline_cache.get_render_pipeline(p.restore)?,
+                            &p.restore_layout,
+                        ))
                     });
                     match (restore, frame.cache_views.get(i)) {
                         (Some((restore, layout)), Some(view)) if !rects.is_empty() => {
                             let data: Vec<[f32; 4]> = rects
                                 .iter()
-                                .map(|r| [r.min.x as f32, r.min.y as f32, r.max.x as f32, r.max.y as f32])
+                                .map(|r| {
+                                    [
+                                        r.min.x as f32,
+                                        r.min.y as f32,
+                                        r.max.x as f32,
+                                        r.max.y as f32,
+                                    ]
+                                })
                                 .collect();
                             let device = render_context.render_device();
                             let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
@@ -997,20 +1031,23 @@ impl ViewNode for GxShadowNode {
                                 &pipeline_cache.get_bind_group_layout(layout),
                                 &BindGroupEntries::sequential((view, buffer.as_entire_binding())),
                             );
-                            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                                label: Some("modern_shadow_restore"),
-                                color_attachments: &[],
-                                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                                    view: layer,
-                                    depth_ops: Some(Operations {
-                                        load: LoadOp::Load,
-                                        store: StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                }),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
+                            let mut pass =
+                                render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                                    label: Some("modern_shadow_restore"),
+                                    color_attachments: &[],
+                                    depth_stencil_attachment: Some(
+                                        RenderPassDepthStencilAttachment {
+                                            view: layer,
+                                            depth_ops: Some(Operations {
+                                                load: LoadOp::Load,
+                                                store: StoreOp::Store,
+                                            }),
+                                            stencil_ops: None,
+                                        },
+                                    ),
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
                             let span = diagnostics.pass_span(&mut pass, "modern_shadow_restore");
                             pass.set_render_pipeline(restore);
                             pass.set_bind_group(0, &bind, &[]);
@@ -1070,8 +1107,10 @@ impl ViewNode for GxShadowNode {
                                     complete = false;
                                     continue;
                                 };
-                                let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
-                                    &mesh.buffer_info
+                                let bevy::render::mesh::RenderMeshBufferInfo::Indexed {
+                                    index_format,
+                                    ..
+                                } = &mesh.buffer_info
                                 else {
                                     continue;
                                 };
@@ -1104,15 +1143,22 @@ impl ViewNode for GxShadowNode {
                                     continue;
                                 };
                                 let index_format = match &mesh.buffer_info {
-                                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                                        *index_format
+                                    bevy::render::mesh::RenderMeshBufferInfo::Indexed {
+                                        index_format,
+                                        ..
+                                    } => *index_format,
+                                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
+                                        continue
                                     }
-                                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
                                 };
                                 pass.set_vertex_buffer(0, vslice.buffer.slice(..));
                                 pass.set_index_buffer(islice.buffer.slice(..), index_format);
                                 for run in &gpu.runs {
-                                    pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
+                                    pass.set_render_pipeline(if run.cutout {
+                                        cutout
+                                    } else {
+                                        opaque
+                                    });
                                     pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
                                     pass.draw_indexed(
                                         (islice.range.start + run.index_range.start)
@@ -1142,7 +1188,12 @@ impl ViewNode for GxShadowNode {
                     // no dynamic pass, so its working layer is its cache (and the static cache no
                     // longer allocates it — `atlas_restores`).
                     if !is_sky {
-                        copy_layer(render_context.command_encoder(), working, static_cache, i as u32);
+                        copy_layer(
+                            render_context.command_encoder(),
+                            working,
+                            static_cache,
+                            i as u32,
+                        );
                     }
                     slot.store(key, std::sync::atomic::Ordering::Relaxed);
                 } else {
@@ -1157,7 +1208,8 @@ impl ViewNode for GxShadowNode {
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
                 continue;
             };
-            let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
+            let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind)
+            else {
                 continue;
             };
             if entities.draws.is_empty() {
@@ -1207,7 +1259,11 @@ impl ViewNode for GxShadowNode {
                     continue;
                 };
                 pass.set_render_pipeline(pipeline);
-                pass.set_bind_group(1, if cmd.skinned { skin_bind } else { draw_bind }, &[cmd.offset]);
+                pass.set_bind_group(
+                    1,
+                    if cmd.skinned { skin_bind } else { draw_bind },
+                    &[cmd.offset],
+                );
                 if let Some(cut) = &cmd.cutout {
                     pass.set_bind_group(2, cut, &[]);
                 }
@@ -1303,7 +1359,8 @@ impl GxShadowNode {
         meshes: &RenderAssets<RenderMesh>,
         allocator: &MeshAllocator,
     ) {
-        let (Some(lights), Some(view_bind)) = (world.get_resource::<ModernLights>(), frame.bind.as_ref())
+        let (Some(lights), Some(view_bind)) =
+            (world.get_resource::<ModernLights>(), frame.bind.as_ref())
         else {
             return;
         };
@@ -1326,7 +1383,10 @@ impl GxShadowNode {
             return;
         };
         let restore = pipes.and_then(|p| {
-            Some((pipeline_cache.get_render_pipeline(p.restore)?, &p.restore_layout))
+            Some((
+                pipeline_cache.get_render_pipeline(p.restore)?,
+                &p.restore_layout,
+            ))
         });
         let (Some(cache), Some(working)) = (frame.cache.as_ref(), frame.texture.as_ref()) else {
             return;
@@ -1357,7 +1417,12 @@ impl GxShadowNode {
             let cached = lights
                 .tier
                 .dynamic_casters
-                .then(|| frame.cache_targets.get(array_layer).zip(frame.cache_views.get(array_layer)))
+                .then(|| {
+                    frame
+                        .cache_targets
+                        .get(array_layer)
+                        .zip(frame.cache_views.get(array_layer))
+                })
                 .flatten();
             let static_target = cached.map_or(view, |(target, _)| target);
 
@@ -1464,7 +1529,11 @@ impl GxShadowNode {
                 if let Some(e) = entities {
                     near[i] = dynamic_casters_for(&e.draws, &light);
                 }
-                keys[i] = if near[i].is_empty() { DYN_STATIC } else { DYN_DRAWN };
+                keys[i] = if near[i].is_empty() {
+                    DYN_STATIC
+                } else {
+                    DYN_DRAWN
+                };
                 let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
                 let dirty = match slot.dynamic {
                     DYN_STATIC => dirty_faces(light.pos, &[], &now),
@@ -1503,7 +1572,12 @@ impl GxShadowNode {
                     None => {
                         // No restore draw yet: the whole layer back, and every slot that has
                         // entities beside it draws them again, every face.
-                        copy_layer(render_context.command_encoder(), cache, working, array_layer as u32);
+                        copy_layer(
+                            render_context.command_encoder(),
+                            cache,
+                            working,
+                            array_layer as u32,
+                        );
                         for (i, s) in slots.clone().enumerate() {
                             if crate::modern::lights::built(s) != slot_state[s].light {
                                 continue;
@@ -1536,8 +1610,13 @@ impl GxShadowNode {
             for (i, s) in slots.clone().enumerate() {
                 if restore_faces[i] | draw_faces[i] != 0 {
                     slot_state[s].dynamic = keys[i];
-                    let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
-                    let redrawn = if keys[i] == DYN_STATIC { ALL_FACES } else { draw_faces[i] };
+                    let now: Vec<DrawnCaster> =
+                        near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+                    let redrawn = if keys[i] == DYN_STATIC {
+                        ALL_FACES
+                    } else {
+                        draw_faces[i]
+                    };
                     let light_pos = lights.shadowed[s].map_or(Vec3::ZERO, |h| h.light.pos);
                     casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], &now, redrawn);
                 }
@@ -1647,9 +1726,9 @@ impl GxShadowNode {
                         continue;
                     };
                     let index_format = match &mesh.buffer_info {
-                        bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                            *index_format
-                        }
+                        bevy::render::mesh::RenderMeshBufferInfo::Indexed {
+                            index_format, ..
+                        } => *index_format,
                         bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
                     };
                     if !set_up {
@@ -1764,7 +1843,9 @@ impl GxShadowNode {
                     }
                     pass.set_vertex_buffer(0, vslice.buffer.slice(..));
                     match &mesh.buffer_info {
-                        bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                        bevy::render::mesh::RenderMeshBufferInfo::Indexed {
+                            index_format, ..
+                        } => {
                             let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
                                 continue;
                             };
@@ -1856,7 +1937,10 @@ fn restore_atlas_slots(
 /// fork: the entity casters one lamp's dynamic phase draws: within
 /// [`crate::modern::lights::DYNAMIC_REACH`] of the light (or its range, if that is shorter), and not
 /// the light's own host — a part no bigger than [`HOST_MAX_RADIUS`] whose bounds hold the light.
-fn dynamic_casters_for<'a>(draws: &'a [EntityDrawCmd], light: &ShadowLight) -> Vec<&'a EntityDrawCmd> {
+fn dynamic_casters_for<'a>(
+    draws: &'a [EntityDrawCmd],
+    light: &ShadowLight,
+) -> Vec<&'a EntityDrawCmd> {
     let reach = light.range.min(crate::modern::lights::DYNAMIC_REACH);
     draws
         .iter()
@@ -1897,7 +1981,11 @@ fn match_casters(drawn: &[DrawnCaster], now: &[DrawnCaster]) -> Option<Vec<Optio
 /// fork: the faces of `light`'s cube one caster can be seen in, as a six-bit mask.
 fn faces_of(light: Vec3, c: &DrawnCaster) -> u8 {
     (0..6usize).fold(0, |m, face| {
-        if face_sees(face, light, c.center, c.radius) { m | 1 << face } else { m }
+        if face_sees(face, light, c.center, c.radius) {
+            m | 1 << face
+        } else {
+            m
+        }
     })
 }
 
@@ -1931,7 +2019,12 @@ fn dirty_faces(light: Vec3, drawn: &[DrawnCaster], now: &[DrawnCaster]) -> u8 {
 /// it is now; one that paired with a caster already drawn and was NOT fully redrawn keeps the pose it
 /// was drawn at. Recording its new pose anyway would let a part creeping under [`DYN_MOVE_YD`] a frame
 /// drift away from its drawn shadow for as long as some other caster kept dirtying the slot.
-fn settle_drawn(light: Vec3, drawn: &[DrawnCaster], now: &[DrawnCaster], redrawn: u8) -> Vec<DrawnCaster> {
+fn settle_drawn(
+    light: Vec3,
+    drawn: &[DrawnCaster],
+    now: &[DrawnCaster],
+    redrawn: u8,
+) -> Vec<DrawnCaster> {
     let pairs = match_casters(drawn, now);
     now.iter()
         .enumerate()
@@ -2029,7 +2122,10 @@ fn atlas_casters_key(
 fn cascade_key(clip_from_world: &Mat4, static_hash: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    clip_from_world.to_cols_array().map(f32::to_bits).hash(&mut h);
+    clip_from_world
+        .to_cols_array()
+        .map(f32::to_bits)
+        .hash(&mut h);
     static_hash.hash(&mut h);
     h.finish().max(1)
 }
@@ -2045,13 +2141,21 @@ fn copy_layer(encoder: &mut CommandEncoder, src: &Texture, dst: &Texture, layer:
         TexelCopyTextureInfo {
             texture: src,
             mip_level: 0,
-            origin: Origin3d { x: 0, y: 0, z: layer },
+            origin: Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
             aspect: TextureAspect::All,
         },
         TexelCopyTextureInfo {
             texture: dst,
             mip_level: 0,
-            origin: Origin3d { x: 0, y: 0, z: layer },
+            origin: Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
             aspect: TextureAspect::All,
         },
         size,
@@ -2096,7 +2200,9 @@ fn box_texels(clip_from_world: &Mat4, center: Vec3, half: Vec3, size: u32) -> UR
             if i & 2 == 0 { -1.0 } else { 1.0 },
             if i & 4 == 0 { -1.0 } else { 1.0 },
         );
-        let p = clip_from_world.project_point3(center + half * sign).truncate();
+        let p = clip_from_world
+            .project_point3(center + half * sign)
+            .truncate();
         lo = lo.min(p);
         hi = hi.max(p);
     }
@@ -2119,8 +2225,14 @@ fn mark_tiles(tiles: &mut [u32; RESTORE_TILES], rect: URect, size: u32) {
     }
     let tile = (size / RESTORE_TILES as u32).max(1);
     let last = RESTORE_TILES as u32 - 1;
-    let (x0, x1) = ((rect.min.x / tile).min(last), ((rect.max.x - 1) / tile).min(last));
-    let (y0, y1) = ((rect.min.y / tile).min(last), ((rect.max.y - 1) / tile).min(last));
+    let (x0, x1) = (
+        (rect.min.x / tile).min(last),
+        ((rect.max.x - 1) / tile).min(last),
+    );
+    let (y0, y1) = (
+        (rect.min.y / tile).min(last),
+        ((rect.max.y - 1) / tile).min(last),
+    );
     // Bits x0..=x1, built in 64 bits so a full row does not overflow the shift.
     let bits = (((1u64 << (x1 + 1)) - 1) & !((1u64 << x0) - 1)) as u32;
     for row in &mut tiles[y0 as usize..=y1 as usize] {
@@ -2174,13 +2286,21 @@ pub(super) fn build(render_app: &mut SubApp) {
         )
         .add_systems(
             Render,
-            (prepare_modern_shadow, queue_terrain_shadow_pipelines, prepare_entity_shadows)
+            (
+                prepare_modern_shadow,
+                queue_terrain_shadow_pipelines,
+                prepare_entity_shadows,
+            )
                 .in_set(RenderSystems::PrepareResources),
         )
         .add_render_graph_node::<ViewNodeRunner<GxShadowNode>>(Core3d, GxShadowLabel)
         .add_render_graph_edges(
             Core3d,
-            (NodePbr::LateShadowPass, GxShadowLabel, Node3d::StartMainPass),
+            (
+                NodePbr::LateShadowPass,
+                GxShadowLabel,
+                Node3d::StartMainPass,
+            ),
         );
 }
 
@@ -2206,7 +2326,11 @@ mod tests {
             assert_eq!(r.max.y % tile, 0);
             for y in r.min.y / tile..r.max.y / tile {
                 for x in r.min.x / tile..r.max.x / tile {
-                    assert_eq!(covered[y as usize] & (1 << x), 0, "tile {x},{y} written twice");
+                    assert_eq!(
+                        covered[y as usize] & (1 << x),
+                        0,
+                        "tile {x},{y} written twice"
+                    );
                     covered[y as usize] |= 1 << x;
                 }
             }
@@ -2235,7 +2359,17 @@ mod tests {
         let b = body(Vec3::new(4.0, 0.0, 0.0));
         assert_eq!(dirty_faces(light, &[b], &[b]), 0);
         let jiggle = body(b.at + Vec3::new(0.0, 0.01, 0.0));
-        assert_eq!(dirty_faces(light, &[b], &[DrawnCaster { center: b.center, ..jiggle }]), 0);
+        assert_eq!(
+            dirty_faces(
+                light,
+                &[b],
+                &[DrawnCaster {
+                    center: b.center,
+                    ..jiggle
+                }]
+            ),
+            0
+        );
     }
 
     /// GOLDEN — **a body walking past a lamp redraws its shadow on the step, not a quarter-yard
@@ -2245,9 +2379,20 @@ mod tests {
         let light = Vec3::ZERO;
         let b = body(Vec3::new(4.0, 0.0, 0.0));
         let step = body(b.at + Vec3::new(0.0, 0.0, 0.05));
-        assert_ne!(dirty_faces(light, &[b], &[step]), 0, "a 5 cm step is movement");
-        let turned = DrawnCaster { turn: Quat::from_rotation_y(0.05), ..b };
-        assert_ne!(dirty_faces(light, &[b], &[turned]), 0, "and so is turning on the spot");
+        assert_ne!(
+            dirty_faces(light, &[b], &[step]),
+            0,
+            "a 5 cm step is movement"
+        );
+        let turned = DrawnCaster {
+            turn: Quat::from_rotation_y(0.05),
+            ..b
+        };
+        assert_ne!(
+            dirty_faces(light, &[b], &[turned]),
+            0,
+            "and so is turning on the spot"
+        );
     }
 
     /// Only the faces a caster is seen in are stale: a body on the lamp's +X side dirties the +X
@@ -2264,7 +2409,10 @@ mod tests {
         assert_eq!(dirty_faces(light, &[arrived], &[]), 1 << 0);
         // Moving across the edge dirties where it was and where it is.
         let moved = body(Vec3::new(0.0, 0.0, 4.0));
-        assert_eq!(dirty_faces(light, &[arrived], &[moved]), (1 << 0) | (1 << 4));
+        assert_eq!(
+            dirty_faces(light, &[arrived], &[moved]),
+            (1 << 0) | (1 << 4)
+        );
     }
 
     /// A caster that paired with its drawn record, but whose faces were not all redrawn this frame
@@ -2276,7 +2424,11 @@ mod tests {
         let a = body(Vec3::new(4.0, 0.0, 0.0));
         let crept = body(a.at + Vec3::new(0.0, 0.015, 0.0));
         let kept = settle_drawn(light, &[a], &[crept], 1 << 4);
-        assert_eq!(kept, vec![a], "not redrawn: the record stays where the shadow is");
+        assert_eq!(
+            kept,
+            vec![a],
+            "not redrawn: the record stays where the shadow is"
+        );
         let kept = settle_drawn(light, &[a], &[crept], ALL_FACES);
         assert_eq!(kept, vec![crept], "redrawn: the record follows");
     }

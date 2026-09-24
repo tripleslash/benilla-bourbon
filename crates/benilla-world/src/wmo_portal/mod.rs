@@ -232,10 +232,7 @@ pub fn room_admits(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstan
 /// [`room_admits`] for a LIGHT. Same shape, different set: a light is admitted by portal
 /// reachability ([`WmoPortalInstance::lit`]) rather than by this frame's frustum-clipped cull, so
 /// tilting the camera cannot switch a lamp on and off.
-pub fn room_admits_light(
-    room: Option<&WmoGroupVis>,
-    instance: Option<&WmoPortalInstance>,
-) -> bool {
+pub fn room_admits_light(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstance>) -> bool {
     match (room, instance) {
         (None, _) => true,
         (Some(r), Some(inst)) => r.lit_by(inst),
@@ -1982,10 +1979,26 @@ mod tests {
         };
         m.group_nav = vec![room(0, 1), room(1, 2), room(3, 1)];
         m.portal_refs = vec![
-            WmoPortalRef { portal: 0, group: 1, side: 1 },
-            WmoPortalRef { portal: 0, group: 0, side: -1 },
-            WmoPortalRef { portal: 0, group: 2, side: 1 },
-            WmoPortalRef { portal: 0, group: 1, side: -1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: -1,
+            },
         ];
         m
     }
@@ -2037,12 +2050,11 @@ mod tests {
         let m = floored_chain_model();
         // Standing in room 0. Room 2 is two doorways away and cannot be on screen through both.
         let lit = lighting_reach(&m, [-6.0, 0.0, 1.0], None);
-        assert_eq!(
-            lit.len(),
-            3,
-            "one verdict per group"
+        assert_eq!(lit.len(), 3, "one verdict per group");
+        assert!(
+            lit.iter().all(|v| *v),
+            "every room on the chain is lit: {lit:?}"
         );
-        assert!(lit.iter().all(|v| *v), "every room on the chain is lit: {lit:?}");
     }
 
     /// GOLDEN — **"names rooms" is not "is indoors", and the porch lamp is the difference.**

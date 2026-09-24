@@ -275,7 +275,6 @@ fn link_corpus_addon(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-
 /// **The real oracle: the director's two verified addons.**
 ///
 /// - `!OmniCC` **works** — its countdown numbers are on their screen. It must not be reported as

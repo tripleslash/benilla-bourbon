@@ -1477,7 +1477,8 @@ fn rebuild_ui_mesh(
             use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
             static SHOWN: AtomicU32 = AtomicU32::new(0);
             static LAST_SEC: AtomicU64 = AtomicU64::new(0);
-            static START: std::sync::OnceLock<bevy::platform::time::Instant> = std::sync::OnceLock::new();
+            static START: std::sync::OnceLock<bevy::platform::time::Instant> =
+                std::sync::OnceLock::new();
             let sec = START
                 .get_or_init(bevy::platform::time::Instant::now)
                 .elapsed()

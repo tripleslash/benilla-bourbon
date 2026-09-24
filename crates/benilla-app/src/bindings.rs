@@ -317,7 +317,11 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
     match crate::local_state::read_to_string(path) {
         Ok(text) => {
             let diff = store::from_diff(&text);
-            info!("bindings: {} overrides read from {}", diff.len(), path.display());
+            info!(
+                "bindings: {} overrides read from {}",
+                diff.len(),
+                path.display()
+            );
             Some(diff)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,

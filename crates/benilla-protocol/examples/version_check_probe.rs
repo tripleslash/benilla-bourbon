@@ -20,8 +20,8 @@ use anyhow::{anyhow, Context, Result};
 // probe stays a straight-line CLI and drives each of them to completion where it stands.
 use benilla_protocol::transport::Conn;
 use benilla_protocol::{auth, host_port, AuthReject, AUTH_PORT, CLIENT_BUILD};
-use futures_lite::future::block_on;
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge};
+use futures_lite::future::block_on;
 use sha1::{Digest, Sha1};
 
 /// Which `crc_hash` the arm puts in the proof packet.
@@ -55,8 +55,8 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)
             .context("sending logon challenge")?;
-        let reply = block_on(auth::read_challenge_reply(&mut stream))
-            .context("reading challenge reply")?;
+        let reply =
+            block_on(auth::read_challenge_reply(&mut stream)).context("reading challenge reply")?;
         let b = PublicKey::from_le_bytes(reply.server_public_key)
             .map_err(|e| anyhow!("invalid server public key: {e}"))?;
         if !b.is_width_stable() {

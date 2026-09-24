@@ -7,7 +7,9 @@ use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
+use bevy::render::render_graph::{
+    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
+};
 use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, storage_buffer_sized,
 };
@@ -114,23 +116,25 @@ fn prepare_lights(
     if pipeline_cache.get_compute_pipeline(pipes.bin).is_none() {
         return;
     }
-    frame.bind = Some(device.create_bind_group(
-        "modern_light_bin",
-        &pipeline_cache.get_bind_group_layout(&pipes.layout),
-        &BindGroupEntries::sequential((
-            light_buffer.0.as_entire_binding(),
-            // The light region of the block alone: the rest of it is read-only storage in the same
-            // frame's render passes, and a writable binding is exclusive per buffer, not per range.
-            BindingResource::Buffer(BufferBinding {
-                buffer: &block.buffer,
-                offset: LIGHT_OFFSET,
-                size: Some(
-                    std::num::NonZero::new(BLOCK_LIGHT_BYTES as u64)
-                        .expect("the light region is never empty"),
-                ),
-            }),
-        )),
-    ));
+    frame.bind = Some(
+        device.create_bind_group(
+            "modern_light_bin",
+            &pipeline_cache.get_bind_group_layout(&pipes.layout),
+            &BindGroupEntries::sequential((
+                light_buffer.0.as_entire_binding(),
+                // The light region of the block alone: the rest of it is read-only storage in the same
+                // frame's render passes, and a writable binding is exclusive per buffer, not per range.
+                BindingResource::Buffer(BufferBinding {
+                    buffer: &block.buffer,
+                    offset: LIGHT_OFFSET,
+                    size: Some(
+                        std::num::NonZero::new(BLOCK_LIGHT_BYTES as u64)
+                            .expect("the light region is never empty"),
+                    ),
+                }),
+            )),
+        ),
+    );
     frame.groups = (lights.tier.cells() as u32).div_ceil(64);
     bevy::log::info_once!(
         "modern lights: grid live — {} cells of {} yd, {} shadowed light(s)",
@@ -167,12 +171,13 @@ impl Node for LightBinNode {
         // The journal's `gpu_modern` column (`benilla-app` `perf::journal`), where the device times
         // passes.
         let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("modern_light_bin"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("modern_light_bin"),
+                    timestamp_writes: None,
+                });
         let span = diagnostics.pass_span(&mut pass, "modern_light_bin");
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
@@ -186,11 +191,18 @@ pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<LightFrame>()
         .add_systems(RenderStartup, init_pipelines)
-        .add_systems(Render, prepare_lights.in_set(RenderSystems::PrepareBindGroups))
+        .add_systems(
+            Render,
+            prepare_lights.in_set(RenderSystems::PrepareBindGroups),
+        )
         .add_render_graph_node::<LightBinNode>(Core3d, LightBinLabel)
         .add_render_graph_edges(Core3d, (LightBinLabel, Node3d::StartMainPass))
         // The atlas slots the cells name are the ones the shadow pass just drew.
         .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, LightBinLabel)
         // fork: P8b — the froxels take their point lights from this frame's cells.
-        .add_render_graph_edge(Core3d, LightBinLabel, crate::modern::volumetrics::FroxelLabel);
+        .add_render_graph_edge(
+            Core3d,
+            LightBinLabel,
+            crate::modern::volumetrics::FroxelLabel,
+        );
 }

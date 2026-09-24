@@ -115,18 +115,9 @@ pub fn inspect(a: InspectArgs) -> Result<()> {
     // finding in this report that is a hard blocker rather than a note.
     biggest(&chain, &entries, a.level);
 
-    histogram(
-        "extensions",
-        &entries,
-        a.top,
-        |e| {
-            e.name
-                .rsplit('.')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-        },
-    );
+    histogram("extensions", &entries, a.top, |e| {
+        e.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase()
+    });
     histogram("top-level directories", &entries, a.top, |e| {
         e.name
             .split(['\\', '/'])
@@ -299,9 +290,7 @@ fn scan_m2(chain: &Chain, entries: &[Entry]) {
     for (v, n) in &versions {
         print!(" v{v}×{n}");
     }
-    println!(
-        "   (this reader accepts 256..=263; anything else fails the parse below)"
-    );
+    println!("   (this reader accepts 256..=263; anything else fails the parse below)");
     println!(
         "  {:<44} {:>4} {:>8} {:>6} {:>5} {:>5} {:>7} {:>8}",
         "model", "ver", "verts", "bones", "tex", "mat", "geosets", "max gid"

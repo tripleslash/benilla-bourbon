@@ -1242,7 +1242,9 @@ fn play_ambience_bed(
                 return;
             }
         };
-        play_ambience_data(zone, out, config, kit_id, &path, kit_vol, fade_ms, now, data);
+        play_ambience_data(
+            zone, out, config, kit_id, &path, kit_vol, fade_ms, now, data,
+        );
     }
 }
 
@@ -1470,13 +1472,9 @@ fn retry_lua_music(
         if let Some((path, mut pending)) = zone.lua_music_decode.take() {
             match pending.take() {
                 None => zone.lua_music_decode = Some((path, pending)),
-                Some(Ok(data)) => play_lua_music_data(
-                    zone,
-                    out,
-                    config,
-                    &path,
-                    mixer::stream_from_decoded(data),
-                ),
+                Some(Ok(data)) => {
+                    play_lua_music_data(zone, out, config, &path, mixer::stream_from_decoded(data))
+                }
                 Some(Err(e)) => {
                     warn!("Lua music: {path} — {e}");
                     // The slot was held for a track that will never sound; hand it back so the

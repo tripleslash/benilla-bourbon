@@ -355,7 +355,11 @@ fn lamp_levers(mut tier: LightTier) -> LightTier {
             tile: var("WOW_LAMP_TILE").and_then(|v| v.parse().ok()),
             shadowed: var("WOW_LAMP_SHADOWED").and_then(|v| v.parse().ok()),
         };
-        if levers.dynamic.is_some() || levers.taps.is_some() || levers.tile.is_some() || levers.shadowed.is_some() {
+        if levers.dynamic.is_some()
+            || levers.taps.is_some()
+            || levers.tile.is_some()
+            || levers.shadowed.is_some()
+        {
             info!(
                 "modern lights: lamp levers — dynamic {:?}, taps {:?}, tile {:?}, shadowed {:?}",
                 levers.dynamic, levers.taps, levers.tile, levers.shadowed
@@ -833,7 +837,10 @@ impl Sway {
             *self = Self::new(pos, frame);
             return;
         }
-        let grew = (self.lo - lo).max_element().max((hi - self.hi).max_element()) > SWAY_NOISE;
+        let grew = (self.lo - lo)
+            .max_element()
+            .max((hi - self.hi).max_element())
+            > SWAY_NOISE;
         self.lo = lo;
         self.hi = hi;
         self.here += dt;
@@ -950,7 +957,8 @@ fn update_lights(
             }
             // The light's reach as the frame sees it: its authored energy over the distance the
             // camera stands at, so a bright chandelier two rooms away loses to the candle beside it.
-            let lum = light.intensity * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
+            let lum = light.intensity
+                * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]);
             ranked.push(Candidate {
                 score: lamp_score(lum, d, light.range),
                 light: ShadowLight {
@@ -979,9 +987,14 @@ fn update_lights(
     let want = tier.shadowed.min(MAX_SHADOWED);
     held.resize(want, None);
     held.truncate(want);
-    assign_slots(&mut held, &ranked, &cull, dt, &mut swap_clock, |slot, light| {
-        built(slot) == light.map_key()
-    });
+    assign_slots(
+        &mut held,
+        &ranked,
+        &cull,
+        dt,
+        &mut swap_clock,
+        |slot, light| built(slot) == light.map_key(),
+    );
     let chosen = held.clone();
 
     *out = ModernLights {
@@ -1147,8 +1160,7 @@ mod tests {
                 t.atlas_layers(),
             );
             assert!(
-                t.shadowed.div_ceil(PER_ATLAS_LAYER) * PER_ATLAS_LAYER
-                    <= layers * PER_ATLAS_LAYER,
+                t.shadowed.div_ceil(PER_ATLAS_LAYER) * PER_ATLAS_LAYER <= layers * PER_ATLAS_LAYER,
                 "{q:?}"
             );
             assert!(t.taps <= 12, "{q:?}: the shader's MAX_TAPS is 12");
@@ -1183,7 +1195,11 @@ mod tests {
                 "{q:?}: every tier with cubes takes the pruned dynamic phase, and only those"
             );
         }
-        for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::Ultra] {
+        for q in [
+            LightingQuality::Low,
+            LightingQuality::Medium,
+            LightingQuality::Ultra,
+        ] {
             assert_eq!(light_tier(q).shadowed, 0, "{q:?} shadows no local light");
             assert_eq!(crate::modern::shadow::local_shadow_layers(q), 0, "{q:?}");
         }
@@ -1196,7 +1212,10 @@ mod tests {
         );
         let cine = light_tier(LightingQuality::Cinematic);
         assert_eq!((cine.shadowed, cine.taps), (MAX_SHADOWED, 12));
-        assert!(cine.shade < 1.0 && cine.aggressive_cull, "a lamp's shadow, not a hole, and culled");
+        assert!(
+            cine.shade < 1.0 && cine.aggressive_cull,
+            "a lamp's shadow, not a hole, and culled"
+        );
         assert_eq!(
             crate::modern::shadow::local_shadow_layers(LightingQuality::Cinematic),
             crate::modern::shadow::MAX_LOCAL_SHADOW_LAYERS
@@ -1244,17 +1263,39 @@ mod tests {
     #[test]
     fn each_tiers_grid_reach_is_the_one_it_is_supposed_to_have() {
         let reach = |q| light_tier(q).reach();
-        assert_eq!(reach(LightingQuality::Low), Vec3::new(0.5, 0.5, 0.5), "no grid");
-        assert_eq!(reach(LightingQuality::Medium), Vec3::new(128.0, 64.0, 128.0));
+        assert_eq!(
+            reach(LightingQuality::Low),
+            Vec3::new(0.5, 0.5, 0.5),
+            "no grid"
+        );
+        assert_eq!(
+            reach(LightingQuality::Medium),
+            Vec3::new(128.0, 64.0, 128.0)
+        );
         assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
         assert_eq!(reach(LightingQuality::Ultra), Vec3::new(60.0, 30.0, 60.0));
-        assert_eq!(reach(LightingQuality::Cinematic), Vec3::new(60.0, 30.0, 60.0));
+        assert_eq!(
+            reach(LightingQuality::Cinematic),
+            Vec3::new(60.0, 30.0, 60.0)
+        );
         // …and past that, the emissive tiers' far level: 18 yd cells to ±324/±144.
         for q in [LightingQuality::Ultra, LightingQuality::Cinematic] {
-            assert_eq!(light_tier(q).far_reach(), Vec3::new(324.0, 144.0, 324.0), "{q:?}");
+            assert_eq!(
+                light_tier(q).far_reach(),
+                Vec3::new(324.0, 144.0, 324.0),
+                "{q:?}"
+            );
         }
-        for q in [LightingQuality::Low, LightingQuality::Medium, LightingQuality::High] {
-            assert_eq!(light_tier(q).far_reach(), Vec3::ZERO, "{q:?} has no far level");
+        for q in [
+            LightingQuality::Low,
+            LightingQuality::Medium,
+            LightingQuality::High,
+        ] {
+            assert_eq!(
+                light_tier(q).far_reach(),
+                Vec3::ZERO,
+                "{q:?} has no far level"
+            );
         }
     }
 
@@ -1269,7 +1310,10 @@ mod tests {
     /// could disagree about which cell the camera is in.
     #[test]
     fn the_emissive_tiers_far_level_covers_every_packed_light_and_its_range() {
-        for q in LightingQuality::ALL.into_iter().filter(|q| q.lights_emissive_sources()) {
+        for q in LightingQuality::ALL
+            .into_iter()
+            .filter(|q| q.lights_emissive_sources())
+        {
             let t = light_tier(q);
             let lit = crate::lighting::MODERN_PACK_RADIUS + 48.0;
             assert!(
@@ -1277,8 +1321,14 @@ mod tests {
                 "{q:?}: {:?} < {lit}",
                 t.far_reach()
             );
-            assert_eq!(t.far_dims.x, t.far_dims.z, "the shader carries one horizontal count");
-            assert!(t.far_step >= 2, "a far level as fine as the near one is just a bigger near level");
+            assert_eq!(
+                t.far_dims.x, t.far_dims.z,
+                "the shader carries one horizontal count"
+            );
+            assert!(
+                t.far_step >= 2,
+                "a far level as fine as the near one is just a bigger near level"
+            );
             // Both levels together fit the one allocation every tier shares.
             assert!(t.cells() <= CELL_ALLOC, "{q:?}: {} cells", t.cells());
         }
@@ -1299,7 +1349,10 @@ mod tests {
             // The camera is inside the far level, near its middle.
             let c = (cam / t.far_cell()).floor().as_ivec3() - far;
             let half = t.far_dims.as_ivec3() / 2;
-            assert!((c - half).abs().max_element() <= 1, "{cam}: far cell {c} vs centre {half}");
+            assert!(
+                (c - half).abs().max_element() <= 1,
+                "{cam}: far cell {c} vs centre {half}"
+            );
         }
     }
 
@@ -1342,8 +1395,16 @@ mod tests {
     #[test]
     fn the_reach_ladder_is_monotone() {
         for pair in LightingQuality::ALL.windows(2) {
-            let (lo, hi) = (light_tier(pair[0]).full_reach(), light_tier(pair[1]).full_reach());
-            assert!(hi.cmpge(lo).all(), "{:?} reaches {hi:?} < {:?}'s {lo:?}", pair[1], pair[0]);
+            let (lo, hi) = (
+                light_tier(pair[0]).full_reach(),
+                light_tier(pair[1]).full_reach(),
+            );
+            assert!(
+                hi.cmpge(lo).all(),
+                "{:?} reaches {hi:?} < {:?}'s {lo:?}",
+                pair[1],
+                pair[0]
+            );
         }
     }
 
@@ -1451,7 +1512,11 @@ mod tests {
         // `c` walks into view far stronger than `b`, the weaker holder.
         let now = scored(&[(a, 5.0), (b, 4.0), (c, 10.0)]);
         run(&mut held, &now, &mut clock, 1.0);
-        assert_eq!(lights_in(&held), vec![Some(a), Some(c)], "c took b's slot, a never moved");
+        assert_eq!(
+            lights_in(&held),
+            vec![Some(a), Some(c)],
+            "c took b's slot, a never moved"
+        );
         assert_eq!(held[1].unwrap().fade, 1.0, "and its shadow has arrived");
     }
 
@@ -1463,7 +1528,12 @@ mod tests {
         let mut held = vec![None; 2];
         let mut clock = 0.0;
         run(&mut held, &scored(&[(a, 5.0), (b, 4.0)]), &mut clock, 1.0);
-        run(&mut held, &scored(&[(a, 5.0), (b, 4.0), (c, 4.0 * 1.2)]), &mut clock, 3.0);
+        run(
+            &mut held,
+            &scored(&[(a, 5.0), (b, 4.0), (c, 4.0 * 1.2)]),
+            &mut clock,
+            3.0,
+        );
         assert_eq!(lights_in(&held), vec![Some(a), Some(b)]);
         assert!(held.iter().flatten().all(|h| !h.retiring));
     }
@@ -1482,7 +1552,10 @@ mod tests {
         for frame in 0..120 {
             assign_slots(&mut held, &now, &None, 1.0 / 60.0, &mut clock, always);
             let leaving = held.iter().flatten().filter(|h| h.evicted).count();
-            assert!(leaving <= 1, "frame {frame}: {leaving} holders evicted at once");
+            assert!(
+                leaving <= 1,
+                "frame {frame}: {leaving} holders evicted at once"
+            );
             if leaving == 1 && first.is_none() {
                 first = Some(frame);
             }
@@ -1490,7 +1563,11 @@ mod tests {
         assert!(first.is_some(), "the contest happened at all");
         run(&mut held, &now, &mut clock, 3.0);
         assert_eq!(
-            lights_in(&held).into_iter().flatten().map(|l| l.id).collect::<std::collections::HashSet<_>>(),
+            lights_in(&held)
+                .into_iter()
+                .flatten()
+                .map(|l| l.id)
+                .collect::<std::collections::HashSet<_>>(),
             [c.id, d.id].into_iter().collect(),
             "given time, both strong lamps are seated"
         );
@@ -1534,11 +1611,21 @@ mod tests {
             atten * w * w
         };
         for d in [1.0, 5.0, 12.0, 19.0] {
-            assert!((lamp_score(2.0, d, 20.0) - 2.0 * falloff(d, 20.0)).abs() < 1e-6, "{d}");
+            assert!(
+                (lamp_score(2.0, d, 20.0) - 2.0 * falloff(d, 20.0)).abs() < 1e-6,
+                "{d}"
+            );
         }
-        assert_eq!(lamp_score(1.0, 25.0, 20.0), 0.0, "past its range a lamp is worth nothing");
+        assert_eq!(
+            lamp_score(1.0, 25.0, 20.0),
+            0.0,
+            "past its range a lamp is worth nothing"
+        );
         assert!(lamp_score(1.0, 0.0, 20.0).is_finite());
-        assert!(lamp_score(1.0, 3.0, 20.0) > lamp_score(4.0, 30.0, 40.0), "near beats bright-far");
+        assert!(
+            lamp_score(1.0, 3.0, 20.0) > lamp_score(4.0, 30.0, 40.0),
+            "near beats bright-far"
+        );
     }
 
     fn cull_at(eye: Vec3) -> ShadowCull {
@@ -1600,7 +1687,10 @@ mod tests {
             id: 1,
             slack: MATCH_SLACK,
         };
-        assert!(!cull.worth_a_cube(outside.pos, outside.range), "not admitted");
+        assert!(
+            !cull.worth_a_cube(outside.pos, outside.range),
+            "not admitted"
+        );
         assert!(
             cull.still_worth_it(outside.pos, outside.range),
             "but had it already held a slot, it would keep it — that gap is the hysteresis"
@@ -1619,12 +1709,26 @@ mod tests {
         // Admitted: it takes the slot immediately, and contributes NOTHING on the frame it
         // arrives — a fade of zero reads exactly as "this light has no cube", which is the whole
         // point. The filling happens after the ramp, so its first step lands next frame.
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, always);
+        assign_slots(
+            &mut held,
+            &ranked(&[a]),
+            &None,
+            1.0 / 60.0,
+            &mut 0.0,
+            always,
+        );
         let h = held[0].expect("took a slot");
         assert_eq!(h.light, a);
         assert_eq!(h.fade, 0.0, "arrives dark");
 
-        assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, always);
+        assign_slots(
+            &mut held,
+            &ranked(&[a]),
+            &None,
+            1.0 / 60.0,
+            &mut 0.0,
+            always,
+        );
         let h = held[0].unwrap();
         assert!(h.fade > 0.0 && h.fade < 1.0, "then ramps: {}", h.fade);
 
@@ -1657,7 +1761,10 @@ mod tests {
 
         assert!(admits(false, false), "an authored light is never gated");
         assert!(admits(false, true));
-        assert!(!admits(true, false), "derived, tier says no: out of the table");
+        assert!(
+            !admits(true, false),
+            "derived, tier says no: out of the table"
+        );
         assert!(admits(true, true), "derived, tier says yes: in it");
 
         // The property that matters: the answer depends only on the tier now, never on when the
@@ -1685,9 +1792,18 @@ mod tests {
         let chapel = 1.0f32;
         let admits = |interior: bool, w: f32| !(interior && w < 0.5);
 
-        assert!(!admits(true, street), "the street lamp stays out of the room");
-        assert!(admits(true, chapel), "the room's own sconce still lights it");
-        assert!(admits(false, street), "and the street lamp still lights the street");
+        assert!(
+            !admits(true, street),
+            "the street lamp stays out of the room"
+        );
+        assert!(
+            admits(true, chapel),
+            "the room's own sconce still lights it"
+        );
+        assert!(
+            admits(false, street),
+            "and the street lamp still lights the street"
+        );
         assert!(
             admits(false, chapel),
             "a building's own light still reaches its exterior walls — the portal gate, not this \
@@ -1762,9 +1878,15 @@ mod tests {
                 "face {face}: matrix {from_matrix} vs shader {uv}"
             );
             // Reverse-Z: the stored depth is `near / major`, which is what the lookup compares.
-            assert!((ndc.z - CUBE_NEAR / major).abs() < 1e-5, "face {face}: {ndc}");
+            assert!(
+                (ndc.z - CUBE_NEAR / major).abs() < 1e-5,
+                "face {face}: {ndc}"
+            );
             // Inside the face, never off it.
-            assert!(uv.min_element() >= -1e-5 && uv.max_element() <= 1.0 + 1e-5, "{uv}");
+            assert!(
+                uv.min_element() >= -1e-5 && uv.max_element() <= 1.0 + 1e-5,
+                "{uv}"
+            );
         }
     }
 
@@ -1777,9 +1899,20 @@ mod tests {
         let a = lamp(0.0);
         let mut held = vec![None; 1];
         for _ in 0..30 {
-            assign_slots(&mut held, &ranked(&[a]), &None, 1.0 / 60.0, &mut 0.0, |_, _| false);
+            assign_slots(
+                &mut held,
+                &ranked(&[a]),
+                &None,
+                1.0 / 60.0,
+                &mut 0.0,
+                |_, _| false,
+            );
         }
-        assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((a, 0.0)), "held, but dark");
+        assert_eq!(
+            held[0].map(|h| (h.light, h.fade)),
+            Some((a, 0.0)),
+            "held, but dark"
+        );
         settle(&mut held, &ranked(&[a]), &None);
         assert_eq!(held[0].unwrap().fade, 1.0, "fades in once built");
         // A settled anchor moving (a re-anchored sway) keeps showing the old faces while the new
@@ -1788,7 +1921,14 @@ mod tests {
             pos: a.pos + Vec3::new(0.0, 0.1, 0.0),
             ..a
         };
-        assign_slots(&mut held, &ranked(&[moved]), &None, 1.0 / 60.0, &mut 0.0, |_, _| false);
+        assign_slots(
+            &mut held,
+            &ranked(&[moved]),
+            &None,
+            1.0 / 60.0,
+            &mut 0.0,
+            |_, _| false,
+        );
         assert_eq!(held[0].map(|h| (h.light, h.fade)), Some((moved, 1.0)));
     }
 
@@ -1812,7 +1952,10 @@ mod tests {
         settle(&mut held, &[swung], &None);
         let h = held[0].expect("still held");
         assert!(!h.retiring && h.fade == 1.0, "{h:?}");
-        assert_eq!(h.light.pos, a.pos, "an unsettled sway does not move the anchor");
+        assert_eq!(
+            h.light.pos, a.pos,
+            "an unsettled sway does not move the anchor"
+        );
         assert_eq!(held[1], None, "and never takes a second slot");
     }
 
@@ -1828,14 +1971,21 @@ mod tests {
             t.step(Vec3::new(x, 0.0, 0.0), dt, f);
         }
         assert!(t.resident() && t.settled(), "{t:?}");
-        assert!(t.anchor().length() < 0.01, "the middle of a ±0.4 swing: {}", t.anchor());
+        assert!(
+            t.anchor().length() < 0.01,
+            "the middle of a ±0.4 swing: {}",
+            t.anchor()
+        );
         assert!(t.reach() >= 0.39 && t.reach() <= 0.41, "{}", t.reach());
 
         // A torch carried down the street keeps restarting its box, so it never settles.
         let mut walk = Sway::new(Vec3::ZERO, 0);
         for f in 1..600u32 {
             walk.step(Vec3::new(f as f32 * dt * 3.0, 0.0, 0.0), dt, f);
-            assert!(!walk.settled(), "frame {f}: a walking light is never settled");
+            assert!(
+                !walk.settled(),
+                "frame {f}: a walking light is never settled"
+            );
         }
     }
 

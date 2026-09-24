@@ -82,7 +82,6 @@ pub(super) const NOISE_SLICES: u32 = 16;
 /// The committed bytes — `NOISE_SIZE² × NOISE_SLICES × RGBA8`, produced by [`generate_noise`].
 const NOISE_BYTES: &[u8] = include_bytes!("../../assets/liquid/magma_noise.rgba");
 
-
 /// Build the `Image` the cata liquid materials bind on stage 5.
 ///
 /// `RENDER_WORLD` only, like every other world texture: nothing on the CPU side reads it back, and
@@ -311,7 +310,10 @@ fn generate_noise() -> Vec<u8> {
     // independence the test asks for, and lava reads as a churn either way.
     const OCTAVES: [(usize, f32); 3] = [(16, 1.0), (8, 0.5), (4, 0.25)];
     let mut out = vec![0u8; n * n * d * 4];
-    for (channel, seed) in [0x1357_9BDFu32, 0x2468_ACE0, 0x9E37_79B1].into_iter().enumerate() {
+    for (channel, seed) in [0x1357_9BDFu32, 0x2468_ACE0, 0x9E37_79B1]
+        .into_iter()
+        .enumerate()
+    {
         for z in 0..d {
             for y in 0..n {
                 for x in 0..n {
@@ -514,7 +516,10 @@ mod tests {
     #[test]
     fn the_committed_noise_volume_matches_the_generator() {
         let fresh = super::generate_noise();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/liquid/magma_noise.rgba");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/liquid/magma_noise.rgba"
+        );
         if std::env::var_os("WOW_REGEN_LIQUID_ART").is_some() {
             std::fs::write(path, &fresh).unwrap();
             return;
@@ -547,13 +552,19 @@ mod tests {
             let va: f32 = pts.iter().map(|p| (p.0 - ma).powi(2)).sum::<f32>().sqrt();
             let vc: f32 = pts.iter().map(|p| (p.1 - mc).powi(2)).sum::<f32>().sqrt();
             let r = cov / (va * vc).max(1e-6);
-            assert!(r.abs() < 0.2, "channels {a}/{c} correlate at {r} - not independent masks");
+            assert!(
+                r.abs() < 0.2,
+                "channels {a}/{c} correlate at {r} - not independent masks"
+            );
         }
         // The clock axis wraps: the last slice continues into the first.
         for (x, y) in [(3usize, 7usize), (31, 31), (60, 12)] {
             let step = (at(0, x, y, 1) - at(0, x, y, 0)).abs();
             let seam = (at(0, x, y, 0) - at(0, x, y, d - 1)).abs();
-            assert!(seam <= step * 3.0 + 8.0, "clock seam at ({x},{y}): {seam} vs step {step}");
+            assert!(
+                seam <= step * 3.0 + 8.0,
+                "clock seam at ({x},{y}): {seam} vs step {step}"
+            );
         }
     }
 

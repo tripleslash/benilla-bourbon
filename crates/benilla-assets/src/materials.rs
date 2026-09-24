@@ -250,7 +250,12 @@ pub struct WowModelExt {
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
     // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
-    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(122, sampler_type = "comparison", visibility(fragment))]
     pub modern_shadow: Handle<Image>,
     #[storage(123, read_only, visibility(fragment))]
@@ -828,7 +833,12 @@ pub struct LiquidCataExt {
     // fork: modern lighting — the sun cascades, so water in shade loses its sun glare and highlight.
     // Texture only, compared by hand with `textureLoad` (`sunshadow::sun_visibility_load`): the
     // layout has no sampler slot left.
-    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     pub modern_shadow: Handle<Image>,
 }
 
@@ -946,7 +956,12 @@ pub struct TerrainExtension {
     #[storage(90, read_only, buffer)]
     pub light_buf: Buffer,
     // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
-    #[texture(121, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(122, sampler_type = "comparison", visibility(fragment))]
     pub modern_shadow: Handle<Image>,
     #[storage(123, read_only, visibility(fragment))]

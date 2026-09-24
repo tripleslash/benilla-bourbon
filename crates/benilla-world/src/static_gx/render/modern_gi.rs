@@ -178,7 +178,12 @@ fn init_gi_pipelines(
     });
 }
 
-fn voxel_texture(device: &RenderDevice, label: &'static str, n: u32, levels: u32) -> (Texture, TextureView) {
+fn voxel_texture(
+    device: &RenderDevice,
+    label: &'static str,
+    n: u32,
+    levels: u32,
+) -> (Texture, TextureView) {
     let texture = device.create_texture(&TextureDescriptor {
         label: Some(label),
         size: Extent3d {
@@ -263,7 +268,10 @@ fn overlaps(center: Vec3, half: Vec3, lo: Vec3, hi: Vec3) -> bool {
 /// The voxel range a world box covers in one level, clamped to that level's window.
 fn box_voxels(center: Vec3, half: Vec3, voxel: f32, base: IVec3, n: i32) -> Option<(IVec3, IVec3)> {
     let lo = ((center - half) / voxel).floor().as_ivec3().max(base);
-    let hi = ((center + half) / voxel).ceil().as_ivec3().min(base + IVec3::splat(n));
+    let hi = ((center + half) / voxel)
+        .ceil()
+        .as_ivec3()
+        .min(base + IVec3::splat(n));
     (lo.cmplt(hi).all()).then_some((lo, hi))
 }
 
@@ -334,8 +342,18 @@ fn prepare_gi_voxels(
     // A tier change (or the first modern frame) re-creates the clipmap, and everything in it is new.
     let fresh = state.tier != Some(tier);
     if fresh {
-        state.albedo = Some(voxel_texture(&device, "modern_gi_voxel_albedo", tier.voxels, tier.levels as u32));
-        state.normal = Some(voxel_texture(&device, "modern_gi_voxel_normal", tier.voxels, tier.levels as u32));
+        state.albedo = Some(voxel_texture(
+            &device,
+            "modern_gi_voxel_albedo",
+            tier.voxels,
+            tier.levels as u32,
+        ));
+        state.normal = Some(voxel_texture(
+            &device,
+            "modern_gi_voxel_normal",
+            tier.voxels,
+            tier.levels as u32,
+        ));
         let raster = tier.voxels * SUPERSAMPLE;
         let depth = device.create_texture(&TextureDescriptor {
             label: Some("modern_gi_voxel_depth"),
@@ -383,9 +401,11 @@ fn prepare_gi_voxels(
         state.height = Some((texture, view));
         state.height_key = 0;
     }
-    let (Some(albedo), Some(normal), Some(height)) =
-        (state.albedo.clone(), state.normal.clone(), state.height.clone())
-    else {
+    let (Some(albedo), Some(normal), Some(height)) = (
+        state.albedo.clone(),
+        state.normal.clone(),
+        state.height.clone(),
+    ) else {
         return;
     };
     if state.store_bind.is_none() {
@@ -468,13 +488,11 @@ fn prepare_gi_voxels(
 
     // Gone or changed: their old box is emptied and rebuilt from whatever still overlaps it.
     let mut departed: Vec<VoxelCaster> = Vec::new();
-    state.casters.retain(|key, had| {
-        match current.get(key) {
-            Some(now) if now == had => true,
-            _ => {
-                departed.push(*had);
-                false
-            }
+    state.casters.retain(|key, had| match current.get(key) {
+        Some(now) if now == had => true,
+        _ => {
+            departed.push(*had);
+            false
         }
     });
     let mut arrived: Vec<(CasterKey, VoxelCaster)> = current
@@ -487,10 +505,17 @@ fn prepare_gi_voxels(
         let d = |v: &VoxelCaster| v.center.distance_squared(gi.camera);
         d(&a.1).total_cmp(&d(&b.1))
     });
-    let admitted = if fresh { 0 } else { arrived.len().min(ARRIVAL_BUDGET) };
+    let admitted = if fresh {
+        0
+    } else {
+        arrived.len().min(ARRIVAL_BUDGET)
+    };
     let current_len = current.len();
 
-    for v in departed.iter().chain(arrived.iter().take(admitted).map(|(_, v)| v)) {
+    for v in departed
+        .iter()
+        .chain(arrived.iter().take(admitted).map(|(_, v)| v))
+    {
         for level in 0..tier.levels {
             let voxel = tier.voxel[level];
             if let Some((lo, hi)) = box_voxels(v.center, v.half, voxel, state.base[level], n) {
@@ -525,7 +550,12 @@ fn prepare_gi_voxels(
                 ),
             });
         }
-        state.jobs.push(VoxelJob { level, lo, hi, axis });
+        state.jobs.push(VoxelJob {
+            level,
+            lo,
+            hi,
+            axis,
+        });
     }
     if !state.jobs.is_empty() {
         bevy::log::info_once!(
@@ -613,20 +643,26 @@ fn prepare_gi_voxels(
     // resident yet is simply not drawn), so no texel stands above it, and the trace skips the map
     // for any ray point higher than this (`probegi::march`). The half-yard covers the depth
     // encoding's rounding.
-    clip.bounds.x = terrain.as_deref().map_or(crate::modern::gi::NO_TERRAIN, |t| {
-        t.cells
-            .iter()
-            .filter(|(_, c, h)| {
-                (c.x - centre.x).abs() <= HEIGHT_HALF + h.x && (c.z - centre.z).abs() <= HEIGHT_HALF + h.z
-            })
-            .map(|(_, c, h)| c.y + h.y + 0.5)
-            .fold(crate::modern::gi::NO_TERRAIN, f32::max)
-    });
+    clip.bounds.x = terrain
+        .as_deref()
+        .map_or(crate::modern::gi::NO_TERRAIN, |t| {
+            t.cells
+                .iter()
+                .filter(|(_, c, h)| {
+                    (c.x - centre.x).abs() <= HEIGHT_HALF + h.x
+                        && (c.z - centre.z).abs() <= HEIGHT_HALF + h.z
+                })
+                .map(|(_, c, h)| c.y + h.y + 0.5)
+                .fold(crate::modern::gi::NO_TERRAIN, f32::max)
+        });
     let mut key = 0u64;
     if let Some(t) = terrain.as_deref() {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        clip_from_world.to_cols_array().map(f32::to_bits).hash(&mut h);
+        clip_from_world
+            .to_cols_array()
+            .map(f32::to_bits)
+            .hash(&mut h);
         for (mesh_id, center, _) in &t.cells {
             let mut cell = std::collections::hash_map::DefaultHasher::new();
             mesh_id.hash(&mut cell);
@@ -856,7 +892,12 @@ impl ViewNode for GiVoxelNode {
                 pass.set_bind_group(2, store_bind, &[]);
                 for (gpu, draw) in &casters {
                     let center = draw.origin + Vec3::from(draw.aabb.center);
-                    if !overlaps(center, Vec3::from(draw.aabb.half_extents), world_lo, world_hi) {
+                    if !overlaps(
+                        center,
+                        Vec3::from(draw.aabb.half_extents),
+                        world_lo,
+                        world_hi,
+                    ) {
                         continue;
                     }
                     let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -910,7 +951,10 @@ pub(super) fn build(render_app: &mut SubApp) {
             bevy::render::RenderStartup,
             init_gi_pipelines.after(init_pipelines),
         )
-        .add_systems(Render, prepare_gi_voxels.in_set(RenderSystems::PrepareResources))
+        .add_systems(
+            Render,
+            prepare_gi_voxels.in_set(RenderSystems::PrepareResources),
+        )
         .add_render_graph_node::<ViewNodeRunner<GiVoxelNode>>(Core3d, GxVoxelLabel)
         .add_render_graph_edges(Core3d, (GxVoxelLabel, Node3d::StartMainPass));
 }
@@ -946,11 +990,23 @@ mod tests {
             let a = clip.project_point3(lo);
             let b = clip.project_point3(hi);
             // The box's corners land on the clip volume's corners, depth included.
-            assert!((a.x.abs() - 1.0).abs() < 1e-4 && (b.x.abs() - 1.0).abs() < 1e-4, "{axis}: {a} {b}");
-            assert!((a.y.abs() - 1.0).abs() < 1e-4 && (b.y.abs() - 1.0).abs() < 1e-4, "{axis}: {a} {b}");
+            assert!(
+                (a.x.abs() - 1.0).abs() < 1e-4 && (b.x.abs() - 1.0).abs() < 1e-4,
+                "{axis}: {a} {b}"
+            );
+            assert!(
+                (a.y.abs() - 1.0).abs() < 1e-4 && (b.y.abs() - 1.0).abs() < 1e-4,
+                "{axis}: {a} {b}"
+            );
             let depth = [a.z, b.z];
-            assert!(depth.contains(&0.0) || depth.iter().any(|z| z.abs() < 1e-4), "{axis}: {a} {b}");
-            assert!(depth.iter().any(|z| (z - 1.0).abs() < 1e-4), "{axis}: {a} {b}");
+            assert!(
+                depth.contains(&0.0) || depth.iter().any(|z| z.abs() < 1e-4),
+                "{axis}: {a} {b}"
+            );
+            assert!(
+                depth.iter().any(|z| (z - 1.0).abs() < 1e-4),
+                "{axis}: {a} {b}"
+            );
             // The centre stays in the middle of the target.
             let mid = clip.project_point3(0.5 * (lo + hi));
             assert!(mid.x.abs() < 1e-4 && mid.y.abs() < 1e-4, "{axis}: {mid}");
@@ -966,7 +1022,10 @@ mod tests {
         let uv_from_ndc = Vec2::new(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
         let q = p.extend(1.0);
         let uv_from_rows = Vec2::new(clip.hf_row_x.dot(q), clip.hf_row_y.dot(q));
-        assert!((uv_from_ndc - uv_from_rows).abs().max_element() < 1e-5, "{uv_from_ndc} {uv_from_rows}");
+        assert!(
+            (uv_from_ndc - uv_from_rows).abs().max_element() < 1e-5,
+            "{uv_from_ndc} {uv_from_rows}"
+        );
         // And the stored depth decodes back to the height.
         let height = clip.hf.y + ndc.z * clip.hf.z;
         assert!((height - p.y).abs() < 1e-2, "{height} vs {}", p.y);

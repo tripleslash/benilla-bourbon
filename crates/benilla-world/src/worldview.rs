@@ -547,7 +547,11 @@ fn live_pose(
             let w = benilla_assets::coords::bevy_to_wow(xf.translation);
             info!(
                 "worldview pose: {:.1},{:.1},{:.1},{:.1},{:.1}",
-                w[0], w[1], w[2], view.yaw.to_degrees(), view.pitch.to_degrees()
+                w[0],
+                w[1],
+                w[2],
+                view.yaw.to_degrees(),
+                view.pitch.to_degrees()
             );
         }
     }
@@ -570,7 +574,10 @@ fn live_pose(
         return;
     }
     let wants_ground = c.len() >= 6;
-    if last.as_ref().is_some_and(|(s, grounded)| *s == v && (*grounded || !wants_ground)) {
+    if last
+        .as_ref()
+        .is_some_and(|(s, grounded)| *s == v && (*grounded || !wants_ground))
+    {
         return;
     }
     let Ok((mut xf, mut view)) = cam.single_mut() else {

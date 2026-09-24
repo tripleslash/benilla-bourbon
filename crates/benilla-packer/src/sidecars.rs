@@ -173,8 +173,12 @@ fn translate(index: &Index, manifest: &Path) -> Result<PackSet> {
             unresolved: 0,
         });
     };
-    let names = manifest_names(&text)
-        .with_context(|| format!("parsing {} — expected {{\"names\": [...]}}", manifest.display()))?;
+    let names = manifest_names(&text).with_context(|| {
+        format!(
+            "parsing {} — expected {{\"names\": [...]}}",
+            manifest.display()
+        )
+    })?;
 
     // Frame bytes wanted per pack, so the wire size can be attributed proportionally below.
     let mut wanted: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
@@ -248,7 +252,8 @@ mod tests {
 
     #[test]
     fn manifest_names_reads_backslash_separated_chain_names() {
-        let text = r#"{"version":1,"names":["DBFilesClient\\Map.dbc","Interface\\Glues\\a b.blp"]}"#;
+        let text =
+            r#"{"version":1,"names":["DBFilesClient\\Map.dbc","Interface\\Glues\\a b.blp"]}"#;
         assert_eq!(
             manifest_names(text).unwrap(),
             vec![

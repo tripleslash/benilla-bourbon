@@ -344,14 +344,9 @@ pub(super) fn attach_item_glows(
                 // A glow model's additive CARDS count too, not only its emitters: 32 of the 35
                 // shipped ones are pure emitters, but `Sparkle_A.m2` is a lone camera-facing quad
                 // and would otherwise light nothing at all.
-                glow_cards.extend(
-                    dm.parts
-                        .iter()
-                        .flatten()
-                        .filter_map(|p| {
-                            benilla_world::modern::lights::emissive::glow_of_geometry(&p.geometry)
-                        }),
-                );
+                glow_cards.extend(dm.parts.iter().flatten().filter_map(|p| {
+                    benilla_world::modern::lights::emissive::glow_of_geometry(&p.geometry)
+                }));
                 glow_at = (glow_at.0 + at, glow_at.1 + 1);
             }
         }
@@ -473,7 +468,10 @@ mod tests {
     /// Pure translations, as a vanilla M2's rest pose is by construction — no inverse-bind array,
     /// identity rest TRS, the pivot encoding bind position
     /// (`benilla_assets::model::build_skeleton`). Bevy space, so the blade runs up **+Y**.
-    fn teebu() -> (benilla_assets::ModelSkeleton, Vec<benilla_assets::ModelAttachment>) {
+    fn teebu() -> (
+        benilla_assets::ModelSkeleton,
+        Vec<benilla_assets::ModelAttachment>,
+    ) {
         let joints = (0..5)
             .map(|i| benilla_assets::ModelJoint {
                 parent: i as i16 - 1, // -1 on the grip bone = root
@@ -574,10 +572,7 @@ mod tests {
                 .map(|slot| {
                     let at = crate::portrait::attachment_point(&skeleton, &attachments, slot)
                         .expect("Teebu authors all five glow attachment points");
-                    let e = app
-                        .world_mut()
-                        .spawn(Transform::from_translation(at))
-                        .id();
+                    let e = app.world_mut().spawn(Transform::from_translation(at)).id();
                     app.world_mut().entity_mut(root).add_child(e);
                     e
                 })

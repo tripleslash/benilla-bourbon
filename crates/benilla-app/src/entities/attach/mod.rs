@@ -847,9 +847,9 @@ pub(super) fn attach_entity_visuals(
                 Some(rb) => parts
                     .iter()
                     .filter(|part| {
-                        visible_geosets.as_ref().is_none_or(|vis| {
-                            benilla_formats::geoset_shown(vis, part.geoset_id)
-                        })
+                        visible_geosets
+                            .as_ref()
+                            .is_none_or(|vis| benilla_formats::geoset_shown(vis, part.geoset_id))
                     })
                     .filter_map(|part| part.billboard.as_ref().map(|b| b.bone))
                     .filter_map(|bone| {
@@ -1102,8 +1102,7 @@ pub(super) fn attach_entity_visuals(
                                 true,
                                 e.color,
                                 0.0,
-                                Vec3::from(local)
-                                    + Vec3::splat((entity.to_bits() % 4096) as f32),
+                                Vec3::from(local) + Vec3::splat((entity.to_bits() % 4096) as f32),
                             ) {
                                 commands.entity(light).insert(flicker);
                             }

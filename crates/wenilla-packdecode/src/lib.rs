@@ -72,7 +72,11 @@ impl Container {
     #[wasm_bindgen(js_name = packUrl)]
     pub fn pack_url(&self, pack_id: u32) -> Option<String> {
         self.index.pack(pack_id)?;
-        Some(format!("{}/{}", self.base, benilla_pack::pack_path(pack_id)))
+        Some(format!(
+            "{}/{}",
+            self.base,
+            benilla_pack::pack_path(pack_id)
+        ))
     }
 
     /// The served size of one pack, for a progress bar that counts bytes rather than objects.

@@ -237,7 +237,13 @@ impl WdlFile {
     /// At `step == 1` the border vertices and edges are exactly [`Self::tile_mesh`]'s, so the two LODs
     /// meet without a crack. A coarser step leaves T-junctions against a finer neighbour, so it hangs a
     /// `skirt`-yard curtain straight down from every border edge to cover them.
-    pub fn tile_mesh_coarse(&self, tile_x: u32, tile_y: u32, step: usize, skirt: f32) -> Option<WdlTileMesh> {
+    pub fn tile_mesh_coarse(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        step: usize,
+        skirt: f32,
+    ) -> Option<WdlTileMesh> {
         if tile_x >= 64 || tile_y >= 64 || step == 0 || !INNER_EDGE.is_multiple_of(step) {
             return None;
         }

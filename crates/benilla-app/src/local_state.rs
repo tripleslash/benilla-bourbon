@@ -396,11 +396,7 @@ pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Resul
         // `localStorage.setItem` on the frame's own thread, and every byte of it is spent there.
         let t0 = bevy::platform::time::Instant::now();
         let r = web_store::set_bytes(path, contents);
-        write_meter::record(
-            path,
-            contents.len(),
-            t0.elapsed().as_secs_f32() * 1000.0,
-        );
+        write_meter::record(path, contents.len(), t0.elapsed().as_secs_f32() * 1000.0);
         return r;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -429,9 +425,10 @@ pub(crate) mod write_meter {
     }
 
     pub(super) fn record(path: &Path, bytes: usize, ms: f32) {
-        let name = path
-            .file_name()
-            .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         SEEN.with(|s| {
             let mut s = s.borrow_mut();
             match s.iter_mut().find(|(n, ..)| *n == name) {
@@ -524,7 +521,12 @@ mod web_store {
         storage()?
             .get_item(&key(path))
             .map_err(|_| Error::new(ErrorKind::Other, "localStorage read failed"))?
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("{} not stored", path.display())))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::NotFound,
+                    format!("{} not stored", path.display()),
+                )
+            })
     }
 
     pub(super) fn set(path: &Path, contents: &str) -> Result<()> {
@@ -619,12 +621,20 @@ mod tests {
     #[test]
     fn the_page_store_round_trips_bytes_and_leaves_text_alone() {
         let text = "SV = { name = \"Zoë\" }\n";
-        assert_eq!(super::bytes_as_text(text.as_bytes()), text, "UTF-8 is stored as itself");
+        assert_eq!(
+            super::bytes_as_text(text.as_bytes()),
+            text,
+            "UTF-8 is stored as itself"
+        );
         assert_eq!(super::text_as_bytes(text.to_string()), text.as_bytes());
         let raw: Vec<u8> = (0u8..=255).chain([0xff, 0xfe, 0x00, 0x80]).collect();
         let stored = super::bytes_as_text(&raw).into_owned();
         assert!(stored.starts_with(super::BYTES_MARK));
-        assert_eq!(super::text_as_bytes(stored), raw, "every byte value comes back");
+        assert_eq!(
+            super::text_as_bytes(stored),
+            raw,
+            "every byte value comes back"
+        );
     }
 
     use super::test_env::{EnvGuard, ENV_LOCK};

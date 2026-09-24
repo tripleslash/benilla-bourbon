@@ -7,10 +7,12 @@ use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
+use bevy::render::render_graph::{
+    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
+};
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d_array,
-    texture_3d, texture_depth_2d, uniform_buffer_sized,
+    sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d_array, texture_3d,
+    texture_depth_2d, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
@@ -225,7 +227,9 @@ fn prepare_gi(
     else {
         return;
     };
-    if pipeline_cache.get_compute_pipeline(pipes.classify).is_none()
+    if pipeline_cache
+        .get_compute_pipeline(pipes.classify)
+        .is_none()
         || pipeline_cache.get_compute_pipeline(pipes.trace).is_none()
         || pipeline_cache.get_compute_pipeline(pipes.blend).is_none()
     {
@@ -433,5 +437,9 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, GiTraceLabel)
         .add_render_graph_edge(Core3d, crate::static_gx::GxVoxelLabel, GiTraceLabel)
         // The froxels' ambient reads the probes.
-        .add_render_graph_edge(Core3d, GiTraceLabel, crate::modern::volumetrics::FroxelLabel);
+        .add_render_graph_edge(
+            Core3d,
+            GiTraceLabel,
+            crate::modern::volumetrics::FroxelLabel,
+        );
 }

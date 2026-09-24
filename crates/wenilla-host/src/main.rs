@@ -139,7 +139,10 @@ async fn main() -> Result<()> {
         }
         (None, Some(packs)) => {
             if !packs.join("index.bpi").is_file() {
-                anyhow::bail!("{} has no index.bpi — run `benilla-pack build` first", packs.display());
+                anyhow::bail!(
+                    "{} has no index.bpi — run `benilla-pack build` first",
+                    packs.display()
+                );
             }
             tracing::info!(
                 packs = %packs.display(),
@@ -277,7 +280,10 @@ async fn main() -> Result<()> {
 /// localhost pin is worth *saying* — the pin applies either way, so a name this cannot recognise
 /// (a `/etc/hosts` alias for loopback) costs one warn line and nothing else.
 fn is_local_realm(upstream: &str) -> bool {
-    let host = upstream.trim().trim_start_matches('[').trim_end_matches(']');
+    let host = upstream
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
         || host == "::1"
         || host

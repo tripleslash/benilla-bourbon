@@ -96,7 +96,11 @@ const DEV_QUERY_CREDS: &str = "dev_query_creds";
 /// The pure lookup behind [`var`] — env object first, query string second, credentials gated —
 /// kept free of `web_sys` so it is unit-tested natively.
 #[allow(dead_code)]
-fn lookup(env: &std::collections::HashMap<String, String>, search: &str, key: &str) -> Option<String> {
+fn lookup(
+    env: &std::collections::HashMap<String, String>,
+    search: &str,
+    key: &str,
+) -> Option<String> {
     if let Some(v) = env.get(key) {
         return Some(v.clone());
     }
@@ -233,13 +237,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn env_object_wins_over_query() {
         let e = env(&[("user", "fromenv")]);
-        assert_eq!(lookup(&e, "?user=fromquery", "user").as_deref(), Some("fromenv"));
+        assert_eq!(
+            lookup(&e, "?user=fromquery", "user").as_deref(),
+            Some("fromenv")
+        );
     }
 
     #[test]
@@ -249,22 +259,37 @@ mod tests {
         assert_eq!(lookup(&e, "?user=alice&pass=pw&char=Al", "pass"), None);
         assert_eq!(lookup(&e, "?user=alice&pass=pw&char=Al", "char"), None);
         let e = env(&[("dev_query_creds", "1")]);
-        assert_eq!(lookup(&e, "?user=alice&pass=pw", "user").as_deref(), Some("alice"));
-        assert_eq!(lookup(&e, "?user=alice&pass=pw", "pass").as_deref(), Some("pw"));
+        assert_eq!(
+            lookup(&e, "?user=alice&pass=pw", "user").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            lookup(&e, "?user=alice&pass=pw", "pass").as_deref(),
+            Some("pw")
+        );
     }
 
     #[test]
     fn non_credential_keys_always_read_the_query() {
         let e = env(&[]);
-        assert_eq!(lookup(&e, "?host=realm.example&renderscale=0.5", "host").as_deref(), Some("realm.example"));
-        assert_eq!(lookup(&e, "?renderscale=0.5", "renderscale").as_deref(), Some("0.5"));
+        assert_eq!(
+            lookup(&e, "?host=realm.example&renderscale=0.5", "host").as_deref(),
+            Some("realm.example")
+        );
+        assert_eq!(
+            lookup(&e, "?renderscale=0.5", "renderscale").as_deref(),
+            Some("0.5")
+        );
         assert_eq!(lookup(&e, "", "host"), None);
     }
 
     #[test]
     fn query_values_are_percent_decoded_and_malformed_pairs_skipped() {
         let e = env(&[]);
-        assert_eq!(lookup(&e, "?host=a%20b&junk&host2=%zz", "host").as_deref(), Some("a b"));
+        assert_eq!(
+            lookup(&e, "?host=a%20b&junk&host2=%zz", "host").as_deref(),
+            Some("a b")
+        );
         assert_eq!(lookup(&e, "?host=%zz", "host"), None);
     }
 
@@ -273,12 +298,27 @@ mod tests {
     /// no realmd behind it.
     #[test]
     fn the_ws_base_yields_the_gateway_hostname() {
-        assert_eq!(host_of_ws_base("wss://gw.example.org:8443"), Some("gw.example.org"));
-        assert_eq!(host_of_ws_base("ws://gw.example.org"), Some("gw.example.org"));
-        assert_eq!(host_of_ws_base("wss://gw.example.org/"), Some("gw.example.org"));
+        assert_eq!(
+            host_of_ws_base("wss://gw.example.org:8443"),
+            Some("gw.example.org")
+        );
+        assert_eq!(
+            host_of_ws_base("ws://gw.example.org"),
+            Some("gw.example.org")
+        );
+        assert_eq!(
+            host_of_ws_base("wss://gw.example.org/"),
+            Some("gw.example.org")
+        );
         // No scheme, and an IPv6 literal whose colons are part of the address, not a port.
-        assert_eq!(host_of_ws_base("gw.example.org:443"), Some("gw.example.org"));
-        assert_eq!(host_of_ws_base("wss://[2001:db8::1]:8443"), Some("2001:db8::1"));
+        assert_eq!(
+            host_of_ws_base("gw.example.org:443"),
+            Some("gw.example.org")
+        );
+        assert_eq!(
+            host_of_ws_base("wss://[2001:db8::1]:8443"),
+            Some("2001:db8::1")
+        );
         // A value that does not parse must be no worse than an absent one: the caller falls back.
         assert_eq!(host_of_ws_base(""), None);
         assert_eq!(host_of_ws_base("wss://"), None);

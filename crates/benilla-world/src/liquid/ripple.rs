@@ -30,18 +30,20 @@
 //! the map already packs — which is what the reference's `GetDynamicDisplMapInterpolation` is, and
 //! why its `ProcWaterAbove` lerps `.x` against `.y` before taking the gradient.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::ecs::query::QueryItem;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::asset::RenderAssetUsages;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
-use bevy::render::render_resource::binding_types::{sampler, storage_buffer_read_only_sized, texture_2d};
+use bevy::render::render_resource::binding_types::{
+    sampler, storage_buffer_read_only_sized, texture_2d,
+};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
@@ -236,7 +238,12 @@ pub(super) fn pack_sky_rows(
         return;
     };
     let (sky, fog) = crate::sky::dome_stops(&light);
-    for (row, stop) in data.0.sky.iter_mut().zip(sky.iter().chain(std::iter::once(&fog))) {
+    for (row, stop) in data
+        .0
+        .sky
+        .iter_mut()
+        .zip(sky.iter().chain(std::iter::once(&fog)))
+    {
         *row = stop.to_array();
     }
 }
@@ -510,7 +517,9 @@ pub(super) fn collect_stamps(
         // runner's legs — and rises a little with speed.
         let submerge = 1.0 - (depth / (height * 2.0)).clamp(0.0, 1.0);
         let amp = WADE_AMPLITUDE * (speed / 4.0).clamp(0.3, 1.6) * submerge;
-        field.stamps.push(perturbation(pos.x, pos.z, WADE_RADIUS, amp));
+        field
+            .stamps
+            .push(perturbation(pos.x, pos.z, WADE_RADIUS, amp));
         if field.stamps.len() >= MAX_STAMPS {
             return;
         }
@@ -523,7 +532,9 @@ pub(super) fn collect_stamps(
     // of the shader's wind swell (`sunshadow::wind_swell`). Same seed and budget as the rain.
     if crate::modern::frame_is_modern() {
         if let Ok(cam) = camera.single() {
-            let budget = MAX_STAMPS.saturating_sub(field.stamps.len()).min(WIND_GUSTS);
+            let budget = MAX_STAMPS
+                .saturating_sub(field.stamps.len())
+                .min(WIND_GUSTS);
             for _ in 0..budget {
                 let mut next = || {
                     *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -552,7 +563,9 @@ pub(super) fn collect_stamps(
     let Ok(cam) = camera.single() else {
         return;
     };
-    let budget = MAX_STAMPS.saturating_sub(field.stamps.len()).min(RAIN_DROPS);
+    let budget = MAX_STAMPS
+        .saturating_sub(field.stamps.len())
+        .min(RAIN_DROPS);
     for _ in 0..budget {
         // A cheap LCG rather than `rand`: this runs every step and wants no allocation, no thread
         // local and no reproducibility contract beyond "different every drop".
@@ -697,10 +710,9 @@ impl ViewNode for RippleNode {
             return Ok(());
         };
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
-        let (Some(map), Some(scratch)) = (
-            gpu_images.get(&field.map),
-            gpu_images.get(&field.scratch),
-        ) else {
+        let (Some(map), Some(scratch)) =
+            (gpu_images.get(&field.map), gpu_images.get(&field.scratch))
+        else {
             return Ok(());
         };
 
@@ -748,7 +760,11 @@ impl ViewNode for RippleNode {
                         });
                 pass.set_pipeline(propagate);
                 // Reproject on the first step only — see `RipplePipeline::settled`.
-                pass.set_bind_group(0, settled.as_ref().filter(|_| step > 0).unwrap_or(&bind), &[]);
+                pass.set_bind_group(
+                    0,
+                    settled.as_ref().filter(|_| step > 0).unwrap_or(&bind),
+                    &[],
+                );
                 pass.draw(0..3, 0..1);
             }
             // Back into the texture the materials bind. See the module header: a GPU copy is
@@ -787,14 +803,21 @@ pub(super) fn register(app: &mut App) {
     };
     render_app
         .add_systems(RenderStartup, init_pipeline)
-        .add_systems(Render, upload_ripple.in_set(RenderSystems::PrepareResources))
+        .add_systems(
+            Render,
+            upload_ripple.in_set(RenderSystems::PrepareResources),
+        )
         .add_render_graph_node::<ViewNodeRunner<RippleNode>>(Core3d, RippleLabel)
         // Before the transparent pass, where the water reads the field. It has no dependency on
         // anything the opaque pass produced — the sim is world-space and self-contained — so this
         // edge is about being finished in time, not about ordering against a producer.
         .add_render_graph_edges(
             Core3d,
-            (Node3d::MainOpaquePass, RippleLabel, Node3d::MainTransparentPass),
+            (
+                Node3d::MainOpaquePass,
+                RippleLabel,
+                Node3d::MainTransparentPass,
+            ),
         );
 }
 
@@ -818,11 +841,17 @@ mod tests {
         let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
         let step = include_str!("../shaders/liquid_ripple.wgsl");
         let stamps = format!("stamps: array<vec4<f32>, {MAX_STAMPS}>");
-        assert!(cata.contains(&stamps), "liquid_cata.wgsl must declare `{stamps}`");
+        assert!(
+            cata.contains(&stamps),
+            "liquid_cata.wgsl must declare `{stamps}`"
+        );
         let sky = format!("sky: array<vec4<f32>, {SKY_ROWS}>");
         assert!(cata.contains(&sky), "liquid_cata.wgsl must declare `{sky}`");
         let count = format!("const MAX_STAMPS: u32 = {MAX_STAMPS}u;");
-        assert!(step.contains(&count), "liquid_ripple.wgsl must declare `{count}`");
+        assert!(
+            step.contains(&count),
+            "liquid_ripple.wgsl must declare `{count}`"
+        );
     }
 
     /// One flat 20-yd-square wet cell at `z`, WoW `x`/`y` in `[0, 20]`.
@@ -884,7 +913,9 @@ mod tests {
         world.run_system(collect).expect("first frame");
 
         // Half a yard along WoW x in 50 ms — 10 yd/s, well over `WADE_MIN_SPEED`.
-        world.resource_mut::<Time>().advance_by(Duration::from_millis(50));
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(50));
         world.resource_mut::<Viewer>().at = Some(wow_to_bevy([10.5, 10.0, 4.0]));
         world.run_system(collect).expect("second frame");
 

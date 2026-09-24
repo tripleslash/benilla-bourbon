@@ -142,43 +142,44 @@ fn spawn_probe(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    commands.spawn((
-        WadeProbe {
-            anchor,
-            axis,
-            age: 0.0,
-        },
-        // The two components `water_fx::emit_water_foam` reads for a non-viewer body. `wades` is
-        // the whole point; `bound: None` keeps the world from culling a fixture by an extent it
-        // was never given.
-        WorldUnit {
-            wades: true,
-            scale: 1.0,
-            height: PROBE_HEIGHT,
-            bound: None,
-        },
-        Transform::from_translation(anchor),
-        // The parent carries no mesh of its own, so nothing would give it the visibility component
-        // its child's inherits from — Bevy warns B0004 and the child's visibility stops
-        // propagating. Stated here rather than left to a required-component chain that does not
-        // reach a mesh-less entity.
-        Visibility::default(),
-    ))
-    // The body is a CHILD, lifted half its height. The parent's translation is the emitter's
-    // contract — feet, because `water_fx` and `liquid::ripple` both measure depth as
-    // `surface - position` — while a capsule's own origin is its middle, so a mesh on the parent
-    // would stand buried to the neck and be invisible under its own ripples.
-    .with_child((
-        // Unlit and crude on purpose: this is a marker, and dressing it up would invite reading it
-        // as a character.
-        Mesh3d(meshes.add(Capsule3d::new(0.4, PROBE_HEIGHT - 0.8))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.9, 0.2, 0.2),
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, PROBE_HEIGHT * 0.5, 0.0),
-    ));
+    commands
+        .spawn((
+            WadeProbe {
+                anchor,
+                axis,
+                age: 0.0,
+            },
+            // The two components `water_fx::emit_water_foam` reads for a non-viewer body. `wades` is
+            // the whole point; `bound: None` keeps the world from culling a fixture by an extent it
+            // was never given.
+            WorldUnit {
+                wades: true,
+                scale: 1.0,
+                height: PROBE_HEIGHT,
+                bound: None,
+            },
+            Transform::from_translation(anchor),
+            // The parent carries no mesh of its own, so nothing would give it the visibility component
+            // its child's inherits from — Bevy warns B0004 and the child's visibility stops
+            // propagating. Stated here rather than left to a required-component chain that does not
+            // reach a mesh-less entity.
+            Visibility::default(),
+        ))
+        // The body is a CHILD, lifted half its height. The parent's translation is the emitter's
+        // contract — feet, because `water_fx` and `liquid::ripple` both measure depth as
+        // `surface - position` — while a capsule's own origin is its middle, so a mesh on the parent
+        // would stand buried to the neck and be invisible under its own ripples.
+        .with_child((
+            // Unlit and crude on purpose: this is a marker, and dressing it up would invite reading it
+            // as a character.
+            Mesh3d(meshes.add(Capsule3d::new(0.4, PROBE_HEIGHT - 0.8))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.9, 0.2, 0.2),
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, PROBE_HEIGHT * 0.5, 0.0),
+        ));
 }
 
 /// Walk the probe along its axis and keep its feet at the water surface.

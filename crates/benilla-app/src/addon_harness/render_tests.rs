@@ -185,7 +185,6 @@ fn link_corpus_addon(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-
 /// **The oracle: two real addons, opposite director-verified outcomes.**
 ///
 /// `!OmniCC` puts cooldown countdown numbers on the director's screen — it works, and it works by

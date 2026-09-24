@@ -271,9 +271,7 @@ pub fn glow_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glo
             hi[i] = hi[i].max(p[i]);
         }
     }
-    let size = (0..3)
-        .map(|i| (hi[i] - lo[i]) * 0.5)
-        .fold(0.0f32, f32::max);
+    let size = (0..3).map(|i| (hi[i] - lo[i]) * 0.5).fold(0.0f32, f32::max);
     Some(Glow { tint, size })
 }
 
@@ -375,7 +373,11 @@ fn glow_emission(glow: &Glow) -> Option<(f32, f32, f32, f32)> {
 }
 
 /// One source's contribution: `(r, g, b, weight, peak size)`, or `None` if it is not emission at all.
-fn emission_of(blend: ParticleBlend, lit: bool, ramp: &OverLife) -> Option<(f32, f32, f32, f32, f32)> {
+fn emission_of(
+    blend: ParticleBlend,
+    lit: bool,
+    ramp: &OverLife,
+) -> Option<(f32, f32, f32, f32, f32)> {
     // Additive only. `Add` is what an artist picks to mean "this glows"; `Alpha` is smoke,
     // `AlphaKey` and `Opaque` are chips and debris. None of the three emits.
     if blend != ParticleBlend::Add {
@@ -480,7 +482,9 @@ pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> V
         let pos = &geometry.positions;
         for &[ia, ib, ic] in geometry.indices.as_chunks::<3>().0 {
             let [a, b, c] = [ia, ib, ic].map(|i| pos.get(i as usize).copied());
-            let (Some(a), Some(b), Some(c)) = (a, b, c) else { continue };
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+                continue;
+            };
             let [a, b, c] = [a, b, c].map(Vec3::from);
             let cross = (b - a).cross(c - a);
             let area = cross.length() * 0.5;
@@ -604,7 +608,10 @@ mod tests {
         // is exactly what the rack was contributing before the refusal.
         let lamp = glow_batch([1.0; 4]);
         let read = glow_of_geometry(&lamp).expect("an untinted additive card IS a glow card");
-        assert_eq!(read.tint, [1.0; 4], "white at full alpha — the maximum weight");
+        assert_eq!(
+            read.tint, [1.0; 4],
+            "white at full alpha — the maximum weight"
+        );
         assert!(
             combine(false, [], [read]).is_some(),
             "and it synthesizes a real light, so refusing it is what stops the rack glowing"
@@ -724,7 +731,10 @@ mod tests {
     fn only_a_warm_particle_light_is_a_flame() {
         use crate::lighting::FlameKind;
         let fire = ramp([[1.0, 0.6, 0.2, 1.0]; 3], 0.6);
-        assert_eq!(synthesize(false, [add(&fire)]).unwrap().flame, Some(FlameKind::Brazier));
+        assert_eq!(
+            synthesize(false, [add(&fire)]).unwrap().flame,
+            Some(FlameKind::Brazier)
+        );
         let cold = ramp([[0.2, 0.4, 1.0, 1.0]; 3], 0.6);
         assert_eq!(synthesize(false, [add(&cold)]).unwrap().flame, None);
         let corona = combine(false, [], [card([1.0, 0.6, 0.2, 1.0], 0.5)]).unwrap();
@@ -803,8 +813,12 @@ mod tests {
     #[test]
     fn cards_and_emitters_combine_into_one_light() {
         let r = glow();
-        let both = combine(false, [add(&r)], [card([1.0, 0.75, 0.4, 1.0], REFERENCE_CARD)])
-            .expect("both");
+        let both = combine(
+            false,
+            [add(&r)],
+            [card([1.0, 0.75, 0.4, 1.0], REFERENCE_CARD)],
+        )
+        .expect("both");
         let flame_only = combine(false, [add(&r)], []).unwrap();
         assert!(both.intensity_scale > flame_only.intensity_scale);
     }
@@ -820,7 +834,12 @@ mod tests {
     /// A pane `w`×`h` yards in the wall `x = x0`, facing +X, as one quad.
     fn pane(x0: f32, y: f32, z: f32, w: f32, h: f32) -> benilla_formats::RenderSubmesh {
         benilla_formats::RenderSubmesh {
-            positions: vec![[x0, y, z], [x0, y + w, z], [x0, y + w, z + h], [x0, y, z + h]],
+            positions: vec![
+                [x0, y, z],
+                [x0, y + w, z],
+                [x0, y + w, z + h],
+                [x0, y, z + h],
+            ],
             normals: vec![[1.0, 0.0, 0.0]; 4],
             indices: vec![0, 1, 2, 0, 2, 3],
             ..Default::default()
@@ -838,12 +857,24 @@ mod tests {
         let glows = window_glows([(warm, false, &glass)]);
         assert_eq!(glows.len(), 1, "{glows:?}");
         let g = glows[0];
-        assert!((g.pos[0] - (10.0 + WINDOW_STANDOFF)).abs() < 1e-4, "stands out in front: {g:?}");
-        assert!((g.pos[1] - 1.0).abs() < 1e-4 && (g.pos[2] - 1.0).abs() < 1e-4, "{g:?}");
-        assert!(g.color[0] > g.color[1] && g.color[1] > g.color[2], "keeps the SIDN hue: {g:?}");
+        assert!(
+            (g.pos[0] - (10.0 + WINDOW_STANDOFF)).abs() < 1e-4,
+            "stands out in front: {g:?}"
+        );
+        assert!(
+            (g.pos[1] - 1.0).abs() < 1e-4 && (g.pos[2] - 1.0).abs() < 1e-4,
+            "{g:?}"
+        );
+        assert!(
+            g.color[0] > g.color[1] && g.color[1] > g.color[2],
+            "keeps the SIDN hue: {g:?}"
+        );
         assert!(g.intensity_scale > 0.0);
 
-        assert!(window_glows([(None, false, &glass)]).is_empty(), "not a night-glow material");
+        assert!(
+            window_glows([(None, false, &glass)]).is_empty(),
+            "not a night-glow material"
+        );
         assert!(
             window_glows([(warm, true, &glass)]).is_empty(),
             "an interior batch's SIDN is dead"
@@ -859,17 +890,34 @@ mod tests {
     #[test]
     fn a_buildings_windows_pool_and_are_capped() {
         let warm = Some([255u8, 200, 120]);
-        let row: Vec<_> = (0..3).map(|i| pane(10.0, 0.5 + i as f32 * 2.2, 1.0, 1.5, 1.5)).collect();
+        let row: Vec<_> = (0..3)
+            .map(|i| pane(10.0, 0.5 + i as f32 * 2.2, 1.0, 1.5, 1.5))
+            .collect();
         let glows = window_glows(row.iter().map(|b| (warm, false, b)));
-        assert_eq!(glows.len(), 1, "one storey of one wall is one pool: {glows:?}");
+        assert_eq!(
+            glows.len(),
+            1,
+            "one storey of one wall is one pool: {glows:?}"
+        );
 
         let street: Vec<_> = (0..200)
-            .map(|i| pane(0.0, i as f32 * WINDOW_CELL, 0.0, 1.5, 1.5 + (i % 7) as f32 * 0.2))
+            .map(|i| {
+                pane(
+                    0.0,
+                    i as f32 * WINDOW_CELL,
+                    0.0,
+                    1.5,
+                    1.5 + (i % 7) as f32 * 0.2,
+                )
+            })
             .collect();
         let glows = window_glows(street.iter().map(|b| (warm, false, b)));
         assert_eq!(glows.len(), MAX_WINDOW_LIGHTS);
         // Kept biggest-first: every survivor is at least as bright as the dimmest of them.
-        let weakest = glows.iter().map(|g| g.intensity_scale).fold(f32::INFINITY, f32::min);
+        let weakest = glows
+            .iter()
+            .map(|g| g.intensity_scale)
+            .fold(f32::INFINITY, f32::min);
         assert!(glows.iter().all(|g| g.intensity_scale >= weakest));
     }
 

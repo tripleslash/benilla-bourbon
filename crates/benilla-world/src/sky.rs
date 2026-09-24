@@ -226,7 +226,7 @@ fn setup_sky(
             sky3: col([0.68, 0.80, 0.93]),
             sky4: col([0.78, 0.86, 0.95]),
             fog: col([0.55, 0.72, 0.92]),
-            warp: Vec4::ZERO, // update_sky_colors fills S + sun azimuth each frame
+            warp: Vec4::ZERO,   // update_sky_colors fills S + sun azimuth each frame
             modern: Vec4::ZERO, // fork: modern lighting (FORK.md, P4)
             glow: Vec4::ZERO,
         },
@@ -305,7 +305,10 @@ fn apply_sky_visibility(
 pub(crate) fn dome_stops(light: &WowLighting) -> ([Vec4; 5], Vec4) {
     // fork: modern lighting (FORK.md) — the zone look's sky and fog tints (1 in classic).
     let (sky_tint, fog_tint) = if crate::modern::frame_is_modern() {
-        (crate::modern::look::sky_tint(), crate::modern::look::fog_tint())
+        (
+            crate::modern::look::sky_tint(),
+            crate::modern::look::fog_tint(),
+        )
     } else {
         ([1.0; 3], [1.0; 3])
     };

@@ -436,8 +436,8 @@ fn prepare_static_gx(
     };
     // fork: modern lighting — the latched model is read here, in the render world, from the same
     // atomic the model lane keys on, so the two lanes cannot disagree about which frame this is.
-    let modern =
-        benilla_assets::materials::MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed);
+    let modern = benilla_assets::materials::MODERN_MODEL_PIPELINES
+        .load(std::sync::atomic::Ordering::Relaxed);
     let key = (msaa.samples(), format, modern);
     if pipes.specialized_for != Some(key) {
         pipes.view_layout = mesh_pipeline

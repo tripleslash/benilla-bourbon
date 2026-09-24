@@ -22,9 +22,9 @@
 //! (decision 0438 §2); this module only *moves* it. Riding hangs off the same component set for
 //! both drives — the mover's platform frame keys on [`Transport`], not on the drive.
 
+use bevy::platform::time::Instant;
 use std::collections::HashMap;
 use std::sync::Arc;
-use bevy::platform::time::Instant;
 
 // avian's own public AABB/tree republish system, registered by name below. Aliased because the
 // chain's concern is *when* it runs, not whose it is — and because the upstream name says what it

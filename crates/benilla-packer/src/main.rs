@@ -165,8 +165,9 @@ fn main() -> Result<()> {
         Cmd::Inspect(a) => inspect::inspect(a),
         Cmd::Extract(a) => extract(a),
         Cmd::Sidecars(a) => {
-            let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let index =
+                Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)
         }
     }
@@ -232,7 +233,10 @@ fn extract(a: ExtractArgs) -> Result<()> {
         .into_iter()
         .map(|e| e.name)
         .filter(|n| {
-            prefix.is_empty() || n.to_ascii_lowercase().replace('/', "\\").starts_with(&prefix)
+            prefix.is_empty()
+                || n.to_ascii_lowercase()
+                    .replace('/', "\\")
+                    .starts_with(&prefix)
         })
         .collect();
     eprintln!(
@@ -374,8 +378,7 @@ fn build(a: BuildArgs) -> Result<()> {
     // forty minutes in. Empty when the flag is absent, which costs one hash lookup per blob.
     let replacements = match &a.replace_from {
         Some(dir) => {
-            let map = replace_lookup(dir)
-                .with_context(|| format!("walking {}", dir.display()))?;
+            let map = replace_lookup(dir).with_context(|| format!("walking {}", dir.display()))?;
             let covered = blobs.iter().filter(|b| map.contains_key(&b.key)).count();
             eprintln!(
                 "--replace-from: {} loose files, {covered} of {} blobs come from {}",

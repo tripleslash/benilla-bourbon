@@ -312,41 +312,39 @@ pub(crate) fn spawn_liquids<'a>(
         // transform is a no-op round-trip).
         let info = wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk);
         let foam = !lq.kind.is_fullbright(); // white surf is a water thing
-        entities.push(
-            {
-                let mut ec = commands.spawn((
-                    Mesh3d(meshes.add(liquid_bevy_mesh(lq, None))),
-                    Transform::IDENTITY,
-                    LiquidSurface,
-                    // **Open-world liquid is exterior scene** — the reference's ADT liquid
-                    // producer `0x683ab0` is called only from the per-window populate
-                    // `0x682fa0`, exactly like ADT terrain (`0x683bf0`) and doodads
-                    // (`0x683700`), so from inside a cavern the lake overhead draws only where a
-                    // doorway window admits it, and not at all from a sealed room (decision
-                    // 1652). This was 0774's last knowingly-ungated bucket, deferred again by
-                    // 0784 on the belief that liquid "has its own lane" — it does not: nothing
-                    // wrote an ADT surface's `Visibility` at all, so `apply_exterior_cull` is its
-                    // sole authority and the tag is the whole change.
-                    //
-                    // Granularity is already the reference's: one entity per MCNK liquid layer
-                    // (33.333 yd), never the 533 yd tile — the half of the cull that decision
-                    // 0780 is about. The `IDENTITY` transform is not incidental either: MCLQ
-                    // positions are absolute, so the mesh `Aabb` Bevy derives is already the
-                    // world-space box the window test wants.
-                    crate::exterior_cull::ExteriorScene,
-                    info,
-                    LiquidSoundSource {
-                        nibble: lq.sound_nibble,
-                    },
-                    // Water is world geometry to every camera EXCEPT the mirror that reflects it
-                    // — see `reflect`'s header, and the reference's own reflection view, which
-                    // never sets the `0x200` water-pass bit.
-                    bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
-                ));
-                record_lane(&mut ec, lane);
-                ec.id()
-            },
-        );
+        entities.push({
+            let mut ec = commands.spawn((
+                Mesh3d(meshes.add(liquid_bevy_mesh(lq, None))),
+                Transform::IDENTITY,
+                LiquidSurface,
+                // **Open-world liquid is exterior scene** — the reference's ADT liquid
+                // producer `0x683ab0` is called only from the per-window populate
+                // `0x682fa0`, exactly like ADT terrain (`0x683bf0`) and doodads
+                // (`0x683700`), so from inside a cavern the lake overhead draws only where a
+                // doorway window admits it, and not at all from a sealed room (decision
+                // 1652). This was 0774's last knowingly-ungated bucket, deferred again by
+                // 0784 on the belief that liquid "has its own lane" — it does not: nothing
+                // wrote an ADT surface's `Visibility` at all, so `apply_exterior_cull` is its
+                // sole authority and the tag is the whole change.
+                //
+                // Granularity is already the reference's: one entity per MCNK liquid layer
+                // (33.333 yd), never the 533 yd tile — the half of the cull that decision
+                // 0780 is about. The `IDENTITY` transform is not incidental either: MCLQ
+                // positions are absolute, so the mesh `Aabb` Bevy derives is already the
+                // world-space box the window test wants.
+                crate::exterior_cull::ExteriorScene,
+                info,
+                LiquidSoundSource {
+                    nibble: lq.sound_nibble,
+                },
+                // Water is world geometry to every camera EXCEPT the mirror that reflects it
+                // — see `reflect`'s header, and the reference's own reflection view, which
+                // never sets the `0x200` water-pass bit.
+                bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
+            ));
+            record_lane(&mut ec, lane);
+            ec.id()
+        });
         // Foam is water-only; the cells it clips against ride `info`, not the marker.
         if foam {
             commands
@@ -772,9 +770,10 @@ pub(super) fn setup_liquid(
                     ripple_buf: ripple_buf.0.clone(),
                 },
             });
-            assets
-                .materials
-                .insert(LiquidKey { kind, path, scroll }, LiquidEntry { material, cata });
+            assets.materials.insert(
+                LiquidKey { kind, path, scroll },
+                LiquidEntry { material, cata },
+            );
         }
     }
     // Frame SETS, not materials — a set backs every renderer/scroll variant of its kind.

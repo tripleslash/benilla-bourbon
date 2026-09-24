@@ -881,7 +881,8 @@ fn spell_start(
                 // `Instant` this file otherwise imports — spelled out fully so it stays that type
                 // regardless.
                 until: Some(
-                    bevy::platform::time::Instant::now() + Duration::from_millis(u64::from(cast_time_ms)),
+                    bevy::platform::time::Instant::now()
+                        + Duration::from_millis(u64::from(cast_time_ms)),
                 ),
             });
         }

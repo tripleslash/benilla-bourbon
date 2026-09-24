@@ -81,7 +81,10 @@ async fn dial(host: &str, port: u16) -> Result<Conn> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::net::ToSocketAddrs;
-        match (host, port).to_socket_addrs().map(|mut a| a.next().is_some()) {
+        match (host, port)
+            .to_socket_addrs()
+            .map(|mut a| a.next().is_some())
+        {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::Error::new(DialFailure {

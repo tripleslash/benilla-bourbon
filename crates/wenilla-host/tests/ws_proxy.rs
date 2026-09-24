@@ -188,7 +188,9 @@ async fn the_port_allowlist_holds_whatever_the_remote_realm_policy_is() {
         // What is actually within reach of a `network_mode: host` gateway on the gateway box: sshd,
         // the mysql the vmangos compose runs, the gateway's own listener, and the near-misses a
         // mistyped realmlist produces.
-        for port in [22u16, 80, 443, 3306, 8080, 8090, 3723, 3725, 8084, 8086, 65535] {
+        for port in [
+            22u16, 80, 443, 3306, 8080, 8090, 3723, 3725, 8084, 8086, 65535,
+        ] {
             let url = format!("ws://{addr}/ws/{port}?host=127.0.0.1");
             let err = tokio_tungstenite::connect_async(&url)
                 .await
