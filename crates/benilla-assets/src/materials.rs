@@ -798,7 +798,8 @@ pub struct LiquidCataExt {
     #[uniform(102)]
     pub look_b: Vec4,
     /// fork: modern lighting — the same tier's Fresnel: `x` = the reflectance at grazing (the curve's
-    /// cap; `look_a.z` is its head-on floor), `y` = the power of its climb along `1 − cos`. `zw` spare.
+    /// cap; `look_a.z` is its head-on floor), `y` = the power of its climb along `1 − cos`, `z` = the
+    /// share of the reference combine blended over the clear surface. `w` spare.
     #[uniform(102)]
     pub look_c: Vec4,
 

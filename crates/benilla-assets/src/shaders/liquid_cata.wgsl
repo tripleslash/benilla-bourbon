@@ -153,7 +153,8 @@ struct LiquidParams {
     // water with no depth under it, z = the refraction's bend per yard of water, w = the glitter
     // spike's gain.
     look_b: vec4<f32>,
-    // x = the reflectance at grazing (the Fresnel's cap), y = the power of its climb; zw spare.
+    // x = the reflectance at grazing (the Fresnel's cap), y = the power of its climb, z = the share
+    // of the reference's combine blended over the clear surface; w spare.
     look_c: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
@@ -605,9 +606,6 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
-// fork: modern lighting — how far (in UV) a bent mirror read may leave the frame before it has faded
-// out; the clamped border texel stands in for it on the way.
-const MODERN_MIRROR_BORDER: f32 = 0.04;
 
 /// fork: modern lighting — **stylised clear water**, above the water, in linear radiance. Replaces
 /// the classic COMBINE on a modern frame at the Modern (Experimental) water tier (`waterDetail 3`,
@@ -642,7 +640,8 @@ fn modern_water(
     in: VsOut,
     n: vec3<f32>,
     v: vec3<f32>,
-    refract_uv: vec2<f32>,
+    bed_raw: vec3<f32>,
+    bed_z: f32,
     frag_view_z: f32,
     deep: vec3<f32>,
     lit: vec3<f32>,
@@ -651,13 +650,12 @@ fn modern_water(
     // `scene_depth` is planar view depth, so the bed's distance along this pixel's ray scales off
     // the surface's by the same ratio. The light that lit the bed crossed the column on its way
     // down as well, so the vertical depth is added once more.
-    let bed_z = scene_depth_at(refract_uv);
     let path = max(bed_z - frag_view_z, 0.0) * length(in.view_vec) / max(frag_view_z, 0.001);
     let column = path * clamp(-v.y, 0.0, 1.0);
     let trans = exp(-w.optics.xyz * min(path + column, 1000.0));
     // The scene copy is linear on a modern frame and the frame's own gamma bytes on a classic one;
-    // this combine runs in linear either way.
-    let bed_raw = textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb;
+    // this combine runs in linear either way. The bed and its depth are the refraction's own read
+    // (`fragment_classic`), shared with the reference half of the blend rather than taken twice.
     let bed = select(colorspace::srgb_to_linear(bed_raw), bed_raw, wow_light.point_count.y > 0.5);
     let scatter = colorspace::srgb_to_linear(deep * lit);
     let deep_lin = colorspace::srgb_to_linear(deep);
@@ -831,10 +829,13 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         let bend = min(w.look_b.z * min(ray_len, MODERN_REFRACT_MAX_PATH) * per_yd, 0.1 * offset_amount);
         refract_uv = uv + n.xz * bend;
     }
-    if (scene_depth_at(refract_uv) < frag_view_z) {
+    var bed_z = scene_depth_at(refract_uv);
+    if (bed_z < frag_view_z) {
         refract_uv = uv;
+        bed_z = scene_z;
     }
-    var refracted = colorspace::modern_in(textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb, wow_light.point_count.y);
+    let bed_raw = textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb;
+    var refracted = colorspace::modern_in(bed_raw, wow_light.point_count.y);
     // Tint what shows through by the swatch's own opacity — this is where the water gets its
     // "you can see the bottom near the shore" behaviour, and it is why the surface can output
     // alpha 1.0 and still read as transparent.
@@ -1006,19 +1007,9 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // screen-space trace, for the same reason, on this read's own NDC.
         let mq = mirror_ndc * mirror_ndc;
         let mq2 = mq * mq;
-        var mirror_edge =
+        let mirror_edge =
             clamp(1.0 - mq2.x, 0.0, 1.0) * clamp(1.0 - mq2.y, 0.0, 1.0)
             * step(0.0, mirror_clip.w);
-        if (experimental) {
-            // fork: modern lighting — the quartic is a fade over the WHOLE frame, not at its edge: a
-            // flat surface reads the mirror at its own pixel, so a fifth of the way in from any border
-            // the mirror was already a third gone, and the bottom of the frame — the water nearest the
-            // eye, which mirrors the sky overhead — wore the fog colour instead of the sky. Only a
-            // read that has actually left the mirror's frame is untrustworthy, so only that fades.
-            let outside = max(max(-mirror_uv, mirror_uv - vec2<f32>(1.0)), vec2<f32>(0.0));
-            mirror_edge = (1.0 - smoothstep(0.0, MODERN_MIRROR_BORDER, max(outside.x, outside.y)))
-                * step(0.0, mirror_clip.w);
-        }
 
         // **Guard 2: this surface is not at the mirror's plane.** One mirrored render can only be
         // about one height, and `liquid::reflect` puts it at the water the eye is over. A surface
@@ -1037,39 +1028,33 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // This is also exactly what perm 4 has in place of the mirror, so the fallback is not a
         // guess — it is the other shipped program.
         var base = wow_light.fog_color.rgb;
-        var mirror = base;
+        if (experimental) {
+            // fork: modern lighting — the experimental tier keeps this whole lookup and puts the sky
+            // dome along the reflected ray in the horizon constant's place: one colour for every
+            // direction (in a jungle zone an olive haze) read as goo over a lake whose mirror had not
+            // rendered yet; the dome is the backdrop the player can see.
+            base = sky_dome(r);
+        }
         if (w.path.z > 0.5) {
-            let mirror_rgb = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
-            mirror = colorspace::modern_in(mirror_rgb, wow_light.point_count.y);
+            let mirror = colorspace::modern_in(textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb, wow_light.point_count.y);
             base = mix(base, mirror, mirror_valid);
         }
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
         // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
         var reflected = mix(base, hit, validity);
         if (experimental) {
-            // fork: modern lighting — the other way round on the experimental tier, and never the
-            // flat horizon constant. The mirror is an exact render of what the surface reflects, the
-            // trace one blurred tap 128 yd out — right for a distant sky, wrong for the bank — and at
-            // the grazing pitch where a reflection is most visible `skyward` hands the trace nearly
-            // all of it. So the mirror goes over the trace, the trace over the SKY DOME along the
-            // reflected ray, and the dome answers wherever neither can: before the mirror has
-            // rendered, about another plane, or off the frame. The horizon constant is one colour for
-            // every direction — in a jungle zone an olive haze — and laid over a whole lake it read
-            // as goo; the dome is the backdrop the player can see, so the water always reflects an
-            // environment, and the mirror's arrival only sharpens it.
-            reflected = mix(sky_dome(r), hit, validity);
-            if (w.path.z > 0.5) {
-                reflected = mix(reflected, mirror, mirror_valid);
-            }
-        }
-        if (experimental) {
             // fork: modern lighting — the same reflection, softened toward the body and laid over
             // `modern_water`'s tinted bed at its stylised Fresnel instead of the two steps below.
             // Linear out, re-encoded so the wrapper's decode hands it back unchanged.
-            rgb = colorspace::linear_to_srgb(modern_water(
-                in, n, v, refract_uv, frag_view_z, swatch(1.0).rgb, water_lit,
+            let clear = colorspace::linear_to_srgb(modern_water(
+                in, n, v, bed_raw, bed_z, frag_view_z, swatch(1.0).rgb, water_lit,
                 colorspace::srgb_to_linear(reflected),
             ));
+            // The tier sits between the clear surface and the reference's combine: `look_c.z` of
+            // the reference's own (the swatch over the refraction, the reflection pulled to the
+            // body), over the same calm normal, the same reflection, and the same bed read.
+            let cata = mix(refracted, mix(reflected, body, 0.6), fres2 * 0.5 + 0.1);
+            rgb = mix(clear, cata, w.look_c.z);
         } else {
             // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
             // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
@@ -1102,11 +1087,19 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // with how much water is in the way and survives only at the shallowest grazing angle.
         let spec_weight = select(fres2, fres2 * fres2 * ramp.a, below);
         rgb += w.shade_params.z * spec_color * spec_weight * water_sun;
-    } else if (!modern) {
-        // fork: modern lighting — a classic frame has no glitter path to carry the sun (that is
-        // HDR, added by the linear wrapper), so the experimental tier keeps the reference's Blinn
-        // track there — without the sheen floor, whose flat grazing lift the reflection carries.
-        rgb += w.shade_params.z * wow_light.light_spec.rgb * spec * fres2;
+    } else {
+        // fork: modern lighting — the experimental tier takes the reference's glare and specular
+        // in the same share it takes the reference's combine (`look_c.z`).
+        let k = w.look_c.z;
+        let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
+        rgb += k * glare * wow_light.light_diffuse.rgb * body * water_sun;
+        rgb += k * w.shade_params.z * spec_color * fres2 * water_sun;
+        if (!modern) {
+            // A classic frame has no glitter path to carry the sun (that is HDR, added by the
+            // linear wrapper), so the clear share keeps the reference's Blinn track there —
+            // without the sheen floor, whose flat grazing lift the reflection carries.
+            rgb += (1.0 - k) * w.shade_params.z * wow_light.light_spec.rgb * spec * fres2;
+        }
     }
     // fork: modern lighting — the sun's glitter path: a tight HDR lobe on the reflected ray over a
     // broad sheen, only where the sun reaches the surface. Added in linear by the wrapper.
