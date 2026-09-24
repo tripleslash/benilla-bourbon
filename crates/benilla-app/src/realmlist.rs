@@ -5,19 +5,17 @@
 //! text *"Address of realm list server"*, default `us.logon.worldofwarcraft.com:3724` — and loads
 //! it from a plain-text `realmlist.wtf` beside the executable, which every private server's setup
 //! page tells you to open in Notepad. (All four strings are byte-verified in `WoW.exe`, adjacent
-//! in the string table at the CVar's registration site; wow-re `mpq/scratch/startup-order-A.md`
-//! row 62 records the same registration.) benilla keeps the **name, the `host[:port]` shape and
-//! the help string**, and replaces the text file with the config it already has.
+//! in the string table at the CVar's registration site, `0x5ab6a6`.) benilla keeps the
+//! **name, the `host[:port]` shape and the help string**, and replaces the text file with the
+//! config it already has.
 //!
 //! **Where the address comes from, per target.** Natively it is a CVar like every other:
 //! `config.toml`, `SetCVar("realmList")`, `$WOW_HOST` for a session. On the page it is
-//! `/config.json`'s `realmlist` and nothing else — the hosted tree's own configuration, fetched
+//! `/config.json`'s `realmlist` and nothing else: the hosted tree's own configuration, fetched
 //! by `web/boot.js` and applied in [`crate::cvars::load_config`] as a session override, so a
-//! re-upload of one ~100-byte asset repoints every client including the ones that have been here
-//! before. Decision 1667 put an editor on the login screen (a "Realmlist" button opening a
-//! `hasEditBox` dialog) and the site took it back: an address a visitor typed was saved into
-//! `config.toml` and outranked the hosted one forever after, so the operator's re-upload would
-//! have moved exactly the visitors who had never used the control. One source beats two.
+//! re-upload of one small asset repoints every client, including returning ones. The page has no
+//! login-screen editor: an address a visitor typed would be saved into `config.toml` and outrank
+//! the hosted one, so one source beats two.
 //!
 //! **It is a CVar, in `config.toml` with every other setting — not a `realmlist.wtf` of our own.**
 //! The reference splits the file for reasons that are entirely its own (the installer and the

@@ -723,7 +723,7 @@ pub(super) fn seed_ui_fixture(
             // Raised through the real registry entry, not a hand-built frame: the text comes from
             // the chain's own `INVITATION` GlobalString and the two buttons from ACCEPT/DECLINE,
             // so the capture exercises the same Show path a real invite takes.
-            if let Err(e) = script.run(r#"StaticPopup_Show("PARTY_INVITE", "Thalyn")"#) {
+            if let Err(e) = script.run(r#"StaticPopup_Show("PARTY_INVITE", "Brisca")"#) {
                 warn!("capture: ui-partyinvite seed failed to raise the dialog: {e}");
             }
         }
@@ -771,8 +771,8 @@ pub(super) fn seed_ui_fixture(
                     ..Default::default()
                 },
             );
-            // The §22 SET block (real Defias Leather shape, 5 members, one equipped): gold
-            // "(1/5)" header + spacer, cream/gray member ladder, green (2)-bonus vs gray
+            // The item-SET block (`0x52b650`; real Defias Leather shape, 5 members, one equipped):
+            // gold "(1/5)" header + spacer, cream/gray member ladder, green (2)-bonus vs gray
             // (4)-bonus — the whole block's visual regression instrument.
             let mut inv: benilla_ui::script::InventorySlots = Default::default();
             inv[4] = Some(benilla_ui::script::InvSlotView {

@@ -286,8 +286,7 @@ fn list(
     quest.bump_reask();
 }
 
-/// **The GROUP_LIST slot writer's record leg** — `0x4e82d0` (VERIFIED wow-re
-/// `ui/scratch/party-oor-stats-and-portrait-law.md` §2.2), the second of the two places the
+/// **The GROUP_LIST slot writer's record leg** — `0x4e82d0`, the second of the two places the
 /// reference asks for a member's stats.
 ///
 /// Per member the writer has two legs, chosen on whether the member already had a record
@@ -324,9 +323,8 @@ fn seat_new_records(
 }
 
 /// **The despawn edge** — CGPlayer_C vtable slot 1 `0x5e9aa0`, which `0x464920` invokes on both
-/// `SMSG_DESTROY_OBJECT` and the `SMSG_UPDATE_OBJECT` OUT_OF_RANGE block (VERIFIED wow-re
-/// `object-layer/scratch/party-record-live-snapshot.md` §3, `ui/scratch/party-oor-stats-and-
-/// portrait-law.md` §2.1). A party or raid member's object is leaving the object manager, so:
+/// `SMSG_DESTROY_OBJECT` and the `SMSG_UPDATE_OBJECT` OUT_OF_RANGE block. A party or raid
+/// member's object is leaving the object manager, so:
 /// **snapshot its live descriptor into the roster record** (`0x5f0880`), then **ask the server for
 /// the member's stats** (`CMSG_REQUEST_PARTY_MEMBER_STATS`, `0x4e8646`), in that order and on that
 /// same instruction sequence.
@@ -393,8 +391,8 @@ fn command_result(
 ) {
     // By KEY, not by sentence, and into the shared queue rather than straight into chat: the
     // catalog row decides the surface, so `result == 7` reaches the red `UIErrorsFrame` line while
-    // the other nine stay chat lines (wow-re `party-command-result-law.md`; decision 2035's
-    // shape). `None` is the reference's own silence — three inputs display nothing at all.
+    // the other nine stay chat lines (`0x496720`; decision 2035's shape). `None` is the
+    // reference's own silence — three inputs display nothing at all.
     errors
         .0
         .extend(group.apply_command_result(operation, member, result));
@@ -442,7 +440,7 @@ mod tests {
             &mut quest,
             0,
             0,
-            vec![member(leader, "Frostshake"), member(far, "Thalyn")],
+            vec![member(leader, "Aldwyn"), member(far, "Brisca")],
             leader,
             None,
             &names,
@@ -464,14 +462,14 @@ mod tests {
         );
 
         // The answer lands for one of them; the re-sent roster asks for neither.
-        names.insert_player(leader, "Frostshake".into(), Some((1, 4, 1)));
+        names.insert_player(leader, "Aldwyn".into(), Some((1, 4, 1)));
         list(
             &mut group,
             &mut errors,
             &mut quest,
             0,
             0,
-            vec![member(leader, "Frostshake"), member(far, "Thalyn")],
+            vec![member(leader, "Aldwyn"), member(far, "Brisca")],
             leader,
             None,
             &names,
@@ -513,8 +511,8 @@ mod tests {
         group
     }
 
-    /// **The despawn edge is where the numbers are kept** (wow-re `0b2a594a` §2.1/§2.3 — the
-    /// deactivate virtual `0x5e9aa0` snapshots `0x5f0880` and sends `0x27f`, in that order).
+    /// **The despawn edge is where the numbers are kept** (the deactivate virtual `0x5e9aa0`
+    /// snapshots `0x5f0880` and sends `0x27f`, in that order).
     ///
     /// Falsifier for the whole report: delete the snapshot and this member's record stays whatever
     /// the wire last said — which, for a member who has never had a stats packet, is nothing, and
@@ -525,7 +523,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
         let guid = 0x1234;
-        let mut group = grouped(&[member(guid, "Thalyn"), member(0x99, "Frostshake")]);
+        let mut group = grouped(&[member(guid, "Brisca"), member(0x99, "Aldwyn")]);
         let _ = asked(&rx); // the roster's own seat-time asks (they are unstreamed here)
 
         // A warrior: rage rides the wire ×10, and the record stores it raw exactly as the
@@ -567,7 +565,7 @@ mod tests {
     fn a_despawn_that_is_not_a_party_member_asks_nothing() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let mut group = grouped(&[member(0x1234, "Thalyn")]);
+        let mut group = grouped(&[member(0x1234, "Brisca")]);
         let _ = asked(&rx);
         // A live object, so only the roster gate can stop it.
         let store = ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[(
@@ -583,7 +581,7 @@ mod tests {
         assert!(asked(&rx).is_empty());
     }
 
-    /// **The roster seat** (`0x4e82d0`, §2.2): a member new to the roster gets the `1/1`
+    /// **The roster seat** (`0x4e82d0`): a member new to the roster gets the `1/1`
     /// placeholder, and is asked for only when we hold no object for them. A resync asks nothing —
     /// the gate the reference puts on `srcRec`, and the reason a busy group does not fire four
     /// queries per GROUP_LIST.
@@ -604,7 +602,7 @@ mod tests {
         let mut world = bevy::ecs::world::World::new();
         index.0.insert(near, world.spawn_empty().id());
 
-        let roster = vec![member(near, "Frostshake"), member(far, "Thalyn")];
+        let roster = vec![member(near, "Aldwyn"), member(far, "Brisca")];
         let mut send = |group: &mut GroupState, members: Vec<GroupMemberEntry>| {
             list(
                 group,

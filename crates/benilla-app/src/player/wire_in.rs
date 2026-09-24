@@ -304,7 +304,7 @@ pub(super) fn apply_server_moves(
     for t in teleports.read() {
         snap_near_teleport(player, &mut cam.yaw, t, time.elapsed_secs());
         // The echo goes now, and it is the WHOLE near-teleport handshake (decision 1340). The
-        // real client echoes on the very next movement tick (wow-re: the 0xC7 drain applies the
+        // real client echoes on the very next movement tick (the 0xC7 drain applies the
         // snap, then `0x60e0a0` sends guid+counter+time) and sends nothing else — no
         // `MSG_MOVE_STOP` exists anywhere in its chain. vmangos holds us at the OLD position
         // until the echo lands; processing it runs the full relocation + visibility refresh
@@ -548,7 +548,7 @@ pub(super) fn merge_server_flags(local: u32, wire: u32) -> u32 {
 }
 
 /// Apply one bare self-addressed `MSG_MOVE_*` — a pose the *server* wrote for our own mover, with
-/// no handshake (decision 0725; wow-re `self-addressed-move.md`). `.go forward`/`up`/`relative`,
+/// no handshake (decision 0725). `.go forward`/`up`/`relative`,
 /// `.cheat fly`/`fixedz` and the movement anticheat's snap-back all land here.
 ///
 /// **A hard snap, and nothing goes back.** The reference writes the wire pose into both its live
@@ -594,8 +594,8 @@ fn apply_self_move(
     // bit parked there alone would be gone before the mover ever read it; the modes live as fields,
     // the way `rooted` does. The reference needs no such step — it has one `[cmov+0x40]` that is both
     // the state and the wire word — and it has the matching apply anyway: the same inbound merge also
-    // runs `0x61a1af → 0x61a230 → SetSwim` (wow-re `swim-transition.md`, "the local unit's server
-    // echo"). This pair is GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
+    // runs `0x61a1af → 0x61a230 → SetSwim`, the local unit's server echo included. This pair is
+    // GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
     player.swimming = player.move_flags & move_flags::SWIMMING != 0;
     // …and the walk gait rides out on the same lift (decision 1752). `0x100` is inside the
     // `SERVER_AUTHORED` mask like the modes above, so a move the server authors for our mover
@@ -697,7 +697,7 @@ fn apply_self_move(
 /// controller driving nothing, which is the shape of the free camera this arc is about.
 ///
 /// **Everything on this resource belonged to the mover that just ended, so all of it dies here**
-/// (decision 1542, B306 — reported and diagnosed by Liho). It used to clear a hand-picked six
+/// (decision 1542). It used to clear a hand-picked six
 /// fields, and the field it did not name was `modes`: `/logout` has vmangos root us for the
 /// countdown (`MiscHandler.cpp` `SetRooted(true)`), we ack the grant, and the next session never
 /// hears an unroot — the fresh server-side `Player` was never rooted, so there is nothing for it
@@ -708,8 +708,8 @@ fn apply_self_move(
 /// a field added tomorrow is mover state by default, which is the safe direction.
 ///
 /// It is also what the reference does, by construction rather than by list: the server's logout
-/// confirm runs `ShutdownGame 0x491180` (wow-re `ui/scratch/lua-state-lifecycle.md` §3.3 —
-/// `0x5aaeb0` → `0x401ee0` → `0x402039`, ~35 subsystem shutdowns, the Lua VM replaced twice), so
+/// confirm runs `ShutdownGame 0x491180` (`0x5aaeb0` → `0x401ee0` → `0x402039`, ~35 subsystem
+/// shutdowns, the Lua VM replaced twice), so
 /// the real client has no per-mover state left to carry across a character-select round trip. Ours
 /// is a long-lived resource; this is where it pays that back.
 pub(super) fn release_on_session_end(
@@ -773,7 +773,7 @@ mod session_end_tests {
         p.wedged = true;
     }
 
-    /// **B306, at its own edge** (decision 1542; reported and diagnosed by Liho). `/logout` has
+    /// **B306, at its own edge** (decision 1542). `/logout` has
     /// vmangos root the player for the countdown (`MiscHandler.cpp:329 SetRooted(true)`), which
     /// reaches us as the ack'd `SMSG_FORCE_MOVE_ROOT` above; the next login gets no unroot, because
     /// server-side the fresh `Player` was never rooted (`SendInitialPacketsBeforeAddToMap` re-sends

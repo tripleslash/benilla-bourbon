@@ -1,20 +1,6 @@
-//! **The shared asset store** — the one open patch chain, the dedup caches every model/texture load
-//! goes through, and the helpers that turn raw BLP pixels into Bevy textures and per-submesh
-//! materials.
-//!
-//! It lives here rather than in the client because it is a layer *under* both sides, and 1164
-//! measured how far under: `WorldAssets` alone is named by 63 files, `LockRecover` by 43 and
-//! `AssetSet` by 37, and they serve UI sprites, portraits and the minimap mask exactly as much as
-//! they serve terrain. Nothing in here reads game state — it knows what pixel shape something
-//! wants, not what a unit frame *is*.
-//!
-//! What stayed up in the client is the 115-line plugin shell that drives it: opening the chain at
-//! startup needs the shared light buffer, evicting on a map change needs the world-map message, and
-//! the residency sweep needs the art-scope instrument. Those three are the only upward reaches the
-//! module ever had (decision 1164) — the data core below has none.
-//!
-//! Deduping by path/material means each unique BLP is decoded + uploaded once, and submeshes sharing
-//! a texture+blend share a material handle — which is what lets Bevy batch draws.
+//! The shared asset store: the one open patch chain, the dedup caches every model and texture load
+//! goes through, and the helpers that turn BLP pixels into textures and per-submesh materials. It
+//! reads no game state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,24 +18,15 @@ use crate::SpatialCache;
 use benilla_formats::read_texture_native_chain;
 use benilla_formats::{blp_to_rgba, tga_to_rgba, Chain, ModelBlend, TryRead};
 
-/// BLP/RGBA -> Bevy `Image` texture helpers (+ solid/cursor/liquid-frame textures). Split out for
-/// size; re-exported so callers keep using `benilla_assets::{solid_layer_chain, …}`.
+/// BLP and RGBA to `Image` helpers, re-exported.
 mod images;
 pub use images::*;
 
-/// How many times a sprite resolution has answered [`SpriteLoad::Pending`] — **the signal that a
-/// cached UI conversion is stale**, and the reason `Pending` is safe to hand out at all.
-///
-/// A caller that draws once and remembers the result (the FrameXML extract gate is exactly that:
-/// equal inputs make it keep last frame's quads untouched) would otherwise hold the placeholder for
-/// as long as its inputs stay equal — which for an open window is forever, and looks like a panel
-/// that stays blank until you close and reopen it. There is no per-asset callback to hang the fix
-/// on, so this is the crude thing that works: a monotonic count, snapshotted around a conversion,
-/// telling that conversion whether anything it resolved has yet to arrive.
-///
-/// Counts every sprite lane alike — the five caches, [`sprite_dimensions`], [`WorldAssets::decode_rgba`]
-/// — because it is bumped inside [`decode_sprite`], which all of them go through. A consumer that
-/// over-triggers on another lane's deferral pays one extra conversion, which is the right way round.
+/// How many times a sprite resolution has answered [`SpriteLoad::Pending`]: the signal that a
+/// cached UI conversion is stale. A caller that draws once and keeps the result while its inputs
+/// stay equal (the FrameXML extract gate) would otherwise hold the placeholder for as long as a
+/// window is open. Snapshotted around a conversion, it tells that conversion whether anything it
+/// resolved has yet to arrive. Bumped inside [`decode_sprite`], so it counts every sprite lane.
 static SPRITE_DEFERRALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Read [`SPRITE_DEFERRALS`]. Snapshot it before a conversion and compare after: unequal means
@@ -62,114 +39,62 @@ pub fn sprite_deferrals() -> u64 {
 /// BLP is ever asked for under it.
 const PENDING_SPRITE_KEY: &str = "@pending";
 
-/// Shared asset store: the **one** open patch chain plus dedup caches, used by every model/texture
-/// load (terrain layers, doodads, WMOs, creatures, GameObjects). Replaces the three independent
-/// chains we used to open. Deduping by path/material means each unique BLP is decoded + uploaded
-/// once, and submeshes sharing a texture+blend share a `StandardMaterial` handle — which is what
-/// lets Bevy batch their draw calls.
+/// The shared asset store: the one open patch chain and the dedup caches, so each BLP decodes once
+/// and submeshes sharing a texture and blend share a material that Bevy batches.
 #[derive(Resource)]
 pub struct WorldAssets {
-    /// The [`AssetServer`], for the one cache below that hands its loads to it rather than decoding
-    /// them itself: [`Self::texture`] on the **web target** (see that method for why the two targets
-    /// differ). Cheap to hold — an `AssetServer` is an `Arc` handle — and kept on every target so
-    /// `open`'s signature does not fork, which is why native has to say out loud that it is holding
-    /// a field it never reads.
+    /// The [`AssetServer`], which [`Self::texture`] hands its loads to on the web target. Held on
+    /// every target so `open`'s signature does not fork.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     server: AssetServer,
-    /// The **one** open patch chain, behind `Arc<Mutex<…>>` because the streaming loaders thread a
-    /// `&mut Chain` (the `read_file` shim); the `Mutex` is `Send + Sync` glue, not a read serializer —
-    /// `Chain` reads are `&self` and open a fresh OS handle, so they share no seek state.
-    /// Main-thread reads lock via [`LockRecover`] (poison-tolerant); contention is ~nil since after
-    /// startup the only main-thread reads are the occasional map-change WDL load + lazy clutter M2s.
+    /// The one open patch chain. The `Mutex` is `Send + Sync` glue for the streaming loaders'
+    /// `&mut Chain`, not a read serializer: `Chain` reads are `&self` on a fresh OS handle.
     pub chain: Arc<Mutex<Chain>>,
-    /// Decoded GPU textures by normalized path.
-    /// Keyed by `(normalized path, wrap_u, wrap_v)`: the SAME BLP is legitimately sampled both
-    /// ways by different models (a sheet that tiles on a wall and clamps on a cutout card), and the
-    /// address mode lives on the Bevy `Image`'s sampler — so each mode needs its own upload
-    /// (decision 0763). Before that key existed, whichever model loaded the texture first decided
-    /// the mode for every later one.
+    /// Decoded GPU textures by `(normalized path, wrap_u, wrap_v)`: one BLP can be sampled both
+    /// ways (tiled on a wall, clamped on a cutout card), and the address mode lives on the sampler.
     pub textures: SpatialCache<(String, bool, bool), Handle<Image>>,
-    /// Decoded UI sprite textures by resolved path (`None` = a miss, cached so a bad path never
-    /// re-walks the chain per frame). Separate from `textures`: sprites are sRGB/clamped, world
-    /// art is Unorm/repeat — the same BLP can legitimately live in both.
+    /// UI sprites by resolved path, misses cached as `None` so a bad path never re-walks the chain
+    /// per frame.
     sprites: HashMap<String, Option<Handle<Image>>>,
-    /// Decoded UI sprite textures sampled with **repeat** addressing on one or both axes (frame
-    /// `Backdrop` pieces — tiled edges/bg — and the reference's `SetTexCoord(0, n, 0, 1)` strips).
-    /// Keyed by resolved path **and** the per-axis wrap, separate from `sprites`: the *same* BLP
-    /// can be wanted clamp-sampled as a plain sprite and repeat-sampled as a backdrop piece, and
-    /// each address-mode pair needs its own GPU image (the sampler is baked into the `Image`).
-    /// See [`Self::sprite_texture_wrapped`].
+    /// UI sprites by path and per-axis wrap, since the sampler bakes into the `Image`.
     tiled_sprites: HashMap<(String, bool, bool), Option<Handle<Image>>>,
-    /// Sprites RESAMPLED to an exact physical size, by `(path, w, h)` — the nameplate border's
-    /// 0188 sharpen and nothing else so far. Keyed by size because that is the whole point: the
-    /// art is re-rasterised whenever the plate's pixel size moves, and reused on every frame in
-    /// between (a resize is rare; a plate is drawn 60 times a second).
+    /// Sprites resampled to an exact physical size, by `(path, w, h)`.
     resampled_sprites: HashMap<(String, u32, u32), Option<Handle<Image>>>,
-    /// The decoded source pixels behind [`Self::resampled_sprites`], so a resize re-samples
-    /// instead of re-decoding the BLP.
+    /// The decoded pixels behind [`Self::resampled_sprites`], so a resize does not re-decode.
     resample_sources: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
-    /// Decoded **portrait** sprites — [`Self::sprite_texture`]'s clamp/sRGB sprite with a circular
-    /// alpha mask baked in ([`portrait_image`]). Its own cache, like `tiled_sprites`: the mask bakes
-    /// into the GPU image, so the same BLP wanted as a plain icon and as a portrait needs two images.
+    /// Portrait sprites, the circular mask baked in ([`portrait_image`]).
     portraits: HashMap<String, Option<Handle<Image>>>,
-    /// Decoded coverage **masks** ([`mask_image`] — linear, not sRGB): the minimap's circular clip
-    /// (decision 0203). Its own cache for the same reason as the others: the format is baked into
-    /// the GPU image.
+    /// Coverage masks ([`mask_image`]): the minimap's circular clip.
     masks: HashMap<String, Option<Handle<Image>>>,
-    /// **Generated** UI sprites — pixels this client computes rather than decodes, keyed by a
-    /// caller-chosen static name ([`Self::generated_sprite`]). Its own cache for the same reason as
-    /// every other one: the sampler bakes into the GPU image. Nothing about the *content* lives
-    /// here — the caller supplies the RGBA — so this stays a cache, not a second art pipeline.
+    /// UI sprites whose pixels the client computes ([`Self::generated_sprite`]).
     generated: HashMap<&'static str, Handle<Image>>,
-    /// The **loose-file root for `Interface\AddOns\` sprite paths** — the AddOns folder, installed
-    /// by the app ([`Self::set_loose_addon_root`]), `None` until then and in every capture run
-    /// (the app resolves it through `local_state`, which is hermetic under `$WOW_CAPTURE`).
-    ///
-    /// Addon art never lives in an MPQ: the reference's Storm open reads loose files from the game
-    /// directory, which is how `<Texture file="Interface\AddOns\Atlas\Images\…"/>` works at all.
-    /// Our equivalent maps that virtual prefix onto the one addon root (decision 1185's single
-    /// folder; decision 1322). Only the UI-sprite decoders consult it — world art has no business
-    /// under `AddOns\`.
+    /// The AddOns folder, where `Interface\AddOns\` paths resolve as loose files, as the reference
+    /// reads them from the game directory; `None` until the app installs it and in capture runs.
     loose_root: Option<PathBuf>,
-    /// Materials deduped by their identity (texture path + blend, or the untextured fallback).
+    /// Materials deduped by [`MaterialKey`].
     pub model_materials: SpatialCache<MaterialKey, Handle<WowModelMaterial>>,
-    /// The shared global-light storage buffer (`lighting::global_light`). Held here so `model_material`
-    /// can clone it into every deduped model material's `light_buf` without threading a `Buffer` through
-    /// the many call sites. One buffer for the whole scene, updated in place each frame.
+    /// The shared global-light buffer, cloned into every deduped model material's `light_buf`.
     pub shared_light: Buffer,
 }
 
-/// Identity of a deduped model material: a textured material is uniquely determined by its texture
-/// path, blend mode, sidedness, alpha-key cutoff, and clutter fade-distance; everything textureless
-/// (missing/failed texture) shares one fallback. Cutoff + fade are in the key so ground clutter (lower
-/// alpha ref + a distance fade) doesn't collide with a tree sharing the same texture.
+/// Identity of a deduped model material; everything textureless shares one fallback per WMO flag.
+/// The cutoff and fade distance are in it so ground clutter never shares a tree's material.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum MaterialKey {
     /// `(texture, blend, two_sided, alpha_key_u8, fade_far_yd_u16, is_wmo, is_fade_variant,
-    /// wrap_u, wrap_v)` — the address mode is part of the identity because it selects a different
-    /// `Image` upload (decision 0763).
+    /// wrap_u, wrap_v)`; the address mode selects a different `Image` upload.
     Textured(String, ModelBlend, bool, u8, u16, bool, bool, bool, bool),
     Fallback(bool),
 }
 
-/// Normalize an internal asset path so case/slash variants of the same file share a cache entry
-/// (MPQ lookup is case-insensitive and accepts either slash).
+/// Fold case and slashes so variants of one file share a cache entry, as MPQ lookup does.
 pub fn normalize_path(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
 }
 
-/// The **cache key** a UI sprite reference folds to: [`normalize_path`], then an extension of
-/// **exactly three characters** stripped — a dot at `len - 4`.
-///
-/// That is the reference's own rule (`0x449590`, which strips a 3-char extension and returns which
-/// of `{".tga", ".blp"}` it was), and its texture cache is keyed on the resulting stem — so
-/// `Foo`, `Foo.blp` and `Foo.tga` are **one** entry, not three. Ours keys the same way, which is
-/// why this is separate from [`sprite_candidates`]: the key identifies the texture, the candidates
-/// are the files that might hold it.
-///
-/// Note a 3-char extension is stripped whatever it is: `Foo.bmp` keys as `Foo`. A longer or shorter
-/// one is not an extension to the client at all — `Foo.jpeg` keys as `Foo.jpeg` and looks for
-/// `Foo.jpeg.blp`.
+/// The cache key a UI sprite reference folds to: [`normalize_path`], then any three-character
+/// extension stripped, as the reference strips it (`0x449590`) and keys its texture cache on the
+/// stem. `Foo`, `Foo.blp` and `Foo.tga` are one entry; `Foo.jpeg` keys as itself.
 pub fn sprite_key(path: &str) -> String {
     let key = normalize_path(path);
     match key.len().checked_sub(4) {
@@ -178,28 +103,10 @@ pub fn sprite_key(path: &str) -> String {
     }
 }
 
-/// The two archive names a UI sprite reference may live under, **in the order the reference tries
-/// them** — `TextureCreate`'s fixed two-candidate chain (`0x449d90`, extension table `0x835248 =
-/// {".tga", ".blp"}`). The supplied extension's pipeline goes first, the other second; both open
-/// through the same Storm primitive, and a miss on the first is silent, so the second is a genuine
-/// fallback rather than an error path.
-///
-/// | reference | first | second |
-/// |---|---|---|
-/// | `Foo` (no 3-char extension) | `Foo.blp` | `Foo.tga` |
-/// | `Foo.blp` | `Foo.blp` | `Foo.tga` |
-/// | `Foo.tga` | `Foo.tga` | `Foo.blp` |
-/// | `Foo.bmp` (any other 3-char) | `Foo.blp` | `Foo.tga` |
-/// | `Foo.jpeg` (not 3 chars) | `Foo.jpeg.blp` | `Foo.jpeg.tga` |
-///
-/// This chain is what makes `Interface\Icons\Ability_Druid_Mangle.tga` — a real macro-chooser entry,
-/// since `Ability_Druid_Mangle.tga.blp` ships and the chooser stores names extension-stripped —
-/// resolve to `…Mangle.blp` on the second try instead of drawing a white square (bug B221). The old
-/// rule here passed an extensioned path through untouched and had no second try at all.
-///
-/// One function, used by the decoders below *and* by the sweeps that assert our own paths resolve
-/// (`ui_script::shipped_xml_tests`, `ui_macro::tests`): a sweep re-implementing this could agree
-/// with itself while disagreeing with what actually draws.
+/// The two files a UI sprite reference may live in, in the order of `TextureCreate`'s two-candidate
+/// chain (`0x449d90`, extension table `0x835248 = {".tga", ".blp"}`): `.tga` first for a `.tga`
+/// reference, `.blp` first otherwise, and a miss on the first is silent. The sweeps that assert our
+/// own paths resolve call this too, so they cannot disagree with what draws.
 pub fn sprite_candidates(path: &str) -> [String; 2] {
     let stem = sprite_key(path);
     let normalized = normalize_path(path);
@@ -211,16 +118,10 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
     }
 }
 
-/// The **texel dimensions** of a UI sprite reference ([`SpriteDims`]) — the number the client's
-/// `CSimpleTexture` size getters read out of `[tex+0x144]`/`[tex+0x148]` when a region authored no
-/// size on an axis (wow-re `region-size-fallback.md` §2, decision 1349: one texel is one FrameXML
-/// unit).
-///
-/// It goes through [`decode_sprite`] rather than sniffing a header, so the size layout uses is the
-/// size the screen shows: the same candidate order, the same BLP-vs-TGA content sniff, and the same
-/// verdict on a candidate that reads but will not decode. The caller memoises — this is asked once
-/// per distinct path, for the handful of regions whose rect is derived from their art — which is
-/// why the answer is three-valued rather than an `Option`: see [`SpriteDims`].
+/// The texel size of a UI sprite, which `CSimpleTexture`'s size getters read (`[tex+0x144]`,
+/// `[tex+0x148]`; `0x770720`, `0x770790`) for a region with no authored size, one texel per
+/// FrameXML unit. Decoded, so layout gets the size the screen shows; three-valued, because the
+/// art can still be coming ([`SpriteDims`]).
 pub fn sprite_dimensions(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
@@ -246,32 +147,9 @@ pub enum SpriteDims {
     Missing,
 }
 
-/// Decode a UI sprite key to RGBA8, **warning once per key that fails to resolve**.
-///
-/// Every sprite cache below stores misses as well as hits, and each calls this on the miss path
-/// *before* inserting — so the warning is self-limiting by construction (one line per distinct key
-/// for the process's life), with no separate "already warned" set to keep.
-///
-/// It exists because the renderer's fallback for an unresolvable path is **silent**. It used to be
-/// silent *and* look like art: a `Texture` region whose file could not be found still pushed a
-/// quad, which `ui_pass` drew with the shared 1×1 white image tinted white — an opaque WHITE
-/// RECTANGLE at the region's exact rect, which is how bug B221's macro-chooser icons looked. That
-/// half is gone (`ui_script::extract` now drops the quad outright when the resolve misses), so the
-/// miss draws *nothing* rather than a white square. It is no less silent for that: nothing on
-/// screen and nothing in Lua says why, and `shipped_xml_tests` sweeps only static XML `file=`
-/// attributes, never a path that arrives at runtime from a DBC or from an addon. So the report
-/// still belongs here.
-///
-/// Walks [`sprite_candidates`] in order and takes the first that both reads and decodes; only when
-/// **all** fail is it a miss. A candidate that reads but won't decode falls through exactly like
-/// one that isn't there — the reference's two loaders both fail silently, so a bad first candidate
-/// can't poison the second.
-///
-/// Each candidate is asked of **two stores**: the patch chain, then — for `Interface\AddOns\`
-/// paths — the loose addon folder ([`loose_addon_file`], decision 1322). The chain never holds an
-/// `AddOns\` path (Blizzard's own `Blizzard_*` stubs aside, addon art only exists on disk), so the
-/// order between the stores is unobservable; chain-first keeps every non-addon path on exactly the
-/// code it always ran.
+/// Decode the first of [`sprite_candidates`] that reads and decodes, from the chain and then the
+/// AddOns folder, as the reference's two loaders fail silently. A miss warns, once per key since
+/// every cache stores its misses: a missing sprite draws nothing, and nothing else says why.
 fn decode_sprite(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
@@ -315,16 +193,9 @@ fn decode_sprite(
         SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return SpriteLoad::Pending;
     }
-    // **"Not there" and "there but would not decode" are different faults, and saying only the
-    // first sends the reader hunting a path that is sitting on disk.** Three colour-mapped TGAs in
-    // the addon corpus read fine and failed to decode for years while this line asserted they did
-    // not resolve (decision 2128).
-    //
-    // The walk above already read every candidate, so the undecodable ones are collected THERE
-    // rather than re-read here. Upstream re-reads through `Chain::read_file`, which wants `&mut`;
-    // this deferred lane holds a shared `&Chain` (it reads through [`ReadMode`], so that a browser
-    // miss can answer `Pending`), and on the browser the re-read would be a second trip through the
-    // resident map for bytes already in hand.
+    // "Not there" and "there but would not decode" are different faults; say which. The walk
+    // above already read every candidate and collected the undecodable ones, so nothing is
+    // re-read here (a browser re-read would be a second trip for bytes already in hand).
     if undecodable.is_empty() {
         warn!(
             "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
@@ -394,10 +265,8 @@ enum SpriteLoad {
     Missing,
 }
 
-/// Decode one candidate's bytes to RGBA8, picking the format by content: a `BLP2` magic is a BLP,
-/// anything else is offered to the TGA decoder (TGA has no magic; its header validation is the
-/// gate). Content, not extension, because the ecosystem mislabels freely — a BLP named `.tga` and
-/// the reverse both ship in real addon folders, and the pixel bytes always know what they are.
+/// Decode by content, not extension, since addon folders mislabel both ways: a `BLP2` magic is a
+/// BLP, anything else goes to the TGA decoder, whose header check is the gate.
 fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     if bytes.starts_with(b"BLP2") {
         blp_to_rgba(bytes)
@@ -406,18 +275,9 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// Read one file from the **two stores the client's file layer has**: the patch chain, then — for
-/// an `Interface\AddOns\` path — the loose addon folder ([`loose_addon_file`]).
-///
-/// The rule shared by every by-path asset an addon can ship: art (the sprite decoder), fonts (the
-/// face loader) and **audio** (`PlayMusic`/`PlaySoundFile`) all reach a file the same way, and
-/// three copies of that would be three things to keep in step — the font leg was already a
-/// hand-rolled second copy of the sprite leg's order when audio became the third caller.
-///
-/// The reference asks the install tree *before* the archive (`0x647e60`'s attempt #4 is the MPQ —
-/// wow-re `ui/scratch/include-lua-dispatch.md` §4.1); the order is flipped here for the same
-/// reason [`decode_sprite`] flips it, and it is unobservable: the chain carries no `AddOns\` path,
-/// so every non-addon read stays on exactly the code it always ran.
+/// Read a file from the patch chain, then, for an `Interface\AddOns\` path, the loose addon folder:
+/// how art, fonts and audio an addon ships all load. The reference asks the install tree first
+/// (`0x647e60`'s attempt #4 is the MPQ); the chain holds no `AddOns\` path, so the order is moot.
 pub fn read_chain_or_loose(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
@@ -430,20 +290,9 @@ pub fn read_chain_or_loose(
     std::fs::read(file).ok()
 }
 
-/// Map a **normalized** addon-relative path (`interface\addons\<addon>\<…>`, lowercase,
-/// backslashed — [`normalize_path`] has run) onto a file under the loose addon root, or `None` if
-/// it is not an `Interface\AddOns\` path or nothing is there.
-///
-/// **Not sprite-specific, and named for that** (decision 2103): 1322 built this for addon-shipped
-/// BLP/TGA art, and an addon's own TTFs reach the client by exactly the same route — a loose file
-/// under the one AddOns root, named by a virtual `Interface\AddOns\…` path no MPQ carries. One
-/// resolver, one prefix rule, one sandbox.
-///
-/// The walk matches each component **case-insensitively** (exact join first — free on the
-/// case-insensitive filesystems macOS installs default to — then a `read_dir` scan): the reference
-/// is a Windows client and addons reference their own art in arbitrary case. The candidate cannot
-/// escape the root — `normalize_path` leaves no `/`, and any dot-component is refused before a
-/// filesystem call happens (same lexical posture as `ui_script::addons::read_under`).
+/// Map a normalized `interface\addons\…` path onto a file under the addon root, matching each
+/// component case-insensitively as the Windows reference does; a dot-component is refused, so a
+/// path cannot escape the root.
 pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
     let rel = candidate.strip_prefix("interface\\addons\\")?;
     let mut at = root.to_path_buf();
@@ -466,14 +315,9 @@ pub fn loose_addon_file(root: &Path, candidate: &str) -> Option<PathBuf> {
     at.is_file().then_some(at)
 }
 
-/// Mutate an asset only when `differs` says its current state doesn't already match.
-///
-/// `Assets::get_mut` alone marks the asset Modified — a uniform re-upload and (on the Metal
-/// non-bindless path) a bind-group rebuild that frame — so a per-frame writer re-pushing an
-/// unchanged value is pure cost (the teleport leak's CPU engine was exactly this shape; the sky
-/// family idled at ~17 such writes per frame). The gate decides on the immutable view; pair it
-/// with values quantized to display precision ([`quantize`]/[`quant255`]) or continuous inputs
-/// defeat the compare.
+/// Mutate an asset only when `differs` says it does not already match: `Assets::get_mut` alone
+/// marks it Modified, a uniform re-upload and, on Metal's non-bindless path, a bind-group rebuild.
+/// Pair it with values quantized to display precision ([`quantize`], [`quant255`]).
 pub fn write_gated<M: bevy::asset::Asset>(
     assets: &mut Assets<M>,
     handle: &Handle<M>,
@@ -487,17 +331,13 @@ pub fn write_gated<M: bevy::asset::Asset>(
     }
 }
 
-/// Quantize to `n`-ths — the write-gate's precision floor for continuously-drifting inputs
-/// (time-of-day bands, camera-aim envelopes). Choose `n` at or below what the output can show:
-/// the reference packs its celestial/sky lanes to bytes (`floor(255·…)`, the 0xFF broadcasts)
-/// and re-submits them as per-frame vertex data, so a 1/255 step IS the reference's own
-/// precision for color/alpha; geometry scalars gate at a sub-pixel step instead.
+/// Quantize to `n`ths, the write gate's floor for drifting inputs: 255 for colour ([`quant255`]),
+/// a sub-pixel step for geometry.
 pub fn quantize(x: f32, n: f32) -> f32 {
     (x * n).round() / n
 }
 
-/// [`quantize`] each channel to the display's 1/255 LSB — the byte precision the reference's own
-/// color lanes carry.
+/// [`quantize`] each channel to 1/255: the reference packs its sky and celestial colours to bytes.
 pub fn quant255(c: [f32; 3]) -> [f32; 3] {
     [
         quantize(c[0], 255.0),
@@ -506,13 +346,8 @@ pub fn quant255(c: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Lock a `Mutex`, recovering the guard even if a previous holder **poisoned** it by panicking.
-///
-/// The shared [`WorldAssets::chain`] is read from many systems; one panic mid-read would otherwise
-/// poison the lock and turn every subsequent `lock().unwrap()` — including the render loop's — into a
-/// cascade. The chain read is a best-effort decode (a half-read texture is harmless), so we recover
-/// the guard and carry on. (Phase 3 deleted the net subsystem's shared mutexes entirely; this remains
-/// only for the asset foundation, which is its one legitimate user.)
+/// Lock a `Mutex`, recovering the guard if a holder panicked, so one failed read of the shared
+/// chain does not fail every later lock; a half-read texture is harmless.
 pub trait LockRecover<T> {
     fn lock_recover(&self) -> MutexGuard<'_, T>;
 }
@@ -524,13 +359,8 @@ impl<T> LockRecover<T> for Mutex<T> {
 }
 
 impl WorldAssets {
-    /// Open the store over an already-opened patch chain.
-    ///
-    /// `shared_light` is the one global-light storage buffer, taken as a **`Buffer`** — a raw wgpu
-    /// handle — and not as the client's `SharedLightBuffer`. That is the whole reason this crate can
-    /// sit under the renderer: the store's only use of it is `clone()` into every deduped model
-    /// material's `light_buf`, so the parameter severs what would otherwise be a dependency on the
-    /// lighting layout and, through it, the rig-palette regions (decision 1164).
+    /// Open the store over an opened patch chain. `shared_light` is a raw `Buffer`, not the
+    /// client's `SharedLightBuffer`, which keeps this crate below the renderer.
     pub fn open(chain: Chain, shared_light: Buffer, server: AssetServer) -> Self {
         Self {
             server,
@@ -549,30 +379,23 @@ impl WorldAssets {
         }
     }
 
-    /// [`read_chain_or_loose`] over this store's own two halves — the by-path read for an asset
-    /// class with no decoder of its own here (audio: `PlayMusic`, `PlaySoundFile`).
+    /// [`read_chain_or_loose`] over this store, for an asset class with no decoder here (audio:
+    /// `PlayMusic`, `PlaySoundFile`).
     pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
         read_chain_or_loose(&self.chain, self.loose_root.as_deref(), path)
     }
 
-    /// The **loose half alone** of [`read_chain_or_loose`], for a caller that has already asked
-    /// the chain itself and been told no.
-    ///
-    /// The sound kit is that caller: on the web target its chain read is the non-blocking
-    /// [`crate::chain::TryRead`] (a blocking fetch for a footstep is the freeze the whole
-    /// deferred-streaming design exists to prevent), and routing its miss back through
-    /// `read_file_or_loose` would pay a second chain lookup — and, worse, a *blocking* one — just
-    /// to reach the AddOns folder. The page never has a loose root, so this is `None` there and
-    /// the two targets agree by construction.
+    /// The loose half alone of [`read_chain_or_loose`], for a caller that has already asked the
+    /// chain and been told no: the sound kit, whose web chain read is the non-blocking
+    /// [`crate::chain::TryRead`] and must not fall back to a blocking one. The page has no loose
+    /// root, so this is `None` there.
     pub fn read_loose_only(&self, path: &str) -> Option<Vec<u8>> {
         let file = loose_addon_file(self.loose_root.as_deref()?, &normalize_path(path))?;
         std::fs::read(file).ok()
     }
 
-    /// Install (or clear) the loose-file root for `Interface\AddOns\` sprite paths — see the
-    /// [`Self::loose_root`] field doc. Called by the app once it knows the AddOns folder; evicts
-    /// cached **misses** so a path asked before the root existed gets a second look (a cached hit
-    /// can only have come from the chain and stays right).
+    /// Install or clear the AddOns folder. Cached misses are evicted so a path asked before it
+    /// existed gets a second look; a cached hit came from the chain and stays right.
     pub fn set_loose_addon_root(&mut self, root: Option<PathBuf>) {
         if self.loose_root == root {
             return;
@@ -584,8 +407,7 @@ impl WorldAssets {
         self.masks.retain(|_, v| v.is_some());
     }
 
-    /// Decode + upload a BLP once per path; later requests for the same texture share the handle.
-    /// `None` if the texture is missing or fails to decode.
+    /// Decode and upload a BLP once per path and wrap; later requests share the handle.
     pub fn texture(
         &mut self,
         path: &str,
@@ -601,12 +423,8 @@ impl WorldAssets {
         Some(handle)
     }
 
-    /// [`Self::texture`]'s decode, **on a target whose loaders run on their own threads**: read the
-    /// BLP out of the chain and upload it, here and now.
-    ///
-    /// Passthrough: world art is uploaded in the form the BLP stores it (decision 1626). Nothing
-    /// reads a world texture main-side — the same reasoning that already makes this lane
-    /// `RenderAssetUsages::RENDER_WORLD` — so there are no CPU texels to lose.
+    /// [`Self::texture`]'s decode where loaders run on their own threads: read the BLP out of the
+    /// chain and upload it now. World art uploads as the BLP stores it; nothing reads it main-side.
     #[cfg(not(target_arch = "wasm32"))]
     fn upload_world_texture(
         &self,
@@ -618,31 +436,13 @@ impl WorldAssets {
         Some(images.add(repeat_texture_authored(crate::for_upload(chain), wrap)))
     }
 
-    /// [`Self::texture`]'s decode **in a browser**, where the line above is the single worst thing
-    /// this crate can do to a frame.
-    ///
-    /// A doodad's textures are named by its `M2Model` and read the first time one of its batches
-    /// builds a material — from a spawn system, on the frame thread. The M2 itself arrived through
-    /// the `AssetReader`, but its textures did not, so on the web that read is a blocking fetch of a
-    /// pack nothing warmed: a whole frozen tab per new tree, in the middle of streaming terrain.
-    ///
-    /// So the web target hands the same load to the [`AssetServer`] instead, at the same URL every
-    /// other `mpq://` texture uses. It resolves to [`crate::BlpImageLoader`]'s `WorldArt` variant,
-    /// which is this function's line-for-line twin (`blp::world_art_image` *is* the port of
-    /// `repeat_texture_authored`, address mode and all — the mode rides the URL, decision 0763), so
-    /// the uploaded `Image` is identical; only *when* it exists changes. Until it does, the material
-    /// does not prepare and the batch is not drawn — a doodad that pops in a few frames late instead
-    /// of a client that stops.
-    ///
-    /// **`contains` first, and it is load-bearing.** A path no archive holds must still return
-    /// `None`, because `model_material`'s fallback (an untextured material) is the right answer for
-    /// it; handing back a handle that will only ever fail would leave that batch invisible forever
-    /// rather than untextured. On this target `contains` is a binary search over the in-memory
-    /// index, so the check is free.
-    ///
-    /// Native keeps the synchronous path deliberately. There the read is a `pread` and the decode
-    /// runs on a pool thread beside the frame, so there is nothing to win — and the FPS campaign
-    /// grades that path, which is not a thing to change as a side effect of a browser fix.
+    /// [`Self::texture`]'s decode in a browser, where a chain read on the frame thread is a
+    /// blocking fetch of a pack nothing warmed. The load goes to the [`AssetServer`] at the same
+    /// `mpq://` URL every other texture uses, which resolves to [`crate::BlpImageLoader`]'s
+    /// `WorldArt` variant, this function's twin (the address mode rides the URL), so the `Image` is
+    /// identical and only arrives later: the batch draws a few frames late instead of stalling.
+    /// `contains` first: a path no archive holds must still return `None`, so `model_material`
+    /// falls back to an untextured material instead of a handle that never loads.
     #[cfg(target_arch = "wasm32")]
     fn upload_world_texture(
         &self,
@@ -657,24 +457,15 @@ impl WorldAssets {
         Some(self.server.load(crate::texture_url(key, wrap)))
     }
 
-    /// Decode a BLP into a clamp-sampled **sRGB** sprite image (mip 0 only) — the celestial discs
-    /// (sun/moon) and every player-UI quad. Unlike [`Self::texture`] (repeat-sampled, gamma-space
-    /// `Unorm`, mipmapped — for tiling world art), this is sRGB + clamp-to-edge with no mip chain.
-    /// Extensionless references get `.blp` appended (the FrameXML convention). Cached by resolved
-    /// path — hits and misses both — in its own `sprites` map, separate from the `textures` cache
-    /// (the same BLP can live in both, with different sampling).
+    /// A clamp-sampled sRGB sprite, mip 0 only: the celestial discs and every UI quad.
     pub fn sprite_texture(
         &mut self,
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        // FrameXML/DBC texture references are canonically EXTENSIONLESS
-        // (`Interface\Buttons\UI-Quickslot2`) — the real client appends `.blp` at resolve. Paths
-        // that already carry an extension (`textures\moon.blp`) pass through unchanged.
         let key = sprite_key(path);
-        // Cached (hits AND misses): the UI extractor asks per quad per frame — uncached, every
-        // frame re-decoded every BLP into a fresh `Image` (unbounded asset growth) and the fresh
-        // handles defeated the quad-list dirty check.
+        // Hits and misses are cached: the UI extractor asks per quad per frame, and a fresh handle
+        // would defeat its dirty check.
         if let Some(cached) = self.sprites.get(&key) {
             return cached.clone();
         }
@@ -694,10 +485,7 @@ impl WorldAssets {
         loaded
     }
 
-    /// Decode a texture to raw RGBA8 `(w, h, bytes)` **without** uploading a GPU image — for callers
-    /// that resample the pixels themselves before upload (the V-plate border sharpen, decision 0188,
-    /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
-    /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
+    /// Decode a UI sprite to raw RGBA8 without uploading or caching, for a caller that resamples.
     pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
         match decode_sprite(
             &self.chain,
@@ -712,16 +500,8 @@ impl WorldAssets {
         }
     }
 
-    /// A UI sprite **resampled to an exact pixel size** by the caller's own kernel, cached by that
-    /// size — the nameplate border (decision 0188).
-    ///
-    /// The plate's frame art is a 128 × 32 BLP drawn at whatever size the plate is, which past the
-    /// 1024×768 knee (and always on a retina framebuffer) is a magnification: the GPU's bilinear
-    /// filter smears the 1 px gold bevel across several soft output pixels, which is the director's
-    /// "blurry border". Resampling the SAME pixels to the target size with a sharp kernel keeps the
-    /// art and loses the smear. This lives here rather than in the plate driver because since
-    /// decision 2148 the plate is a widget like any other and its border is an ordinary texture
-    /// region — the substitution has to happen where a texture path becomes an image.
+    /// A UI sprite resampled to an exact pixel size by the caller's kernel, cached by size: the
+    /// nameplate border, whose 1 px bevel bilinear magnification would smear.
     pub fn resampled_sprite(
         &mut self,
         path: &str,
@@ -762,10 +542,7 @@ impl WorldAssets {
         made
     }
 
-    /// A UI sprite decoded with **repeat** (wrap) addressing on both axes — the frame `Backdrop`
-    /// tiled pieces (`backdrop-mechanism.md`): a border edge strip samples UVs `[0..N]` and a tiled
-    /// bg `[0..w/period]`, so the texture must wrap, not clamp. [`Self::sprite_texture_wrapped`]
-    /// with both axes on; see there for the cache and the decode.
+    /// A UI sprite repeating on both axes, for a frame `Backdrop`'s tiled pieces (`0x77f0c0`).
     pub fn sprite_texture_tiled(
         &mut self,
         path: &str,
@@ -774,13 +551,7 @@ impl WorldAssets {
         self.sprite_texture_wrapped(path, (true, true), images)
     }
 
-    /// A UI sprite decoded with **repeat** addressing on the axes `wrap` names and clamp on the
-    /// rest — the reference's one-axis tiling idiom (`SetTexCoord(0, n, 0, 1)` on the stance
-    /// shelf's middle strip) wraps along its length and must clamp across it, or the strip's
-    /// bottom row bleeds into its top edge (decision 2000; [`sprite_image_wrapped`]). Same
-    /// sRGB/no-mip decode + extensionless→`.blp` resolve as [`Self::sprite_texture`], but its
-    /// own cache keyed by the wrap pair (the sampler is baked into the `Image`, so a path wanted
-    /// under two address modes needs two GPU images). Cached hits **and** misses.
+    /// A UI sprite repeating on the axes `wrap` names ([`sprite_image_wrapped`]).
     pub fn sprite_texture_wrapped(
         &mut self,
         path: &str,
@@ -809,30 +580,18 @@ impl WorldAssets {
         loaded
     }
 
-    /// The stand-in a sprite cache hands back while its real art is still coming: **1x1, fully
-    /// transparent**.
-    ///
-    /// `None` would be the obvious answer for "not yet", and it is the wrong one. A UI quad whose
-    /// texture is `None` is not skipped — `ui_pass` draws it with the shared 1x1 *white* image tinted
-    /// by the quad's colour, which for an icon is white, which is an opaque white rectangle at the
-    /// icon's exact rect. That is the same fallback bug B221 was (see [`decode_sprite`]), and having
-    /// every icon flash through it on the way in would be a worse artefact than the stall this lane
-    /// exists to remove. Transparent draws nothing, which is what "not yet" should look like.
-    ///
-    /// One image for the whole process, in the `generated` cache beside the colour picker's wheel —
-    /// so the handle is *stable*, and the quad-list dirty check does not see a new texture every
-    /// frame a load is outstanding.
+    /// The stand-in a sprite cache hands back while its real art is still coming: 1x1, fully
+    /// transparent. Not `None`: a UI quad with no texture draws the shared white image, an opaque
+    /// white rectangle at an icon's rect. One image for the process, in the `generated` cache, so
+    /// the handle is stable and the quad-list dirty check does not see a new texture every frame.
     fn pending_sprite(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
         self.generated_sprite(PENDING_SPRITE_KEY, images, || (1, 1, vec![0, 0, 0, 0]))
     }
 
-    /// [`Self::sprite_texture`] for a **one-shot warmer** — a caller that resolves its art once and
-    /// keeps the handle. See [`ReadMode::Block`] for why those cannot take a placeholder: nothing
-    /// asks them again, so "not here yet" would mean "never".
-    ///
-    /// The customers are the glue screens' art table, the chat-bubble and V-plate boot sets, and the
-    /// loading-screen backdrop. All four resolve on a boot or loading frame, where a blocking read is
-    /// what has always happened and there is no animation to protect.
+    /// [`Self::sprite_texture`] for a one-shot warmer, a caller that resolves its art once and
+    /// keeps the handle, so it cannot take a placeholder ([`ReadMode::Block`]): the glue screens'
+    /// art table, the chat-bubble and V-plate boot sets, and the loading-screen backdrop, all on a
+    /// boot or loading frame.
     pub fn sprite_texture_blocking(
         &mut self,
         path: &str,
@@ -856,9 +615,8 @@ impl WorldAssets {
         loaded
     }
 
-    /// [`Self::sprite_texture_tiled`]'s blocking twin — see [`Self::sprite_texture_blocking`]. One
-    /// caller: the chat bubble's tiled edge strip, whose texel size is baked at load. Both axes
-    /// wrap, so it shares the deferred lane's cache under that pair's key (decision 2000).
+    /// [`Self::sprite_texture_tiled`]'s blocking twin, for the chat bubble's tiled edge strip,
+    /// whose texel size is baked at load. Both axes wrap, so it shares the deferred lane's cache.
     pub fn sprite_texture_tiled_blocking(
         &mut self,
         path: &str,
@@ -881,9 +639,8 @@ impl WorldAssets {
         loaded
     }
 
-    /// [`Self::mask_texture`]'s blocking twin — see [`Self::sprite_texture_blocking`]. Its callers
-    /// are the minimap's boot art table and `SetMaskTexture`, which commits the requested path
-    /// before it resolves and so has nothing to ask again.
+    /// [`Self::mask_texture`]'s blocking twin, for the minimap's boot art table and
+    /// `SetMaskTexture`, which commits the requested path before it resolves.
     pub fn mask_texture_blocking(
         &mut self,
         path: &str,
@@ -906,8 +663,8 @@ impl WorldAssets {
         loaded
     }
 
-    /// [`Self::decode_rgba`]'s blocking twin — see [`Self::sprite_texture_blocking`]. One caller:
-    /// the V-plate border, whose pixels are kept and resampled per plate size for the session.
+    /// [`Self::decode_rgba`]'s blocking twin, for the V-plate border, whose pixels are kept and
+    /// resampled per plate size for the session.
     pub fn decode_rgba_blocking(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
         match decode_sprite(
             &self.chain,
@@ -920,17 +677,8 @@ impl WorldAssets {
         }
     }
 
-    /// A sprite whose pixels this client **computes**, cached under `key` and built at most once.
-    /// `make` returns `(width, height, rgba8)` and runs only on the first ask.
-    ///
-    /// The customer is the colour picker: the reference's `<ColorWheelTexture>` and
-    /// `<ColorValueTexture>` carry no `file=` at all, because the hue disc and the brightness ramp
-    /// are generated by the client and no BLP in the chain is either of them. The generation itself
-    /// deliberately stays with the caller — the pixel law belongs to the widget, not to the asset
-    /// layer, which knows only how to cache and upload.
-    ///
-    /// Uploaded through [`sprite_image`], so it samples exactly like every other UI sprite:
-    /// sRGB, clamp-to-edge, linear, no mips.
+    /// A sprite whose pixels the client computes, built once by `make`: the colour picker's
+    /// `<ColorWheelTexture>` and `<ColorValueTexture>`, which name no `file=`.
     pub fn generated_sprite(
         &mut self,
         key: &'static str,
@@ -946,10 +694,7 @@ impl WorldAssets {
         handle
     }
 
-    /// A **portrait** sprite: [`Self::sprite_texture`]'s clamp/sRGB decode with a circular alpha mask
-    /// baked in ([`portrait_image`]) — the unit-frame portrait, round like the client's. Same
-    /// extensionless→`.blp` resolve; its own cache (the mask bakes into the GPU image, so a path
-    /// wanted both plain and portrait needs two images). Cached hits **and** misses.
+    /// A unit-frame portrait, the circular mask baked in ([`portrait_image`]).
     pub fn portrait_texture(
         &mut self,
         path: &str,
@@ -975,11 +720,9 @@ impl WorldAssets {
         loaded
     }
 
-    /// The tabard designer's emblem cell (decision 1977): the emblem BLP decoded and rewritten to
-    /// **white carrying its own alpha** — `(a << 24) | 0x00FFFFFF` per texel, the reference's
-    /// `0x503431` loop — as an ordinary clamped sprite the caller tints. Cached per path like a
-    /// sprite; a file that fails to open yields `None` (the reference installs its static array's
-    /// stale contents instead; nothing here has a previous emblem to show).
+    /// The tabard designer's emblem cell for the caller to tint: white carrying its own alpha,
+    /// `(a << 24) | 0x00FFFFFF` per texel (the reference's `0x503431` loop). A file that fails to
+    /// open gives `None`, where the reference keeps its static array's stale contents.
     pub fn emblem_mask_texture(
         &mut self,
         path: &str,
@@ -1013,9 +756,7 @@ impl WorldAssets {
         loaded
     }
 
-    /// A coverage **mask** ([`mask_image`] — linear/clamp, the texel bytes handed to the shader
-    /// 1:1): the minimap's `MinimapMask.blp` circle (decision 0203, [`crate::ui_pass::UiQuadMask`]).
-    /// Same extensionless→`.blp` resolve as [`Self::sprite_texture`]; its own cache, hits AND misses.
+    /// A coverage mask, its bytes handed to the shader 1:1 ([`mask_image`]): the minimap's circle.
     pub fn mask_texture(
         &mut self,
         path: &str,
@@ -1041,10 +782,8 @@ impl WorldAssets {
         loaded
     }
 
-    /// Decode a cursor BLP (e.g. `Interface\Cursor\Point.blp`) into a single-mip GPU image for
-    /// winit's custom OS cursor (`CursorIcon::Custom`) — *not* the mipmapped, repeat-sampled
-    /// [`repeat_texture_authored`] used for world art. `None` if the file is missing or fails to decode.
-    /// macOS doesn't use this (it drives `NSCursor` from the raw RGBA directly — see `crate::cursor`).
+    /// Decode a cursor BLP (`Interface\Cursor\Point.blp`) for winit's custom OS cursor; macOS
+    /// drives `NSCursor` from the raw RGBA instead.
     #[cfg(not(target_os = "macos"))]
     pub fn decode_cursor(
         &mut self,
@@ -1059,9 +798,8 @@ impl WorldAssets {
         Some(images.add(cursor_texture(w, h, rgba)))
     }
 
-    /// A `StandardMaterial` for a model submesh, deduped by (texture, blend) so submeshes/models
-    /// sharing a texture share one material handle (enabling draw-call batching). A missing/failed
-    /// texture falls back to a single shared untextured material.
+    /// A model submesh material, deduped by [`MaterialKey`] so submeshes sharing a texture share a
+    /// handle and batch; a missing texture falls back to one shared untextured material.
     pub fn model_material(
         &mut self,
         texture: Option<&str>,
@@ -1076,10 +814,9 @@ impl WorldAssets {
         images: &mut Assets<Image>,
         materials: &mut Assets<WowModelMaterial>,
     ) -> Handle<WowModelMaterial> {
-        // Alpha-test cutoff: callers may override (ground clutter uses the detail-doodad ref ≈ 0.5);
-        // everything else uses the general vanilla model alpha key.
+        // Ground clutter passes its own cutoff (128/255); everything else takes the M2 alpha key.
         let cutoff = alpha_cutoff.unwrap_or(VANILLA_ALPHA_KEY_REF);
-        // Ground-clutter distance fade (None for normal models). Near = 0.75× far (the client's ratio).
+        // Ground-clutter fade: near is 0.75 of far, the client's ratio.
         let clutter_fade = match fade_far {
             Some(far) => Vec4::new(far * 0.75, far, 0.0, 1.0),
             None => Vec4::ZERO,
@@ -1088,7 +825,7 @@ impl WorldAssets {
             self.texture(t, wrap, images)
                 .map(|h| (normalize_path(t), h))
         });
-        // Only AlphaTest consumes the cutoff, so don't fragment opaque/blend materials by it.
+        // Only AlphaTest reads the cutoff, so opaque and blend materials do not split on it.
         let key_alpha = if blend == ModelBlend::AlphaTest {
             (cutoff * 255.0).round() as u8
         } else {
@@ -1112,21 +849,15 @@ impl WorldAssets {
         if let Some(handle) = self.model_materials.fetch(&key) {
             return handle;
         }
-        // Per-submesh blend (opaque trunk/wall vs alpha-cut leaves/windows). This builder serves
-        // ground clutter, which never authors the multiply modes — Mod/Mod2x fall to plain Blend
-        // here rather than growing this path the marker bits `model_render::model_material` packs
-        // (that builder is the one every Mod-capable consumer uses; decision 0528).
+        // This builder serves ground clutter, which never authors Mod/Mod2x; every Mod-capable
+        // consumer uses `model_render::model_material`.
         let alpha_mode = match blend {
             ModelBlend::Opaque => AlphaMode::Opaque,
             ModelBlend::AlphaTest => AlphaMode::Mask(cutoff),
             ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
         };
-        // Single-sided unless the M2's 0x04 flag is set — matches the real client (many canopy planes
-        // are visible from one direction only).
+        // Single-sided unless the M2's 0x04 flag is set, as in the reference.
         let cull_mode = if two_sided { None } else { Some(Face::Back) };
-        // The base StandardMaterial carries texture/alpha/cull; our `wow_model.wgsl` extension does
-        // the WoW lighting (PBR fields like reflectance/roughness are ignored by it). Light uniforms
-        // are placeholders — `apply_wow_lighting` fills them from Light.dbc + the panel knobs.
         let base = match resolved {
             Some((_, image)) => StandardMaterial {
                 base_color_texture: Some(image),
@@ -1135,8 +866,7 @@ impl WorldAssets {
                 cull_mode,
                 ..default()
             },
-            // No resolved texture → untextured WHITE draw (stage disabled in the reference —
-            // wow-re m2-runtime-texture-null-bind.md; see model_render.rs for the full note).
+            // No texture: an untextured white draw, the reference's disabled stage (`0x59d020`).
             None => StandardMaterial {
                 base_color: Color::WHITE,
                 ..default()
@@ -1149,21 +879,18 @@ impl WorldAssets {
                 modern_cascades: crate::materials::MODERN_SHADOW_CASCADES,
                 modern_fog: crate::materials::MODERN_FOG_VOLUME, // fork: modern lighting (FORK.md, P4)
                 clutter_fade,
-                // x = WMO (FFP N·L × MOCV, not SH); y = distance-fade blend variant (depth-write-on
-                // via `specialize` — see WowModelKey; no live caller passes it here).
+                // x = WMO (FFP N·L × MOCV), y = the fade blend twin (no caller passes it here).
                 model_flags: Vec4::new(
                     if is_wmo { 1.0 } else { 0.0 },
                     if is_fade_variant { 1.0 } else { 0.0 },
                     0.0,
                     0.0,
                 ),
-                // x = doodad-lobe sun scale; `1.0` (lit) here — this builder serves clutter, which lights on
-                // the FFP N·L path with its own baked MCSH tint, so the lobe's `sun_scale` is unused.
+                // Clutter lights on the FFP N·L path with its own MCSH tint; no selector.
                 sun_scale: Vec4::new(1.0, 0.0, 0.0, 0.0),
-                tint: Vec4::ONE, // clutter never carries an animated M2Color tint (w: not a WMO batch)
+                tint: Vec4::ONE, // clutter has no animated M2Color tint and is not a WMO batch
                 sidn: Vec4::ZERO, // clutter is never SIDN/WINDOW glass (WMO-only)
                 anim_slots: Vec4::ZERO,
-                // The shared global light (light/fog/SH come from here, updated in place each frame).
                 light_buf: self.shared_light.clone(),
             },
         });
@@ -1172,25 +899,18 @@ impl WorldAssets {
     }
 }
 
-/// World/render configuration read once at startup from the environment, shared by the subsystems
-/// that need it: terrain reads `unload_budget` (the release lane).
-/// Inserted by [`AssetPlugin`] alongside [`WorldAssets`]; its *presence* is also the "there is a
-/// client install" gate the world-side setups key on.
-///
-/// How far terrain streams is deliberately **not** here: the residency window derives from the
-/// live `farclip` view distance (`benilla_world::view::ViewDistance` — the player's Terrain
-/// Distance setting), as the reference derives it (decision 1513).
+/// Render configuration read once from the environment at startup, inserted beside
+/// [`WorldAssets`]; its presence is the "there is a client install" gate world setups key on.
+/// Terrain residency is not here: it derives from the live `farclip`, as in the reference.
 #[derive(Resource, Clone, Copy)]
 pub struct RenderConfig {
-    /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`,
-    /// default 1; `0` = unbudgeted — the whole trailing row in one frame, the pre-B181
-    /// behaviour, kept as the controlled A/B leg on one build).
+    /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`, default 1;
+    /// `0` releases the whole trailing row in one frame, the unbudgeted A/B leg).
     pub unload_budget: usize,
 }
 
-/// Startup ordering seam: [`AssetPlugin`] opens the patch chain in this set so every other
-/// subsystem's startup (catalog loads, terrain/lighting setup) can run `.after(AssetSet::Open)` and
-/// borrow the shared [`WorldAssets`].
+/// Startup ordering: the patch chain opens in [`AssetSet::Open`], so other startup systems run
+/// after it and borrow [`WorldAssets`].
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetSet {
     Open,
@@ -1200,9 +920,6 @@ pub enum AssetSet {
 mod tests {
     use super::*;
 
-    /// The disk tree spells its names in mixed case, the candidate arrives normalized-lowercase
-    /// (as [`sprite_candidates`] always hands it over) — the walk must land on the file anyway,
-    /// because the reference is a Windows client and addon authors never matched their own case.
     #[test]
     fn loose_addon_file_maps_addon_paths_case_insensitively() {
         let root =
@@ -1211,9 +928,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("BlackrockDepths.blp"), b"x").unwrap();
 
-        // The returned SPELLING is filesystem-dependent (a case-insensitive filesystem answers
-        // the exact-join fast path with the candidate's own casing), so the claim is that the
-        // path opens the right file, not how it is spelt.
+        // The returned spelling depends on the filesystem's case sensitivity, so check the file.
         let hit = loose_addon_file(
             &root,
             "interface\\addons\\atlas\\images\\maps\\blackrockdepths.blp",
@@ -1221,7 +936,6 @@ mod tests {
         .expect("mixed-case tree resolves a lowercase candidate");
         assert_eq!(std::fs::read(&hit).unwrap(), b"x");
 
-        // Not an AddOns path → not this store's question.
         assert_eq!(loose_addon_file(&root, "interface\\icons\\foo.blp"), None);
         // A directory is not a file, and a missing file is a miss, not an error.
         assert_eq!(loose_addon_file(&root, "interface\\addons\\atlas"), None);
@@ -1229,8 +943,7 @@ mod tests {
             loose_addon_file(&root, "interface\\addons\\atlas\\images\\maps\\nope.blp"),
             None
         );
-        // Dot-components never reach the filesystem (the read_under posture; `normalize_path`
-        // already forbids `/`, so this is the one lexical escape left to refuse).
+        // Dot-components never reach the filesystem; `normalize_path` already leaves no `/`.
         assert_eq!(
             loose_addon_file(&root, "interface\\addons\\..\\..\\etc\\passwd"),
             None
@@ -1239,14 +952,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// **The by-path read every addon-shipped asset resolves by** — chain first, then the one
-    /// loose folder ([`read_chain_or_loose`]). Audio is that rule's third caller, after art and
-    /// fonts, and an addon's own track is exactly the file no MPQ can hold: this leg is the whole
-    /// reason `PlayMusic("Interface\\AddOns\\…")` can make a sound at all.
-    ///
-    /// Against the **real** chain, because both legs matter — a client file must still come from
-    /// the archive, and only a real chain can show the loose folder is a *fallback* rather than a
-    /// shadow over it.
+    /// Against the real chain: a client file must still come from the archive, and the loose
+    /// folder is a fallback, not a shadow over it.
     #[test]
     fn read_chain_or_loose_asks_the_chain_then_an_addons_own_file_on_disk() {
         let data = benilla_formats::wow_data_or_skip!();
@@ -1278,7 +985,7 @@ mod tests {
         );
         // In neither store: a plain miss, which every caller renders as silence.
         assert!(read_chain_or_loose(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
-        // No folder configured (a capture run — `local_state` is hermetic there): chain only.
+        // No folder configured (a capture run, where `local_state` is hermetic): chain only.
         assert!(
             read_chain_or_loose(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
         );

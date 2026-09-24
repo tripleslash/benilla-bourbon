@@ -747,8 +747,9 @@ fn shipped_target_frame_runs_the_level_law() {
         .unwrap();
     assert!(ok, "hostile +10: the skull shows ({:?})", s.errors());
 
-    // A DEAD mob is NOT a corpse (§5: UnitIsCorpse is a pure TYPEID_CORPSE object check, and
-    // UnitLevel has no health test) — the ref shows a dead mob's NUMBER, not the skull.
+    // A DEAD mob is NOT a corpse (UnitIsCorpse `0x5161c0` is a pure TYPEID_CORPSE object check,
+    // and UnitLevel `0x517fc0` has no health test) — the ref shows a dead mob's NUMBER, not the
+    // skull.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -1363,7 +1364,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         Some(UnitState {
             exists: true,
             is_connected: true, // CheckDead's second term — a feign is not a link-drop
-            name: Some("Nazriel".into()),
+            name: Some("Corvane".into()),
             health,
             max_health: 1500,
             level: 60,
@@ -1990,7 +1991,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
         "player",
         Some(UnitState {
             exists: true,
-            name: Some("Frostshake".into()),
+            name: Some("Aldwyn".into()),
             health: 100,
             max_health: 100,
             level: 60,
@@ -2012,7 +2013,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
 
     let party = |leader_index: u32, master_looter: Option<u32>, method: &str| PartyState {
         members: vec![PartyMemberInfo {
-            name: "Thalyn".into(),
+            name: "Brisca".into(),
             guid: 0x7A17,
         }],
         leader_index,

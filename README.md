@@ -8,12 +8,6 @@
   </p>
 </div>
 
-> [!IMPORTANT]
-> **Issues are off, and pull requests are not open yet.** [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
-> says what will get in when they are. Until then, the way to contribute is to join the
-> [Discord](https://discord.gg/wJSJx467G4) and report the bugs you find. Questions and ideas are
-> welcome in the same place.
-
 ## wenilla — this fork: benilla in a browser tab
 
 This fork's `web` branch adds **wenilla**: the same client compiled to WebAssembly, so a 1.12.1
@@ -109,6 +103,12 @@ The server defaults to `localhost:3724`, the stock `realmd` auth port. Point `WO
 at any IP or hostname, appending the auth port if yours is remapped
 (`WOW_HOST=play.example.com:5000`). Credentials go in at the login screen, or set `WOW_USER` /
 `WOW_PASS` to skip it.
+
+## Contributing
+
+Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says what gets
+in and how a change is judged. Bugs, questions and ideas are welcome on the
+[Discord](https://discord.gg/wJSJx467G4) too.
 
 ---
 
