@@ -55,11 +55,11 @@ struct FroxelFog {
     // hall — a 30 yd tunnel carrying a 292 yd record — wrapped the city in the building's teal.
     room: vec4<f32>,
     // x = the room medium's extinction (1/yd, uniform); y = its weight (the classic 4 s interior
-    // crossfade); zw unused.
+    // crossfade); z = the night air's extinction (1/yd); w = the night air's glow (r).
     room_media: vec4<f32>,
-    // rgb = the room's ambient in-scatter radiance; w unused.
+    // rgb = the room's ambient in-scatter radiance; w = the night air's glow (g).
     room_ambient: vec4<f32>,
-    // rgb = the room's key-light in-scatter radiance; w unused.
+    // rgb = the room's key-light in-scatter radiance; w = the night air's glow (b).
     room_sun: vec4<f32>,
 }
 
@@ -94,6 +94,11 @@ fn room_reach(f: FroxelFog, dir: vec3<f32>) -> f32 {
         return 0.0;
     }
     return max(sqrt(disc) - b, 0.0);
+}
+
+// fork: the night air's own glow, scattered on top of the haze's (`volumetrics::NIGHT_GLOW`).
+fn night_glow(f: FroxelFog) -> vec3<f32> {
+    return vec3<f32>(f.room_media.w, f.room_ambient.w, f.room_sun.w);
 }
 
 const MODE_ANALYTIC: f32 = 1.0;
@@ -212,12 +217,15 @@ fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32)
     // The open air keeps the ray the room did not take.
     let open_share = max(1.0 - (room_len / len) * room_w, 0.0);
     let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y) * open_share;
-    // fork: plus the night air (`room_media.z`), whose near clear is long over this far out.
-    let haze_tau = (f.medium.x + f.room_media.z) * len * (1.0 - t)
-        * height_average(f, f.camera.y + ray.y * t, p.y);
+    // fork: plus the night air (`room_media.z`), which glows on top (`night_glow`).
+    let haze_path = len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
+    let night_tau = f.room_media.z * haze_path;
+    let haze_tau = f.medium.x * haze_path + night_tau;
     let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
-    let tr = exp(-(fog_tau + haze_tau + far_tau));
-    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share);
+    let total_tau = fog_tau + haze_tau + far_tau;
+    let tr = exp(-total_tau);
+    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share)
+        + night_glow(f) * (night_tau / max(total_tau, 1e-6));
     // Front to back: the room, then everything past it.
     return vec4<f32>(room_lum * (1.0 - room_tr) + room_tr * lum * (1.0 - tr), room_tr * tr);
 }

@@ -57,10 +57,15 @@ const POINT_FORWARD: f32 = 0.3;
 // the camera with a grey glow.
 const POINT_HALO_YD: f32 = 4.0;
 const POINT_FAR_SHARE: f32 = 0.35;
-// fork: the night air's near clear (yd of planar depth): none of it nearer than `NEAR`, all of it past
-// `FAR`. The street the player stands in stays clear; the distance layers into haze.
-const NIGHT_CLEAR_NEAR: f32 = 30.0;
-const NIGHT_CLEAR_FAR: f32 = 150.0;
+// fork: at the flame a light scatters this many times its far-field share into the haze, so a torch
+// or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps).
+const POINT_HALO_GAIN: f32 = 4.0;
+// fork: the night air keeps `NIGHT_NEAR_SHARE` of itself at the camera, ramping to all of it between
+// `NIGHT_CLEAR_NEAR` and `NIGHT_CLEAR_FAR` yards of planar depth: the street stays readable, the
+// distance layers into the haze, and the lamps beside the player still have air to light.
+const NIGHT_NEAR_SHARE: f32 = 0.35;
+const NIGHT_CLEAR_NEAR: f32 = 10.0;
+const NIGHT_CLEAR_FAR: f32 = 80.0;
 
 // The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
 // medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
@@ -102,7 +107,7 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>) -> vec3<f32> {
     let g2 = POINT_G * POINT_G;
     let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
     let phase = mix(1.0, hg, POINT_FORWARD);
-    let halo = mix(POINT_FAR_SHARE, 1.0, exp(-dl / POINT_HALO_YD));
+    let halo = mix(POINT_FAR_SHARE, POINT_HALO_GAIN, exp(-dl / POINT_HALO_YD));
     return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase * halo);
 }
 
@@ -154,9 +159,10 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
     // beam has open sky straight above it by definition.
     let cover = canopy_cover(p);
-    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover)
-        + f.room_media.z * density * smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d);
-    let sigma = sigma_fog + sigma_haze;
+    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover);
+    let sigma_night = f.room_media.z * density
+        * mix(NIGHT_NEAR_SHARE, 1.0, smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d));
+    let sigma = sigma_fog + sigma_haze + sigma_night;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -234,7 +240,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    var cur = vec4<f32>((lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze, sigma);
+    var cur = vec4<f32>(
+        (lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze
+            + (lum_haze + froxelfog::night_glow(f) + points) * sigma_night,
+        sigma,
+    );
 
     // History: this froxel's world point in last frame's grid. Clip w is the planar depth.
     if (f.medium.w > 0.0) {

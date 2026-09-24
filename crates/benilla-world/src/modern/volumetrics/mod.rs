@@ -64,13 +64,16 @@ const CLOUD_HEIGHT: f32 = 350.0;
 /// Scatter history weight on a steady frame (was the plan's 0.9: beams shimmered with the jitter).
 const HISTORY_WEIGHT: f32 = 0.95;
 /// fork: **the night air** — haze extinction (1/yd) added in every zone overnight (scaled by the
-/// SIDN night fraction), so a night city fades into a dim haze with distance instead of being a
-/// vacuum. It is the DISTANCE's haze and not the street's: `froxel_scatter.wgsl` clears it within
-/// `NIGHT_CLEAR_NEAR` yards of the camera and ramps it in by `NIGHT_CLEAR_FAR`, so what the player
-/// stands among stays clear and only the far city layers into it. By day it is zero, so the zones
-/// calibrated against daylight shots keep their air. It rides `room_media.z`, apart from the
-/// zone's own shaft haze, because that one must reach the camera (a beam starts at the eye).
-const NIGHT_HAZE: f32 = 0.0025;
+/// SIDN night fraction), so a night city layers into a lit haze with distance, as the Forever
+/// Orgrimmar night shot does. `froxel_scatter.wgsl` keeps `NIGHT_NEAR_SHARE` of it at the camera and
+/// all of it past `NIGHT_CLEAR_FAR`, so the street stays readable and the lamps around the player
+/// still have air to light. By day it is zero. It rides `room_media.z`, apart from the zone's own
+/// shaft haze.
+const NIGHT_HAZE: f32 = 0.004;
+/// fork: the night air's own glow: the zone's fog colour (decoded) times this, times the night
+/// fraction, is the radiance it scatters on top of the haze's. The night fog alone solves to a near
+/// black veil (Orgrimmar's is 0.011 linear), where the reference's night haze is a lit purple.
+const NIGHT_GLOW: f32 = 5.0;
 /// fork: **the air is as faint by day as it is at midnight.** The zone rows' shaft haze was fitted
 /// to reference shots, and in play the daylight lit it into a veil — Goldshire at dusk sat in an
 /// orange wash, while the same air under the moon read as the faint haze the user wants at every
@@ -478,6 +481,8 @@ fn update_volume(
     }
 
     let shaft_key = shaft_key(l.diffuse, &look.0);
+    let night = l.sidn_night.clamp(0.0, 1.0);
+    let night_glow = Vec3::from(l.fog_color.map(super::srgb_to_linear)) * (NIGHT_GLOW * night);
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
@@ -547,21 +552,22 @@ fn update_volume(
             (Some((centre, radius)), Some(_)) => centre.extend(radius),
             _ => Vec4::ZERO,
         },
+        // fork: the night air's extinction and glow (see `NIGHT_HAZE`, `NIGHT_GLOW`); the glow's rgb
+        // rides the three spare `.w` lanes of the room rows.
         room_media: Vec4::new(
             room_media.map_or(0.0, |m| m.density),
             room_w,
-            // fork: the night air's own extinction (see `NIGHT_HAZE`).
-            NIGHT_HAZE * l.sidn_night.clamp(0.0, 1.0),
-            0.0,
+            NIGHT_HAZE * night,
+            night_glow.x,
         ),
         room_ambient: room_media
             .map(|m| Vec3::from(m.ambient_in) * Vec3::from(look.0.haze_tint))
             .unwrap_or_default()
-            .extend(0.0),
+            .extend(night_glow.y),
         room_sun: room_media
             .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.glow))
             .unwrap_or_default()
-            .extend(0.0),
+            .extend(night_glow.z),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
