@@ -13,7 +13,7 @@ use bevy::prelude::*;
 
 use benilla_assets::coords::wow_to_bevy;
 
-use crate::lighting::{GameClock, LightingResolveSet, WowLighting};
+use crate::lighting::{GameClock, LightingConsumeSet, LightingResolveSet, WowLighting};
 
 /// 06:30 and 21:30 — the reference's dawn and dusk (the sky warp's peaks).
 pub const SUNRISE_MINUTE: f32 = 390.0;
@@ -40,12 +40,21 @@ pub fn key_horizon() -> f32 {
 }
 
 fn horizon_factor(elevation: f32) -> f32 {
-    let t = ((elevation - KEY_ZERO_ELEVATION) / (KEY_FULL_ELEVATION - KEY_ZERO_ELEVATION)).clamp(0.0, 1.0);
+    let t = ((elevation - KEY_ZERO_ELEVATION) / (KEY_FULL_ELEVATION - KEY_ZERO_ELEVATION))
+        .clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The arc's rewrite of the resolved bodies; every `WowLighting` consumer reads after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct SunArcSet;
+
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Update, apply_sun_arc.after(LightingResolveSet));
+    app.configure_sets(Update, LightingConsumeSet.after(SunArcSet))
+        .add_systems(
+            Update,
+            apply_sun_arc.in_set(SunArcSet).after(LightingResolveSet),
+        );
 }
 
 /// Unit vector (Bevy axes) toward a body at `phase` along its arc — 0 rising in the east, 0.5 due
@@ -79,8 +88,18 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
         return;
     };
     let minute = clock.minute as f32;
-    let sun_elev = lighting.celestial_dir.normalize_or_zero().y.clamp(-1.0, 1.0).asin();
-    let moon_elev = lighting.moon_dir_white.normalize_or_zero().y.clamp(-1.0, 1.0).asin();
+    let sun_elev = lighting
+        .celestial_dir
+        .normalize_or_zero()
+        .y
+        .clamp(-1.0, 1.0)
+        .asin();
+    let moon_elev = lighting
+        .moon_dir_white
+        .normalize_or_zero()
+        .y
+        .clamp(-1.0, 1.0)
+        .asin();
 
     let sun = arc_to_body(day_phase(minute), sun_elev);
     let moon = arc_to_body(night_phase(minute), moon_elev);
@@ -88,11 +107,20 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
     lighting.moon_dir_white = moon;
 
     let (to_key, key_elev) = if sun_elev > HANDOFF_ELEVATION {
-        (arc_to_body(day_phase(minute), sun_elev.max(MIN_KEY_ELEVATION)), sun_elev)
+        (
+            arc_to_body(day_phase(minute), sun_elev.max(MIN_KEY_ELEVATION)),
+            sun_elev,
+        )
     } else {
-        (arc_to_body(night_phase(minute), moon_elev.max(MIN_KEY_ELEVATION)), moon_elev)
+        (
+            arc_to_body(night_phase(minute), moon_elev.max(MIN_KEY_ELEVATION)),
+            moon_elev,
+        )
     };
-    KEY_HORIZON.store(horizon_factor(key_elev).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    KEY_HORIZON.store(
+        horizon_factor(key_elev).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // `sun_dir` is the direction light TRAVELS.
     lighting.sun_dir = -to_key;
 }
