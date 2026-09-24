@@ -46,6 +46,10 @@ const MIN_SPAN: f32 = 8.0;
 const MAX_CLEAR_SHARE: f32 = 0.35;
 /// Albedo is a calibration here, not a physical ratio, but a black ambient channel must not explode.
 const MAX_ALBEDO: f32 = 16.0;
+/// The fog colour's saturation `(max - min) / max` never exceeds this (see [`subtle`]).
+pub const MAX_FOG_SATURATION: f32 = 0.3;
+/// Nor its brightest channel (gamma) this.
+pub const MAX_FOG_LEVEL: f32 = 0.78;
 
 /// What one frame's media is solved from. Colours are the authored gamma values.
 #[derive(Clone, Copy, Debug)]
@@ -99,14 +103,30 @@ pub struct Media {
     pub g_backward: f32,
 }
 
+/// fork: **the haze is always subtle.** The tinted fog colour (gamma) is held to at most
+/// [`MAX_FOG_SATURATION`] saturation and [`MAX_FOG_LEVEL`] on its brightest channel, hue kept: the
+/// Forever tint on Westfall's and Stranglethorn's authored fog made a saturated cyan wall over half
+/// the screen. Every zone's air passes through here.
+fn subtle(c: [f32; 3]) -> [f32; 3] {
+    let c = c.map(|v| v.max(0.0));
+    let hi = c[0].max(c[1]).max(c[2]);
+    if hi <= 1e-5 {
+        return c;
+    }
+    let lo = c[0].min(c[1]).min(c[2]);
+    let keep = (MAX_FOG_SATURATION * hi / (hi - lo).max(1e-5)).min(1.0);
+    let level = (MAX_FOG_LEVEL / hi).min(1.0);
+    c.map(|v| (hi - (hi - v) * keep) * level)
+}
+
 pub fn solve(i: &MediaInputs) -> Media {
     let decode = |c: [f32; 3]| c.map(crate::modern::srgb_to_linear);
     // The zone's fog tint is calibrated on the zone's own `Light.dbc` fog, so it fades out with the
     // room's: Durotar's (green x2.6, the amber its grey fog wants) on Orgrimmar's teal MFOG record
     // was most of what made the gate hall green.
-    let fog = decode([0, 1, 2].map(|c| {
+    let fog = decode(subtle([0, 1, 2].map(|c| {
         i.fog_color[c] * (1.0 + (i.fog_tint[c] - 1.0) * (1.0 - i.interior.clamp(0.0, 1.0)))
-    }));
+    })));
     let ambient = decode(i.ambient);
     let key = decode(i.diffuse);
     let storm = i.storm.clamp(0.0, 1.0);
@@ -228,13 +248,13 @@ mod tests {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     }
 
-    /// The plan's exit: distant fog within ΔE 5 of the DBC colour. A horizontal ray to infinity at the
+    /// The plan's exit: distant fog within ΔE 5 of the DBC colour (held subtle). A horizontal ray to infinity at the
     /// reference phase lands on the colour exactly; side-on to the sun it stays close.
     #[test]
     fn distant_fog_lands_on_the_dbc_colour() {
         let i = elwynn_noon();
         let m = solve(&i);
-        let target = i.fog_color.map(crate::modern::srgb_to_linear);
+        let target = subtle(i.fog_color).map(crate::modern::srgb_to_linear);
         let far = |phase: f32| [0, 1, 2].map(|c| m.ambient_in[c] + m.key_in[c] * phase);
         assert!(delta_e(far(REFERENCE_PHASE), target) < 0.5, "{:?} vs {target:?}", far(REFERENCE_PHASE));
         // Side-on through the dual lobe (μ = 0): 0.7 · hg(0.75) + 0.3 · hg(−0.2).
@@ -257,6 +277,16 @@ mod tests {
         let span = 500.0 - 125.0;
         assert!((a.density * span - FAR_TAU).abs() < 1e-4);
         assert!((-a.density * span).exp() > 0.15, "the zone end must still show the scene");
+    }
+
+    #[test]
+    fn a_tinted_fog_is_never_a_saturated_wall() {
+        let c = subtle([0.35 * 1.9, 0.6 * 2.5, 0.7 * 2.25]);
+        let (hi, lo) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+        assert!(hi <= MAX_FOG_LEVEL + 1e-5);
+        assert!((hi - lo) / hi <= MAX_FOG_SATURATION + 1e-4);
+        assert!(c[2] >= c[1] && c[1] >= c[0], "hue kept");
+        assert_eq!(subtle([0.5, 0.52, 0.55]), [0.5, 0.52, 0.55]);
     }
 
     #[test]
@@ -311,7 +341,7 @@ mod tests {
         for c in 0..3 {
             let sum = m.ambient_in[c] + m.key_in[c] * REFERENCE_PHASE;
             assert!(m.ambient_in[c] >= sum * SHADED_SHARE - 1e-6, "channel {c}");
-            let target = crate::modern::srgb_to_linear(i.fog_color[c]);
+            let target = crate::modern::srgb_to_linear(subtle(i.fog_color)[c]);
             assert!((sum - target).abs() < 1e-4, "channel {c}: {sum} vs {target}");
         }
     }
@@ -351,7 +381,7 @@ mod tests {
             [0, 1, 2].map(|c| m.ambient_in[c] + m.key_in[c] * REFERENCE_PHASE)
         };
         let room = colour(1.0);
-        let target = teal.map(crate::modern::srgb_to_linear);
+        let target = subtle(teal).map(crate::modern::srgb_to_linear);
         for c in 0..3 {
             assert!((room[c] - target[c]).abs() < 1e-4, "channel {c}: {} vs {}", room[c], target[c]);
         }
