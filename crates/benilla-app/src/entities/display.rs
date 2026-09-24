@@ -265,10 +265,10 @@ pub(crate) struct DisplayModel {
     /// FIXED fallback camera instead.
     pub(super) pane_camera: Option<benilla_assets::PortraitCamera>,
     /// A bow display's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2),
-    /// captured with `parts`: `[top, bottom]` as `(bone, model-local Bevy position)`. The held-item
+    /// captured with `parts`: `[top, bottom]`, each bone-local and model-local. The held-item
     /// attach marks the prop root with them so the string drawer can span the tips. `None` for
     /// every non-bow model.
-    pub(super) string_anchors: Option<[(u16, Vec3); 2]>,
+    pub(super) string_anchors: Option<[benilla_assets::StringTip; 2]>,
     /// The fishing pole's `$CCH` line anchor (wow-re `fishing-line.md`), mesh-frame Bevy space,
     /// captured with `parts`. The held-item attach marks the mainhand prop with it so the line
     /// drawer can span rod tip → bobber. `None` for every model that doesn't author it.

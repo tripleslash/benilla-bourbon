@@ -37,8 +37,9 @@ use crate::bone_target_id;
 use crate::coords::wow_to_bevy;
 use crate::model::{
     arm_subtree_roots, billboard_info, build_animation_clip, build_attachments, build_global_bones,
-    build_grip_clip, build_skeleton, finger_subtree_roots, in_subtree, skeleton_pivots,
-    upper_subtree_root, AnimClip, ModelAnimations, ModelAttachment, ModelSkeleton, ModelSubmesh,
+    build_grip_clip, build_skeleton, build_string_tip, finger_subtree_roots, in_subtree,
+    skeleton_pivots, upper_subtree_root, AnimClip, ModelAnimations, ModelAttachment, ModelSkeleton,
+    ModelSubmesh,
 };
 
 /// A loaded M2 model: its render batches + authored bounds (the distance-fade size source) + the
@@ -128,9 +129,9 @@ pub struct M2Model {
     /// camera and the pane falls back to the orthographic leg).
     pub cameras: Vec<PaneCamera>,
     /// A bow's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2), baked to Bevy
-    /// space: `[top, bottom]` as `(bone index, model-local position)` — the two limb-tip points the
-    /// engine-drawn string spans. `None` for every non-bow model.
-    pub string_anchors: Option<[(u16, Vec3); 2]>,
+    /// space: `[top, bottom]`, each tip bone-local AND model-local ([`crate::StringTip`]) — the two
+    /// limb-tip points the engine-drawn string spans. `None` for every non-bow model.
+    pub string_anchors: Option<[crate::StringTip; 2]>,
     /// The fishing pole's `$CCH` line anchor (wow-re `fishing-line.md` §2), baked to Bevy space in
     /// the mesh frame — the rod-tip point the engine-drawn fishing line starts from. `None` for
     /// every model that doesn't author it (exactly one weapon model in the chain does).
@@ -904,12 +905,14 @@ impl AssetLoader for M2ModelLoader {
             })
             .collect();
 
-        // The bowstring anchors (bows only): raw WoW positions → Bevy, the meshes' frame.
-        let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
-            [
-                (a.top.0, wow_to_bevy(a.top.1)),
-                (a.bottom.0, wow_to_bevy(a.bottom.1)),
-            ]
+        // The bowstring anchors (bows only): raw WoW positions → Bevy, kept model-local AND
+        // rebased onto the tip bone's pivot — `posed_point` composes a bone-local offset, so the
+        // flexing prop's tips land `pivot` off the limb if handed the model-space point.
+        let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).and_then(|a| {
+            Some([
+                build_string_tip(a.top, &pivots)?,
+                build_string_tip(a.bottom, &pivots)?,
+            ])
         });
 
         // The fishing line's near anchor (mesh frame, like the bowstring anchors).

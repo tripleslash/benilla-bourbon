@@ -32,10 +32,10 @@ const HAND_ARROW: u16 = 0x23;
 pub(crate) struct Bowstring {
     /// The unit wearing the bow — the HandArrow middle vertex and nock latch live on it.
     pub(crate) owner: Entity,
-    /// The `$WTT` top / `$WTB` bottom anchors as `(bone, model-local Bevy offset)` — the bone is
-    /// load-bearing on an animated prop (see the module note): the limb tips move with the draw.
-    pub(crate) top: (u16, Vec3),
-    pub(crate) bottom: (u16, Vec3),
+    /// The `$WTT` top / `$WTB` bottom anchors — the bone is load-bearing on an animated prop (see
+    /// the module note): the limb tips move with the draw.
+    pub(crate) top: benilla_assets::StringTip,
+    pub(crate) bottom: benilla_assets::StringTip,
 }
 
 /// Draw every visible bow's string (per frame, post-propagation so the prop/joint frames are
@@ -62,11 +62,12 @@ fn draw_bowstrings(
             continue;
         }
         // The prop's own pose when it flexes (`joints_root` IS this entity, so its
-        // `GlobalTransform` is the frame `posed_point` wants); its rigid frame otherwise, which is
-        // the same answer for a bow standing at bind pose.
-        let tip = |(bone, offset): (u16, Vec3)| {
-            flex.and_then(|p| p.posed_point(prop, bone, offset))
-                .unwrap_or_else(|| prop.transform_point(offset))
+        // `GlobalTransform` is the frame `posed_point` wants), composing the pivot-rebased offset
+        // through the live bone; the model-local point through its rigid frame otherwise, which
+        // is the same answer for a bow standing at bind pose.
+        let tip = |t: benilla_assets::StringTip| {
+            flex.and_then(|p| p.posed_point(prop, t.bone, t.offset))
+                .unwrap_or_else(|| prop.transform_point(t.rest))
         };
         let top = tip(bs.top);
         let bottom = tip(bs.bottom);

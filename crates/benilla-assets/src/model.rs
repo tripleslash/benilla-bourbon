@@ -502,6 +502,31 @@ pub struct ModelMarker {
     pub offset: Vec3,
 }
 
+/// One bow limb tip (`$WTT`/`$WTB`, wow-re `nocked-ammo-cancel.md` §G2) in both frames its readers
+/// need: `offset` is bone-local from the bind pivot (the [`ModelMarker`] bake, what
+/// `RigPose::posed_point` composes through a flexing prop's live bone), `rest` is the same point
+/// model-local (the rigid prop-root frame a resting prop and the weapon trail read).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringTip {
+    pub bone: u16,
+    pub offset: Vec3,
+    pub rest: Vec3,
+}
+
+/// Bake one raw `(bone, WoW model-space position)` anchor into a [`StringTip`] — the
+/// [`build_markers`] bake plus the un-rebased point. `None` for an out-of-range bone.
+pub(crate) fn build_string_tip(
+    (bone, position): (u16, [f32; 3]),
+    pivots: &[Vec3],
+) -> Option<StringTip> {
+    let rest = wow_to_bevy(position);
+    Some(StringTip {
+        bone,
+        offset: rest - *pivots.get(bone as usize)?,
+        rest,
+    })
+}
+
 /// Bake the raw [`benilla_formats::EventMarker`] table into [`ModelMarker`]s — the same
 /// `offset = wow_to_bevy(position) − pivot_bevy(bone)` bake and the same defence-in-depth bone
 /// range check as [`build_attachments`]. File order is preserved (queries take the first ident
@@ -1164,5 +1189,38 @@ mod tests {
             built.joints[23].parent_arm.is_none() && built.joints[25].parent_arm.is_none(),
             "the swinging spine bones are ordinary"
         );
+    }
+
+    /// A bow's limb tip, composed through its bone at bind pose, lands on the authored point. The
+    /// flexing prop's string reads `posed_point(bone, offset)` = bone frame × offset, so an offset
+    /// left in model space puts each tip one pivot off the limb — the string floated beside the
+    /// bow. The tip bone's pivot is nonzero so dropping the rebase fails here.
+    #[test]
+    fn a_string_tip_composed_through_its_bone_lands_on_the_marker() {
+        let bone = |parent, pivot| benilla_formats::SkeletonBone {
+            parent,
+            pivot,
+            key_bone: -1,
+            billboard: None,
+            parent_arm: None,
+        };
+        let raw = benilla_formats::Skeleton {
+            bones: vec![bone(-1, [0.0, 0.0, 0.1]), bone(0, [0.05, 0.0, 0.9])],
+        };
+        let (skeleton, _) = build_skeleton(&raw);
+        let tip = build_string_tip((1, [0.06, 0.01, 0.95]), &skeleton_pivots(&raw)).unwrap();
+        // The bind-pose bone frame is the local-translation chain, the fold `RigPose` composes.
+        let frame: Vec3 = [0usize, 1]
+            .iter()
+            .map(|&i| skeleton.joints[i].local_translation)
+            .sum();
+        assert!(
+            (frame + tip.offset - tip.rest).length() < 1e-6,
+            "posed tip {:?} ≠ marker {:?}",
+            frame + tip.offset,
+            tip.rest
+        );
+        assert_eq!(tip.rest, wow_to_bevy([0.06, 0.01, 0.95]));
+        assert!(build_string_tip((2, [0.0; 3]), &skeleton_pivots(&raw)).is_none());
     }
 }

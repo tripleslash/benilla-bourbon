@@ -368,7 +368,7 @@ fn spawn_slot(
         if let Some([top, bottom]) = dm.string_anchors {
             commands
                 .entity(root)
-                .insert(crate::weapon_trail::WeaponTrail::new(top.1, bottom.1));
+                .insert(crate::weapon_trail::WeaponTrail::new(top.rest, bottom.rest));
         }
     }
     // The fishing line's near anchor (wow-re `fishing-line.md`, decision 1099): a MAINHAND prop
