@@ -1,9 +1,8 @@
-// The retained static-world pass: `wow_model.wgsl`'s shading for never-fade, order-free,
-// non-animated statics (ADT doodads, WMO groups, interior M2 props) over retained buffers, with
-// per-vertex flag words and a per-item record in place of materials. Admission
-// (`static_gx::StaticGx::divert`): Opaque/AlphaTest only, no env map, no depth flags.
-// Keep in sync with `wow_model.wgsl`: naga_oil cannot import functions that reference another
-// module's bindings, so the light prefix, the helpers and the lighting lanes are copies.
+// The retained static-world pass: `wow_model.wgsl`'s shading for statics that never fade or
+// animate (ADT doodads, WMO groups, interior M2 props), with per-vertex flag words and a per-item
+// record in place of materials. `StaticGx::divert` admits opaque and alpha-tested batches with no
+// env map and no depth flags. The light prefix, helpers and lighting lanes copy `wow_model.wgsl`'s
+// and must stay in sync: naga_oil cannot import functions that use another module's bindings.
 
 // fork: modern lighting (FORK.md)
 #import benilla_modern::colorspace
@@ -234,10 +233,9 @@ struct GxCell {
     origin: vec4<f32>, // xyz = the bake's recentring origin
 }
 @group(1) @binding(0) var<uniform> cell: GxCell;
-// The per-item record table, indexed by the vertex word's low 16 bits: x = texture-array layer,
-// y = WMO authored batch order (0 on cells), z = MOMT SIDN colour r|g<<8|b<<16 (gamma bytes),
-// w = flags: bit 0 exile kill, bits 1..=13 interior-prop probe slot, bit 14 interior fog (the
-// client's per-group `[0xca7f00]`).
+// The per-item records, indexed by the vertex word's low 16 bits: x the texture-array layer, y
+// the WMO batch order (0 on cells), z the MOMT SIDN colour r|g<<8|b<<16 in gamma bytes, w flags:
+// bit 0 exile kill, bits 1..=13 the interior-prop probe slot, bit 14 interior fog (`[0xca7f00]`).
 @group(1) @binding(1) var<storage, read> recs: array<vec4<u32>>;
 @group(1) @binding(2) var tex_array: texture_2d_array<f32>;
 // Repeat and clamp model-albedo samplers: trilinear, aniso 8, the same as the entity path's.
@@ -753,14 +751,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let primary = clamp(lit_prop_room + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
         rgb = folded * primary;
     } else {
-        // ---- the exterior ADT-doodad lane (slice 1) + the exterior MODD-prop family (B4) --
-        // The intensity family: statics are `mat_shade` only (no per-instance ramp byte —
-        // that is an entity concern): lit ground ⇒ mix(2.5,0.5,0)=2.5, MCSH-shadowed ⇒ 0.5,
-        // and the Matte mid-band (an exterior WMO MODD prop) FIXED 1.0 — the 2.5 site is one
-        // a MODD prop never reaches (§8b); then the recorded `min(I,1)` cap (unfaithful,
-        // kept in exact sync — 0803 §3; today it makes Matte and Lit read identically, and
-        // the distinct bit exists so lifting the cap cannot silently split this lane).
-        // fork: modern lighting (FORK.md, P3) — the baked MCSH doodad shade retires in a modern frame.
+        // ---- exterior ADT doodads and exterior MODD props ----
+        // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit.
+        // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, since lifting it takes sun-facing
+        // surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
+        // fork: modern lighting (FORK.md, P3): the baked MCSH doodad shade
+        // retires in a modern frame.
         let shade_t = select(select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u), 0.0, MODERN_FRAME);
         let intensity = min(
             select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),

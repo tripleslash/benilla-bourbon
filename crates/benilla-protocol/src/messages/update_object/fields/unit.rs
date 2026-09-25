@@ -99,7 +99,8 @@ impl ObjectFields {
         self.unit_pet_number() != 0
     }
     /// `UNIT_FIELD_PETNUMBER`: `GetUnitName` (`0x609210`) keys the pet-name cache on it when
-    /// nonzero; a `HIGHGUID_PET` guid's number is not a substitute, no name query answers it.
+    /// nonzero. A `HIGHGUID_PET` guid's number is no substitute: a companion's is never filed in
+    /// its charm info, so no pet-name query answers it.
     pub fn unit_pet_number(&self) -> u32 {
         self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0)
     }
@@ -266,7 +267,7 @@ impl ObjectFields {
     pub fn unit_flags(&self) -> u32 {
         self.get_u32(FIELD_UNIT_FLAGS).unwrap_or(0)
     }
-    /// `UNIT_FIELD_COMBATREACH` (`+0x1f0`): melee reach, summed as `rA + rB + 1.333`, cap 5.0,
+    /// `UNIT_FIELD_COMBATREACH` (`+0x1f0`): melee reach, summed as `rA + rB + 1.333`, floor 5.0,
     /// by the attack range gate (`0x6e3480`); 1.5, the vanilla default, before it streams.
     pub fn unit_combat_reach(&self) -> f32 {
         self.get_f32(FIELD_UNIT_COMBATREACH).unwrap_or(1.5)

@@ -1,5 +1,4 @@
-//! The **realmlist** — the address benilla dials for the logon (realmd) handshake, and the one
-//! setting a player cannot start the game without (decision 1667).
+//! The realmlist: the `host[:port]` benilla dials for the logon handshake.
 //!
 //! The reference client has no UI for this at all: it registers a CVar named `realmList` — help
 //! text *"Address of realm list server"*, default `us.logon.worldofwarcraft.com:3724` — and loads
@@ -17,28 +16,15 @@
 //! login-screen editor: an address a visitor typed would be saved into `config.toml` and outrank
 //! the hosted one, so one source beats two.
 //!
-//! **It is a CVar, in `config.toml` with every other setting — not a `realmlist.wtf` of our own.**
-//! The reference splits the file for reasons that are entirely its own (the installer and the
-//! patcher write the realmlist without touching a player's `Config.wtf`), and benilla has neither.
-//! Decision 0954's law is one folder and one config file; a second file would buy nothing and
-//! would fork the atomic-write, unknown-key-preservation and debounce machinery that already
-//! exists. `GetCVar("realmList")` answers, which is also what the reference's own console does.
-//!
-//! **`$WOW_HOST` still wins for the session** and never reaches the file — the same law
-//! `WOW_UI_SCALE`/`WOW_FARCLIP` run under (`crate::cvars`' module doc). Every probe, smoke run and
-//! harness leg sets it, so the env path is the one that must not change behaviour: its value is
-//! taken **verbatim**, not through [`normalize`], so nothing that connects today can start
-//! failing a syntax check.
+//! `$WOW_HOST` wins for the session, is never written to the file, and is taken verbatim, not
+//! through [`normalize`].
 
 use bevy::prelude::*;
 
-/// Installs [`Realmlist`]. Its own plugin (rather than a line in `CvarPlugin`) because every other
-/// CVar knob resource is owned by the module it belongs to, and because the resource has to exist
-/// before `cvars::load_config` applies the saved value at `Startup` — `lib.rs` orders it there.
+/// Installs [`Realmlist`], which must exist before `cvars::load_config` applies the saved value.
 pub(crate) struct RealmlistPlugin;
 
-/// `realmList`'s change callback (1667, 2303): a string row — a value that is not an address
-/// is consumed with a warn, and the resource keeps its truth.
+/// `realmList`'s change callback: a value that is not an address is ignored with a warning.
 pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<Realmlist>) {
     if !ev.is(CVAR_REALMLIST) {
         return;
@@ -56,16 +42,11 @@ impl Plugin for RealmlistPlugin {
     }
 }
 
-/// The CVar name — the reference's own spelling, `realmList`.
+/// The CVar name, the reference's spelling.
 pub(crate) const CVAR_REALMLIST: &str = "realmList";
 
-/// benilla's registered default.
-///
-/// **Not the reference's** `us.logon.worldofwarcraft.com:3724`, which is a knowing divergence and
-/// a small one: that host has not resolved since 2019, so shipping it would mean every first
-/// launch begins with a DNS failure. benilla is a client for servers you run or choose, and the
-/// one it can assume is the one on the machine it is running on — which is also what every
-/// existing `WOW_HOST`-less dev and capture run already dials.
+/// Deviation: the local machine's server, not the reference's
+/// `us.logon.worldofwarcraft.com:3724`, because that host no longer resolves.
 pub(crate) const DEFAULT_REALMLIST: &str = "localhost";
 
 /// The longest address [`normalize`] accepts. It was the realmlist dialog's `letters` cap
@@ -74,14 +55,9 @@ pub(crate) const DEFAULT_REALMLIST: &str = "localhost";
 /// limit, but nothing an operator writes into `config.json` by hand approaches it.
 pub(crate) const MAX_LETTERS: usize = 64;
 
-/// The address the next logon attempt dials, as `host[:port]` — [`benilla_protocol::host_port`]
-/// supplies [`benilla_protocol::AUTH_PORT`] when the port is left off.
-///
-/// The session's live value, so a change takes effect on the **next attempt** with no relaunch.
-/// It is deliberately not read by the IO thread: the host travels on each
-/// [`crate::net::LoginRequest`], exactly as the credentials have since decision 0539 — an attempt
-/// carries everything about itself, and a mid-flight edit cannot repoint the attempt already on
-/// the wire.
+/// The address the next logon attempt dials, as `host[:port]` (the port defaults to
+/// [`benilla_protocol::AUTH_PORT`]). It travels on each [`crate::net::LoginRequest`], so an edit
+/// never repoints an attempt in flight.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Realmlist {
     address: String,
@@ -97,7 +73,7 @@ impl Default for Realmlist {
         // fallback — `cvars::load_config` applies `/config.json`'s `realmlist` over it at Startup,
         // and `default_realmlist` is what a page that names none is left with.
         match crate::webenv::var("WOW_HOST").ok_or(()) {
-            // Verbatim, not normalized — see the module doc.
+            // Verbatim, not normalized.
             Ok(host) if !host.trim().is_empty() => Realmlist {
                 address: host,
                 pinned_by_env: true,
@@ -111,11 +87,7 @@ impl Default for Realmlist {
 }
 
 impl Realmlist {
-    /// A realmlist at `address` with **no env pin**, whatever the ambient `$WOW_HOST` says.
-    ///
-    /// For tests only, and it exists because [`Default`] reads the environment: a suite run from a
-    /// shell that exports `WOW_HOST` (which every probe recipe in this repo does) would otherwise
-    /// assert against that shell's value and refuse every write.
+    /// A realmlist with no env pin, for tests, since [`Default`] reads `$WOW_HOST`.
     #[cfg(test)]
     pub(crate) fn unpinned(address: &str) -> Self {
         Realmlist {
@@ -124,13 +96,11 @@ impl Realmlist {
         }
     }
 
-    /// What the next attempt dials.
     pub(crate) fn address(&self) -> &str {
         &self.address
     }
 
-    /// Point at `address` — already through [`normalize`]. Ignored while pinned by the env, so a
-    /// stray `SetCVar` cannot repoint a harness leg mid-run.
+    /// Points at an already normalized `address`; ignored while pinned by the env.
     pub(crate) fn set(&mut self, address: &str) {
         if self.pinned_by_env || self.address == address {
             return;
@@ -155,7 +125,7 @@ impl Realmlist {
 pub(crate) fn normalize(input: &str) -> Option<String> {
     let mut s = input.trim();
 
-    // `SET realmlist <value>` / `set realmlist = <value>` — the .wtf line, unwrapped to its value.
+    // `SET realmlist <value>` or `set realmlist = <value>`.
     if let Some(rest) = strip_prefix_ci(s, "set") {
         if rest.starts_with(|c: char| c.is_whitespace()) {
             if let Some(value) = strip_prefix_ci(rest.trim_start(), "realmlist") {
@@ -163,8 +133,7 @@ pub(crate) fn normalize(input: &str) -> Option<String> {
             }
         }
     }
-    // One matched pair of quotes (the .wtf line quotes its value); `trim_matches` would eat a
-    // run of them, which is a different string than the one the player pasted.
+    // One matched pair of quotes only; `trim_matches` would eat a run of them.
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
         s = &s[1..s.len() - 1];
     }
@@ -173,16 +142,12 @@ pub(crate) fn normalize(input: &str) -> Option<String> {
     if s.is_empty() || s.chars().count() > MAX_LETTERS {
         return None;
     }
-    // No whitespace and no control characters: an address with a space in it is a paste that
-    // brought a second word along, not a host.
+    // Whitespace or control characters mean the paste brought a second word along.
     if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
-    // Mirror `host_port`'s own split exactly (`benilla-protocol`): a **single** colon means the
-    // suffix was meant as a port, so a non-numeric one is a typo worth naming here rather than a
-    // DNS failure thirty seconds later. Two or more colons is an IPv6 literal, which `host_port`
-    // deliberately leaves intact — so this leaves it intact too rather than inventing a second,
-    // stricter law for the same string.
+    // Mirrors `host_port`'s split: a single colon must carry a valid port; two or more colons
+    // are an IPv6 literal, left intact.
     if let Some((host, port)) = s.rsplit_once(':') {
         if !host.contains(':') && (host.is_empty() || port.parse::<u16>().is_err()) {
             return None;
@@ -191,8 +156,7 @@ pub(crate) fn normalize(input: &str) -> Option<String> {
     Some(s.to_string())
 }
 
-/// `s` without `prefix`, matched case-insensitively. `str::get` returns `None` on a non-boundary
-/// index, so a multi-byte character straddling the split can never be sliced through.
+/// `s` without `prefix`, case-insensitively; `str::get` refuses a non-boundary split.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     s.get(..prefix.len())
         .filter(|head| head.eq_ignore_ascii_case(prefix))
@@ -231,8 +195,6 @@ mod tests {
         );
     }
 
-    /// The line a private server's setup page tells you to paste into `realmlist.wtf` — in every
-    /// spelling those pages actually use.
     #[test]
     fn a_pasted_wtf_line_is_unwrapped() {
         for line in [
@@ -250,7 +212,6 @@ mod tests {
         }
     }
 
-    /// A host that merely *starts* with the letters of the prefix is not a .wtf line.
     #[test]
     fn a_host_named_like_the_prefix_is_left_alone() {
         assert_eq!(
@@ -271,7 +232,6 @@ mod tests {
         assert_eq!(normalize(&"a".repeat(MAX_LETTERS + 1)), None);
     }
 
-    /// The port half of `host_port`'s law, enforced forward: a single colon means a port.
     #[test]
     fn a_single_colon_must_carry_a_real_port() {
         assert_eq!(normalize("logon.example.org:notaport"), None);
@@ -284,8 +244,6 @@ mod tests {
         );
     }
 
-    /// An IPv6 literal keeps `host_port`'s own answer: more than one colon is a raw address and
-    /// comes back intact, with the default port.
     #[test]
     fn an_ipv6_literal_is_left_intact() {
         assert_eq!(normalize("::1").as_deref(), Some("::1"));
@@ -297,7 +255,6 @@ mod tests {
         );
     }
 
-    /// Every value this module can hand out survives `host_port` — the one consumer downstream.
     #[test]
     fn the_default_is_a_host_the_protocol_can_split() {
         let (host, port) =
@@ -306,7 +263,6 @@ mod tests {
         assert_eq!(port, benilla_protocol::AUTH_PORT);
     }
 
-    /// A pinned session refuses to be repointed — the harness guard.
     #[test]
     fn an_env_pinned_realmlist_ignores_writes() {
         let mut r = Realmlist {

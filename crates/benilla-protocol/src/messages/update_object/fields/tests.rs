@@ -308,7 +308,7 @@ fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
     assert_eq!(
         f.player_honor_rank(),
         None,
-        "the HIGHEST rank is a different field (1222) — absent means absent"
+        "the HIGHEST rank is a different field: absent means absent"
     );
     // A demoted player keeps the higher lifetime rank.
     let demoted = ObjectFields::from_pairs(&[(195, 0x03_00_00_00), (1222, 0x0B_00_00_00)]);
@@ -547,7 +547,7 @@ fn corpse_descriptor_indices_and_packing() {
     // `+0x1D = 35` flags · `+0x1E = 36` dynamic flags (vmangos `UpdateFields_1_12_1.h:338-350`).
     let corpse = ObjectFields::from_pairs(&[
         (12, 49),
-        // Slot 4 (chest): DisplayInfoID 902 | InventoryType 5 << 24 (`Player.cpp:4821`).
+        // Slot 4 (chest): DisplayInfoID 902 | InventoryType 5 << 24 (`Player.cpp:4822`).
         (13 + 4, 902 | (5 << 24)),
         // BYTES_1: (0) | race<<8 | gender<<16 | skin<<24 (`Corpse.cpp:228`).
         (32, (6 << 8) | (1 << 16) | (3 << 24)),

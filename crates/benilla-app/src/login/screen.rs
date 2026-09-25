@@ -1,22 +1,10 @@
-//! The login screen's **layout** — the reference `AccountLogin.xml` arrangement rebuilt in Bevy
-//! UI (decision 0539), full-bleed and scaled to the window (`height / 768`, the glue engine's
-//! virtual screen).
+//! The login screen's layout: the reference `AccountLogin.xml` arrangement in Bevy UI, scaled by
+//! `height / 768` (the glue virtual screen), over the `UI_MainMenu` scene. Each control carries
+//! its `AccountLogin.xml` size and anchor at its spawn site.
 //!
-//! Bottom layer: the glue booth's fullscreen render (the `UI_MainMenu` scene — the burning gate,
-//! its authored fog/fires live). Over it: the WoW logo (256×128 at TOPLEFT (3,−7)), the account
-//! box (160×37 at BOTTOM (8,345)) and password box (160×37 at BOTTOM (8,270)) with their
-//! `GlueFontNormal` labels seated just above each (the ref's BOTTOM→TOP (0,−23) anchor on a
-//! 64-tall centered rect ≈ text center 9 px above the box top), Login (`GlueButtonTemplate`
-//! 170×45 at TOP (8,−519)), the
-//! Remember Account Name checkbox (20×20 at its resolved absolute (17, top 653) with the 10 px
-//! shadowed gold label at LEFT+24), the Blizzard logo (100×100 at BOTTOM (0,8)) under the
-//! `BLIZZ_DISCLAIMER` line (BOTTOM (0,10)), and the version block (BOTTOMLEFT (0,10),
-//! `VERSION_TEMPLATE` filled with the 5875 build facts). The Credits/Cinematics/TOS side of the
-//! reference layout is deliberately absent (decision 0539 §1), and so is the ref's **Quit**
-//! button (`AccountLoginExitButton`): benilla ships in a browser tab, where closing the client is
-//! the browser's gesture, not a control the page owns — the same call the ESC menu's Exit Game
-//! rung went out on (GameMenuFrame.xml's SCOPE note). The dialog is the ref's shared
-//! `GlueDialog` box (512-wide `UI-DialogBox`, text wrapping at 440, one 200×40 button).
+//! Deviation: the Credits, Cinematics and TOS buttons are absent, because the screen keeps only
+//! what logging in needs. Deviation (this fork): so is the Quit button (`AccountLoginExitButton`),
+//! because in a browser tab closing the client is the browser's gesture.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -34,8 +22,7 @@ use benilla_assets::WorldAssets;
 use super::{ClientState, Field, LoginForm};
 
 const SCREEN_Z: i32 = 1100;
-/// `GlueFontDisableSmall`'s color (GlueFonts.xml) — the grey the reference's own
-/// `AccountLoginRealmName` readout draws in.
+/// `GlueFontDisableSmall`'s color (GlueFonts.xml), the `AccountLoginRealmName` readout's grey.
 const DISABLED_GREY: Color = Color::srgb(0.5, 0.5, 0.5);
 /// `DEFAULT_TOOLTIP_COLOR` (AccountLogin.lua): the edit boxes' backdrop tint (border rgb, bg rgb).
 const BOX_BORDER: Color = Color::srgb(0.8, 0.8, 0.8);
@@ -50,26 +37,23 @@ pub(crate) enum LoginAction {
     ToggleSave,
 }
 
-/// Root of the login screen (despawned whole on exit); `with_art` mirrors the select screen's
-/// artless-early-spawn upgrade latch; `s` is the glue scale the tree was baked at, so a window
-/// resize (mac fullscreen) rebuilds it.
+/// Root of the login screen; `with_art` and `s` (the glue scale) record what the tree was built
+/// with, so late art or a window resize rebuilds it.
 #[derive(Component)]
 pub(super) struct LoginUi {
     with_art: bool,
     s: f32,
 }
-/// The account box's row items (segments + carets — [`refresh_boxes`] paints them through
-/// [`paint_glue_field`]).
+/// The account box's row items, painted by [`refresh_boxes`].
 #[derive(Component, Clone)]
 pub(super) struct AccountText;
-/// The password box's row items (its display is the `*` mask — the box law's own `password` flag).
+/// The password box's row items, displayed as the `*` mask.
 #[derive(Component, Clone)]
 pub(super) struct PasswordText;
-/// The checkbox's checked overlay (visibility = the form's save flag).
+/// The checkbox's checked overlay, shown while the form's save flag is set.
 #[derive(Component)]
 pub(super) struct CheckMark;
-/// The checkbox's hover highlight (driven by [`refresh_checkbox`] — the checkbox isn't a
-/// `GlueBtn`, so the shared button pass doesn't cover it).
+/// The checkbox's hover highlight, driven by [`refresh_checkbox`].
 #[derive(Component)]
 pub(super) struct CheckHilight;
 /// The realmlist readout — the ref's own `AccountLoginRealmName` slot, rewritten in place by
@@ -77,9 +61,8 @@ pub(super) struct CheckHilight;
 #[derive(Component)]
 pub(super) struct RealmlistReadout;
 
-/// Spawn the screen tree once its prerequisites exist (the select screen's boot-order pattern:
-/// the INITIAL state's `OnEnter` fires before the MPQ chain / booth slots do) — and upgrade an
-/// artless early spawn the moment the client art lands.
+/// Spawn the screen tree once its prerequisites exist (the initial state's `OnEnter` fires before
+/// the MPQ chain and booth slots do), and rebuild an artless early spawn when the art lands.
 pub(super) fn materialize_screen(
     mut commands: Commands,
     existing: Query<(Entity, &LoginUi)>,
@@ -102,8 +85,6 @@ pub(super) fn materialize_screen(
     let s = crate::glue::screen_scale(window.single().ok());
     match existing.single() {
         Ok((root, ui)) => {
-            // Rebuild when the art lands after an early artless spawn, or when a window resize
-            // (mac fullscreen, a drag) has changed the glue scale the tree was baked at.
             if (!ui.with_art && with_art) || ui.s != s {
                 commands.entity(root).despawn();
                 spawn_screen(
@@ -149,7 +130,7 @@ fn spawn_screen(
     window: &Query<&Window, With<PrimaryWindow>>,
 ) {
     let font = wow_font(assets);
-    // The edit boxes type in `GlueEditBoxFont` — ARIALN, not FRIZQT (GlueFonts.xml).
+    // The edit boxes type in `GlueEditBoxFont`, ARIALN (GlueFonts.xml).
     let edit_font: Handle<Font> = assets.load("mpq://Fonts/ARIALN.ttf");
     let scene_image = match portraits.0.get(GLUE_SLOT) {
         Some(PortraitSource::Live(h)) => Some(h.clone()),
@@ -175,20 +156,15 @@ fn spawn_screen(
             BackgroundColor(BACKDROP),
         ))
         .with_children(|ui| {
-            // The 3D scene, full-bleed and first — the ref's screen IS the fullscreen ModelFFX
-            // (`UI_MainMenu`); the page tint behind it is the no-art fallback. It stays on the
-            // WINDOW while the chrome below does not: the pillarbox's black bars are the booth
-            // camera's own output clear *inside* this window-sized target (1619 §3), so the pane
-            // that samples the target covers the window and brings the bars with it.
+            // The fullscreen `UI_MainMenu` ModelFFX scene, window-sized: the pillarbox bars are the
+            // booth camera's own clear inside the target, so the pane must cover the window.
             if let Some(image) = scene_image {
                 ui.spawn((ImageNode::new(image), overlay()));
             }
         })
         .id();
 
-    // ...and every piece of chrome hangs off the CANVAS — the boxed scene's own rect (decision
-    // 2091). Anchored to the window instead, the logo, the version line and Realmlist/Quit stood
-    // out in the bars at 21:9 (B377).
+    // The chrome hangs off the canvas, the boxed scene's rect, so it stays out of the bars.
     let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
     canvas.with_children(|ui| {
         // The WoW logo (`AccountLoginLogo`, 256×128 at TOPLEFT (3,−7), OVERLAY).
@@ -196,9 +172,8 @@ fn spawn_screen(
             ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));
         }
 
-        // The Blizzard logo (100×100 at BOTTOM (0,8), ARTWORK) with the `BLIZZ_DISCLAIMER`
-        // copyright line at BOTTOM (0,10) drawn over its lower band (the authored overlap — the
-        // wordmark pixels sit above it).
+        // The Blizzard logo (100×100 at BOTTOM (0,8), ARTWORK) under the `BLIZZ_DISCLAIMER`
+        // line at BOTTOM (0,10), an authored overlap.
         if let Some(blizz) = &art.blizzard_logo {
             ui.spawn((Node {
                 position_type: PositionType::Absolute,
@@ -242,9 +217,8 @@ fn spawn_screen(
             s,
         );
 
-        // The version block (`AccountLoginVersion`, GlueFontNormalSmall at BOTTOMLEFT (0,10),
-        // justifyH LEFT): `VERSION_TEMPLATE` = "%s %s (%s) (%s)\n%s" filled with our wire
-        // identity's frozen facts — versionType, version, internalVersion, buildType, date.
+        // `AccountLoginVersion` (GlueFontNormalSmall at BOTTOMLEFT (0,10)): `VERSION_TEMPLATE`
+        // filled with versionType, version, internalVersion, buildType and date.
         let version = {
             let template = strings.text("VERSION_TEMPLATE", "%s %s (%s) (%s)\n%s");
             let build = benilla_protocol::CLIENT_BUILD.to_string();
@@ -280,9 +254,8 @@ fn spawn_screen(
             s,
         );
 
-        // The two edit boxes + their labels. Each box is BOTTOM-anchored with the ref's +8 x
-        // offset (a 16·s left margin inside a centered row shifts the center by 8·s); the label's
-        // resolved seat is text-center ≈ 9 px above the box top (see the module doc).
+        // The account box (160×37 at BOTTOM (8,345)) and password box (160×37 at BOTTOM
+        // (8,270)): a 16·s left margin in a centred row makes the +8 x offset.
         for (bottom, label, action, marker_account) in [
             (
                 345.0,
@@ -297,10 +270,8 @@ fn spawn_screen(
                 false,
             ),
         ] {
-            // The ref hangs the label's FontString off the EDIT BOX (`BOTTOM` ← the box's `TOP`,
-            // offset (0,−23), a 256×64 rect with the text centred in it) — so it is centred on the
-            // box, which sits at the screen centre +8. Centring a full-width node with a left
-            // margin instead put it at +16: eight units right of the box it labels.
+            // The label is a 256×64 centred rect anchored BOTTOM to the box's TOP at (0,−23), so
+            // it centres on the box at +8, the same left margin as the box row.
             outlined_text(
                 ui,
                 Node {
@@ -395,26 +366,12 @@ fn spawn_screen(
                 });
             });
 
-        // **The realmlist readout** — the address this client will dial, in the reference's own
-        // `AccountLoginRealmName` slot.
-        //
-        // It is a readout and nothing else. Decision 1667 put an editor behind it (a "Realmlist"
-        // button in the empty TOS/Credits/Cinematics stack above, opening a `hasEditBox` dialog),
-        // and the site took that back: the browser client's address comes from `/config.json`
-        // and from nowhere else, so a control that wrote a second, higher-precedence copy into
-        // `config.toml` would let a player's old value quietly outrank the one the operator
-        // redeployed. Native keeps the CVar (`SetCVar("realmList")`, `config.toml`), which is the
-        // seam the reference itself edits through `realmlist.wtf`.
-        //
-        // With the button gone the readout goes back to the reference's own anchor, which is the
-        // Quit button itself: `AccountLoginRealmName` is a 256-wide right-justified
-        // `GlueFontDisableSmall` at TOPRIGHT ← `AccountLoginExitButton`'s BOTTOMRIGHT, (−8, −10),
-        // filled in `AccountLogin_OnShow` from `GetServerName()`. Resolved: Quit is BOTTOMRIGHT
-        // (−5, 29) at 150×38, so its bottom edge is 768 − 29 = 739 from the top and the readout's
-        // top is 10 below that (749); its right edge is 8 further in (5 + 8 = 13). The Quit
-        // button itself is gone now (the header's note) and the readout keeps that resolved seat:
-        // the anchor was always the reference's arithmetic, never a live dependency on the
-        // button, and the line reads where the player's eye already learned to find it.
+        // The realmlist readout, the address this client will dial, in the reference's
+        // `AccountLoginRealmName` seat: 256 wide, right-justified, TOPRIGHT to the Quit button's
+        // BOTTOMRIGHT at (−8,−10), resolved to top 749, right 13; it keeps that seat with the button
+        // gone. Deviation (this fork): a readout only, with no editor behind it, because the browser
+        // client's address comes from `/config.json` alone and a saved copy would outrank the
+        // hosted one. Native keeps the `realmList` CVar.
         outlined_text(
             ui,
             Node {
@@ -427,7 +384,7 @@ fn spawn_screen(
             RealmlistReadout,
             GlueText {
                 text: realmlist.address(),
-                size: 12.0, // GlueFontDisableSmall = GlueFontNormalSmall's 12, in grey
+                size: 12.0, // GlueFontDisableSmall
                 color: DISABLED_GREY,
                 wrap: false,
             },
@@ -435,9 +392,8 @@ fn spawn_screen(
             s,
         );
 
-        // The Remember Account Name checkbox (20×20 at the resolved absolute (17, top 653) —
-        // the ref anchors it under the Community button we cut; the spot is the same) + its
-        // 10 px shadowed gold label at LEFT+24.
+        // The Remember Account Name checkbox (20×20 at (17, top 653), resolved from its anchor
+        // under the absent Community button) and its label at LEFT+24.
         ui.spawn((Node {
             position_type: PositionType::Absolute,
             left: px(17.0),
@@ -530,8 +486,7 @@ fn spawn_screen(
     });
 }
 
-/// Paint both boxes from their [`EditBoxState`]s — segments, selection highlight, and the caret at
-/// the cursor — through the shared [`paint_glue_field`] (decision 0704).
+/// Paint both boxes from their [`EditBoxState`]s through the shared [`paint_glue_field`].
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_boxes(
     form: Res<LoginForm>,
@@ -553,14 +508,9 @@ pub(super) fn refresh_boxes(
     );
 }
 
-/// The realmlist readout, rewritten in place when the address changes (the ref's own
-/// `AccountLoginRealmName:SetText`). `sync_outlines` carries the write into the eight outline
-/// copies, so the whole nine-string stack follows.
-///
-/// An unconditional compare rather than a `Res::is_changed` gate: it is one string comparison
-/// against one entity, and the gate would silently depend on the screen tree never being spawned
-/// **after** the last change to the resource — which is exactly what a rebuild on a window resize
-/// does. Cheap beats subtly order-dependent.
+/// The realmlist readout, rewritten in place when the address changes
+/// (`AccountLoginRealmName:SetText`); `sync_outlines` carries it to the outline copies. It
+/// compares every frame, not on `Res::is_changed`, because a rebuilt tree can postdate the change.
 pub(super) fn refresh_realmlist(
     realmlist: Res<crate::realmlist::Realmlist>,
     mut texts: Query<&mut Text, With<RealmlistReadout>>,
@@ -572,8 +522,8 @@ pub(super) fn refresh_realmlist(
     }
 }
 
-/// The checkbox's visuals: the checked overlay tracks the form's save flag; the ADD hover ring
-/// tracks the button's interaction (the checkbox isn't a `GlueBtn`, so the shared pass skips it).
+/// The checkbox's checked overlay and hover ring; it is not a `GlueBtn`, so the shared button
+/// pass skips it.
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_checkbox(
     form: Res<LoginForm>,
@@ -617,7 +567,7 @@ pub(super) fn exit_login(
     for e in &roots {
         commands.entity(e).despawn();
     }
-    // The next screen re-establishes its own scene the same frame (select's per-frame feed).
+    // The next screen sets its own scene the same frame.
     preview.scene = None;
     preview.look = None;
     if let Some(root) = dialog.root.take() {
@@ -626,9 +576,7 @@ pub(super) fn exit_login(
     dialog.close();
 }
 
-/// The login-screen shot instrument (`WOW_LOGIN_SHOT_OUT=<path>`, decision 0539 §7): once the
-/// screen has been up a few seconds (art + scene settled), write one PNG via Bevy's framebuffer
-/// readback. Inert without the env.
+/// `WOW_LOGIN_SHOT_OUT=<path>`: one PNG of the login screen once it has settled.
 pub(super) fn debug_login_shot(
     mut commands: Commands,
     state: Res<State<ClientState>>,
