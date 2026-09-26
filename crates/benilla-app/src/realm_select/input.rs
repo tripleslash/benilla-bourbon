@@ -22,6 +22,7 @@ pub(super) fn clicks(
     hits: Res<crate::glue::GlueClicks>,
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
+    mut intent: ResMut<crate::login::LoginIntent>,
     mut sounds: MessageWriter<GlueSound>,
     time: Res<Time>,
     mut last_click: Local<Option<(String, f32)>>,
@@ -61,7 +62,7 @@ pub(super) fn clicks(
         try_enter(&mut realms, &mut commands, &mut sounds);
     }
     if let Some(with_sound) = leave {
-        do_cancel(&mut realms, &choice, &mut sounds, with_sound);
+        do_cancel(&mut realms, &choice, &mut intent, &mut sounds, with_sound);
     }
 }
 
@@ -71,11 +72,12 @@ pub(super) fn keys(
     (mut wheel, mut wheel_carry): (MessageReader<MouseWheel>, Local<WheelNotches>),
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
+    mut intent: ResMut<crate::login::LoginIntent>,
     mut sounds: MessageWriter<GlueSound>,
     mut commands: Commands,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        do_cancel(&mut realms, &choice, &mut sounds, true);
+        do_cancel(&mut realms, &choice, &mut intent, &mut sounds, true);
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
@@ -155,6 +157,7 @@ fn scroll_into_view(realms: &mut Realms, row: usize, total: usize) {
 fn do_cancel(
     realms: &mut Realms,
     choice: &RealmChoice,
+    intent: &mut crate::login::LoginIntent,
     sounds: &mut MessageWriter<GlueSound>,
     with_sound: bool,
 ) {
@@ -163,6 +166,7 @@ fn do_cancel(
     }
     realms.hide();
     let _ = choice.0.try_send(RealmRequest::Abandon);
+    intent.realm_list_cancelled();
 }
 
 /// `RealmList_OnOk`: play the click, hide the frame, answer the park.

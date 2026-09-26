@@ -2,8 +2,7 @@
 //! dialogs and the saved account; the layout is [`screen`]. Deviation: the Credits, Cinematics
 //! and TOS side of the reference screen is absent, because the screen keeps only what logging in
 //! needs. Deviation (this fork): so is the Quit button, because in a browser tab closing the
-//! client is the browser's gesture; ESC, which the reference binds to that Quit, leaves
-//! fullscreen instead ([`leave_fullscreen`]) and otherwise does nothing.
+//! client is the browser's gesture; ESC, which the reference binds to that Quit, does nothing.
 //!
 //! The credential policy drives the IO thread's pre-logon park: `WOW_USER` plus `WOW_PASS`
 //! auto-submit, pending credentials resubmit every 3 s (app-side; the IO thread never sleeps),
@@ -38,7 +37,6 @@ use crate::net::{
 };
 use crate::portrait::{GluePreview, GlueScene};
 use crate::sound::GlueSound;
-use crate::video::{DisplayMode, VideoConfig};
 
 pub(crate) use screen::LoginAction;
 pub(crate) use smoke::smoke_character;
@@ -130,6 +128,15 @@ impl LoginIntent {
     pub(crate) fn clear(&mut self) {
         self.creds = None;
         self.retry_at = None;
+    }
+
+    /// The realm list's Cancel over the login screen: the IO thread re-parks pre-logon, so the
+    /// attempt is over and the Login button answers again. Over character select it is inert.
+    pub(crate) fn realm_list_cancelled(&mut self) {
+        if self.park == IoPark::AtLogin {
+            self.in_flight = false;
+            self.clear();
+        }
     }
 
     /// The account this session authenticated as, from the env fast path or the screen; it
@@ -639,8 +646,8 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     preview.yaw = 0.0;
 }
 
-/// The screen's input: typing, Tab, Enter submits, Esc leaves fullscreen (an open dialog takes it
-/// first), and clicks on the boxes, buttons and checkbox.
+/// The screen's input: typing, Tab, Enter submits, Esc does nothing (an open dialog takes it),
+/// and clicks on the boxes, buttons and checkbox.
 #[allow(clippy::type_complexity)]
 fn login_input(
     realms: Res<crate::realm_select::Realms>,
@@ -655,7 +662,6 @@ fn login_input(
     mut dialog: ResMut<GlueDialog>,
     strings: Option<Res<GlueStrings>>,
     mut sounds: MessageWriter<GlueSound>,
-    mut video: ResMut<VideoConfig>,
 ) {
     // The reference's `RealmList` is a DIALOG-strata frame over this screen, so while it is up
     // everything here is inert, Escape included (it is the list's Cancel).
@@ -753,13 +759,6 @@ fn login_input(
     {
         do_login = true;
     }
-    // **ESC is not a quit here** (the module header). The reference's own binding was the Quit
-    // button, which this screen no longer draws, so the key is left with the one thing a player
-    // pressing it on a full-screen client actually means — and nothing at all otherwise.
-    if !dialog_open && keys.just_pressed(KeyCode::Escape) {
-        leave_fullscreen(&mut video);
-    }
-
     if do_login && !attempt.intent.in_flight {
         // `gsLogin` on every press: `AccountLogin_Login` plays it before `DefaultServerLogin`,
         // so an empty-box refusal clicks too.
@@ -814,29 +813,6 @@ fn on_account_edited(form: &mut LoginForm) {
             form.save = false;
         }
     }
-}
-
-/// ESC's whole job on this screen: **drop out of fullscreen, if we are in it.**
-///
-/// The write is to [`VideoConfig`] and nowhere else, because that resource is the seam the window
-/// actually hangs off — `video::apply_window_mode` watches it, flips the window and hands
-/// `gxResolution` back on the way out, and `cvars::compose_file` composes the saved `gxWindow`
-/// from this same field, so the choice persists without this function knowing how a config file
-/// is spelled. The live CVar *table* is not written here: it is seeded from these knobs whenever a
-/// VM is built (`cvars::sync_cvars`'s registration seed), which is every VM the player will meet
-/// after this screen.
-///
-/// **Windowed in, nothing happens** — the early return is the "ESC does nothing" half of the
-/// contract, and it is the only guard: `just_pressed` is already an edge, so a held key does not
-/// re-enter this, and the one thing worth not doing on a no-op press is writing the resource.
-///
-/// Returns whether it did anything, which is what the test below asks it.
-fn leave_fullscreen(video: &mut VideoConfig) -> bool {
-    if video.display == DisplayMode::Windowed {
-        return false;
-    }
-    video.display = DisplayMode::Windowed;
-    true
 }
 
 // ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
@@ -957,29 +933,6 @@ fn save_account(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **ESC on this screen is not a quit and is not a toggle.** It leaves fullscreen once and
-    /// then does nothing — pressing it again must not put the player *back* into fullscreen,
-    /// which a naive "flip the mode" reading of "Esc exits fullscreen" would do, and which is
-    /// how a key that is supposed to be an escape hatch becomes a trap.
-    #[test]
-    fn escape_leaves_fullscreen_once_and_is_inert_afterwards() {
-        let mut video = VideoConfig {
-            display: DisplayMode::Fullscreen,
-            ..VideoConfig::default()
-        };
-        assert!(
-            leave_fullscreen(&mut video),
-            "the first press did something"
-        );
-        assert_eq!(video.display, DisplayMode::Windowed);
-        assert!(!leave_fullscreen(&mut video), "the second press did not");
-        assert_eq!(
-            video.display,
-            DisplayMode::Windowed,
-            "and never toggles back"
-        );
-    }
 
     /// `drive_policy` alone with the env fast path spent, so an ambient `WOW_USER` cannot seed
     /// credentials.
