@@ -1,5 +1,7 @@
-//! **The optional content layers a chain may or may not carry** — today exactly one, the updated
-//! character models (`patch-A.MPQ` / the `data-hd` container).
+//! **The optional content layers a chain may or may not carry**: the updated character models
+//! (`patch-A.MPQ` / the `data-hd` container), decided at boot, and the Turtle WoW 1.18.1 layer (the
+//! `data-turtle` container), mounted and unmounted live as the client enters a realm that
+//! advertises 1.18.1 or one that does not.
 //!
 //! ## What a layer is
 //!
@@ -36,7 +38,7 @@
 //! them reads the CVar and nothing here reads back into them. The one lever that crosses both is
 //! [`hd_models_env`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The archive that carries the updated character models, matched case-insensitively against the
 /// `Data` directory listing.
@@ -72,6 +74,19 @@ pub const HD_DATA_SEGMENT: &str = "data-hd";
 /// each other by `tests/web_names.rs`.
 pub const HD_PACK_KEY_BASE: u32 = 1 << 30;
 
+/// The URL path segment the Turtle WoW 1.18.1 layer's BENPACK container is served from, beside
+/// `/data` and `/data-hd`. Fetched only when a 1.18.1 realm is entered.
+///
+/// **Twinned in `web/packs.js` and `web/sw.js`**; `tests/web_names.rs` checks them.
+pub const TURTLE_DATA_SEGMENT: &str = "data-turtle";
+
+/// What the Turtle layer's pack ids are offset by in the resident map — see [`HD_PACK_KEY_BASE`]
+/// for why a layer needs its own key range. `1 << 31` sits above the HD layer's `1 << 30` with the
+/// same four orders of magnitude to spare, and `key_base + pack_id` still fits a `u32`.
+///
+/// **Twinned in `web/packs.js`** (`TURTLE_PACK_KEY_BASE`); `tests/web_names.rs` checks them.
+pub const TURTLE_PACK_KEY_BASE: u32 = 1 << 31;
+
 /// The name prefix under which the Turtle layer carries a table **merged with the HD layer's**.
 ///
 /// Mounted above the Turtle layer, the HD layer's copy of a table answers for every row, so a row
@@ -80,6 +95,98 @@ pub const HD_PACK_KEY_BASE: u32 = 1 << 30;
 /// `<prefix><name>`, and the web chain serves that alias for `<name>` only while both layers are
 /// mounted. Neither layer's own copy changes, so each still answers alone.
 pub const TURTLE_HD_ALIAS_PREFIX: &str = "benilla-turtle-hd\\";
+
+/// The name a table merged with the HD layer's is carried under — see [`TURTLE_HD_ALIAS_PREFIX`].
+pub fn turtle_hd_alias(name: &str) -> String {
+    format!("{TURTLE_HD_ALIAS_PREFIX}{name}")
+}
+
+/// Which mounted container answers a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layer {
+    /// The 1.12.1 corpus.
+    Base,
+    /// The updated character models.
+    Hd,
+    /// The Turtle WoW 1.18.1 layer.
+    Turtle,
+    /// The Turtle layer's merge of a table with the HD layer's, under [`turtle_hd_alias`].
+    TurtleHdAlias,
+}
+
+/// **The layer priority law**, in one place: HD above Turtle above the base corpus — MPQ's own
+/// "later wins", as `patch-A.MPQ` mounts above every numbered patch — except that a table merged
+/// for the pair answers for the pair. `hd` and `turtle` are `None` for a layer that is not mounted
+/// and whether it holds the name otherwise; `alias` is whether the Turtle layer holds a merge of it.
+pub fn pick_layer(hd: Option<bool>, turtle: Option<bool>, alias: bool) -> Layer {
+    if hd.is_some() && turtle.is_some() && alias {
+        return Layer::TurtleHdAlias;
+    }
+    if hd == Some(true) {
+        return Layer::Hd;
+    }
+    if turtle == Some(true) {
+        return Layer::Turtle;
+    }
+    Layer::Base
+}
+
+/// Bumped on every live mount change, so a cache of chain-derived data can tell it is stale.
+static DATA_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Which mount set the chain answers from: it changes whenever the Turtle layer is mounted or
+/// unmounted, and never otherwise.
+pub fn data_generation() -> u64 {
+    DATA_GENERATION.load(Ordering::Acquire)
+}
+
+/// Whether this target can mount the Turtle layer at all: the browser build, which is served the
+/// `data-turtle` container. The native build reads MPQs and has no Turtle container to read.
+pub const fn turtle_available() -> bool {
+    cfg!(target_arch = "wasm32")
+}
+
+#[cfg(target_arch = "wasm32")]
+mod live {
+    use std::sync::{Arc, RwLock};
+
+    use crate::webpack::PackStore;
+
+    /// The mounted Turtle layer, shared by every chain of the process (the `AssetReader`'s, the
+    /// world store's, the UI's): one live mount, not a parameter three crates would have to thread.
+    static TURTLE: RwLock<Option<Arc<PackStore>>> = RwLock::new(None);
+
+    pub fn mount_turtle(store: PackStore) {
+        *TURTLE.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
+        super::DATA_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub fn unmount_turtle() {
+        let was = TURTLE.write().unwrap_or_else(|e| e.into_inner()).take();
+        if was.is_some() {
+            super::DATA_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    pub fn turtle() -> Option<Arc<PackStore>> {
+        TURTLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use live::{mount_turtle, turtle, unmount_turtle};
+
+/// Whether the Turtle layer is mounted now. Always `false` natively.
+pub fn turtle_mounted() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        live::turtle().is_some()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
 
 /// The live answer. Off until something says otherwise — see the module header.
 static HD_MODELS: AtomicBool = AtomicBool::new(false);
@@ -132,4 +239,44 @@ pub fn layer_switch(raw: &str) -> Option<bool> {
 /// switch takes on that target.
 pub fn hd_models_env() -> Option<bool> {
     layer_switch(&std::env::var("WOW_HD_MODELS").ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HD over Turtle over the base corpus, each only when mounted and holding the name, and the
+    /// pair's merged table only when both are mounted.
+    #[test]
+    fn the_priority_is_hd_then_turtle_then_base() {
+        assert_eq!(pick_layer(None, None, false), Layer::Base);
+        assert_eq!(pick_layer(Some(false), Some(false), false), Layer::Base);
+        assert_eq!(pick_layer(Some(true), None, false), Layer::Hd);
+        assert_eq!(pick_layer(None, Some(true), false), Layer::Turtle);
+        assert_eq!(pick_layer(Some(true), Some(true), false), Layer::Hd);
+        assert_eq!(pick_layer(Some(false), Some(true), false), Layer::Turtle);
+        assert_eq!(
+            pick_layer(Some(true), Some(true), true),
+            Layer::TurtleHdAlias
+        );
+        // A merge answers only for the pair: with either layer down, the alias is not consulted.
+        assert_eq!(pick_layer(None, Some(true), true), Layer::Turtle);
+        assert_eq!(pick_layer(Some(true), None, true), Layer::Hd);
+    }
+
+    #[test]
+    fn the_layer_key_ranges_do_not_overlap_and_fit_a_u32() {
+        const { assert!(HD_PACK_KEY_BASE < TURTLE_PACK_KEY_BASE) };
+        // The corpus cap is 18,000 objects per container.
+        assert!(HD_PACK_KEY_BASE.checked_add(18_000).unwrap() < TURTLE_PACK_KEY_BASE);
+        assert!(TURTLE_PACK_KEY_BASE.checked_add(18_000).is_some());
+    }
+
+    #[test]
+    fn the_turtle_layer_is_browser_only_and_never_mounted_natively() {
+        assert_eq!(turtle_available(), cfg!(target_arch = "wasm32"));
+        if !turtle_available() {
+            assert!(!turtle_mounted());
+        }
+    }
 }

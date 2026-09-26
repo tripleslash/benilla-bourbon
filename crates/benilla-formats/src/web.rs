@@ -273,6 +273,69 @@ mod wasm {
         format!("{origin}/{}", crate::layers::HD_DATA_SEGMENT)
     }
 
+    /// The root the **Turtle WoW 1.18.1 layer** is served from: `/data-turtle`, beside `/data` and
+    /// `/data-hd`, laid out like them.
+    pub fn turtle_data_base() -> String {
+        let origin = web_sys::window()
+            .expect("benilla_formats::web only runs inside a browser tab")
+            .location()
+            .origin()
+            .expect("window.location.origin");
+        format!("{origin}/{}", crate::layers::TURTLE_DATA_SEGMENT)
+    }
+
+    /// Open the Turtle WoW 1.18.1 layer and mount it, for a 1.18.1 realm about to be entered.
+    ///
+    /// The page does the network half (`window.__wenilla_packs.openLayer('turtle')`): the layer's
+    /// index, listfile and boot packs, and its container opened in the decode worker. The container
+    /// then opens here off the index the page handed over. `Ok(false)` is an origin that serves no
+    /// `/data-turtle`, which is not an error of this client: the caller refuses the realm instead.
+    pub async fn open_turtle_layer() -> anyhow::Result<bool> {
+        use wasm_bindgen::JsCast;
+        if crate::layers::turtle_mounted() {
+            return Ok(true);
+        }
+        let window = web_sys::window().ok_or_else(|| anyhow::anyhow!("no window"))?;
+        let packs = js_sys::Reflect::get(&window, &"__wenilla_packs".into())
+            .map_err(|e| anyhow::anyhow!("window.__wenilla_packs: {e:?}"))?;
+        let open = js_sys::Reflect::get(&packs, &"openLayer".into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+            .ok_or_else(|| anyhow::anyhow!("this page's packs.js has no openLayer"))?;
+        let promise = open
+            .call1(&packs, &"turtle".into())
+            .map_err(|e| anyhow::anyhow!("openLayer('turtle'): {e:?}"))?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| anyhow::anyhow!("openLayer('turtle') returned no Promise"))?;
+        let opened = wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| anyhow::anyhow!("openLayer('turtle'): {e:?}"))?
+            .is_truthy();
+        if !opened {
+            return Ok(false);
+        }
+        let store = crate::webpack::PackStore::open_turtle(turtle_data_base())?;
+        crate::layers::mount_turtle(store);
+        Ok(true)
+    }
+
+    /// Unmount the Turtle layer and let the page drop what it holds of it (its resident packs and
+    /// its worker container), for a realm that does not advertise 1.18.1.
+    pub fn close_turtle_layer() {
+        crate::layers::unmount_turtle();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(packs) = js_sys::Reflect::get(&window, &"__wenilla_packs".into()) else {
+            return;
+        };
+        if let Ok(close) = js_sys::Reflect::get(&packs, &"closeLayer".into()) {
+            if let Some(f) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&close) {
+                let _ = f.call1(&packs, &"turtle".into());
+            }
+        }
+    }
+
     /// One `console.warn`, for the handful of places that must say something to a player's console
     /// on a target where `tracing` has been taken off the build (`quiet_console_on_web`).
     pub fn console_warn(msg: &str) {
@@ -330,6 +393,29 @@ mod wasm {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
                 js_sys::Reflect::get(&window, &"__wenilla_boottrace_hd".into())
+                    .ok()?
+                    .dyn_into::<js_sys::Array>()
+                    .ok()
+            });
+            if let Some(arr) = arr {
+                arr.push(&name.into());
+            }
+        });
+    }
+
+    /// The Turtle layer's half of the boot trace (`window.__wenilla_boottrace_turtle`): `name` was
+    /// answered by the Turtle WoW 1.18.1 layer. The instrument for "no Turtle read on a 1.12.1
+    /// realm": after switching back, this array stops growing.
+    pub fn trace_turtle(name: &str) {
+        use wasm_bindgen::JsCast;
+        thread_local! {
+            static TRACE_TURTLE: std::cell::OnceCell<Option<js_sys::Array>> =
+                const { std::cell::OnceCell::new() };
+        }
+        TRACE_TURTLE.with(|cell| {
+            let arr = cell.get_or_init(|| {
+                let window = web_sys::window()?;
+                js_sys::Reflect::get(&window, &"__wenilla_boottrace_turtle".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -455,7 +541,8 @@ mod wasm {
 
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
-    console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base, trace, trace_hd,
+    close_turtle_layer, console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base,
+    open_turtle_layer, trace, trace_hd, trace_turtle, turtle_data_base,
 };
 
 #[cfg(test)]

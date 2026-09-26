@@ -90,6 +90,36 @@ pub struct Chain {
     hd: Option<crate::webpack::PackStore>,
 }
 
+/// Which container answers one read, owned so it outlives the lock the live Turtle slot sits behind
+/// ([`crate::layers::turtle`]).
+#[cfg(target_arch = "wasm32")]
+enum Answer {
+    Base,
+    Hd,
+    Turtle(std::sync::Arc<crate::webpack::PackStore>),
+    /// The Turtle layer's merge of the table with the HD layer's, under its alias name.
+    TurtleHdAlias(std::sync::Arc<crate::webpack::PackStore>, String),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Answer {
+    fn store<'a>(&'a self, chain: &'a Chain) -> &'a crate::webpack::PackStore {
+        match self {
+            Answer::Base => &chain.store,
+            Answer::Hd => chain.hd.as_ref().expect("an HD answer has an HD layer"),
+            Answer::Turtle(s) | Answer::TurtleHdAlias(s, _) => s,
+        }
+    }
+
+    /// The name to read: the alias for a merged table, the asked name otherwise.
+    fn name<'a>(&'a self, asked: &'a str) -> &'a str {
+        match self {
+            Answer::TurtleHdAlias(_, alias) => alias,
+            _ => asked,
+        }
+    }
+}
+
 /// `patch-?.MPQ` as the reference's `FindFirstFileW` glob matches it (template `0x82edbc`, wrapper
 /// `0x42ad10`): `?` is exactly one character, any case, so `patch-10.MPQ` never mounts.
 #[cfg(not(target_arch = "wasm32"))]
@@ -337,24 +367,52 @@ impl Chain {
         Ok(Self { store, hd })
     }
 
-    /// The layer that should answer for `name`: the HD overlay when it holds it, else the base
-    /// container. **The whole of the priority law on this target**, in one place so no method below
-    /// restates it.
+    /// The container that should answer for `name` — [`crate::layers::pick_layer`] over the layers
+    /// mounted now: the HD overlay when it holds the name, else the Turtle layer when it is mounted
+    /// and holds it, else the base container; a table the Turtle layer merged with the HD layer's
+    /// answers under its alias while both are mounted. **The whole of the priority law on this
+    /// target**, in one place so no method below restates it.
     ///
     /// `contains` on a `PackStore` is a binary search over an index already in memory, so asking the
-    /// overlay first costs ~17 probes and no I/O — cheap enough that there is no reason for any
-    /// caller to shortcut it.
-    fn layer_for(&self, name: &str) -> &crate::webpack::PackStore {
-        match &self.hd {
-            Some(hd) if hd.contains(name) => {
-                // The layer half of the boot trace, so a `?boottrace=1` capture can say whether the
-                // layer is being read at all and which names reach it — see `web::trace_hd`. A
-                // no-op unless the page armed the array, exactly like its twin.
-                crate::web::trace_hd(name);
-                hd
+    /// overlays first costs ~17 probes each and no I/O. Only a `.dbc` is asked for an alias: the
+    /// packer merges tables and nothing else.
+    fn answer(&self, name: &str) -> Answer {
+        let turtle = crate::layers::turtle();
+        let alias = match (&self.hd, &turtle) {
+            (Some(_), Some(t)) if name.to_ascii_lowercase().ends_with(".dbc") => {
+                let alias = crate::layers::turtle_hd_alias(name);
+                t.contains(&alias).then_some(alias)
             }
-            _ => &self.store,
+            _ => None,
+        };
+        let layer = crate::layers::pick_layer(
+            self.hd.as_ref().map(|hd| hd.contains(name)),
+            turtle.as_ref().map(|t| t.contains(name)),
+            alias.is_some(),
+        );
+        // The layer halves of the boot trace, so a `?boottrace=1` capture can say whether a layer is
+        // being read at all and which names reach it (`web::trace_hd`); no-ops unless the page armed
+        // the arrays.
+        match (layer, turtle, alias) {
+            (crate::layers::Layer::TurtleHdAlias, Some(t), Some(alias)) => {
+                crate::web::trace_turtle(name);
+                Answer::TurtleHdAlias(t, alias)
+            }
+            (crate::layers::Layer::Hd, _, _) => {
+                crate::web::trace_hd(name);
+                Answer::Hd
+            }
+            (crate::layers::Layer::Turtle, Some(t), _) => {
+                crate::web::trace_turtle(name);
+                Answer::Turtle(t)
+            }
+            _ => Answer::Base,
         }
+    }
+
+    /// Whether the Turtle WoW 1.18.1 layer is mounted now — see [`crate::layers::turtle_mounted`].
+    pub fn turtle_mounted(&self) -> bool {
+        crate::layers::turtle_mounted()
     }
 
     /// Whether the updated-character-model layer is mounted on this chain — for the boot report and
@@ -368,7 +426,9 @@ impl Chain {
     ///
     /// No I/O, no allocation, no network: a binary search over the index's sorted key array.
     pub fn contains(&self, name: &str) -> bool {
-        self.hd.as_ref().is_some_and(|hd| hd.contains(name)) || self.store.contains(name)
+        self.hd.as_ref().is_some_and(|hd| hd.contains(name))
+            || crate::layers::turtle().is_some_and(|t| t.contains(name))
+            || self.store.contains(name)
     }
 
     /// No archive *files* exist on the web target — a blob's home is a pack id, not a path — so
@@ -384,7 +444,8 @@ impl Chain {
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-        self.layer_for(name).read_sync(name)
+        let answer = self.answer(name);
+        answer.store(self).read_sync(answer.name(name))
     }
 
     /// Read `name` **without ever blocking the frame** — the lane the UI and the sound engine take.
@@ -397,7 +458,8 @@ impl Chain {
         // included — the array is deduplicated by hand and first push is still first need, so a
         // name that took three frames to arrive appears exactly where it was first wanted.
         crate::web::trace(name);
-        self.layer_for(name).try_read_sync(name)
+        let answer = self.answer(name);
+        answer.store(self).try_read_sync(answer.name(name))
     }
 
     /// Would [`Self::try_read`] answer without deferring? Starts the warm if not — see
@@ -407,13 +469,15 @@ impl Chain {
     /// For a caller whose work reads several blobs and is only correct once it can read all of them:
     /// it asks first, does nothing while the answer is no, and the packs warm in the meantime.
     pub fn ready(&self, name: &str) -> bool {
-        self.layer_for(name).is_ready(name)
+        let answer = self.answer(name);
+        answer.store(self).is_ready(answer.name(name))
     }
 
     /// Warm the pack `name` lives in, and return immediately — see
     /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
     pub fn prefetch(&self, name: &str) {
-        self.layer_for(name).prefetch(name);
+        let answer = self.answer(name);
+        answer.store(self).prefetch(answer.name(name));
     }
 
     /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`
@@ -426,7 +490,8 @@ impl Chain {
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name);
-        self.layer_for(name).read_async(name).await
+        let answer = self.answer(name);
+        answer.store(self).read_async(answer.name(name)).await
     }
 
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.
@@ -446,18 +511,22 @@ impl Chain {
         // the same name either way — which layer would *answer* a read of it is `layer_for`'s
         // business, not this list's. An HD container shipping no listfile is simply no extra names,
         // on the same terms as the base container shipping without one.
-        if let Some(hd) = &self.hd {
-            if let Ok(extra) = hd.listfile() {
-                let seen: std::collections::HashSet<String> = out
-                    .iter()
-                    .map(|e| e.name.replace('/', "\\").to_ascii_lowercase())
-                    .collect();
-                out.extend(
-                    extra.into_iter().filter(|e| {
-                        !seen.contains(&e.name.replace('/', "\\").to_ascii_lowercase())
-                    }),
-                );
-            }
+        let turtle = crate::layers::turtle();
+        let overlays = self.hd.iter().chain(turtle.as_deref());
+        let mut seen: std::collections::HashSet<String> = out
+            .iter()
+            .map(|e| e.name.replace('/', "\\").to_ascii_lowercase())
+            .collect();
+        for layer in overlays {
+            let Ok(extra) = layer.listfile() else {
+                continue;
+            };
+            out.extend(extra.into_iter().filter(|e| {
+                let key = e.name.replace('/', "\\").to_ascii_lowercase();
+                // A merged table's alias is how the pair answers `<name>`, not a name of its own.
+                !key.starts_with(&crate::layers::TURTLE_HD_ALIAS_PREFIX.to_ascii_lowercase())
+                    && seen.insert(key)
+            }));
         }
         Ok(out)
     }
