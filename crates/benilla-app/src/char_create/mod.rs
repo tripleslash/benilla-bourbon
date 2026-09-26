@@ -18,6 +18,7 @@ use bevy::prelude::*;
 
 use crate::char_select::{ClientState, Roster};
 use crate::entities::CharCreate;
+use crate::flavor::ClientFlavor;
 use crate::glue_strings::GlueStrings;
 use crate::net::{CharActionResultMessage, CharPick, CharRequest};
 use crate::portrait::{CreateLook, GlueLook, GluePreview};
@@ -97,6 +98,7 @@ impl Plugin for CharCreatePlugin {
 fn debug_auto_create(
     mut sel: ResMut<CreateSelection>,
     pick: Res<CharPick>,
+    flavor: Res<ClientFlavor>,
     time: Res<Time>,
     mut fired: Local<bool>,
     mut armed_at: Local<Option<f32>>,
@@ -115,7 +117,7 @@ fn debug_auto_create(
     }
     sel.name.set_text(&name);
     sel.creating = true;
-    let _ = pick.0.try_send(CharRequest::Create(sel.request()));
+    let _ = pick.0.try_send(CharRequest::Create(sel.request(*flavor)));
     *fired = true;
     info!("char create: auto-create fired for {:?}", sel.name.text);
 }
@@ -293,7 +295,10 @@ impl CreateSelection {
         }
     }
 
-    fn request(&self) -> CharCreateReq {
+    /// The create request. A Turtle WoW 1.18.1 realm reads a trailing challenge mask: 0 is what its
+    /// `ChallengeList_Save` builds with none chosen (`SELECTED_IDS = 0`, then each chosen id
+    /// added). Deviation: this screen has no challenge list, so a Turtle character is always 0.
+    fn request(&self, flavor: ClientFlavor) -> CharCreateReq {
         CharCreateReq {
             name: self.name.text.clone(),
             race: self.race,
@@ -304,7 +309,7 @@ impl CreateSelection {
             hair_style: self.dials[2],
             hair_color: self.dials[3],
             facial_hair: self.dials[4],
-            challenge_mask: None,
+            challenge_mask: flavor.is_turtle().then_some(0),
         }
     }
 }
@@ -370,6 +375,7 @@ fn create_input(
     time: Res<Time>,
     mut preview: ResMut<GluePreview>,
     pick: Res<CharPick>,
+    flavor: Res<ClientFlavor>,
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut rng: Local<u64>,
@@ -464,7 +470,7 @@ fn create_input(
     if do_create && !sel.creating {
         sel.creating = true;
         sounds.write(GlueSound("gsCharacterCreationCreateChar"));
-        let _ = pick.0.try_send(CharRequest::Create(sel.request()));
+        let _ = pick.0.try_send(CharRequest::Create(sel.request(*flavor)));
     }
     if changed_look {
         preview.scene = Some(crate::portrait::GlueScene::Race(sel.race));
@@ -704,6 +710,15 @@ mod tests {
         assert_eq!(all, (1..=8).collect::<Vec<u8>>());
         assert!(ALLIANCE.windows(2).all(|w| w[0] < w[1]));
         assert!(HORDE.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// A 1.12.1 realm gets the 1.12.1 body; a Turtle realm's handler reads a challenge mask after
+    /// it, and the screen sends none chosen.
+    #[test]
+    fn only_a_turtle_request_carries_a_challenge_mask() {
+        let sel = CreateSelection::default();
+        assert_eq!(sel.request(ClientFlavor::Vanilla).challenge_mask, None);
+        assert_eq!(sel.request(ClientFlavor::Turtle).challenge_mask, Some(0));
     }
 
     #[test]
