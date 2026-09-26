@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{ScriptValue, UiScript};
+use benilla_ui::script::{ScriptValue, UiFlavor, UiScript};
 use benilla_ui::toc::Toc;
 
 use super::content;
@@ -278,20 +278,38 @@ const BLIZZARD_ADDONS: [&str; 12] = [
     "Blizzard_TrainerUI",
 ];
 
-/// The Blizzard addons the chain carries as LoadOnDemand registry rows, for `UIParentLoadAddOn`;
-/// a toc that is not LoadOnDemand is skipped, as the startup walk does not read the chain.
-fn chain_addons() -> Vec<Addon> {
+/// Turtle WoW 1.18.1's own addons, in its archives beside the Blizzard ones (each with its folder
+/// on the install's disk, as theirs have): `## Secure: 1` and not LoadOnDemand, so its client's
+/// archive pass registers them and its startup walk loads them. `Turtle_General` restores the
+/// saved tables Turtle's FrameXML rows read (`TransmogOutfits`, `LFTPresets`, `ChronoboonBuffs`,
+/// `Turtle_ChallengesCache`); `Turtle_GroupUI` is its group frames.
+const TURTLE_ADDONS: [&str; 2] = ["Turtle_General", "Turtle_GroupUI"];
+
+/// The addons the chain carries as registry rows: the Blizzard ones that are LoadOnDemand, for
+/// `UIParentLoadAddOn` (a Blizzard toc that is not is skipped), then, in a Turtle WoW VM, Turtle's
+/// own, which the startup walk loads.
+fn chain_addons(flavor: UiFlavor) -> Vec<Addon> {
+    chain_addons_in(flavor, super::reference_ui::read)
+}
+
+/// [`chain_addons`] over a given chain reader.
+fn chain_addons_in(flavor: UiFlavor, chain: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<Addon> {
+    let read = |name: &str| {
+        let bytes = chain(&format!("Interface/AddOns/{name}/{name}.toc"))?;
+        Some(Addon {
+            name: name.to_string(),
+            toc: Toc::parse(&benilla_ui::source::decode(&bytes)),
+            source: Source::Chain,
+        })
+    };
+    let turtle: &[&str] = match flavor {
+        UiFlavor::Vanilla => &[],
+        UiFlavor::Turtle => &TURTLE_ADDONS,
+    };
     BLIZZARD_ADDONS
         .iter()
-        .filter_map(|name| {
-            let bytes = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))?;
-            let toc = Toc::parse(&benilla_ui::source::decode(&bytes));
-            toc.load_on_demand().then(|| Addon {
-                name: (*name).to_string(),
-                toc,
-                source: Source::Chain,
-            })
-        })
+        .filter_map(|name| read(name).filter(|a| a.toc.load_on_demand()))
+        .chain(turtle.iter().filter_map(|name| read(name)))
         .collect()
 }
 
@@ -301,9 +319,9 @@ fn chain_addons() -> Vec<Addon> {
 /// (`0x42ad10`), and `0x51c9b0` returns on a name-hash hit (`0x51ca10`) and tail-inserts
 /// (`0x521ad0`). That order is the Lua index space, and in the one shared Lua state (`0x7040d0`)
 /// it decides whose copy of a global wins.
-fn discover() -> Vec<Addon> {
+fn discover(flavor: UiFlavor) -> Vec<Addon> {
     // The archive pass, in `BLIZZARD_ADDONS` order: the shipped `patch.MPQ` listfile's too.
-    let mut found = chain_addons();
+    let mut found = chain_addons(flavor);
     // The loose pass, minus the names the archive registered.
     let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
     found.extend(
@@ -710,7 +728,7 @@ pub(super) fn load_third_party(
     roster: &[String],
     version_check: bool,
 ) -> Vec<String> {
-    let addons = discover();
+    let addons = discover(script.flavor());
     // Registered even when empty: `GetNumAddOns()` must answer 0, not a previous session's list.
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     // Chain rows read their files off the player's patch chain.
@@ -1027,7 +1045,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
         let (home, _h) = hermetic_root("scanorder");
-        let chain = chain_addons();
+        let chain = chain_addons(UiFlavor::Vanilla);
         if chain.is_empty() {
             eprintln!("skipping: the chain carries no Blizzard addon rows");
             return;
@@ -1041,7 +1059,7 @@ mod tests {
         );
         write_addon(&home, "Loose", "## Interface: 11200\n", &[]);
 
-        let found = discover();
+        let found = discover(UiFlavor::Vanilla);
         let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
 
         let first_loose = names.iter().position(|n| *n == "Loose").expect("Loose");
@@ -1069,12 +1087,51 @@ mod tests {
         );
     }
 
+    /// A Turtle WoW VM registers Turtle's own two archive addons after the Blizzard rows, as they
+    /// are, not LoadOnDemand, for the startup walk; a 1.12.1 VM never probes for them, and a
+    /// Blizzard toc that is not LoadOnDemand stays out either way.
+    #[test]
+    fn a_turtle_vm_registers_turtles_own_addons_for_the_startup_walk() {
+        let chain = |path: &str| -> Option<Vec<u8>> {
+            let toc = match path {
+                "Interface/AddOns/Blizzard_TrainerUI/Blizzard_TrainerUI.toc" => {
+                    "## Interface: 11200\n## LoadOnDemand: 1\nBlizzard_TrainerUI.xml\n"
+                }
+                "Interface/AddOns/Blizzard_RaidUI/Blizzard_RaidUI.toc" => {
+                    "## Interface: 11200\nBlizzard_RaidUI.xml\n"
+                }
+                "Interface/AddOns/Turtle_General/Turtle_General.toc" => {
+                    "## Interface: 11200\n## Secure: 1\nTurtle_General.lua\n"
+                }
+                _ => return None,
+            };
+            Some(toc.as_bytes().to_vec())
+        };
+        let names = |flavor| {
+            chain_addons_in(flavor, chain)
+                .into_iter()
+                .map(|a| (a.name, a.toc.load_on_demand()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(UiFlavor::Vanilla),
+            vec![("Blizzard_TrainerUI".to_string(), true)]
+        );
+        assert_eq!(
+            names(UiFlavor::Turtle),
+            vec![
+                ("Blizzard_TrainerUI".to_string(), true),
+                ("Turtle_General".to_string(), false),
+            ]
+        );
+    }
+
     /// Every chain row is LoadOnDemand and chain-sourced, the eight windows the interface opens
     /// through them are rows, and `benilla.toc` lists none, like the reference's `FrameXML.toc`.
     #[test]
     fn the_chain_carries_blizzards_load_on_demand_addons_as_registry_rows() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let rows = chain_addons();
+        let rows = chain_addons(UiFlavor::Vanilla);
         assert!(
             rows.iter().any(|a| a.name == "Blizzard_TrainerUI"),
             "the trainer addon is a row: {:?}",
@@ -2373,7 +2430,7 @@ mod tests {
         // Registry order: the chain's Blizzard rows, then the folder's two (`0x51c777` before
         // `0x51c78f`, tail-inserted), one line per registry row.
         let mut expected = String::new();
-        for a in chain_addons() {
+        for a in chain_addons(UiFlavor::Vanilla) {
             expected.push_str(&format!("{}: enabled\n", a.name));
         }
         expected.push_str("Drop: disabled\nKeep: enabled\n");
