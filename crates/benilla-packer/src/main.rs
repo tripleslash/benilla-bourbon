@@ -162,6 +162,13 @@ struct VerifyArgs {
     /// site).
     #[arg(long, default_value_t = 20)]
     stride: usize,
+    /// A layer container: check only the names this key list (`overlay.tsv`) holds.
+    #[arg(long, value_name = "LIST")]
+    only: Option<PathBuf>,
+    /// The tree the build took replacements from: a replaced texture is checked to be exactly 2x
+    /// its chain original rather than byte-equal to it.
+    #[arg(long, value_name = "DIR")]
+    replace_from: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -629,8 +636,20 @@ fn verify(a: VerifyArgs) -> Result<()> {
         index.build_id()
     );
 
-    let names: Vec<String> = chain.list()?.into_iter().map(|e| e.name).collect();
+    let mut names: Vec<String> = chain.list()?.into_iter().map(|e| e.name).collect();
+    if let Some(list) = &a.only {
+        let keep = overlay::read_list(list)?;
+        names.retain(|n| keep.contains(&name_key(n)));
+        // One name per key: a listfile can spell one path several ways.
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|n| seen.insert(name_key(n)));
+    }
+    let replaced = match &a.replace_from {
+        Some(dir) => replace_lookup(dir)?,
+        None => HashMap::new(),
+    };
     let checked = AtomicUsize::new(0);
+    let doubled = AtomicUsize::new(0);
     let missing = AtomicUsize::new(0);
 
     names
@@ -656,7 +675,10 @@ fn verify(a: VerifyArgs) -> Result<()> {
             let body = pack_body(&wire, at.pack_id).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
             let body = decode_pack_body(body, &meta).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
             let got = frame_from_body(&body, &at).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
-            if got != want {
+            if replaced.contains_key(&key) {
+                check_doubled(&want, &got).with_context(|| format!("{name}: replacement"))?;
+                doubled.fetch_add(1, Ordering::Relaxed);
+            } else if got != want {
                 bail!(
                     "{name}: container has {} bytes, chain has {}",
                     got.len(),
@@ -671,8 +693,10 @@ fn verify(a: VerifyArgs) -> Result<()> {
         })?;
 
     eprintln!(
-        "\rverified {} blobs byte-for-byte against the chain ({} missing)",
+        "\rverified {} blobs against the chain: {} byte-for-byte, {} replacements exactly 2x ({} missing)",
         checked.load(Ordering::Relaxed),
+        checked.load(Ordering::Relaxed) - doubled.load(Ordering::Relaxed),
+        doubled.load(Ordering::Relaxed),
         missing.load(Ordering::Relaxed)
     );
     Ok(())
