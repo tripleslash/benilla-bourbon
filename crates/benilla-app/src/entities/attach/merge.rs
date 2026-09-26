@@ -165,6 +165,12 @@ pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), MergedForms>);
 const MERGED_FORMS_CAP: usize = 1024;
 
 impl MergedFormsCache {
+    /// Drop every entry, with the display caches: once their models go, a key's address may be
+    /// reused by another model's geometry.
+    pub(in crate::entities) fn clear(&mut self) {
+        self.0.clear();
+    }
+
     /// The forms of `group`, built on a miss; a singleton borrows the model's own, uncached.
     pub(in crate::entities) fn forms(
         &mut self,

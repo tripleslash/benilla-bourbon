@@ -452,6 +452,8 @@ struct DisplayCaches<'w> {
     items: Option<ResMut<'w, equipment::ItemDisplays>>,
     glows: Option<ResMut<'w, ItemGlows>>,
     bones: ResMut<'w, corpse::BonesModels>,
+    /// Keyed by the address of a model's geometry, which a rebuilt model may reuse.
+    merged: ResMut<'w, attach::MergedFormsCache>,
 }
 
 /// Drop every display and skin cache on a map change; an entry rebuilds on its next use.
@@ -482,6 +484,7 @@ impl DisplayCaches<'_> {
             items,
             glows,
             mut bones,
+            mut merged,
         } = self;
         info!(
         "display caches evicted: {} creature / {} go / {} item / {} fx / {} glow models, {} skins",
@@ -510,6 +513,7 @@ impl DisplayCaches<'_> {
             g.models.clear();
         }
         bones.0.clear();
+        merged.clear();
     }
 }
 

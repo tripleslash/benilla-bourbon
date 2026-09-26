@@ -97,7 +97,14 @@ fn tear_down_visual(entity: &mut EntityCommands) {
 /// body ([`Creatures::is_character_body`]) — as a display swap does, for a change of the art they
 /// are made of: the updated character models turned on or off ([`crate::hd_models`]). Returns how
 /// many. An edge, never per frame.
+///
+/// Call it once the new art has landed: the display and skin caches drop first, since an entry
+/// built while the reloads were in flight holds the old model's skeleton and meshes, and the
+/// model's animation graph, reloaded in place, would drive them with the new model's bones.
 pub(crate) fn rebuild_character_bodies(world: &mut World) -> usize {
+    if let Err(e) = world.run_system_cached(|caches: super::DisplayCaches| caches.clear()) {
+        warn!("character rebuild: the display caches could not be dropped — {e}");
+    }
     let mut attached = world.query_filtered::<(Entity, &NetEntity), With<VisualAttached>>();
     let creatures = world.get_resource::<Creatures>();
     let bodies: Vec<Entity> = attached
@@ -264,10 +271,16 @@ mod tests {
 
     /// A change of the character art rebuilds the players' bodies as a display swap does, and
     /// leaves every body that is not a character alone: without a creature catalog no unit display
-    /// reads as one.
+    /// reads as one. The display caches drop first, so the rebuild reads the new art.
     #[test]
     fn a_character_art_change_rebuilds_the_character_bodies_only() {
         let mut world = World::new();
+        world.init_resource::<super::super::SkinComposites>();
+        world.init_resource::<super::super::spell_fx::SpellFx>();
+        world.init_resource::<super::super::attach::MergedFormsCache>();
+        let mut bones = super::super::corpse::BonesModels::default();
+        bones.0.insert((1, 0), super::super::empty_shell());
+        world.insert_resource(bones);
         let body = |world: &mut World, kind: EntityKind| {
             let unit = world
                 .spawn((
@@ -288,6 +301,14 @@ mod tests {
         let (object, object_part) = body(&mut world, EntityKind::GameObject);
 
         assert_eq!(rebuild_character_bodies(&mut world), 1);
+
+        assert!(
+            world
+                .resource::<super::super::corpse::BonesModels>()
+                .0
+                .is_empty(),
+            "a model built on the old art is not reused"
+        );
 
         assert!(!world.entity(player).contains::<VisualAttached>());
         assert!(!world.entity(player).contains::<AppliedDisplay>());
