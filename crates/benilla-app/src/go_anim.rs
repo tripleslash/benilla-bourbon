@@ -126,6 +126,15 @@ pub(crate) fn go_animates(type_id: i32) -> bool {
     )
 }
 
+/// fork: whether a GameObject of this type may carry a light derived from its glow
+/// ([`benilla_world::modern::lights::emissive`], the Ultra/Cinematic tiers; the reference derives
+/// none). Refused: the types a script fires rather than a fixture that burns — TRAP 6 (traps,
+/// explosions, the invisible triggers vmangos shows only to a GM), AREADAMAGE 12, CAMERA 13,
+/// DUEL_ARBITER 16, FISHINGNODE 17, SUMMONING_RITUAL 18, SPELLCASTER 22 and AURA_GENERATOR 30.
+pub(crate) fn go_type_derives_light(type_id: i32) -> bool {
+    !matches!(type_id, 6 | 12 | 13 | 16 | 17 | 18 | 22 | 30)
+}
+
 /// `GAMEOBJECT_TYPE_DOOR`, the one type a ghost's mover trace drops; also what an absent
 /// `GAMEOBJECT_TYPE_ID` means, since vmangos omits zero-valued fields.
 const GO_TYPE_DOOR: i32 = 0;
@@ -736,6 +745,24 @@ mod tests {
             !ghost_passable(EntityKind::Player, 0),
             "same for a player — the absent-field trap is not unit-specific"
         );
+    }
+
+    /// fork: a trap, a trigger or a script's effect object never carries a derived light; a
+    /// fixture (a GENERIC brazier, a CHEST, a GOOBER lamp, a SPELL_FOCUS campfire) may.
+    #[test]
+    fn only_fixture_types_derive_a_light() {
+        for refused in [6, 12, 13, 16, 17, 18, 22, 30] {
+            assert!(
+                !go_type_derives_light(refused),
+                "type {refused} is script-driven"
+            );
+        }
+        for fixture in [0, 3, 5, 8, 10, 19] {
+            assert!(
+                go_type_derives_light(fixture),
+                "type {fixture} is a fixture"
+            );
+        }
     }
 
     /// vmangos omits the zero field, so `None` is ACTIVE, open, for every door that spawns open.

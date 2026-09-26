@@ -142,6 +142,28 @@ impl EmitTiming {
             looping: vec![true],
         }
     }
+
+    /// Test/tool constructor: one looping slot per entry of `on`, each at a constant `rate` with
+    /// its gate held on or off for the whole band.
+    pub fn gated(rate: f32, on: &[bool]) -> Self {
+        let held = |v: f32| {
+            Some(ScalarAnim {
+                period: 0.0,
+                step: true,
+                wrap: true,
+                gseq: false,
+                keys: vec![(0.0, v)],
+            })
+        };
+        Self {
+            rate: on.iter().map(|_| held(rate)).collect(),
+            enabled: on
+                .iter()
+                .map(|&o| held(if o { 1.0 } else { 0.0 }))
+                .collect(),
+            looping: vec![true; on.len()],
+        }
+    }
 }
 
 /// One frame's sample of the emitter's nine parameter tracks (`+0x34..+0x130`, all but rate and

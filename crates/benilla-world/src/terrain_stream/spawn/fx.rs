@@ -110,21 +110,30 @@ pub(super) fn spawn_emissive_light_for(
     submeshes: &[benilla_assets::ModelSubmesh],
     transform: Transform,
     room: Option<&crate::wmo_portal::WmoGroupVis>,
+    // The model's loader-idle file slot: only what fires or draws in it counts
+    // ([`crate::modern::lights::emissive::emits_at_rest`]).
+    idle: usize,
     out: &mut Vec<Entity>,
 ) {
     // **No tier gate here.** The light is spawned whatever the tier, tagged
     // [`SynthesizedLight`], and `global_light` drops it from the table when the tier does not want
     // it. Gating the spawn instead made a lamp's fate depend on whether it streamed in before or
     // after the lighting latch — see that type's note.
-    let Some(emissive) = crate::modern::lights::emissive::for_model(lights, emitters, submeshes)
-    else {
+    use crate::modern::lights::emissive;
+    let Some(emissive) = emissive::for_model(lights, emitters, submeshes, idle) else {
         return;
     };
     // The centroid and fixture radius are `emissive`'s own law, shared with the entity lane —
     // a GameObject brazier is this same derivation over `EntityPart`s instead of `ModelSubmesh`es.
-    let Some((local, radius)) = crate::modern::lights::emissive::glow_anchor(
-        emitters.iter().map(|e| e.def.position),
-        submeshes.iter().map(|b| b.geometry.as_ref()),
+    let Some((local, radius)) = emissive::glow_anchor(
+        emitters
+            .iter()
+            .filter(|e| emissive::emits_at_rest(&e.def.timing, idle))
+            .map(|e| e.def.position),
+        submeshes
+            .iter()
+            .filter(|b| emissive::shown_at_rest(b.alpha_anim.as_deref(), idle))
+            .map(|b| b.geometry.as_ref()),
     ) else {
         return;
     };

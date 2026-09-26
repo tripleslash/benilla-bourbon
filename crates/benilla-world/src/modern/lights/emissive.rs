@@ -196,19 +196,50 @@ pub fn combine<'a>(
     })
 }
 
-/// [`combine`] over a loaded model's own parts — the form both spawners call.
+/// [`combine`] over a loaded model's own parts — the form the doodad spawners call. `idle` is the
+/// model's loader-idle file slot, the sequence a placed prop rests in.
 pub fn for_model(
     lights: &[ModelLight],
     emitters: &[ModelEmitter],
     submeshes: &[ModelSubmesh],
+    idle: usize,
 ) -> Option<Emissive> {
     combine(
         lights.iter().any(|l| l.def.casts()),
         emitters
             .iter()
+            .filter(|e| emits_at_rest(&e.def.timing, idle))
             .map(|e| (e.def.blend, e.def.lit, &e.def.over_life)),
-        submeshes.iter().filter_map(glow_of),
+        submeshes
+            .iter()
+            .filter(|b| shown_at_rest(b.alpha_anim.as_deref(), idle))
+            .filter_map(glow_of),
     )
+}
+
+/// fork: **whether an emitter fires at all in the sequence its model rests in** — gate on and rate
+/// above zero somewhere in slot `idle` ([`benilla_formats::EmitTiming::first_burst`], the
+/// reference's `enabled != 0 && rate > 0` birth test). An explosion's flames and a chest's
+/// opening sparkle are keyed off in Stand and only fire in the sequence a script arms
+/// (`G_BarrelExplode.m2`: all seven emitters off in Stand, on in 157/150); a light derived from
+/// them lights a barrel that is not exploding.
+pub fn emits_at_rest(timing: &benilla_formats::EmitTiming, idle: usize) -> bool {
+    timing.first_burst(Some(idle)).is_some()
+}
+
+/// fork: **whether a batch is drawn at all in the sequence its model rests in** — its colour alpha
+/// and transparency weight both reach above zero somewhere in slot `idle`. The reference skips a
+/// batch whose alpha is `≤ 0` (`0x707680`), so a card keyed hidden in Stand draws nothing there
+/// and emits nothing here. `None` is a batch with no animated alpha: drawn.
+pub fn shown_at_rest(alpha: Option<&benilla_formats::AlphaAnim>, idle: usize) -> bool {
+    let Some(alpha) = alpha else { return true };
+    let slot = alpha.seq(Some(idle));
+    let peak = |track: Option<&benilla_formats::ScalarAnim>| {
+        track.filter(|t| !t.keys.is_empty()).map_or(1.0, |t| {
+            t.keys.iter().map(|&(_, v)| v).fold(f32::MIN, f32::max)
+        })
+    };
+    peak(slot.color.as_ref()) > 0.0 && peak(slot.weight.as_ref()) > 0.0
 }
 
 /// One batch read as a glow card, or `None` when it is not one.
@@ -926,5 +957,77 @@ mod tests {
     fn a_sliver_of_glass_is_not_a_light() {
         let slit = pane(0.0, 0.0, 0.0, 0.2, 0.5);
         assert!(window_glows([(Some([255u8, 255, 255]), false, &slit)]).is_empty());
+    }
+
+    /// An emitter counts only in a slot where its gate is on and its rate above zero: an
+    /// explosion keyed off in the rest sequence emits nothing there.
+    #[test]
+    fn an_emitter_gated_off_at_rest_does_not_count() {
+        let timing = benilla_formats::EmitTiming::gated(20.0, &[true, false]);
+        assert!(emits_at_rest(&timing, 0), "gate on in slot 0");
+        assert!(!emits_at_rest(&timing, 1), "gate off in slot 1");
+        let silent = benilla_formats::EmitTiming::gated(0.0, &[true]);
+        assert!(!emits_at_rest(&silent, 0), "a zero rate births nothing");
+    }
+
+    /// A card whose alpha is keyed to zero across the rest sequence is not drawn there, so it is
+    /// no glow; a card with no animated alpha is always drawn.
+    #[test]
+    fn a_card_hidden_at_rest_does_not_count() {
+        let held = |v: f32| benilla_formats::ScalarAnim {
+            period: 0.0,
+            step: true,
+            wrap: true,
+            gseq: false,
+            keys: vec![(0.0, v)],
+        };
+        let alpha = benilla_formats::AlphaAnim::new(vec![
+            benilla_formats::AlphaSeq {
+                color: Some(held(0.0)),
+                weight: None,
+            },
+            benilla_formats::AlphaSeq {
+                color: None,
+                weight: Some(held(0.6)),
+            },
+        ])
+        .expect("an animated alpha");
+        assert!(!shown_at_rest(Some(&alpha), 0), "hidden in slot 0");
+        assert!(shown_at_rest(Some(&alpha), 1), "drawn in slot 1");
+        assert!(shown_at_rest(None, 0), "no animated alpha: drawn");
+    }
+
+    /// GOLDEN — **the barrel that is not exploding.** `G_BarrelExplode.m2` (GameObject display
+    /// 472) authors seven emitters, the flames and flare additive and unlit, every one keyed off in
+    /// Stand and fired only by the explode sequences (157, 150). None of them emits at rest, while
+    /// the Elwynn campfire's flames do.
+    #[test]
+    fn an_explosion_models_emitters_are_off_at_rest() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open vanilla patch chain");
+        let at_rest = |chain: &mut benilla_formats::Chain, path: &str| -> Vec<bool> {
+            let bytes = chain.read_file(path).expect("read model");
+            let stand = benilla_formats::parse_m2_animations(&bytes)
+                .iter()
+                .find(|a| a.anim_id == 0)
+                .map(|a| a.seq_index)
+                .expect("a Stand sequence");
+            benilla_formats::parse_m2_particle_emitters(&bytes)
+                .expect("parse emitters")
+                .iter()
+                .map(|e| emits_at_rest(&e.timing, stand))
+                .collect()
+        };
+        let barrel = at_rest(&mut chain, "World\\Goober\\G_BarrelExplode.m2");
+        assert_eq!(barrel.len(), 7, "seven emitters");
+        assert!(barrel.iter().all(|on| !on), "all off in Stand: {barrel:?}");
+        let campfire = at_rest(
+            &mut chain,
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Campfire\\ElwynnCampfire.m2",
+        );
+        assert!(
+            campfire.iter().all(|&on| on),
+            "a fire burns at rest: {campfire:?}"
+        );
     }
 }

@@ -247,6 +247,10 @@ pub(super) fn spawn_loaded_placements(
                         &m.submeshes,
                         p.transform,
                         None,
+                        m.animations
+                            .as_ref()
+                            .and_then(benilla_assets::ModelAnimations::idle_seq)
+                            .unwrap_or(0),
                         &mut ents,
                     );
                     tag_world_object(&mut commands, &ents, &object);
@@ -739,6 +743,10 @@ pub(super) fn spawn_loaded_placements(
                 &m.submeshes,
                 d.transform,
                 fade.room.as_ref(),
+                m.animations
+                    .as_ref()
+                    .and_then(benilla_assets::ModelAnimations::idle_seq)
+                    .unwrap_or(0),
                 &mut ents,
             );
             tag_world_object(&mut commands, &ents, &object);

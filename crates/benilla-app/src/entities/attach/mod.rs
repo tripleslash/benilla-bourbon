@@ -778,27 +778,58 @@ pub(super) fn attach_entity_visuals(
             // spells out: attach runs once and the lighting model latches later, so a question
             // asked here is asked before the answer exists. The light is spawned and tagged;
             // `global_light` drops it per frame on any tier below Cinematic.
-            if net.kind == EntityKind::GameObject {
+            // fork: only a fixture's type ([`crate::go_anim::go_type_derives_light`]), and only what
+            // fires or draws in the sequence the model rests in: an explosion keyed off in Stand, or
+            // a card hidden there, is not a lamp.
+            let go_type = stores.get(entity).map_or(0, |s| s.0.gameobject_type_id());
+            if net.kind == EntityKind::GameObject && crate::go_anim::go_type_derives_light(go_type)
+            {
                 if let Some(dm) = dm {
-                    let parts = dm.parts.iter().flatten();
-                    if let Some(e) = benilla_world::modern::lights::emissive::combine(
+                    use benilla_world::modern::lights::emissive;
+                    let idle = dm
+                        .animations
+                        .as_ref()
+                        .and_then(benilla_assets::ModelAnimations::idle_seq)
+                        .unwrap_or(0);
+                    let emitters = dm
+                        .emitters
+                        .iter()
+                        .filter(|em| emissive::emits_at_rest(&em.def.timing, idle));
+                    let parts = dm
+                        .parts
+                        .iter()
+                        .flatten()
+                        .filter(|p| emissive::shown_at_rest(p.alpha_anim.as_deref(), idle));
+                    // An invisible GameObject is one whose model draws nothing at rest (a
+                    // transparent or empty M2, the note above); its emitters alone light nothing.
+                    let drawn = parts.clone().next().is_some();
+                    if let Some(e) = emissive::combine(
                         model_lights.iter().any(|l| l.def.casts()),
-                        dm.emitters
-                            .iter()
+                        emitters
+                            .clone()
                             .map(|em| (em.def.blend, em.def.lit, &em.def.over_life)),
-                        parts.clone().filter_map(|p| {
-                            benilla_world::modern::lights::emissive::glow_of_geometry(&p.geometry)
-                        }),
-                    ) {
+                        parts
+                            .clone()
+                            .filter_map(|p| emissive::glow_of_geometry(&p.geometry)),
+                    )
+                    .filter(|_| drawn)
+                    {
                         // The glowing part's own centroid, not the model origin — a brazier's fire
                         // sits in its bowl, a yard or two up from the foot the origin is at, and a
                         // light at the origin puts the glow inside the stand.
-                        if let Some((local, radius)) =
-                            benilla_world::modern::lights::emissive::glow_anchor(
-                                dm.emitters.iter().map(|em| em.def.position),
-                                parts.map(|p| p.geometry.as_ref()),
-                            )
-                        {
+                        if let Some((local, radius)) = emissive::glow_anchor(
+                            emitters.map(|em| em.def.position),
+                            parts.map(|p| p.geometry.as_ref()),
+                        ) {
+                            // Which GameObject derived a light, for pinning a stray one in the field.
+                            debug!(
+                                "gameobject derived light: display {:?} type {go_type} model {} \
+                                 colour {:?} × {:.2} at {local:?}",
+                                net.display_id,
+                                display_label(&dm.handle),
+                                e.color,
+                                e.intensity_scale,
+                            );
                             let light = commands
                                 .spawn((
                                     benilla_world::terrain_stream::point_light(
