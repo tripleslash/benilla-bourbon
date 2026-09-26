@@ -3292,4 +3292,287 @@
         -- The reference's OptionsFrame row (UIParent.lua:16): the centre slot, openable while dead.
         UIPanelWindows["BenillaOptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
     ]]></Script>
+
+    <!--
+        Our Graphics rows in Turtle WoW 1.18.1's own options window, which the game menu opens on
+        a Turtle realm (GameMenuFrame.xml). That window is data-driven: its Options\Options.lua
+        lists categories of rows in `GameOptions`, and its OptionsFrame.lua builds a category's
+        controls from them each time the category shows, labelling a row with `_G[row.name]` and
+        tipping it with `row.desc`. Our rows join the categories Turtle's own sit in. A 1.12.1
+        chain has no `GameOptions`, and none of this runs there.
+    -->
+    <Script><![CDATA[
+        -- Read at load, after the chain's OptionsFrame.xml and before any addon.
+        BENILLA_TURTLE_OPTIONS = type(GameOptions) == "table" and 1 or nil
+
+        if ( BENILLA_TURTLE_OPTIONS ) then
+            -- Row labels, read through `_G[row.name]`: our rows' own.
+            BENILLA_WORLD_SHADOWS = "Real Character Shadows"
+            BENILLA_HD_MODELS = "Use updated character models"
+            BENILLA_LIGHTING_MODEL = "Lighting"
+            BENILLA_LIGHTING_QUALITY = "Lighting Quality"
+            BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
+            BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
+            BENILLA_WATER_DETAIL = "Water Detail"
+            BENILLA_RENDER_SCALE = "Render Scale"
+
+            -- A dropdown's `<identifier>Dropdown_Init`, in the shape of Turtle's own
+            -- (Options\Functions.lua): each entry picks through OptionsFrameDropdown_OnValueChanged.
+            local function dropdown(cvar, entries)
+                return function()
+                    local menu = getglobal(UIDROPDOWNMENU_INIT_MENU)
+                    for _, entry in ipairs(entries) do
+                        local info = {}
+                        info.text = entry.text
+                        info.value = entry.value
+                        info.func = OptionsFrameDropdown_OnValueChanged
+                        UIDropDownMenu_AddButton(info)
+                    end
+                    UIDropDownMenu_SetSelectedValue(menu, GetCVar(cvar))
+                end
+            end
+            -- The entries our own rows offer, in their order.
+            BenillaLightingModelDropdown_Init = dropdown("lightingModel", {
+                { text = "Classic", value = "0" },
+                { text = "Modern", value = "1" },
+            })
+            BenillaLightingQualityDropdown_Init = dropdown("lightingQuality", {
+                { text = "Low", value = "0" },
+                { text = "Medium", value = "1" },
+                { text = "High", value = "2" },
+                { text = "Ultra", value = "3" },
+                { text = "Cinematic", value = "4" },
+            })
+            BenillaWaterDetailDropdown_Init = dropdown("waterDetail", {
+                { text = "Modern", value = "2" },
+                { text = "Modern (Experimental)", value = "3" },
+                { text = "Modern (SSR)", value = "1" },
+                { text = "Classic", value = "0" },
+            })
+
+            -- The rows, by the category they join; the bounds are our rows'. The tooltips are
+            -- ours, whose "Applies when you click Apply" holds here too (below).
+            local rows = {
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_WORLD_SHADOWS", desc = BENILLA_TOOLTIP_WORLD_SHADOWS,
+                    type = "checkbutton", cvar = "worldShadows" } },
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_HD_MODELS", desc = BENILLA_TOOLTIP_HD_MODELS,
+                    type = "checkbutton", cvar = "hdCharacterModels",
+                    requirement = OPTION_RESTART_REQUIREMENT } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_LIGHTING_MODEL", desc = BENILLA_TOOLTIP_LIGHTING_MODEL,
+                    type = "dropdown", identifier = "BenillaLightingModel",
+                    cvar = "lightingModel" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_LIGHTING_QUALITY", desc = BENILLA_TOOLTIP_LIGHTING_QUALITY,
+                    type = "dropdown", identifier = "BenillaLightingQuality",
+                    cvar = "lightingQuality" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_AMBIENT_OCCLUSION", desc = BENILLA_TOOLTIP_AMBIENT_OCCLUSION,
+                    type = "slider", cvar = "ssaoStrength", minval = 0, maxval = 1.0, step = 0.05 } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_INDIRECT_LIGHT", desc = BENILLA_TOOLTIP_INDIRECT_LIGHT,
+                    type = "slider", cvar = "ssgiStrength", minval = 0, maxval = 1.0, step = 0.05 } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_WATER_DETAIL", desc = BENILLA_TOOLTIP_WATER_DETAIL,
+                    type = "dropdown", identifier = "BenillaWaterDetail", cvar = "waterDetail" } },
+                { category = DISPLAY, row = {
+                    name = "BENILLA_RENDER_SCALE", desc = BENILLA_TOOLTIP_RENDER_SCALE,
+                    type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.05,
+                    numberLabels = true } },
+            }
+            -- The first category of a name: DISPLAY is both a VIDEO and an interface category,
+            -- and VIDEO's comes first.
+            for _, entry in ipairs(rows) do
+                for _, category in ipairs(GameOptions) do
+                    if ( category.options and category.name == entry.category ) then
+                        tinsert(category.options, entry.row)
+                        break
+                    end
+                end
+            end
+
+            -- ── The VIDEO rows stage to Apply ──
+            -- Deviation: Turtle's window writes a row the moment its control changes
+            -- (OptionsFrame.lua's local `OnControlValueChanged`). Here its VIDEO rows (the
+            -- categories under the VIDEO header) stage instead and commit on an Apply button, as
+            -- every Graphics row of our window does; Okay commits them too, and Cancel or closing
+            -- the window discards them, having written nothing. Its other rows write as Turtle's do.
+            local video
+            for _, category in ipairs(GameOptions) do
+                if ( not category.options ) then
+                    video = category.name == VIDEO
+                elseif ( video ) then
+                    for _, option in ipairs(category.options) do
+                        option.benillaStaged = 1
+                    end
+                end
+            end
+
+            -- option -> the value its control shows, uncommitted.
+            local staged = {}
+
+            local function committed(option)
+                if ( option.cvar ) then
+                    return GetCVar(option.cvar)
+                elseif ( option.uvar ) then
+                    return getglobal(option.uvar)
+                elseif ( option.getter ) then
+                    return getglobal(option.getter)()
+                end
+            end
+
+            local function same(a, b)
+                if ( tonumber(a) and tonumber(b) ) then
+                    return tonumber(a) == tonumber(b)
+                end
+                return tostring(a) == tostring(b)
+            end
+
+            local apply = CreateFrame("Button", "OptionsFrameApply", OptionsFrame, "UIPanelButtonTemplate")
+            apply:SetWidth(96)
+            apply:SetHeight(22)
+            apply:SetPoint("BOTTOMRIGHT", OptionsFrameOkay, "BOTTOMLEFT", 0, 0)
+            apply:SetText("Apply")
+            apply:Hide()
+
+            -- A value equal to the committed one is no edit.
+            local function stage(option, value)
+                if ( same(value, committed(option)) ) then
+                    staged[option] = nil
+                else
+                    staged[option] = value
+                end
+                if ( next(staged) ) then
+                    apply:Show()
+                else
+                    apply:Hide()
+                end
+            end
+
+            -- Commit what is staged as OnControlValueChanged writes a row, then mark it
+            -- unchanged, so Cancel's OptionsFrame_RevertOptions leaves it. `redraw` re-renders the
+            -- category, since Turtle greys a dependent row off the committed value.
+            local function commit(redraw)
+                if ( not next(staged) ) then
+                    return
+                end
+                local restart
+                for option, value in pairs(staged) do
+                    if ( option.cvar ) then
+                        SetCVar(option.cvar, value, option.name)
+                    elseif ( option.uvar ) then
+                        setglobal(option.uvar, value)
+                    elseif ( option.setter ) then
+                        getglobal(option.setter)(tonumber(value))
+                    end
+                    if ( option.func ) then
+                        getglobal(option.func)(value)
+                    end
+                    restart = restart or option.restartGx
+                    option.initialValue = value
+                    option.changedValue = false
+                end
+                staged = {}
+                apply:Hide()
+                if ( restart ) then
+                    RestartGx()
+                end
+                if ( redraw ) then
+                    OptionsFrame_OnShow()
+                end
+            end
+
+            apply:SetScript("OnClick", function()
+                PlaySound("igMainMenuOption")
+                commit(1)
+            end)
+            local okay = OptionsFrameOkay:GetScript("OnClick")
+            OptionsFrameOkay:SetScript("OnClick", function()
+                commit()
+                okay()
+            end)
+
+            -- Turtle's three control handlers, each computing its value as Turtle's does; a VIDEO
+            -- row stages it, any other row goes to Turtle's own.
+            local checkClick = OptionsFrameCheckButton_OnClick
+            function OptionsFrameCheckButton_OnClick()
+                local option = this:GetParent().option
+                if ( not option.benillaStaged ) then
+                    return checkClick()
+                end
+                local on = this:GetChecked()
+                local value = on and (option.inverted and "0" or "1") or (option.inverted and "1" or "0")
+                stage(option, value)
+                PlaySound("igMainMenuOptionCheckBoxOn")
+            end
+
+            local dropdownChanged = OptionsFrameDropdown_OnValueChanged
+            function OptionsFrameDropdown_OnValueChanged()
+                local menu = getglobal(UIDROPDOWNMENU_OPEN_MENU)
+                local option = menu:GetParent().option
+                if ( not option.benillaStaged ) then
+                    return dropdownChanged()
+                end
+                UIDropDownMenu_SetSelectedValue(menu, this.value)
+                stage(option, this.value)
+            end
+
+            local sliderChanged = OptionsFrameSlider_OnValueChanged
+            function OptionsFrameSlider_OnValueChanged()
+                local option = this:GetParent().option
+                if ( not option.benillaStaged ) then
+                    return sliderChanged()
+                end
+                local v = this:GetValue()
+                stage(option, option.inverted and (option.maxval - v + option.minval) or v)
+            end
+
+            -- A category re-renders from the committed values; show the staged ones over them, as
+            -- Turtle's UpdateOptions sets each control.
+            local function showStaged()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    local value = option and staged[option]
+                    if ( value ~= nil ) then
+                        if ( option.type == "checkbutton" ) then
+                            frame.control:SetChecked(option.inverted and (1 - tonumber(value)) or tonumber(value))
+                        elseif ( option.type == "slider" ) then
+                            frame.control:SetValue(tonumber(option.inverted and (option.maxval - value + option.minval) or value))
+                        elseif ( option.type == "dropdown" ) then
+                            UIDropDownMenu_Initialize(frame.control, getglobal(option.identifier .. "Dropdown_Init"))
+                            UIDropDownMenu_SetSelectedValue(frame.control, value)
+                        end
+                    end
+                end
+            end
+
+            local listClick = OptionsListButton_OnClick
+            function OptionsListButton_OnClick(category, focusOption)
+                listClick(category, focusOption)
+                if ( next(staged) ) then
+                    showStaged()
+                end
+            end
+
+            -- Defaults writes the category's defaults outright, as Turtle's does, over anything
+            -- staged.
+            local setDefaults = OptionsFrame_SetDefaults
+            function OptionsFrame_SetDefaults(popup)
+                if ( not popup ) then
+                    staged = {}
+                    apply:Hide()
+                end
+                return setDefaults(popup)
+            end
+
+            local onHide = OptionsFrame_OnHide
+            function OptionsFrame_OnHide()
+                staged = {}
+                apply:Hide()
+                return onHide()
+            end
+        end
+    ]]></Script>
 </Ui>

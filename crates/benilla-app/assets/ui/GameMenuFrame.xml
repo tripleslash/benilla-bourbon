@@ -117,7 +117,29 @@
                     <OnClick>
                         PlaySound("igMainMenuOption")
                         HideUIPanel(GameMenuFrame)
+                        -- On a Turtle WoW realm, its own window, as its GameMenuFrame.xml opens it
+                        -- (it carries our Graphics rows, OptionsFrame.xml); else ours.
+                        if ( BENILLA_TURTLE_OPTIONS ) then
+                            ShowUIPanel(OptionsFrame)
+                        else
+                            ShowUIPanel(BenillaOptionsFrame)
+                        end
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <!-- Turtle WoW's menu has a Key Bindings rung under Options (its GameMenuFrame.xml),
+                 and its options window has no bindings page. Shown on a Turtle realm only, where it
+                 opens our window's Keybindings page. -->
+            <Button name="GameMenuButtonKeybindings" inherits="GameMenuButtonTemplate" text="KEY_BINDINGS" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        PlaySound("igMainMenuOption")
+                        HideUIPanel(GameMenuFrame)
                         ShowUIPanel(BenillaOptionsFrame)
+                        BenillaOptionsFrame_SelectCategory("Keybindings")
                     </OnClick>
                 </Scripts>
             </Button>
@@ -196,4 +218,14 @@
             </OnHide>
         </Scripts>
     </Frame>
+    <Script><![CDATA[
+        -- On a Turtle realm the Key Bindings rung sits between Options and Edit Mode, one rung
+        -- taller.
+        if ( BENILLA_TURTLE_OPTIONS ) then
+            GameMenuButtonKeybindings:Show()
+            GameMenuButtonEditMode:ClearAllPoints()
+            GameMenuButtonEditMode:SetPoint("TOPLEFT", GameMenuButtonKeybindings, "BOTTOMLEFT", 0, -20)
+            GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + GameMenuButtonKeybindings:GetHeight())
+        end
+    ]]></Script>
 </Ui>
