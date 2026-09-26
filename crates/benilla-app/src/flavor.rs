@@ -42,6 +42,14 @@ impl ClientFlavor {
     pub(crate) fn is_turtle(self) -> bool {
         self == Self::Turtle
     }
+
+    /// The interface flavor a VM built under this client flavor runs.
+    pub(crate) fn ui(self) -> benilla_ui::script::UiFlavor {
+        match self {
+            Self::Vanilla => benilla_ui::script::UiFlavor::Vanilla,
+            Self::Turtle => benilla_ui::script::UiFlavor::Turtle,
+        }
+    }
 }
 
 /// The flavor in force, for a table with no `World` at hand (a race's name, side, helm prefix):

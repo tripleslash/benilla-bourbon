@@ -160,6 +160,7 @@ pub use chat_misc::EmoteRequest;
 pub use chat_send::ChatSend;
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
+pub use client::UiFlavor;
 pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
     PetitionSlotView, RandomPropertyView, UiCursorMode,
@@ -439,6 +440,26 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnKeyDown",
     "OnKeyUp",
 ];
+
+/// What a Turtle WoW VM takes beyond [`SCRIPT_KINDS`]. `OnInputLanguageChanged` is a real slot the
+/// reference accepts on every client and fires only when an input method changes the language;
+/// with no input method here nothing fires it, so a 1.12.1 VM refuses it (a documented deviation,
+/// `SCRIPT_KINDS`' rule), and a Turtle VM takes the reference's behaviour: stored, never fired.
+const TURTLE_SCRIPT_KINDS: [&str; 1] = ["OnInputLanguageChanged"];
+
+/// The kind `name` names in a VM of `flavor`, in its canonical spelling, matched
+/// case-insensitively.
+pub(crate) fn script_kind(flavor: UiFlavor, name: &str) -> Option<&'static str> {
+    let extra: &[&'static str] = match flavor {
+        UiFlavor::Vanilla => &[],
+        UiFlavor::Turtle => &TURTLE_SCRIPT_KINDS,
+    };
+    SCRIPT_KINDS
+        .iter()
+        .chain(extra)
+        .copied()
+        .find(|k| k.eq_ignore_ascii_case(name))
+}
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // UiScript: the public host

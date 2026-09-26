@@ -35,6 +35,12 @@ fn install_boot_vm(world: &mut World) {
             return;
         }
     };
+    // Before anything loads: the flavor decides the manifest, `GetBuildInfo` and the script kinds.
+    let flavor = world
+        .get_resource::<crate::flavor::ClientFlavor>()
+        .copied()
+        .unwrap_or_default();
+    script.set_flavor(flavor.ui());
     seed_vm_clock(world, &mut script);
     install_addon_asset_resolvers(world, &mut script);
     load_global_strings(world, &script);

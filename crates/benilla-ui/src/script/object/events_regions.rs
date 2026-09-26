@@ -6,7 +6,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::script::binding_abi::optional_string;
 use crate::script::region::region_wrapper;
-use crate::script::{Model, RegionData, REG_SCRIPTS, SCRIPT_KINDS};
+use crate::script::{script_kind, Model, RegionData, REG_SCRIPTS};
 use crate::widget::RegionKind;
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, publish_global};
@@ -86,13 +86,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, name): (Table, String)| get_script(lua, &this, &name))?,
     )?;
     // `HasScript(name)`: 1 if the widget can carry that script kind, else nil, whether or not one
-    // is set. Answered from the flat `SCRIPT_KINDS`, so another type's kind reads 1 too, where the
-    // reference's tables are per widget type (base `0x76a0d0`; a plain Frame has no `OnClick`).
+    // is set. Answered from the flat kind list ([`script_kind`]), so another type's kind reads 1
+    // too, where the reference's tables are per widget type (base `0x76a0d0`; a plain Frame has no
+    // `OnClick`).
     m.set(
         "HasScript",
-        lua.create_function(|_, (_this, name): (Table, String)| {
+        lua.create_function(|lua, (_this, name): (Table, String)| {
+            let flavor = lua.app_data_ref::<Model>().expect("model").flavor;
             Ok(crate::script::binding_abi::flag(
-                SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)),
+                script_kind(flavor, &name).is_some(),
             ))
         })?,
     )?;
@@ -210,15 +212,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `SetScript(name, func)`: stores the closure under one of [`SCRIPT_KINDS`], else raises.
-/// Deviation: real 1.12 kinds nothing fires yet raise too (`OnHyperlinkEnter`, `OnHyperlinkLeave`,
-/// `OnMessageScrollChanged`, `OnInputLanguageChanged`, the movie frame's), because an accepted
-/// handler that never runs fails silently. `OnAttributeChanged` is 2.0's, with no 1.12 slot.
+/// `SetScript(name, func)`: stores the closure under a kind the VM takes ([`script_kind`]), else
+/// raises. Deviation: real 1.12 kinds nothing fires yet raise too (`OnHyperlinkEnter`,
+/// `OnHyperlinkLeave`, `OnMessageScrollChanged`, the movie frame's, and `OnInputLanguageChanged`
+/// outside a Turtle WoW VM), because an accepted handler that never runs fails silently.
+/// `OnAttributeChanged` is 2.0's, with no 1.12 slot.
 fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> mlua::Result<()> {
-    let kind = SCRIPT_KINDS
-        .iter()
-        .copied()
-        .find(|&k| k.eq_ignore_ascii_case(name))
+    let flavor = lua.app_data_ref::<Model>().expect("model").flavor;
+    let kind = script_kind(flavor, name)
         .ok_or_else(|| mlua::Error::runtime(format!("SetScript: unsupported script '{name}'")))?;
     let h = frame_handle_of(lua, this)?;
     let id = lua.app_data_mut::<Model>().expect("model").frame_id(h);
@@ -268,13 +269,9 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
 }
 
 fn get_script(lua: &Lua, this: &Table, name: &str) -> mlua::Result<Value> {
-    let kind = match SCRIPT_KINDS
-        .iter()
-        .copied()
-        .find(|&k| k.eq_ignore_ascii_case(name))
-    {
-        Some(k) => k,
-        None => return Ok(Value::Nil),
+    let flavor = lua.app_data_ref::<Model>().expect("model").flavor;
+    let Some(kind) = script_kind(flavor, name) else {
+        return Ok(Value::Nil);
     };
     let id = decode_id(this)?;
     let scripts: Table = lua.named_registry_value(REG_SCRIPTS)?;

@@ -11,6 +11,21 @@ const VERSION: &str = "1.12.1";
 const BUILD: &str = "5875";
 const BUILD_DATE: &str = "Sep 19 2006";
 
+/// Turtle WoW 1.18.1's, as its `WoW.exe` spells them: the in-game `GetBuildInfo` sits at the same
+/// `0x4884a0` and loads `0x837c04`, `0x837bfc` and `0x834798`.
+const TURTLE_VERSION: &str = "1.18.1";
+const TURTLE_BUILD: &str = "7272";
+const TURTLE_BUILD_DATE: &str = "Mar 20 2026";
+
+/// Which client's interface this VM runs: the 1.12.1 reference, or Turtle WoW 1.18.1, whose
+/// FrameXML the player's Turtle chain supplies. The host sets it once, as it builds the VM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiFlavor {
+    #[default]
+    Vanilla,
+    Turtle,
+}
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
@@ -46,10 +61,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBuildInfo",
         lua.create_function(|lua, ()| {
+            let flavor = lua.app_data_ref::<Model>().expect("model app_data").flavor;
+            let (version, build, date) = match flavor {
+                UiFlavor::Vanilla => (VERSION, BUILD, BUILD_DATE),
+                UiFlavor::Turtle => (TURTLE_VERSION, TURTLE_BUILD, TURTLE_BUILD_DATE),
+            };
             Ok(MultiValue::from_vec(vec![
-                Value::String(lua.create_string(VERSION)?),
-                Value::String(lua.create_string(BUILD)?),
-                Value::String(lua.create_string(BUILD_DATE)?),
+                Value::String(lua.create_string(version)?),
+                Value::String(lua.create_string(build)?),
+                Value::String(lua.create_string(date)?),
             ]))
         })?,
     )?;
@@ -187,6 +207,16 @@ impl super::UiScript {
     pub fn set_framerate(&mut self, fps: f64) {
         self.model_mut().framerate = fps;
     }
+
+    /// Set which client's interface this VM runs, before anything loads into it.
+    pub fn set_flavor(&mut self, flavor: UiFlavor) {
+        self.model_mut().flavor = flavor;
+    }
+
+    /// Which client's interface this VM runs.
+    pub fn flavor(&self) -> UiFlavor {
+        self.model_ref().flavor
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +237,18 @@ mod tests {
             3,
             "three values, never a fourth"
         );
+    }
+
+    /// A Turtle WoW VM answers as Turtle's `WoW.exe` does: its three strings, still no fourth.
+    #[test]
+    fn get_build_info_answers_as_turtle_wow_under_its_flavor() {
+        let mut s = UiScript::new().unwrap();
+        s.set_flavor(super::UiFlavor::Turtle);
+        assert_eq!(
+            s.eval::<Vec<String>>("return { GetBuildInfo() }").unwrap(),
+            vec!["1.18.1", "7272", "Mar 20 2026"]
+        );
+        assert_eq!(s.arity("GetBuildInfo()").unwrap(), 3);
     }
 
     /// Never nil: addons index with it at file scope, and a nil index errors far from the cause.
