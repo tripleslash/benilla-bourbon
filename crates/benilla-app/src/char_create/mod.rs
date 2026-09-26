@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn the_chosen_icons_are_lock_highlighted() {
         use crate::glue::art::GlueArt;
-        use crate::glue::widgets::{icon_button, LockHighlight};
+        use crate::glue::widgets::{icon_button, IconFrame, LockHighlight};
 
         fn spawn_icons(mut commands: Commands, art: Res<GlueArt>) {
             let font = Handle::<Font>::default();
@@ -748,6 +748,7 @@ mod tests {
                         "",
                         &art,
                         1.0,
+                        IconFrame::VANILLA,
                     );
                 }
                 for sex in 0..2u8 {
@@ -761,6 +762,7 @@ mod tests {
                         "",
                         &art,
                         1.0,
+                        IconFrame::VANILLA,
                     );
                 }
                 for slot in 0..8u8 {
@@ -774,6 +776,7 @@ mod tests {
                         "",
                         &art,
                         1.0,
+                        IconFrame::VANILLA,
                     );
                 }
             });

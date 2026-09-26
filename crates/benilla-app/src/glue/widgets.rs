@@ -278,37 +278,6 @@ fn outlined_spans<W: Bundle, T: Bundle>(
     real
 }
 
-/// A 48² race/class/gender check-button: the `IconShadow`, the face, a `ButtonHilight-Square`
-/// lit on hover and locked while selected (the template's `CheckedTexture` is commented out), and
-/// the `HighlightText` name label at BOTTOM +1. `dyn_icon` and `label_dyn` are refresh markers.
-///
-/// It carries its own [`LockHighlight`]: `SetCharacterRace`/`Class`/`Gender` lock these by hand
-/// (`CharacterCreate.lua` l.171/254/326), and the screen's query needs the component present.
-pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
-    parent: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    action: A,
-    dyn_icon: Option<I>,
-    fixed: Option<(Handle<Image>, Rect)>,
-    label_dyn: Option<L>,
-    label: &str,
-    art: &GlueArt,
-    s: f32,
-) {
-    icon_button_framed(
-        parent,
-        font,
-        action,
-        dyn_icon,
-        fixed,
-        label_dyn,
-        label,
-        art,
-        s,
-        IconFrame::VANILLA,
-    );
-}
-
 /// An icon button's template geometry: its square and the `UI-CharacterCreate-IconShadow` square
 /// centred behind it at (2,-2), if the template has one.
 #[derive(Clone, Copy)]
@@ -325,9 +294,14 @@ impl IconFrame {
     };
 }
 
-/// [`icon_button`] at a given template's geometry.
-#[allow(clippy::too_many_arguments)] // icon_button's nine and the frame
-pub(crate) fn icon_button_framed<A: Component, I: Bundle, L: Bundle>(
+/// A race/class/gender check-button at its template's `frame`: the `IconShadow`, the face, a
+/// `ButtonHilight-Square` lit on hover and locked while selected (the template's `CheckedTexture`
+/// is commented out), and the `HighlightText` name label at BOTTOM +1. `dyn_icon` and `label_dyn`
+/// are refresh markers.
+///
+/// It carries its own [`LockHighlight`]: `SetCharacterRace`/`Class`/`Gender` lock these by hand
+/// (`CharacterCreate.lua` l.171/254/326), and the screen's query needs the component present.
+pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     action: A,

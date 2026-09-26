@@ -18,8 +18,8 @@ use crate::glue::art::{
     tc_rect, GlueArt, ALLIANCE_BORDER, ALLIANCE_FILL, BACKDROP, BTN_BG, DIM, GOLD, INFO_TEXT,
 };
 use crate::glue::widgets::{
-    abs, dial_arrow, glue_button, icon_button_framed, outlined_text, ArtSwap, FallbackFace,
-    GlueBtnKind, GlueText, Hilight, IconFrame,
+    abs, dial_arrow, glue_button, icon_button, outlined_text, ArtSwap, FallbackFace, GlueBtnKind,
+    GlueText, Hilight, IconFrame,
 };
 
 const SCREEN_Z: i32 = 1100;
@@ -279,7 +279,11 @@ fn left_tower(
 ) {
     let px = |v: f32| Val::Px(v * s);
     let turtle = crate::flavor::turtle();
-    let l = if turtle { &TURTLE_TOWER } else { &VANILLA_TOWER };
+    let l = if turtle {
+        &TURTLE_TOWER
+    } else {
+        &VANILLA_TOWER
+    };
     ui.spawn((Node {
         position_type: PositionType::Absolute,
         left: px(28.0),
@@ -359,7 +363,7 @@ fn left_tower(
                     },))
                     .with_children(|col| {
                         for &race in faction {
-                            icon_button_framed(
+                            icon_button(
                                 col,
                                 font,
                                 CreateAction::Race(race),
@@ -395,7 +399,7 @@ fn left_tower(
                             };
                             (h.clone(), tc_rect(*size, half))
                         });
-                        icon_button_framed(
+                        icon_button(
                             g,
                             font,
                             CreateAction::Gender(sex),
@@ -426,7 +430,7 @@ fn left_tower(
                 },))
                 .with_children(|grid| {
                     for slot in 0..8u8 {
-                        icon_button_framed(
+                        icon_button(
                             grid,
                             font,
                             CreateAction::ClassSlot(slot),

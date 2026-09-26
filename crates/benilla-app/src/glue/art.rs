@@ -577,7 +577,10 @@ pub(crate) fn parse_race_icon_tcoords(src: &str) -> std::collections::HashMap<St
         else {
             continue;
         };
-        let v: Vec<f32> = inner.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+        let v: Vec<f32> = inner
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
         if let [l, r, t, b] = v[..] {
             table.insert(key.to_string(), [l, r, t, b]);
         }
