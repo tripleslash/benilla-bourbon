@@ -258,9 +258,7 @@ pub(in crate::entities) fn ensure_item_model(
         Some(d) if d.model[col].is_some() => {
             let mut model = d.model[col].clone().unwrap();
             if let ItemModelKind::Helm { race, sex } = kind {
-                // Race 1-8 is Hu Or Dw Ni Sc Ta Gn Tr, sex M or F.
-                const RACE_PREFIX: [&str; 8] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr"];
-                let prefix = RACE_PREFIX[(race.clamp(1, 8) - 1) as usize];
+                let prefix = helm_race_prefix(race, crate::flavor::turtle());
                 let letter = if sex == 1 { 'F' } else { 'M' };
                 let stem = model.strip_suffix(".m2").unwrap_or(&model).to_string();
                 model = format!("{stem}_{prefix}{letter}.m2");
@@ -281,4 +279,12 @@ pub(in crate::entities) fn ensure_item_model(
         _ => super::empty_display(),
     };
     held.models.insert((display, kind), dm);
+}
+
+/// A helm model's race infix, ChrRaces' clientPrefix: race 1-8 is Hu Or Dw Ni Sc Ta Gn Tr, and
+/// Turtle WoW adds Go (9, Goblin) and Be (10, High Elf). An unknown race wears the nearest row's.
+pub(crate) fn helm_race_prefix(race: u8, turtle: bool) -> &'static str {
+    const RACE_PREFIX: [&str; 10] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr", "Go", "Be"];
+    let last = if turtle { 10 } else { 8 };
+    RACE_PREFIX[(race.clamp(1, last) - 1) as usize]
 }

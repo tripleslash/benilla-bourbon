@@ -31,6 +31,40 @@ type SectionKey = (u8, u8, u8, u8, u8);
 /// The playable races, ChrRaces ids 1–8; Goblin (9) and above are not creatable.
 const PLAYABLE_RACES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
+/// Turtle WoW 1.18.1's playable races: 1.12.1's plus Goblin (9, Horde) and High Elf (10, ChrRaces
+/// fileString `BloodElf`, Alliance), every race its ChrRaces and CharBaseInfo both name.
+const TURTLE_PLAYABLE_RACES: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+/// Turtle's ChrRaces fileStrings: 1.12.1's, and its two races.
+const TURTLE_KNOWN_FILES: [(u8, &str); 10] = [
+    (1, "Human"),
+    (2, "Orc"),
+    (3, "Dwarf"),
+    (4, "NightElf"),
+    (5, "Scourge"),
+    (6, "Tauren"),
+    (7, "Gnome"),
+    (8, "Troll"),
+    (9, "Goblin"),
+    (10, "BloodElf"),
+];
+
+/// Turtle's `CharBaseInfo` rows by race, the same parse guard: 1.12.1's pairs and the ones Turtle
+/// adds (Human Hunter, Orc Mage, Dwarf Warlock, Undead Hunter, Tauren Priest, Gnome Hunter, Troll
+/// Warlock), and its two races'.
+const TURTLE_KNOWN_COMBOS: [(u8, &[u8]); 10] = [
+    (1, &[1, 2, 3, 4, 5, 8, 9]), // Human
+    (2, &[1, 3, 4, 7, 8, 9]),    // Orc
+    (3, &[1, 2, 3, 4, 5, 8, 9]), // Dwarf
+    (4, &[1, 3, 4, 5, 11]),      // Night Elf
+    (5, &[1, 3, 4, 5, 8, 9]),    // Undead
+    (6, &[1, 3, 5, 7, 11]),      // Tauren
+    (7, &[1, 3, 4, 8, 9]),       // Gnome
+    (8, &[1, 3, 4, 5, 7, 8, 9]), // Troll
+    (9, &[1, 3, 4, 8, 9]),       // Goblin
+    (10, &[1, 2, 3, 4, 5, 8]),   // High Elf
+];
+
 /// The shipped ChrRaces fileStrings (col 15), guarding [`load_races`]' string columns.
 const KNOWN_FILES: [(u8, &str); 8] = [
     (1, "Human"),
@@ -58,7 +92,33 @@ const KNOWN_COMBOS: [(u8, &[u8]); 8] = [
 
 /// `CharBaseInfo` pairs the client never offers: its class-list builder `0x4706b0` skips the
 /// literal `race == 3 && class == 8` (Dwarf-Mage), though the row and its outfit are populated.
+/// Turtle's client patches both immediates to `0xFE` (`cmp edi, 0FEh` / `cmp byte [ecx+1], 0FEh`
+/// at the same address), so it skips none and offers every row.
 const UNUSED_COMBOS: [(u8, u8); 1] = [(3, 8)];
+
+/// Which client's character data a catalog is loaded against, and the guards that go with it.
+struct Rules {
+    playable: &'static [u8],
+    known_files: &'static [(u8, &'static str)],
+    known_combos: &'static [(u8, &'static [u8])],
+    unused_combos: &'static [(u8, u8)],
+}
+
+/// World of Warcraft 1.12.1.
+const VANILLA: Rules = Rules {
+    playable: &PLAYABLE_RACES,
+    known_files: &KNOWN_FILES,
+    known_combos: &KNOWN_COMBOS,
+    unused_combos: &UNUSED_COMBOS,
+};
+
+/// Turtle WoW 1.18.1.
+const TURTLE: Rules = Rules {
+    playable: &TURTLE_PLAYABLE_RACES,
+    known_files: &TURTLE_KNOWN_FILES,
+    known_combos: &TURTLE_KNOWN_COMBOS,
+    unused_combos: &[],
+};
 
 /// One worn item of a CharStartOutfit row: its ItemDisplayInfo id and its InventoryType.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +210,17 @@ impl CharCreateCatalog {
     /// Load the catalog from the patch chain. The misparse guards compare the raw combos, so they
     /// run before `UNUSED_COMBOS` are stripped.
     pub fn load(chain: &mut Chain) -> Result<Self> {
-        let (displays, files, custom_tokens) = load_races(chain)?;
+        Self::load_with(chain, &VANILLA)
+    }
+
+    /// Load the catalog from a chain with the Turtle WoW 1.18.1 layer mounted: ten races, Turtle's
+    /// race/class table and none of the 1.12.1 client's skipped pairs.
+    pub fn load_turtle(chain: &mut Chain) -> Result<Self> {
+        Self::load_with(chain, &TURTLE)
+    }
+
+    fn load_with(chain: &mut Chain, rules: &Rules) -> Result<Self> {
+        let (displays, files, custom_tokens) = load_races(chain, rules.playable)?;
         let combos = load_combos(chain)?;
         let start_outfits = load_start_outfits(chain)?;
         let avail = load_available_sections(chain)?;
@@ -158,7 +228,7 @@ impl CharCreateCatalog {
         let facial = load_facial_hair_styles(chain)?;
 
         let mut ranges = HashMap::new();
-        for race in PLAYABLE_RACES {
+        for &race in rules.playable {
             for sex in [0u8, 1] {
                 ranges.insert(
                     (race, sex),
@@ -175,15 +245,15 @@ impl CharCreateCatalog {
             ranges,
             start_outfits,
         };
-        catalog.self_check()?;
-        for combo in UNUSED_COMBOS {
-            catalog.combos.remove(&combo);
+        catalog.self_check(rules)?;
+        for combo in rules.unused_combos {
+            catalog.combos.remove(combo);
         }
         Ok(catalog)
     }
 
-    fn self_check(&self) -> Result<()> {
-        for (race, classes) in KNOWN_COMBOS {
+    fn self_check(&self, rules: &Rules) -> Result<()> {
+        for &(race, classes) in rules.known_combos {
             let got = self.classes_for_race(race);
             if got != classes {
                 bail!(
@@ -192,7 +262,7 @@ impl CharCreateCatalog {
                 );
             }
         }
-        for (race, file) in KNOWN_FILES {
+        for &(race, file) in rules.known_files {
             if self.race_file(race) != Some(file) {
                 bail!(
                     "ChrRaces misparse: race {race} fileString {:?} != known {file:?} \
@@ -221,7 +291,7 @@ impl CharCreateCatalog {
                 );
             }
         }
-        for race in PLAYABLE_RACES {
+        for &race in rules.playable {
             for sex in [0u8, 1] {
                 if self.body_display(race, sex).unwrap_or(0) == 0 {
                     bail!("ChrRaces: race {race} sex {sex} has no body displayId");
@@ -253,6 +323,7 @@ impl CharCreateCatalog {
 #[allow(clippy::type_complexity)] // one pass over one DBC → the catalog's three race-keyed maps
 fn load_races(
     chain: &mut Chain,
+    playable: &[u8],
 ) -> Result<(
     HashMap<u8, (u32, u32)>,
     HashMap<u8, String>,
@@ -276,7 +347,7 @@ fn load_races(
     for r in rs.records() {
         let Some(race) = u32_at(r, 0) else { continue };
         let race = race as u8;
-        if !PLAYABLE_RACES.contains(&race) {
+        if !playable.contains(&race) {
             continue;
         }
         if let (Some(male), Some(female)) = (u32_at(r, 4), u32_at(r, 5)) {

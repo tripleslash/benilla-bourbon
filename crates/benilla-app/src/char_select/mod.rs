@@ -856,18 +856,9 @@ pub(crate) fn wow_font(assets: &AssetServer) -> Handle<Font> {
 
 // ── 1.12 display names ──────────────────────────────────────────────────────────────────────────
 
+/// A race's display name, Turtle WoW's two included while its flavor is in force.
 pub(crate) fn race_name(race: u8) -> &'static str {
-    match race {
-        1 => "Human",
-        2 => "Orc",
-        3 => "Dwarf",
-        4 => "Night Elf",
-        5 => "Undead",
-        6 => "Tauren",
-        7 => "Gnome",
-        8 => "Troll",
-        _ => "?",
-    }
+    crate::ui_unit::race_names_in(race, crate::flavor::turtle()).map_or("?", |(name, _)| name)
 }
 
 pub(crate) fn class_name(class: u8) -> &'static str {

@@ -44,6 +44,13 @@ impl ClientFlavor {
     }
 }
 
+/// The flavor in force, for a table with no `World` at hand (a race's name, side, helm prefix):
+/// the Turtle layer is mounted exactly while [`ClientFlavor`] is `Turtle`, since the switch
+/// changes both, so this is one relaxed atomic load. Always false on native, which has no layer.
+pub(crate) fn turtle() -> bool {
+    benilla_formats::layers::turtle_mounted()
+}
+
 /// Whether this build can play `realm` at all: a Turtle realm needs the Turtle layer, which only
 /// the web build mounts. The auto-answer skips a realm that fails this; a click on one is refused
 /// with a reason.
@@ -190,6 +197,34 @@ mod tests {
             playable(&realm(v(1, 18, 1))),
             benilla_formats::layers::turtle_available()
         );
+    }
+
+    /// Goblin and High Elf exist only under Turtle, on the sides their templates' group masks give;
+    /// 1.12.1's tables answer exactly as before.
+    #[test]
+    fn turtle_races_are_turtle_only() {
+        use crate::char_create::{alliance_races, horde_races};
+        use crate::ui_unit::{race_faction_group_in, race_names_in, race_pvp_team_in};
+        assert_eq!(race_names_in(9, false), None);
+        assert_eq!(race_names_in(10, false), None);
+        assert_eq!(race_names_in(9, true), Some(("Goblin", "Goblin")));
+        assert_eq!(race_names_in(10, true), Some(("High Elf", "BloodElf")));
+        assert_eq!(race_names_in(5, true), race_names_in(5, false));
+        assert_eq!(race_faction_group_in(9, false), None);
+        assert_eq!(race_faction_group_in(9, true), Some("Horde"));
+        assert_eq!(race_faction_group_in(10, true), Some("Alliance"));
+        assert_eq!(
+            race_pvp_team_in(9, false),
+            1,
+            "1.12.1's Goblin row answers Alliance"
+        );
+        assert_eq!(race_pvp_team_in(10, false), -1);
+        assert_eq!(race_pvp_team_in(9, true), 0);
+        assert_eq!(race_pvp_team_in(10, true), 1);
+        assert_eq!(alliance_races(false), [1, 3, 4, 7]);
+        assert_eq!(horde_races(false), [2, 5, 6, 8]);
+        assert_eq!(alliance_races(true), [1, 3, 4, 7, 10]);
+        assert_eq!(horde_races(true), [2, 5, 6, 8, 9]);
     }
 
     /// Entering a realm of the flavor already in force answers the park and touches nothing else:

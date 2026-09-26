@@ -786,6 +786,7 @@ fn setup_entities(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     world_assets: Option<ResMut<WorldAssets>>,
+    flavor: Option<Res<crate::flavor::ClientFlavor>>,
 ) {
     // A person-sized box; its origin is centred, so it is lifted by half its height.
     let mesh = meshes.add(Cuboid::new(2.0, 4.0, 2.0));
@@ -900,9 +901,19 @@ fn setup_entities(
         Ok(sections) => commands.insert_resource(SkinSections(sections)),
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
-    match CharCreateCatalog::load(&mut chain) {
+    // Turtle WoW's races and race/class table are its own; the 1.12.1 load refuses them.
+    let catalog = if flavor.is_some_and(|f| f.is_turtle()) {
+        CharCreateCatalog::load_turtle(&mut chain)
+    } else {
+        CharCreateCatalog::load(&mut chain)
+    };
+    match catalog {
         Ok(catalog) => commands.insert_resource(CharCreate(catalog)),
-        Err(e) => warn!("char-create catalog unavailable, the create screen is disabled: {e:#}"),
+        Err(e) => {
+            // A rerun must not leave the other flavor's catalog answering.
+            commands.remove_resource::<CharCreate>();
+            warn!("char-create catalog unavailable, the create screen is disabled: {e:#}");
+        }
     }
     match load_item_display_catalog(&mut chain) {
         Ok(catalog) => {

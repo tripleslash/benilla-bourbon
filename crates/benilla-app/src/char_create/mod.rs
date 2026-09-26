@@ -32,6 +32,29 @@ use crate::sound::GlueSound;
 /// `UnitFactionGroup("player")` with.
 pub(crate) const ALLIANCE: [u8; 4] = [1, 3, 4, 7]; // Human, Dwarf, Night Elf, Gnome
 const HORDE: [u8; 4] = [2, 5, 6, 8]; // Orc, Scourge, Tauren, Troll
+/// Turtle WoW's columns, five buttons each (its `CharacterCreate.xml` chains 1-5 and 6-10): its
+/// High Elf (10) is Alliance and its Goblin (9) Horde, by their faction templates' group masks
+/// (1610: 3, 1609: 5).
+const TURTLE_ALLIANCE: [u8; 5] = [1, 3, 4, 7, 10];
+const TURTLE_HORDE: [u8; 5] = [2, 5, 6, 8, 9];
+
+/// The Alliance column under a flavor.
+pub(crate) fn alliance_races(turtle: bool) -> &'static [u8] {
+    if turtle {
+        &TURTLE_ALLIANCE
+    } else {
+        &ALLIANCE
+    }
+}
+
+/// The Horde column under a flavor.
+pub(crate) fn horde_races(turtle: bool) -> &'static [u8] {
+    if turtle {
+        &TURTLE_HORDE
+    } else {
+        &HORDE
+    }
+}
 /// The reference's initial facing (`SetCharacterCreateFacing(-15)`), reset on every race switch.
 const INITIAL_FACING: f32 = -15.0 * std::f32::consts::PI / 180.0;
 

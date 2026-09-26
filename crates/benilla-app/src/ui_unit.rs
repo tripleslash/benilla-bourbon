@@ -478,6 +478,12 @@ fn fire_unit_combat(
 /// The race id to `UnitRace`'s display name and `raceFile` token (`"Scourge"`, `"NightElf"`); the
 /// display name is also what `$R`/`$r` expand to.
 pub(crate) fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
+    race_names_in(race, crate::flavor::turtle())
+}
+
+/// [`race_names`] under a given flavor: Turtle WoW's ChrRaces adds Goblin (9) and High Elf (10,
+/// fileString `BloodElf`).
+pub(crate) fn race_names_in(race: u8, turtle: bool) -> Option<(&'static str, &'static str)> {
     Some(match race {
         1 => ("Human", "Human"),
         2 => ("Orc", "Orc"),
@@ -487,6 +493,8 @@ pub(crate) fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
         6 => ("Tauren", "Tauren"),
         7 => ("Gnome", "Gnome"),
         8 => ("Troll", "Troll"),
+        9 if turtle => ("Goblin", "Goblin"),
+        10 if turtle => ("High Elf", "BloodElf"),
         _ => return None,
     })
 }
@@ -511,14 +519,22 @@ pub(crate) fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
 /// where addons concatenate `UnitFactionGroup("player")` at file scope; [`faction_group`] reads
 /// the live template.
 pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
-    if !(1..=8).contains(&race) {
+    race_faction_group_in(race, crate::flavor::turtle())
+}
+
+/// [`race_faction_group`] under a given flavor: Turtle WoW's ten playable races.
+pub(crate) fn race_faction_group_in(race: u8, turtle: bool) -> Option<&'static str> {
+    let last = if turtle { 10 } else { 8 };
+    if !(1..=last).contains(&race) {
         return None;
     }
-    Some(if crate::char_create::ALLIANCE.contains(&race) {
-        "Alliance"
-    } else {
-        "Horde"
-    })
+    Some(
+        if crate::char_create::alliance_races(turtle).contains(&race) {
+            "Alliance"
+        } else {
+            "Horde"
+        },
+    )
 }
 
 /// A unit's PvP team digit, `0x5efe00`'s `0` Horde, `1` Alliance, `-1` no side, from the race and
@@ -527,7 +543,15 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
 /// `GetPVPRankInfo` (`0x51a9af`, `0x51a9c8`), `UnitPVPName` (`0x5efe60`) and the scoreboard
 /// (`0x4aa200`). A frozen copy of the shipped nine rows; race 9 (Goblin) answers Alliance.
 pub(crate) fn race_pvp_team(race: u8) -> i8 {
+    race_pvp_team_in(race, crate::flavor::turtle())
+}
+
+/// [`race_pvp_team`] under a given flavor: Turtle WoW's rows put Goblin (9, template 1609, group
+/// mask 5) with the Horde and add High Elf (10, template 1610, mask 3) to the Alliance.
+pub(crate) fn race_pvp_team_in(race: u8, turtle: bool) -> i8 {
     match race {
+        9 if turtle => 0,
+        10 if turtle => 1,
         // Group mask 3, Player|Alliance: `& 4` clear, `& 2` set.
         1 | 3 | 4 | 7 | 9 => 1,
         // Group mask 5, Player|Horde: `& 4` set, tested first.
