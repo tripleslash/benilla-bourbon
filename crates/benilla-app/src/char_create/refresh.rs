@@ -12,9 +12,9 @@ use super::parts::{
     CharCreateUi, DialRow, DynIcon, DynText, DynTint, InfoKind, InfoScroll, ScrollArrow,
     ScrollHides, ScrollThumb,
 };
-use super::{class_file, race_classes, CreateAction, CreateSelection, ALLIANCE};
+use super::{alliance_races, class_file, race_classes, CreateAction, CreateSelection};
 use crate::glue::art::{
-    class_tc, race_tc, tc_rect, GlueArt, ALLIANCE_FILL, BACKDROP_ALLIANCE, BACKDROP_HORDE, BTN_BG,
+    class_tc, tc_rect, GlueArt, ALLIANCE_FILL, BACKDROP_ALLIANCE, BACKDROP_HORDE, BTN_BG,
     BTN_HOVER, FALLBACK_ALPHA, HORDE_FILL,
 };
 use crate::glue::widgets::{FallbackFace, GlueDisabled, Hilight, HoverLabel, LockHighlight};
@@ -49,7 +49,7 @@ pub(super) fn refresh_dynamic(
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
     let classes = race_classes(cat, sel.race);
-    let alliance = ALLIANCE.contains(&sel.race);
+    let alliance = alliance_races(crate::flavor::turtle()).contains(&sel.race);
     let file = cat
         .and_then(|c| c.0.race_file(sel.race))
         .unwrap_or("Human")
@@ -68,7 +68,7 @@ pub(super) fn refresh_dynamic(
             DynIcon::Race(r) => art
                 .races
                 .as_ref()
-                .and_then(|(h, size)| Some((h.clone(), tc_rect(*size, race_tc(*r, sel.sex)?)))),
+                .and_then(|(h, size)| Some((h.clone(), tc_rect(*size, art.race_tc(*r, sel.sex)?)))),
             DynIcon::ClassSlot(i) => {
                 let class = classes.get(*i as usize).copied();
                 art.classes
@@ -84,7 +84,7 @@ pub(super) fn refresh_dynamic(
                 (h.clone(), tc_rect(*size, half))
             }),
             DynIcon::Info(InfoKind::Race) => art.races.as_ref().and_then(|(h, size)| {
-                Some((h.clone(), tc_rect(*size, race_tc(sel.race, sel.sex)?)))
+                Some((h.clone(), tc_rect(*size, art.race_tc(sel.race, sel.sex)?)))
             }),
             DynIcon::Info(InfoKind::Class) => art
                 .classes

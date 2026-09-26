@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::WorldAssets;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::add_material::AddUiMaterial;
 use super::backdrop::BackdropEdges;
@@ -144,6 +144,9 @@ pub(crate) struct GlueArt {
     pub(crate) column_tabs: Option<(Handle<Image>, Vec2)>,
     pub(crate) tab_highlight: Option<Handle<AddUiMaterial>>,
     pub(crate) sort_arrow: Option<(Handle<Image>, Vec2)>,
+    /// Turtle WoW's `RACE_ICON_TCOORDS`, read off its own `CharacterCreate.lua` while its flavor is
+    /// in force: its races sheet is an 8-wide grid, not 1.12.1's 4-wide one. `None` reads 1.12.1's.
+    pub(crate) race_tcoords: Option<std::collections::HashMap<String, [f32; 4]>>,
 }
 
 /// `RealmSortButtonTemplate`'s `WhoFrame-ColumnTabs` slices, `[left, right, top, bottom]` each:
@@ -225,6 +228,18 @@ impl GlueArt {
         const CC: &str = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-";
         const GB: &str = "Interface\\Glues\\Common\\Glue-Panel-Button-";
         self.races = sized(assets, &format!("{CC}Races"), images);
+        // Turtle's races sheet has its own grid, named in its own glue script.
+        self.race_tcoords = crate::flavor::turtle()
+            .then(|| {
+                let lua = assets
+                    .chain
+                    .lock_recover()
+                    .read_file("Interface\\GlueXML\\CharacterCreate.lua")
+                    .ok()?;
+                let table = parse_race_icon_tcoords(&String::from_utf8_lossy(&lua));
+                (!table.is_empty()).then_some(table)
+            })
+            .flatten();
         self.classes = sized(assets, &format!("{CC}Classes"), images);
         self.gender = sized(assets, &format!("{CC}Gender"), images);
         self.factions = sized(assets, &format!("{CC}Factions"), images);
@@ -533,6 +548,58 @@ fn race_cell(race: u8) -> Option<(f32, f32)> {
     })
 }
 
+/// `RACE_ICON_TCOORDS` out of a `CharacterCreate.lua`: `["HUMAN_MALE"] = {l, r, t, b},` rows between
+/// the table's braces, keyed as written. An unparsable row is skipped.
+pub(crate) fn parse_race_icon_tcoords(src: &str) -> std::collections::HashMap<String, [f32; 4]> {
+    let mut table = std::collections::HashMap::new();
+    let Some(start) = src.find("RACE_ICON_TCOORDS") else {
+        return table;
+    };
+    let body = &src[start..];
+    let Some(open) = body.find('{') else {
+        return table;
+    };
+    for line in body[open + 1..].lines() {
+        let line = line.trim();
+        if line.starts_with('}') {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("[\"") else {
+            continue;
+        };
+        let Some((key, rest)) = rest.split_once("\"]") else {
+            continue;
+        };
+        let Some(inner) = rest
+            .split_once('{')
+            .and_then(|(_, r)| r.split_once('}'))
+            .map(|(v, _)| v)
+        else {
+            continue;
+        };
+        let v: Vec<f32> = inner.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+        if let [l, r, t, b] = v[..] {
+            table.insert(key.to_string(), [l, r, t, b]);
+        }
+    }
+    table
+}
+
+impl GlueArt {
+    /// A race's cell on the loaded races sheet: Turtle's own table while its flavor is in force,
+    /// keyed `<FILESTRING>_<SEX>` as its `CharacterCreateEnumerateRaces` does, else 1.12.1's.
+    pub(crate) fn race_tc(&self, race: u8, sex: u8) -> Option<[f32; 4]> {
+        let Some(table) = &self.race_tcoords else {
+            return race_tc(race, sex);
+        };
+        let (_, file) = crate::ui_unit::race_names_in(race, true)?;
+        let sex = if sex == 1 { "FEMALE" } else { "MALE" };
+        table
+            .get(&format!("{}_{sex}", file.to_ascii_uppercase()))
+            .copied()
+    }
+}
+
 pub(crate) fn race_tc(race: u8, sex: u8) -> Option<[f32; 4]> {
     let (c, r) = race_cell(race)?;
     let r = r + if sex == 1 { 2.0 } else { 0.0 };
@@ -569,4 +636,33 @@ pub(crate) fn tc_rect(size: Vec2, tc: [f32; 4]) -> Rect {
         tc[1] * size.x,
         tc[3] * size.y,
     )
+}
+
+#[cfg(test)]
+mod race_tcoords_tests {
+    use super::*;
+
+    /// Turtle's table as its `CharacterCreate.lua` writes it: tabs, blank lines, trailing spaces.
+    #[test]
+    fn turtle_s_race_icon_table_parses_as_written() {
+        let src = "MAX_RACES = 10;\nRACE_ICON_TCOORDS = {\n\t[\"HUMAN_MALE\"]\t\t= {0, 0.125, 0, 0.25},\n\n\t[\"BLOODELF_FEMALE\"]\t= {0.5, 0.625, 0.75, 1.0}, \n\t[\"GOBLIN_MALE\"]\t= {0.5, 0.625, 0, 0.25},\n};\nCLASS_ICON_TCOORDS = {\n\t[\"WARRIOR\"]\t= {0, 0.25, 0, 0.25},\n};";
+        let t = parse_race_icon_tcoords(src);
+        assert_eq!(t.len(), 3, "the class table after it is not read");
+        assert_eq!(t["HUMAN_MALE"], [0.0, 0.125, 0.0, 0.25]);
+        assert_eq!(t["BLOODELF_FEMALE"], [0.5, 0.625, 0.75, 1.0]);
+        assert_eq!(t["GOBLIN_MALE"], [0.5, 0.625, 0.0, 0.25]);
+    }
+
+    /// With Turtle's table loaded, races resolve through it by fileString; without, 1.12.1's.
+    #[test]
+    fn the_loaded_table_answers_by_file_string() {
+        let mut art = GlueArt::default();
+        assert_eq!(art.race_tc(1, 0), race_tc(1, 0));
+        art.race_tcoords = Some(parse_race_icon_tcoords(
+            "RACE_ICON_TCOORDS = {\n[\"NIGHTELF_FEMALE\"] = {0.375, 0.5, 0.5, 0.75},\n[\"BLOODELF_MALE\"] = {0.5, 0.625, 0.25, 0.5},\n}",
+        ));
+        assert_eq!(art.race_tc(4, 1), Some([0.375, 0.5, 0.5, 0.75]));
+        assert_eq!(art.race_tc(10, 0), Some([0.5, 0.625, 0.25, 0.5]));
+        assert_eq!(art.race_tc(9, 0), None, "a row the table lacks is no cell");
+    }
 }

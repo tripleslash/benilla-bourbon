@@ -295,14 +295,58 @@ pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     art: &GlueArt,
     s: f32,
 ) {
+    icon_button_framed(
+        parent,
+        font,
+        action,
+        dyn_icon,
+        fixed,
+        label_dyn,
+        label,
+        art,
+        s,
+        IconFrame::VANILLA,
+    );
+}
+
+/// An icon button's template geometry: its square and the `UI-CharacterCreate-IconShadow` square
+/// centred behind it at (2,-2), if the template has one.
+#[derive(Clone, Copy)]
+pub(crate) struct IconFrame {
+    pub(crate) size: f32,
+    pub(crate) shadow: Option<f32>,
+}
+
+impl IconFrame {
+    /// 1.12.1's `CharacterCreateIconButtonTemplate`, 48², under a 64² shadow.
+    pub(crate) const VANILLA: Self = Self {
+        size: 48.0,
+        shadow: Some(64.0),
+    };
+}
+
+/// [`icon_button`] at a given template's geometry.
+#[allow(clippy::too_many_arguments)] // icon_button's nine and the frame
+pub(crate) fn icon_button_framed<A: Component, I: Bundle, L: Bundle>(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    action: A,
+    dyn_icon: Option<I>,
+    fixed: Option<(Handle<Image>, Rect)>,
+    label_dyn: Option<L>,
+    label: &str,
+    art: &GlueArt,
+    s: f32,
+    frame: IconFrame,
+) {
     let px = |v: f32| Val::Px(v * s);
     let mut b = parent.spawn((
         action,
         Button,
         LockHighlight::default(),
         Node {
-            width: px(48.0),
-            height: px(48.0),
+            width: px(frame.size),
+            height: px(frame.size),
             ..default()
         },
     ));
@@ -310,12 +354,10 @@ pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
         b.insert((FallbackFace, BackgroundColor(BTN_BG))); // no art: the label is the button face
     }
     b.with_children(|b| {
-        // The shadow: 64² centred, offset (2,−2), behind everything.
-        if let Some(shadow) = &art.icon_shadow {
-            b.spawn((
-                ImageNode::new(shadow.clone()),
-                abs(s, -6.0, -6.0, 64.0, 64.0),
-            ));
+        // The shadow, centred at offset (2,−2), behind everything.
+        if let (Some(shadow), Some(side)) = (&art.icon_shadow, frame.shadow) {
+            let at = (frame.size - side) / 2.0 + 2.0;
+            b.spawn((ImageNode::new(shadow.clone()), abs(s, at, at, side, side)));
         }
         // A dynamic face is transparent until the refresh assigns it, since a default
         // `ImageNode` is a white square; the gender halves are fixed.

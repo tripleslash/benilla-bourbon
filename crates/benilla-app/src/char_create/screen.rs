@@ -13,16 +13,94 @@ use crate::portrait::{GlueLook, GluePreview, PortraitImages, PortraitSource, GLU
 use benilla_assets::WorldAssets;
 
 use super::parts::{CharCreateUi, DialRow, DynIcon, DynText, DynTint, StatusLine};
-use super::{CreateAction, CreateSelection, ALLIANCE, HORDE, INITIAL_FACING};
+use super::{alliance_races, horde_races, CreateAction, CreateSelection, INITIAL_FACING};
 use crate::glue::art::{
     tc_rect, GlueArt, ALLIANCE_BORDER, ALLIANCE_FILL, BACKDROP, BTN_BG, DIM, GOLD, INFO_TEXT,
 };
 use crate::glue::widgets::{
-    abs, dial_arrow, glue_button, icon_button, outlined_text, ArtSwap, FallbackFace, GlueBtnKind,
-    GlueText, Hilight,
+    abs, dial_arrow, glue_button, icon_button_framed, outlined_text, ArtSwap, FallbackFace,
+    GlueBtnKind, GlueText, Hilight, IconFrame,
 };
 
 const SCREEN_Z: i32 = 1100;
+
+/// The configuration tower's authored geometry, in the frame's own coordinates (y down), one per
+/// client: each number is its `CharacterCreate.xml` anchor chain resolved.
+struct TowerLayout {
+    /// The frame's TOPLEFT (28, -top) on the screen.
+    top: f32,
+    /// The three `OuterBorder` pieces: top, height, texcoords (l, r, t, b), drawn upside down.
+    borders: [(f32, f32, [f32; 4], bool); 3],
+    /// `UI-CharacterCreate-Background`: top and height, 218 wide at x -3.
+    background: (f32, f32),
+    /// `CharacterCreateBanners`' height, 256 wide at TOP (-2,-60).
+    banners_height: f32,
+    /// The ALLIANCE caption's centre x (HORDE's is 151 in both).
+    alliance_center: f32,
+    /// The race buttons' template, and its two columns' left x; both start at y 68, 5 apart.
+    race: IconFrame,
+    race_columns: [f32; 2],
+    /// The gender pair's TOPLEFT and the class and gender buttons' template.
+    gender: (f32, f32),
+    icon: IconFrame,
+    /// The class grid: TOPLEFT, buttons per row, the gap between them, the gap between rows.
+    classes: (f32, f32, usize, f32, f32),
+    /// The first dial row's TOPLEFT, and the Randomize button's.
+    dials: (f32, f32),
+    randomize: (f32, f32),
+}
+
+/// 1.12.1: four races a column, three classes a row.
+const VANILLA_TOWER: TowerLayout = TowerLayout {
+    top: 74.0,
+    borders: [
+        (0.0, 236.0, [0.0, 0.875, 0.0, 0.9375], false),
+        (236.0, 240.0, [0.0, 0.875, 0.0, 0.9375], false),
+        (476.0, 210.0, [0.0, 0.875, 0.1796875, 1.0], false),
+    ],
+    background: (0.0, 680.0),
+    banners_height: 259.0,
+    alliance_center: 51.0,
+    race: IconFrame::VANILLA,
+    race_columns: [33.0, 127.0],
+    // Race button 4's BOTTOMLEFT + (20,-28).
+    gender: (53.0, 303.0),
+    icon: IconFrame::VANILLA,
+    classes: (27.0, 369.0, 3, 4.0, 0.0),
+    dials: (4.0, 480.0),
+    randomize: (30.0, 645.0),
+};
+
+/// Turtle WoW 1.18.1's `CharacterCreate.xml`: the frame 19 higher (TOPLEFT (28,-55)), five 45²
+/// races a column (the second at button 1's RIGHT + 49), the gender pair at button 5's BOTTOMLEFT
+/// + (27,-25), 40² class and gender buttons under 55² shadows, four classes a row from the male
+/// button's BOTTOMLEFT + (-44,-15), the dials at class 6's BOTTOM + (20,-15), a 500-tall banner and
+/// a 228-tall bottom border. Its first border piece is authored upside down (top 1.0, bottom
+/// 0.1796875) and its middle one a single row stretched (top = bottom = 0.9375).
+const TURTLE_TOWER: TowerLayout = TowerLayout {
+    top: 55.0,
+    borders: [
+        (0.0, 236.0, [0.0, 0.875, 0.1796875, 1.0], true),
+        (236.0, 240.0, [0.0, 0.875, 0.9375, 0.9375], false),
+        (476.0, 228.0, [0.0, 0.875, 0.1796875, 1.0], false),
+    ],
+    background: (6.0, 692.0),
+    banners_height: 500.0,
+    alliance_center: 57.0,
+    race: IconFrame {
+        size: 45.0,
+        shadow: None,
+    },
+    race_columns: [33.0, 127.0],
+    gender: (60.0, 338.0),
+    icon: IconFrame {
+        size: 40.0,
+        shadow: Some(55.0),
+    },
+    classes: (16.0, 393.0, 4, 5.0, 3.0),
+    dials: (2.0, 491.0),
+    randomize: (28.0, 656.0),
+};
 
 // ── Spawn ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -190,8 +268,8 @@ fn spawn_screen(
     });
 }
 
-/// The configuration tower, `CharacterCreateConfigurationFrame` (206×600 at TOPLEFT (28,-74)),
-/// every child at its authored offset.
+/// The configuration tower, `CharacterCreateConfigurationFrame` (206×600 at TOPLEFT (28,-top)),
+/// every child at its authored offset in the client's layout ([`TowerLayout`]).
 fn left_tower(
     ui: &mut ChildSpawnerCommands,
     art: &GlueArt,
@@ -200,10 +278,12 @@ fn left_tower(
     strings: &GlueStrings,
 ) {
     let px = |v: f32| Val::Px(v * s);
+    let turtle = crate::flavor::turtle();
+    let l = if turtle { &TURTLE_TOWER } else { &VANILLA_TOWER };
     ui.spawn((Node {
         position_type: PositionType::Absolute,
         left: px(28.0),
-        top: px(74.0),
+        top: px(l.top),
         width: px(206.0),
         height: px(600.0),
         ..default()
@@ -212,35 +292,38 @@ fn left_tower(
             // `UI-CharacterCreate-Background` behind three stacked `OuterBorder` pieces, 224 wide
             // centered on the 206 frame (x -9).
             if let Some(bg) = &art.tower_bg {
-                tower.spawn((ImageNode::new(bg.clone()), abs(s, -3.0, 0.0, 218.0, 680.0)));
+                let (top, height) = l.background;
+                tower.spawn((ImageNode::new(bg.clone()), abs(s, -3.0, top, 218.0, height)));
             }
             if let Some((border, size)) = &art.tower_border {
-                for (top, height, tc) in [
-                    (0.0, 236.0, [0.0, 0.875, 0.0, 0.9375]),
-                    (236.0, 240.0, [0.0, 0.875, 0.0, 0.9375]),
-                    (476.0, 210.0, [0.0, 0.875, 0.1796875, 1.0]),
-                ] {
+                for (top, height, mut tc, flip_y) in l.borders {
+                    // A zero-height region is one texel row stretched, as the client samples it.
+                    if tc[3] <= tc[2] {
+                        tc[3] = tc[2] + 1.0 / size.y.max(1.0);
+                    }
                     tower.spawn((
                         ImageNode {
                             image: border.clone(),
                             rect: Some(tc_rect(*size, tc)),
+                            flip_y,
                             ..default()
                         },
                         abs(s, -9.0, top, 224.0, height),
                     ));
                 }
             }
-            // `CharacterCreateBanners`, 256×259 at TOP (-2,-60), behind the race grid.
+            // `CharacterCreateBanners`, 256 wide at TOP (-2,-60), behind the race grid.
             if let Some(banners) = &art.banners {
                 tower.spawn((
                     ImageNode::new(banners.clone()),
-                    abs(s, -27.0, 60.0, 256.0, 259.0),
+                    abs(s, -27.0, 60.0, 256.0, l.banners_height),
                 ));
             }
             // The XML's `text="ALLIANCE"` is a GlueStrings key, shown as "Alliance".
-            for (key, fallback, center) in
-                [("ALLIANCE", "Alliance", 51.0), ("HORDE", "Horde", 151.0)]
-            {
+            for (key, fallback, center) in [
+                ("ALLIANCE", "Alliance", l.alliance_center),
+                ("HORDE", "Horde", 151.0),
+            ] {
                 outlined_text(
                     tower,
                     Node {
@@ -260,8 +343,11 @@ fn left_tower(
                 );
             }
 
-            // Two columns of 48² buttons at (33,68) and (127,68), row pitch 48+5.
-            for (faction, left) in [(ALLIANCE, 33.0), (HORDE, 127.0)] {
+            // Two columns of race buttons from y 68, 5 apart.
+            for (faction, left) in [
+                (alliance_races(turtle), l.race_columns[0]),
+                (horde_races(turtle), l.race_columns[1]),
+            ] {
                 tower
                     .spawn((Node {
                         position_type: PositionType::Absolute,
@@ -272,8 +358,8 @@ fn left_tower(
                         ..default()
                     },))
                     .with_children(|col| {
-                        for race in faction {
-                            icon_button(
+                        for &race in faction {
+                            icon_button_framed(
                                 col,
                                 font,
                                 CreateAction::Race(race),
@@ -283,17 +369,18 @@ fn left_tower(
                                 race_name(race),
                                 art,
                                 s,
+                                l.race,
                             );
                         }
                     });
             }
 
-            // The gender pair at race button 4's BOTTOMLEFT + (20,-28).
+            // The gender pair under the last race row.
             tower
                 .spawn((Node {
                     position_type: PositionType::Absolute,
-                    left: px(53.0),
-                    top: px(303.0),
+                    left: px(l.gender.0),
+                    top: px(l.gender.1),
                     flex_direction: FlexDirection::Row,
                     column_gap: px(5.0),
                     ..default()
@@ -308,7 +395,7 @@ fn left_tower(
                             };
                             (h.clone(), tc_rect(*size, half))
                         });
-                        icon_button(
+                        icon_button_framed(
                             g,
                             font,
                             CreateAction::Gender(sex),
@@ -318,25 +405,28 @@ fn left_tower(
                             strings.text(key, fallback),
                             art,
                             s,
+                            l.icon,
                         );
                     }
                 });
 
-            // Three wide, columns at x 27/79/131; 8 slots, unused ones collapse.
+            // The class grid; 8 slots, unused ones collapse.
+            let (left, top, per_row, gap, row_gap) = l.classes;
             tower
                 .spawn((Node {
                     position_type: PositionType::Absolute,
-                    left: px(27.0),
-                    top: px(369.0),
-                    width: px(3.0 * 48.0 + 2.0 * 4.0),
+                    left: px(left),
+                    top: px(top),
+                    width: px(per_row as f32 * l.icon.size + (per_row - 1) as f32 * gap),
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
-                    column_gap: px(4.0),
+                    column_gap: px(gap),
+                    row_gap: px(row_gap),
                     ..default()
                 },))
                 .with_children(|grid| {
                     for slot in 0..8u8 {
-                        icon_button(
+                        icon_button_framed(
                             grid,
                             font,
                             CreateAction::ClassSlot(slot),
@@ -346,16 +436,17 @@ fn left_tower(
                             "",
                             art,
                             s,
+                            l.icon,
                         );
                     }
                 });
 
-            // `CharacterCustomizationFrameTemplate`, 198×32 rows stacked from (4,480).
+            // `CharacterCustomizationFrameTemplate`, 198×32 rows stacked.
             tower
                 .spawn((Node {
                     position_type: PositionType::Absolute,
-                    left: px(4.0),
-                    top: px(480.0),
+                    left: px(l.dials.0),
+                    top: px(l.dials.1),
                     width: px(198.0),
                     flex_direction: FlexDirection::Column,
                     ..default()
@@ -372,8 +463,8 @@ fn left_tower(
             tower
                 .spawn((Node {
                     position_type: PositionType::Absolute,
-                    left: px(30.0),
-                    top: px(645.0),
+                    left: px(l.randomize.0),
+                    top: px(l.randomize.1),
                     ..default()
                 },))
                 .with_children(|r| {
