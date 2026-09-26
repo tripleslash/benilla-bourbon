@@ -39,8 +39,9 @@ pub fn peak_size(def: &ParticleEmitterDef) -> f32 {
 }
 
 /// The flat gain on every synthesised SPELL light, folded into the intensity at synthesis. `1.0`
-/// = "a spell light sits on the same rungs a torch does".
-pub const SPELL_LIGHT_GAIN: f32 = 1.0;
+/// would sit a spell light on a torch's rungs; half of that keeps a Fireball, a burning body or a
+/// cast hand a subtle pool around the effect rather than a light over the whole scene.
+pub const SPELL_LIGHT_GAIN: f32 = 0.5;
 
 /// The HOLY fallback hue: a warm white with a gold cast. Used when a holy effect's ramp yields no
 /// usable key, which is the common case rather than the exception — Holy Light's strongest emitter
