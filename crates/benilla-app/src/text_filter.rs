@@ -22,6 +22,7 @@
 //! the pattern literals and the subject are ASCII-lowercased and matched case-sensitively, which
 //! keeps every offset. The shipped patterns use no backreferences or lookaround.
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 use regex::{Regex, RegexSet};
 
@@ -497,9 +498,6 @@ impl Plugin for TextFilterPlugin {
         app.add_observer(on_cvar);
         app.init_resource::<TextFilterSwitches>()
             .init_resource::<TextFilter>()
-            .add_systems(
-                Startup,
-                load_text_filter_lists.after(benilla_assets::AssetSet::Open),
-            );
+            .add_data_loaders(load_text_filter_lists);
     }
 }

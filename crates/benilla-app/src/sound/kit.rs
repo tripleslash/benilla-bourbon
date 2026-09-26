@@ -16,7 +16,8 @@ use kira::sound::PlaybackState;
 
 use benilla_formats::{sound_kit_flags, SoundKitCatalog, TryRead};
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::dev_state::DebugState;
 
 use super::math;
@@ -1096,7 +1097,7 @@ fn evict_kit_cache(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_sound_kits.after(AssetSet::Open))
+    app.add_data_loaders(load_sound_kits)
         .add_systems(
             Update,
             (

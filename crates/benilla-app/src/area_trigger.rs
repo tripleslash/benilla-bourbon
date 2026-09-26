@@ -15,12 +15,13 @@
 //! retry. Probe by moving into the volume instead.
 
 use benilla_assets::coords::bevy_to_wow;
+use benilla_assets::DataLoadAppExt;
 use benilla_formats::AreaTriggerCatalog;
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::world_map::CurrentMap;
 
@@ -60,7 +61,7 @@ pub(crate) struct AreaTriggerPlugin;
 impl Plugin for AreaTriggerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InsideTrigger>()
-            .add_systems(Startup, load_area_triggers.after(AssetSet::Open))
+            .add_data_loaders(load_area_triggers)
             // After Input has moved the avatar, so the position tested is the one the movement
             // stream reports, which the server re-checks the claim against.
             .add_systems(

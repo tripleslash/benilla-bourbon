@@ -1,12 +1,13 @@
 //! World-map state: the `Map.dbc` catalog and the current map id, for every subsystem that keys
 //! off the map (the terrain and WDL streamers, the loading screen, time-of-day lighting).
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::MapCatalogRes;
 use benilla_formats::load_map_catalog;
 use bevy::prelude::*;
 
 use benilla_assets::LockRecover;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::WorldAssets;
 
 /// The map before the server names one: Eastern Kingdoms (`Map.dbc` id 0).
 pub(crate) const DEFAULT_MAP_ID: u32 = 0;
@@ -42,10 +43,8 @@ pub(crate) struct WorldMapPlugin;
 
 impl Plugin for WorldMapPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<MapChange>().add_systems(
-            Startup,
-            load_world_map.after(AssetSet::Open).in_set(WorldMapLoad),
-        );
+        app.add_message::<MapChange>()
+            .add_data_loaders(load_world_map.in_set(WorldMapLoad));
         app.add_systems(Update, announce_map_change);
     }
 }

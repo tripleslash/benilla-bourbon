@@ -16,7 +16,8 @@ use benilla_protocol::EntityKind;
 use crate::creature_anim::AnimSoundEvent;
 use crate::entities::mount::{MountBody, MountChild};
 use crate::net::{FieldChanged, NetEntity, ObjectStore, SelfPlayer};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{
@@ -565,20 +566,19 @@ fn fall_landing_vocals(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_creature_voices.after(AssetSet::Open))
-        .add_systems(
-            Update,
-            (
-                death_vocals,
-                creature_anim_vocals,
-                ai_reaction_vocals,
-                pet_talk_vocals,
-                pet_dismiss_sounds,
-                fall_landing_vocals,
-                creature_body_loops,
-            )
-                .in_set(WorldStage::Present),
-        );
+    app.add_data_loaders(load_creature_voices).add_systems(
+        Update,
+        (
+            death_vocals,
+            creature_anim_vocals,
+            ai_reaction_vocals,
+            pet_talk_vocals,
+            pet_dismiss_sounds,
+            fall_landing_vocals,
+            creature_body_loops,
+        )
+            .in_set(WorldStage::Present),
+    );
 }
 
 #[cfg(test)]

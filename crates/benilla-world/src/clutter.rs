@@ -12,8 +12,9 @@ use bevy::prelude::*;
 use crate::view::WorldCamera;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::LockRecover;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::WorldAssets;
 use benilla_formats::{
     load_ground_effect_catalog, load_m2_mesh, scatter_ground_doodads, ChunkMesh,
     GroundDoodadPlacement, GroundEffectCatalog, ModelBlend, RenderSubmesh, SHADOW_MAP_SIZE,
@@ -27,7 +28,7 @@ impl Plugin for ClutterPlugin {
         // Inserted at build, not in `setup_clutter`: `benilla-app`'s Startup CVar loader applies a
         // saved `WorldDetail` onto it.
         app.init_resource::<ClutterConfig>()
-            .add_systems(Startup, setup_clutter.after(AssetSet::Open))
+            .add_data_loaders(setup_clutter)
             .add_systems(
                 Update,
                 (

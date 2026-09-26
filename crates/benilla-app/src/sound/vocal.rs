@@ -39,7 +39,8 @@ use bevy::prelude::*;
 use benilla_formats::{SoundKitCatalog, VocalUiSoundCatalog, VOCAL_UI_LINES};
 
 use crate::net::{ObjectStore, SelfPlayer};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{self, Bus, KitRef, PlayExtras, SoundCategory, SoundKits};
@@ -258,7 +259,7 @@ pub(super) fn speak_line(
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<VocalSpeech>()
-        .add_systems(Startup, load_vocal_ui_sounds.after(AssetSet::Open))
+        .add_data_loaders(load_vocal_ui_sounds)
         .add_systems(Update, build_vocal_table.in_set(WorldStage::Stream));
 }
 

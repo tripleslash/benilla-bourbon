@@ -7,11 +7,11 @@
 
 use bevy::platform::time::Instant;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{AnimClip, ModelAnimations};
 use benilla_formats::AnimDataCatalog;
 use bevy::prelude::*;
 
-use benilla_assets::AssetSet;
 use benilla_world::schedule::WorldStage;
 
 /// The pure selection logic: the `0x5fd100` tables, the gait, swing and ready picks, the rate math.
@@ -781,16 +781,12 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<HardLanding>()
             // The pending-morph latch, the reference's per-unit `[+0xd54]`.
             .init_resource::<MorphLatch>()
-            .add_systems(
-                Startup,
-                (
-                    load_anim_data,
-                    load_spell_visuals,
-                    load_blood_tables,
-                    load_env_damage_table,
-                )
-                    .after(AssetSet::Open),
-            )
+            .add_data_loaders((
+                load_anim_data,
+                load_spell_visuals,
+                load_blood_tables,
+                load_env_damage_table,
+            ))
             .add_systems(
                 Update,
                 (

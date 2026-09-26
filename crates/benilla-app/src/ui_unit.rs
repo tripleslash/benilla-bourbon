@@ -2,6 +2,7 @@
 //! [`UnitState`] per token for the engine-free `Unit*` bindings, plus the unit events; the Lua API
 //! never reaches into the ECS.
 
+use benilla_assets::DataLoadAppExt;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -166,7 +167,7 @@ impl Plugin for UiUnitPlugin {
             Update,
             load_exhaustion_rows.in_set(crate::ui_script::UiFeed),
         )
-        .add_systems(PostStartup, (load_default_languages, load_languages));
+        .add_data_loaders((load_default_languages, load_languages));
     }
 }
 

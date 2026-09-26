@@ -1,6 +1,7 @@
 //! Sound: the 1.12 client's own selection and scheduling ([`kit`], the triggers) over kira behind
 //! an FMOD-shaped seam ([`mixer`]). This module holds the output, the listener and the config.
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 
 use crate::net::Embodied;
@@ -403,10 +404,7 @@ impl Plugin for SoundPlugin {
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
-        .add_systems(
-            Startup,
-            load_materials.after(benilla_assets::AssetSet::Open),
-        )
+        .add_data_loaders(load_materials)
         .add_systems(PreUpdate, feed_world_hold)
         .add_systems(
             Update,

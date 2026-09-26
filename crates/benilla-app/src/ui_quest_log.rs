@@ -4,6 +4,7 @@
 //! its line and fires `QUEST_WATCH_UPDATE`. Abandons, shares and header folds drain from here.
 
 use crate::ui_items::{count_of, InventoryScope};
+use benilla_assets::DataLoadAppExt;
 use std::collections::HashSet;
 
 use bevy::prelude::*;
@@ -128,11 +129,7 @@ impl Plugin for UiQuestLogPlugin {
         net::register(app);
         crate::query_cache::register::<QuestLog>(app);
         app.init_resource::<QuestLog>()
-            .add_systems(
-                Startup,
-                (load_quest_header_names, load_quest_tag_names)
-                    .after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders((load_quest_header_names, load_quest_tag_names))
             .add_systems(
                 Update,
                 (

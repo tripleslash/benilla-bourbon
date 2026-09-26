@@ -27,6 +27,7 @@ use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::net::Guid;
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::ride_frame::RideFrame;
 use benilla_world::vis_chain::VisChainOnly;
@@ -37,12 +38,9 @@ pub(crate) struct TransportPlugin;
 impl Plugin for TransportPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Timetables>()
-            // After `AssetSet::Open`, whose Commands insert `WorldAssets`; unordered, this finds
-            // none and silently does nothing.
-            .add_systems(
-                Startup,
-                setup_taxi_nodes.after(benilla_assets::AssetSet::Open),
-            )
+            // After `AssetSet::Open`, whose Commands insert `WorldAssets` (unordered, this finds
+            // none and silently does nothing), and again when the chain's data changes.
+            .add_data_loaders(setup_taxi_nodes)
             .add_systems(
                 Update,
                 // After the net drain and before input, so the deck is posed before the mover

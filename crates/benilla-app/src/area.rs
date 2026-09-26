@@ -37,7 +37,8 @@ use benilla_ui::script::UiScript;
 
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::target::Factions;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// The shared `AreaTable.dbc` catalog, read by the world map and this module; absent if the DBC
 /// failed to read.
@@ -253,16 +254,15 @@ pub(crate) struct AreaPlugin;
 
 impl Plugin for AreaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_area_table.after(AssetSet::Open))
-            .add_systems(
-                Update,
-                // After the leaf authority: leaf, indoor bit and names must come from one frame,
-                // as in the client's single-pass resolve (`0x67e510`), or a stale leaf fires a
-                // spurious splash.
-                feed_zone_events
-                    .after(crate::ui_script::UiInput)
-                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
-            );
+        app.add_data_loaders(load_area_table).add_systems(
+            Update,
+            // After the leaf authority: leaf, indoor bit and names must come from one frame,
+            // as in the client's single-pass resolve (`0x67e510`), or a stale leaf fires a
+            // spurious splash.
+            feed_zone_events
+                .after(crate::ui_script::UiInput)
+                .after(benilla_world::terrain_stream::AreaAuthoritySet),
+        );
     }
 }
 

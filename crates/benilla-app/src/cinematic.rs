@@ -26,7 +26,8 @@
 
 use std::time::Duration;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::{CinematicCatalog, CinematicPath};
 use benilla_ui::script::UiScript;
 use benilla_world::schedule::WorldStage;
@@ -130,10 +131,8 @@ pub(crate) struct CinematicPlugin;
 impl Plugin for CinematicPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cinematic>()
-            .add_systems(
-                Startup,
-                (load_catalog.after(AssetSet::Open), spawn_letterbox),
-            )
+            .add_systems(Startup, spawn_letterbox)
+            .add_data_loaders(load_catalog)
             .add_systems(
                 Update,
                 // One chain in one frame, after the net drain and after `control` seats the

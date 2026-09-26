@@ -35,6 +35,7 @@
 //! interpreted (`0x5c28af`, flags bit `0x800` clear), so the line goes through
 //! [`benilla_ui::markup`].
 
+use benilla_assets::DataLoadAppExt;
 use benilla_ui::markup::{self, TokenKind};
 use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
@@ -223,10 +224,7 @@ impl Plugin for GameTipPlugin {
             // Initialised here, not by the CVar host: [`on_cvar`] takes it as a plain `ResMut` and
             // panics without it.
             .init_resource::<GameTipSetting>()
-            .add_systems(
-                Startup,
-                load_game_tips.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(load_game_tips)
             // After the loading screen's drive, which sets the edge this reads.
             .add_systems(
                 Update,

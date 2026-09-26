@@ -23,7 +23,8 @@ use bevy::prelude::*;
 use benilla_formats::{AreaSoundCatalog, TryRead};
 
 use crate::net::{ServerSoundKind, ServerSoundMessage};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::lighting::GameClock;
 use benilla_world::schedule::WorldStage;
 
@@ -1378,7 +1379,7 @@ fn report_stream_voices(zone: NonSend<ZoneAudio>, mut out: NonSendMut<super::Sou
 
 pub(super) fn plugin(app: &mut App) {
     app.insert_non_send_resource(ZoneAudio::default())
-        .add_systems(Startup, load_area_sounds.after(AssetSet::Open))
+        .add_data_loaders(load_area_sounds)
         .add_systems(
             Update,
             (server_sounds, zone_audio)

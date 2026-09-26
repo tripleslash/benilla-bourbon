@@ -12,10 +12,11 @@
 use bevy::prelude::*;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+use benilla_assets::DataLoadAppExt;
 use benilla_formats::WaterSoundCatalog;
 
 use crate::net::Embodied;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{
@@ -295,7 +296,7 @@ fn start_loop(
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<LiquidLoopState>()
-        .add_systems(Startup, load_water_sounds.after(AssetSet::Open))
+        .add_data_loaders(load_water_sounds)
         .add_systems(
             Update,
             // Before the channel pump, which applies this frame's gains and positions.

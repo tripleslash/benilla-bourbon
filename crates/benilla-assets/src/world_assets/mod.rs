@@ -910,10 +910,56 @@ pub struct RenderConfig {
 }
 
 /// Startup ordering: the patch chain opens in [`AssetSet::Open`], so other startup systems run
-/// after it and borrow [`WorldAssets`].
+/// after it and borrow [`WorldAssets`]; the catalogs are built from it in [`AssetSet::Catalogs`].
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetSet {
     Open,
+    /// The one run of [`DataLoad`] at startup, right after [`AssetSet::Open`].
+    Catalogs,
+}
+
+/// **The schedule every catalog loader runs in**: once at startup, in [`AssetSet::Catalogs`], and
+/// again whenever the data the chain answers from changes — the Turtle WoW 1.18.1 layer mounted or
+/// unmounted (`benilla_formats::layers::data_generation`) — so every catalog is rebuilt from the
+/// chain it will be read against. A loader here replaces what it inserts and spawns nothing, which
+/// is what makes a second run safe.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DataLoad;
+
+/// Marks an `App` whose [`DataLoad`] schedule and startup run are installed.
+#[derive(Resource)]
+struct DataLoadInstalled;
+
+/// Run [`DataLoad`]: at startup and on every data change. Its commands apply when the run ends,
+/// so a caller sees every catalog the run built.
+pub fn run_data_load(world: &mut World) {
+    world.try_run_schedule(DataLoad).ok();
+}
+
+/// Registering a catalog loader.
+pub trait DataLoadAppExt {
+    /// Add `systems` to [`DataLoad`], installing the schedule and its startup run the first time
+    /// any plugin does, so every `App` that has a loader also runs it — a test `App` with one
+    /// plugin included.
+    fn add_data_loaders<M>(
+        &mut self,
+        systems: impl bevy::ecs::schedule::IntoScheduleConfigs<bevy::ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self;
+}
+
+impl DataLoadAppExt for App {
+    fn add_data_loaders<M>(
+        &mut self,
+        systems: impl bevy::ecs::schedule::IntoScheduleConfigs<bevy::ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self {
+        if !self.world().contains_resource::<DataLoadInstalled>() {
+            self.insert_resource(DataLoadInstalled)
+                .init_schedule(DataLoad)
+                .configure_sets(Startup, AssetSet::Catalogs.after(AssetSet::Open))
+                .add_systems(Startup, run_data_load.in_set(AssetSet::Catalogs));
+        }
+        self.add_systems(DataLoad, systems)
+    }
 }
 
 #[cfg(test)]

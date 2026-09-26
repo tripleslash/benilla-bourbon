@@ -8,6 +8,7 @@ pub(crate) mod backdrop;
 pub(crate) mod dialog;
 pub(crate) mod widgets;
 
+use benilla_assets::DataLoadAppExt;
 use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
@@ -32,10 +33,7 @@ impl Plugin for GluePlugin {
             add_material::AddUiMaterial,
         >::default())
             .init_resource::<GlueArt>()
-            .add_systems(
-                Startup,
-                crate::glue_strings::load_glue_strings.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(crate::glue_strings::load_glue_strings)
             .init_resource::<GlueClicks>()
             .init_resource::<dialog::GlueDialog>()
             .add_message::<dialog::GlueDialogAnswer>()

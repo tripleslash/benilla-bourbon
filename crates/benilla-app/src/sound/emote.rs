@@ -8,7 +8,8 @@ use bevy::prelude::*;
 use benilla_formats::EmoteSoundCatalog;
 
 use crate::net::{EmoteKind, EmoteMessage, ObjectStore};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
@@ -132,6 +133,6 @@ fn emote_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_emote_sounds.after(AssetSet::Open))
+    app.add_data_loaders(load_emote_sounds)
         .add_systems(Update, emote_sounds.in_set(WorldStage::Present));
 }

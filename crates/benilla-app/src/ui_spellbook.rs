@@ -25,7 +25,8 @@ use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::{gate, UiInput};
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// `SkillLine.dbc` × `SkillLineAbility.dbc`; absent when the data failed to load.
 #[derive(Resource)]
@@ -52,7 +53,7 @@ pub(crate) struct UiSpellbookPlugin;
 impl Plugin for UiSpellbookPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LearnedInTab>()
-            .add_systems(Startup, load_skill_lines.after(AssetSet::Open))
+            .add_data_loaders(load_skill_lines)
             .add_systems(
                 Update,
                 (

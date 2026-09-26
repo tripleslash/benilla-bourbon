@@ -9,6 +9,7 @@
 //! [`PendingItemOps`], until the descriptor resolves them or the server answers a non-zero
 //! `SMSG_INVENTORY_CHANGE_FAILURE`.
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST};
 use benilla_protocol::ObjectFields;
 use benilla_ui::script::EQUIPMENT_BAG;
@@ -923,11 +924,9 @@ impl Plugin for UiItemsPlugin {
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<LockTransitions>()
             .init_resource::<net::BagOpens>()
-            // After the chain opens: unordered, it can run first and skip every item DBC.
-            .add_systems(
-                Startup,
-                load_item_dbcs.after(benilla_assets::AssetSet::Open),
-            )
+            // After the chain opens (unordered, it can run first and skip every item DBC), and
+            // again when its data changes.
+            .add_data_loaders(load_item_dbcs)
             .add_systems(
                 Update,
                 (

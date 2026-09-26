@@ -31,7 +31,8 @@ use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// Opener spell ids (effect 47) that `send_spell_cast` intercepted, opened by
 /// [`open_trade_skill`] the same frame.
@@ -75,7 +76,7 @@ impl Plugin for UiTradeSkillPlugin {
         app.init_resource::<TradeSkillOpens>()
             .init_resource::<TradeSkillOpen>()
             .init_resource::<TradeSkillRepeat>()
-            .add_systems(Startup, load_spell_focus.after(AssetSet::Open))
+            .add_data_loaders(load_spell_focus)
             .add_systems(
                 Update,
                 (

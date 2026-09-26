@@ -12,7 +12,8 @@ use benilla_protocol::messages::ActionButton;
 
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 mod cast_fail;
 mod drain;
@@ -222,8 +223,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<UiErrorKeys>()
             .init_resource::<UiErrorTexts>()
             .init_resource::<GoOpenerCasts>()
-            .add_systems(Startup, load_spells.after(AssetSet::Open))
-            .add_systems(Startup, load_spell_mechanics.after(AssetSet::Open))
+            .add_data_loaders((load_spells, load_spell_mechanics))
             .add_systems(
                 Update,
                 (

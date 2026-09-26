@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{M2Model, WmoModel};
 use benilla_formats::{
     load_creature_catalog, load_gameobject_catalog, load_item_display_catalog, CharCreateCatalog,
@@ -13,7 +14,7 @@ use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use crate::net::NetEntity;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::model_fade::apply_render_fade;
 use benilla_world::schedule::WorldStage;
 
@@ -610,7 +611,7 @@ impl Plugin for EntitiesPlugin {
         // A display swap's rebuild edge, for the impact-kit replay the reference runs at the end
         // of `0x60abe0`.
         .add_message::<live_display::DisplaySwapped>()
-        .add_systems(Startup, setup_entities.after(AssetSet::Open))
+        .add_data_loaders(setup_entities)
         .add_systems(Update, (evict_display_caches, scope_entity_art))
         // Land every body composite a worker finished (web only — native blends inline and never
         // queues one). **Before `DisplayBuildSet`**, which heads the chain the three composite

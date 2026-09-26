@@ -5,7 +5,8 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::ChrClasses;
 
 /// The parsed table; [`benilla_formats::ChrClasses`] documents the columns.
@@ -16,7 +17,7 @@ pub(crate) struct ChrClassesPlugin;
 
 impl Plugin for ChrClassesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_chr_classes.after(AssetSet::Open));
+        app.add_data_loaders(load_chr_classes);
     }
 }
 

@@ -15,6 +15,7 @@ use benilla_ui::script::{GmTicketIntent, GmTicketWrite, ScriptValue, UiScript};
 use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
+use benilla_assets::DataLoadAppExt;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
@@ -370,10 +371,7 @@ impl Plugin for UiGmTicketPlugin {
         net::register(app);
         app.init_resource::<GmTicketState>()
             .init_resource::<GmTicketFeedState>()
-            .add_systems(
-                Startup,
-                load_gm_ticket_dbc.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(load_gm_ticket_dbc)
             .add_systems(
                 Update,
                 (

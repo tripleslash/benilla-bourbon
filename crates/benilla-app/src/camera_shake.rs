@@ -34,7 +34,8 @@ use crate::creature_anim::{
 use crate::entities::Creatures;
 use crate::net::{Embodied, NetEntity, ObjectStore, Spline};
 use crate::player::ViewSubject;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
@@ -156,7 +157,7 @@ pub(crate) struct CameraShakePlugin;
 impl Plugin for CameraShakePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShakes>()
-            .add_systems(Startup, load_shakes.after(AssetSet::Open))
+            .add_data_loaders(load_shakes)
             // Capture-gated with the applier (in `crate::player`), which is what retires
             // records: an emitter running without it would leak a record per footfall.
             .add_systems(

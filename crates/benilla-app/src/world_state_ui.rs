@@ -19,7 +19,8 @@ use bevy::prelude::*;
 use benilla_formats::{chat_channel_flags as chan, WorldStateUiCatalog, WorldStateUiRow};
 use benilla_ui::script::{UiScript, WorldStateUiView};
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use crate::world_state::WorldStates;
 
@@ -177,7 +178,7 @@ pub(crate) struct WorldStateUiPlugin;
 
 impl Plugin for WorldStateUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_world_state_ui.after(AssetSet::Open))
+        app.add_data_loaders(load_world_state_ui)
             .add_systems(Update, feed_world_state_ui.after(crate::ui_script::UiInput));
     }
 }

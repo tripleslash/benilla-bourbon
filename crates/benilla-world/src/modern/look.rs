@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::prelude::*;
 
-use benilla_assets::{AdtTile, AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{AdtTile, LockRecover, WorldAssets};
 use benilla_formats::AreaTableCatalog;
 
 use super::ActiveLighting;
@@ -259,7 +260,7 @@ fn publish(look: ZoneLook) {
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ActiveLook>()
-        .add_systems(Startup, load_zone_catalog.after(AssetSet::Open))
+        .add_data_loaders(load_zone_catalog)
         .add_systems(Last, update_look);
 }
 

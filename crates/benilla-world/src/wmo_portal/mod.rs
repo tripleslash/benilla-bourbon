@@ -45,6 +45,7 @@ pub use seed::{down_ray_seeds, floor_z_at, DownRaySeeds};
 use crate::terrain_stream::{terrain_height_under, TerrainStreamer};
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{AdtTile, WmoGroupNav, WmoModel, WmoPortalInfo};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::Projection;
@@ -295,31 +296,28 @@ pub struct WmoPortalPlugin;
 
 impl Plugin for WmoPortalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Startup,
-            interior::load_wmo_areas.after(benilla_assets::AssetSet::Open),
-        )
-        .init_resource::<CurrentWmoInterior>()
-        .init_resource::<PlayerWmoRoom>()
-        .init_resource::<CurrentAreaInterior>()
-        .init_resource::<CameraWmoFog>()
-        .init_resource::<CameraRoomExtent>()
-        .init_resource::<CameraInteriorClaim>()
-        .init_resource::<ExteriorWindows>()
-        .init_resource::<WmoCullProbe>()
-        .add_systems(
-            Update,
-            (
-                compute_wmo_pvs,
-                track_current_interior,
-                track_area_interior,
-                track_unit_interiors,
-            )
-                .in_set(WmoPvsSet)
-                // On this frame's camera pose: the flood, the claim and the windows key on the eye
-                // and decide what the frame may draw.
-                .after(crate::view::CameraPoseSet),
-        );
+        app.add_data_loaders(interior::load_wmo_areas)
+            .init_resource::<CurrentWmoInterior>()
+            .init_resource::<PlayerWmoRoom>()
+            .init_resource::<CurrentAreaInterior>()
+            .init_resource::<CameraWmoFog>()
+            .init_resource::<CameraRoomExtent>()
+            .init_resource::<CameraInteriorClaim>()
+            .init_resource::<ExteriorWindows>()
+            .init_resource::<WmoCullProbe>()
+            .add_systems(
+                Update,
+                (
+                    compute_wmo_pvs,
+                    track_current_interior,
+                    track_area_interior,
+                    track_unit_interiors,
+                )
+                    .in_set(WmoPvsSet)
+                    // On this frame's camera pose: the flood, the claim and the windows key on the eye
+                    // and decide what the frame may draw.
+                    .after(crate::view::CameraPoseSet),
+            );
     }
 }
 
