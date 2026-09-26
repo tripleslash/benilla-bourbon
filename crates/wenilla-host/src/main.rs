@@ -60,6 +60,11 @@ struct Cli {
     /// never requests this tree, which is exactly what serving it here lets you verify.
     #[arg(long, requires = "packs")]
     packs_hd: Option<PathBuf>,
+    /// The Turtle WoW 1.18.1 layer's container (`benilla-pack overlay` then `build --only …
+    /// --out web/packs-turtle`), served at `/data-turtle/*` beside `--packs`. Fetched only while the
+    /// client is on a realm that advertises 1.18.1.
+    #[arg(long, requires = "packs")]
+    packs_turtle: Option<PathBuf>,
     /// Forward `/data/*` and `/data-hd/*` to a hosted static tree (e.g. `https://wow.example.com`)
     /// instead of serving a local container — for working on the client with no game data here.
     #[arg(long, conflicts_with_all = ["data", "packs"])]
@@ -96,7 +101,7 @@ struct Cli {
     ///
     /// Off by default, and the default is the safe half of the pair: without it every session goes
     /// to loopback whatever anyone asks for, so a page cannot aim this proxy and neither can a
-    /// mistyped flag. With it, this host will connect wherever a page asks — on 3724 and 8085
+    /// mistyped flag. With it, this host will connect wherever a page asks — on 3724, 8085 and 8086
     /// only, but wherever. Turn it on for a gateway that fronts a realm somewhere else; leave it
     /// off for the single-box case, which is what this tool is for.
     #[arg(long)]
@@ -172,13 +177,23 @@ async fn main() -> Result<()> {
                 tracing::info!(packs_hd = %hd.display(), "serving the updated-character-model layer");
                 router = router.merge(wenilla_host::packs::hd_router(hd, !cli.no_ranges));
             }
+            if let Some(turtle) = &cli.packs_turtle {
+                if !turtle.join("index.bpi").is_file() {
+                    anyhow::bail!(
+                        "{} has no index.bpi — run `benilla-pack overlay` and `build --only` first",
+                        turtle.display()
+                    );
+                }
+                tracing::info!(packs_turtle = %turtle.display(), "serving the Turtle WoW 1.18.1 layer");
+                router = router.merge(wenilla_host::packs::turtle_router(turtle, !cli.no_ranges));
+            }
             router
         }
         // Neither: a gateway. Not an error — it is the *hosted* shape, where the container is
         // static objects on a static host and this process exists only for the two sockets.
         (None, None) => match &cli.packs_remote {
             Some(base) => {
-                tracing::info!(remote = %base, "forwarding /data and /data-hd to a remote site");
+                tracing::info!(remote = %base, "forwarding /data, /data-hd and /data-turtle to a remote site");
                 wenilla_host::remote::router(base)
             }
             None => {
@@ -237,7 +252,7 @@ async fn main() -> Result<()> {
     if cli.allow_remote_realms {
         tracing::warn!(
             "--allow-remote-realms is set: this proxy will connect to whatever host a page names, \
-             on ports 3724 and 8085. Only do this on a gateway you mean to be one."
+             on ports 3724, 8085 and 8086. Only do this on a gateway you mean to be one."
         );
     }
     tracing::info!(

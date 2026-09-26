@@ -162,7 +162,7 @@ async fn an_allowed_proxy_dials_the_host_the_client_names() {
 
 /// **The port allowlist is not a function of the remote-realm policy.** `--allow-remote-realms`
 /// widens *which box* may be dialed and nothing else — the port set stays the compiled-in
-/// `{3724, 8085}` under either setting, so a gateway sharing the host's network namespace cannot be
+/// `{3724, 8085, 8086}` (realmd and the 1.12.1 and 1.18.1 world servers) under either setting, so a gateway sharing the host's network namespace cannot be
 /// aimed at sshd, the database, or its own listener whatever a page asks for.
 ///
 /// Written against `wenilla_host::ALLOWED_PORTS` itself — the exact value `main.rs` hands the
@@ -173,8 +173,8 @@ async fn an_allowed_proxy_dials_the_host_the_client_names() {
 async fn the_port_allowlist_holds_whatever_the_remote_realm_policy_is() {
     assert_eq!(
         wenilla_host::ALLOWED_PORTS,
-        [3724, 8085],
-        "the hosted allowlist is realmd + mangosd and nothing else"
+        [3724, 8085, 8086],
+        "the hosted allowlist is realmd + the two world servers and nothing else"
     );
 
     for remote in [RemoteRealms::Refuse, RemoteRealms::Allow] {
@@ -189,7 +189,7 @@ async fn the_port_allowlist_holds_whatever_the_remote_realm_policy_is() {
         // the mysql the vmangos compose runs, the gateway's own listener, and the near-misses a
         // mistyped realmlist produces.
         for port in [
-            22u16, 80, 443, 3306, 8080, 8090, 3723, 3725, 8084, 8086, 65535,
+            22u16, 80, 443, 3306, 8080, 8090, 3723, 3725, 8084, 8087, 65535,
         ] {
             let url = format!("ws://{addr}/ws/{port}?host=127.0.0.1");
             let err = tokio_tungstenite::connect_async(&url)

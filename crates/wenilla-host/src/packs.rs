@@ -40,6 +40,12 @@ pub fn hd_router(packs: &Path, allow_ranges: bool) -> axum::Router {
     mount(packs, allow_ranges, "/data-hd")
 }
 
+/// The Turtle WoW 1.18.1 layer's container at `/data-turtle`, on the HD layer's terms: the client
+/// asks for it only while it is on a realm that advertises 1.18.1.
+pub fn turtle_router(packs: &Path, allow_ranges: bool) -> axum::Router {
+    mount(packs, allow_ranges, "/data-turtle")
+}
+
 fn mount(packs: &Path, allow_ranges: bool, at: &str) -> axum::Router {
     let serve = ServeDir::new(packs).append_index_html_on_directories(false);
     let inner = axum::Router::new().fallback_service(

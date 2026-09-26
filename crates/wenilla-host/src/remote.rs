@@ -1,4 +1,4 @@
-//! Forwarding `/data/*` and `/data-hd/*` to a hosted static tree (`--packs-remote`), for working
+//! Forwarding `/data/*`, `/data-hd/*` and `/data-turtle/*` to a hosted static tree (`--packs-remote`), for working
 //! on the client without a local container.
 //!
 //! The page cannot simply fetch the site cross-origin: it reads its containers from its own
@@ -37,7 +37,7 @@ struct Upstream {
     base: String,
 }
 
-/// Mount `/data` and `/data-hd`, each forwarded to the same path under `base`
+/// Mount `/data`, `/data-hd` and `/data-turtle`, each forwarded to the same path under `base`
 /// (e.g. `https://wow.example.com`).
 pub fn router(base: &str) -> axum::Router {
     let state = Upstream {
@@ -52,6 +52,7 @@ pub fn router(base: &str) -> axum::Router {
     axum::Router::new()
         .route("/data/{*rest}", axum::routing::any(forward))
         .route("/data-hd/{*rest}", axum::routing::any(forward))
+        .route("/data-turtle/{*rest}", axum::routing::any(forward))
         .with_state(state)
 }
 

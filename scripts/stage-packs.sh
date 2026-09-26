@@ -43,6 +43,14 @@ PACKS=web/packs
 # them nothing at all. Absent is an ordinary state -- the site simply has no layer, the client
 # says so once in the console and runs on the original art.
 PACKS_HD=web/packs-hd
+# The Turtle WoW 1.18.1 layer's container, hosted at `/data-turtle` and fetched only while the
+# client is on a realm that advertises 1.18.1:
+#
+#   benilla-pack overlay ... --out <dir>, then build --only <dir>/overlay.tsv --out web/packs-turtle
+#
+# Absent is an ordinary state: the site serves 1.12.1 realms only, and the client refuses a 1.18.1
+# realm with a message saying why.
+PACKS_TURTLE=web/packs-turtle
 SITE=web/site
 
 # First candidate that exists and is non-empty. Staging outranks `dist` so a hook run stages THIS
@@ -89,11 +97,12 @@ done
 # ---------------------------------------------------------------------------------------------
 [ -d "${PACKS}" ] || echo "warning: no ${PACKS} — staging the client with no game data (benilla-pack build)" >&2
 [ -d "${PACKS_HD}" ] || echo "note: no ${PACKS_HD} — staging without the updated-character-model layer" >&2
+[ -d "${PACKS_TURTLE}" ] || echo "note: no ${PACKS_TURTLE} — staging without the Turtle WoW 1.18.1 layer" >&2
 
 mkdir -p "${SITE}"
 # Everything EXCEPT data/. Deleting a junction or symlink never touches its target, but leaving it
 # in place also skips re-creating it, and on Windows that is one fewer `cmd //c` per build.
-find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data ! -name data-hd -exec rm -rf {} +
+find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data ! -name data-hd ! -name data-turtle -exec rm -rf {} +
 
 # Git Bash maps `cp -l` to CreateHardLink, so this is metadata-only even for the 90 MB wasm. The
 # fallback copy is for a filesystem that refuses links (a FAT stick, a mounted share).
@@ -151,7 +160,8 @@ if [ -n "${oversize}" ]; then
   exit 1
 fi
 
-# $1 = the container directory, $2 = the name it takes under ${SITE} (`data`, `data-hd`).
+# $1 = the container directory, $2 = the name it takes under ${SITE} (`data`, `data-hd`,
+# `data-turtle`).
 link_data() {
   src="$1"
   dst="${SITE}/$2"
@@ -186,6 +196,20 @@ link_data() {
 }
 [ -d "${PACKS}" ] && link_data "${PACKS}" data
 [ -d "${PACKS_HD}" ] && link_data "${PACKS_HD}" data-hd
+[ -d "${PACKS_TURTLE}" ] && link_data "${PACKS_TURTLE}" data-turtle
+
+# A typical static host serves at most 20,000 assets per version, and three containers plus
+# the page are counted together. Counted off the container trees themselves (not through the
+# links), so a staged junction is walked by nothing but this line.
+objects=$(find "${SITE}" -maxdepth 1 -type f | wc -l)
+for tree in "${PACKS}" "${PACKS_HD}" "${PACKS_TURTLE}"; do
+  [ -d "${tree}" ] && objects=$((objects + $(find "${tree}" -type f | wc -l)))
+done
+echo "assets to upload: ${objects} (a typical static host's limit: 20000)"
+if [ "${objects}" -gt 20000 ]; then
+  echo "error: over a static host's 20,000-asset limit — drop a layer or rebuild with fewer objects" >&2
+  exit 1
+fi
 
 echo "staged ${SITE}:"
 ls -la "${SITE}"
