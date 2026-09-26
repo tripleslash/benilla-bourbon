@@ -27,6 +27,11 @@ pub(crate) const SPELL_BURST_SPAN: f32 = 0.6;
 /// How fast a KIT light goes dark once its instance is reaped ([`FxDecay`]) — quicker than the
 /// model's own `Decay`: the aura is over the moment the server said so.
 pub(crate) const SPELL_REAP_FADE: f32 = 0.25;
+/// fork: the further gain on a KIT light ([`SpellLightMode::Kit`]) — a cast hand, a burning aura —
+/// on top of the spell gain. It sits a fraction of a yard from the body it rides, where the falloff
+/// peaks, and holds for the aura's whole life, so at a missile's strength it floods the unit and
+/// reads as the body glowing. At this share it is a candle's pool against the caster.
+pub(crate) const KIT_LIGHT_GAIN: f32 = 0.4;
 /// How many spell lights may be alive at once, across every lane. The shared table packs the 256
 /// nearest sources; a raid's worth of casts must never evict a city's torches.
 pub(crate) const SPELL_LIGHTS_MAX: usize = 24;
@@ -121,7 +126,12 @@ pub(crate) fn spawn_spell_light(
     let Some(emitter) = dm.emitters.get(spell.emitter) else {
         return;
     };
-    let mut light = point_light(spell.color, spell.intensity);
+    let gain = if mode == SpellLightMode::Kit {
+        KIT_LIGHT_GAIN
+    } else {
+        1.0
+    };
+    let mut light = point_light(spell.color, spell.intensity * gain);
     let base = light.intensity;
     light.intensity = 0.0; // the envelope brings it up
     let mut e = commands.spawn((
@@ -140,24 +150,65 @@ pub(crate) fn spawn_spell_light(
 
 /// Run every live spell light's envelope. Writes [`WorldPointLight::intensity`] only on a real
 /// change; the packer reads it in `PostUpdate`.
+///
+/// fork: a unit lights with ONE kit light — the strongest of its live ones this frame
+/// ([`kit_winners`]). Two casting hands and a burning aura stand a yard apart on one body; three
+/// lights there are one light three times as bright, and they read as the whole unit glowing.
+#[allow(clippy::type_complexity)]
 pub(crate) fn advance_spell_lights(
     time: Res<Time>,
-    mut lights: Query<(&mut SpellLight, &mut WorldPointLight, Option<&ChildOf>)>,
+    mut lights: Query<(
+        Entity,
+        &mut SpellLight,
+        &mut WorldPointLight,
+        Option<&ChildOf>,
+        Option<&LightOwner>,
+    )>,
     reaped: Query<Has<FxDecay>>,
 ) {
     let dt = time.delta_secs();
-    for (mut light, mut point, parent) in &mut lights {
+    for (_, mut light, _, parent, _) in &mut lights {
         light.age += dt;
         if light.mode == SpellLightMode::Kit
             && parent.is_some_and(|c| reaped.get(c.parent()).unwrap_or(false))
         {
             light.reaped += dt;
         }
-        let want = light.base * light.envelope();
+    }
+    let winners = kit_winners(lights.iter().filter_map(|(e, light, _, _, owner)| {
+        (light.mode == SpellLightMode::Kit)
+            .then(|| owner.map(|o| (e, o.0, light.base * light.envelope())))
+            .flatten()
+    }));
+    for (e, light, mut point, _, owner) in &mut lights {
+        let outshone =
+            light.mode == SpellLightMode::Kit && owner.is_some() && !winners.contains(&e);
+        let want = if outshone {
+            0.0
+        } else {
+            light.base * light.envelope()
+        };
         if (point.intensity - want).abs() > 1e-3 {
             point.intensity = want;
         }
     }
+}
+
+/// The kit light each unit keeps, from `(light, unit, strength now)`: the strongest per unit, the
+/// lower entity on a tie so the choice does not flicker between equals.
+fn kit_winners(
+    lights: impl IntoIterator<Item = (Entity, Entity, f32)>,
+) -> bevy::platform::collections::HashSet<Entity> {
+    let mut best: bevy::platform::collections::HashMap<Entity, (Entity, f32)> = Default::default();
+    for (light, unit, want) in lights {
+        let keep = best.get(&unit).is_none_or(|&(held, strength)| {
+            want > strength || (want == strength && light.to_bits() < held.to_bits())
+        });
+        if keep {
+            best.insert(unit, (light, want));
+        }
+    }
+    best.into_values().map(|(light, _)| light).collect()
 }
 
 /// The ceiling ([`SPELL_LIGHTS_MAX`]): drop the OLDEST beyond it — the newest cast is the one the
@@ -177,6 +228,28 @@ pub(crate) fn budget_spell_lights(mut commands: Commands, lights: Query<(Entity,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fork: one body, one kit light — the strongest; another unit keeps its own.
+    #[test]
+    fn a_unit_keeps_only_its_strongest_kit_light() {
+        let mut world = World::new();
+        let [hand_l, hand_r, aura, other, caster, bystander] =
+            std::array::from_fn(|_| world.spawn_empty().id());
+        let winners = kit_winners([
+            (hand_l, caster, 0.3),
+            (hand_r, caster, 0.3),
+            (aura, caster, 0.4),
+            (other, bystander, 0.1),
+        ]);
+        assert!(winners.contains(&aura) && winners.contains(&other));
+        assert_eq!(winners.len(), 2, "{winners:?}");
+        let tie = kit_winners([(hand_r, caster, 0.3), (hand_l, caster, 0.3)]);
+        assert_eq!(tie.len(), 1);
+        assert!(
+            tie.contains(&hand_l.min(hand_r)),
+            "the lower entity wins a tie"
+        );
+    }
 
     /// GOLDEN — the envelope's four legs, on the pure function. The ONSET leg is a firework's
     /// fuse: a light lit at spawn flashes the rocket's flight instead of its burst.
