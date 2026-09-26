@@ -686,6 +686,15 @@ fn pipes_field(d: &mut Diag, pipes: Option<(usize, usize)>) -> String {
     format!("+{new}/{}", created.saturating_sub(settled))
 }
 
+/// The warm pass's outcome — drained, or timed out with pipelines pending — on the console the
+/// web build has. Its `info!`/`warn!` are silenced there while this probe is armed, and a timeout
+/// is what sends the rest of the warm set to compile live, in play.
+pub(crate) fn note_warm(what: &str) {
+    if armed() {
+        out(&format!("[diag] pipeline warm: {what}"));
+    }
+}
+
 /// A pipeline compiled **live** — say so on the console the web build actually has.
 ///
 /// `pipe_warm`'s tripwire is a `warn!`, and on this target that goes nowhere: `quiet_console_on_web`
