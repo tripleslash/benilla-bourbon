@@ -609,6 +609,11 @@ async fn run(
                     hair_style: 0,
                     hair_color: 0,
                     facial_hair: 0,
+                    challenge_mask: realm
+                        .as_ref()
+                        .and_then(|r| r.version)
+                        .filter(|v| v.is_turtle())
+                        .map(|_| 0),
                 };
                 match session.create_character_async(&starter).await? {
                     messages::CHAR_CREATE_SUCCESS | messages::CHAR_CREATE_NAME_IN_USE => {}

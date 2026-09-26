@@ -281,6 +281,7 @@ impl CreateSelection {
             hair_style: self.dials[2],
             hair_color: self.dials[3],
             facial_hair: self.dials[4],
+            challenge_mask: None,
         }
     }
 }

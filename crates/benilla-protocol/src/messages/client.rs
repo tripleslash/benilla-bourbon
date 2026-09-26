@@ -25,9 +25,10 @@ pub fn auth_session(
 }
 
 /// `CMSG_CHAR_CREATE` body: the name cstring then nine bytes (`Packets/Character.cpp:4-19`); the
-/// last, `outfit_id`, is 0 because the server ignores it (`CharacterHandler.cpp:310`).
+/// last, `outfit_id`, is 0 because the server ignores it (`CharacterHandler.cpp:310`). A 1.18 realm
+/// reads a `u32` challenge mask after it ([`CharCreateReq::challenge_mask`]).
 pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
-    let mut body = Vec::with_capacity(req.name.len() + 10);
+    let mut body = Vec::with_capacity(req.name.len() + 14);
     body.extend_from_slice(req.name.as_bytes());
     body.push(0);
     body.extend_from_slice(&[
@@ -41,6 +42,9 @@ pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
         req.facial_hair,
         0,
     ]);
+    if let Some(mask) = req.challenge_mask {
+        body.extend_from_slice(&mask.to_le_bytes());
+    }
     body
 }
 

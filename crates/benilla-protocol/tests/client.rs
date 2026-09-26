@@ -71,6 +71,7 @@ fn client_bodies_golden() {
             hair_style: 0,
             hair_color: 0,
             facial_hair: 0,
+            challenge_mask: None,
         }),
         hx("42656e696c6c6100010100000000000000"),
         "CMSG_CHAR_CREATE body (zero appearance)"
@@ -86,9 +87,28 @@ fn client_bodies_golden() {
             hair_style: 5,
             hair_color: 6,
             facial_hair: 7,
+            challenge_mask: None,
         }),
         hx("42656e696c6c6100010100030405060700"),
         "CMSG_CHAR_CREATE body (distinct appearance)"
+    );
+    // A 1.18 realm's body: the same nine bytes (race 9, Goblin), then Turtle's u32 challengeMask
+    // (0 = none) as its last four.
+    assert_eq!(
+        messages::char_create(&messages::CharCreateReq {
+            name: "Benilla".into(),
+            race: 9,
+            class: 1,
+            gender: 0,
+            skin: 3,
+            face: 4,
+            hair_style: 5,
+            hair_color: 6,
+            facial_hair: 7,
+            challenge_mask: Some(0),
+        }),
+        hx("42656e696c6c610009010003040506070000000000"),
+        "CMSG_CHAR_CREATE body for a 1.18 realm (Goblin, no challenge)"
     );
     assert_eq!(
         messages::messagechat(0, 7, ".tele Westfall"),

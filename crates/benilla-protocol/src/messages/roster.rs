@@ -35,6 +35,10 @@ pub struct CharCreateReq {
     pub hair_style: u8,
     pub hair_color: u8,
     pub facial_hair: u8,
+    /// Turtle WoW 1.18.1's trailing `challengeMask` (0 = no challenge mode), sent only to a 1.18
+    /// realm: its handler reads the u32 after `outfit_id`, and a body that ends before it is a bad
+    /// packet it kicks. `None` sends the 1.12.1 body.
+    pub challenge_mask: Option<u32>,
 }
 
 /// The vmangos `CHARACTER_FLAG_*` bits of [`Character::flags`] that the select screen renders.
