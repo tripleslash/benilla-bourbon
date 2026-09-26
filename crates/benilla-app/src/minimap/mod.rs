@@ -35,7 +35,7 @@ use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{DataLoadAppExt, LockRecover, WorldAssets};
 use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
@@ -225,6 +225,15 @@ struct MinimapAssets {
     forms: Option<HashMap<u32, benilla_formats::ShapeshiftForm>>,
 }
 
+/// A change of the data the chain answers from re-maps tiles to files (`md5translate.trs`), so the
+/// resolved handles go.
+fn forget_minimap_tiles(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut cache: ResMut<MinimapTileCache>,
+) {
+    *cache = MinimapTileCache::default();
+}
+
 /// Tile handles by ADT index for one [`CurrentMap`], `None` for a tile with no art (open ocean);
 /// the interior half by `(group, col, row)` for the building whose tile stem is resident.
 #[derive(Resource, Default)]
@@ -235,7 +244,8 @@ struct MinimapTileCache {
     interior: HashMap<(usize, u32, u32), Option<Handle<Image>>>,
 }
 
-/// Load the translate catalog and the minimap art once the patch chain is open.
+/// Load the translate catalog, the shapeshift table and the minimap art from the chain: at startup
+/// and again when its data changes (Turtle WoW changes both tables).
 fn setup_minimap(
     mut commands: Commands,
     world_assets: Option<ResMut<WorldAssets>>,
@@ -890,7 +900,8 @@ impl Plugin for MinimapPlugin {
             .init_resource::<MinimapInside>()
             .init_resource::<MinimapPing>()
             .init_resource::<composite::MinimapComposite>()
-            .add_systems(Startup, setup_minimap.after(AssetSet::Open))
+            .add_data_loaders(setup_minimap)
+            .add_observer(forget_minimap_tiles)
             .add_systems(Startup, composite::setup_composite)
             .add_systems(
                 Update,

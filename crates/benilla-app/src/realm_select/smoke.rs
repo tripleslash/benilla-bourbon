@@ -44,6 +44,7 @@ pub(super) fn debug_realm_smoke(
     time: Res<Time>,
     mut walk: Local<Walk>,
     mut exit: MessageWriter<AppExit>,
+    mut commands: Commands,
 ) {
     walk.seen += msgs.read().count() as u32;
     if std::env::var_os("WOW_REALM_SMOKE").is_none() || walk.phase == u8::MAX {
@@ -110,7 +111,7 @@ pub(super) fn debug_realm_smoke(
                 return;
             }
             info!("realm-smoke: dialog up, character select still underneath → Okay");
-            okay(realms, &choice);
+            okay(realms, &mut commands);
             (walk.phase, walk.mark, walk.rosters) = (2, now, walk.seen + 1);
         }
         // ── 2 · Okay has to land: a fresh roster, dialog down, still at select. ──────────────
@@ -137,7 +138,7 @@ pub(super) fn debug_realm_smoke(
             (walk.phase, walk.mark) = (5, now);
         }
         5 if realms.shown && now - walk.mark > DWELL => {
-            okay(realms, &choice);
+            okay(realms, &mut commands);
             (walk.phase, walk.mark, walk.rosters) = (6, now, walk.seen + 1);
         }
         6 if walk.seen >= walk.rosters && !realms.shown && at_select => {
@@ -159,7 +160,7 @@ fn open(mut realms: ResMut<Realms>, choice: &RealmChoice) {
 }
 
 /// `RealmList_OnOk` on whatever the dialog opened with highlighted, or the first row.
-fn okay(mut realms: ResMut<Realms>, choice: &RealmChoice) {
+fn okay(mut realms: ResMut<Realms>, commands: &mut Commands) {
     let name = realms.selected().map(|r| r.name.clone()).or_else(|| {
         realms
             .rows()
@@ -170,7 +171,7 @@ fn okay(mut realms: ResMut<Realms>, choice: &RealmChoice) {
         return;
     };
     realms.hide();
-    let _ = choice.0.try_send(RealmRequest::Enter(name));
+    realms.enter(commands, name);
 }
 
 /// `RealmList_OnCancel`.

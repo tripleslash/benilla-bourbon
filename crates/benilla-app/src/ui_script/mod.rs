@@ -380,8 +380,8 @@ fn arbitrate_pointer_over_ui(
 /// The session lifecycle: the VM's birth, identity, death and reload.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity,
-    LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
+    end_ui_session, ingame_ui_up, reinstall_boot_vm, run_pending_reload, setup_script,
+    AddOnIdentity, LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
 };
 // Test-only: other modules' tests consume these, and a plain re-export would warn unused.
 #[cfg(test)]

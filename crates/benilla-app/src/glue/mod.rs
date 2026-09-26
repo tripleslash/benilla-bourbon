@@ -33,6 +33,7 @@ impl Plugin for GluePlugin {
             add_material::AddUiMaterial,
         >::default())
             .init_resource::<GlueArt>()
+            .add_observer(art::forget_glue_art)
             .add_data_loaders(crate::glue_strings::load_glue_strings)
             .init_resource::<GlueClicks>()
             .init_resource::<dialog::GlueDialog>()

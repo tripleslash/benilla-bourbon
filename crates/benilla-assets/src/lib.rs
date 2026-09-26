@@ -217,6 +217,56 @@ fn strip_sampler_marker(path: &str) -> Option<String> {
     matches!(tag, "rc" | "cr" | "cc").then(|| format!("{base}.{ext}"))
 }
 
+/// Reload every `mpq://` asset loaded so far — BLP images, M2 and WMO models, ADT tiles, WDT
+/// indices — whose archive name `in_layer` holds, for a layer just mounted or unmounted: the
+/// server keys an asset by path, so without this a live handle keeps answering with the bytes it
+/// was first loaded from. Returns the reloads asked for. An edge, never per frame.
+pub fn reload_chain_assets(world: &World, in_layer: impl Fn(&str) -> bool) -> usize {
+    use bevy::asset::io::AssetSourceId;
+    use bevy::asset::AssetPath;
+
+    fn collect<A: Asset>(
+        world: &World,
+        server: &AssetServer,
+        in_layer: &dyn Fn(&str) -> bool,
+        out: &mut std::collections::HashSet<AssetPath<'static>>,
+    ) {
+        let Some(assets) = world.get_resource::<Assets<A>>() else {
+            return;
+        };
+        for id in assets.ids() {
+            let Some(path) = server.get_path(id) else {
+                continue; // made in code, not loaded
+            };
+            if !matches!(path.source(), AssetSourceId::Name(n) if n.as_ref() == MPQ_SOURCE) {
+                continue;
+            }
+            let Some(raw) = path.path().to_str() else {
+                continue;
+            };
+            let archive = strip_sampler_marker(raw).unwrap_or_else(|| raw.to_string());
+            if in_layer(&archive.replace('/', "\\")) {
+                // A labelled sub-asset and its file are one reload.
+                out.insert(path.without_label().into_owned());
+            }
+        }
+    }
+
+    let Some(server) = world.get_resource::<AssetServer>() else {
+        return 0;
+    };
+    let mut paths = std::collections::HashSet::new();
+    collect::<Image>(world, server, &in_layer, &mut paths);
+    collect::<M2Model>(world, server, &in_layer, &mut paths);
+    collect::<WmoModel>(world, server, &in_layer, &mut paths);
+    collect::<AdtTile>(world, server, &in_layer, &mut paths);
+    collect::<WdtIndex>(world, server, &in_layer, &mut paths);
+    for path in &paths {
+        server.reload(path.clone());
+    }
+    paths.len()
+}
+
 /// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`. Call it before
 /// `AssetPlugin` builds (before `DefaultPlugins`), which reads the sources.
 pub fn register_mpq_source(app: &mut App, data_dir: &Path) -> Result<()> {

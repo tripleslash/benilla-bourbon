@@ -72,6 +72,7 @@ mod dev;
 mod doodad_events;
 mod entities;
 mod fishing_line;
+mod flavor;
 mod footprints;
 mod game_plugins;
 mod glue;
@@ -112,6 +113,9 @@ mod screen_fade;
 mod screenshot;
 mod shaders;
 
+/// Every boot-time reader of the chain rebuilds with it or says why not; read off the source.
+#[cfg(test)]
+mod data_load_guard_tests;
 mod game_tip;
 mod name_persist;
 mod opaque2d;

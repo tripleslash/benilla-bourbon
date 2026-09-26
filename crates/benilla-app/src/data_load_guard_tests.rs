@@ -18,15 +18,11 @@ use std::path::{Path, PathBuf};
 const ALLOWED: &[(&str, &str)] = &[
     (
         "setup_loading_screen",
-        "spawns the cover; each screen's art is chosen per map at runtime",
-    ),
-    (
-        "setup_minimap",
-        "spawns the minimap frame and its border art",
+        "spawns the cover; LoadingScreens.dbc and the bar art, which no layer overrides",
     ),
     (
         "load_ink",
-        "the footprint decal art, which no layer overrides",
+        "spawns the footprint lane; FootprintTextures.dbc, which no layer overrides",
     ),
     (
         "setup_sun",
@@ -131,6 +127,20 @@ fn startup_systems(text: &str) -> Vec<String> {
     out
 }
 
+/// The system names an `add_data_loaders(…)` registration names, by the same reading.
+fn data_loaders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(i) = text[at..].find("add_data_loaders(") {
+        let open = at + i + "add_data_loaders".len();
+        let args = balanced(text, open);
+        at = open + 1;
+        // `Startup, …` so the one reader serves both.
+        out.extend(startup_systems(&format!("add_systems(Startup, {args})")));
+    }
+    out
+}
+
 /// The body of `fn name(` in `text`, if it is defined there.
 fn fn_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!("fn {name}(");
@@ -195,6 +205,46 @@ fn every_startup_reader_of_the_chain_is_a_data_loader_or_says_why_not() {
     assert!(
         stale.is_empty(),
         "allowlisted Startup chain readers that no longer exist or no longer read the chain: {stale:?}"
+    );
+}
+
+/// **A second run of `DataLoad` is safe**: every loader replaces what it inserts, so it must not
+/// spawn, or each realm switch would leave one more of its entities behind.
+#[test]
+fn no_data_loader_spawns() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let mut files = Vec::new();
+    for krate in ["crates/benilla-app/src", "crates/benilla-world/src"] {
+        sources(&root.join(krate), &mut files);
+    }
+    let texts: Vec<String> = files
+        .into_iter()
+        .map(|p| non_test(&std::fs::read_to_string(&p).expect("reading a source file")).to_string())
+        .collect();
+    let mut loaders = 0;
+    let mut spawning = Vec::new();
+    for text in &texts {
+        for system in data_loaders(text) {
+            let Some(body) = texts.iter().find_map(|t| fn_body(t, &system)) else {
+                continue;
+            };
+            loaders += 1;
+            if body.contains(".spawn(") || body.contains("spawn_batch(") {
+                spawning.push(system);
+            }
+        }
+    }
+    assert!(
+        loaders > 40,
+        "the scan found only {loaders} loaders — it has gone blind"
+    );
+    assert!(
+        spawning.is_empty(),
+        "these DataLoad loaders spawn, so a realm switch would duplicate their entities — keep the \
+         spawn in Startup and the chain read in the loader: {spawning:?}"
     );
 }
 

@@ -28,6 +28,7 @@ pub(crate) use load::pvp_rp;
 
 use bevy::prelude::*;
 
+use crate::flavor::ClientFlavor;
 use crate::net::{RealmChoice, RealmListMessage, RealmRequest};
 use benilla_protocol::RealmInfo;
 
@@ -202,16 +203,38 @@ impl Realms {
         self.refresh_in = REFRESH_SECS;
     }
 
-    /// Answer a park with a realm and remember it as [`Self::current`].
-    pub(super) fn enter(&mut self, choice: &RealmChoice, name: String) {
+    /// Answer a park with a realm and remember it as [`Self::current`]. Through
+    /// [`crate::flavor::enter_realm`], which switches the client's data first when the realm is
+    /// for the other client (a Turtle WoW 1.18.1 realm after a 1.12.1 one, or back).
+    pub(super) fn enter(&mut self, commands: &mut Commands, name: String) {
+        let flavor = self
+            .realms
+            .iter()
+            .find(|r| r.name == name)
+            .map_or(ClientFlavor::Vanilla, ClientFlavor::of);
         self.current = Some(name.clone());
-        let _ = choice.0.try_send(RealmRequest::Enter(name));
+        crate::flavor::enter_realm(commands, name, flavor);
+    }
+
+    /// Raise the dialog again over a refused realm ([`crate::flavor`]), keeping the highlight.
+    pub(crate) fn reopen(&mut self) {
+        let selected = self.selected.clone();
+        self.open();
+        if selected.is_some() {
+            self.selected = selected;
+        }
     }
 
     /// `RealmList:Hide()`, and nothing else.
     pub(super) fn hide(&mut self) {
         self.shown = false;
     }
+}
+
+/// Whether the auto-answer may take `realm`: up, and for a client this build can play
+/// ([`crate::flavor::playable`]); a click on an unplayable one is refused with a reason instead.
+fn answerable(realm: &RealmInfo) -> bool {
+    !is_down(realm) && crate::flavor::playable(realm)
 }
 
 /// `GetRealmInfo`'s `realmDown`: flag bit 0x02, greyed and not enterable; the reference's
@@ -258,8 +281,8 @@ impl Plugin for RealmSelectPlugin {
 fn apply_realm_policy(
     mut msgs: MessageReader<RealmListMessage>,
     mut realms: ResMut<Realms>,
-    choice: Res<RealmChoice>,
     cvars: Res<crate::cvars::Cvars>,
+    mut commands: Commands,
 ) {
     if !realms.env_read {
         realms.env_read = true;
@@ -295,7 +318,7 @@ fn apply_realm_policy(
         ) {
             Some(name) => {
                 realms.select(&name);
-                realms.enter(&choice, name);
+                realms.enter(&mut commands, name);
             }
             None => realms.open(),
         }
@@ -318,7 +341,7 @@ fn auto_answer(realms: &Realms, remembered: Option<&str>, unattended: bool) -> O
         realms
             .realms
             .iter()
-            .find(|r| r.name.eq_ignore_ascii_case(want) && !is_down(r))
+            .find(|r| r.name.eq_ignore_ascii_case(want) && answerable(r))
             .map(|r| r.name.clone())
     });
     named.or_else(|| {
@@ -329,7 +352,7 @@ fn auto_answer(realms: &Realms, remembered: Option<&str>, unattended: bool) -> O
                     .rows()
                     .into_iter()
                     .map(|i| &realms.realms[i])
-                    .find(|r| !is_down(r))
+                    .find(|r| answerable(r))
                     .map(|r| r.name.clone())
             })
             .flatten()
@@ -614,6 +637,29 @@ mod tests {
             auto_answer(&r, Some("Down"), true).as_deref(),
             Some("Up"),
             "unattended skips the offline row rather than dialing it"
+        );
+    }
+
+    /// A build with no Turtle layer never auto-enters a Turtle WoW realm: the ladder falls through
+    /// to the next realm it can play.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_auto_answer_skips_a_realm_this_build_cannot_play() {
+        let mut turtle = realm("TurtleWoW (1.18.1.7272)", 1, 0, 0x04, 0, 1.0);
+        turtle.version = benilla_protocol::auth::realm_version_tag(&turtle.name);
+        let r = list(vec![
+            turtle,
+            realm("Classic (1.12.1.5875)", 1, 0, 0x04, 0, 1.0),
+        ]);
+        assert_eq!(
+            auto_answer(&r, Some("TurtleWoW (1.18.1.7272)"), false),
+            None,
+            "the remembered Turtle realm is not answered for"
+        );
+        assert_eq!(
+            auto_answer(&r, None, true).as_deref(),
+            Some("Classic (1.12.1.5875)"),
+            "unattended takes the realm it can play"
         );
     }
 

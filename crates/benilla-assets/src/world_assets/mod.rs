@@ -359,6 +359,21 @@ impl<T> LockRecover<T> for Mutex<T> {
 }
 
 impl WorldAssets {
+    /// Drop every cache filled from the chain — decoded textures, UI sprites and their misses, the
+    /// derived images and the materials over them — for a change of the data the chain answers
+    /// from (the Turtle layer mounted or unmounted). The next request re-reads the chain; a miss is
+    /// forgotten too, since the new data may hold what the old did not. Procedural sprites stay.
+    pub fn forget_chain_art(&mut self) {
+        self.textures.clear();
+        self.model_materials.clear();
+        self.sprites.clear();
+        self.tiled_sprites.clear();
+        self.resampled_sprites.clear();
+        self.resample_sources.clear();
+        self.portraits.clear();
+        self.masks.clear();
+    }
+
     /// Open the store over an opened patch chain. `shared_light` is a raw `Buffer`, not the
     /// client's `SharedLightBuffer`, which keeps this crate below the renderer.
     pub fn open(chain: Chain, shared_light: Buffer, server: AssetServer) -> Self {
@@ -925,6 +940,13 @@ pub enum AssetSet {
 /// is what makes a second run safe.
 #[derive(bevy::ecs::schedule::ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DataLoad;
+
+/// **The data the chain answers from changed** — the Turtle WoW 1.18.1 layer mounted or unmounted —
+/// and [`DataLoad`] has already rerun. Triggered once per change, never per frame: a cache of
+/// chain-derived data that outlives the change registers an observer that forgets it, and the
+/// next use rebuilds it from the new data.
+#[derive(bevy::ecs::event::Event, Debug, Clone, Copy)]
+pub struct ChainDataChanged;
 
 /// Marks an `App` whose [`DataLoad`] schedule and startup run are installed.
 #[derive(Resource)]

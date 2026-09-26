@@ -135,6 +135,7 @@ impl PluginGroup for GamePlugins {
             .add(crate::glue::GluePlugin)
             .add(crate::char_select::CharSelectPlugin { start: self.start })
             .add(crate::login::LoginPlugin)
+            .add(crate::flavor::FlavorPlugin)
             .add(crate::realm_select::RealmSelectPlugin)
             .add(crate::char_create::CharCreatePlugin)
             .add(SoundPlugin)

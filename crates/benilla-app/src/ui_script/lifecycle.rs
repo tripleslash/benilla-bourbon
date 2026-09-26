@@ -253,6 +253,13 @@ fn mint_entry_vm(world: &mut World) {
     install_boot_vm(world);
 }
 
+/// Rebuild the glue VM for a change of the data the chain answers from (a realm of the other
+/// flavor entered, [`crate::flavor`]): GlobalStrings and the font registry come from the new
+/// chain. The dying VM's CVars fold first, as at world entry.
+pub(crate) fn reinstall_boot_vm(world: &mut World) {
+    mint_entry_vm(world);
+}
+
 /// Put the parked boot VM back into the world, if one is parked.
 fn unpark_boot_vm(world: &mut World) {
     if let Some(ParkedBootVm(vm)) = world.remove_non_send_resource::<ParkedBootVm>() {

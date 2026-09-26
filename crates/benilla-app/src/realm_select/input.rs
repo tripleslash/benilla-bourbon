@@ -25,6 +25,7 @@ pub(super) fn clicks(
     mut sounds: MessageWriter<GlueSound>,
     time: Res<Time>,
     mut last_click: Local<Option<(String, f32)>>,
+    mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
     let mut enter = false;
@@ -57,7 +58,7 @@ pub(super) fn clicks(
         }
     }
     if enter {
-        try_enter(&mut realms, &choice, &mut sounds);
+        try_enter(&mut realms, &mut commands, &mut sounds);
     }
     if let Some(with_sound) = leave {
         do_cancel(&mut realms, &choice, &mut sounds, with_sound);
@@ -71,13 +72,14 @@ pub(super) fn keys(
     mut realms: ResMut<Realms>,
     choice: Res<RealmChoice>,
     mut sounds: MessageWriter<GlueSound>,
+    mut commands: Commands,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         do_cancel(&mut realms, &choice, &mut sounds, true);
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        try_enter(&mut realms, &choice, &mut sounds);
+        try_enter(&mut realms, &mut commands, &mut sounds);
         return;
     }
 
@@ -167,7 +169,7 @@ fn do_cancel(
 ///
 /// Not built: the reference's `REALM_IS_FULL` Yes/No confirm for a `Full` realm with no characters
 /// on it; ours enters directly. `Full` is the `0x80` flag, which vmangos never sets.
-fn try_enter(realms: &mut Realms, choice: &RealmChoice, sounds: &mut MessageWriter<GlueSound>) {
+fn try_enter(realms: &mut Realms, commands: &mut Commands, sounds: &mut MessageWriter<GlueSound>) {
     let Some(realm) = realms.selected() else {
         return; // the reference disables Okay with nothing highlighted
     };
@@ -177,7 +179,7 @@ fn try_enter(realms: &mut Realms, choice: &RealmChoice, sounds: &mut MessageWrit
     let name = realm.name.clone();
     sounds.write(GlueSound("gsLoginChangeRealmOK"));
     realms.hide();
-    realms.enter(choice, name);
+    realms.enter(commands, name);
 }
 
 #[cfg(test)]

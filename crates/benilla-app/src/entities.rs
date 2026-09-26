@@ -431,22 +431,48 @@ pub(crate) struct EntityVisualsSet;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DisplayBuildSet;
 
+/// Every display and skin cache, dropped together.
+#[derive(bevy::ecs::system::SystemParam)]
+struct DisplayCaches<'w> {
+    composites: ResMut<'w, SkinComposites>,
+    fx: ResMut<'w, spell_fx::SpellFx>,
+    creatures: Option<ResMut<'w, Creatures>>,
+    gos: Option<ResMut<'w, GameObjects>>,
+    items: Option<ResMut<'w, equipment::ItemDisplays>>,
+    glows: Option<ResMut<'w, ItemGlows>>,
+    bones: ResMut<'w, corpse::BonesModels>,
+}
+
 /// Drop every display and skin cache on a map change; an entry rebuilds on its next use.
 fn evict_display_caches(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
-    mut composites: ResMut<SkinComposites>,
-    mut fx: ResMut<spell_fx::SpellFx>,
-    creatures: Option<ResMut<Creatures>>,
-    gos: Option<ResMut<GameObjects>>,
-    items: Option<ResMut<equipment::ItemDisplays>>,
-    glows: Option<ResMut<ItemGlows>>,
-    mut bones: ResMut<corpse::BonesModels>,
+    caches: DisplayCaches,
 ) {
     if changes.is_empty() {
         return;
     }
     changes.clear();
-    info!(
+    caches.clear();
+}
+
+/// The same on a change of the data the chain answers from: every cached model and skin was
+/// built from the other flavor's files.
+fn forget_display_caches(_: On<benilla_assets::ChainDataChanged>, caches: DisplayCaches) {
+    caches.clear();
+}
+
+impl DisplayCaches<'_> {
+    fn clear(self) {
+        let DisplayCaches {
+            mut composites,
+            mut fx,
+            creatures,
+            gos,
+            items,
+            glows,
+            mut bones,
+        } = self;
+        info!(
         "display caches evicted: {} creature / {} go / {} item / {} fx / {} glow models, {} skins",
         creatures.as_ref().map_or(0, |c| c.models.len()),
         gos.as_ref().map_or(0, |g| g.models.len()),
@@ -455,24 +481,25 @@ fn evict_display_caches(
         glows.as_ref().map_or(0, |g| g.models.len()),
         composites.ready.len(),
     );
-    composites.ready.clear();
-    // The in-flight blends go too: their look belongs to the map being left, and a `Task` dropped
-    // here is cancelled rather than left to finish for a cache that no longer wants it.
-    composites.blending.clear();
-    fx.models.clear();
-    if let Some(mut c) = creatures {
-        c.models.clear();
+        composites.ready.clear();
+        // The in-flight blends go too: their look belongs to the art being left, and a `Task`
+        // dropped here is cancelled rather than left to finish for a cache that no longer wants it.
+        composites.blending.clear();
+        fx.models.clear();
+        if let Some(mut c) = creatures {
+            c.models.clear();
+        }
+        if let Some(mut g) = gos {
+            g.models.clear();
+        }
+        if let Some(mut i) = items {
+            i.models.clear();
+        }
+        if let Some(mut g) = glows {
+            g.models.clear();
+        }
+        bones.0.clear();
     }
-    if let Some(mut g) = gos {
-        g.models.clear();
-    }
-    if let Some(mut i) = items {
-        i.models.clear();
-    }
-    if let Some(mut g) = glows {
-        g.models.clear();
-    }
-    bones.0.clear();
 }
 
 /// Expire composited skins by distance within a map. The display-id model caches are not swept:
@@ -613,6 +640,7 @@ impl Plugin for EntitiesPlugin {
         .add_message::<live_display::DisplaySwapped>()
         .add_data_loaders(setup_entities)
         .add_systems(Update, (evict_display_caches, scope_entity_art))
+        .add_observer(forget_display_caches)
         // Land every body composite a worker finished (web only — native blends inline and never
         // queues one). **Before `DisplayBuildSet`**, which heads the chain the three composite
         // callers sit in, so a look that finished between frames is in the cache before the same

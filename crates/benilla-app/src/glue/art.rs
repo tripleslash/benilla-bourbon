@@ -176,6 +176,12 @@ pub(crate) struct CloseBtnArt {
     pub(crate) hi: Option<Handle<AddUiMaterial>>,
 }
 
+/// The art set loads again on its next use after a change of the data the chain answers from:
+/// Turtle WoW ships its own create-screen art (its race icons among it).
+pub(crate) fn forget_glue_art(_: On<benilla_assets::ChainDataChanged>, mut art: ResMut<GlueArt>) {
+    art.tried = false;
+}
+
 impl GlueArt {
     /// Load the art set once; a piece that fails stays `None`.
     pub(crate) fn ensure_loaded(
