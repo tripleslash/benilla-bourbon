@@ -55,6 +55,15 @@ fn main() -> Result<()> {
             realm.category,
             realm.id
         );
+        // The client version the realm's tag names, which picks the client's data for it.
+        if let Some(v) = realm.version {
+            let build = v.build.map(|b| format!(" build {b}")).unwrap_or_default();
+            let turtle = if v.is_turtle() { " (Turtle WoW)" } else { "" };
+            println!(
+                "          version {}.{}.{}{build}{turtle}",
+                v.major, v.minor, v.patch
+            );
+        }
     }
 
     Ok(())
