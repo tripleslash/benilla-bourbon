@@ -284,39 +284,38 @@ mod wasm {
         format!("{origin}/{}", crate::layers::TURTLE_DATA_SEGMENT)
     }
 
-    /// Open the Turtle WoW 1.18.1 layer and mount it, for a 1.18.1 realm about to be entered.
-    ///
-    /// The page does the network half (`window.__wenilla_packs.openLayer('turtle')`): the layer's
-    /// index, listfile and boot packs, and its container opened in the decode worker. The container
-    /// then opens here off the index the page handed over. `Ok(false)` is an origin that serves no
-    /// `/data-turtle`, which is not an error of this client: the caller refuses the realm instead.
-    pub async fn open_turtle_layer() -> anyhow::Result<bool> {
+    /// Start the page's half of the Turtle WoW 1.18.1 layer — its container in the decode worker,
+    /// its boot packs — and return at once, for [`mount_turtle_layer`]. Never earlier: a realm list
+    /// that merely advertises a 1.18.1 realm fetches nothing, so a 1.12.1 player never pays for it.
+    fn warm_turtle_layer() {
         use wasm_bindgen::JsCast;
-        if crate::layers::turtle_mounted() {
-            return Ok(true);
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(packs) = js_sys::Reflect::get(&window, &"__wenilla_packs".into()) else {
+            return;
+        };
+        if let Ok(open) = js_sys::Reflect::get(&packs, &"openLayer".into()) {
+            if let Some(f) = open.dyn_ref::<js_sys::Function>() {
+                // The promise is the page's to settle; nothing here waits on it.
+                let _ = f.call1(&packs, &"turtle".into());
+            }
         }
-        let window = web_sys::window().ok_or_else(|| anyhow::anyhow!("no window"))?;
-        let packs = js_sys::Reflect::get(&window, &"__wenilla_packs".into())
-            .map_err(|e| anyhow::anyhow!("window.__wenilla_packs: {e:?}"))?;
-        let open = js_sys::Reflect::get(&packs, &"openLayer".into())
-            .ok()
-            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-            .ok_or_else(|| anyhow::anyhow!("this page's packs.js has no openLayer"))?;
-        let promise = open
-            .call1(&packs, &"turtle".into())
-            .map_err(|e| anyhow::anyhow!("openLayer('turtle'): {e:?}"))?
-            .dyn_into::<js_sys::Promise>()
-            .map_err(|_| anyhow::anyhow!("openLayer('turtle') returned no Promise"))?;
-        let opened = wasm_bindgen_futures::JsFuture::from(promise)
-            .await
-            .map_err(|e| anyhow::anyhow!("openLayer('turtle'): {e:?}"))?
-            .is_truthy();
-        if !opened {
-            return Ok(false);
+    }
+
+    /// Mount the Turtle WoW 1.18.1 layer now, for a 1.18.1 realm being entered: off the index the
+    /// page already holds from an earlier visit, else one blocking fetch of it — this runs behind
+    /// the connect dialog, and a realm switch is a load, not a frame. An origin that serves no
+    /// `/data-turtle` is an error the caller turns into a refused realm.
+    pub fn mount_turtle_layer() -> anyhow::Result<()> {
+        if crate::layers::turtle_mounted() {
+            return Ok(());
         }
         let store = crate::webpack::PackStore::open_turtle(turtle_data_base())?;
         crate::layers::mount_turtle(store);
-        Ok(true)
+        // The page's half: the worker's container and the boot packs. Idempotent there.
+        warm_turtle_layer();
+        Ok(())
     }
 
     /// Unmount the Turtle layer and let the page drop what it holds of it (its resident packs and
@@ -542,7 +541,7 @@ mod wasm {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
     close_turtle_layer, console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base,
-    open_turtle_layer, trace, trace_hd, trace_turtle, turtle_data_base,
+    mount_turtle_layer, trace, trace_hd, trace_turtle, turtle_data_base,
 };
 
 #[cfg(test)]

@@ -197,6 +197,9 @@ const packs = {
   turtleIndex: null,
   turtleListfile: null,
   turtleManifest: null,
+  /// The Turtle open in flight, and the close count an open checks it has not been overtaken by.
+  _turtleOpening: null,
+  _turtleGeneration: 0,
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
@@ -530,13 +533,28 @@ const packs = {
   // ---- the live layers ------------------------------------------------------------------
 
   /// Open a live layer — `'turtle'`, the Turtle WoW 1.18.1 layer the client mounts on entering a
-  /// realm that advertises 1.18.1 (`benilla_formats::web::open_turtle_layer`). Resolves `true` once
-  /// the layer's index and listfile are here, its container is open in the decode worker and its
-  /// boot packs are resident; `false` when this origin serves no such container, which is the
-  /// client's cue to refuse the realm rather than play it on the 1.12.1 data. Idempotent.
-  async openLayer(name) {
-    if (name !== 'turtle') return false;
-    if (this.turtleIndex) return true;
+  /// realm that advertises 1.18.1 (`benilla_formats::web::mount_turtle_layer`), and never before.
+  /// Resolves `true` once the layer's index and listfile are here, its container is open in the
+  /// decode worker and its boot packs are resident; `false` when this origin serves no such
+  /// container (the client has already refused the realm then, off its own fetch of the index).
+  /// Idempotent.
+  openLayer(name) {
+    if (name !== 'turtle') return Promise.resolve(false);
+    if (this.turtleIndex) return Promise.resolve(true);
+    // One open in flight at a time; a second call joins it.
+    if (!this._turtleOpening) {
+      this._turtleOpening = this._openTurtle().finally(() => {
+        this._turtleOpening = null;
+      });
+    }
+    return this._turtleOpening;
+  },
+
+  /// `openLayer('turtle')`'s body. A `closeLayer` while it is in flight bumps the generation, and
+  /// an open that finds it moved stops before it makes the layer real.
+  async _openTurtle() {
+    const generation = this._turtleGeneration;
+    const closed = () => generation !== this._turtleGeneration;
     const base = `${location.origin}/${TURTLE_DATA_SEGMENT}`;
     let index;
     try {
@@ -545,14 +563,18 @@ const packs = {
       console.warn(`wenilla: this origin serves no /${TURTLE_DATA_SEGMENT} container (${e.message})`);
       return false;
     }
-    this.turtleManifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
-    this.turtleListfile = await fetchRetry(`${base}/listfile.txt`)
+    const manifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
+    const listfile = await fetchRetry(`${base}/listfile.txt`)
       .then((r) => (r.ok ? r.text() : null))
       .catch(() => null);
+    if (closed()) return false;
     // Only now is the layer real to `url()` and to Rust's `PackStore::open_turtle`.
+    this.turtleManifest = manifest;
+    this.turtleListfile = listfile;
     this.turtleBase = base;
     this.turtleIndex = index;
     await openLayerInWorker('turtle', base, index);
+    if (closed()) return false;
     const boot = (this.turtleManifest && this.turtleManifest.boot) || { packs: [] };
     // Into the layer's key space before anything is warmed — see `TURTLE_PACK_KEY_BASE`.
     await prefetch(
@@ -567,6 +589,7 @@ const packs = {
   /// download — and `sw.js` sweeps them with everything else when the corpus is re-packed.
   closeLayer(name) {
     if (name !== 'turtle') return;
+    this._turtleGeneration += 1;
     for (const key of [...this._resident.keys()]) {
       if (key >= TURTLE_PACK_KEY_BASE) {
         this._residentBytes -= this._resident.get(key).length;

@@ -121,7 +121,7 @@ impl PackStore {
     /// The **Turtle WoW 1.18.1 layer**'s container, at `/data-turtle`: the HD layer's shape, in its
     /// own key range ([`crate::layers::TURTLE_PACK_KEY_BASE`]) and page slots. Opened when a 1.18.1
     /// realm is entered, off the index the page fetched for it
-    /// ([`crate::web::open_turtle_layer`]).
+    /// ([`crate::web::mount_turtle_layer`]).
     pub fn open_turtle(base: String) -> Result<Self> {
         Self::open_at(
             base,
