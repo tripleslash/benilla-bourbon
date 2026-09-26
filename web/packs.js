@@ -135,6 +135,13 @@ const HD_PACK_KEY_BASE = 1 << 30;
 /// Where the layer's container is served from, beside `/data`. Twin of
 /// `benilla_formats::layers::HD_DATA_SEGMENT`.
 const HD_DATA_SEGMENT = 'data-hd';
+/// **The Turtle WoW 1.18.1 layer's pack-key offset.** Twin of
+/// `benilla_formats::layers::TURTLE_PACK_KEY_BASE`; the two MUST agree. `2 ** 31`, not `1 << 31`:
+/// a JavaScript shift is 32-bit signed, and `1 << 31` is negative.
+const TURTLE_PACK_KEY_BASE = 2 ** 31;
+/// Where the Turtle layer's container is served from. Twin of
+/// `benilla_formats::layers::TURTLE_DATA_SEGMENT`.
+const TURTLE_DATA_SEGMENT = 'data-turtle';
 /// The `localStorage` entry the client keeps its CVars in — `benilla-app/src/local_state.rs`'s
 /// `web_store::key` over `config_path()`. Read here, before any wasm exists, for exactly one key:
 /// whether to fetch the optional layer at all. See `hdWanted`.
@@ -183,6 +190,13 @@ const packs = {
   hdListfile: null,
   /// The layer's `boot-packs.json`, same shape as `manifest`. Null with the layer off.
   hdManifest: null,
+  /// The Turtle WoW 1.18.1 layer's root, index, listfile and `boot-packs.json`, the HD layer's four
+  /// slots over again. Empty until the client enters a realm that advertises 1.18.1 and asks for
+  /// the layer (`openLayer('turtle')`), and emptied again when it leaves one (`closeLayer`).
+  turtleBase: '',
+  turtleIndex: null,
+  turtleListfile: null,
+  turtleManifest: null,
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
@@ -504,10 +518,69 @@ const packs = {
   /// Rust does not go through this: it passes the URL it built alongside every key, from the store
   /// that owns the id. This is for the page's own prefetch, which has only the manifest's numbers.
   url(packId) {
+    if (packId >= TURTLE_PACK_KEY_BASE) {
+      return `${this.turtleBase}/${packPath(packId - TURTLE_PACK_KEY_BASE)}`;
+    }
     if (packId >= HD_PACK_KEY_BASE) {
       return `${this.hdBase}/${packPath(packId - HD_PACK_KEY_BASE)}`;
     }
     return `${this.base}/${packPath(packId)}`;
+  },
+
+  // ---- the live layers ------------------------------------------------------------------
+
+  /// Open a live layer — `'turtle'`, the Turtle WoW 1.18.1 layer the client mounts on entering a
+  /// realm that advertises 1.18.1 (`benilla_formats::web::open_turtle_layer`). Resolves `true` once
+  /// the layer's index and listfile are here, its container is open in the decode worker and its
+  /// boot packs are resident; `false` when this origin serves no such container, which is the
+  /// client's cue to refuse the realm rather than play it on the 1.12.1 data. Idempotent.
+  async openLayer(name) {
+    if (name !== 'turtle') return false;
+    if (this.turtleIndex) return true;
+    const base = `${location.origin}/${TURTLE_DATA_SEGMENT}`;
+    let index;
+    try {
+      index = await fetchIndex(base);
+    } catch (e) {
+      console.warn(`wenilla: this origin serves no /${TURTLE_DATA_SEGMENT} container (${e.message})`);
+      return false;
+    }
+    this.turtleManifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
+    this.turtleListfile = await fetchRetry(`${base}/listfile.txt`)
+      .then((r) => (r.ok ? r.text() : null))
+      .catch(() => null);
+    // Only now is the layer real to `url()` and to Rust's `PackStore::open_turtle`.
+    this.turtleBase = base;
+    this.turtleIndex = index;
+    await openLayerInWorker('turtle', base, index);
+    const boot = (this.turtleManifest && this.turtleManifest.boot) || { packs: [] };
+    // Into the layer's key space before anything is warmed — see `TURTLE_PACK_KEY_BASE`.
+    await prefetch(
+      boot.packs.map(([id, bytes]) => [id + TURTLE_PACK_KEY_BASE, bytes]),
+      () => {}
+    );
+    return true;
+  },
+
+  /// Drop a live layer on leaving its realm: its resident packs, its slots and its worker
+  /// container. Cache Storage keeps its objects — returning to the realm is then a disk read, not a
+  /// download — and `sw.js` sweeps them with everything else when the corpus is re-packed.
+  closeLayer(name) {
+    if (name !== 'turtle') return;
+    for (const key of [...this._resident.keys()]) {
+      if (key >= TURTLE_PACK_KEY_BASE) {
+        this._residentBytes -= this._resident.get(key).length;
+        this._resident.delete(key);
+      }
+    }
+    for (const key of [...this._failed]) {
+      if (key >= TURTLE_PACK_KEY_BASE) this._failed.delete(key);
+    }
+    this.turtleBase = '';
+    this.turtleIndex = null;
+    this.turtleListfile = null;
+    this.turtleManifest = null;
+    if (this.worker) this.worker.postMessage({ type: 'close', layer: 'turtle' });
   },
 
   // ---- Cache Storage ---------------------------------------------------------------------
@@ -706,7 +779,7 @@ async function bootstrapHd(opts = {}) {
   // its codec or decoded size — so it is opened as a second container there, keyed by the same
   // offset this file uses. Without this every layer warm falls back to a page-side fetch and a
   // decode on the frame thread, which works and is exactly what it costs.
-  await openHdInWorker();
+  await openLayerInWorker('hd', packs.hdBase, packs.hdIndex);
   if (opts.prefetch === false) return;
   const hdBoot = (packs.hdManifest && packs.hdManifest.boot) || { packs: [] };
   // Offset into the layer's key space before anything is warmed — see `HD_PACK_KEY_BASE`. The
@@ -715,16 +788,16 @@ async function bootstrapHd(opts = {}) {
   await prefetch(keyed, () => {});
 }
 
-/// Hand the layer's index to the decode worker as a second container.
+/// Hand a layer's index (`'hd'` or `'turtle'`) to the decode worker as a container of its own.
 ///
 /// Fire-and-forget in spirit but awaited in fact, because the boot prefetch that follows should go
 /// through the worker rather than race it. A worker that refuses the layer is not an error here:
 /// `packworker.js` keeps its corpus container and answers layer keys with a `miss`, which the page
 /// already handles as "fetch it yourself".
-async function openHdInWorker() {
+async function openLayerInWorker(layer, base, index) {
   const worker = packs.worker;
-  if (!worker || !packs.hdIndex) return;
-  const copy = packs.hdIndex.slice().buffer;
+  if (!worker || !index) return;
+  const copy = index.slice().buffer;
   await new Promise((resolve) => {
     const done = (ok) => {
       clearTimeout(timer);
@@ -733,16 +806,16 @@ async function openHdInWorker() {
     };
     const onMessage = (e) => {
       const m = e.data;
-      if (m && m.hd && (m.type === 'opened' || m.type === 'failed')) {
+      if (m && m.layer === layer && (m.type === 'opened' || m.type === 'failed')) {
         if (m.type === 'failed') {
-          console.warn('wenilla: pack worker would not open the model layer —', m.error);
+          console.warn(`wenilla: pack worker would not open the ${layer} layer —`, m.error);
         }
         done(m.type === 'opened');
       }
     };
     const timer = setTimeout(() => done(false), WORKER_OPEN_TIMEOUT_MS);
     worker.addEventListener('message', onMessage);
-    worker.postMessage({ type: 'open', hd: true, base: packs.hdBase, index: copy }, [copy]);
+    worker.postMessage({ type: 'open', layer, base, index: copy }, [copy]);
   });
 }
 
@@ -932,10 +1005,10 @@ async function startWorker(enabled) {
   const opened = new Promise((resolve) => {
     const onMessage = (e) => {
       const m = e.data;
-      // `!m.hd` — the layer opens through its own handshake (`openHdInWorker`) and its reply must
-      // not settle this one. They cannot overlap today (the layer is opened after this returns),
+      // `!m.layer` — a layer opens through its own handshake (`openLayerInWorker`) and its reply
+      // must not settle this one. They cannot overlap today (a layer is opened after this returns),
       // but a handshake that reads any reply is a handshake that breaks the first time one does.
-      if (m && !m.hd && (m.type === 'opened' || m.type === 'failed')) finishOpen(m);
+      if (m && !m.layer && (m.type === 'opened' || m.type === 'failed')) finishOpen(m);
     };
     const timer = setTimeout(() => finishOpen(null), WORKER_OPEN_TIMEOUT_MS);
     finishOpen = (answer) => {

@@ -1,4 +1,4 @@
-# Static-host headers (the `_headers` format). Eleven rules of the 100 allowed.
+# Static-host headers (the `_headers` format). Fifteen rules of the 100 allowed.
 #
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
@@ -78,6 +78,21 @@
   Cache-Control: public, max-age=604800
 
 /data-hd/boot-packs.json
+  Cache-Control: no-cache
+
+# The Turtle WoW 1.18.1 layer, at /data-turtle: the same four rules again, spelled out for the same
+# reason the /data-hd ones are.
+/data-turtle/p/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data-turtle/index.bpi
+  Cache-Control: public, max-age=604800
+
+/data-turtle/listfile.txt
+  Cache-Control: public, max-age=604800
+
+/data-turtle/boot-packs.json
   Cache-Control: no-cache
 
 /sw.js

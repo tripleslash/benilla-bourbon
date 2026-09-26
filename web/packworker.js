@@ -61,22 +61,27 @@ const wasmReady = wasm_bindgen({ module_or_path: './wenilla-packdecode_bg.wasm' 
 /// job before that is refused rather than queued, because the page does not send one until it has
 /// been told the container is open.
 let container = null;
-/// The updated-character-model layer's container, opened by a second `open` with `hd: true`. Null
-/// whenever the player has the option off, which is the default — see `packs.js::bootstrapHd`.
+/// The layers' containers, each opened by an `open` naming its `layer`: `hd`, the updated character
+/// models (null whenever the player has the option off, the default — see `packs.js::bootstrapHd`),
+/// and `turtle`, the Turtle WoW 1.18.1 layer (open only while the client is on a 1.18.1 realm, and
+/// dropped by a `close` when it leaves one).
 ///
-/// A **second container**, not a second index in the first: a `.bpk` does not restate its pack's
-/// codec or decoded size, so decoding needs the index the pack came from, and the two containers
-/// number their packs from 0 independently. `containerFor` is where that is resolved.
-let hdContainer = null;
+/// A **container per layer**, not more indices in the first: a `.bpk` does not restate its pack's
+/// codec or decoded size, so decoding needs the index the pack came from, and every container
+/// numbers its packs from 0 independently. `containerFor` is where that is resolved.
+const layers = { hd: null, turtle: null };
 
-/// **The key space.** Twin of `benilla_formats::layers::HD_PACK_KEY_BASE` and of `packs.js`'s own
-/// constant; all three must agree. Every id crossing this file is a RESIDENT key, and the container
-/// it belongs to plus its id inside that container are recovered here and nowhere else.
+/// **The key space.** Twins of `benilla_formats::layers::HD_PACK_KEY_BASE` and
+/// `TURTLE_PACK_KEY_BASE` and of `packs.js`'s own constants; all must agree. Every id crossing this
+/// file is a RESIDENT key, and the container it belongs to plus its id inside that container are
+/// recovered here and nowhere else. `2 ** 31`, as a JavaScript `1 << 31` is negative.
 const HD_PACK_KEY_BASE = 1 << 30;
+const TURTLE_PACK_KEY_BASE = 2 ** 31;
 
 /// Which container a resident key names, and what its id is inside it.
 function containerFor(key) {
-  if (key >= HD_PACK_KEY_BASE) return { c: hdContainer, id: key - HD_PACK_KEY_BASE };
+  if (key >= TURTLE_PACK_KEY_BASE) return { c: layers.turtle, id: key - TURTLE_PACK_KEY_BASE };
+  if (key >= HD_PACK_KEY_BASE) return { c: layers.hd, id: key - HD_PACK_KEY_BASE };
   return { c: container, id: key };
 }
 
@@ -86,6 +91,9 @@ self.onmessage = (event) => {
   switch (msg.type) {
     case 'open':
       open(msg);
+      break;
+    case 'close':
+      if (msg.layer in layers) layers[msg.layer] = null;
       break;
     case 'fetch':
       run(msg.id, (id, c) => fetchPack(id, c));
@@ -107,23 +115,23 @@ async function open(msg) {
   try {
     await wasmReady;
     const opened = new wasm_bindgen.Container(msg.base, new Uint8Array(msg.index));
-    if (msg.hd) hdContainer = opened;
+    if (msg.layer in layers) layers[msg.layer] = opened;
     else container = opened;
     self.postMessage({
       type: 'opened',
-      hd: !!msg.hd,
+      layer: msg.layer,
       buildId: opened.buildId(),
       packCount: opened.packCount(),
     });
   } catch (e) {
-    // Only the corpus is fatal. A layer that will not open leaves `hdContainer` null and every warm
-    // of a layer key falls back to the page's own fetch — the same degradation as no worker at all,
-    // which is what the "accelerator, never a dependency" law asks for.
-    if (msg.hd) hdContainer = null;
+    // Only the corpus is fatal. A layer that will not open stays null and every warm of its keys
+    // falls back to the page's own fetch — the same degradation as no worker at all, which is what
+    // the "accelerator, never a dependency" law asks for.
+    if (msg.layer in layers) layers[msg.layer] = null;
     else container = null;
     self.postMessage({
       type: 'failed',
-      hd: !!msg.hd,
+      layer: msg.layer,
       error: String(e && e.message ? e.message : e),
     });
   }

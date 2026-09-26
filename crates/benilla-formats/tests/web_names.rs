@@ -88,6 +88,32 @@ fn the_layer_key_space_is_the_same_number_in_rust_and_in_the_page() {
     );
 }
 
+/// **The Turtle layer's key space and segment, spelled as the HD layer's are.** `TURTLE_PACK_KEY_BASE`
+/// in both JS files as `2 ** 31` (a JavaScript `1 << 31` is negative, so the one spelling that would
+/// look like the Rust is the one that is wrong), `TURTLE_DATA_SEGMENT` in the page, and the tree's
+/// prefix in the service worker, which otherwise never caches the layer.
+#[test]
+fn the_turtle_layer_is_the_same_key_space_and_tree_in_rust_and_in_the_page() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let read = |js: &str| {
+        std::fs::read_to_string(root.join(js)).unwrap_or_else(|e| panic!("reading {js}: {e}"))
+    };
+    assert_eq!(benilla_formats::layers::TURTLE_PACK_KEY_BASE, 1 << 31);
+    for js in ["web/packs.js", "web/packworker.js"] {
+        assert!(
+            read(js).contains("const TURTLE_PACK_KEY_BASE = 2 ** 31;"),
+            "{js} does not spell the Turtle layer's key space as `2 ** 31`"
+        );
+    }
+    let segment = benilla_formats::layers::TURTLE_DATA_SEGMENT;
+    assert!(read("web/packs.js").contains(&format!("const TURTLE_DATA_SEGMENT = '{segment}';")));
+    assert!(read("web/sw.js").contains(&format!("const TURTLE_DATA_PREFIX = '/{segment}/';")));
+    assert!(read("web/_headers").contains(&format!("/{segment}/p/*")));
+}
+
 /// **The warm ladder is spelled twice and must be one order.**
 ///
 /// `benilla_formats::web`'s five `PRIORITY_*` constants here, and five `const PRIORITY_* = n;`

@@ -41,7 +41,7 @@
 //
 // ## Scope
 //
-// `/data/` and `/data-hd/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
+// `/data/`, `/data-hd/` and `/data-turtle/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
 // (the gateway address and the realmlist, which must never be held: re-uploading it is how a client
 // gets repointed) — is not passed to `respondWith` at all, so it keeps its ordinary `no-cache`
 // behaviour and a rebuilt bundle still lands on a reload. A service worker that made the dev loop
@@ -81,6 +81,10 @@ const DATA_PREFIX = '/data/';
 /// the corpus's `p/*` rule is: a pack's URL names its content, so a rebuilt layer either produces
 /// the same object at the same id or a different id nothing holds.
 const HD_DATA_PREFIX = '/data-hd/';
+/// The Turtle WoW 1.18.1 layer's tree, on the HD layer's terms and for the same reasons: immutable
+/// objects whose names are their content, fetched only while the client is on a 1.18.1 realm and
+/// kept for the next visit to one. Twin of `benilla_formats::layers::TURTLE_DATA_SEGMENT`.
+const TURTLE_DATA_PREFIX = '/data-turtle/';
 /// Network-first with a cache fallback: the build-id pointer.
 const POINTER = 'boot-packs.json';
 
@@ -108,11 +112,9 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  const prefix = url.pathname.startsWith(DATA_PREFIX)
-    ? DATA_PREFIX
-    : url.pathname.startsWith(HD_DATA_PREFIX)
-      ? HD_DATA_PREFIX
-      : null;
+  const prefix = [DATA_PREFIX, HD_DATA_PREFIX, TURTLE_DATA_PREFIX].find((p) =>
+    url.pathname.startsWith(p)
+  );
   if (!prefix) return;
   const name = url.pathname.slice(prefix.length);
   if (name === POINTER) {
