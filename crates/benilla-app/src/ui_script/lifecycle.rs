@@ -14,7 +14,6 @@ use super::{
     UiKeyboardCapture,
 };
 use crate::ui_script::addons;
-use crate::ui_script::addons::Addon;
 
 pub(crate) fn setup_script(world: &mut World) {
     install_boot_vm(world);
@@ -360,7 +359,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 // path's does.
                 script.push_sound_suppression();
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
-                let files = Addon::builtin().toc.files;
+                let files = super::manifest::ingame_manifest(&script);
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.identity = identity;
                 pending.roster = roster;

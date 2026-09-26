@@ -50,6 +50,25 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// One file's bytes off the 1.12.1 corpus alone, under any Turtle WoW layer: the stock file a layer's
+/// own may replace. Native mounts no layer, so it is [`read`] there.
+pub(super) fn read_stock(req: &str) -> Option<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        match chain()?.store().read_sync(req) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                debug!("ui_script: {req} is not in the 1.12.1 corpus: {e:#}");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        read(req)
+    }
+}
+
 /// **Are this file's bytes already in memory?** — and if not, start the warm that puts them there.
 ///
 /// The web target's chain reads a pack at a time and [`read`] below is synchronous, so a caller

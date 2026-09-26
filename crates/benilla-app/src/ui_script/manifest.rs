@@ -4,7 +4,8 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{UiFlavor, UiScript};
+use benilla_ui::toc::Toc;
 
 use super::addons::Addon;
 use super::reference_ui;
@@ -24,6 +25,73 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
     manifest_files()
         .into_iter()
         .filter(|f| !reference_ui::is_chain_entry(f))
+        .collect()
+}
+
+/// The reference's own FrameXML load order, on the chain.
+const FRAMEXML_TOC: &str = "Interface\\FrameXML\\FrameXML.toc";
+
+/// The in-game manifest for the VM's flavor: [`MANIFEST`]'s entries, and in a Turtle WoW VM the
+/// rows Turtle's own `FrameXML.toc` adds to the stock one, spliced in ([`splice_flavor_rows`]).
+/// Read once, at the entry edge; a 1.12.1 VM reads nothing.
+pub(super) fn ingame_manifest(script: &UiScript) -> Vec<String> {
+    let files = Addon::builtin().toc.files;
+    if script.flavor() != UiFlavor::Turtle {
+        return files;
+    }
+    let toc = |bytes: Vec<u8>| Toc::parse(&String::from_utf8_lossy(&bytes)).files;
+    let stock = reference_ui::read_stock(FRAMEXML_TOC).map(toc);
+    let flavor = reference_ui::read(FRAMEXML_TOC).map(toc);
+    match (stock, flavor) {
+        (Some(stock), Some(flavor)) => splice_flavor_rows(&files, &stock, &flavor),
+        _ => {
+            warn!(
+                "ui_script: a FrameXML.toc is missing from the chain, so Turtle WoW's own \
+                 interface rows do not load"
+            );
+            files
+        }
+    }
+}
+
+/// `ours` with every row of the `flavor` toc that the `stock` toc lacks, as an
+/// `Interface\FrameXML\` entry. Each goes after the latest of `ours` among the stock rows the
+/// flavor loads before it, so everything the flavor's client has loaded by then is loaded here
+/// too, and rows seated at one place keep the flavor's order. With no such row it goes after
+/// `GlobalStrings.lua`, and never ahead of entry 0, the font registry. Rows compare
+/// case-insensitively; one `ours` already lists is not added twice.
+pub(super) fn splice_flavor_rows(
+    ours: &[String],
+    stock: &[String],
+    flavor: &[String],
+) -> Vec<String> {
+    let key = |row: &str| row.replace('/', "\\").to_ascii_lowercase();
+    let chain_key = |row: &str| key(&format!("Interface\\FrameXML\\{row}"));
+    let at: std::collections::HashMap<String, usize> =
+        ours.iter().enumerate().map(|(i, r)| (key(r), i)).collect();
+    let stock: std::collections::HashSet<String> = stock.iter().map(|r| key(r)).collect();
+    let home = at
+        .get(&chain_key("GlobalStrings.lua"))
+        .copied()
+        .unwrap_or(0);
+
+    // Walking the flavor's order: the latest of ours among the stock rows seen so far.
+    let mut latest = home;
+    let mut seated: Vec<Vec<String>> = vec![Vec::new(); ours.len()];
+    for row in flavor {
+        if stock.contains(&key(row)) {
+            if let Some(&i) = at.get(&chain_key(row)) {
+                latest = latest.max(i);
+            }
+        } else if !at.contains_key(&chain_key(row)) {
+            if let Some(slot) = seated.get_mut(latest) {
+                slot.push(format!("Interface\\FrameXML\\{row}"));
+            }
+        }
+    }
+    ours.iter()
+        .zip(seated)
+        .flat_map(|(row, after)| std::iter::once(row.clone()).chain(after))
         .collect()
 }
 
@@ -242,10 +310,7 @@ pub(crate) fn load_ingame_ui(
     // Bounded, addons included: a chunk that never returns fails as a load error instead of
     // freezing the loading screen. The caller disarms the budget once the edge is done.
     script.set_instruction_budget(super::addons::LOAD_INSTRUCTION_BUDGET);
-    let mut failures = load_manifest(
-        script,
-        Addon::builtin().toc.files.get(1..).unwrap_or_default(),
-    );
+    let mut failures = load_manifest(script, ingame_manifest(script).get(1..).unwrap_or_default());
     failures.extend(bootstrap_positions(script));
     // Each addon's `ADDON_LOADED` fires as that addon finishes, as the reference does (`0x51f5ad`).
     failures.extend(super::addons::load_third_party(
@@ -273,6 +338,90 @@ mod tests {
             Some("Interface\\FrameXML\\Fonts.xml"),
             "the font registry is the manifest's first entry — the loader splits there"
         );
+    }
+
+    fn rows(list: &[&str]) -> Vec<String> {
+        list.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// Turtle WoW's rows go after the latest of ours among the stock rows its toc loads before
+    /// them; rows seated together keep its order; entry 0 stays the font registry.
+    #[test]
+    fn a_flavor_s_own_rows_follow_every_stock_row_it_loads_before_them() {
+        let ours = rows(&[
+            "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\UIParent.xml",
+            "Ours.xml",
+            "Interface\\FrameXML\\PartyFrame.xml",
+            "Interface\\FrameXML\\Minimap.xml",
+            "Interface\\FrameXML\\TutorialFrame.xml",
+            "GameMenuFrame.xml",
+        ]);
+        let stock = rows(&[
+            "GlobalStrings.lua",
+            "Fonts.xml",
+            "UIParent.xml",
+            "Minimap.xml",
+            "PartyFrame.xml",
+            "TutorialFrame.xml",
+            "GameMenuFrame.xml",
+            "StatsFrame.xml",
+        ]);
+        let turtle = rows(&[
+            "GlobalStrings.lua",
+            "Globals.lua",
+            "Overrides.lua",
+            "Fonts.xml",
+            "UIParent.xml",
+            "Minimap.xml",
+            "PartyFrame.xml",
+            "json.lua",
+            "TutorialFrame.xml",
+            "GameMenuFrame.xml",
+            "StatsFrame.xml",
+            "Hooks.lua",
+            "LFT/LFT.lua",
+            "LFT\\LFT.xml",
+        ]);
+        assert_eq!(
+            splice_flavor_rows(&ours, &stock, &turtle),
+            rows(&[
+                "Interface\\FrameXML\\Fonts.xml",
+                "Interface\\FrameXML\\GlobalStrings.lua",
+                "Interface\\FrameXML\\Globals.lua",
+                "Interface\\FrameXML\\Overrides.lua",
+                "Interface\\FrameXML\\UIParent.xml",
+                "Ours.xml",
+                "Interface\\FrameXML\\PartyFrame.xml",
+                "Interface\\FrameXML\\Minimap.xml",
+                // After Minimap.xml, which ours loads after PartyFrame.xml.
+                "Interface\\FrameXML\\json.lua",
+                "Interface\\FrameXML\\TutorialFrame.xml",
+                "Interface\\FrameXML\\Hooks.lua",
+                "Interface\\FrameXML\\LFT/LFT.lua",
+                "Interface\\FrameXML\\LFT\\LFT.xml",
+                "GameMenuFrame.xml",
+            ])
+        );
+    }
+
+    /// The stock toc against itself splices nothing, so a 1.12.1 manifest is unchanged; a row
+    /// ours already lists is never doubled.
+    #[test]
+    fn the_stock_toc_against_itself_changes_nothing() {
+        let ours = Addon::builtin().toc.files;
+        let stock = rows(&["GlobalStrings.lua", "Fonts.xml", "UIParent.xml"]);
+        assert_eq!(splice_flavor_rows(&ours, &stock, &stock), ours);
+        let listed = rows(&["GlobalStrings.lua", "UIParent.xml"]);
+        assert_eq!(splice_flavor_rows(&ours, &stock[..1], &listed), ours);
+    }
+
+    /// A 1.12.1 VM's manifest is benilla.toc as written, with no chain read for a toc.
+    #[test]
+    fn a_vanilla_vm_loads_the_manifest_as_written() {
+        let script = UiScript::new().unwrap();
+        assert_eq!(ingame_manifest(&script), Addon::builtin().toc.files);
     }
 
     /// A shipped `.xml` the manifest does not list never loads, with no error to say so.
