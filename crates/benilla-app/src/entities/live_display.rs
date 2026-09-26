@@ -64,6 +64,62 @@ fn live_display_id(kind: EntityKind, store: &ObjectStore) -> Option<u32> {
     }
 }
 
+/// Tear an attached entity's visual down for `attach_entity_visuals` to rebuild from scratch, the
+/// reference's `0x60abe0` rebuild: its children and every part of the built visual go, and
+/// `Reattached` skips the spawn fade.
+fn tear_down_visual(entity: &mut EntityCommands) {
+    entity
+        .despawn_related::<Children>()
+        .remove::<(
+            VisualAttached,
+            AppliedDisplay,
+            super::equipment::AppliedEquipment,
+            super::mount::AppliedMount,
+            super::mount::MountChild,
+            AnimationPlayer,
+            bevy::animation::transition::AnimationTransitions,
+            AnimationGraphHandle,
+            benilla_assets::ModelAnimations,
+            crate::creature_anim::AnimDriver,
+            (
+                benilla_world::rig_anim::RigPose,
+                crate::creature_anim::BodyTwist,
+                benilla_world::rig_anim::GlobalSeqDrive,
+            ),
+            benilla_world::rig_palette::RigSkin,
+            super::BoneAttach,
+            super::equipment::HeldAttached,
+        )>()
+        .insert(super::equipment::Reattached);
+}
+
+/// Rebuild every character body — players, and the units and corpses whose display is a character
+/// body ([`Creatures::is_character_body`]) — as a display swap does, for a change of the art they
+/// are made of: the updated character models turned on or off ([`crate::hd_models`]). Returns how
+/// many. An edge, never per frame.
+pub(crate) fn rebuild_character_bodies(world: &mut World) -> usize {
+    let mut attached = world.query_filtered::<(Entity, &NetEntity), With<VisualAttached>>();
+    let creatures = world.get_resource::<Creatures>();
+    let bodies: Vec<Entity> = attached
+        .iter(world)
+        .filter(|(_, net)| match net.kind {
+            EntityKind::Player => true,
+            EntityKind::Unit | EntityKind::Corpse => net
+                .display_id
+                .zip(creatures)
+                .is_some_and(|(display, c)| c.is_character_body(display)),
+            _ => false,
+        })
+        .map(|(entity, _)| entity)
+        .collect();
+    let mut commands = world.commands();
+    for &entity in &bodies {
+        tear_down_visual(&mut commands.entity(entity));
+    }
+    world.flush();
+    bodies.len()
+}
+
 /// Diff each attached entity's live appearance against what its visual was built with: a display
 /// move swaps the model, a scale move arms the 2 s ease, and a change of the native display or
 /// `SCALE_X` restamps [`CollisionHeight`]. Mount children carry no [`ObjectStore`]: their display
@@ -98,30 +154,7 @@ pub(super) fn refresh_live_display(
                 net.display_id = Some(live);
                 swapped.write(DisplaySwapped { entity });
                 // `attach_entity_visuals` rebuilds from scratch, fade-skipped by `Reattached`.
-                commands
-                    .entity(entity)
-                    .despawn_related::<Children>()
-                    .remove::<(
-                        VisualAttached,
-                        AppliedDisplay,
-                        super::equipment::AppliedEquipment,
-                        super::mount::AppliedMount,
-                        super::mount::MountChild,
-                        AnimationPlayer,
-                        bevy::animation::transition::AnimationTransitions,
-                        AnimationGraphHandle,
-                        benilla_assets::ModelAnimations,
-                        crate::creature_anim::AnimDriver,
-                        (
-                            benilla_world::rig_anim::RigPose,
-                            crate::creature_anim::BodyTwist,
-                            benilla_world::rig_anim::GlobalSeqDrive,
-                        ),
-                        benilla_world::rig_palette::RigSkin,
-                        super::BoneAttach,
-                        super::equipment::HeldAttached,
-                    )>()
-                    .insert(super::equipment::Reattached);
+                tear_down_visual(&mut commands.entity(entity));
             }
         }
 
@@ -217,37 +250,56 @@ pub(super) fn heal_rig_starved(
             "rig heal: guid {:016x} was denied a palette rig at attach — rebuilding (0x60abe0 shape)",
             guid.0
         );
-        commands
-            .entity(entity)
-            .despawn_related::<Children>()
-            .remove::<(
-                VisualAttached,
-                AppliedDisplay,
-                super::equipment::AppliedEquipment,
-                super::mount::AppliedMount,
-                super::mount::MountChild,
-                AnimationPlayer,
-                bevy::animation::transition::AnimationTransitions,
-                AnimationGraphHandle,
-                benilla_assets::ModelAnimations,
-                crate::creature_anim::AnimDriver,
-                (
-                    benilla_world::rig_anim::RigPose,
-                    crate::creature_anim::BodyTwist,
-                    benilla_world::rig_anim::GlobalSeqDrive,
-                ),
-                benilla_world::rig_palette::RigSkin,
-                super::BoneAttach,
-                super::equipment::HeldAttached,
-                benilla_world::rig_palette::RigStarved,
-            )>()
-            .insert(super::equipment::Reattached);
+        tear_down_visual(
+            commands
+                .entity(entity)
+                .remove::<benilla_world::rig_palette::RigStarved>(),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A change of the character art rebuilds the players' bodies as a display swap does, and
+    /// leaves every body that is not a character alone: without a creature catalog no unit display
+    /// reads as one.
+    #[test]
+    fn a_character_art_change_rebuilds_the_character_bodies_only() {
+        let mut world = World::new();
+        let body = |world: &mut World, kind: EntityKind| {
+            let unit = world
+                .spawn((
+                    NetEntity {
+                        kind,
+                        display_id: Some(7),
+                        scale: 1.0,
+                    },
+                    VisualAttached,
+                    AppliedDisplay(Some(7)),
+                ))
+                .id();
+            let part = world.spawn(ChildOf(unit)).id();
+            (unit, part)
+        };
+        let (player, player_part) = body(&mut world, EntityKind::Player);
+        let (creature, creature_part) = body(&mut world, EntityKind::Unit);
+        let (object, object_part) = body(&mut world, EntityKind::GameObject);
+
+        assert_eq!(rebuild_character_bodies(&mut world), 1);
+
+        assert!(!world.entity(player).contains::<VisualAttached>());
+        assert!(!world.entity(player).contains::<AppliedDisplay>());
+        assert!(world
+            .entity(player)
+            .contains::<super::super::equipment::Reattached>());
+        assert!(world.get_entity(player_part).is_err(), "its parts go too");
+        for (untouched, part) in [(creature, creature_part), (object, object_part)] {
+            assert!(world.entity(untouched).contains::<VisualAttached>());
+            assert!(world.get_entity(part).is_ok());
+        }
+    }
 
     #[test]
     fn a_starved_unit_rebuilds_when_the_table_has_room_and_waits_when_it_has_not() {

@@ -413,14 +413,17 @@
         --
         -- The tooltip carries THREE things a player cannot find out by clicking, in the order
         -- they will be wanted. First what changes — only characters, so a player who turns it
-        -- off and looks at a tree knows why nothing happened. Then the restart, which is the whole
-        -- reason the row is not self-evident. Then, on the web build, the download: the row is ON
-        -- by default now, so what a browser client needs before the click is what turning it OFF
-        -- saves rather than what turning it on costs.
+        -- off and looks at a tree knows why nothing happened. Then when: in the browser the layer
+        -- is a live mount and Apply swaps it (crate::hd_models); the desktop client decides its
+        -- archives at start. Then, on the web build, the download: the row is ON by default, so
+        -- what a browser client needs before the click is what turning it OFF saves rather than
+        -- what turning it on costs.
         BENILLA_TOOLTIP_HD_MODELS =
             "Uses the updated, higher-detail player character models and animations in place of "
             .. "the original ones. Creatures, buildings and the world are unaffected.\n\n"
-            .. "Takes effect the next time you start the game.\n\n"
+            .. "In the browser this applies when you click Apply; the characters around you "
+            .. "change once their new models have arrived. The desktop client applies it the "
+            .. "next time you start the game.\n\n"
             .. "On by default. In the browser these models are an additional ~1.7 GB of game "
             .. "data; turning this off fetches none of it and plays on the original art."
 
@@ -2064,20 +2067,14 @@
                                                 -- in the browser) and this box is whether the
                                                 -- chain mounts it.
                                                 --
-                                                -- RESTART: Apply writes the CVar like every row
-                                                -- on the page, but there is no live commit to
-                                                -- reach. A chain decides its mounts when it
-                                                -- OPENS, the client holds two open chains, and
-                                                -- every model, skin and DBC already loaded came
-                                                -- out of them, so the next start is what reads
-                                                -- it (cvars::boot_cvar, the way gxWindow is read).
-                                                --
-                                                -- So the row carries NO flag of its own, and
-                                                -- deliberately not an inert one: a `restart = 1`
-                                                -- no code consults is a promise of machinery that
-                                                -- is not there. The tooltip carries the fact, in
-                                                -- as many words, which is where a player looks
-                                                -- before clicking rather than after.
+                                                -- Apply writes the CVar like every row on the
+                                                -- page. In the browser that edge swaps the layer
+                                                -- live (crate::hd_models: mount, catalogs,
+                                                -- caches, reloads, then the character bodies
+                                                -- rebuild). A native chain decides its archives
+                                                -- as it opens, so there the next start reads it
+                                                -- (cvars::apply_boot_layers). The tooltip says
+                                                -- which.
                                                 OptionsRow_OnLoad(self, "hdCharacterModels",
                                                     "Use updated character models",
                                                     "BENILLA_TOOLTIP_HD_MODELS")
@@ -3356,10 +3353,10 @@
                 { category = WORLD_APPEARANCE, row = {
                     name = "BENILLA_WORLD_SHADOWS", desc = BENILLA_TOOLTIP_WORLD_SHADOWS,
                     type = "checkbutton", cvar = "worldShadows" } },
+                -- Turtle WoW runs in the browser only, where the layer swaps live on Apply.
                 { category = WORLD_APPEARANCE, row = {
                     name = "BENILLA_HD_MODELS", desc = BENILLA_TOOLTIP_HD_MODELS,
-                    type = "checkbutton", cvar = "hdCharacterModels",
-                    requirement = OPTION_RESTART_REQUIREMENT } },
+                    type = "checkbutton", cvar = "hdCharacterModels" } },
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_LIGHTING_MODEL", desc = BENILLA_TOOLTIP_LIGHTING_MODEL,
                     type = "dropdown", identifier = "BenillaLightingModel",

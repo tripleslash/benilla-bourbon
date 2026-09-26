@@ -220,8 +220,12 @@ fn strip_sampler_marker(path: &str) -> Option<String> {
 /// Reload every `mpq://` asset loaded so far — BLP images, M2 and WMO models, ADT tiles, WDT
 /// indices — whose archive name `in_layer` holds, for a layer just mounted or unmounted: the
 /// server keys an asset by path, so without this a live handle keeps answering with the bytes it
-/// was first loaded from. Returns the reloads asked for. An edge, never per frame.
-pub fn reload_chain_assets(world: &World, in_layer: impl Fn(&str) -> bool) -> usize {
+/// was first loaded from. Returns the assets reloading, each of which sends its
+/// `AssetEvent::Modified` when the new bytes land (or fails to load). An edge, never per frame.
+pub fn reload_chain_assets(
+    world: &World,
+    in_layer: impl Fn(&str) -> bool,
+) -> Vec<bevy::asset::UntypedAssetId> {
     use bevy::asset::io::AssetSourceId;
     use bevy::asset::AssetPath;
 
@@ -230,6 +234,7 @@ pub fn reload_chain_assets(world: &World, in_layer: impl Fn(&str) -> bool) -> us
         server: &AssetServer,
         in_layer: &dyn Fn(&str) -> bool,
         out: &mut std::collections::HashSet<AssetPath<'static>>,
+        ids: &mut Vec<bevy::asset::UntypedAssetId>,
     ) {
         let Some(assets) = world.get_resource::<Assets<A>>() else {
             return;
@@ -248,23 +253,25 @@ pub fn reload_chain_assets(world: &World, in_layer: impl Fn(&str) -> bool) -> us
             if in_layer(&archive.replace('/', "\\")) {
                 // A labelled sub-asset and its file are one reload.
                 out.insert(path.without_label().into_owned());
+                ids.push(id.untyped());
             }
         }
     }
 
     let Some(server) = world.get_resource::<AssetServer>() else {
-        return 0;
+        return Vec::new();
     };
     let mut paths = std::collections::HashSet::new();
-    collect::<Image>(world, server, &in_layer, &mut paths);
-    collect::<M2Model>(world, server, &in_layer, &mut paths);
-    collect::<WmoModel>(world, server, &in_layer, &mut paths);
-    collect::<AdtTile>(world, server, &in_layer, &mut paths);
-    collect::<WdtIndex>(world, server, &in_layer, &mut paths);
+    let mut ids = Vec::new();
+    collect::<Image>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<M2Model>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<WmoModel>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<AdtTile>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<WdtIndex>(world, server, &in_layer, &mut paths, &mut ids);
     for path in &paths {
         server.reload(path.clone());
     }
-    paths.len()
+    ids
 }
 
 /// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`. Call it before

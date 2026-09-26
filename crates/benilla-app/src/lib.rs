@@ -79,6 +79,7 @@ mod glue;
 mod glue_strings;
 mod go_anim;
 mod go_templates;
+mod hd_models;
 #[cfg(feature = "dev")]
 mod hover_log;
 mod items;

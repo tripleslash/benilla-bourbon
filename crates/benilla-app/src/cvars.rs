@@ -745,12 +745,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     //     `Chain::open_layered` warns **once to the console** and runs on the original art, which
     //     is the state that arm was written for.
     //
-    // **Read at boot, applied at boot** ([`crate::cvars::boot_cvar`], like `gxWindow`), because a
-    // chain's mounts are decided when it opens and the client holds two open chains. There is no
-    // knob resource for the same reason: nothing downstream can act on a change mid-session, so the
-    // row is marked `restart` in the options window and says so in its tooltip rather than
-    // pretending to swap the world's art under a running frame. `$WOW_HD_MODELS` overrides
-    // session-only, which is how the model test suite runs against the layer.
+    // **Read at boot** ([`crate::cvars::boot_cvar`], like `gxWindow`), for the chains the client
+    // opens then. On the web build the layer is a live mount afterwards too: a change of the row
+    // swaps it at that edge ([`crate::hd_models`]). A native chain decides its archives as it
+    // opens, so there the next start reads it, and the tooltip says which. `$WOW_HD_MODELS`
+    // overrides session-only, which is how the model test suite runs against the layer.
     ours(
         "hdCharacterModels",
         "1",

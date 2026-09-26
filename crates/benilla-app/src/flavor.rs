@@ -109,7 +109,7 @@ fn switch(world: &mut World, to: ClientFlavor) -> anyhow::Result<()> {
     benilla_assets::run_data_load(world);
     world.trigger(benilla_assets::ChainDataChanged);
     let reloaded = layer.map_or(0, |in_layer| {
-        benilla_assets::reload_chain_assets(world, in_layer)
+        benilla_assets::reload_chain_assets(world, in_layer).len()
     });
     // The boot VM holds GlobalStrings off the chain it was built on.
     crate::ui_script::reinstall_boot_vm(world);

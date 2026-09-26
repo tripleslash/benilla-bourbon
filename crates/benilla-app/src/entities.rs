@@ -50,7 +50,7 @@ use mount::reseat_mounts;
 pub(crate) mod corpse;
 
 mod live_display;
-pub(crate) use live_display::DisplaySwapped;
+pub(crate) use live_display::{rebuild_character_bodies, DisplaySwapped};
 use live_display::{refresh_live_display, tick_scale_ease};
 
 /// Terrain conform: a model flagged `GlobalModelFlags & 3 ∈ {1,3}` tilts to the ground.
@@ -234,6 +234,17 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// Whether a display is a character body — a character model (`Character\`), or a humanoid
+    /// NPC's `CreatureDisplayInfoExtra` appearance — the art the updated character models replace.
+    pub(crate) fn is_character_body(&self, display_id: u32) -> bool {
+        self.catalog.model(display_id).is_some_and(|m| {
+            m.npc_appearance.is_some()
+                || m.model_path
+                    .get(..10)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("character\\"))
+        })
+    }
+
     /// A display's foley material (`Material.dbc` id), the creature half of the footfall rustle.
     pub(crate) fn foley_material(&self, display_id: u32) -> Option<u32> {
         self.catalog.foley_material(display_id)

@@ -1152,12 +1152,12 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The **Use updated character models** row — the Graphics page's one content switch, and the
-/// only row on it whose effect is not visible until the next start.
+/// The **Use updated character models** row — the Graphics page's one content switch.
 ///
 /// The box stages to Apply like every Graphics row (fork), and Apply must actually WRITE
-/// `hdCharacterModels`: nothing downstream acts on it this session (a chain decides its mounts
-/// when it opens), so a stage that committed to nothing would silently lose the player's click.
+/// `hdCharacterModels`: that write is the edge the browser build swaps the layer on
+/// (`crate::hd_models`), and the value the next start reads natively, so a stage that committed to
+/// nothing would silently lose the player's click.
 #[test]
 fn the_updated_character_models_box_writes_its_cvar_at_apply() {
     benilla_formats::wow_data_or_skip!();
