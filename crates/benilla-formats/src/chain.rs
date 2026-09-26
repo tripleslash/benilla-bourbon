@@ -78,16 +78,25 @@ pub struct Chain {
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     store: crate::webpack::PackStore,
-    /// The updated-character-model layer, when the player has it on: a **second container**, at
-    /// `/data-hd`, consulted ahead of `store` for every question.
-    ///
-    /// `None` is the default and the cheap state — not "an empty overlay" but *no overlay*, which
-    /// is the whole point of the option: nothing above is fetched, not even the 400 KB index that
-    /// would say what the layer holds. Every method below reads as `hd.and_then(…).unwrap_or_else(base)`
-    /// for that reason: overlay-first resolution is exactly MPQ's own priority rule
-    /// (`patch-A.MPQ` mounts above every numbered patch), restated here because the wasm target has
-    /// no archive stack to inherit it from.
-    hd: Option<crate::webpack::PackStore>,
+}
+
+/// The live layers one read resolves against — the updated character models and the Turtle WoW
+/// 1.18.1 layer ([`crate::layers`]), each mounted or not for the whole page — taken once per read,
+/// so the read keeps its handles past the locks. With a layer off its share is one relaxed load.
+#[cfg(target_arch = "wasm32")]
+struct Mounts {
+    hd: Option<std::sync::Arc<crate::webpack::PackStore>>,
+    turtle: Option<std::sync::Arc<crate::webpack::PackStore>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Mounts {
+    fn now() -> Self {
+        Self {
+            hd: crate::layers::hd(),
+            turtle: crate::layers::turtle(),
+        }
+    }
 }
 
 /// Whether `name` is a DBC table, by its suffix and without allocating: the one kind of name the
@@ -327,22 +336,23 @@ impl Chain {
     /// 1300: a corrupt `dbc.MPQ` must not become mystery missing-file errors); here the only way to
     /// fail is that `/data-hd/index.bpi` is not hosted, and the right answer to "this origin
     /// ships no HD layer" is the game in its original art, not a refusal to boot.
+    ///
+    /// The HD layer is the page's one live mount ([`crate::layers::hd`]), shared by every chain:
+    /// the first open with `hd_models` mounts it, and a later open finds it mounted. `false` leaves
+    /// a mount alone; turning the layer off is [`crate::web::close_hd_layer`]'s.
     pub fn open_layered(_path: &Path, hd_models: bool) -> Result<Self> {
         let store = crate::webpack::PackStore::open(crate::web::data_base())?;
-        let hd = hd_models
-            .then(|| crate::webpack::PackStore::open_hd(crate::web::hd_data_base()))
-            .and_then(|opened| match opened {
-                Ok(store) => Some(store),
-                Err(e) => {
-                    crate::web::console_warn(&format!(
-                        "updated character models are on but this origin serves no {} container \
-                         ({e:#}) — running on the original art",
-                        crate::layers::HD_DATA_SEGMENT
-                    ));
-                    None
-                }
-            });
-        Ok(Self { store, hd })
+        if hd_models && !crate::layers::hd_mounted() {
+            match crate::webpack::PackStore::open_hd(crate::web::hd_data_base()) {
+                Ok(hd) => crate::layers::mount_hd(hd),
+                Err(e) => crate::web::console_warn(&format!(
+                    "updated character models are on but this origin serves no {} container \
+                     ({e:#}) — running on the original art",
+                    crate::layers::HD_DATA_SEGMENT
+                )),
+            }
+        }
+        Ok(Self { store })
     }
 
     /// The container that should answer for `name` — [`crate::layers::pick_layer`] over the layers
@@ -356,13 +366,14 @@ impl Chain {
     /// relaxed atomic load here ([`crate::layers::turtle`]), and only a `.dbc` read with both layers
     /// mounted builds an alias name.
     ///
-    /// `turtle` is the caller's handle on the mounted layer, so the answer can borrow it.
+    /// `mounts` is the caller's handle on the live layers, so the answer can borrow them.
     fn pick<'a>(
         &'a self,
         name: &str,
-        turtle: Option<&'a crate::webpack::PackStore>,
+        mounts: &'a Mounts,
     ) -> (&'a crate::webpack::PackStore, Option<String>) {
-        let alias = match (&self.hd, turtle) {
+        let (hd, turtle) = (mounts.hd.as_deref(), mounts.turtle.as_deref());
+        let alias = match (hd, turtle) {
             (Some(_), Some(t)) if is_table(name) => {
                 let alias = crate::layers::turtle_hd_alias(name);
                 t.contains(&alias).then_some(alias)
@@ -370,14 +381,14 @@ impl Chain {
             _ => None,
         };
         let layer = crate::layers::pick_layer(
-            self.hd.as_ref().map(|hd| hd.contains(name)),
+            hd.map(|hd| hd.contains(name)),
             turtle.map(|t| t.contains(name)),
             alias.is_some(),
         );
         // The layer halves of the boot trace, so a `?boottrace=1` capture can say whether a layer is
         // being read at all and which names reach it (`web::trace_hd`); no-ops unless the page armed
         // the arrays.
-        match (layer, turtle, &self.hd) {
+        match (layer, turtle, hd) {
             (crate::layers::Layer::TurtleHdAlias, Some(t), _) => {
                 crate::web::trace_turtle(name);
                 (t, alias)
@@ -399,10 +410,10 @@ impl Chain {
         crate::layers::turtle_mounted()
     }
 
-    /// Whether the updated-character-model layer is mounted on this chain — for the boot report and
-    /// the diagnostics line, which should say which corpus a session is actually running on.
+    /// Whether the updated-character-model layer is mounted now — for the boot report and the
+    /// diagnostics line, which should say which corpus a session is actually running on.
     pub fn hd_character_models(&self) -> bool {
-        self.hd.is_some()
+        crate::layers::hd_mounted()
     }
 
     /// Whether the container holds `name` (accepts `/` or `\`; case-insensitive — the equivalence is
@@ -410,7 +421,7 @@ impl Chain {
     ///
     /// No I/O, no allocation, no network: a binary search over the index's sorted key array.
     pub fn contains(&self, name: &str) -> bool {
-        self.hd.as_ref().is_some_and(|hd| hd.contains(name))
+        crate::layers::hd().is_some_and(|hd| hd.contains(name))
             || crate::layers::turtle().is_some_and(|t| t.contains(name))
             || self.store.contains(name)
     }
@@ -428,8 +439,8 @@ impl Chain {
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-        let turtle = crate::layers::turtle();
-        let (store, alias) = self.pick(name, turtle.as_deref());
+        let mounts = Mounts::now();
+        let (store, alias) = self.pick(name, &mounts);
         store.read_sync(alias.as_deref().unwrap_or(name))
     }
 
@@ -443,8 +454,8 @@ impl Chain {
         // included — the array is deduplicated by hand and first push is still first need, so a
         // name that took three frames to arrive appears exactly where it was first wanted.
         crate::web::trace(name);
-        let turtle = crate::layers::turtle();
-        let (store, alias) = self.pick(name, turtle.as_deref());
+        let mounts = Mounts::now();
+        let (store, alias) = self.pick(name, &mounts);
         store.try_read_sync(alias.as_deref().unwrap_or(name))
     }
 
@@ -455,16 +466,16 @@ impl Chain {
     /// For a caller whose work reads several blobs and is only correct once it can read all of them:
     /// it asks first, does nothing while the answer is no, and the packs warm in the meantime.
     pub fn ready(&self, name: &str) -> bool {
-        let turtle = crate::layers::turtle();
-        let (store, alias) = self.pick(name, turtle.as_deref());
+        let mounts = Mounts::now();
+        let (store, alias) = self.pick(name, &mounts);
         store.is_ready(alias.as_deref().unwrap_or(name))
     }
 
     /// Warm the pack `name` lives in, and return immediately — see
     /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
     pub fn prefetch(&self, name: &str) {
-        let turtle = crate::layers::turtle();
-        let (store, alias) = self.pick(name, turtle.as_deref());
+        let mounts = Mounts::now();
+        let (store, alias) = self.pick(name, &mounts);
         store.prefetch(alias.as_deref().unwrap_or(name));
     }
 
@@ -478,8 +489,8 @@ impl Chain {
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name);
-        let turtle = crate::layers::turtle();
-        let (store, alias) = self.pick(name, turtle.as_deref());
+        let mounts = Mounts::now();
+        let (store, alias) = self.pick(name, &mounts);
         store.read_async(alias.as_deref().unwrap_or(name)).await
     }
 
@@ -500,8 +511,12 @@ impl Chain {
         // the same name either way — which layer would *answer* a read of it is `layer_for`'s
         // business, not this list's. An HD container shipping no listfile is simply no extra names,
         // on the same terms as the base container shipping without one.
-        let turtle = crate::layers::turtle();
-        let overlays = self.hd.iter().chain(turtle.as_deref());
+        let mounts = Mounts::now();
+        let overlays = mounts
+            .hd
+            .as_deref()
+            .into_iter()
+            .chain(mounts.turtle.as_deref());
         let mut seen: std::collections::HashSet<String> = out
             .iter()
             .map(|e| e.name.replace('/', "\\").to_ascii_lowercase())

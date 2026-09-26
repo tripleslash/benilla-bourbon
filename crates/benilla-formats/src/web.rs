@@ -284,10 +284,10 @@ mod wasm {
         format!("{origin}/{}", crate::layers::TURTLE_DATA_SEGMENT)
     }
 
-    /// Start the page's half of the Turtle WoW 1.18.1 layer — its container in the decode worker,
-    /// its boot packs — and return at once, for [`mount_turtle_layer`]. Never earlier: a realm list
-    /// that merely advertises a 1.18.1 realm fetches nothing, so a 1.12.1 player never pays for it.
-    fn warm_turtle_layer() {
+    /// Tell the page to open or close its half of a live layer (`web/packs.js`'s `openLayer` /
+    /// `closeLayer`: the container in the decode worker, the boot packs, the resident packs), and
+    /// return at once — an open's promise is the page's to settle; nothing here waits on it.
+    fn page_layer(method: &str, layer: &str) {
         use wasm_bindgen::JsCast;
         let Some(window) = web_sys::window() else {
             return;
@@ -295,10 +295,9 @@ mod wasm {
         let Ok(packs) = js_sys::Reflect::get(&window, &"__wenilla_packs".into()) else {
             return;
         };
-        if let Ok(open) = js_sys::Reflect::get(&packs, &"openLayer".into()) {
-            if let Some(f) = open.dyn_ref::<js_sys::Function>() {
-                // The promise is the page's to settle; nothing here waits on it.
-                let _ = f.call1(&packs, &"turtle".into());
+        if let Ok(f) = js_sys::Reflect::get(&packs, &method.into()) {
+            if let Some(f) = f.dyn_ref::<js_sys::Function>() {
+                let _ = f.call1(&packs, &layer.into());
             }
         }
     }
@@ -313,8 +312,9 @@ mod wasm {
         }
         let store = crate::webpack::PackStore::open_turtle(turtle_data_base())?;
         crate::layers::mount_turtle(store);
-        // The page's half: the worker's container and the boot packs. Idempotent there.
-        warm_turtle_layer();
+        // The page's half: the worker's container and the boot packs. Idempotent there. Never
+        // earlier: a realm list that merely advertises a 1.18.1 realm fetches nothing.
+        page_layer("openLayer", "turtle");
         Ok(())
     }
 
@@ -322,17 +322,34 @@ mod wasm {
     /// its worker container), for a realm that does not advertise 1.18.1.
     pub fn close_turtle_layer() {
         crate::layers::unmount_turtle();
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Ok(packs) = js_sys::Reflect::get(&window, &"__wenilla_packs".into()) else {
-            return;
-        };
-        if let Ok(close) = js_sys::Reflect::get(&packs, &"closeLayer".into()) {
-            if let Some(f) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&close) {
-                let _ = f.call1(&packs, &"turtle".into());
-            }
+        page_layer("closeLayer", "turtle");
+    }
+
+    /// Mount the updated character models now, for the player turning them on: off the index the
+    /// page holds (it fetched one at boot with the option on, or on an earlier turn), else one
+    /// blocking fetch of it — this runs on the Apply click, an edge, never in a frame. Every later
+    /// read of a name the layer holds answers from it, and the switch chains open by
+    /// ([`crate::layers::hd_character_models`]) follows. An origin that serves no `/data-hd` is an
+    /// error and leaves nothing mounted.
+    pub fn mount_hd_layer() -> anyhow::Result<()> {
+        if crate::layers::hd_mounted() {
+            return Ok(());
         }
+        let store = crate::webpack::PackStore::open_hd(hd_data_base())?;
+        crate::layers::mount_hd(store);
+        crate::layers::set_hd_character_models(true);
+        // The page's half: the worker's container and the boot packs. Idempotent there.
+        page_layer("openLayer", "hd");
+        Ok(())
+    }
+
+    /// Unmount the updated character models, for the player turning them off, and let the page
+    /// drop what it holds of the layer (its resident packs and its worker container). Cache
+    /// Storage keeps its objects, so a later turn back on refetches the index and not the packs.
+    pub fn close_hd_layer() {
+        crate::layers::unmount_hd();
+        crate::layers::set_hd_character_models(false);
+        page_layer("closeLayer", "hd");
     }
 
     /// One `console.warn`, for the handful of places that must say something to a player's console
@@ -540,8 +557,9 @@ mod wasm {
 
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
-    close_turtle_layer, console_warn, data_base, fetch_sync, fetch_sync_range, hd_data_base,
-    mount_turtle_layer, trace, trace_hd, trace_turtle, turtle_data_base,
+    close_hd_layer, close_turtle_layer, console_warn, data_base, fetch_sync, fetch_sync_range,
+    hd_data_base, mount_hd_layer, mount_turtle_layer, trace, trace_hd, trace_turtle,
+    turtle_data_base,
 };
 
 #[cfg(test)]

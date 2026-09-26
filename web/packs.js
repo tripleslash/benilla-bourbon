@@ -142,6 +142,18 @@ const TURTLE_PACK_KEY_BASE = 2 ** 31;
 /// Where the Turtle layer's container is served from. Twin of
 /// `benilla_formats::layers::TURTLE_DATA_SEGMENT`.
 const TURTLE_DATA_SEGMENT = 'data-turtle';
+/// The live layers `openLayer` / `closeLayer` know: where each is served, its resident-key range
+/// (`[keyBase, keyEnd)`), and the prefix of the `packs` slots it hands its root, index, listfile and
+/// `boot-packs.json` over in (`hdBase`, `hdIndex`, … — the names Rust's `PackStore` reads).
+const LAYERS = {
+  hd: { segment: HD_DATA_SEGMENT, keyBase: HD_PACK_KEY_BASE, keyEnd: TURTLE_PACK_KEY_BASE, slot: 'hd' },
+  turtle: {
+    segment: TURTLE_DATA_SEGMENT,
+    keyBase: TURTLE_PACK_KEY_BASE,
+    keyEnd: Infinity,
+    slot: 'turtle',
+  },
+};
 /// The `localStorage` entry the client keeps its CVars in — `benilla-app/src/local_state.rs`'s
 /// `web_store::key` over `config_path()`. Read here, before any wasm exists, for exactly one key:
 /// whether to fetch the optional layer at all. See `hdWanted`.
@@ -197,9 +209,10 @@ const packs = {
   turtleIndex: null,
   turtleListfile: null,
   turtleManifest: null,
-  /// The Turtle open in flight, and the close count an open checks it has not been overtaken by.
-  _turtleOpening: null,
-  _turtleGeneration: 0,
+  /// Per live layer: the open in flight, and the close count an open checks it has not been
+  /// overtaken by.
+  _opening: { hd: null, turtle: null },
+  _generation: { hd: 0, turtle: 0 },
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
@@ -532,35 +545,40 @@ const packs = {
 
   // ---- the live layers ------------------------------------------------------------------
 
-  /// Open a live layer — `'turtle'`, the Turtle WoW 1.18.1 layer the client mounts on entering a
-  /// realm that advertises 1.18.1 (`benilla_formats::web::mount_turtle_layer`), and never before.
-  /// Resolves `true` once the layer's index and listfile are here, its container is open in the
-  /// decode worker and its boot packs are resident; `false` when this origin serves no such
-  /// container (the client has already refused the realm then, off its own fetch of the index).
-  /// Idempotent.
-  openLayer(name) {
-    if (name !== 'turtle') return Promise.resolve(false);
-    if (this.turtleIndex) return Promise.resolve(true);
-    // One open in flight at a time; a second call joins it.
-    if (!this._turtleOpening) {
-      this._turtleOpening = this._openTurtle().finally(() => {
-        this._turtleOpening = null;
+  /// Open a live layer — `'hd'`, the updated character models, at boot with the option on
+  /// (`bootstrapHd`) and whenever the player turns them on (`benilla_formats::web::mount_hd_layer`);
+  /// `'turtle'`, the Turtle WoW 1.18.1 layer the client mounts on entering a realm that advertises
+  /// 1.18.1 (`benilla_formats::web::mount_turtle_layer`), and never before. Resolves `true` once the
+  /// layer's index and listfile are here, its container is open in the decode worker and its boot
+  /// packs are resident (`opts.prefetch === false` skips that warm); `false` when this origin serves
+  /// no such container. Idempotent.
+  openLayer(name, opts = {}) {
+    const layer = LAYERS[name];
+    if (!layer) return Promise.resolve(false);
+    if (this[`${layer.slot}Index`]) return Promise.resolve(true);
+    // One open in flight per layer; a second call joins it.
+    if (!this._opening[name]) {
+      this._opening[name] = this._openLayer(name, opts).finally(() => {
+        this._opening[name] = null;
       });
     }
-    return this._turtleOpening;
+    return this._opening[name];
   },
 
-  /// `openLayer('turtle')`'s body. A `closeLayer` while it is in flight bumps the generation, and
-  /// an open that finds it moved stops before it makes the layer real.
-  async _openTurtle() {
-    const generation = this._turtleGeneration;
-    const closed = () => generation !== this._turtleGeneration;
-    const base = `${location.origin}/${TURTLE_DATA_SEGMENT}`;
+  /// `openLayer`'s body. A `closeLayer` while it is in flight bumps the layer's generation, and an
+  /// open that finds it moved stops before it makes the layer real.
+  async _openLayer(name, opts) {
+    const layer = LAYERS[name];
+    const generation = this._generation[name];
+    const closed = () => generation !== this._generation[name];
+    // `location.origin`, character for character what `benilla_formats::web`'s `*_data_base()`
+    // builds; the two must agree or the client opens a container at an address the page never warmed.
+    const base = `${location.origin}/${layer.segment}`;
     let index;
     try {
       index = await fetchIndex(base);
     } catch (e) {
-      console.warn(`wenilla: this origin serves no /${TURTLE_DATA_SEGMENT} container (${e.message})`);
+      console.warn(`wenilla: this origin serves no /${layer.segment} container (${e.message})`);
       return false;
     }
     const manifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
@@ -568,42 +586,50 @@ const packs = {
       .then((r) => (r.ok ? r.text() : null))
       .catch(() => null);
     if (closed()) return false;
-    // Only now is the layer real to `url()` and to Rust's `PackStore::open_turtle`.
-    this.turtleManifest = manifest;
-    this.turtleListfile = listfile;
-    this.turtleBase = base;
-    this.turtleIndex = index;
-    await openLayerInWorker('turtle', base, index);
+    // Only now is the layer real to `url()` and to Rust's `PackStore::open_hd` / `open_turtle`, so a
+    // failed fetch leaves the page as it was with the layer off.
+    this[`${layer.slot}Manifest`] = manifest;
+    this[`${layer.slot}Listfile`] = listfile;
+    this[`${layer.slot}Base`] = base;
+    this[`${layer.slot}Index`] = index;
+    // The decode worker needs the layer's OWN index to decode its packs — a `.bpk` does not restate
+    // its codec or decoded size — so it is opened there as a container of its own.
+    await openLayerInWorker(name, base, index);
     if (closed()) return false;
-    const boot = (this.turtleManifest && this.turtleManifest.boot) || { packs: [] };
-    // Into the layer's key space before anything is warmed — see `TURTLE_PACK_KEY_BASE`.
+    if (opts.prefetch === false) return true;
+    const boot = (manifest && manifest.boot) || { packs: [] };
+    // Into the layer's key space before anything is warmed: the manifest holds the container's own
+    // ids, and every key that leaves this line is a resident key.
     await prefetch(
-      boot.packs.map(([id, bytes]) => [id + TURTLE_PACK_KEY_BASE, bytes]),
-      () => {}
+      boot.packs.map(([id, bytes]) => [id + layer.keyBase, bytes]),
+      () => {},
     );
     return true;
   },
 
-  /// Drop a live layer on leaving its realm: its resident packs, its slots and its worker
-  /// container. Cache Storage keeps its objects — returning to the realm is then a disk read, not a
-  /// download — and `sw.js` sweeps them with everything else when the corpus is re-packed.
+  /// Drop a live layer — the player turning the updated character models off, or the client leaving
+  /// a 1.18.1 realm: its resident packs, its slots and its worker container. Cache Storage keeps its
+  /// objects — turning back is then a disk read, not a download — and `sw.js` sweeps them with
+  /// everything else when the corpus is re-packed.
   closeLayer(name) {
-    if (name !== 'turtle') return;
-    this._turtleGeneration += 1;
+    const layer = LAYERS[name];
+    if (!layer) return;
+    this._generation[name] += 1;
+    const inLayer = (key) => key >= layer.keyBase && key < layer.keyEnd;
     for (const key of [...this._resident.keys()]) {
-      if (key >= TURTLE_PACK_KEY_BASE) {
+      if (inLayer(key)) {
         this._residentBytes -= this._resident.get(key).length;
         this._resident.delete(key);
       }
     }
     for (const key of [...this._failed]) {
-      if (key >= TURTLE_PACK_KEY_BASE) this._failed.delete(key);
+      if (inLayer(key)) this._failed.delete(key);
     }
-    this.turtleBase = '';
-    this.turtleIndex = null;
-    this.turtleListfile = null;
-    this.turtleManifest = null;
-    if (this.worker) this.worker.postMessage({ type: 'close', layer: 'turtle' });
+    this[`${layer.slot}Base`] = '';
+    this[`${layer.slot}Index`] = null;
+    this[`${layer.slot}Listfile`] = null;
+    this[`${layer.slot}Manifest`] = null;
+    if (this.worker) this.worker.postMessage({ type: 'close', layer: name });
   },
 
   // ---- Cache Storage ---------------------------------------------------------------------
@@ -777,38 +803,14 @@ export async function bootstrap(base, onProgress = () => {}, opts = {}) {
 /// the Rust side for the same reason.
 async function bootstrapHd(opts = {}) {
   if (!hdWanted()) return;
-  // `location.origin`, character for character what `benilla_formats::web::hd_data_base()` builds
-  // and the twin of boot.js's `${location.origin}/data`. The two must agree or the client would
-  // open a container at an address the page never warmed.
-  const base = `${location.origin}/${HD_DATA_SEGMENT}`;
-  try {
-    packs.hdIndex = await fetchIndex(base);
-  } catch (e) {
-    console.warn(
-      `wenilla: updated character models are on, but this origin serves no /${HD_DATA_SEGMENT} ` +
-        `container — running on the original art (${e.message})`,
-    );
-    return;
+  // The shared open (`packs.openLayer`), which a later turn-on at the options window takes too:
+  // index, then `boot-packs.json` and the listfile, then the layer made real (`hdBase`, `hdIndex`),
+  // then its container in the decode worker, then — unless `opts.prefetch === false` — its boot
+  // packs, offset into the layer's key space.
+  const opened = await packs.openLayer('hd', { prefetch: opts.prefetch });
+  if (!opened) {
+    console.warn('wenilla: updated character models are on — running on the original art');
   }
-  // Only now is the layer real: `hdBase` is what `url()` resolves layer keys against, and Rust
-  // opens `PackStore::open_hd` off `hdIndex`, so setting it after the fetch means a failed fetch
-  // leaves the page in exactly the state it would have been in with the option off.
-  packs.hdBase = base;
-  packs.hdManifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
-  packs.hdListfile = await fetchRetry(`${base}/listfile.txt`)
-    .then((r) => (r.ok ? r.text() : null))
-    .catch(() => null);
-  // The decode worker needs the layer's OWN index to decode its packs — a `.bpk` does not restate
-  // its codec or decoded size — so it is opened as a second container there, keyed by the same
-  // offset this file uses. Without this every layer warm falls back to a page-side fetch and a
-  // decode on the frame thread, which works and is exactly what it costs.
-  await openLayerInWorker('hd', packs.hdBase, packs.hdIndex);
-  if (opts.prefetch === false) return;
-  const hdBoot = (packs.hdManifest && packs.hdManifest.boot) || { packs: [] };
-  // Offset into the layer's key space before anything is warmed — see `HD_PACK_KEY_BASE`. The
-  // manifest holds the container's own ids, and every key that leaves this line is a resident key.
-  const keyed = hdBoot.packs.map(([id, bytes]) => [id + HD_PACK_KEY_BASE, bytes]);
-  await prefetch(keyed, () => {});
 }
 
 /// Hand a layer's index (`'hd'` or `'turtle'`) to the decode worker as a container of its own.

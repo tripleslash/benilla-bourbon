@@ -1,7 +1,10 @@
 //! **The optional content layers a chain may or may not carry**: the updated character models
-//! (`patch-A.MPQ` / the `data-hd` container), decided at boot, and the Turtle WoW 1.18.1 layer (the
-//! `data-turtle` container), mounted and unmounted live as the client enters a realm that
-//! advertises 1.18.1 or one that does not.
+//! (`patch-A.MPQ` / the `data-hd` container) and the Turtle WoW 1.18.1 layer (the `data-turtle`
+//! container). On the web build both are live mounts shared by every chain of the page: the HD
+//! layer mounts at the first chain open when the player has it on and again whenever they turn it
+//! on ([`crate::web::mount_hd_layer`]), and the Turtle layer as the client enters a realm that
+//! advertises 1.18.1. Natively the HD layer is an archive each chain decides on as it opens, and
+//! there is no Turtle layer.
 //!
 //! ## What a layer is
 //!
@@ -134,7 +137,7 @@ pub fn pick_layer(hd: Option<bool>, turtle: Option<bool>, alias: bool) -> Layer 
 /// Bumped on every live mount change, so a cache of chain-derived data can tell it is stale.
 static DATA_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Which mount set the chain answers from: it changes whenever the Turtle layer is mounted or
+/// Which mount set the chain answers from: it changes whenever a live layer is mounted or
 /// unmounted, and never otherwise.
 pub fn data_generation() -> u64 {
     DATA_GENERATION.load(Ordering::Acquire)
@@ -153,49 +156,98 @@ mod live {
 
     use crate::webpack::PackStore;
 
-    /// The mounted Turtle layer, shared by every chain of the process (the `AssetReader`'s, the
-    /// world store's, the UI's): one live mount, not a parameter three crates would have to thread.
-    static TURTLE: RwLock<Option<Arc<PackStore>>> = RwLock::new(None);
-    /// Whether [`TURTLE`] holds a layer: the read path's fast path. Every chain read asks, so on a
-    /// 1.12.1 realm the whole cost of the layer is this one relaxed load — the lock is never taken.
-    static MOUNTED: AtomicBool = AtomicBool::new(false);
+    /// One live layer's mount, shared by every chain of the process (the `AssetReader`'s, the world
+    /// store's, the UI's): one live mount, not a parameter three crates would have to thread.
+    pub(super) struct Slot {
+        store: RwLock<Option<Arc<PackStore>>>,
+        /// Whether `store` holds a layer: the read path's fast path. Every chain read asks, so with
+        /// the layer off its whole cost is this one relaxed load — the lock is never taken.
+        mounted: AtomicBool,
+    }
+
+    impl Slot {
+        const fn new() -> Self {
+            Self {
+                store: RwLock::new(None),
+                mounted: AtomicBool::new(false),
+            }
+        }
+
+        fn mount(&self, store: PackStore) {
+            *self.store.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
+            self.mounted.store(true, Ordering::Release);
+            super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn unmount(&self) {
+            self.mounted.store(false, Ordering::Release);
+            let was = self.store.write().unwrap_or_else(|e| e.into_inner()).take();
+            if was.is_some() {
+                super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        /// The mounted layer, as a handle a read can keep past the lock — the lock is never held
+        /// while a read waits on the network, which on the page's own thread would be a wait it
+        /// cannot make.
+        fn get(&self) -> Option<Arc<PackStore>> {
+            if !self.mounted.load(Ordering::Relaxed) {
+                return None;
+            }
+            self.store.read().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        fn mounted(&self) -> bool {
+            self.mounted.load(Ordering::Relaxed)
+        }
+    }
+
+    static TURTLE: Slot = Slot::new();
+    static HD: Slot = Slot::new();
 
     pub fn mount_turtle(store: PackStore) {
-        *TURTLE.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
-        MOUNTED.store(true, Ordering::Release);
-        super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
+        TURTLE.mount(store);
     }
 
     pub fn unmount_turtle() {
-        MOUNTED.store(false, Ordering::Release);
-        let was = TURTLE.write().unwrap_or_else(|e| e.into_inner()).take();
-        if was.is_some() {
-            super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
-        }
+        TURTLE.unmount();
     }
 
-    /// The mounted layer, as a handle a read can keep past the lock — the lock is never held while
-    /// a read waits on the network, which on the page's own thread would be a wait it cannot make.
+    /// The mounted Turtle layer.
     pub fn turtle() -> Option<Arc<PackStore>> {
-        if !MOUNTED.load(Ordering::Relaxed) {
-            return None;
-        }
-        TURTLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+        TURTLE.get()
     }
 
-    pub fn mounted() -> bool {
-        MOUNTED.load(Ordering::Relaxed)
+    pub(super) fn turtle_mounted() -> bool {
+        TURTLE.mounted()
+    }
+
+    pub fn mount_hd(store: PackStore) {
+        HD.mount(store);
+    }
+
+    pub fn unmount_hd() {
+        HD.unmount();
+    }
+
+    /// The mounted updated-character-model layer.
+    pub fn hd() -> Option<Arc<PackStore>> {
+        HD.get()
+    }
+
+    pub(super) fn hd_mounted() -> bool {
+        HD.mounted()
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use live::{mount_turtle, turtle, unmount_turtle};
+pub use live::{hd, mount_hd, mount_turtle, turtle, unmount_hd, unmount_turtle};
 
 /// Whether the Turtle layer is mounted now. Always `false` natively.
 pub fn turtle_mounted() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        live::mounted()
+        live::turtle_mounted()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -203,16 +255,37 @@ pub fn turtle_mounted() -> bool {
     }
 }
 
+/// Whether the updated character models are mounted now: the live mount on the web build, and
+/// natively the switch every chain opens by ([`hd_character_models`]), since a native chain
+/// decides at its open and the client opens its chains at boot.
+pub fn hd_mounted() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        live::hd_mounted()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        hd_character_models()
+    }
+}
+
+/// Whether this target can mount or unmount the updated character models under a running client:
+/// the browser build, whose layer is a live mount. A native chain decides at its open.
+pub const fn hd_live() -> bool {
+    cfg!(target_arch = "wasm32")
+}
+
 /// The live answer. Off until something says otherwise — see the module header.
 static HD_MODELS: AtomicBool = AtomicBool::new(false);
 
 /// Turn the updated-character-model layer on or off for every chain opened **after** this call.
 ///
-/// Called once, before the `App` is built, from whoever knows the player's setting
-/// (`benilla_app`'s `hdCharacterModels` CVar, `benilla-worldview`'s `$WOW_HD_MODELS`). It does not
-/// reach back into a chain already open: the layer is a mount decision, and a mounted chain has
-/// made it. That is why the client's options row says the change takes effect on restart rather
-/// than pretending to swap 3.3 GiB of art under a running world.
+/// Called before the `App` is built, from whoever knows the player's setting (`benilla_app`'s
+/// `hdCharacterModels` CVar, `benilla-worldview`'s `$WOW_HD_MODELS`). It does not reach back into
+/// a chain already open: natively the layer is a mount decision a chain makes as it opens, so the
+/// native options row takes effect on restart. On the web build the layer is a live mount, and
+/// [`crate::web::mount_hd_layer`] / [`crate::web::close_hd_layer`] change it under a running client
+/// (and set this switch to match).
 pub fn set_hd_character_models(on: bool) {
     HD_MODELS.store(on, Ordering::Relaxed);
 }
@@ -293,5 +366,11 @@ mod tests {
         if !turtle_available() {
             assert!(!turtle_mounted());
         }
+    }
+
+    /// The HD layer is a live mount on the web build only; natively a chain decides at its open.
+    #[test]
+    fn the_hd_layer_is_live_only_in_the_browser() {
+        assert_eq!(hd_live(), cfg!(target_arch = "wasm32"));
     }
 }
