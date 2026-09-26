@@ -1832,6 +1832,35 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// Turtle WoW's `OptionsFrame.lua` has no `OptionsFrameSliders`; without it every Graphics row
+/// reads the bounds Turtle's `Options\Options.lua` carries, which are the stock table's own.
+#[test]
+fn the_graphics_rows_read_the_same_bounds_without_the_stock_slider_table() {
+    benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    let mismatch = s
+        .eval::<String>(
+            r#"
+            local stock = OptionsFrameSliders
+            OptionsFrameSliders = nil
+            for i, _ in BENILLA_GRAPHICS_SLIDER_ROWS do
+                local a, b = stock[i], BenillaGraphicsSliderInfo(i)
+                if a.minValue ~= b.minValue or a.maxValue ~= b.maxValue
+                    or a.valueStep ~= b.valueStep then
+                    return tostring(i)
+                end
+            end
+            OptionsFrameSliders = stock
+            return ""
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        mismatch, "",
+        "row {mismatch}'s fallback differs from the stock table"
+    );
+}
+
 /// On 1.12's grid, 177 + n * 60 (`OptionsFrame.lua:26`), so 300 lands on 297; staged to Apply like
 /// every Graphics row (fork).
 #[test]

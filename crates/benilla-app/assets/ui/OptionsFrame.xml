@@ -677,6 +677,24 @@
             [6] = "RowBrightness", [9] = "RowWeatherDensity",
         }
 
+        -- A graphics row's bounds: the stock table's row. Turtle WoW's OptionsFrame.lua has no
+        -- OptionsFrameSliders; its Options\Options.lua carries the same bounds for these rows
+        -- (UI_SCALE, FARCLIP, ENVIRONMENT_DETAIL, GAMMA, WEATHER_DETAIL), read here without it.
+        function BenillaGraphicsSliderInfo(i)
+            if ( OptionsFrameSliders ) then
+                return OptionsFrameSliders[i]
+            end
+            local lo, hi = OPTIONS_FARCLIP_MIN, OPTIONS_FARCLIP_MAX
+            local bounds = {
+                { minValue = 0.64, maxValue = 1.0, valueStep = 0.01 },
+                { minValue = lo, maxValue = hi, valueStep = (hi - lo) / 10 },
+                { minValue = 0, maxValue = 2, valueStep = 1 },
+                [6] = { minValue = -0.5, maxValue = 0.5, valueStep = 0.1 },
+                [9] = { minValue = 0, maxValue = 3, valueStep = 1 },
+            }
+            return bounds[i]
+        end
+
         -- SetMinMaxValues re-clamps and fires OnValueChanged, which must not write back.
         function OptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
@@ -1936,9 +1954,9 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "uiScale", "UI Scale",
                                                     "OPTION_TOOLTIP_UI_SCALE")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[1].minValue,
-                                                    OptionsFrameSliders[1].maxValue,
-                                                    OptionsFrameSliders[1].valueStep)
+                                                local info = BenillaGraphicsSliderInfo(1)
+                                                OptionsSliderRow_Setup(self, info.minValue, info.maxValue,
+                                                    info.valueStep)
                                                 -- A live write would rescale the slider mid-drag.
                                                 self.deferred = 1
                                             </OnLoad></Scripts>
@@ -1951,9 +1969,9 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[2].minValue,
-                                                    OptionsFrameSliders[2].maxValue,
-                                                    OptionsFrameSliders[2].valueStep, "raw")
+                                                local info = BenillaGraphicsSliderInfo(2)
+                                                OptionsSliderRow_Setup(self, info.minValue, info.maxValue,
+                                                    info.valueStep, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
@@ -1965,9 +1983,9 @@
                                                 OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail",
                                                     "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
                                                 -- Stop names from the era quality ladder.
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[3].minValue,
-                                                    OptionsFrameSliders[3].maxValue,
-                                                    OptionsFrameSliders[3].valueStep, nil,
+                                                local info = BenillaGraphicsSliderInfo(3)
+                                                OptionsSliderRow_Setup(self, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1986,9 +2004,9 @@
                                                 OptionsNumFuncRow_OnLoad(self, GetGamma, SetGamma,
                                                     tostring(1 - gd), "Brightness",
                                                     "BENILLA_TOOLTIP_BRIGHTNESS")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[6].minValue,
-                                                    OptionsFrameSliders[6].maxValue,
-                                                    OptionsFrameSliders[6].valueStep, "travel")
+                                                local info = BenillaGraphicsSliderInfo(6)
+                                                OptionsSliderRow_Setup(self, info.minValue, info.maxValue,
+                                                    info.valueStep, "travel")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
@@ -2003,9 +2021,9 @@
                                                     "OPTION_TOOLTIP_WEATHER_DETAIL")
                                                 -- Our names for `0x67b870`'s spawn-rate gains
                                                 -- `{0.1, 0.33, 0.66, 1.0}` (`[0x8680ec]`).
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[9].minValue,
-                                                    OptionsFrameSliders[9].maxValue,
-                                                    OptionsFrameSliders[9].valueStep, nil,
+                                                local info = BenillaGraphicsSliderInfo(9)
+                                                OptionsSliderRow_Setup(self, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
                                                     { "Minimal", "Low", "Medium", "Full" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2202,7 +2220,7 @@
                                     <Scripts>
                                         <OnShow>
                                             for i, name in BENILLA_GRAPHICS_SLIDER_ROWS do
-                                                local info = OptionsFrameSliders[i]
+                                                local info = BenillaGraphicsSliderInfo(i)
                                                 local row = getglobal(this:GetName() .. name)
                                                 if ( info and row ) then
                                                     OptionsSliderRow_Setup(row, info.minValue, info.maxValue,
