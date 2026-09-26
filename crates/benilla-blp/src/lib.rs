@@ -172,6 +172,11 @@ struct Header<'a> {
     chain: usize,
 }
 
+/// A BLP2's level-0 `(width, height)`, off the header alone: no level is decoded.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    parse_header(bytes).map(|h| (h.width, h.height))
+}
+
 /// Parse and bounds-check the BLP2 header, palette and level table.
 fn parse_header(bytes: &[u8]) -> Result<Header<'_>> {
     if bytes.len() < HEADER_SIZE || &bytes[0..4] != b"BLP2" {

@@ -14,6 +14,7 @@
 
 mod group;
 mod inspect;
+mod overlay;
 mod plan;
 mod sidecars;
 
@@ -62,6 +63,9 @@ enum Cmd {
     /// compositor is built at `UPSCALE_FACTOR = 2`, so `scripts/upscale-hd-textures.py` has to see
     /// the BLPs. Extract, upscale in place, then `build --replace-from` the same directory.
     Extract(ExtractArgs),
+    /// Work out the Turtle WoW 1.18.1 layer: what a Turtle install's numbered patches add to or
+    /// change over the 1.12.1 corpus, as the key list `build --only` packs. See `overlay.rs`.
+    Overlay(overlay::OverlayArgs),
 }
 
 #[derive(Parser)]
@@ -127,6 +131,19 @@ struct BuildArgs {
     /// with no loose file simply comes from the archive.
     #[arg(long, value_name = "DIR")]
     replace_from: Option<PathBuf>,
+    /// Pack only the keys this list names — `overlay`'s `overlay.tsv`, which makes the container a
+    /// layer over another rather than a corpus of its own. Its listfile names only those keys.
+    #[arg(long, value_name = "LIST")]
+    only: Option<PathBuf>,
+    /// Add every loose file under this directory as a blob of its own, named by its path from the
+    /// directory (`\` for the separator) — `overlay`'s `add/`, whose merged tables no archive holds.
+    #[arg(long, value_name = "DIR")]
+    add_from: Option<PathBuf>,
+    /// Refuse a `--replace-from` texture that is not exactly twice its archive original in both
+    /// dimensions: the whole point of such a tree is the compositor's 2x, and a 1x file slipping
+    /// through renders a character with quarter-size armour and nothing to point at.
+    #[arg(long, requires = "replace_from")]
+    require_doubled: bool,
     /// Plan and report, but write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -164,6 +181,7 @@ fn main() -> Result<()> {
         Cmd::Verify(a) => verify(a),
         Cmd::Inspect(a) => inspect::inspect(a),
         Cmd::Extract(a) => extract(a),
+        Cmd::Overlay(a) => overlay::overlay(a),
         Cmd::Sidecars(a) => {
             let index =
                 Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
@@ -211,6 +229,38 @@ fn resolve(chain: &Chain) -> Vec<Blob> {
     // A HashMap drain is arbitrary; sort so the whole build is deterministic from here on.
     out.sort_unstable_by_key(|b| b.key);
     out
+}
+
+/// A resolved blob's bytes: by block index, or by name for an entry encrypted under its name
+/// (Turtle's patch archives encrypt a few), which the nameless read cannot decrypt.
+fn read_blob(
+    archives: &[benilla_mpq::Archive],
+    b: &Blob,
+    names: &HashMap<u64, String>,
+) -> Result<Vec<u8>> {
+    let archive = &archives[b.archive];
+    if archive.is_encrypted(b.block) {
+        let name = names
+            .get(&b.key)
+            .with_context(|| format!("block {} is encrypted and named in no listfile", b.block))?;
+        return archive
+            .read_file(name)
+            .map_err(|e| anyhow::anyhow!("reading {name}: {e}"));
+    }
+    archive
+        .read_block(b.block)
+        .map_err(|e| anyhow::anyhow!("reading block {} : {e}", b.block))
+}
+
+/// `--require-doubled`: a replacement texture is exactly twice its original in both dimensions.
+fn check_doubled(original: &[u8], replacement: &[u8]) -> Result<()> {
+    let dims = |b: &[u8]| benilla_blp::dimensions(b).map_err(|e| anyhow::anyhow!("{e}"));
+    let (ow, oh) = dims(original).context("the archive original is not a BLP2")?;
+    let (rw, rh) = dims(replacement).context("the replacement is not a BLP2")?;
+    if (rw, rh) != (ow * 2, oh * 2) {
+        bail!("{rw}x{rh} is not twice the original {ow}x{oh} (still 1x? run the upscale first)");
+    }
+    Ok(())
 }
 
 /// The loose path a chain name takes on disk: backslashes become separators, everything else is
@@ -312,6 +362,29 @@ fn replace_lookup(dir: &Path) -> Result<HashMap<u64, PathBuf>> {
     Ok(out)
 }
 
+/// Every file under `dir` as `(chain name, path)`: the name is its path from `dir` with `\` for the
+/// separator, the inverse of [`loose_path`]. Sorted, so the build stays deterministic.
+fn loose_names(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    fn walk(dir: &Path, rel: &mut Vec<String>, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            rel.push(entry.file_name().to_string_lossy().into_owned());
+            if path.is_dir() {
+                walk(&path, rel, out)?;
+            } else {
+                out.push((rel.join("\\"), path));
+            }
+            rel.pop();
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut Vec::new(), &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
 /// Every name any archive's `(listfile)` mentions, keyed the way the container is. Names are a
 /// grouping *hint* and a debugging aid; none of them ship in `index.bpi`.
 fn name_hints(chain: &Chain) -> HashMap<u64, String> {
@@ -332,10 +405,44 @@ fn build(a: BuildArgs) -> Result<()> {
     eprintln!("mounted {} archives", chain.archives().len());
 
     let mut blobs = resolve(&chain);
+    let mut names = name_hints(&chain);
+    if let Some(list) = &a.only {
+        let keep = overlay::read_list(list)?;
+        blobs.retain(|b| keep.contains(&b.key));
+        names.retain(|k, _| keep.contains(k));
+        if blobs.len() != keep.len() {
+            bail!(
+                "{} lists {} keys but the chain resolves {} of them",
+                list.display(),
+                keep.len(),
+                blobs.len()
+            );
+        }
+    }
+    // `--add-from`: blobs no archive holds, named by their path under the directory.
+    let mut added: HashMap<u64, PathBuf> = HashMap::new();
+    if let Some(dir) = &a.add_from {
+        for (name, path) in loose_names(dir)? {
+            let key = name_key(&name);
+            if blobs.iter().any(|b| b.key == key) {
+                bail!("--add-from {name} is already a name in the chain; add only new names");
+            }
+            let len = std::fs::metadata(&path)?.len();
+            blobs.push(Blob {
+                key,
+                archive: usize::MAX,
+                block: 0,
+                len: u32::try_from(len).context("an added file over 4 GiB")?,
+            });
+            eprintln!("--add-from: {name}");
+            names.insert(key, name);
+            added.insert(key, path);
+        }
+        blobs.sort_unstable_by_key(|b| b.key);
+    }
     if let Some(n) = a.limit {
         blobs.truncate(n);
     }
-    let names = name_hints(&chain);
     let corpus: u64 = blobs.iter().map(|b| b.len as u64).sum();
     eprintln!(
         "resolved {} entries, {:.2} GiB uncompressed, {} named ({:.3}%)",
@@ -408,6 +515,11 @@ fn build(a: BuildArgs) -> Result<()> {
             let plan_blobs = g
                 .iter()
                 .map(|b| {
+                    if let Some(path) = added.get(&b.key) {
+                        let bytes = std::fs::read(path)
+                            .with_context(|| format!("reading added {}", path.display()))?;
+                        return Ok((b.key, bytes));
+                    }
                     // The loose override first — see `--replace-from`. A read failure here is fatal
                     // rather than a silent fall back to the archive: the whole point of the flag is
                     // that these bytes ship, and a container that quietly used the un-upscaled
@@ -415,12 +527,13 @@ fn build(a: BuildArgs) -> Result<()> {
                     if let Some(path) = replacements.get(&b.key) {
                         let bytes = std::fs::read(path)
                             .with_context(|| format!("reading override {}", path.display()))?;
+                        if a.require_doubled {
+                            check_doubled(&read_blob(archives, b, &names)?, &bytes)
+                                .with_context(|| format!("override {}", path.display()))?;
+                        }
                         return Ok((b.key, bytes));
                     }
-                    let bytes = archives[b.archive]
-                        .read_block(b.block)
-                        .map_err(|e| anyhow::anyhow!("reading block {} : {e}", b.block))?;
-                    Ok((b.key, bytes))
+                    Ok((b.key, read_blob(archives, b, &names)?))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let prefer = plan::prefer_for(g, &names);

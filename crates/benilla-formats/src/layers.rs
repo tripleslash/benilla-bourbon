@@ -72,6 +72,15 @@ pub const HD_DATA_SEGMENT: &str = "data-hd";
 /// each other by `tests/web_names.rs`.
 pub const HD_PACK_KEY_BASE: u32 = 1 << 30;
 
+/// The name prefix under which the Turtle layer carries a table **merged with the HD layer's**.
+///
+/// Mounted above the Turtle layer, the HD layer's copy of a table answers for every row, so a row
+/// only Turtle has disappears. Where the HD copy lacks Turtle rows (`HelmetGeosetVisData`: 20 of
+/// Turtle's 40 ids), `benilla-pack overlay --hd` writes the HD rows plus the Turtle-only rows under
+/// `<prefix><name>`, and the web chain serves that alias for `<name>` only while both layers are
+/// mounted. Neither layer's own copy changes, so each still answers alone.
+pub const TURTLE_HD_ALIAS_PREFIX: &str = "benilla-turtle-hd\\";
+
 /// The live answer. Off until something says otherwise — see the module header.
 static HD_MODELS: AtomicBool = AtomicBool::new(false);
 

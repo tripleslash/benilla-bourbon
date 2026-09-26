@@ -111,6 +111,26 @@ const EQUIP_TEX_DIRS: [&str; 8] = [
     "FootTexture",
 ];
 
+/// Whether `name` is art the body composite reads that is still at the reference's own 1× scale,
+/// and so must be resampled by [`UPSCALE_FACTOR`] before this atlas can take it: the compositor
+/// copies texel for texel into tiles authored at 2×. `width` is the texture's level-0 width.
+///
+/// A `Character\` skin or overlay is 1× up to the 256² partition's width; an `Item\TextureComponents`
+/// region or a guild emblem half up to the 128-wide tile. `Character\` also holds model-bound art
+/// (hair), which a resample leaves correct, only larger.
+pub fn composite_input_at_1x(name: &str, width: u32) -> bool {
+    let lower = name.replace('/', "\\").to_ascii_lowercase();
+    if !lower.ends_with(".blp") {
+        return false;
+    }
+    if lower.starts_with("character\\") {
+        return width <= 256;
+    }
+    let tile_art = lower.starts_with("item\\texturecomponents\\")
+        || lower.starts_with(&format!("{}\\", GUILD_EMBLEM_DIR.to_ascii_lowercase()));
+    tile_art && width <= 128
+}
+
 /// The `[0x803bf8]` table: per bodyslot 2–9 and layer 0–7, the default cell of the slot's art,
 /// `-1` for never; two layer choosers (`[0xb42424 + layer*4]`) overrule it ([`equip_column`]).
 /// A row holds one record per cell, blitted by ascending cell.
@@ -759,6 +779,37 @@ mod tests {
     }
     use super::*;
     use crate::read_texture_mip_chain;
+
+    /// A composite input is 1× up to its own tile's reference width — the skin partition's 256, an
+    /// equipment region's or emblem half's 128 — and nothing outside those trees is one.
+    #[test]
+    fn composite_inputs_are_1x_up_to_their_reference_width() {
+        assert!(composite_input_at_1x(
+            "Character\\Goblin\\Male\\GoblinMaleSkin00_00.blp",
+            256
+        ));
+        assert!(!composite_input_at_1x(
+            "Character\\Human\\Male\\HumanMaleSkin00_00.blp",
+            512
+        ));
+        assert!(composite_input_at_1x(
+            "Item\\TextureComponents\\TorsoUpperTexture\\Turtle_Robe_TU_U.blp",
+            128
+        ));
+        assert!(!composite_input_at_1x(
+            "item/texturecomponents/TorsoUpperTexture/Robe_TU_U.BLP",
+            256
+        ));
+        assert!(composite_input_at_1x(
+            "Textures\\GuildEmblems\\Emblem_00_15_TU_U.blp",
+            128
+        ));
+        assert!(!composite_input_at_1x("Textures\\Minimap\\map01.blp", 128));
+        assert!(!composite_input_at_1x(
+            "Character\\Human\\Male\\HumanMale.m2",
+            0
+        ));
+    }
 
     /// The value is the shipped Human male skinColor 3 row.
     #[test]
