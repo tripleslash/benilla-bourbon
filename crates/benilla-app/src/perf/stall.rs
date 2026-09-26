@@ -9,8 +9,9 @@
 //! samples anyway.
 //!
 //! After a teardown sample, an [`EXIT_KILL_MS`] backstop `libc::_exit`s the wedged process with
-//! the code [`AppExit`] asked for; `_exit` skips the atexit teardown the hang may own. The
-//! watchdog and its backstop always run; the sample file is written only where
+//! the code [`AppExit`] asked for; `_exit` skips the atexit teardown the hang may own. Natively
+//! the watchdog and its backstop always run (on wasm32 neither does: a stalled page just freezes
+//! the tab); the sample file is written only where
 //! `benilla-config/` exists, never under `$WOW_CAPTURE`.
 //!
 //! Two injectors test it end to end: `WOW_STALL_INJECT=<at_secs>:<ms>` sleeps the main thread

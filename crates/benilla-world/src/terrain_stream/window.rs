@@ -141,7 +141,8 @@ mod tests {
     use super::*;
     use benilla_formats::tile_to_world;
 
-    /// 350 is the registered default; at 177 the outer window sits on its 8-chunk floor.
+    /// 350 is the reference's registered default (this fork ships 1000); at 177 the outer window
+    /// sits on its 8-chunk floor.
     #[test]
     fn the_radii_are_the_references() {
         assert_eq!(inner_radius(777.0), 24);

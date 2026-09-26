@@ -1,16 +1,19 @@
-//! The background networking threads, the socket half of the net bridge.
+//! The network sequencer, the socket half of the net bridge. Natively it runs on a read thread
+//! (every await a blocking socket read) beside one long-lived write thread; on wasm32 it is one
+//! `spawn_local` task and `crate::net`'s `web_writer_pump` drains the writes.
 //!
-//! [`spawn_net`]'s read thread parks pre-logon for a [`LoginRequest`], walks logon, realm and
+//! [`spawn_net`]'s sequencer parks pre-logon for a [`LoginRequest`], walks logon, realm and
 //! world handshake, then parks at character select until the app picks a guid. The pick sends
 //! `CMSG_PLAYER_LOGIN` and announces the connection without waiting for the verdict, as the
 //! reference's world is already loading when it sends the login (`0x46c272`), so the destination's
 //! tiles stream a round trip early; a later `SMSG_CHARACTER_LOGIN_FAILED` ends the cycle like a
 //! logout ([`Cycle::LoginRefused`]). A stream failure emits
 //! [`SessionEvent::Disconnected`] with [`SessionEnd::Lost`] and re-parks. All policy lives in
-//! [`crate::login`] and [`crate::char_select`]; this thread only sequences and never sleeps.
+//! [`crate::login`] and [`crate::char_select`]; the sequencer only sequences and never sleeps.
 //!
-//! One long-lived write thread drains [`ClientCommand`](super::ClientCommand)s; each connection
-//! hands it the fresh [`WorldWriter`] over a swap channel, so there is only ever one writer.
+//! Natively one long-lived write thread drains [`ClientCommand`](super::ClientCommand)s; each
+//! connection hands it the fresh [`WorldWriter`] over a swap channel, so there is only ever one
+//! writer.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -233,7 +236,8 @@ pub(super) struct NetHandles {
     pub(super) commands_rx: Receiver<ClientCommand>,
 }
 
-/// Spawns the read thread with its park and cycle loop, and the one long-lived write thread.
+/// Spawns the sequencer with its park and cycle loop: natively on a read thread beside the one
+/// long-lived write thread, on wasm32 as a `spawn_local` task.
 pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();

@@ -1,6 +1,7 @@
-//! Leaving: the game menu's Logout and Exit Game, from the request to the countdown dialog and the
-//! process exit. The server owns the clock: vmangos answers `CMSG_LOGOUT_REQUEST` with
-//! `SMSG_LOGOUT_RESPONSE { u32 reason, u8 instant }` (`MiscHandler.cpp:284`):
+//! Leaving: the game menu's Logout and `Quit()` (`/quit`; this fork has no Exit Game rung), from
+//! the request to the countdown dialog and the process exit. The server owns the clock: vmangos
+//! answers `CMSG_LOGOUT_REQUEST` with `SMSG_LOGOUT_RESPONSE { u32 reason, u8 instant }`
+//! (`MiscHandler.cpp:284`):
 //!
 //! - `reason != 0`: refused (1 in combat, 3 jumping or falling, 2 GM-frozen).
 //! - `instant == 1`: out at once (resting, on a taxi, or a GM-level account), with no dialog.
@@ -176,7 +177,7 @@ fn drain_logout(
     }
 }
 
-/// `SMSG_LOGOUT_COMPLETE` returns to character select, or ends the process for Exit Game.
+/// `SMSG_LOGOUT_COMPLETE` returns to character select, or ends the process for a `Quit()`.
 fn exit_on_logout_complete(
     mut logged_out: MessageReader<LoggedOutMessage>,
     mut logout: ResMut<LogoutState>,

@@ -1,7 +1,8 @@
-//! The network-to-ECS bridge. A read thread owns the blocking [`WorldSession`] and streams
-//! [`SessionEvent`]s; a write thread drains [`ClientCommand`]s. [`apply_net_updates`] turns the
-//! events into real entities keyed by [`Guid`] through [`GuidIndex`]; movement paths become
-//! [`Spline`]s, the server clock [`ServerTime`], one-shot directives Bevy [`Message`]s.
+//! The network-to-ECS bridge. Natively a read thread owns the [`WorldSession`] and streams
+//! [`SessionEvent`]s and a write thread drains [`ClientCommand`]s; on wasm32 the session is one
+//! `spawn_local` task and `web_writer_pump` drains the commands each frame. [`apply_net_updates`]
+//! turns the events into real entities keyed by [`Guid`] through [`GuidIndex`]; movement paths
+//! become [`Spline`]s, the server clock [`ServerTime`], one-shot directives Bevy [`Message`]s.
 //!
 //! It runs in [`WorldStage::Net`], before `Input`, so a server teleport snaps, streams and covers
 //! in one frame. Coordinates cross from WoW into Bevy space here (`wow_to_bevy`).

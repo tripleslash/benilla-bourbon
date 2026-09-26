@@ -660,7 +660,8 @@ pub fn forearm_dressed(equipment: &[Option<&ItemDisplay>; 8]) -> bool {
         .any(|b| b.layer == LAYER_ARM_LOWER && (1..=6).contains(&b.column))
 }
 
-/// A layer's atlas rect `(x, y, w, h)` in the 256² body atlas (`0x475c50`).
+/// A layer's atlas rect `(x, y, w, h)` in the body atlas: `0x475c50`'s 256² partition scaled by
+/// `UPSCALE_FACTOR`.
 pub fn equip_tile(layer: usize) -> Option<(u32, u32, u32, u32)> {
     EQUIP_TILES.get(layer).copied()
 }

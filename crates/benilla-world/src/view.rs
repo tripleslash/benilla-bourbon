@@ -259,7 +259,7 @@ impl ViewDistance {
 }
 
 impl Default for ViewDistance {
-    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 350 default, read once at
+    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 1000 default, read once at
     /// startup, so a headless capture can reproduce a player's view distance.
     fn default() -> Self {
         // fork: modern lighting — `launch_env`, so the browser world view reaches it (`?farclip=`).

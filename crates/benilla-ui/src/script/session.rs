@@ -1,4 +1,5 @@
-//! The session verbs: the game menu's Logout and Exit Game, their dialogs' answers, `ReloadUI`
+//! The session verbs: Logout and `Quit()` (the fork's menu has no Exit Game rung; `/quit` calls
+//! it), their dialogs' answers, `ReloadUI`
 //! and the cinematic pair. Each queues a [`SessionRequest`] the app turns into a packet or an
 //! exit; the server decides whether a logout is instant or a 20-second countdown.
 

@@ -308,8 +308,6 @@ fn seed_launch_env() {
     );
 }
 
-/// The world viewer's entry point, the engine with no game attached, called by the
-/// `benilla-worldview` shim.
 /// The world viewer — `benilla-worldview`'s engine-only run, reachable from the browser too
 /// (`?worldview=1`, fork-owned). The native shim calls `benilla_world::worldview::run` directly;
 /// this wrapper adds what only the client crate can supply on the web: the worker pool, the query

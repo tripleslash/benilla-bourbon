@@ -541,7 +541,8 @@ mod tests {
         );
     }
 
-    /// The re-dress fires once per change: the composite behind it reads BLPs synchronously.
+    /// The re-dress fires once per change: each one starts a body composite, which reads and
+    /// blends BLPs.
     #[test]
     fn a_gear_change_restamps_what_the_visual_is_dressed_with() {
         let mut s = stand(&[0], &[0], None);

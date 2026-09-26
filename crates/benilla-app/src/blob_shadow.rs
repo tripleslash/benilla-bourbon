@@ -23,7 +23,9 @@
 //!   (`0x707aea`), exactly like `UnitRenderAlpha`. Unlit, no fog, no depth write; the texture is
 //!   `Rgba8Unorm`, so the multiply runs on raw bytes as the reference's does.
 //! - Registration: units, players and corpses cast one; game objects and dynamic objects never do
-//!   (`0x670e94`, `0x613e10`). The reference's `shadowLOD` toggle is not built: always on.
+//!   (`0x670e94`, `0x613e10`). The reference's `shadowLOD` toggle is not built. Deviation (this
+//!   fork): the lane hides under `worldShadows 1` or a modern-lighting frame, where the shadow map
+//!   owns unit shadows.
 //! - Deviation: the shadow is gated on `InheritedVisibility`, though the reference draws one under
 //!   an undrawn body (`0x48161d`), because benilla's exterior-scene election hides units the
 //!   reference never loads, and their shadows would stay on the floor below.
