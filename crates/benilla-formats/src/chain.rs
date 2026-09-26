@@ -90,34 +90,12 @@ pub struct Chain {
     hd: Option<crate::webpack::PackStore>,
 }
 
-/// Which container answers one read, owned so it outlives the lock the live Turtle slot sits behind
-/// ([`crate::layers::turtle`]).
+/// Whether `name` is a DBC table, by its suffix and without allocating: the one kind of name the
+/// Turtle layer can carry a merge of (see [`crate::layers::TURTLE_HD_ALIAS_PREFIX`]).
 #[cfg(target_arch = "wasm32")]
-enum Answer {
-    Base,
-    Hd,
-    Turtle(std::sync::Arc<crate::webpack::PackStore>),
-    /// The Turtle layer's merge of the table with the HD layer's, under its alias name.
-    TurtleHdAlias(std::sync::Arc<crate::webpack::PackStore>, String),
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Answer {
-    fn store<'a>(&'a self, chain: &'a Chain) -> &'a crate::webpack::PackStore {
-        match self {
-            Answer::Base => &chain.store,
-            Answer::Hd => chain.hd.as_ref().expect("an HD answer has an HD layer"),
-            Answer::Turtle(s) | Answer::TurtleHdAlias(s, _) => s,
-        }
-    }
-
-    /// The name to read: the alias for a merged table, the asked name otherwise.
-    fn name<'a>(&'a self, asked: &'a str) -> &'a str {
-        match self {
-            Answer::TurtleHdAlias(_, alias) => alias,
-            _ => asked,
-        }
-    }
+fn is_table(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".dbc")
 }
 
 /// `patch-?.MPQ` as the reference's `FindFirstFileW` glob matches it (template `0x82edbc`, wrapper
@@ -374,12 +352,18 @@ impl Chain {
     /// target**, in one place so no method below restates it.
     ///
     /// `contains` on a `PackStore` is a binary search over an index already in memory, so asking the
-    /// overlays first costs ~17 probes each and no I/O. Only a `.dbc` is asked for an alias: the
-    /// packer merges tables and nothing else.
-    fn answer(&self, name: &str) -> Answer {
-        let turtle = crate::layers::turtle();
-        let alias = match (&self.hd, &turtle) {
-            (Some(_), Some(t)) if name.to_ascii_lowercase().ends_with(".dbc") => {
+    /// overlays first costs ~17 probes each and no I/O. On a 1.12.1 realm the Turtle layer costs one
+    /// relaxed atomic load here ([`crate::layers::turtle`]), and only a `.dbc` read with both layers
+    /// mounted builds an alias name.
+    ///
+    /// `turtle` is the caller's handle on the mounted layer, so the answer can borrow it.
+    fn pick<'a>(
+        &'a self,
+        name: &str,
+        turtle: Option<&'a crate::webpack::PackStore>,
+    ) -> (&'a crate::webpack::PackStore, Option<String>) {
+        let alias = match (&self.hd, turtle) {
+            (Some(_), Some(t)) if is_table(name) => {
                 let alias = crate::layers::turtle_hd_alias(name);
                 t.contains(&alias).then_some(alias)
             }
@@ -387,26 +371,26 @@ impl Chain {
         };
         let layer = crate::layers::pick_layer(
             self.hd.as_ref().map(|hd| hd.contains(name)),
-            turtle.as_ref().map(|t| t.contains(name)),
+            turtle.map(|t| t.contains(name)),
             alias.is_some(),
         );
         // The layer halves of the boot trace, so a `?boottrace=1` capture can say whether a layer is
         // being read at all and which names reach it (`web::trace_hd`); no-ops unless the page armed
         // the arrays.
-        match (layer, turtle, alias) {
-            (crate::layers::Layer::TurtleHdAlias, Some(t), Some(alias)) => {
+        match (layer, turtle, &self.hd) {
+            (crate::layers::Layer::TurtleHdAlias, Some(t), _) => {
                 crate::web::trace_turtle(name);
-                Answer::TurtleHdAlias(t, alias)
+                (t, alias)
             }
-            (crate::layers::Layer::Hd, _, _) => {
+            (crate::layers::Layer::Hd, _, Some(hd)) => {
                 crate::web::trace_hd(name);
-                Answer::Hd
+                (hd, None)
             }
             (crate::layers::Layer::Turtle, Some(t), _) => {
                 crate::web::trace_turtle(name);
-                Answer::Turtle(t)
+                (t, None)
             }
-            _ => Answer::Base,
+            _ => (&self.store, None),
         }
     }
 
@@ -444,8 +428,9 @@ impl Chain {
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-        let answer = self.answer(name);
-        answer.store(self).read_sync(answer.name(name))
+        let turtle = crate::layers::turtle();
+        let (store, alias) = self.pick(name, turtle.as_deref());
+        store.read_sync(alias.as_deref().unwrap_or(name))
     }
 
     /// Read `name` **without ever blocking the frame** — the lane the UI and the sound engine take.
@@ -458,8 +443,9 @@ impl Chain {
         // included — the array is deduplicated by hand and first push is still first need, so a
         // name that took three frames to arrive appears exactly where it was first wanted.
         crate::web::trace(name);
-        let answer = self.answer(name);
-        answer.store(self).try_read_sync(answer.name(name))
+        let turtle = crate::layers::turtle();
+        let (store, alias) = self.pick(name, turtle.as_deref());
+        store.try_read_sync(alias.as_deref().unwrap_or(name))
     }
 
     /// Would [`Self::try_read`] answer without deferring? Starts the warm if not — see
@@ -469,15 +455,17 @@ impl Chain {
     /// For a caller whose work reads several blobs and is only correct once it can read all of them:
     /// it asks first, does nothing while the answer is no, and the packs warm in the meantime.
     pub fn ready(&self, name: &str) -> bool {
-        let answer = self.answer(name);
-        answer.store(self).is_ready(answer.name(name))
+        let turtle = crate::layers::turtle();
+        let (store, alias) = self.pick(name, turtle.as_deref());
+        store.is_ready(alias.as_deref().unwrap_or(name))
     }
 
     /// Warm the pack `name` lives in, and return immediately — see
     /// [`crate::webpack::PackStore::prefetch`]. Idempotent and cheap enough to call every frame.
     pub fn prefetch(&self, name: &str) {
-        let answer = self.answer(name);
-        answer.store(self).prefetch(answer.name(name));
+        let turtle = crate::layers::turtle();
+        let (store, alias) = self.pick(name, turtle.as_deref());
+        store.prefetch(alias.as_deref().unwrap_or(name));
     }
 
     /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`
@@ -490,8 +478,9 @@ impl Chain {
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name);
-        let answer = self.answer(name);
-        answer.store(self).read_async(answer.name(name)).await
+        let turtle = crate::layers::turtle();
+        let (store, alias) = self.pick(name, turtle.as_deref());
+        store.read_async(alias.as_deref().unwrap_or(name)).await
     }
 
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.

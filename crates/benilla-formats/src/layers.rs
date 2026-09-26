@@ -148,6 +148,7 @@ pub const fn turtle_available() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 mod live {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
 
     use crate::webpack::PackStore;
@@ -155,21 +156,35 @@ mod live {
     /// The mounted Turtle layer, shared by every chain of the process (the `AssetReader`'s, the
     /// world store's, the UI's): one live mount, not a parameter three crates would have to thread.
     static TURTLE: RwLock<Option<Arc<PackStore>>> = RwLock::new(None);
+    /// Whether [`TURTLE`] holds a layer: the read path's fast path. Every chain read asks, so on a
+    /// 1.12.1 realm the whole cost of the layer is this one relaxed load — the lock is never taken.
+    static MOUNTED: AtomicBool = AtomicBool::new(false);
 
     pub fn mount_turtle(store: PackStore) {
         *TURTLE.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
-        super::DATA_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        MOUNTED.store(true, Ordering::Release);
+        super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn unmount_turtle() {
+        MOUNTED.store(false, Ordering::Release);
         let was = TURTLE.write().unwrap_or_else(|e| e.into_inner()).take();
         if was.is_some() {
-            super::DATA_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            super::DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
         }
     }
 
+    /// The mounted layer, as a handle a read can keep past the lock — the lock is never held while
+    /// a read waits on the network, which on the page's own thread would be a wait it cannot make.
     pub fn turtle() -> Option<Arc<PackStore>> {
+        if !MOUNTED.load(Ordering::Relaxed) {
+            return None;
+        }
         TURTLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn mounted() -> bool {
+        MOUNTED.load(Ordering::Relaxed)
     }
 }
 
@@ -180,7 +195,7 @@ pub use live::{mount_turtle, turtle, unmount_turtle};
 pub fn turtle_mounted() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        live::turtle().is_some()
+        live::mounted()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
