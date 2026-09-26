@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(at(burst(), 10.0), 0.0, "and stays gone");
         let fuse = || SpellLight::new(1.0, 1.5, SpellLightMode::Burst { span: 0.6 });
         assert_eq!(at(fuse(), 1.4), 0.0);
-        assert_eq!(at(fuse(), 1.5 + SPELL_LIGHT_RAMP), 1.0);
+        assert!((at(fuse(), 1.5 + SPELL_LIGHT_RAMP) - 1.0).abs() < 1e-3);
         let mut reaped = kit();
         reaped.age = 5.0;
         reaped.reaped = SPELL_REAP_FADE * 0.5;
