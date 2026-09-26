@@ -60,6 +60,14 @@ type SpawnTables<'w> = (
     Option<ResMut<'w, crate::static_gx::StaticGx>>,
 );
 
+/// Whether `h`'s load has failed for good: no retry will bring it.
+fn load_failed<A: Asset>(asset_server: &AssetServer, h: &Handle<A>) -> bool {
+    matches!(
+        asset_server.load_state(h),
+        bevy::asset::LoadState::Failed(_)
+    )
+}
+
 pub(super) fn spawn_loaded_placements(
     mut commands: Commands,
     placements: ResMut<Placements>,
@@ -97,6 +105,10 @@ pub(super) fn spawn_loaded_placements(
         usize::MAX
     };
     let mut spawned_n = 0usize;
+    // Under Turtle WoW only, a model whose load failed spawns nothing and counts as up: no retry
+    // brings it, and a placement left pending holds its zone's loading cover forever. A 1.12.1
+    // realm waits as before. Read once per run, and only while spawns are pending.
+    let turtle = benilla_formats::layers::turtle_mounted();
     // The anim clock origin: each instance's phase is its spawn time, as in the reference.
     let now = time.elapsed_secs();
     let light = &shared_light.0;
@@ -117,6 +129,10 @@ pub(super) fn spawn_loaded_placements(
             let entities = match &p.model {
                 ModelHandle::M2(h) => {
                     let Some(m) = m2s.get(h) else {
+                        if turtle && load_failed(&asset_server, h) {
+                            p.spawned = true;
+                            *pending_spawns -= 1;
+                        }
                         continue; // model still loading (or missing): try next frame
                     };
                     let key = ModelKey::from(h);
@@ -273,6 +289,10 @@ pub(super) fn spawn_loaded_placements(
                 }
                 ModelHandle::Wmo(h) => {
                     let Some(m) = wmos.get(h) else {
+                        if turtle && load_failed(&asset_server, h) {
+                            p.spawned = true;
+                            *pending_spawns -= 1;
+                        }
                         continue;
                     };
                     // Static forms only: WMO group geometry never skins.
@@ -534,6 +554,10 @@ pub(super) fn spawn_loaded_placements(
                 continue;
             }
             let Some(m) = m2s.get(&d.handle) else {
+                if turtle && load_failed(&asset_server, &d.handle) {
+                    d.spawned = true;
+                    *pending_spawns -= 1;
+                }
                 continue; // this prop's M2 still loading
             };
             let key = ModelKey::from(&d.handle);

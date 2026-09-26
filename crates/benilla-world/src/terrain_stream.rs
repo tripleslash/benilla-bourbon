@@ -107,6 +107,8 @@ pub struct TerrainStreamer {
     window: Option<StreamWindow>,
     /// The off-grid focus tile last warned about, so the warning fires once per tile.
     off_grid_reported: Option<(i32, i32)>,
+    /// The map id last warned about for having no `Map.dbc` directory, so it warns once per map.
+    unknown_map: Option<u32>,
 }
 
 /// The map-global WMO's placement id: a WMO-only map has no ADT uniqueIds to collide with, and
@@ -582,6 +584,41 @@ fn stream_terrain(
     let placements = placements.into_inner();
     let map_id = focus.map(current_map.map(|m| m.0));
     let Some(dir) = map_catalog.0.directory(map_id).map(str::to_string) else {
+        // Under Turtle WoW only, a map its tables do not name has no world to stream, and the
+        // loading cover must not wait on one: the last map is dropped and the focus published
+        // resident, the map-edge law (ground that is not there counts as there). A 1.12.1 realm
+        // idles here as before. The flavor is read on this path only.
+        if benilla_formats::layers::turtle_mounted() {
+            if state.unknown_map != Some(map_id) {
+                warn!("terrain: map {map_id} has no Map.dbc directory — nothing to stream");
+                state.unknown_map = Some(map_id);
+            }
+            if state.map_dir.is_some() || !state.tiles.is_empty() {
+                drop_streamed_world(
+                    &mut commands,
+                    &mut state,
+                    placements,
+                    &mut welds,
+                    &mut static_merge,
+                    staticgx.as_deref_mut(),
+                    &mut activity,
+                );
+                state.map_dir = None;
+            }
+            // This map's own focus tile, as the publish below computes it: the settle release
+            // keys on it.
+            let center = focus.resolve(camera.single().ok().map(|c| c.translation));
+            let tile = StreamWindow::at(view.farclip, center[0], center[1]).focus_tile();
+            if let Some(p) = load_progress.as_mut() {
+                p.focus_tile = Some(tile);
+                p.total = 1;
+                p.ready = 1;
+                p.focus_resident = true;
+                p.scene_ready = true;
+                p.placements_pending = 0;
+                p.complete = true;
+            }
+        }
         return;
     };
 
