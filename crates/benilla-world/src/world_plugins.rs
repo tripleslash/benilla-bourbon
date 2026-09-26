@@ -188,10 +188,14 @@ impl Plugin for WorldFoundation {
         }
         // `WOW_UPLOAD_BUDGET=<MB>`: cap the per-frame GPU upload of meshes and images (bevy's
         // `RenderAssetBytesPerFrame`, unlimited by default), a measurement lever.
-        if let Some(mb) = std::env::var("WOW_UPLOAD_BUDGET")
+        // In the browser the render world prepares on the thread that draws, so a zone line whose
+        // textures and meshes all land together would upload them inside one frame; there the
+        // default is `WEB_UPLOAD_BUDGET_MB`. A single asset over the cap still uploads whole.
+        let upload_mb = std::env::var("WOW_UPLOAD_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-        {
+            .or(WEB_UPLOAD_BUDGET_MB);
+        if let Some(mb) = upload_mb {
             app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
                 mb * 1024 * 1024,
             ));
@@ -205,3 +209,11 @@ impl Plugin for WorldFoundation {
         }
     }
 }
+
+/// The browser's default per-frame GPU upload cap in MB (native stays unlimited unless
+/// `WOW_UPLOAD_BUDGET` asks). At 60 fps it is ~1 GB/s: a zone's art arrives over a few frames
+/// instead of one.
+#[cfg(target_arch = "wasm32")]
+const WEB_UPLOAD_BUDGET_MB: Option<usize> = Some(16);
+#[cfg(not(target_arch = "wasm32"))]
+const WEB_UPLOAD_BUDGET_MB: Option<usize> = None;

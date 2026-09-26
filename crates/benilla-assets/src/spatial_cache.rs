@@ -65,6 +65,11 @@ impl<K: Eq + Hash, V> SpatialCache<K, V> {
         Some(slot.0.clone())
     }
 
+    /// Whether `key` is cached, without counting a use.
+    pub fn contains(&self, key: &K) -> bool {
+        self.map.contains_key(key)
+    }
+
     /// Install a freshly-built value, counted as a use.
     pub fn insert(&mut self, key: K, value: V) {
         self.map.insert(key, (value, None));

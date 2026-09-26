@@ -490,6 +490,20 @@ pub(crate) fn stream_chunk_clutter(
         let Ok((_, mut cc)) = chunks.get_mut(ent) else {
             continue;
         };
+        // A model not yet resident would be read with a synchronous fetch on the browser's frame
+        // thread; `m2_ready` starts its pack's warm and the chunk builds on a later frame.
+        let ready = {
+            let chain = assets.chain.lock_recover();
+            cc.models
+                .iter()
+                .filter(|(path, _)| !geometry.0.contains(path))
+                .fold(true, |all, (path, _)| {
+                    benilla_formats::m2_ready(&chain, path) && all
+                })
+        };
+        if !ready {
+            continue;
+        }
         if d2 < visible_d2 {
             late += 1;
             late_nearest = late_nearest.min(d2.sqrt());

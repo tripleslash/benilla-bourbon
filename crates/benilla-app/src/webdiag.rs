@@ -468,6 +468,21 @@ fn report(world: &mut World) {
             bytes as f64 / 1024.0
         ));
     }
+    // Blocking chain reads: a synchronous XHR plus a pack decode on this thread, each one. Named,
+    // because the caller is what needs moving to `Chain::try_read` (see
+    // `benilla_formats::webpack::sync_meter`).
+    let blocking = blocking_reads();
+    if !blocking.is_empty() {
+        let total: f32 = blocking.iter().map(|b| b.2).sum();
+        let reads: u32 = blocking.iter().map(|b| b.1).sum();
+        line.push_str(&format!(
+            "
+[diag]   blocking chain reads: {reads}x {total:.1}ms —"
+        ));
+        for (name, calls, ms) in blocking.iter().take(TOP_BLOCKING) {
+            line.push_str(&format!(" {name} {calls}x {ms:.1}ms;"));
+        }
+    }
     out(&line);
 
     d.slow = 0;
@@ -744,6 +759,20 @@ fn signed_mb(bytes: i64) -> String {
     } else {
         format!("({:+.0}MB)", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+/// How many blocking chain reads a report names.
+const TOP_BLOCKING: usize = 6;
+
+/// This window's blocking chain reads: `(name, reads, ms)`, costliest first.
+#[cfg(target_arch = "wasm32")]
+fn blocking_reads() -> Vec<(String, u32, f32)> {
+    benilla_formats::webpack::sync_meter::take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn blocking_reads() -> Vec<(String, u32, f32)> {
+    Vec::new()
 }
 
 /// This window's `localStorage` writes: `(file, writes, bytes, ms)`, costliest first.

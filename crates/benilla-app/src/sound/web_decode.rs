@@ -110,8 +110,8 @@ async fn decode_in_browser(bytes: &[u8]) -> Result<StaticSoundData, String> {
         .dyn_into()
         .map_err(|_| "decodeAudioData did not resolve to an AudioBuffer".to_string())?;
     // The one part of this that IS on the main thread: copying the browser's planar channels into
-    // kira's interleaved frames — a memcpy where the decode it replaces was tens of milliseconds.
-    frames_from(&audio)
+    // kira's interleaved frames, sliced across tasks so a long track does not take one frame.
+    frames_from(&audio).await
 }
 
 /// The one context this module decodes on, built on first use and kept.
@@ -138,31 +138,72 @@ fn decode_context() -> Result<web_sys::OfflineAudioContext, String> {
     })
 }
 
-/// An `AudioBuffer`'s planar channels into kira's interleaved [`Frame`]s.
+/// Frames copied per slice of [`frames_from`]: ~6 s of audio, about a millisecond of copying.
+const COPY_SLICE: usize = 1 << 18;
+
+/// An `AudioBuffer`'s planar channels into kira's interleaved [`Frame`]s, **a slice at a time**.
+///
+/// A zone track is minutes long, so the whole copy is tens of MB of `f32`s. That landed in one
+/// frame and froze the tab at the zone line. So the copy reads bounded ranges and yields to the
+/// browser between them, and the result is filled in place (one allocation, no final copy).
 ///
 /// Mono is duplicated to both sides rather than left half-silent (`Frame::from_mono`, the same
 /// answer kira's own decoder gives a mono file); anything above two channels takes the first two,
 /// which is every file in the corpus and all the mixer can place anyway.
-fn frames_from(audio: &web_sys::AudioBuffer) -> Result<StaticSoundData, String> {
-    let left = audio.get_channel_data(0).map_err(js_err)?;
-    let frames: Arc<[Frame]> = if audio.number_of_channels() > 1 {
-        let right = audio.get_channel_data(1).map_err(js_err)?;
-        left.iter()
-            .zip(right.iter())
-            .map(|(l, r)| Frame {
-                left: *l,
-                right: *r,
-            })
-            .collect()
-    } else {
-        left.iter().map(|s| Frame::from_mono(*s)).collect()
-    };
+async fn frames_from(audio: &web_sys::AudioBuffer) -> Result<StaticSoundData, String> {
+    let len = audio.length() as usize;
+    let stereo = audio.number_of_channels() > 1;
+    let mut frames: Arc<[std::mem::MaybeUninit<Frame>]> = Arc::new_uninit_slice(len);
+    let slice = COPY_SLICE.min(len.max(1));
+    let (mut left, mut right) = (vec![0.0f32; slice], vec![0.0f32; slice]);
+    let mut at = 0;
+    while at < len {
+        let n = slice.min(len - at);
+        audio
+            .copy_from_channel_with_start_in_channel(&mut left[..n], 0, at as u32)
+            .map_err(js_err)?;
+        if stereo {
+            audio
+                .copy_from_channel_with_start_in_channel(&mut right[..n], 1, at as u32)
+                .map_err(js_err)?;
+        }
+        let dst = Arc::get_mut(&mut frames).expect("the only owner until it is returned");
+        for i in 0..n {
+            dst[at + i].write(if stereo {
+                Frame {
+                    left: left[i],
+                    right: right[i],
+                }
+            } else {
+                Frame::from_mono(left[i])
+            });
+        }
+        at += n;
+        if at < len {
+            next_task().await;
+        }
+    }
+    // SAFETY: the loop above wrote every index in `0..len`.
+    let frames = unsafe { frames.assume_init() };
     Ok(StaticSoundData {
         sample_rate: audio.sample_rate() as u32,
         frames,
         settings: Default::default(),
         slice: None,
     })
+}
+
+/// Resolve on the browser's next task (`setTimeout(0)`), so a paint can happen in between; a
+/// resolved promise would only yield to the microtask queue, which drains before the frame.
+async fn next_task() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let queued =
+            web_sys::window().is_some_and(|w| w.set_timeout_with_callback(&resolve).is_ok());
+        if !queued {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 fn js_err(e: wasm_bindgen::JsValue) -> String {

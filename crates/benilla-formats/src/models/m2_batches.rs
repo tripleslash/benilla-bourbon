@@ -187,6 +187,12 @@ pub fn load_m2_mesh(chain: &mut Chain, raw_path: &str) -> Result<Vec<RenderSubme
     load_m2_mesh_skinned(chain, raw_path, &[])
 }
 
+/// Would [`load_m2_mesh`] read `raw_path` without blocking? Starts the pack warm if not. Always
+/// true on native; in the browser a `false` read would be a synchronous XHR on the frame thread.
+pub fn m2_ready(chain: &Chain, raw_path: &str) -> bool {
+    chain.ready(&model_path(raw_path))
+}
+
 /// [`load_m2_mesh`] with `Monster1/2/3` filled from `skins` (`CreatureDisplayInfo` variations).
 pub fn load_m2_mesh_skinned(
     chain: &mut Chain,

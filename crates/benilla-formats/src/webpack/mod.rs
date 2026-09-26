@@ -185,6 +185,15 @@ impl PackStore {
         if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
             return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
         }
+        // Metered: from here on this read is a synchronous XHR on the thread that draws.
+        let t0 = js_sys::Date::now();
+        let out = self.fetch_sync(name, at, &meta);
+        sync_meter::record(name, (js_sys::Date::now() - t0) as f32);
+        out
+    }
+
+    /// [`Self::read_sync`]'s blocking half: the pack is not resident.
+    fn fetch_sync(&self, name: &str, at: Located, meta: &PackMeta) -> Result<Vec<u8>> {
         let url = self.pack_url(at.pack_id);
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
             let (start, end) = at.wire_range();
@@ -197,11 +206,11 @@ impl PackStore {
             // The body is already paid for, so it is absorbed rather than discarded, and the policy
             // steps down; the async lane promotes it back if a 206 ever shows up.
             probe::demote();
-            return self.absorb(name, at, &meta, &body);
+            return self.absorb(name, at, meta, &body);
         }
         let (_, wire) =
             crate::web::fetch_sync_range(&url, None).map_err(|e| fetch_err(name, at.pack_id, e))?;
-        self.absorb(name, at, &meta, &wire)
+        self.absorb(name, at, meta, &wire)
     }
 
     /// Read a blob **only if it costs nothing** — the frame thread's lane.
@@ -379,6 +388,42 @@ impl PackStore {
                 size: 0,
             })
             .collect())
+    }
+}
+
+/// **What blocking reads cost the frame** — the meter `benilla_app::webdiag` reports.
+///
+/// A [`PackStore::read_sync`] whose pack is not resident is a synchronous XHR plus a pack decode on
+/// the thread that draws, and no frame meter can say that is why a frame went long. This names the
+/// file as well as the cost, so a freeze points at its caller.
+pub mod sync_meter {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// `name -> (reads, total ms)` since the last [`take`].
+        static SEEN: RefCell<Vec<(String, u32, f32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(name: &str, ms: f32) {
+        SEEN.with(|s| {
+            let mut s = s.borrow_mut();
+            match s.iter_mut().find(|(n, ..)| n == name) {
+                Some((_, calls, total)) => {
+                    *calls += 1;
+                    *total += ms;
+                }
+                None => s.push((name.to_string(), 1, ms)),
+            }
+        });
+    }
+
+    /// Drain the window's blocking reads, costliest first: `(name, reads, ms)`.
+    pub fn take() -> Vec<(String, u32, f32)> {
+        SEEN.with(|s| {
+            let mut v = std::mem::take(&mut *s.borrow_mut());
+            v.sort_by(|a, b| b.2.total_cmp(&a.2));
+            v
+        })
     }
 }
 

@@ -247,7 +247,7 @@ pub use models::{
     accumulate_wmo_group_collision, authored_half_height, batch_footprint, glue_art_extent,
     hand_grip_finger_poses, load_m2_animation_summary, load_m2_bone_spins, load_m2_bounds,
     load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned, load_object_model, load_wmo,
-    load_wmo_collision_tris, m2_bone_spins, m2_owner_reach, m2_ribbon_emitter_count,
+    load_wmo_collision_tris, m2_bone_spins, m2_owner_reach, m2_ready, m2_ribbon_emitter_count,
     m2_sequence_visible_textures, m2_texture_transform_count, non_separable_billboard_bones,
     owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,

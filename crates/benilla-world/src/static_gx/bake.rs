@@ -93,8 +93,12 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
 
     // ---- Phase 1 — what is due, and in what order do its items sit ------------------------
     let mut due: Vec<GxRegion> = Vec::new();
+    let mut budget = BakeBudget::new(now);
     for (&cell, state) in cells.iter_mut() {
         if !bake_due(state, world.cells.contains_key(&cell), frame, now) {
+            continue;
+        }
+        if !budget.take(state) {
             continue;
         }
         state.dirty = false;
@@ -111,6 +115,9 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
     }
     for (&instance, state) in wmos.iter_mut() {
         if !bake_due(state, world.wmos.contains_key(&instance), frame, now) {
+            continue;
+        }
+        if !budget.take(state) {
             continue;
         }
         state.dirty = false;
@@ -131,6 +138,9 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
     // Prop regions: the referrer set is the selection key, and the draw carries the set list.
     for (&instance, state) in props.iter_mut() {
         if !bake_due(state, world.props.contains_key(&instance), frame, now) {
+            continue;
+        }
+        if !budget.take(state) {
             continue;
         }
         state.dirty = false;
@@ -210,6 +220,48 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
 
 /// Whether a dirty region bakes now: after the short quiet window first, the long one once
 /// published, at the age cap, or on `now` ([`StaticGx::flush_now`]).
+/// Vertices one play frame may bake before the rest of the due regions wait for the next frame.
+///
+/// **Browser only.** There the bake's `scope` is joined on the thread that draws, so a zone line
+/// that makes a city and its neighbourhood due together bakes them all inside one frame. A region
+/// that alone is over the budget still bakes (the first is always granted), so a big WMO is one
+/// long frame rather than a queue of them. [`StaticGx::flush_now`] is exempt: the reveal gate
+/// needs the whole window published the frame it asks. Native keeps its unmetered bake.
+#[cfg(target_arch = "wasm32")]
+const PLAY_BAKE_VERTS: Option<usize> = Some(60_000);
+#[cfg(not(target_arch = "wasm32"))]
+const PLAY_BAKE_VERTS: Option<usize> = None;
+
+/// This flush's running spend against [`PLAY_BAKE_VERTS`].
+struct BakeBudget {
+    left: Option<usize>,
+    granted: bool,
+}
+
+impl BakeBudget {
+    fn new(flush_now: bool) -> Self {
+        Self {
+            left: if flush_now { None } else { PLAY_BAKE_VERTS },
+            granted: false,
+        }
+    }
+
+    /// May this due region bake this frame? A refused region stays dirty and is due again next
+    /// frame, so nothing is dropped, only deferred.
+    fn take(&mut self, state: &super::GxCell) -> bool {
+        let Some(left) = self.left else {
+            return true;
+        };
+        let verts: usize = state.items.iter().map(|i| i.geometry.positions.len()).sum();
+        if self.granted && verts > left {
+            return false;
+        }
+        self.granted = true;
+        self.left = Some(left.saturating_sub(verts));
+        true
+    }
+}
+
 fn bake_due(state: &super::GxCell, published: bool, frame: u32, now: bool) -> bool {
     if !state.dirty {
         return false;
