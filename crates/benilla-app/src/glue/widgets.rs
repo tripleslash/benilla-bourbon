@@ -287,7 +287,8 @@ pub(crate) struct IconFrame {
 }
 
 impl IconFrame {
-    /// 1.12.1's `CharacterCreateIconButtonTemplate`, 48², under a 64² shadow.
+    /// 1.12.1's class and gender templates: `CharacterCreateIconButtonTemplate`'s 48² under a
+    /// 64² shadow.
     pub(crate) const VANILLA: Self = Self {
         size: 48.0,
         shadow: Some(64.0),

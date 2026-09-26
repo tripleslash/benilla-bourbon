@@ -61,7 +61,11 @@ const VANILLA_TOWER: TowerLayout = TowerLayout {
     background: (0.0, 680.0),
     banners_height: 259.0,
     alliance_center: 51.0,
-    race: IconFrame::VANILLA,
+    // `CharacterCreateRaceButtonTemplate` adds no `IconShadow`; the class and gender ones do.
+    race: IconFrame {
+        size: 48.0,
+        shadow: None,
+    },
     race_columns: [33.0, 127.0],
     // Race button 4's BOTTOMLEFT + (20,-28).
     gender: (53.0, 303.0),
