@@ -377,6 +377,7 @@ mod tests {
             flags,
             category,
             id: 0,
+            version: None,
         }
     }
 

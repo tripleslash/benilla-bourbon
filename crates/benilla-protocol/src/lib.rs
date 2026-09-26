@@ -8,7 +8,7 @@ pub mod messages;
 pub mod transport;
 pub mod wire;
 pub mod world;
-pub use auth::AuthReject;
+pub use auth::{AuthReject, RealmVersion};
 pub use events::{
     decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, SessionEnd,
     SessionEvent, SessionEventKind,
@@ -132,6 +132,10 @@ pub struct RealmInfo {
     pub category: u8,
     /// The wire's realm id.
     pub id: u8,
+    /// The client version the realm advertises, when its realmd tags it: flag `0x04`
+    /// (SPECIFYBUILD) with the version appended to the name, which is how a mangos-family realmd
+    /// says it to a 1.x client ([`auth::realm_version_tag`]). `None` for an untagged realm.
+    pub version: Option<RealmVersion>,
 }
 
 /// A successful logon: the SRP6 session key, the realms, and the realmd connection, kept open

@@ -277,6 +277,46 @@ pub fn write_realm_list_request(w: &mut impl Write) -> std::io::Result<()> {
     w.write_all(&packet)
 }
 
+/// `REALM_FLAG_SPECIFYBUILD`: the realm's name carries its client version. 1.x clients have no
+/// field for it, so a mangos-family realmd appends it to the name, which the list shows verbatim.
+pub const REALM_FLAG_SPECIFYBUILD: u8 = 0x04;
+
+/// A realm's advertised client version, read off its [`REALM_FLAG_SPECIFYBUILD`] tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealmVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+    /// The build, when the tag carries one (`(1.18.1.7272)`); mangos's stock `(1,12,1)` has none.
+    pub build: Option<u16>,
+}
+
+impl RealmVersion {
+    /// A Turtle WoW 1.18 realm: the client version whose data and logic benilla layers on for it.
+    pub fn is_turtle(&self) -> bool {
+        self.major == 1 && self.minor == 18
+    }
+}
+
+/// The version a realm name's trailing tag spells: ` (major.minor.patch[.build])`, or mangos's
+/// stock ` (major,minor,patch)`. `None` for a name without a well-formed tag.
+pub fn realm_version_tag(name: &str) -> Option<RealmVersion> {
+    let inner = name.strip_suffix(')')?.rsplit_once(" (")?.1;
+    let parts: Vec<&str> = inner.split(['.', ',']).collect();
+    let byte = |i: usize| parts.get(i)?.parse::<u8>().ok();
+    let build = match parts.len() {
+        3 => None,
+        4 => Some(parts[3].parse::<u16>().ok()?),
+        _ => return None,
+    };
+    Some(RealmVersion {
+        major: byte(0)?,
+        minor: byte(1)?,
+        patch: byte(2)?,
+        build,
+    })
+}
+
 /// The magic populations the 1.12 realm-list parser (`0x5b2230`) rewrites, as `(population sent,
 /// population rewritten, flag OR'd)`: Recommended, New and Full travel as these exact float bit
 /// patterns, not as wire flags.
@@ -315,6 +355,9 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
             population = f32::from_bits(rewritten);
             flags |= bit;
         }
+        let version = (flags & REALM_FLAG_SPECIFYBUILD != 0)
+            .then(|| realm_version_tag(&name))
+            .flatten();
         realms.push(RealmInfo {
             name,
             address,
@@ -324,6 +367,7 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
             flags,
             category,
             id,
+            version,
         });
     }
     let _footer_padding = read_u16_le_async(r).await?; // consume so the stream stays aligned
@@ -432,6 +476,67 @@ mod tests {
         assert_eq!(r.characters, 3);
         assert_eq!(r.category, 2);
         assert_eq!(r.id, 9);
+        assert_eq!(r.version, None, "an untagged realm advertises no version");
+    }
+
+    /// One realm with `flags` and `name`, through the real parser.
+    fn one_realm(flags: u8, name: &str) -> RealmInfo {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(flags);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(b"h:8086\0");
+        body.extend_from_slice(&1.0f32.to_le_bytes());
+        body.extend_from_slice(&[0, 1, 2]);
+        let mut packet = vec![CMD_REALM_LIST];
+        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+        packet.extend_from_slice(&0u32.to_le_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(&0u16.to_le_bytes());
+        futures_lite::future::block_on(read_realm_list(&mut packet.as_slice()))
+            .unwrap()
+            .remove(0)
+    }
+
+    /// Both tag shapes read, the name is kept as sent, and only a SPECIFYBUILD realm is read at all.
+    #[test]
+    fn a_specifybuild_realm_advertises_its_version_in_its_name() {
+        let turtle = one_realm(0x04, "TurtleWoW (1.18.1.7272)");
+        assert_eq!(
+            turtle.name, "TurtleWoW (1.18.1.7272)",
+            "the name is kept as sent"
+        );
+        let v = turtle.version.expect("tagged");
+        assert_eq!((v.major, v.minor, v.patch, v.build), (1, 18, 1, Some(7272)));
+        assert!(v.is_turtle());
+
+        let classic = one_realm(0x04, "Classic (1.12.1.5875)").version.unwrap();
+        assert_eq!(classic.build, Some(5875));
+        assert!(!classic.is_turtle());
+
+        // mangos's stock 1.x form: commas, no build.
+        let stock = one_realm(0x04, "Nostalrius (1,12,1)").version.unwrap();
+        assert_eq!((stock.minor, stock.build), (12, None));
+
+        // No flag, no version: a realm merely named like a tag is not one.
+        assert_eq!(one_realm(0x00, "Odd (1.18.1.7272)").version, None);
+    }
+
+    #[test]
+    fn a_malformed_tag_is_no_version() {
+        for name in [
+            "Classic",
+            "Classic (1.12)",
+            "Classic (1.12.1.5875.1)",
+            "Classic (one.12.1)",
+            "Classic (1.12.1.70000)",
+            "Classic 1.12.1",
+            "Classic (1.12.1",
+        ] {
+            assert_eq!(realm_version_tag(name), None, "{name}");
+        }
     }
 
     /// The rewritten values are the reference parser's own, bit for bit.
