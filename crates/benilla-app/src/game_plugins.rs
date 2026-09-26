@@ -663,7 +663,12 @@ pub(crate) mod schedule_tests {
     /// - the area-spirit-healer poll over `Transform` and `NetEntity`: it is level-triggered, so a
     ///   unit seen a frame early or late is decided again next frame;
     /// - `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene` over
-    ///   `MatAnimTable`, a slot allocator whose owners touch disjoint slots.
+    ///   `MatAnimTable`, a slot allocator whose owners touch disjoint slots;
+    /// - the cursor classifier against `world_focus`'s focus publish and settle release over
+    ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
+    /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
+    ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
+    ///   those two do not write, and a chat line commutes with their pushes.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -672,7 +677,7 @@ pub(crate) mod schedule_tests {
     /// This fork's own systems add their pairs on top of upstream's count: the modern lighting
     /// model, the liquid reflection camera and ripple clock, SSILVB, the character shadow map, and
     /// the web build's writer pump and stutter probe. Declaring those orders is fork-side work.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_801;
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_705;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

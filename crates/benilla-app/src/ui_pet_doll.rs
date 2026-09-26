@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(
             s.defense_skill,
             (0, 0),
-            "INTERIM — unconfirmed in the reference"
+            "a pet's snapshot has no defense pair; `UnitDefense(\"pet\")` answers level × 5 itself"
         );
     }
 

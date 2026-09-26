@@ -221,8 +221,9 @@ fn feed_death(
         // Ghost to alive: reclaim, spirit healer or an accepted res.
         (Some((_, _, true)), false, false) => {
             feed.died_at = None;
-            // The 1.12 client re-queries on the ghost-bit edge (`0x5ee990`), and the not-found
-            // answer drops the map markers; the server's own push is sent only with a looter
+            // The not-found answer drops the map markers. The reference sends nothing on this
+            // edge: its ghost-bit watcher (`0x5ee990`) clears the corpse cache, and `0x491f50`
+            // queries only while a ghost. The server's own push needs a looter
             // (`Map.cpp:3617-3629`).
             let _ = net.0.send(ClientCommand::CorpseQuery);
         }
@@ -251,7 +252,7 @@ fn feed_death(
     }
 
     // ── The offer and confirm announcements ──
-    if let Some(name) = offer_announcement(memo, &death_net, dead || ghost, |offer| {
+    if let Some(name) = offer_announcement(memo, &death_net, store.0.is_dead_or_ghost(), |offer| {
         // A player caster's name is empty on the wire; hold the popup until the cache resolves it.
         if offer.name.is_empty() {
             names.resolve(offer.caster, &net).map(str::to_owned)
