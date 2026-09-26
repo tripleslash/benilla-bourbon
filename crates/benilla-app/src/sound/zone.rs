@@ -589,6 +589,16 @@ fn start_music_stream(
     let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
         return false;
     };
+    // Deviation: Turtle WoW's radio kits (60401, 60423, Everlook's `.radio` stations) name an
+    // http stream, which its client plays off the network; this one reads the chain only, so the
+    // kit is dropped, reported once, however often the server re-pushes it. No chain path holds
+    // "://", and the flavor is read only for one that does.
+    if path.contains("://") && crate::flavor::turtle() {
+        if kits.first_unplayable(kit_id) {
+            warn!("zone music: kit {kit_id} streams {path} — no network music, dropped");
+        }
+        return false;
+    }
     open_music_stream(zone, out, assets, config, kit_id, path, kit_vol)
 }
 

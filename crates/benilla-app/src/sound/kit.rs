@@ -8,7 +8,7 @@
 //! and restarts on its next trigger; the reference mutes it past the cutoff and restarts it on
 //! re-entry itself (`0x7a5095`, `0x7a51a2`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Result};
 use bevy::prelude::*;
@@ -72,9 +72,18 @@ pub(crate) struct SoundKits {
     pending: HashMap<String, deferred::PendingSfx>,
     pick: HashMap<u32, PickState>,
     rng: Rng,
+    /// Kit ids already reported unplayable, under Turtle WoW only: its servers name kits its client
+    /// tables lack, and a looping object event re-fires one every cycle, so the first miss per id
+    /// is the error and later ones drop silently. A 1.12.1 realm reports every miss.
+    unplayable: HashSet<u32>,
 }
 
 impl SoundKits {
+    /// Whether this is the first report of `kit` as unplayable ([`Self::unplayable`]).
+    pub(super) fn first_unplayable(&mut self, kit: u32) -> bool {
+        self.unplayable.insert(kit)
+    }
+
     /// One 32-bit draw for [`bark_chance_pass`], off the stream the per-shot variations share.
     pub(super) fn roll(&mut self) -> u32 {
         self.rng.next()
@@ -432,10 +441,17 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
     let kit = match kit_ref {
-        KitRef::Id(id) => kits.catalog.get(id),
-        KitRef::Name(name) => kits.catalog.by_name(name),
-    }
-    .ok_or_else(|| anyhow!("unknown sound kit"))?;
+        KitRef::Id(id) => match kits.catalog.get(id) {
+            Some(kit) => kit,
+            // The flavor is read on a miss only; see [`SoundKits::unplayable`].
+            None if crate::flavor::turtle() && !kits.unplayable.insert(id) => return Ok(false),
+            None => bail!("unknown sound kit"),
+        },
+        KitRef::Name(name) => kits
+            .catalog
+            .by_name(name)
+            .ok_or_else(|| anyhow!("unknown sound kit"))?,
+    };
 
     let (id, volume, flags, min_dist, cutoff, eax_def) = (
         kit.id,
@@ -788,6 +804,7 @@ impl SoundKits {
             pending: HashMap::new(),
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
+            unplayable: HashSet::new(),
         }
     }
 
