@@ -208,9 +208,15 @@ impl super::UiScript {
         self.model_mut().framerate = fps;
     }
 
-    /// Set which client's interface this VM runs, before anything loads into it.
+    /// Set which client's interface this VM runs, before anything loads into it; a Turtle WoW VM
+    /// gets the engine verbs Turtle's interface calls that a 1.12.1 one does not.
     pub fn set_flavor(&mut self, flavor: UiFlavor) {
         self.model_mut().flavor = flavor;
+        if flavor == UiFlavor::Turtle {
+            if let Err(e) = super::camera_view::install_turtle(&self.lua) {
+                self.push_error(e);
+            }
+        }
     }
 
     /// Which client's interface this VM runs.
