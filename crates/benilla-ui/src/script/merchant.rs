@@ -128,6 +128,12 @@ impl super::UiScript {
     pub fn repair_mode(&self) -> bool {
         self.model_ref().repair_mode
     }
+
+    /// Leave repair mode, as `HideRepairCursor` does, for the world's right mouse-down, which
+    /// resets the Repair base mode to Point (`0x492c68`).
+    pub fn end_repair_mode(&mut self) {
+        self.model_mut().repair_mode = false;
+    }
 }
 
 /// 1 or nil, as the client pushes a usable flag (`pushnumber(1.0)` / `pushnil`).
@@ -911,6 +917,31 @@ mod tests {
         assert!(s.take_container_moves().is_empty());
     }
 
+    /// The targeting arm writes the Cast base mode over Repair (`0x6e50b0`) and its end restores
+    /// Point (`0x6e49f5`, `0x6e554c`), so arming ends repair mode for good. The idle feed pushes
+    /// false every frame, which must leave repair mode standing.
+    #[test]
+    fn arming_spell_targeting_ends_repair_mode_and_disarming_does_not_restore_it() {
+        let mut s = UiScript::new().unwrap();
+        let mut vendor = stock();
+        vendor.can_repair = true;
+        s.set_merchant(Some(vendor));
+        s.run("ShowRepairCursor()").unwrap();
+        s.set_spell_targeting(false);
+        assert!(s.repair_mode(), "the idle feed keeps repair mode");
+
+        s.set_spell_targeting(true);
+        assert!(!s.repair_mode(), "the targeting arm ends repair mode");
+        assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
+
+        s.set_spell_targeting(false);
+        assert!(
+            !s.repair_mode(),
+            "ending the targeting restores Point, not Repair"
+        );
+        assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
+    }
+
     #[test]
     fn clearing_the_merchant_empties_it() {
         let mut s = UiScript::new().unwrap();
@@ -1114,8 +1145,9 @@ mod tests {
         (n("updates"), n("shows"), n("hides"))
     }
 
-    /// The grab goes through the cursor setter (`0x4950f0`): `CURSOR_UPDATE` at `0x495159`, and
-    /// no `ACTIONBAR_SHOWGRID` since mode 5 is not mode 7.
+    /// The grab goes through the cursor setter (`0x4950f0`): its `ClearCursor(1,1)` (`0x495112`)
+    /// signals `CURSOR_UPDATE` from the clear's tail, the set signals it again (`0x495159`), and no
+    /// `ACTIONBAR_SHOWGRID` since mode 5 is not mode 7.
     #[test]
     fn a_vendor_grab_fires_cursor_update_but_not_the_bar_grid() {
         let mut s = UiScript::new().unwrap();
@@ -1124,12 +1156,12 @@ mod tests {
         s.run("PickupMerchantItem(1)").unwrap();
         assert_eq!(
             cursor_event_counts(&mut s),
-            (1, 0, 0),
+            (2, 0, 0),
             "(CURSOR_UPDATE, ACTIONBAR_SHOWGRID, ACTIONBAR_HIDEGRID) after a vendor grab"
         );
         // The toggle-off is a plain clear: one more CURSOR_UPDATE, no HIDEGRID.
         s.run("PickupMerchantItem(1)").unwrap();
-        assert_eq!(cursor_event_counts(&mut s), (2, 0, 0));
+        assert_eq!(cursor_event_counts(&mut s), (3, 0, 0));
     }
 
     #[test]

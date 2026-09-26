@@ -121,8 +121,8 @@ player build to the tests.
 
 ## Contributing
 
-Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says what gets
-in and how a change is judged. Bugs, questions and ideas are welcome on the
+Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says where to
+start, what gets in and how a change is judged. Bugs, questions and ideas are welcome on the
 [Discord](https://discord.gg/wJSJx467G4) too.
 
 ---
