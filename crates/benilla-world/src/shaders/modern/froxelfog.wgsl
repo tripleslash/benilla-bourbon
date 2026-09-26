@@ -63,6 +63,125 @@ struct FroxelFog {
     room_sun: vec4<f32>,
 }
 
+// Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).
+const CANOPY_HAZE: f32 = 1.5;
+// fork: **a room's air stays clear.** Inside a building (the room weight) the open air's shaft haze
+// keeps `ROOM_HAZE_SHARE`: an inn's candles over the zone's haze put a grey veil on the common room.
+const ROOM_HAZE_SHARE: f32 = 0.15;
+// fork: the night air keeps `NIGHT_NEAR_SHARE` of itself at the camera, ramping to all of it between
+// `NIGHT_CLEAR_NEAR` and `NIGHT_CLEAR_FAR` yards of planar depth: the street stays readable, the
+// distance layers into the haze, and the lamps beside the player still have air to light.
+const NIGHT_NEAR_SHARE: f32 = 0.35;
+const NIGHT_CLEAR_NEAR: f32 = 10.0;
+const NIGHT_CLEAR_FAR: f32 = 80.0;
+
+// The medium's extinction at world point `p`, `d` yards of planar depth from the main camera, per
+// yard of ray: x = the fog, y = the shaft haze, z = the night air. `room` is `room_weight` at `p`,
+// `wisps` the drifting noise's scale on the fog (1 = its mean), `cover` the canopy cover (0 = open).
+fn extinction(f: FroxelFog, p: vec3<f32>, d: f32, room: f32, wisps: f32, cover: f32) -> vec3<f32> {
+    let density = height_density(f, p.y);
+    // fork: modern lighting — a room's medium reaches as far as the room does: inside its walls the
+    // building's MFOG (uniform, no near-clear range), past them the zone's own air.
+    let open_fog = f.media.x * fog_clear(f, d) * density;
+    let fog = mix(open_fog, f.room_media.x, room) * wisps;
+    let haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover) * mix(1.0, ROOM_HAZE_SHARE, room);
+    let night = f.room_media.z * density
+        * mix(NIGHT_NEAR_SHARE, 1.0, smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d));
+    return vec3<f32>(fog, haze, night);
+}
+
+// ── The point lights' in-scatter, shared by the froxels and the composite's per-pixel halo ──────
+// Point lights' in-scatter against their surface lighting.
+const POINT_GAIN: f32 = 0.35;
+// fork: a lamp's glow in the haze leans a little toward the eye (smoke scatters forward): the share
+// of a Henyey-Greenstein lobe of `POINT_G` mixed over the isotropic term.
+const POINT_G: f32 = 0.5;
+const POINT_FORWARD: f32 = 0.3;
+// fork: **the glow sits at the flame.** A light's in-scatter keeps `POINT_FAR_SHARE` of itself past
+// its halo and all of it within `POINT_HALO_YD` of the source, so a brazier stands in a small bright
+// halo while a street of lit windows (each a light, 48 yd of range) no longer fills the air around
+// the camera with a grey glow. At the flame it scatters `POINT_HALO_GAIN` times its far-field share,
+// so a torch or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps).
+const POINT_HALO_YD: f32 = 4.0;
+const POINT_FAR_SHARE: f32 = 0.35;
+const POINT_HALO_GAIN: f32 = 4.0;
+// fork: inside a building a light keeps `ROOM_POINT_FAR_SHARE` past its halo and its halo shrinks
+// to `ROOM_POINT_HALO_YD` at `ROOM_POINT_HALO_GAIN`: an inn's dozen candles each filling their
+// range put a grey veil on the whole common room.
+const ROOM_POINT_FAR_SHARE: f32 = 0.0;
+const ROOM_POINT_HALO_YD: f32 = 1.5;
+const ROOM_POINT_HALO_GAIN: f32 = 1.5;
+
+// fork: **a lamp stands in its own air.** A light's halo excess also scatters in a small pocket of
+// air around it: `LAMP_AIR` times the night air's extinction (`room_media.z`, zero by day, full at
+// the SIDN night) at the light, falling off over `LAMP_AIR_YD`. The zone's own air is a few
+// thousandths per yard, and a flame's halo lit in it alone came out at a few hundredths of the
+// night scene's radiance — no halo at all; the pocket gives a flame a core glow about two yards
+// across instead of a lit fog filling its whole range.
+const LAMP_AIR: f32 = 20.0;
+const LAMP_AIR_YD: f32 = 1.0;
+
+// How much lamp air a table light stands in, from its colour row's `w` (0/1 the indoor class, plus
+// `global_light::WINDOW_TAG` 0.25 for a window's night glow): a lit pane is not a flame, and a
+// facade of window lights each standing in lamp air put a grey fog over the whole house.
+fn lamp_air_share(class_w: f32) -> f32 {
+    return select(1.0, 0.0, fract(class_w) > 0.125);
+}
+
+// The lamp air's extinction at its peak (1/yd) for a light of colour-row `w`: scale it by
+// `exp(-dl / LAMP_AIR_YD)` at distance `dl` from the light.
+fn lamp_air(f: FroxelFog, class_w: f32) -> f32 {
+    return LAMP_AIR * f.room_media.z * lamp_air_share(class_w);
+}
+
+// fork: **the halo is integrated per pixel.** A lamp among the table's first `halo_lights` (the table
+// is packed nearest-to-camera first) scatters only its far share into the froxels, and the halo pass
+// adds its halo along each pixel's own ray: a 4 yd halo is two or three froxel slices deep at street
+// range, and its lamp air a yard, so in the volume it smeared into a faint blob or vanished. Window
+// lights stay in the froxels whole (`is_halo_light`): they take no lamp air, and a city's panes would
+// otherwise take the slots of the lamps past them.
+const HALO_LIGHTS: u32 = 32u;
+
+// How many of the table's first lights are scanned for per-pixel halos: the tier's point-light count
+// (`screen.w`, 0 on the analytic tier, which scatters no point light), at most `HALO_LIGHTS`.
+fn halo_lights(f: FroxelFog, table_count: u32) -> u32 {
+    return min(min(u32(f.screen.w), HALO_LIGHTS), table_count);
+}
+
+// Whether table light `i`, of colour-row `w`, takes its halo per pixel rather than in the froxels.
+fn is_halo_light(i: u32, halo_count: u32, class_w: f32) -> bool {
+    return i < halo_count && lamp_air_share(class_w) > 0.5;
+}
+
+// The surface lanes' WoW falloff under the same range window, zero past the range. +0.5 keeps a
+// point inside the flame finite.
+fn point_falloff(dl: f32, range: f32) -> f32 {
+    let q = dl / max(range, 1e-3);
+    let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+    return window * window / (0.7 * dl + 0.03 * dl * dl + 0.5);
+}
+
+// The forward lobe relative to the isotropic term, so a light's total in-scatter is unchanged:
+// brighter looking toward the lamp, dimmer looking away. `mu` = cos(light→point, point→eye).
+fn point_phase(mu: f32) -> f32 {
+    let g2 = POINT_G * POINT_G;
+    let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
+    return mix(1.0, hg, POINT_FORWARD);
+}
+
+// The halo's e-folding distance, its far share and its peak gain, by the room weight at the light.
+fn point_halo_yd(room: f32) -> f32 {
+    return mix(POINT_HALO_YD, ROOM_POINT_HALO_YD, room);
+}
+
+fn point_far_share(room: f32) -> f32 {
+    return mix(POINT_FAR_SHARE, ROOM_POINT_FAR_SHARE, room);
+}
+
+fn point_halo_gain(room: f32) -> f32 {
+    return mix(POINT_HALO_GAIN, ROOM_POINT_HALO_GAIN, room);
+}
+
 // Yards over which the room's medium fades out at its own bound, so a doorway is a soft edge in the
 // air rather than a sphere the eye can find.
 const ROOM_EDGE: f32 = 8.0;

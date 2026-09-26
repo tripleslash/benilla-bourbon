@@ -120,6 +120,18 @@ const MODERN_LOCAL_GAIN: f32 = 1.3;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct NightGlow;
 
+/// fork: **a light that stands for a lit window**, not a lamp — a [`NightGlow`] from a building's
+/// pooled SIDN glass (`terrain_stream::spawn::spawn_window_lights_for`). A lamp's own SIDN glass is
+/// a `NightGlow` without it.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct WindowPane;
+
+/// fork: added to a [`WindowPane`] light's `w` lane in the point table, over its 0/1 indoor class,
+/// which every surface lane reads as `w >= 0.5`. The fog reads the fraction
+/// (`froxelfog::lamp_air_share`): a window's light keeps no lamp air, since a lit pane is not a
+/// flame, and a facade of them stood in a grey fog.
+pub const WINDOW_TAG: f32 = 0.25;
+
 /// fork: **the light a luminous spell throws** — a Fireball's core, a Fire Nova's flash, a holy
 /// blessing (`benilla_formats::spell_light`, spawned and enveloped by the app's spell-effect lanes).
 /// Packed only on the modern tiers that bin lights into a grid (Medium and up): the classic
@@ -342,6 +354,7 @@ fn build_light_data(
         Option<&LightRooms>,
         Option<&crate::modern::lights::SynthesizedLight>,
         Option<&NightGlow>,
+        Has<WindowPane>,
         // fork: the flame flicker ([`super::FlameFlicker`]) — folded into the committed colour
         // here and nowhere else, so no other reader of the light's intensity sees it.
         Option<&super::FlameFlicker>,
@@ -474,10 +487,10 @@ fn build_light_data(
             && crate::modern::lights::lights_enabled()
     });
     wanting.clear();
-    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool)> = lights_q
+    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, bool)> = lights_q
         .iter()
         .filter_map(
-            |(entity, pl, gt, rooms, synthesized, night_glow, flame, spell)| {
+            |(entity, pl, gt, rooms, synthesized, night_glow, window, flame, spell)| {
                 let p = gt.translation();
                 let d2 = p.distance_squared(cam_pos);
                 // The tier gate for DERIVED lights, read where the light is READ rather than where it
@@ -539,7 +552,7 @@ fn build_light_data(
                         .and_then(|inst| wmos.as_ref()?.get(&inst.handle))
                         .is_some_and(|model| crate::wmo_portal::rooms_are_indoor(&r.0, model))
                 });
-                Some((d2, p, pl.range, rgb, indoors))
+                Some((d2, p, pl.range, rgb, indoors, window))
             },
         )
         .collect();
@@ -583,7 +596,7 @@ fn build_light_data(
         0.0
     };
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
-    for (i, (_, p, range, rgb, indoors)) in pts.iter().enumerate() {
+    for (i, (_, p, range, rgb, indoors, window)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
         // fork: modern lighting (P8) — **`w` is 1 for a light that is INDOORS**, and the surface
         // lanes' class test runs both ways off it: an interior fragment takes only indoor lights,
@@ -603,7 +616,8 @@ fn build_light_data(
         // ([`crate::wmo_portal::rooms_are_indoor`]), NOT from "does it name rooms". The two differ
         // on every porch lamp and courtyard brazier in the game: those name a building's shell, so
         // the old reading called them indoor and a two-way test would have switched them off.
-        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], f32::from(u8::from(*indoors))];
+        let tag = if *window { WINDOW_TAG } else { 0.0 };
+        fresh.points[2 * i + 1] = [rgb[0], rgb[1], rgb[2], f32::from(u8::from(*indoors)) + tag];
     }
     // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame,
     // which a pool that changes frame to frame needs.
@@ -623,7 +637,7 @@ fn build_light_data(
             let snap = |v: f32| (((half + v) / cell).floor() + 0.5) * cell - half;
             let anchor = Vec3::new(snap(cam_pos.x), cam_pos.y, snap(cam_pos.z));
             let (mut boxed, mut sphere) = (0usize, 0usize);
-            for (_, p, _, _, _) in &pts {
+            for (_, p, _, _, _, _) in &pts {
                 let dv = *p - anchor;
                 boxed += usize::from(dv.x.abs().max(dv.z.abs()) <= 33.570_166);
                 sphere += usize::from(dv.length() <= 48.0);
@@ -639,7 +653,7 @@ fn build_light_data(
                 "[points] {} packed, cam {cam_pos:.1?} — this chunk's candidates: {boxed} (was {sphere} at the 48 yd sphere), 3 slots",
                 pts.len()
             );
-            for (d2, p, _, rgb, _) in pts.iter().take(8) {
+            for (d2, p, _, rgb, _, _) in pts.iter().take(8) {
                 out.push_str(&format!(
                     "\n  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]",
                     d2.sqrt(),

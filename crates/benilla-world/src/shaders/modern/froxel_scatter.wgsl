@@ -42,38 +42,8 @@ const SHAFT_SKY_SHARE: f32 = 0.55;
 // dual lobe alone passes ~0.4 at 90 degrees from the sun.
 const SHAFT_ISOTROPIC: f32 = 0.5;
 
-// Under full cover the shaft haze is this much denser, and scatters the key this much harder on top.
-const CANOPY_HAZE: f32 = 1.5;
+// Under full cover the shaft haze scatters the key this much harder (its density: `froxelfog::CANOPY_HAZE`).
 const CANOPY_SHAFT: f32 = 1.0;
-// Point lights' in-scatter against their surface lighting.
-const POINT_GAIN: f32 = 0.35;
-// fork: a lamp's glow in the haze leans a little toward the eye (smoke scatters forward): the share
-// of a Henyey-Greenstein lobe of `POINT_G` mixed over the isotropic term.
-const POINT_G: f32 = 0.5;
-const POINT_FORWARD: f32 = 0.3;
-// fork: **the glow sits at the flame.** A light's in-scatter keeps `POINT_FAR_SHARE` of itself past
-// its halo and all of it within `POINT_HALO_YD` of the source, so a brazier stands in a small bright
-// halo while a street of lit windows (each a light, 48 yd of range) no longer fills the air around
-// the camera with a grey glow.
-const POINT_HALO_YD: f32 = 4.0;
-const POINT_FAR_SHARE: f32 = 0.35;
-// fork: at the flame a light scatters this many times its far-field share into the haze, so a torch
-// or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps).
-const POINT_HALO_GAIN: f32 = 4.0;
-// fork: **a room's air stays clear.** Inside a building (the room weight) a light keeps
-// `ROOM_POINT_FAR_SHARE` past its halo, its halo shrinks to `ROOM_POINT_HALO_YD` at
-// `ROOM_POINT_HALO_GAIN`, and the open air's shaft haze keeps `ROOM_HAZE_SHARE`: an inn's dozen
-// candles each filling their range, over the zone's haze, put a grey veil on the whole common room.
-const ROOM_POINT_FAR_SHARE: f32 = 0.0;
-const ROOM_POINT_HALO_YD: f32 = 1.5;
-const ROOM_POINT_HALO_GAIN: f32 = 1.5;
-const ROOM_HAZE_SHARE: f32 = 0.15;
-// fork: the night air keeps `NIGHT_NEAR_SHARE` of itself at the camera, ramping to all of it between
-// `NIGHT_CLEAR_NEAR` and `NIGHT_CLEAR_FAR` yards of planar depth: the street stays readable, the
-// distance layers into the haze, and the lamps beside the player still have air to light.
-const NIGHT_NEAR_SHARE: f32 = 0.35;
-const NIGHT_CLEAR_NEAR: f32 = 10.0;
-const NIGHT_CLEAR_FAR: f32 = 80.0;
 
 // The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
 // medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
@@ -96,40 +66,44 @@ fn canopy_cover(p: vec3<f32>) -> f32 {
     return 1.0 - open * 0.25;
 }
 
-// One table light's in-scatter at a froxel: the surface lanes' WoW falloff under the same range
-// window, zero past the range. `to_eye` is the unit direction from the froxel to the camera.
-//
-// fork: under a forward lobe (`POINT_G`, `POINT_FORWARD`), relative to the isotropic term so the
-// light's total in-scatter is unchanged: brighter looking toward the lamp, dimmer looking away.
-fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32) -> vec3<f32> {
+// A light's in-scatter at a froxel: `medium` is radiance still to scale by the froxel's extinction,
+// `lamp` the halo's share already scattered by the light's own lamp air (`froxelfog::lamp_air`).
+struct PointScatter {
+    medium: vec3<f32>,
+    lamp: vec3<f32>,
+}
+
+// One table light's in-scatter at a froxel (`froxelfog`'s point law). `to_eye` is the unit direction
+// from the froxel to the camera. A halo light (`froxelfog::is_halo_light`) scatters only its far
+// share here: the halo pass integrates its halo per pixel.
+fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32) -> PointScatter {
     let pos_range = light_table.points[2u * i];
     let dl = length(pos_range.xyz - p);
     if (dl >= pos_range.w) {
-        return vec3<f32>(0.0);
+        return PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     }
-    let q = dl / max(pos_range.w, 1e-3);
-    let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
-    // +0.5 keeps a froxel inside the flame finite.
-    let atten = 1.0 / (0.7 * dl + 0.03 * dl * dl + 0.5);
     let mu = dot((p - pos_range.xyz) / max(dl, 1e-3), to_eye);
-    let g2 = POINT_G * POINT_G;
-    let hg = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * POINT_G * mu, 1e-4), 1.5);
-    let phase = mix(1.0, hg, POINT_FORWARD);
-    let halo_yd = mix(POINT_HALO_YD, ROOM_POINT_HALO_YD, room);
-    let halo = mix(
-        mix(POINT_FAR_SHARE, ROOM_POINT_FAR_SHARE, room),
-        mix(POINT_HALO_GAIN, ROOM_POINT_HALO_GAIN, room),
-        exp(-dl / halo_yd),
+    let far = froxelfog::point_far_share(room);
+    let rgb_class = light_table.points[2u * i + 1u];
+    let excess = select(
+        (froxelfog::point_halo_gain(room) - far) * exp(-dl / froxelfog::point_halo_yd(room)),
+        0.0,
+        froxelfog::is_halo_light(i, halo_count, rgb_class.w),
     );
-    return light_table.points[2u * i + 1u].rgb * (atten * window * window * POINT_GAIN * phase * halo);
+    let lit = rgb_class.rgb
+        * (froxelfog::point_falloff(dl, pos_range.w) * froxelfog::POINT_GAIN * froxelfog::point_phase(mu));
+    let lamp = froxelfog::lamp_air(modern_block.fog, rgb_class.w) * exp(-dl / froxelfog::LAMP_AIR_YD);
+    return PointScatter(lit * (far + excess), lit * (excess * lamp));
 }
 
 // Every light one grid cell names, at a froxel.
-fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32) -> vec3<f32> {
-    var sum = vec3<f32>(0.0);
+fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32) -> PointScatter {
+    var sum = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     let count = locallight::cell_count(cell);
     for (var i = 0u; i < count; i = i + 1u) {
-        sum = sum + point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room);
+        let one = point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room, halo_count);
+        sum.medium = sum.medium + one.medium;
+        sum.lamp = sum.lamp + one.lamp;
     }
     return sum;
 }
@@ -160,21 +134,19 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // clears, so shafts can begin at the camera. Both are per yard of the view ray.
     let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
     let wisps = mix(1.0, 0.35 + 1.3 * noise, f.medium.y);
-    let density = froxelfog::height_density(f, p.y);
     // fork: modern lighting — a room's medium reaches as far as the room does (`froxelfog::room`):
     // inside its walls the froxel breathes the building's MFOG (uniform, no near-clear range), and
     // past them the zone's own air, so a doorway's view is fogged by what is on the far side of it.
     let room = froxelfog::room_weight(f, p);
-    let open_fog = f.media.x * froxelfog::fog_clear(f, d) * density;
-    let sigma_fog = mix(open_fog, f.room_media.x, room) * wisps;
     // Under a canopy the air is thick with dust and damp: the haze gets denser and scatters the key
     // much harder there, so the light through a gap in the leaves reads as a beam. The cover is the
     // neighbourhood's (the sky map around the froxel), not the froxel's own column — a point inside a
     // beam has open sky straight above it by definition.
     let cover = canopy_cover(p);
-    let sigma_haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover) * mix(1.0, ROOM_HAZE_SHARE, room);
-    let sigma_night = f.room_media.z * density
-        * mix(NIGHT_NEAR_SHARE, 1.0, smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d));
+    let ext = froxelfog::extinction(f, p, d, room, wisps, cover);
+    let sigma_fog = ext.x;
+    let sigma_haze = ext.y;
+    let sigma_night = ext.z;
     let sigma = sigma_fog + sigma_haze + sigma_night;
 
     // In-scatter.
@@ -221,7 +193,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
-    var points = vec3<f32>(0.0);
+    var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
 
     // The point lights, isotropic, with the surface lanes' WoW falloff and range window.
     //
@@ -235,27 +207,33 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // same lights as the ground under it. Without a grid (`?modern_lights=0`) the old walk stands.
     let lg = modern_block.lights;
     let to_eye = normalize(f.camera.xyz - p);
+    let halo_count = froxelfog::halo_lights(f, u32(light_table.rows[20].x));
     if (locallight::grid_live(lg)) {
         let pair = locallight::cell_pair(lg, p);
         if (pair.w > 0u) {
             let far_w = bitcast<f32>(pair.z);
             if (far_w < 1.0) {
-                points = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room) * (1.0 - far_w);
+                let near = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room, halo_count);
+                points = PointScatter(near.medium * (1.0 - far_w), near.lamp * (1.0 - far_w));
             }
             if (far_w > 0.0) {
-                points = points + cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room) * far_w;
+                let far = cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room, halo_count);
+                points.medium = points.medium + far.medium * far_w;
+                points.lamp = points.lamp + far.lamp * far_w;
             }
         }
     } else {
         let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
         for (var i = 0u; i < count; i = i + 1u) {
-            points = points + point_in_scatter(i, p, to_eye, room);
+            let one = point_in_scatter(i, p, to_eye, room, halo_count);
+            points.medium = points.medium + one.medium;
+            points.lamp = points.lamp + one.lamp;
         }
     }
 
     var cur = vec4<f32>(
-        (lum_fog + points) * sigma_fog + (lum_haze + points) * sigma_haze
-            + (lum_haze + froxelfog::night_glow(f) + points) * sigma_night,
+        lum_fog * sigma_fog + lum_haze * sigma_haze + (lum_haze + froxelfog::night_glow(f)) * sigma_night
+            + points.medium * sigma + points.lamp,
         sigma,
     );
 

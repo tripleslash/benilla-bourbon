@@ -18,7 +18,7 @@ pub(crate) use flicker::is_warm;
 pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
 pub use global_light::{
     new_shared_light_buffer, LightOwner, LightRooms, NightGlow, SharedLightBuffer, SpellFxLight,
-    WorldPointLight, MODERN_PACK_RADIUS,
+    WindowPane, WorldPointLight, MODERN_PACK_RADIUS,
 };
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,

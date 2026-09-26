@@ -44,8 +44,16 @@ struct FroxelPipelines {
     scatter: CachedComputePipelineId,
     integrate: CachedComputePipelineId,
     composite_shader: Handle<Shader>,
-    /// Per MSAA sample count: the depth binding's type and the target's sample count differ.
-    composites: HashMap<u32, (BindGroupLayoutDescriptor, CachedRenderPipelineId)>,
+    /// Per MSAA sample count: the depth binding's type and the target's sample count differ. The
+    /// layout, the composite and the lamp-halo pipeline (`fs_halo`), which share it.
+    composites: HashMap<
+        u32,
+        (
+            BindGroupLayoutDescriptor,
+            CachedRenderPipelineId,
+            CachedRenderPipelineId,
+        ),
+    >,
 }
 
 /// The scatter ping-pong, the noise, and this frame's compute bind groups. `ready` = the compute
@@ -374,6 +382,8 @@ fn specialize_composites(
                     texture_3d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
                     storage_buffer_read_only_sized(false, None),
+                    // The point table, for the per-pixel lamp halos (`fog_composite.wgsl`).
+                    storage_buffer_read_only_sized(false, None),
                 ),
             ),
         );
@@ -391,27 +401,44 @@ fn specialize_composites(
                 operation: BlendOperation::Add,
             },
         };
-        let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-            label: Some("modern_fog_composite".into()),
-            layout: vec![layout.clone()],
-            vertex: fullscreen_shader.to_vertex_state(),
-            fragment: Some(FragmentState {
-                shader: pipes.composite_shader.clone(),
-                shader_defs,
-                entry_point: Some("fs_composite".into()),
-                targets: vec![Some(ColorTargetState {
-                    format: ViewTarget::TEXTURE_FORMAT_HDR,
-                    blend: Some(blend),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            multisample: MultisampleState {
-                count: samples,
-                ..default()
+        // The lamp halos add over the finished frame: `result = halo + frame`.
+        let additive = BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
             },
-            ..default()
-        });
-        pipes.composites.insert(samples, (layout, id));
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        };
+        let queue = |label: &str, entry: &str, blend: BlendState| {
+            pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                label: Some(label.to_owned().into()),
+                layout: vec![layout.clone()],
+                vertex: fullscreen_shader.to_vertex_state(),
+                fragment: Some(FragmentState {
+                    shader: pipes.composite_shader.clone(),
+                    shader_defs: shader_defs.clone(),
+                    entry_point: Some(entry.to_owned().into()),
+                    targets: vec![Some(ColorTargetState {
+                        format: ViewTarget::TEXTURE_FORMAT_HDR,
+                        blend: Some(blend),
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
+                multisample: MultisampleState {
+                    count: samples,
+                    ..default()
+                },
+                ..default()
+            })
+        };
+        let composite = queue("modern_fog_composite", "fs_composite", blend);
+        let halo = queue("modern_lamp_halo", "fs_halo", additive);
+        pipes.composites.insert(samples, (layout, composite, halo));
     }
 }
 
@@ -480,96 +507,144 @@ impl ViewNode for FroxelNode {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct FogCompositeLabel;
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub(crate) struct LampHaloLabel;
+
+/// The fullscreen fog passes' view query: both draw over the view target with the same bindings.
+type FogPassQuery = (
+    &'static ViewTarget,
+    &'static ViewDepthTexture,
+    &'static ViewUniformOffset,
+    &'static Msaa,
+    &'static ModernFogView,
+);
+
 #[derive(Default)]
 struct FogCompositeNode;
 
 impl ViewNode for FogCompositeNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        &'static ViewUniformOffset,
-        &'static Msaa,
-        &'static ModernFogView,
-    );
+    type ViewQuery = FogPassQuery;
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'w, '_, Self::ViewQuery>,
+        view: QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        if !world
-            .get_resource::<ActiveLighting>()
-            .is_some_and(|a| a.is_modern())
-        {
-            return Ok(());
-        }
-        if world
-            .get_resource::<ModernVolume>()
-            .is_none_or(|v| v.mode == FogMode::Off)
-        {
-            return Ok(());
-        }
-        // Armed a frame after the latch (a reallocation); binding it earlier is a validation error.
-        if !depth
-            .texture
-            .usage()
-            .contains(TextureUsages::TEXTURE_BINDING)
-        {
-            return Ok(());
-        }
-        let pipes = world.resource::<FroxelPipelines>();
-        let Some((layout, id)) = pipes.composites.get(&msaa.samples()) else {
-            return Ok(());
-        };
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(pipeline) = pipeline_cache.get_render_pipeline(*id) else {
-            return Ok(());
-        };
-        let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
-            return Ok(());
-        };
-        let Some(volume) = world
-            .resource::<RenderAssets<GpuImage>>()
-            .get(MODERN_FOG_VOLUME.id())
-        else {
-            return Ok(());
-        };
-        let Some(block) = world
-            .resource::<RenderAssets<GpuShaderStorageBuffer>>()
-            .get(MODERN_SHADOW_CASCADES.id())
-        else {
-            return Ok(());
-        };
-        let bind = render_context.render_device().create_bind_group(
-            "modern_fog_composite",
-            &pipeline_cache.get_bind_group_layout(layout),
-            &BindGroupEntries::sequential((
-                view_binding,
-                depth.view(),
-                &volume.texture_view,
-                &volume.sampler,
-                block.buffer.as_entire_binding(),
-            )),
-        );
-        let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("modern_fog_composite"),
-                color_attachments: &[Some(view_target.get_color_attachment())],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        let span = diagnostics.pass_span(&mut pass, "modern_fog_composite");
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind, &[view_offset.offset]);
-        pass.draw(0..3, 0..1);
-        span.end(&mut pass);
-        Ok(())
+        run_fog_pass(FogPass::Composite, render_context, view, world)
     }
+}
+
+/// fork: the nearest lamps' halos (`fog_composite.wgsl`'s `fs_halo`), added after the transparent
+/// pass so an alpha-blended tree behind a lamp cannot paint over its glow.
+#[derive(Default)]
+struct LampHaloNode;
+
+impl ViewNode for LampHaloNode {
+    type ViewQuery = FogPassQuery;
+
+    fn run<'w>(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        view: QueryItem<'w, '_, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        run_fog_pass(FogPass::Halo, render_context, view, world)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FogPass {
+    Composite,
+    Halo,
+}
+
+fn run_fog_pass<'w>(
+    which: FogPass,
+    render_context: &mut RenderContext<'w>,
+    (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'w, '_, FogPassQuery>,
+    world: &'w World,
+) -> Result<(), NodeRunError> {
+    if !world
+        .get_resource::<ActiveLighting>()
+        .is_some_and(|a| a.is_modern())
+    {
+        return Ok(());
+    }
+    if world
+        .get_resource::<ModernVolume>()
+        .is_none_or(|v| v.mode == FogMode::Off)
+    {
+        return Ok(());
+    }
+    // Armed a frame after the latch (a reallocation); binding it earlier is a validation error.
+    if !depth
+        .texture
+        .usage()
+        .contains(TextureUsages::TEXTURE_BINDING)
+    {
+        return Ok(());
+    }
+    let pipes = world.resource::<FroxelPipelines>();
+    let Some((layout, composite, halo)) = pipes.composites.get(&msaa.samples()) else {
+        return Ok(());
+    };
+    let (label, id) = match which {
+        FogPass::Composite => ("modern_fog_composite", composite),
+        FogPass::Halo => ("modern_lamp_halo", halo),
+    };
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let Some(pipeline) = pipeline_cache.get_render_pipeline(*id) else {
+        return Ok(());
+    };
+    let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
+        return Ok(());
+    };
+    let Some(volume) = world
+        .resource::<RenderAssets<GpuImage>>()
+        .get(MODERN_FOG_VOLUME.id())
+    else {
+        return Ok(());
+    };
+    let Some(block) = world
+        .resource::<RenderAssets<GpuShaderStorageBuffer>>()
+        .get(MODERN_SHADOW_CASCADES.id())
+    else {
+        return Ok(());
+    };
+    let Some(light) = world.get_resource::<SharedLightBuffer>() else {
+        return Ok(());
+    };
+    let bind = render_context.render_device().create_bind_group(
+        label,
+        &pipeline_cache.get_bind_group_layout(layout),
+        &BindGroupEntries::sequential((
+            view_binding,
+            depth.view(),
+            &volume.texture_view,
+            &volume.sampler,
+            block.buffer.as_entire_binding(),
+            light.0.as_entire_binding(),
+        )),
+    );
+    let diagnostics = render_context.diagnostic_recorder();
+    let mut pass = render_context
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(view_target.get_color_attachment())],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    let span = diagnostics.pass_span(&mut pass, label);
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind, &[view_offset.offset]);
+    pass.draw(0..3, 0..1);
+    span.end(&mut pass);
+    Ok(())
 }
 
 pub(super) fn build(render_app: &mut SubApp) {
@@ -601,7 +676,17 @@ pub(super) fn build(render_app: &mut SubApp) {
         )
         .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, FogCompositeLabel)
         .add_render_graph_edge(Core3d, crate::ssilvb::SsilvbLabel, FogCompositeLabel)
-        .add_render_graph_edge(Core3d, FogCompositeLabel, crate::liquid::LiquidScreenLabel);
+        .add_render_graph_edge(Core3d, FogCompositeLabel, crate::liquid::LiquidScreenLabel)
+        // fork: the lamp halos, over everything the main pass drew, transparents included.
+        .add_render_graph_node::<ViewNodeRunner<LampHaloNode>>(Core3d, LampHaloLabel)
+        .add_render_graph_edges(
+            Core3d,
+            (
+                Node3d::MainTransparentPass,
+                LampHaloLabel,
+                Node3d::EndMainPass,
+            ),
+        );
 }
 
 #[cfg(test)]
