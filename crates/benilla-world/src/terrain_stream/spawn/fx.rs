@@ -105,6 +105,9 @@ pub(super) fn spawn_lights_for(
 /// because the cube shadow then has that wall between the light and the room.
 pub(super) fn spawn_emissive_light_for(
     commands: &mut Commands,
+    // The model's file path: a light fixture whose glow is its unlit glass lights from that
+    // ([`crate::modern::lights::emissive::fixture_glass`]).
+    path: &str,
     lights: &[ModelLight],
     emitters: &[ModelEmitter],
     submeshes: &[benilla_assets::ModelSubmesh],
@@ -120,21 +123,24 @@ pub(super) fn spawn_emissive_light_for(
     // it. Gating the spawn instead made a lamp's fate depend on whether it streamed in before or
     // after the lighting latch — see that type's note.
     use crate::modern::lights::emissive;
-    let Some(emissive) = emissive::for_model(lights, emitters, submeshes, idle) else {
-        return;
-    };
     // The centroid and fixture radius are `emissive`'s own law, shared with the entity lane —
     // a GameObject brazier is this same derivation over `EntityPart`s instead of `ModelSubmesh`es.
-    let Some((local, radius)) = emissive::glow_anchor(
-        emitters
-            .iter()
-            .filter(|e| emissive::emits_at_rest(&e.def.timing, idle))
-            .map(|e| e.def.position),
-        submeshes
-            .iter()
-            .filter(|b| emissive::shown_at_rest(b.alpha_anim.as_deref(), idle))
-            .map(|b| b.geometry.as_ref()),
-    ) else {
+    let recipe = emissive::for_model(lights, emitters, submeshes, idle).and_then(|emissive| {
+        let (local, radius) = emissive::glow_anchor(
+            emitters
+                .iter()
+                .filter(|e| emissive::emits_at_rest(&e.def.timing, idle))
+                .map(|e| e.def.position),
+            submeshes
+                .iter()
+                .filter(|b| emissive::shown_at_rest(b.alpha_anim.as_deref(), idle))
+                .map(|b| b.geometry.as_ref()),
+        )?;
+        Some((emissive, local, radius))
+    });
+    let Some((emissive, local, radius)) =
+        recipe.or_else(|| emissive::fixture_glass(path, lights, submeshes, idle))
+    else {
         return;
     };
     let before = out.len();
@@ -190,6 +196,33 @@ pub(super) fn spawn_window_lights_for(
             glow.intensity_scale,
             None,
             None, // a lit window is glass: it glows, it does not burn
+            out,
+        );
+        for e in &out[before..] {
+            commands.entity(*e).insert((
+                crate::modern::lights::SynthesizedLight,
+                crate::lighting::NightGlow,
+                crate::lighting::WindowPane,
+            ));
+        }
+    }
+    // fork: and the lamps in the building's own geometry — a street lamp's SIDN glass, one light
+    // per lantern ([`crate::modern::lights::emissive::lamp_glass_glows`]). Night-only like the
+    // glass, but a lamp: no `WindowPane`.
+    let lamps = crate::modern::lights::emissive::lamp_glass_glows(
+        submeshes
+            .iter()
+            .map(|b| (b.sidn, b.interior, b.geometry.as_ref())),
+    );
+    for lamp in lamps {
+        let before = out.len();
+        spawn_point_light(
+            commands,
+            transform.transform_point(wow_to_bevy(lamp.pos)),
+            lamp.color,
+            lamp.intensity_scale,
+            None,
+            None, // glass: it glows, it does not burn
             out,
         );
         for e in &out[before..] {

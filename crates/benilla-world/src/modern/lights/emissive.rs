@@ -274,6 +274,12 @@ pub fn glow_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glo
     if geometry.env_map {
         return None;
     }
+    batch_glow(geometry)
+}
+
+/// A glowing batch's alpha-weighted mean tint and half-extent — what [`glow_of_geometry`] and
+/// [`glass_of_geometry`] read once each has decided the batch glows.
+fn batch_glow(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
     if geometry.positions.is_empty() {
         return None;
     }
@@ -331,6 +337,15 @@ pub fn glow_anchor<'a>(
     emitter_positions: impl IntoIterator<Item = [f32; 3]>,
     cards: impl IntoIterator<Item = &'a benilla_formats::RenderSubmesh> + Clone,
 ) -> Option<([f32; 3], f32)> {
+    glow_anchor_by(emitter_positions, cards, glow_of_geometry)
+}
+
+/// [`glow_anchor`] over the batches `glows` reads as glowing.
+fn glow_anchor_by<'a>(
+    emitter_positions: impl IntoIterator<Item = [f32; 3]>,
+    cards: impl IntoIterator<Item = &'a benilla_formats::RenderSubmesh> + Clone,
+    glows: fn(&benilla_formats::RenderSubmesh) -> Option<Glow>,
+) -> Option<([f32; 3], f32)> {
     let mut sum = [0.0f32; 3];
     let mut n = 0.0f32;
     for pos in emitter_positions {
@@ -340,7 +355,7 @@ pub fn glow_anchor<'a>(
         n += 1.0;
     }
     for geometry in cards.clone() {
-        if glow_of_geometry(geometry).is_none() {
+        if glows(geometry).is_none() {
             continue;
         }
         let positions = &geometry.positions;
@@ -364,7 +379,7 @@ pub fn glow_anchor<'a>(
     let mid = [sum[0] / n, sum[1] / n, sum[2] / n];
     let mut radius = 0.0f32;
     for geometry in cards {
-        if glow_of_geometry(geometry).is_none() {
+        if glows(geometry).is_none() {
             continue;
         }
         for p in &geometry.positions {
@@ -373,6 +388,71 @@ pub fn glow_anchor<'a>(
         }
     }
     Some((mid, radius))
+}
+
+/// fork: **a lamp whose glow is its glass.** Some fixtures author neither a light, an emitter nor an
+/// additive card: the lantern is an opaque UNLIT batch (M2 render flag `0x01`), drawn fullbright
+/// over a lit post — `StormwindStreetlamp01.m2` is a post and one unlit `STORMWINDLAMPGLASS` batch,
+/// and every lamp on Stormwind's streets stood dark in its own pool. An unlit batch alone is not a
+/// light: 482 of the 5,802 world models carry one, and most are fireflies, falls, slime, crystals
+/// and beams. What makes it one is the model being a light fixture by its own file name
+/// ([`is_light_fixture`]); 105 models pass both tests, every one a lamp, lantern, candle, torch,
+/// brazier or chandelier. It is the fallback: a fixture that emits by the recipe above keeps that
+/// answer, and one that authors a casting light gets none ([`combine`]).
+///
+/// The light and its anchor in model space, or `None`.
+pub fn fixture_glass(
+    path: &str,
+    lights: &[ModelLight],
+    submeshes: &[ModelSubmesh],
+    idle: usize,
+) -> Option<(Emissive, [f32; 3], f32)> {
+    if !is_light_fixture(path) {
+        return None;
+    }
+    let shown = || {
+        submeshes
+            .iter()
+            .filter(|b| shown_at_rest(b.alpha_anim.as_deref(), idle))
+            .map(|b| b.geometry.as_ref())
+    };
+    let emissive = combine(
+        lights.iter().any(|l| l.def.casts()),
+        [],
+        shown().filter_map(glass_of_geometry),
+    )?;
+    let (local, radius) = glow_anchor_by([], shown(), glass_of_geometry)?;
+    Some((emissive, local, radius))
+}
+
+/// Whether a model is a light fixture by its file name: a lamp, lantern, candle, torch, brazier,
+/// sconce, chandelier or candelabra.
+pub fn is_light_fixture(path: &str) -> bool {
+    const FIXTURES: [&str; 8] = [
+        "lamp",
+        "lantern",
+        "candle",
+        "torch",
+        "brazier",
+        "sconce",
+        "chandelier",
+        "candelabra",
+    ];
+    let file = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    FIXTURES.iter().any(|k| file.contains(k))
+}
+
+/// One batch read as a fixture's lit glass: UNLIT, and neither additive (a card, read by
+/// [`glow_of_geometry`]) nor env-mapped (a reflection).
+pub fn glass_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
+    if !geometry.emissive || geometry.additive || geometry.env_map {
+        return None;
+    }
+    batch_glow(geometry)
 }
 
 /// A glow card's contribution: `(r, g, b, weight)`.
@@ -505,7 +585,7 @@ pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> V
     let mut pools: std::collections::HashMap<[i32; 3], Pool> = std::collections::HashMap::new();
     for (sidn, interior, geometry) in batches {
         let Some(rgb) = sidn else { continue };
-        if interior || rgb == [0, 0, 0] {
+        if interior || rgb == [0, 0, 0] || is_lamp_glass(geometry) {
             continue;
         }
         // SIDN is gamma bytes; the light table is linear.
@@ -573,6 +653,93 @@ pub fn window_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> V
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
     out.truncate(MAX_WINDOW_LIGHTS);
     out.into_iter().map(|(_, g)| g).collect()
+}
+
+/// fork: how far (yd) a lamp-glass triangle may sit from a lantern's running centre and still be
+/// that lantern's: a lantern is a yard across, and a city's lamps stand ten or more apart.
+const LANTERN_REACH: f32 = 1.5;
+
+/// Whether a batch is a lamp's glass rather than a window's, by its texture's file name
+/// ([`is_light_fixture`]'s words): Stormwind's street lamps are city geometry, lanterns in
+/// batches of `STORMWINDLAMPGLASS` under the same SIDN material class as the panes.
+pub fn is_lamp_glass(geometry: &benilla_formats::RenderSubmesh) -> bool {
+    geometry.texture.as_deref().is_some_and(is_light_fixture)
+}
+
+/// fork: **the lamps a building's own geometry holds.** A WMO lantern is SIDN glass like a window —
+/// it glows by the night fraction and the reference commits no light for it — but pooled as a
+/// window it stood a yard off its glass, merged with the panes around it and lost the building's
+/// window budget to them: not one lamp on Stormwind's streets had a light. So lamp glass
+/// ([`is_lamp_glass`]) in an exterior group is gathered lantern by lantern ([`LANTERN_REACH`]),
+/// and each is a light at its glass's centre, as strong as a glow card of its half-extent. The
+/// caller tags them night-only, as the glass is, but not as windows: a lamp stands in lamp air.
+pub fn lamp_glass_glows<'a>(batches: impl IntoIterator<Item = WindowBatch<'a>>) -> Vec<WindowGlow> {
+    struct Lantern {
+        area: f32,
+        centre: Vec3,
+        color: Vec3,
+        lo: Vec3,
+        hi: Vec3,
+    }
+    let mut lanterns: Vec<Lantern> = Vec::new();
+    for (sidn, interior, geometry) in batches {
+        let Some(rgb) = sidn else { continue };
+        if interior || rgb == [0, 0, 0] || !is_lamp_glass(geometry) {
+            continue;
+        }
+        let color = Vec3::from(rgb.map(|c| (c as f32 / 255.0).powf(2.2)));
+        let pos = &geometry.positions;
+        for &[ia, ib, ic] in geometry.indices.as_chunks::<3>().0 {
+            let [a, b, c] = [ia, ib, ic].map(|i| pos.get(i as usize).copied());
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+                continue;
+            };
+            let [a, b, c] = [a, b, c].map(Vec3::from);
+            let area = (b - a).cross(c - a).length() * 0.5;
+            if area <= 1e-5 {
+                continue;
+            }
+            let mid = (a + b + c) / 3.0;
+            let index = match lanterns
+                .iter()
+                .position(|l| (l.centre / l.area).distance(mid) <= LANTERN_REACH)
+            {
+                Some(i) => i,
+                None => {
+                    lanterns.push(Lantern {
+                        area: 0.0,
+                        centre: Vec3::ZERO,
+                        color: Vec3::ZERO,
+                        lo: mid,
+                        hi: mid,
+                    });
+                    lanterns.len() - 1
+                }
+            };
+            let lantern = &mut lanterns[index];
+            lantern.area += area;
+            lantern.centre += mid * area;
+            lantern.color += color * area;
+            lantern.lo = lantern.lo.min(a).min(b).min(c);
+            lantern.hi = lantern.hi.max(a).max(b).max(c);
+        }
+    }
+    lanterns
+        .into_iter()
+        .filter_map(|l| {
+            let color = l.color / l.area;
+            let glow = Glow {
+                tint: [color.x, color.y, color.z, 1.0],
+                size: ((l.hi - l.lo) * 0.5).max_element(),
+            };
+            let lit = combine(false, [], [glow])?;
+            Some(WindowGlow {
+                pos: (l.centre / l.area).to_array(),
+                color: lit.color,
+                intensity_scale: lit.intensity_scale,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -646,6 +813,92 @@ mod tests {
         assert!(
             combine(false, [], [read]).is_some(),
             "and it synthesizes a real light, so refusing it is what stops the rack glowing"
+        );
+    }
+
+    /// GOLDEN — **the Stormwind street lamp.** `StormwindStreetlamp01.m2` is an opaque lit post and
+    /// one opaque UNLIT glass batch (1.02 x 1.02 x 0.62 yd at 4.35 yd up), no light, no emitter, no
+    /// card: the recipe proper finds nothing, and the fixture fallback lights it at its glass. The
+    /// same unlit batch on a model that is not a fixture (a firefly swarm) lights nothing.
+    #[test]
+    fn a_fixtures_unlit_glass_is_its_light() {
+        let glass = benilla_formats::RenderSubmesh {
+            emissive: true,
+            positions: vec![[-0.51, -0.51, 4.04], [0.51, 0.51, 4.66]],
+            ..Default::default()
+        };
+        let post = benilla_formats::RenderSubmesh {
+            positions: vec![[-0.58, -1.0, 0.0], [0.58, 1.0, 4.9]],
+            ..Default::default()
+        };
+        assert_eq!(
+            glow_of_geometry(&glass),
+            None,
+            "glass is not an additive card"
+        );
+        assert!(glass_of_geometry(&glass).is_some());
+        assert_eq!(glass_of_geometry(&post), None, "a lit post is not glass");
+        let (lit, anchor) = {
+            let glows = [glass_of_geometry(&glass).unwrap()];
+            let lit = combine(false, [], glows).expect("the glass emits");
+            let anchor = glow_anchor_by([], [&glass, &post], glass_of_geometry).unwrap();
+            (lit, anchor)
+        };
+        assert!(
+            (anchor.0[2] - 4.35).abs() < 1e-3,
+            "the light sits in the glass: {anchor:?}"
+        );
+        assert_eq!(lit.flame, None, "glass does not flicker");
+        let path = "World\\Generic\\Human\\Passive Doodads\\Lamps\\StormwindStreetlamp01.m2";
+        assert!(is_light_fixture(path));
+        assert!(!is_light_fixture(
+            "World\\ENVIRONMENT\\DOODAD\\ANQUIRAJ\\Fireflies\\Hive_Fireflies_01.m2"
+        ));
+    }
+
+    /// GOLDEN — **Stormwind's street lamps are the city's own glass.** Two lanterns in one
+    /// `STORMWINDLAMPGLASS` SIDN batch, twelve yards apart, are two lights, each at its glass and
+    /// neither a window; a pane in the same building still pools as a window, and the lamp glass
+    /// is not counted there.
+    #[test]
+    fn a_buildings_lamp_glass_is_one_light_per_lantern() {
+        let lantern = |x: f32| -> Vec<[f32; 3]> {
+            vec![
+                [x - 0.5, 0.0, 4.0],
+                [x + 0.5, 0.0, 4.0],
+                [x + 0.5, 0.0, 4.8],
+                [x, 0.5, 4.0],
+                [x, -0.5, 4.0],
+                [x, -0.5, 4.8],
+            ]
+        };
+        let mut positions = lantern(0.0);
+        positions.extend(lantern(12.0));
+        let glass = benilla_formats::RenderSubmesh {
+            texture: Some("DUNGEONS\\TEXTURES\\DOODADS\\STORMWINDLAMPGLASS.BLP".into()),
+            positions,
+            indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            ..Default::default()
+        };
+        let pane = pane(20.0, 2.0, 3.0, 2.0, 2.0);
+        let white = Some([255, 255, 255]);
+        let lamps = lamp_glass_glows([(white, false, &glass), (white, false, &pane)]);
+        assert_eq!(lamps.len(), 2, "one light per lantern: {lamps:?}");
+        for (lamp, x) in lamps.iter().zip([0.0, 12.0]) {
+            assert!(
+                (lamp.pos[0] - x).abs() < 0.5 && (lamp.pos[2] - 4.3).abs() < 0.5,
+                "{lamp:?}"
+            );
+        }
+        let windows = window_glows([(white, false, &glass), (white, false, &pane)]);
+        assert_eq!(
+            windows.len(),
+            1,
+            "the pane is a window, the lamps are not: {windows:?}"
+        );
+        assert!(
+            lamp_glass_glows([(white, true, &glass)]).is_empty(),
+            "an interior group's SIDN is dead"
         );
     }
 

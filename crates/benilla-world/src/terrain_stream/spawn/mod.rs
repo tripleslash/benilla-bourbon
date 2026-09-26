@@ -258,6 +258,7 @@ pub(super) fn spawn_loaded_placements(
                     // light block at all. No-op on every other tier.
                     spawn_emissive_light_for(
                         &mut commands,
+                        &object.label,
                         &m.lights,
                         &m.emitters,
                         &m.submeshes,
@@ -762,6 +763,7 @@ pub(super) fn spawn_loaded_placements(
             // room gate as the light above, so one of them in a culled room still lights nothing.
             spawn_emissive_light_for(
                 &mut commands,
+                &object.label,
                 &m.lights,
                 &m.emitters,
                 &m.submeshes,
