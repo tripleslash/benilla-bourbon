@@ -18,6 +18,13 @@ pub type AddonChainReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
 /// [`AddonChainReader`], shared so a load can call it without holding the model.
 pub(crate) type SharedChainReader = std::rc::Rc<dyn Fn(&str) -> Option<Vec<u8>>>;
 
+/// Reads a saved-variables file by its path in the host's state folder; absent is `NotFound`.
+pub type AddonSavedReader = Box<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
+
+/// [`AddonSavedReader`], shared so a load can call it without holding the model.
+pub(crate) type SharedSavedReader =
+    std::rc::Rc<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
+
 /// One addon as the AddOn API sees it, filled by the host at discovery.
 #[derive(Clone, Debug, Default)]
 pub struct AddOnInfo {
@@ -491,7 +498,7 @@ fn load_bindings(lua: &Lua, name: &str, read: &Reader) {
 /// as chunks in the shared globals with no `setfenv` (`0x704bc0`, `0x704ae0`), between its files
 /// and `ADDON_LOADED` so saved values win; a missing file is skipped (`0x51f4a9`, `0x51f530`).
 fn load_saved_variables(lua: &Lua, i: usize) {
-    let (name, account, character, has_account, has_character) = {
+    let (name, account, character, has_account, has_character, reader) = {
         let model = lua.app_data_ref::<Model>().expect("model");
         let a = &model.addons[i];
         (
@@ -500,6 +507,7 @@ fn load_saved_variables(lua: &Lua, i: usize) {
             model.addons_saved_character.clone(),
             !a.saved_variables.is_empty(),
             !a.saved_variables_per_character.is_empty(),
+            model.addons_saved_reader.clone(),
         )
     };
     for (dir, declared) in [(account, has_account), (character, has_character)] {
@@ -508,7 +516,11 @@ fn load_saved_variables(lua: &Lua, i: usize) {
         }
         let Some(dir) = dir else { continue };
         let path = dir.join(format!("{name}.lua"));
-        let bytes = match std::fs::read(&path) {
+        let read = match &reader {
+            Some(read) => read(&path),
+            None => std::fs::read(&path),
+        };
+        let bytes = match read {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // the first-run case
             Err(e) => {
@@ -636,6 +648,10 @@ impl super::UiScript {
     /// Seat the reader chain-sourced addons (`AddOnInfo::chain`) are read through.
     pub fn set_addon_chain_reader(&self, reader: AddonChainReader) {
         self.model_mut().addons_chain_reader = Some(std::rc::Rc::from(reader));
+    }
+    /// Seat the reader saved-variables files are read through; without one they read off disk.
+    pub fn set_addon_saved_reader(&self, reader: AddonSavedReader) {
+        self.model_mut().addons_saved_reader = Some(std::rc::Rc::from(reader));
     }
     /// Replace the AddOn registry; called once at world entry, after discovery.
     pub fn register_addons(

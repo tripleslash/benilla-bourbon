@@ -82,6 +82,8 @@ pub(crate) struct Model {
     /// Saved-variables folders, one `<Addon>.lua` each: the account's, then this character's.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
     pub(crate) addons_saved_character: Option<std::path::PathBuf>,
+    /// The host's reader for those files; without one they read off disk.
+    pub(crate) addons_saved_reader: Option<super::addon::SharedSavedReader>,
     /// FrameXML templates, global across files as the client's (`0x6ee500`); held here so the
     /// loader runs from a bare `&Lua`, which lets `LoadAddOn` load inside a binding.
     pub(crate) framexml_templates:
@@ -1000,6 +1002,7 @@ impl Model {
             font_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
+            addons_saved_reader: None,
             framexml_templates: Default::default(),
             framexml_debug: Default::default(),
             framexml_fonts: Default::default(),

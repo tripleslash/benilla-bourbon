@@ -715,6 +715,8 @@ pub(super) fn load_third_party(
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     // Chain rows read their files off the player's patch chain.
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    // Saved variables read through `local_state` too: on the page `std::fs` is unsupported.
+    script.set_addon_saved_reader(Box::new(crate::local_state::read));
     // Each enable bit through the reference's query: the character's explicit row, else what the
     // realm's other characters agree on, else the manifest's `## DefaultState`.
     //
