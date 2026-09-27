@@ -73,6 +73,25 @@ fn visible(s: &mut UiScript) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A rankless service (Apprentice First Aid, a Turtle fishing trainer's first row) answers ""
+/// for its subtext, so Turtle's unguarded `format(PARENS_TEMPLATE, serviceSubText)` holds.
+#[test]
+fn rankless_service_subtext_is_empty_string() {
+    let mut t = trainer();
+    t.services[0].subtext = None;
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(t));
+    let sub = s
+        .eval::<Option<String>>("local _,sub = GetTrainerServiceInfo(2) return sub")
+        .unwrap();
+    assert_eq!(sub.as_deref(), Some(""));
+    assert_eq!(
+        s.eval::<String>("local _,sub = GetTrainerServiceInfo(2) return format('(%s)', sub)")
+            .unwrap(),
+        "()"
+    );
+}
+
 #[test]
 fn tree_interleaves_headers_and_ordered_services() {
     let mut s = UiScript::new().unwrap();
