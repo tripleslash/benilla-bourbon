@@ -972,6 +972,49 @@ fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A texture whose height comes from its art resolves once the art's size lands, with no layout
+/// write in between: on the web the size is in flight at the first sweep, and Turtle WoW's options
+/// frame stretches its `Top` and `Bot` pieces between two corners with no authored height.
+#[test]
+fn an_unsized_texture_resolves_when_its_arts_size_lands_after_the_first_sweep() {
+    use std::rc::Rc;
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let landed = Rc::new(std::cell::Cell::new(false));
+    let probe_landed = landed.clone();
+    s.set_texture_size_probe(Box::new(move |p| {
+        (p == "Interface\\Top" && probe_landed.get()).then_some((256, 256))
+    }));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Box")
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(648); f:SetHeight(520)
+        Top = f:CreateTexture("Top", "BACKGROUND")
+        Top:SetTexture("Interface\\Top")
+        Top:SetPoint("TOPLEFT", f, "TOPLEFT", 256, 0)
+        Top:SetPoint("TOPRIGHT", f, "TOPRIGHT", -128, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return Top:GetBottom() == nil").unwrap(),
+        "no size yet: the height axis has no span, so the region does not resolve"
+    );
+
+    landed.set(true);
+    s.resolve();
+    assert_eq!(
+        s.eval::<Vec<f64>>(
+            "return { Top:GetLeft(), Top:GetRight(), Top:GetTop(), Top:GetBottom() }"
+        )
+        .unwrap(),
+        vec![256.0, 520.0, 520.0, 264.0],
+        "the art's 256 texels are the height, the anchors the width"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// The constructors' string arguments take four shapes, by whether the binding tests its parser's
 /// return: a region constructor's `name` and `layer` (`0x6f3510` → `0x6f3690`, untested) and
 /// `CreateFrame`'s `name` and `inherits` (`0x6f3690`, unguarded) read a table as absent and

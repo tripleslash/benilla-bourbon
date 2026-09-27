@@ -55,11 +55,13 @@ pub(super) fn ingame_manifest(script: &UiScript) -> Vec<String> {
 }
 
 /// `ours` with every row of the `flavor` toc that the `stock` toc lacks, as an
-/// `Interface\FrameXML\` entry. Each goes after the latest of `ours` among the stock rows the
-/// flavor loads before it, so everything the flavor's client has loaded by then is loaded here
-/// too, and rows seated at one place keep the flavor's order. With no such row it goes after
-/// `GlobalStrings.lua`, and never ahead of entry 0, the font registry. Rows compare
-/// case-insensitively; one `ours` already lists is not added twice.
+/// `Interface\FrameXML\` entry, and without every stock row the flavor drops, which its client
+/// never runs (Turtle WoW's drops `SoundOptionsFrame.xml` and `UIOptionsFrame.xml`, whose scripts
+/// call the stock `OptionsFrame.lua` Turtle replaced). Each added row goes after the latest of
+/// `ours` among the stock rows the flavor loads before it, so everything the flavor's client has
+/// loaded by then is loaded here too, and rows seated at one place keep the flavor's order. With
+/// no such row it goes after `GlobalStrings.lua`, and never ahead of entry 0, the font registry.
+/// Rows compare case-insensitively; one `ours` already lists is not added twice.
 pub(super) fn splice_flavor_rows(
     ours: &[String],
     stock: &[String],
@@ -70,6 +72,12 @@ pub(super) fn splice_flavor_rows(
     let at: std::collections::HashMap<String, usize> =
         ours.iter().enumerate().map(|(i, r)| (key(r), i)).collect();
     let stock: std::collections::HashSet<String> = stock.iter().map(|r| key(r)).collect();
+    let listed: std::collections::HashSet<String> = flavor.iter().map(|r| key(r)).collect();
+    let dropped: std::collections::HashSet<String> = stock
+        .iter()
+        .filter(|r| !listed.contains(*r))
+        .map(|r| chain_key(r))
+        .collect();
     let home = at
         .get(&chain_key("GlobalStrings.lua"))
         .copied()
@@ -91,7 +99,10 @@ pub(super) fn splice_flavor_rows(
     }
     ours.iter()
         .zip(seated)
-        .flat_map(|(row, after)| std::iter::once(row.clone()).chain(after))
+        .flat_map(|(row, after)| {
+            let kept = (!dropped.contains(&key(row))).then(|| row.clone());
+            kept.into_iter().chain(after)
+        })
         .collect()
 }
 
@@ -345,7 +356,8 @@ mod tests {
     }
 
     /// Turtle WoW's rows go after the latest of ours among the stock rows its toc loads before
-    /// them; rows seated together keep its order; entry 0 stays the font registry.
+    /// them; rows seated together keep its order; entry 0 stays the font registry; a stock row
+    /// its toc drops is not loaded.
     #[test]
     fn a_flavor_s_own_rows_follow_every_stock_row_it_loads_before_them() {
         let ours = rows(&[
@@ -355,6 +367,7 @@ mod tests {
             "Ours.xml",
             "Interface\\FrameXML\\PartyFrame.xml",
             "Interface\\FrameXML\\Minimap.xml",
+            "Interface\\FrameXML\\SoundOptionsFrame.xml",
             "Interface\\FrameXML\\TutorialFrame.xml",
             "GameMenuFrame.xml",
         ]);
@@ -364,6 +377,7 @@ mod tests {
             "UIParent.xml",
             "Minimap.xml",
             "PartyFrame.xml",
+            "SoundOptionsFrame.xml",
             "TutorialFrame.xml",
             "GameMenuFrame.xml",
             "StatsFrame.xml",
@@ -395,7 +409,8 @@ mod tests {
                 "Ours.xml",
                 "Interface\\FrameXML\\PartyFrame.xml",
                 "Interface\\FrameXML\\Minimap.xml",
-                // After Minimap.xml, which ours loads after PartyFrame.xml.
+                // After Minimap.xml, which ours loads after PartyFrame.xml; SoundOptionsFrame.xml,
+                // which the flavor drops, is gone.
                 "Interface\\FrameXML\\json.lua",
                 "Interface\\FrameXML\\TutorialFrame.xml",
                 "Interface\\FrameXML\\Hooks.lua",

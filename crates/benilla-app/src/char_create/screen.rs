@@ -228,7 +228,11 @@ fn spawn_screen(
         // `CharacterCreateWoWLogo` (256×128 at (3,-7)), after the tower, as the reference's
         // frame order draws it over the border art.
         if let Some(logo) = &art.logo {
-            ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));
+            ui.spawn((
+                ImageNode::new(logo.clone()),
+                abs(s, 3.0, 7.0, 256.0, 128.0),
+                crate::glue::art::GlueLogo,
+            ));
         }
 
         super::panels::right_stack(ui, art, &font, s);

@@ -169,7 +169,11 @@ fn spawn_screen(
     canvas.with_children(|ui| {
         // The WoW logo (`AccountLoginLogo`, 256×128 at TOPLEFT (3,−7), OVERLAY).
         if let Some(logo) = &art.logo {
-            ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));
+            ui.spawn((
+                ImageNode::new(logo.clone()),
+                abs(s, 3.0, 7.0, 256.0, 128.0),
+                crate::glue::art::GlueLogo,
+            ));
         }
 
         // The Blizzard logo (100×100 at BOTTOM (0,8), ARTWORK) under the `BLIZZ_DISCLAIMER`

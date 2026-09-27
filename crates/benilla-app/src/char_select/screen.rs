@@ -187,7 +187,11 @@ fn spawn_screen(
     canvas.with_children(|ui| {
         // `CharacterSelectLogo`, 256×128 at TOPLEFT (3,-7).
         if let Some(logo) = &art.logo {
-            ui.spawn((ImageNode::new(logo.clone()), abs(s, 3.0, 7.0, 256.0, 128.0)));
+            ui.spawn((
+                ImageNode::new(logo.clone()),
+                abs(s, 3.0, 7.0, 256.0, 128.0),
+                crate::glue::art::GlueLogo,
+            ));
         }
 
         // `CharSelectCharacterName`, GlueFontNormalHuge gold at BOTTOM (0,100).

@@ -99,9 +99,9 @@ fn frame_node_hash(input: &LayoutInput, over: Option<Anchor>) -> u64 {
     node.finish()
 }
 
-/// A region's per-node input hash: its anchors, explicit size and measured text extent.
+/// A region's per-node input hash: its anchors, explicit size, measured text extent and art span.
 #[inline]
-fn region_node_hash(data: &RegionData) -> u64 {
+fn region_node_hash(data: &RegionData, probe: Option<&crate::script::TextureSizeProbe>) -> u64 {
     let mut node = InputFingerprint::default();
     node.anchors(&data.anchors);
     match data.size {
@@ -118,21 +118,43 @@ fn region_node_hash(data: &RegionData) -> u64 {
         }
         None => node.feed(u64::MAX),
     }
-    // The art, only where an axis authored 0 takes its span from it (`content_span`): a new
-    // texture moves such a region, while a sized region's art cannot move its rect.
-    if !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0) {
-        node.feed(data.fill.is_some() as u64);
-        match &data.texture {
-            Some(path) => {
-                node.feed(path.len() as u64);
-                for b in path.as_bytes() {
-                    node.feed(u64::from(*b));
-                }
-            }
-            None => node.feed(u64::MAX),
-        }
-    }
+    feed_art(&mut node, data, probe);
     node.finish()
+}
+
+/// Whether an axis of `data` authored 0 takes its span from the art (`content_span`).
+fn spans_from_art(data: &RegionData) -> bool {
+    !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+}
+
+/// The art, only where an axis takes its span from it: the path and the probe's answer for it. A
+/// new texture moves such a region, and so does art whose size lands after the region's sweep (in
+/// flight on the web), while a sized region's art cannot move its rect.
+fn feed_art(
+    node: &mut InputFingerprint,
+    data: &RegionData,
+    probe: Option<&crate::script::TextureSizeProbe>,
+) {
+    if !spans_from_art(data) {
+        return;
+    }
+    node.feed(data.fill.is_some() as u64);
+    match &data.texture {
+        Some(path) => {
+            node.feed(path.len() as u64);
+            for b in path.as_bytes() {
+                node.feed(u64::from(*b));
+            }
+        }
+        None => node.feed(u64::MAX),
+    }
+    match content_span(data, probe) {
+        Some((w, h)) => {
+            node.f32(w);
+            node.f32(h);
+        }
+        None => node.feed(u64::MAX),
+    }
 }
 
 /// A texture's content-derived span in FrameXML units. `CSimpleTexture::GetWidth` (`0x770720`,
@@ -497,6 +519,7 @@ impl UiScript {
     /// [`UiScript::resolve`]'s body on a bare `Model`, so a Lua binding can force a fresh resolve,
     /// as `UpdateScrollChildRect` must report a range reflecting a same-tick `SetHeight`.
     pub(super) fn resolve_layout(model: &mut Model) {
+        Self::name_landed_art(model);
         Self::resolve_layout_inner(model);
         if !model.layout_verify_recheck {
             return;
@@ -540,6 +563,37 @@ impl UiScript {
             before.1.len(),
             model.region_resolved.len(),
         );
+    }
+
+    /// Names every region whose art had no size at its last sweep and has one now, so its hash
+    /// moves and the resolve re-sweeps it; the rest wait on. Nothing else would: the art landing
+    /// (in flight on the web) is no layout write.
+    fn name_landed_art(model: &mut Model) {
+        if model.layout_art_waiting.is_empty() {
+            return;
+        }
+        let mut landed = Vec::new();
+        let Model {
+            layout_art_waiting,
+            region_data,
+            texture_size_probe,
+            ..
+        } = &mut *model;
+        layout_art_waiting.retain(|&rh| match region_data.get(&rh) {
+            Some(data) if spans_from_art(data) => {
+                if content_span(data, texture_size_probe.as_ref()).is_some() {
+                    landed.push(rh);
+                    false
+                } else {
+                    true
+                }
+            }
+            // Gone, or sized since: a later sweep re-enrols it if it needs the art again.
+            _ => false,
+        });
+        for rh in landed {
+            model.touch_layout_region(rh);
+        }
     }
 
     fn resolve_layout_inner(model: &mut Model) {
@@ -596,6 +650,7 @@ impl UiScript {
             layout_last_scope,
             layout_rounds,
             pending_size_changed,
+            layout_art_waiting,
             texture_size_probe,
             ..
         } = model;
@@ -616,7 +671,7 @@ impl UiScript {
                 let now = if n & REGION_TAG != 0 {
                     let rh = scope.regions[(n & !REGION_TAG) as usize].rh;
                     match region_data.get(&rh) {
-                        Some(d) => region_node_hash(d),
+                        Some(d) => region_node_hash(d, texture_size_probe.as_ref()),
                         None => continue,
                     }
                 } else {
@@ -856,6 +911,9 @@ impl UiScript {
                         if height == 0.0 {
                             height = ch;
                         }
+                    } else if data.texture.is_some() {
+                        // Art with no size yet waits for `name_landed_art`.
+                        layout_art_waiting.insert(rh);
                     }
                 }
                 scratch.anchors.clear();
@@ -983,8 +1041,10 @@ impl UiScript {
             next_id,
             screen,
             layout_scope: scope,
+            texture_size_probe,
             ..
         } = model;
+        let probe = texture_size_probe.as_ref();
 
         // One id per live frame, its layout input's scale and clamp synced from the arena.
         let mut ids: Vec<(FrameHandle, u32)> = Vec::with_capacity(frame_to_id.len());
@@ -1125,6 +1185,7 @@ impl UiScript {
                 }
                 None => fp.feed(u64::MAX),
             }
+            feed_art(&mut fp, data, probe);
             if let Some(r) = live {
                 // Mint an id for a region that never needed one, without `Model::region_id`'s
                 // epoch bump, which would re-dirty the running resolve.
@@ -1141,7 +1202,7 @@ impl UiScript {
                 #[allow(clippy::cast_possible_truncation)]
                 let idx = scope.regions.len() as u32 | REGION_TAG;
                 if let Some(slot) = scope.now.get_mut(id as usize) {
-                    *slot = region_node_hash(data);
+                    *slot = region_node_hash(data, probe);
                     scope.node_of[id as usize] = idx;
                 }
                 // A region reads its anchor targets' rects and its owner's scale.

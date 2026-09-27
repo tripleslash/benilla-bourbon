@@ -3295,8 +3295,9 @@
         a Turtle realm (GameMenuFrame.xml). That window is data-driven: its Options\Options.lua
         lists categories of rows in `GameOptions`, and its OptionsFrame.lua builds a category's
         controls from them each time the category shows, labelling a row with `_G[row.name]` and
-        tipping it with `row.desc`. Our rows join the categories Turtle's own sit in. A 1.12.1
-        chain has no `GameOptions`, and none of this runs there.
+        tipping it with `row.desc`. Turtle's rows benilla cannot honour are cut, and ours join the
+        categories Turtle's own sit in. A 1.12.1 chain has no `GameOptions`, and none of this runs
+        there.
     -->
     <Script><![CDATA[
         -- Read at load, after the chain's OptionsFrame.xml and before any addon.
@@ -3347,6 +3348,53 @@
                 { text = "Classic", value = "0" },
             })
 
+            -- ── Only rows that work here ──
+            -- Deviation: Turtle's rows benilla cannot honour are cut, by the name Turtle keys them
+            -- with (Options\Options.lua).
+            local cut = {
+                -- What the browser page owns, not the client: the display mode and its refresh,
+                -- the desktop's gamma ramp, multisampling, vsync and the hardware cursor.
+                RESOLUTION = 1, WINDOWED_MODE = 1, WINDOWED_MAXIMIZED = 1, REFRESH = 1,
+                DESKTOP_GAMMA = 1, MULTISAMPLE = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
+                HARDWARE_CURSOR = 1, FIX_LAG = 1,
+                -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
+                -- `lod`, `shadowLevel`, `baseMip`, `spellEffectLevel`, the 1.12 shader switches,
+                -- `movieSubtitle`, `autointeract` and its camera style, `UnitNamePlayerPVPTitle`.
+                USE_UISCALE = 1, WORLD_LOD = 1, TERRAIN_MIP = 1, TEXTURE_DETAIL = 1,
+                SPELL_DETAIL = 1, ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
+                FULL_SCREEN_GLOW = 1, DEATH_EFFECT = 1, VERTEX_ANIMATION_SHADERS = 1,
+                PHONG_SHADING = 1, USE_WEATHER_SHADER = 1, CINEMATIC_SUBTITLES = 1,
+                CLICK_TO_MOVE = 1, CLICK_CAMERA_STYLE = 1, SHOW_PLAYER_TITLES = 1,
+                -- Latched at boot into every sampler (`tex_filter`), which a page reload re-reads.
+                TRILINEAR_FILTERING = 1, ANISOTROPIC = 1,
+                -- The engine path is missing: Simple Chat's re-layout, a zone-objective tracker,
+                -- and the GUID `UnitExists` returns on Turtle, which its challenge lookup keys by.
+                SIMPLE_CHAT_TEXT = 1, HIDE_OUTDOOR_WORLD_STATE_TEXT = 1,
+                SHOW_PLAYER_CHALLENGES_TEXT = 1,
+            }
+            -- A category left with no row goes too (VIDEO's Miscellaneous).
+            for i = getn(GameOptions), 1, -1 do
+                local category = GameOptions[i]
+                if ( category.options ) then
+                    for k = getn(category.options), 1, -1 do
+                        local option = category.options[k]
+                        if ( cut[option.name] ) then
+                            tremove(category.options, k)
+                        elseif ( option.name == "UI_SCALE" or option.name == "GAMMA" ) then
+                            -- Gated on a cut row (`useUiScale`, `desktopGamma`): always live here.
+                            option.dependency = nil
+                        elseif ( option.name == "ENVIRONMENT_DETAIL" ) then
+                            -- Turtle's `smallCull` 0-2 is our `WorldDetail` 0-2, which the 1.12
+                            -- slider of this name drives.
+                            option.cvar = "WorldDetail"
+                        end
+                    end
+                    if ( getn(category.options) == 0 ) then
+                        tremove(GameOptions, i)
+                    end
+                end
+            end
+
             -- The rows, by the category they join; the bounds are our rows'. The tooltips are
             -- ours, whose "Applies when you click Apply" holds here too (below).
             local rows = {
@@ -3389,6 +3437,8 @@
                     end
                 end
             end
+            -- Turtle's OnLoad listed the categories before the cut: list them again.
+            OptionsFrame_UpdateCategories()
 
             -- ── The VIDEO rows stage to Apply ──
             -- Deviation: Turtle's window writes a row the moment its control changes

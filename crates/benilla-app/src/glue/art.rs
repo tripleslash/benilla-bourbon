@@ -179,10 +179,36 @@ pub(crate) struct CloseBtnArt {
     pub(crate) hi: Option<Handle<AddUiMaterial>>,
 }
 
+/// The WoW logo a glue screen shows at its top left, the one piece of glue chrome Turtle WoW's
+/// layer replaces; [`forget_glue_art`] repoints it when the data changes under an open screen.
+#[derive(Component)]
+pub(crate) struct GlueLogo;
+
 /// The art set loads again on its next use after a change of the data the chain answers from:
-/// Turtle WoW ships its own create-screen art (its race icons among it).
-pub(crate) fn forget_glue_art(_: On<benilla_assets::ChainDataChanged>, mut art: ResMut<GlueArt>) {
+/// Turtle WoW ships its own create-screen art (its race icons among it) and logo. A logo already
+/// on screen (character select stays up across a realm change) takes the new one at once.
+pub(crate) fn forget_glue_art(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut art: ResMut<GlueArt>,
+    mut logos: Query<&mut ImageNode, With<GlueLogo>>,
+    assets: Option<ResMut<WorldAssets>>,
+    images: Option<ResMut<Assets<Image>>>,
+    add_mats: Option<ResMut<Assets<AddUiMaterial>>>,
+) {
     art.tried = false;
+    let (Some(mut assets), Some(mut images), Some(mut add_mats)) = (assets, images, add_mats)
+    else {
+        return;
+    };
+    if logos.is_empty() {
+        return;
+    }
+    art.ensure_loaded(&mut assets, &mut images, &mut add_mats);
+    if let Some(logo) = &art.logo {
+        for mut node in &mut logos {
+            node.image = logo.clone();
+        }
+    }
 }
 
 impl GlueArt {

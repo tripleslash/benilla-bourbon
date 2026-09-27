@@ -113,6 +113,9 @@ pub(crate) struct Model {
     /// cached graph's shape alone, so a resolve seeds its dirty closure from them. `None` derives
     /// the graph in full; `WOW_LAYOUT_VERIFY` checks every incremental pass against a full one.
     pub(crate) layout_touched: Option<Vec<u32>>,
+    /// Regions whose last sweep took an axis from art with no size yet (in flight on the web, or
+    /// missing), re-asked before each resolve and named once it answers (`name_landed_art`).
+    pub(crate) layout_art_waiting: HashSet<RegionHandle>,
     /// Regions a write may have re-keyed for text measure (text, font, outline, wrap, scale) since
     /// the last sweep, which asks only these; `None` walks all. A site that forgets to name its
     /// region is caught by `WOW_LAYOUT_VERIFY`, on for every test here, which panics on the miss.
@@ -1018,6 +1021,7 @@ impl Model {
             layout_fingerprint: None,
             layout_epoch: 0,
             layout_touched: None,
+            layout_art_waiting: HashSet::new(),
             measure_dirty: None,
             msg_swept: std::collections::HashMap::new(),
             msg_lines_hashed: 0,

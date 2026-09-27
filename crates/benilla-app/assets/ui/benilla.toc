@@ -58,7 +58,8 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
-# The reference's three options windows, loaded hidden so addons find their frames by name.
+# The reference's three options windows, loaded hidden so addons find their frames by name. A
+# Turtle WoW VM loads only its own OptionsFrame.xml: its toc drops the other two.
 # Deviation: the player opens our own options window, `OptionsFrame.xml` below, because 1.12's
 # settings screens are much worse to use; the stock one holds `OptionsFrame`.
 Interface\FrameXML\OptionsFrame.xml
