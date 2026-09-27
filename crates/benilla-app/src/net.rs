@@ -878,6 +878,10 @@ pub(crate) enum ClientCommand {
         guid: u64,
     },
     /// `CMSG_MESSAGECHAT`. A plain line, `.` GM commands included, goes as `Say`.
+    /// The language every later chat line goes out in: the self race's `ChrRaces.BaseLanguage`.
+    SetChatLanguage {
+        language: u32,
+    },
     Chat {
         kind: ChatKind,
         target: Option<String>,

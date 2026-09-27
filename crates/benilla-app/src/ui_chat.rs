@@ -92,6 +92,7 @@ impl Plugin for UiChatPlugin {
                     language::load_language_words,
                     language::feed_language_skills,
                     language::feed_default_language,
+                    language::feed_chat_language,
                 )
                     .before(feed::feed_chat),
             )
