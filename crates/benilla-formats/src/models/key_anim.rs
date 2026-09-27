@@ -239,11 +239,13 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     }
     if track.gseq != 0xffff {
         // Keys are loop-relative ms, wrapped on the table duration (else the last key's time).
-        let period_ms = gseq_durations
-            .get(track.gseq as usize)
-            .copied()
-            .filter(|&d| d > 0)
-            .unwrap_or_else(|| keys.last().map(|&(t, _)| t).unwrap_or(0).max(1));
+        let duration = gseq_durations.get(track.gseq as usize).copied();
+        // A zero duration pins the cursor at 0 (`0x714379`): the track holds its first key.
+        if duration == Some(0) {
+            return (!drop_constant(first)).then(|| constant(first));
+        }
+        let period_ms =
+            duration.unwrap_or_else(|| keys.last().map(|&(t, _)| t).unwrap_or(0).max(1));
         return Some(KeyAnim {
             period: period_ms as f32 / 1000.0,
             step,
@@ -334,6 +336,35 @@ mod tests {
         ])
         .expect("animates");
         assert!(set.uniform().is_none());
+    }
+
+    /// `Stars.m2` (patch-Y) keys a UV scroll on a zero-duration global sequence, which the
+    /// reference's cursor never leaves 0 on.
+    #[test]
+    fn a_zero_duration_global_sequence_holds_its_first_key() {
+        let track = M2Track::<f32> {
+            interp: 1,
+            gseq: 1,
+            ranges: Vec::new(),
+            keys: vec![(0, 0.25), (666_667, -2.0)],
+        };
+        let baked = bake_track(&track, &[250_000, 0], None, |v| v, |_| false, |_| false)
+            .expect("a held value still bakes");
+        assert_eq!(baked.period, 0.0, "no clock");
+        assert_eq!(baked.keys, vec![(0.0, 0.25)]);
+        let live = bake_track(
+            &M2Track { gseq: 0, ..track },
+            &[250_000, 0],
+            None,
+            |v| v,
+            |_| false,
+            |_| false,
+        )
+        .expect("a live loop");
+        assert_eq!(
+            live.period, 250.0,
+            "a nonzero duration still wraps on the table"
+        );
     }
 
     #[test]
