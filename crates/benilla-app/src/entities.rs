@@ -345,6 +345,7 @@ impl Creatures {
                     static_mesh: part.mesh.clone(),
                     skinned_mesh: part.skinned_mesh.clone(),
                     material: part.material.clone(),
+                    alpha_anim: part.alpha_anim.clone(),
                 }),
             }
         }

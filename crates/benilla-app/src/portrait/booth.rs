@@ -508,6 +508,11 @@ pub(super) fn spawn_booth_model(
             }
         }
     }
+    // The file slot of the Stand armed below, which each batch's material alpha reads: slot 0 is
+    // not always Stand (Turtle WoW's GoblinFemale opens on anim 125).
+    let stand_seq = anims
+        .and_then(|a| a.find(catalog.map_or(0, |c| a.resolve(0, c).id)))
+        .map(|clip| clip.seq_index);
     for p in parts {
         let use_rig = p.skinned.is_some() && rig_slot != 0;
         let mesh = if use_rig {
@@ -529,7 +534,7 @@ pub(super) fn spawn_booth_model(
         let tag_slot = if use_rig { rig_slot } else { 0 };
         if let Some(anim) = &p.alpha_anim {
             let mat_anim =
-                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
+                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, stand_seq);
             child.insert((
                 bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
                     tag_slot,

@@ -214,8 +214,7 @@ pub(super) fn sync_dressup_booth(
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material),
-                // Not built, as in the glue preview.
-                alpha_anim: None,
+                alpha_anim: p.alpha_anim.clone(),
                 twins: BoothTwins::default(),
                 mat_anim: false,
             })

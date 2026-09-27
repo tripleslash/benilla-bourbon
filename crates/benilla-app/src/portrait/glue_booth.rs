@@ -1159,8 +1159,7 @@ pub(super) fn sync_glue_booth(
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
                 twins: relight_twins(&p.twins, &mut scene, &mut booth_light, &mut materials),
-                // `None`: the character assembly does not carry its alpha loops.
-                alpha_anim: None,
+                alpha_anim: p.alpha_anim.clone(),
                 mat_anim: false,
             });
         }
