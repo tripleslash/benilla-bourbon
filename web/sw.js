@@ -41,7 +41,7 @@
 //
 // ## Scope
 //
-// `/data/`, `/data-hd/` and `/data-turtle/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
+// `/data/`, `/data-hd/`, `/data-turtle/` and `/data-reforged/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
 // (the gateway address and the realmlist, which must never be held: re-uploading it is how a client
 // gets repointed) — is not passed to `respondWith` at all, so it keeps its ordinary `no-cache`
 // behaviour and a rebuilt bundle still lands on a reload. A service worker that made the dev loop
@@ -85,6 +85,9 @@ const HD_DATA_PREFIX = '/data-hd/';
 /// objects whose names are their content, fetched only while the client is on a 1.18.1 realm and
 /// kept for the next visit to one. Twin of `benilla_formats::layers::TURTLE_DATA_SEGMENT`.
 const TURTLE_DATA_PREFIX = '/data-turtle/';
+/// The reforged art layer's tree, on the Turtle layer's terms: fetched only while the client is on a
+/// 1.18.1 realm with the setting on. Twin of `benilla_formats::layers::REFORGED_DATA_SEGMENT`.
+const REFORGED_DATA_PREFIX = '/data-reforged/';
 /// Network-first with a cache fallback: the build-id pointer.
 const POINTER = 'boot-packs.json';
 
@@ -112,7 +115,7 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  const prefix = [DATA_PREFIX, HD_DATA_PREFIX, TURTLE_DATA_PREFIX].find((p) =>
+  const prefix = [DATA_PREFIX, HD_DATA_PREFIX, TURTLE_DATA_PREFIX, REFORGED_DATA_PREFIX].find((p) =>
     url.pathname.startsWith(p)
   );
   if (!prefix) return;

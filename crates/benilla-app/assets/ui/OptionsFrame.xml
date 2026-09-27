@@ -427,6 +427,18 @@
             .. "On by default. In the browser these models are an additional ~1.7 GB of game "
             .. "data; turning this off fetches none of it and plays on the original art."
 
+        -- Reforged game models and textures: Turtle WoW's own window only (below), for Turtle's
+        -- Project Reforged art. The tooltip says the two things a click cannot show: that it
+        -- waits for the next load (the layer is latched as the page loads, cvars::
+        -- apply_boot_layers), and that a 1.12.1 realm never gets it.
+        BENILLA_TOOLTIP_REFORGED_MODELS =
+            "Uses the reforged, higher-detail models and textures for creatures, gear, spells, "
+            .. "buildings and the world on Turtle WoW realms. Realms of the original game are "
+            .. "unaffected.\n\n"
+            .. "Takes effect the next time you load the game.\n\n"
+            .. "On by default. In the browser this art is an additional download, fetched as you "
+            .. "meet it; turning this off fetches none of it."
+
         BENILLA_TOOLTIP_WORLD_SHADOWS =
             "Renders real dynamic silhouettes for players, NPCs, creatures, and mounts. Terrain, "
             .. "buildings, and trees keep their authored shading, matching Wrath's character-only "
@@ -3307,7 +3319,22 @@
             -- Row labels, read through `_G[row.name]`: our rows' own.
             BENILLA_WORLD_SHADOWS = "Real Character Shadows"
             BENILLA_HD_MODELS = "Use updated character models"
+            BENILLA_REFORGED_MODELS = "Use reforged game models and textures"
             BENILLA_LIGHTING_MODEL = "Lighting"
+
+            -- A row that waits for the next load says so when applied, in the shape of 1.12's
+            -- own CLIENT_RESTART_ALERT dialog (StaticPopup.lua), in the browser's words.
+            BENILLA_RELOAD_REQUIRED = "Reload the game to apply this change: the reforged "
+                .. "game models and textures are chosen as the game loads."
+            StaticPopupDialogs["BENILLA_RELOAD_REQUIRED"] = {
+                text = BENILLA_RELOAD_REQUIRED,
+                button1 = OKAY,
+                showAlert = 1,
+                timeout = 0,
+                exclusive = 1,
+                whileDead = 1,
+                hideOnEscape = 1,
+            }
             BENILLA_LIGHTING_QUALITY = "Lighting Quality"
             BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
@@ -3405,6 +3432,10 @@
                 { category = WORLD_APPEARANCE, row = {
                     name = "BENILLA_HD_MODELS", desc = BENILLA_TOOLTIP_HD_MODELS,
                     type = "checkbutton", cvar = "hdCharacterModels" } },
+                -- Latched as the page loads: Apply writes it for the next load and says so.
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_REFORGED_MODELS", desc = BENILLA_TOOLTIP_REFORGED_MODELS,
+                    type = "checkbutton", cvar = "reforgedModels", benillaReload = 1 } },
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_LIGHTING_MODEL", desc = BENILLA_TOOLTIP_LIGHTING_MODEL,
                     type = "dropdown", identifier = "BenillaLightingModel",
@@ -3505,7 +3536,7 @@
                 if ( not next(staged) ) then
                     return
                 end
-                local restart
+                local restart, reload
                 for option, value in pairs(staged) do
                     if ( option.cvar ) then
                         SetCVar(option.cvar, value, option.name)
@@ -3518,6 +3549,7 @@
                         getglobal(option.func)(value)
                     end
                     restart = restart or option.restartGx
+                    reload = reload or option.benillaReload
                     option.initialValue = value
                     option.changedValue = false
                 end
@@ -3525,6 +3557,9 @@
                 apply:Hide()
                 if ( restart ) then
                     RestartGx()
+                end
+                if ( reload ) then
+                    StaticPopup_Show("BENILLA_RELOAD_REQUIRED")
                 end
                 if ( redraw ) then
                     OptionsFrame_OnShow()

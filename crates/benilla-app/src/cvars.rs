@@ -748,6 +748,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts          whatever `patch-?.MPQ` archives it finds and never asks",
     ),
+    // **`reforgedModels` — the reforged game models and textures, ON by default.** Turtle WoW's
+    // Project Reforged art (its letter patches, a `/data-reforged` container in the browser),
+    // mounted over the Turtle layer on a 1.18.1 realm and never on a 1.12.1 one; its row is in
+    // Turtle's own options window only. **Read at boot** ([`apply_boot_layers`]) and latched for
+    // the session, so a change takes effect on the next load, which the row's popup says.
+    ours(
+        "reforgedModels",
+        "1",
+        "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts \
+         whatever `patch-?.MPQ` archives it finds and never asks",
+    ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is
     // [`crate::perf::FpsJournalSetting`].
@@ -1723,6 +1734,13 @@ pub(crate) fn apply_boot_layers() {
                 .unwrap_or(false)
         });
     benilla_formats::set_hd_character_models(hd);
+    // The reforged art mounts later, with the Turtle layer, but on this read: the session keeps
+    // what the page loaded with, and a change of the row waits for the next load.
+    let reforged = boot_cvar("reforgedModels")
+        .or_else(|| registered_default("reforgedModels").map(str::to_string))
+        .and_then(|v| benilla_formats::layers::layer_switch(&v))
+        .unwrap_or(false);
+    benilla_formats::layers::set_reforged_models(reforged);
 }
 
 /// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
@@ -3497,6 +3515,11 @@ mod tests {
                 "hdCharacterModels",
                 "not Lua: read before the App exists by `apply_boot_layers` in this file, which the \
                  scan skips — a mount has no later reader to observe it",
+            ),
+            (
+                "reforgedModels",
+                "not Lua: latched before the App exists by `apply_boot_layers` in this file, which \
+                 the scan skips; Turtle's options window writes it for the next load",
             ),
             (
                 "useUiScale",

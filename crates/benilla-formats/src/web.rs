@@ -284,6 +284,17 @@ mod wasm {
         format!("{origin}/{}", crate::layers::TURTLE_DATA_SEGMENT)
     }
 
+    /// The root the **reforged art layer** is served from: `/data-reforged`, beside the others,
+    /// laid out like them.
+    pub fn reforged_data_base() -> String {
+        let origin = web_sys::window()
+            .expect("benilla_formats::web only runs inside a browser tab")
+            .location()
+            .origin()
+            .expect("window.location.origin");
+        format!("{origin}/{}", crate::layers::REFORGED_DATA_SEGMENT)
+    }
+
     /// Tell the page to open or close its half of a live layer (`web/packs.js`'s `openLayer` /
     /// `closeLayer`: the container in the decode worker, the boot packs, the resident packs), and
     /// return at once — an open's promise is the page's to settle; nothing here waits on it.
@@ -323,6 +334,26 @@ mod wasm {
     pub fn close_turtle_layer() {
         crate::layers::unmount_turtle();
         page_layer("closeLayer", "turtle");
+    }
+
+    /// Mount the reforged art layer now, with the Turtle layer for a 1.18.1 realm being entered:
+    /// the Turtle layer's terms, off the index the page holds or one blocking fetch of it. An
+    /// origin that serves no `/data-reforged` is an error the caller reports and plays on without.
+    pub fn mount_reforged_layer() -> anyhow::Result<()> {
+        if crate::layers::reforged_mounted() {
+            return Ok(());
+        }
+        let store = crate::webpack::PackStore::open_reforged(reforged_data_base())?;
+        crate::layers::mount_reforged(store);
+        page_layer("openLayer", "reforged");
+        Ok(())
+    }
+
+    /// Unmount the reforged art layer and let the page drop what it holds of it, for a realm that
+    /// does not advertise 1.18.1.
+    pub fn close_reforged_layer() {
+        crate::layers::unmount_reforged();
+        page_layer("closeLayer", "reforged");
     }
 
     /// Mount the updated character models now, for the player turning them on: off the index the
@@ -432,6 +463,28 @@ mod wasm {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
                 js_sys::Reflect::get(&window, &"__wenilla_boottrace_turtle".into())
+                    .ok()?
+                    .dyn_into::<js_sys::Array>()
+                    .ok()
+            });
+            if let Some(arr) = arr {
+                arr.push(&name.into());
+            }
+        });
+    }
+
+    /// The reforged layer's half of the boot trace (`window.__wenilla_boottrace_reforged`): `name`
+    /// was answered by the reforged art layer.
+    pub fn trace_reforged(name: &str) {
+        use wasm_bindgen::JsCast;
+        thread_local! {
+            static TRACE_REFORGED: std::cell::OnceCell<Option<js_sys::Array>> =
+                const { std::cell::OnceCell::new() };
+        }
+        TRACE_REFORGED.with(|cell| {
+            let arr = cell.get_or_init(|| {
+                let window = web_sys::window()?;
+                js_sys::Reflect::get(&window, &"__wenilla_boottrace_reforged".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -557,9 +610,9 @@ mod wasm {
 
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
-    close_hd_layer, close_turtle_layer, console_warn, data_base, fetch_sync, fetch_sync_range,
-    hd_data_base, mount_hd_layer, mount_turtle_layer, trace, trace_hd, trace_turtle,
-    turtle_data_base,
+    close_hd_layer, close_reforged_layer, close_turtle_layer, console_warn, data_base, fetch_sync,
+    fetch_sync_range, hd_data_base, mount_hd_layer, mount_reforged_layer, mount_turtle_layer,
+    reforged_data_base, trace, trace_hd, trace_reforged, trace_turtle, turtle_data_base,
 };
 
 #[cfg(test)]

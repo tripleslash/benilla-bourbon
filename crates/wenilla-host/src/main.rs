@@ -65,6 +65,11 @@ struct Cli {
     /// client is on a realm that advertises 1.18.1.
     #[arg(long, requires = "packs")]
     packs_turtle: Option<PathBuf>,
+    /// The reforged art layer's container (`benilla-pack overlay --patches B,…,Y` then `build
+    /// --only … --out web/packs-reforged`), served at `/data-reforged/*` beside `--packs`. Fetched
+    /// only with the Turtle layer, while the player's setting has it on.
+    #[arg(long, requires = "packs")]
+    packs_reforged: Option<PathBuf>,
     /// Forward `/data/*` and `/data-hd/*` to a hosted static tree (e.g. `https://wow.example.com`)
     /// instead of serving a local container — for working on the client with no game data here.
     #[arg(long, conflicts_with_all = ["data", "packs"])]
@@ -187,13 +192,26 @@ async fn main() -> Result<()> {
                 tracing::info!(packs_turtle = %turtle.display(), "serving the Turtle WoW 1.18.1 layer");
                 router = router.merge(wenilla_host::packs::turtle_router(turtle, !cli.no_ranges));
             }
+            if let Some(reforged) = &cli.packs_reforged {
+                if !reforged.join("index.bpi").is_file() {
+                    anyhow::bail!(
+                        "{} has no index.bpi — run `benilla-pack overlay` and `build --only` first",
+                        reforged.display()
+                    );
+                }
+                tracing::info!(packs_reforged = %reforged.display(), "serving the reforged art layer");
+                router = router.merge(wenilla_host::packs::reforged_router(
+                    reforged,
+                    !cli.no_ranges,
+                ));
+            }
             router
         }
         // Neither: a gateway. Not an error — it is the *hosted* shape, where the container is
         // static objects on a static host and this process exists only for the two sockets.
         (None, None) => match &cli.packs_remote {
             Some(base) => {
-                tracing::info!(remote = %base, "forwarding /data, /data-hd and /data-turtle to a remote site");
+                tracing::info!(remote = %base, "forwarding /data, /data-hd, /data-turtle and /data-reforged to a remote site");
                 wenilla_host::remote::router(base)
             }
             None => {

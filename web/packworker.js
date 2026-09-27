@@ -63,13 +63,13 @@ const wasmReady = wasm_bindgen({ module_or_path: './wenilla-packdecode_bg.wasm' 
 let container = null;
 /// The layers' containers, each opened by an `open` naming its `layer`: `hd`, the updated character
 /// models (null whenever the player has the option off, the default — see `packs.js::bootstrapHd`),
-/// and `turtle`, the Turtle WoW 1.18.1 layer (open only while the client is on a 1.18.1 realm, and
-/// dropped by a `close` when it leaves one).
+/// `turtle`, the Turtle WoW 1.18.1 layer (open only while the client is on a 1.18.1 realm, and
+/// dropped by a `close` when it leaves one), and `reforged`, the reforged art opened with it.
 ///
 /// A **container per layer**, not more indices in the first: a `.bpk` does not restate its pack's
 /// codec or decoded size, so decoding needs the index the pack came from, and every container
 /// numbers its packs from 0 independently. `containerFor` is where that is resolved.
-const layers = { hd: null, turtle: null };
+const layers = { hd: null, turtle: null, reforged: null };
 
 /// **The key space.** Twins of `benilla_formats::layers::HD_PACK_KEY_BASE` and
 /// `TURTLE_PACK_KEY_BASE` and of `packs.js`'s own constants; all must agree. Every id crossing this
@@ -77,9 +77,12 @@ const layers = { hd: null, turtle: null };
 /// recovered here and nowhere else. `2 ** 31`, as a JavaScript `1 << 31` is negative.
 const HD_PACK_KEY_BASE = 1 << 30;
 const TURTLE_PACK_KEY_BASE = 2 ** 31;
+/// Twin of `benilla_formats::layers::REFORGED_PACK_KEY_BASE`; `3 << 30` would be negative here.
+const REFORGED_PACK_KEY_BASE = 3 * 2 ** 30;
 
 /// Which container a resident key names, and what its id is inside it.
 function containerFor(key) {
+  if (key >= REFORGED_PACK_KEY_BASE) return { c: layers.reforged, id: key - REFORGED_PACK_KEY_BASE };
   if (key >= TURTLE_PACK_KEY_BASE) return { c: layers.turtle, id: key - TURTLE_PACK_KEY_BASE };
   if (key >= HD_PACK_KEY_BASE) return { c: layers.hd, id: key - HD_PACK_KEY_BASE };
   return { c: container, id: key };

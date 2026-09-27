@@ -114,6 +114,31 @@ fn the_turtle_layer_is_the_same_key_space_and_tree_in_rust_and_in_the_page() {
     assert!(read("web/_headers").contains(&format!("/{segment}/p/*")));
 }
 
+/// **The reforged layer's key space and segment, spelled as the Turtle layer's are**: `3 * 2 ** 30`
+/// in both JS files (a JavaScript `3 << 30` is negative), the segment in the page, the tree's prefix
+/// in the service worker, and its packs' cache rule in `_headers`.
+#[test]
+fn the_reforged_layer_is_the_same_key_space_and_tree_in_rust_and_in_the_page() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let read = |js: &str| {
+        std::fs::read_to_string(root.join(js)).unwrap_or_else(|e| panic!("reading {js}: {e}"))
+    };
+    assert_eq!(benilla_formats::layers::REFORGED_PACK_KEY_BASE, 3 << 30);
+    for js in ["web/packs.js", "web/packworker.js"] {
+        assert!(
+            read(js).contains("const REFORGED_PACK_KEY_BASE = 3 * 2 ** 30;"),
+            "{js} does not spell the reforged layer's key space as `3 * 2 ** 30`"
+        );
+    }
+    let segment = benilla_formats::layers::REFORGED_DATA_SEGMENT;
+    assert!(read("web/packs.js").contains(&format!("const REFORGED_DATA_SEGMENT = '{segment}';")));
+    assert!(read("web/sw.js").contains(&format!("const REFORGED_DATA_PREFIX = '/{segment}/';")));
+    assert!(read("web/_headers").contains(&format!("/{segment}/p/*")));
+}
+
 /// **The warm ladder is spelled twice and must be one order.**
 ///
 /// `benilla_formats::web`'s five `PRIORITY_*` constants here, and five `const PRIORITY_* = n;`

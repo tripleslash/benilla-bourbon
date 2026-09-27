@@ -155,22 +155,46 @@ fn switch(world: &mut World, to: ClientFlavor) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Mount or unmount the Turtle layer for `to`, returning a test for the names it holds.
+/// Mount or unmount the Turtle layer for `to`, and the reforged art over it while the player's
+/// setting has that on ([`benilla_formats::layers::reforged_models`], read as the page loaded),
+/// returning a test for the names they hold.
+///
+/// The reforged art is Turtle's own add-on, so it goes wherever the Turtle layer goes and never
+/// onto a 1.12.1 realm. An origin that serves no `/data-reforged` plays on Turtle's art; only the
+/// Turtle layer's own mount can refuse the realm.
 #[cfg(target_arch = "wasm32")]
 fn mount(to: ClientFlavor) -> anyhow::Result<Option<impl Fn(&str) -> bool>> {
-    let store = match to {
+    let (store, reforged) = match to {
         ClientFlavor::Turtle => {
             benilla_formats::web::mount_turtle_layer()?;
-            benilla_formats::layers::turtle()
+            if benilla_formats::layers::reforged_models() {
+                if let Err(e) = benilla_formats::web::mount_reforged_layer() {
+                    warn!("flavor: the reforged models and textures could not be mounted — {e:#}");
+                }
+            }
+            (
+                benilla_formats::layers::turtle(),
+                benilla_formats::layers::reforged(),
+            )
         }
         ClientFlavor::Vanilla => {
-            // Taken before the unmount: its names are the ones going back to the 1.12.1 bytes.
-            let store = benilla_formats::layers::turtle();
+            // Taken before the unmount: their names are the ones going back to the 1.12.1 bytes.
+            let stores = (
+                benilla_formats::layers::turtle(),
+                benilla_formats::layers::reforged(),
+            );
+            benilla_formats::web::close_reforged_layer();
             benilla_formats::web::close_turtle_layer();
-            store
+            stores
         }
     };
-    Ok(store.map(|s| move |name: &str| s.contains(name)))
+    if store.is_none() && reforged.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(move |name: &str| {
+        store.as_ref().is_some_and(|s| s.contains(name))
+            || reforged.as_ref().is_some_and(|r| r.contains(name))
+    }))
 }
 
 /// Native has no Turtle layer: a Turtle realm cannot be played, and Vanilla is all there is.

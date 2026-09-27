@@ -80,13 +80,15 @@ pub struct Chain {
     store: crate::webpack::PackStore,
 }
 
-/// The live layers one read resolves against — the updated character models and the Turtle WoW
-/// 1.18.1 layer ([`crate::layers`]), each mounted or not for the whole page — taken once per read,
-/// so the read keeps its handles past the locks. With a layer off its share is one relaxed load.
+/// The live layers one read resolves against — the updated character models, the Turtle WoW
+/// 1.18.1 layer and the reforged art over it ([`crate::layers`]), each mounted or not for the whole
+/// page — taken once per read, so the read keeps its handles past the locks. With a layer off its
+/// share is one relaxed load.
 #[cfg(target_arch = "wasm32")]
 struct Mounts {
     hd: Option<std::sync::Arc<crate::webpack::PackStore>>,
     turtle: Option<std::sync::Arc<crate::webpack::PackStore>>,
+    reforged: Option<std::sync::Arc<crate::webpack::PackStore>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -95,6 +97,7 @@ impl Mounts {
         Self {
             hd: crate::layers::hd(),
             turtle: crate::layers::turtle(),
+            reforged: crate::layers::reforged(),
         }
     }
 }
@@ -372,10 +375,11 @@ impl Chain {
     }
 
     /// The container that should answer for `name` — [`crate::layers::pick_layer`] over the layers
-    /// mounted now: the HD overlay when it holds the name, else the Turtle layer when it is mounted
-    /// and holds it, else the base container; a table the Turtle layer merged with the HD layer's
-    /// answers under its alias while both are mounted. **The whole of the priority law on this
-    /// target**, in one place so no method below restates it.
+    /// mounted now: the reforged art when it holds the name, else the HD overlay when it does, else
+    /// the Turtle layer when it is mounted and holds it, else the base container; a table the
+    /// Turtle layer merged with the HD layer's answers under its alias while both are mounted.
+    /// **The whole of the priority law on this target**, in one place so no method below restates
+    /// it.
     ///
     /// `contains` on a `PackStore` is a binary search over an index already in memory, so asking the
     /// overlays first costs ~17 probes each and no I/O. On a 1.12.1 realm the Turtle layer costs one
@@ -396,7 +400,9 @@ impl Chain {
             }
             _ => None,
         };
+        let reforged = mounts.reforged.as_deref();
         let layer = crate::layers::pick_layer(
+            reforged.map(|r| r.contains(name)),
             hd.map(|hd| hd.contains(name)),
             turtle.map(|t| t.contains(name)),
             alias.is_some(),
@@ -404,16 +410,20 @@ impl Chain {
         // The layer halves of the boot trace, so a `?boottrace=1` capture can say whether a layer is
         // being read at all and which names reach it (`web::trace_hd`); no-ops unless the page armed
         // the arrays.
-        match (layer, turtle, hd) {
-            (crate::layers::Layer::TurtleHdAlias, Some(t), _) => {
+        match (layer, turtle, hd, reforged) {
+            (crate::layers::Layer::Reforged, _, _, Some(r)) => {
+                crate::web::trace_reforged(name);
+                (r, None)
+            }
+            (crate::layers::Layer::TurtleHdAlias, Some(t), _, _) => {
                 crate::web::trace_turtle(name);
                 (t, alias)
             }
-            (crate::layers::Layer::Hd, _, Some(hd)) => {
+            (crate::layers::Layer::Hd, _, Some(hd), _) => {
                 crate::web::trace_hd(name);
                 (hd, None)
             }
-            (crate::layers::Layer::Turtle, Some(t), _) => {
+            (crate::layers::Layer::Turtle, Some(t), _, _) => {
                 crate::web::trace_turtle(name);
                 (t, None)
             }
@@ -437,7 +447,8 @@ impl Chain {
     ///
     /// No I/O, no allocation, no network: a binary search over the index's sorted key array.
     pub fn contains(&self, name: &str) -> bool {
-        crate::layers::hd().is_some_and(|hd| hd.contains(name))
+        crate::layers::reforged().is_some_and(|r| r.contains(name))
+            || crate::layers::hd().is_some_and(|hd| hd.contains(name))
             || crate::layers::turtle().is_some_and(|t| t.contains(name))
             || self.store.contains(name)
     }
@@ -529,9 +540,10 @@ impl Chain {
         // on the same terms as the base container shipping without one.
         let mounts = Mounts::now();
         let overlays = mounts
-            .hd
+            .reforged
             .as_deref()
             .into_iter()
+            .chain(mounts.hd.as_deref())
             .chain(mounts.turtle.as_deref());
         let mut seen: std::collections::HashSet<String> = out
             .iter()

@@ -131,6 +131,18 @@ impl PackStore {
         )
     }
 
+    /// The **reforged art layer**'s container, at `/data-reforged`: the Turtle layer's shape, in its
+    /// own key range ([`crate::layers::REFORGED_PACK_KEY_BASE`]) and page slots. Opened with the
+    /// Turtle layer when the setting has it on ([`crate::web::mount_reforged_layer`]).
+    pub fn open_reforged(base: String) -> Result<Self> {
+        Self::open_at(
+            base,
+            crate::layers::REFORGED_PACK_KEY_BASE,
+            "reforgedIndex",
+            "reforgedListfile",
+        )
+    }
+
     fn open_at(
         base: String,
         key_base: u32,

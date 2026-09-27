@@ -1,10 +1,12 @@
 //! **The optional content layers a chain may or may not carry**: the updated character models
-//! (`patch-A.MPQ` / the `data-hd` container) and the Turtle WoW 1.18.1 layer (the `data-turtle`
-//! container). On the web build both are live mounts shared by every chain of the page: the HD
-//! layer mounts at the first chain open when the player has it on and again whenever they turn it
-//! on ([`crate::web::mount_hd_layer`]), and the Turtle layer as the client enters a realm that
-//! advertises 1.18.1. Natively the HD layer is an archive each chain decides on as it opens, and
-//! there is no Turtle layer.
+//! (`patch-A.MPQ` / the `data-hd` container), the Turtle WoW 1.18.1 layer (the `data-turtle`
+//! container) and the reforged art over it (Project Reforged's letter patches / the
+//! `data-reforged` container). On the web build all three are live mounts shared by every chain of
+//! the page: the HD layer mounts at the first chain open when the player has it on and again
+//! whenever they turn it on ([`crate::web::mount_hd_layer`]), the Turtle layer as the client enters
+//! a realm that advertises 1.18.1, and the reforged layer with it when the player's setting, read
+//! as the page loads ([`set_reforged_models`]), has it on. Natively the HD layer is an archive each
+//! chain decides on as it opens, and there is no Turtle or reforged layer.
 //!
 //! ## What a layer is
 //!
@@ -90,6 +92,19 @@ pub const TURTLE_DATA_SEGMENT: &str = "data-turtle";
 /// **Twinned in `web/packs.js`** (`TURTLE_PACK_KEY_BASE`); `tests/web_names.rs` checks them.
 pub const TURTLE_PACK_KEY_BASE: u32 = 1 << 31;
 
+/// The URL path segment the reforged art layer's BENPACK container is served from, beside the
+/// others. Fetched only when a 1.18.1 realm is entered with the setting on.
+///
+/// **Twinned in `web/packs.js` and `web/sw.js`**; `tests/web_names.rs` checks them.
+pub const REFORGED_DATA_SEGMENT: &str = "data-reforged";
+
+/// What the reforged layer's pack ids are offset by in the resident map — see
+/// [`HD_PACK_KEY_BASE`]. `3 << 30` sits above the Turtle layer's `1 << 31` with the same four
+/// orders of magnitude to spare, and `key_base + pack_id` still fits a `u32`.
+///
+/// **Twinned in `web/packs.js`** (`REFORGED_PACK_KEY_BASE`); `tests/web_names.rs` checks them.
+pub const REFORGED_PACK_KEY_BASE: u32 = 3 << 30;
+
 /// The name prefix under which the Turtle layer carries a table **merged with the HD layer's**.
 ///
 /// Mounted above the Turtle layer, the HD layer's copy of a table answers for every row, so a row
@@ -115,13 +130,24 @@ pub enum Layer {
     Turtle,
     /// The Turtle layer's merge of a table with the HD layer's, under [`turtle_hd_alias`].
     TurtleHdAlias,
+    /// The reforged art over the Turtle layer.
+    Reforged,
 }
 
-/// **The layer priority law**, in one place: HD above Turtle above the base corpus — MPQ's own
-/// "later wins", as `patch-A.MPQ` mounts above every numbered patch — except that a table merged
-/// for the pair answers for the pair. `hd` and `turtle` are `None` for a layer that is not mounted
-/// and whether it holds the name otherwise; `alias` is whether the Turtle layer holds a merge of it.
-pub fn pick_layer(hd: Option<bool>, turtle: Option<bool>, alias: bool) -> Layer {
+/// **The layer priority law**, in one place: reforged above HD above Turtle above the base corpus
+/// — MPQ's own "later wins", as the reference mounts `patch-?.MPQ` by name, so `patch-B` to
+/// `patch-Y` above `patch-A` above every numbered patch — except that a table merged for the HD and
+/// Turtle pair answers for the pair. Each layer is `None` when it is not mounted and whether it
+/// holds the name otherwise; `alias` is whether the Turtle layer holds a merge of it.
+pub fn pick_layer(
+    reforged: Option<bool>,
+    hd: Option<bool>,
+    turtle: Option<bool>,
+    alias: bool,
+) -> Layer {
+    if reforged == Some(true) {
+        return Layer::Reforged;
+    }
     if hd.is_some() && turtle.is_some() && alias {
         return Layer::TurtleHdAlias;
     }
@@ -204,6 +230,24 @@ mod live {
 
     static TURTLE: Slot = Slot::new();
     static HD: Slot = Slot::new();
+    static REFORGED: Slot = Slot::new();
+
+    pub fn mount_reforged(store: PackStore) {
+        REFORGED.mount(store);
+    }
+
+    pub fn unmount_reforged() {
+        REFORGED.unmount();
+    }
+
+    /// The mounted reforged art layer.
+    pub fn reforged() -> Option<Arc<PackStore>> {
+        REFORGED.get()
+    }
+
+    pub(super) fn reforged_mounted() -> bool {
+        REFORGED.mounted()
+    }
 
     pub fn mount_turtle(store: PackStore) {
         TURTLE.mount(store);
@@ -241,7 +285,39 @@ mod live {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use live::{hd, mount_hd, mount_turtle, turtle, unmount_hd, unmount_turtle};
+pub use live::{
+    hd, mount_hd, mount_reforged, mount_turtle, reforged, turtle, unmount_hd, unmount_reforged,
+    unmount_turtle,
+};
+
+/// Whether the reforged art layer is mounted now. Always `false` natively.
+pub fn reforged_mounted() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        live::reforged_mounted()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Whether the player's setting has the reforged art on, as read when the page loaded. **Latched
+/// for the session**: the layer mounts with the Turtle layer on every entry into a 1.18.1 realm
+/// while this is on, and a change of the setting takes effect at the next load.
+static REFORGED_MODELS: AtomicBool = AtomicBool::new(false);
+
+/// Latch the reforged setting for the session — called once, before the `App` is built, by
+/// whoever read the player's setting (`benilla_app`'s `reforgedModels` CVar). Off until then, so a
+/// test or a tool never mounts it.
+pub fn set_reforged_models(on: bool) {
+    REFORGED_MODELS.store(on, Ordering::Relaxed);
+}
+
+/// Whether the reforged art mounts with the Turtle layer this session ([`set_reforged_models`]).
+pub fn reforged_models() -> bool {
+    REFORGED_MODELS.load(Ordering::Relaxed)
+}
 
 /// Whether the Turtle layer is mounted now. Always `false` natively.
 pub fn turtle_mounted() -> bool {
@@ -337,27 +413,71 @@ mod tests {
     /// pair's merged table only when both are mounted.
     #[test]
     fn the_priority_is_hd_then_turtle_then_base() {
-        assert_eq!(pick_layer(None, None, false), Layer::Base);
-        assert_eq!(pick_layer(Some(false), Some(false), false), Layer::Base);
-        assert_eq!(pick_layer(Some(true), None, false), Layer::Hd);
-        assert_eq!(pick_layer(None, Some(true), false), Layer::Turtle);
-        assert_eq!(pick_layer(Some(true), Some(true), false), Layer::Hd);
-        assert_eq!(pick_layer(Some(false), Some(true), false), Layer::Turtle);
+        assert_eq!(pick_layer(None, None, None, false), Layer::Base);
         assert_eq!(
-            pick_layer(Some(true), Some(true), true),
+            pick_layer(None, Some(false), Some(false), false),
+            Layer::Base
+        );
+        assert_eq!(pick_layer(None, Some(true), None, false), Layer::Hd);
+        assert_eq!(pick_layer(None, None, Some(true), false), Layer::Turtle);
+        assert_eq!(pick_layer(None, Some(true), Some(true), false), Layer::Hd);
+        assert_eq!(
+            pick_layer(None, Some(false), Some(true), false),
+            Layer::Turtle
+        );
+        assert_eq!(
+            pick_layer(None, Some(true), Some(true), true),
             Layer::TurtleHdAlias
         );
         // A merge answers only for the pair: with either layer down, the alias is not consulted.
-        assert_eq!(pick_layer(None, Some(true), true), Layer::Turtle);
-        assert_eq!(pick_layer(Some(true), None, true), Layer::Hd);
+        assert_eq!(pick_layer(None, None, Some(true), true), Layer::Turtle);
+        assert_eq!(pick_layer(None, Some(true), None, true), Layer::Hd);
+    }
+
+    /// The reforged art answers every name it holds, over every other layer and merge — its
+    /// letters mount above `patch-A` and the numbered patches — and nothing it does not.
+    #[test]
+    fn the_reforged_layer_is_on_top() {
+        assert_eq!(
+            pick_layer(Some(true), Some(true), Some(true), true),
+            Layer::Reforged
+        );
+        assert_eq!(
+            pick_layer(Some(true), None, Some(true), false),
+            Layer::Reforged
+        );
+        assert_eq!(
+            pick_layer(Some(false), Some(true), Some(true), true),
+            Layer::TurtleHdAlias
+        );
+        assert_eq!(
+            pick_layer(Some(false), None, Some(true), false),
+            Layer::Turtle
+        );
+        assert_eq!(
+            pick_layer(Some(false), None, Some(false), false),
+            Layer::Base
+        );
     }
 
     #[test]
     fn the_layer_key_ranges_do_not_overlap_and_fit_a_u32() {
         const { assert!(HD_PACK_KEY_BASE < TURTLE_PACK_KEY_BASE) };
+        const { assert!(TURTLE_PACK_KEY_BASE < REFORGED_PACK_KEY_BASE) };
         // The corpus cap is 18,000 objects per container.
         assert!(HD_PACK_KEY_BASE.checked_add(18_000).unwrap() < TURTLE_PACK_KEY_BASE);
-        assert!(TURTLE_PACK_KEY_BASE.checked_add(18_000).is_some());
+        assert!(TURTLE_PACK_KEY_BASE.checked_add(18_000).unwrap() < REFORGED_PACK_KEY_BASE);
+        assert!(REFORGED_PACK_KEY_BASE.checked_add(18_000).is_some());
+    }
+
+    /// The reforged setting is off until the client latches it, so no test or tool mounts it, and
+    /// the layer is never mounted natively.
+    #[test]
+    fn the_reforged_layer_is_off_by_default_and_browser_only() {
+        assert!(!reforged_models());
+        if !turtle_available() {
+            assert!(!reforged_mounted());
+        }
     }
 
     #[test]

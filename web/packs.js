@@ -142,6 +142,13 @@ const TURTLE_PACK_KEY_BASE = 2 ** 31;
 /// Where the Turtle layer's container is served from. Twin of
 /// `benilla_formats::layers::TURTLE_DATA_SEGMENT`.
 const TURTLE_DATA_SEGMENT = 'data-turtle';
+/// **The reforged art layer's pack-key offset.** Twin of
+/// `benilla_formats::layers::REFORGED_PACK_KEY_BASE`; the two MUST agree. `3 * 2 ** 30`, not
+/// `3 << 30`: a JavaScript shift is 32-bit signed, and `3 << 30` is negative.
+const REFORGED_PACK_KEY_BASE = 3 * 2 ** 30;
+/// Where the reforged layer's container is served from. Twin of
+/// `benilla_formats::layers::REFORGED_DATA_SEGMENT`.
+const REFORGED_DATA_SEGMENT = 'data-reforged';
 /// The live layers `openLayer` / `closeLayer` know: where each is served, its resident-key range
 /// (`[keyBase, keyEnd)`), and the prefix of the `packs` slots it hands its root, index, listfile and
 /// `boot-packs.json` over in (`hdBase`, `hdIndex`, … — the names Rust's `PackStore` reads).
@@ -150,8 +157,14 @@ const LAYERS = {
   turtle: {
     segment: TURTLE_DATA_SEGMENT,
     keyBase: TURTLE_PACK_KEY_BASE,
-    keyEnd: Infinity,
+    keyEnd: REFORGED_PACK_KEY_BASE,
     slot: 'turtle',
+  },
+  reforged: {
+    segment: REFORGED_DATA_SEGMENT,
+    keyBase: REFORGED_PACK_KEY_BASE,
+    keyEnd: Infinity,
+    slot: 'reforged',
   },
 };
 /// The `localStorage` entry the client keeps its CVars in — `benilla-app/src/local_state.rs`'s
@@ -209,10 +222,16 @@ const packs = {
   turtleIndex: null,
   turtleListfile: null,
   turtleManifest: null,
+  /// The reforged art layer's four slots, on the Turtle layer's terms: filled when the client enters
+  /// a 1.18.1 realm with the setting on (`openLayer('reforged')`), emptied when it leaves one.
+  reforgedBase: '',
+  reforgedIndex: null,
+  reforgedListfile: null,
+  reforgedManifest: null,
   /// Per live layer: the open in flight, and the close count an open checks it has not been
   /// overtaken by.
-  _opening: { hd: null, turtle: null },
-  _generation: { hd: 0, turtle: 0 },
+  _opening: { hd: null, turtle: null, reforged: null },
+  _generation: { hd: 0, turtle: 0, reforged: 0 },
   /// Generated pack lists: `{boot: {packs: [[id, wireBytes], …], bytes}, world: {…}}`.
   manifest: null,
   /// The warm priorities, named — the values Rust passes to `warmPack`/`prefetch`. Exposed so the
@@ -534,6 +553,9 @@ const packs = {
   /// Rust does not go through this: it passes the URL it built alongside every key, from the store
   /// that owns the id. This is for the page's own prefetch, which has only the manifest's numbers.
   url(packId) {
+    if (packId >= REFORGED_PACK_KEY_BASE) {
+      return `${this.reforgedBase}/${packPath(packId - REFORGED_PACK_KEY_BASE)}`;
+    }
     if (packId >= TURTLE_PACK_KEY_BASE) {
       return `${this.turtleBase}/${packPath(packId - TURTLE_PACK_KEY_BASE)}`;
     }
@@ -548,7 +570,8 @@ const packs = {
   /// Open a live layer — `'hd'`, the updated character models, at boot with the option on
   /// (`bootstrapHd`) and whenever the player turns them on (`benilla_formats::web::mount_hd_layer`);
   /// `'turtle'`, the Turtle WoW 1.18.1 layer the client mounts on entering a realm that advertises
-  /// 1.18.1 (`benilla_formats::web::mount_turtle_layer`), and never before. Resolves `true` once the
+  /// 1.18.1 (`benilla_formats::web::mount_turtle_layer`), and never before; `'reforged'`, the
+  /// reforged art mounted with it while the setting is on (`mount_reforged_layer`). Resolves `true` once the
   /// layer's index and listfile are here, its container is open in the decode worker and its boot
   /// packs are resident (`opts.prefetch === false` skips that warm); `false` when this origin serves
   /// no such container. Idempotent.
