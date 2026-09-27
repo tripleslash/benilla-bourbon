@@ -146,8 +146,10 @@ impl Plugin for UiUnitPlugin {
                 // First, so a worldport's leaving edge precedes the entering edge `feed_units`
                 // raises for the same port.
                 fire_leaving_world_on_worldport,
-                feed_units,
+                // Before `feed_units`, whose `PLAYER_TARGET_CHANGED` runs `InspectUnit("target")`:
+                // `CanInspect` must answer for the new target, not last frame's.
                 feed_unit_reach,
+                feed_units,
                 feed_player_control,
                 feed_farsight_focus,
                 melee_unit_combat,
@@ -2228,6 +2230,109 @@ mod tests {
                 r#"return CanInspect("target") ~= nil"#
             ),
             "a non-attackable player 3 yards away is inspectable"
+        );
+    }
+
+    /// `InspectFrame_OnEvent` runs `InspectUnit("target")` at `PLAYER_TARGET_CHANGED`
+    /// (`Blizzard_InspectUI.lua:32`): the reach must already name the new target there, or a player
+    /// inspected and then a creature clicked reopens the window on the creature, whose
+    /// `UnitRace` is nil. The plugin chains `feed_unit_reach` before `feed_units` for this.
+    #[test]
+    fn a_retarget_answers_can_inspect_for_the_new_target() {
+        use benilla_protocol::messages::{ObjectFields, ObjectType};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const NON_ATTACKABLE: u32 = 1 << 1;
+        const FIELD_UNIT_FLAGS: u16 = 46;
+        const ME: u64 = 0x0000_0000_0000_0001;
+        const FRIEND: u64 = 0x0000_0000_0000_0003;
+        const BOAR: u64 = 0xF130_0000_0000_0002;
+
+        let mut app = App::new();
+        app.add_message::<FieldChanged>();
+        app.init_resource::<Selection>()
+            .init_resource::<UnitFeedState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_TARGET_CHANGED")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, CanInspect("target") and "inspectable" or "refused")
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+
+        let store = |kind, pairs: &[(u16, u32)]| {
+            ObjectStore(ObjectFields::from_pairs(pairs).into_created(kind))
+        };
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(ME),
+                store(ObjectType::Player, &[]),
+                Transform::default(),
+            ))
+            .id();
+        let friend = app
+            .world_mut()
+            .spawn((
+                Guid(FRIEND),
+                store(ObjectType::Player, &[(FIELD_UNIT_FLAGS, NON_ATTACKABLE)]),
+                Transform::from_xyz(3.0, 0.0, 0.0),
+            ))
+            .id();
+        let boar = app
+            .world_mut()
+            .spawn((
+                Guid(BOAR),
+                store(ObjectType::Unit, &[]),
+                Transform::from_xyz(0.0, 3.0, 0.0),
+            ))
+            .id();
+        app.insert_resource(crate::net::GuidIndex(
+            [(ME, me), (FRIEND, friend), (BOAR, boar)]
+                .into_iter()
+                .collect(),
+        ));
+
+        // One frame of the plugin's chain on `target`, then what the handler saw.
+        let frame = |app: &mut App, target: Entity, guid: u64| -> Vec<String> {
+            app.insert_resource(Selection {
+                target: Some(target),
+                guid: Some(guid),
+            });
+            app.world_mut().run_system_once(feed_unit_reach).unwrap();
+            app.world_mut().run_system_once(feed_units).unwrap();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+
+        assert_eq!(
+            frame(&mut app, friend, FRIEND),
+            vec!["inspectable".to_string()],
+            "the control: a friendly player in range is inspectable at its own event"
+        );
+        assert_eq!(
+            frame(&mut app, boar, BOAR),
+            vec!["refused".to_string()],
+            "the retarget's event reads the creature's reach, not the player's"
         );
     }
 
