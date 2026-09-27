@@ -217,6 +217,7 @@ pub(super) fn attach_item_glows(
                                 bone: glow.bone,
                                 offset: seat,
                                 attach: Some(glow.attach),
+                                idle: Transform::IDENTITY,
                             },
                         ));
                     }

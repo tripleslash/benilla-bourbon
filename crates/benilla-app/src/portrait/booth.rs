@@ -112,6 +112,8 @@ pub(super) struct BoothRider {
     pub(super) material: Handle<WowModelMaterial>,
     pub(super) bone: u16,
     pub(super) offset: Vec3,
+    /// The item's root-bone idle pose under the seat ([`super::PortraitRider::idle`]).
+    pub(super) idle: Transform,
     /// An attached model composes onto its parent's alpha (`0x714000`), so a ghost's helm
     /// feathers with the head under it.
     pub(super) twins: BoothTwins,
@@ -574,7 +576,7 @@ pub(super) fn spawn_booth_model(
         let mut child = commands.spawn((
             Mesh3d(r.mesh.clone()),
             MeshMaterial3d(instance.material(&r.material, &r.twins)),
-            Transform::from_translation(r.offset),
+            Transform::from_translation(r.offset) * r.idle,
             layer.clone(),
             ChildOf(anchor),
         ));

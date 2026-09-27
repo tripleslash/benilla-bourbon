@@ -1171,6 +1171,7 @@ pub(super) fn sync_glue_booth(
                 material: relight(&r.material, &mut scene, &mut booth_light, &mut materials),
                 bone: r.bone,
                 offset: r.offset,
+                idle: Transform::IDENTITY,
                 twins: relight_twins(&r.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();

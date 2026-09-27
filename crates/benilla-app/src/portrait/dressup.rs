@@ -227,6 +227,7 @@ pub(super) fn sync_dressup_booth(
                 material: relight(&r.material),
                 bone: r.bone,
                 offset: r.offset,
+                idle: Transform::IDENTITY,
                 twins: BoothTwins::default(),
             })
             .collect();

@@ -27,6 +27,33 @@ fn idle_poses_bones(dm: &super::super::DisplayModel) -> bool {
         .is_some_and(|a| a.first_seq.is_some())
 }
 
+/// The loader idle's pose of a parentless bone 0 at the sequence start, as the one rigid
+/// transform a static mesh can take: `T(pivot + d) · R · S · T(−pivot)`, the joint's local pose
+/// over its inverse bind pose. The identity when the idle is the bind pose or bone 0 has a parent.
+fn idle_root_pose(dm: &super::super::DisplayModel) -> Transform {
+    let Some(anims) = dm.animations.as_ref().filter(|a| a.first_seq.is_some()) else {
+        return Transform::IDENTITY;
+    };
+    let Some(joint) = dm.skeleton.joints.first().filter(|j| j.parent < 0) else {
+        return Transform::IDENTITY;
+    };
+    let Some(bone) = anims
+        .idle_clip()
+        .and_then(|clip| anims.pose.node(clip.node))
+        .and_then(|node| anims.pose.clips.get(node.clip as usize))
+        .and_then(|clip| clip.bones.iter().find(|b| b.bone == 0))
+    else {
+        return Transform::IDENTITY;
+    };
+    let pivot = joint.local_translation;
+    let posed = Mat4::from_scale_rotation_translation(
+        bone.scale.sample(0.0).unwrap_or(Vec3::ONE),
+        bone.rotation.sample(0.0).unwrap_or(Quat::IDENTITY),
+        bone.translation.sample(0.0).unwrap_or(pivot),
+    ) * Mat4::from_translation(-pivot);
+    Transform::from_matrix(posed)
+}
+
 fn item_fade_set(part: &super::super::EntityPart) -> FadeSet<'_> {
     FadeSet {
         steady: &part.material,
@@ -419,6 +446,8 @@ fn spawn_slot(
     // indexes the palette by it and the tint arrives up the `ParentModel` chain (`0x714000`),
     // else the wearer's, which carries the body's tint.
     let rig_slot = item_rig.or(rider).unwrap_or(ctx.rig_slot);
+    // The booth draws the static mesh, so it takes the idle's root-bone pose as one transform.
+    let portrait_idle = idle_root_pose(dm);
     // Billboard batches spawn as world-root cards below; as children they would sit at the grip.
     let mut billboard_parts = Vec::new();
     commands.entity(root).with_children(|parent| {
@@ -443,13 +472,14 @@ fn spawn_slot(
                 },
                 // The picker's triangles; the render meshes are `RENDER_WORLD`-only.
                 benilla_world::interact::PickMesh(part.geometry.clone()),
-                // The booth's mirror: the static mesh and steady material at the bone's bind pose.
+                // The booth's mirror: the static mesh and steady material, posed as the item idles.
                 crate::portrait::PortraitRider {
                     static_mesh: part.mesh.clone(),
                     material: part.material.clone(),
                     bone,
                     offset,
                     attach: Some(hs.attach),
+                    idle: portrait_idle,
                 },
             ));
             if skinned.is_some() {

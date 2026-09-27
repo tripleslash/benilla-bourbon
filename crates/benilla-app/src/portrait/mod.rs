@@ -197,6 +197,10 @@ pub(crate) struct PortraitRider {
     /// The M2 attachment id the rider hangs from, for [`attach_reset`]; `None` for the host
     /// model's own geometry, which sits in no attachment node.
     pub(crate) attach: Option<u16>,
+    /// The item's own loader-idle pose of its root bone, composed under the attach seat; the
+    /// identity for an item whose idle is its bind pose. Reforged's Stormwind guard helm holds its
+    /// root 0.19 yd down in Stand, and the booth draws the static mesh.
+    pub(crate) idle: Transform,
 }
 
 /// Stamped on an anchor child for each camera-facing batch a unit wears (the eye-glow, an item's
@@ -1449,6 +1453,7 @@ fn sync_portraits(
                     material: booth_light.studio.variant(&r.material, &mut wow_mats),
                     bone: r.bone,
                     offset: r.offset,
+                    idle: r.idle,
                     twins: BoothTwins::default(),
                 })
                 .collect();
@@ -1863,6 +1868,7 @@ fn sync_body_booth(
                 material: booth_light.pane.variant(&r.material, wow_mats),
                 bone: r.bone,
                 offset: r.offset,
+                idle: r.idle,
                 twins: BoothTwins::default(),
             })
             .collect();
@@ -2269,6 +2275,7 @@ mod tests {
             bone: 4,
             offset: Vec3::new(0.21, 1.42, 0.06),
             attach: Some(attach),
+            idle: Transform::IDENTITY,
         }
     }
 
@@ -2403,6 +2410,7 @@ mod tests {
             bone: 4,
             offset: Vec3::ZERO,
             attach: Some(attach),
+            idle: Transform::IDENTITY,
         }
     }
 
