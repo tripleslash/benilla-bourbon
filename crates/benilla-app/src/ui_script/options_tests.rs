@@ -963,7 +963,7 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     let mut s = audio_harness();
     s.set_cvar_host("MusicVolume", "0.9");
     s.set_cvar_host("EnableMusic", "0");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
         .unwrap();
@@ -1083,7 +1083,7 @@ fn the_indirect_lighting_sliders_read_their_cvars_and_reach_zero() {
     let mut s = audio_harness();
     s.set_cvar_host("ssaoStrength", "0.5");
     s.set_cvar_host("ssgiStrength", "0.25");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1164,7 +1164,7 @@ fn the_updated_character_models_box_writes_its_cvar_at_apply() {
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowHdModels";
     let mut s = audio_harness();
     s.set_cvar_host("hdCharacterModels", "0");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1212,7 +1212,7 @@ fn the_water_detail_dropdown_writes_the_reference_tier_numbers() {
     // Seed the 1.12.1 tier BEFORE the XML loads, so the capsule has something to read that is not
     // the registered default — a row that showed "Cataclysm" here would pass on a stuck widget.
     s.set_cvar_host("waterDetail", "0");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1300,7 +1300,7 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("gxVSync", "0");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1351,7 +1351,7 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
     benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
     let s = audio_harness();
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1417,7 +1417,7 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowWorldDetail";
     let mut s = audio_harness();
     s.set_cvar_host("WorldDetail", "0");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1722,7 +1722,7 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("renderScale", "1");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -1911,7 +1911,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
     s.set_cvar_host("farclip", "297");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
@@ -2076,7 +2076,7 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     let mut s = audio_harness();
     s.set_cvar_host("deselectOnClick", "0");
     s.set_cvar_host("autoLootDefault", "1");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     let _ = s.take_cvar_changes();
 
@@ -3844,7 +3844,7 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
     benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("mousespeed", "1.25");
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();
@@ -3886,8 +3886,8 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// 1.12 stores a factor, 1.0 to 2.0 (`UIOptionsFrame.lua:90`), over `cameraDistanceMax`'s 15 yd
-/// base: the CVar carries the factor and the readout the distance.
+/// 1.12 stores a factor, 1.0 to 2.0 (`UIOptionsFrame.lua:90`), over `cameraDistanceMax` (15 yd by
+/// default): the CVar carries the factor and the readout the resulting zoom limit.
 #[test]
 fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     benilla_formats::wow_data_or_skip!();
@@ -3951,6 +3951,29 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
         .unwrap(),
         "15 yd",
         "the readout follows the reset"
+    );
+
+    // The readout is the zoom limit: `cameraDistanceMax` x the factor, held to 50 (`0x5112d6`).
+    s.run("SetCVar(\"cameraDistanceMax\", \"20\") OptionsPage_Refresh(\"Controls\")")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "20 yd"
+    );
+    s.run(
+        "BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(3.0)",
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "40 yd",
+        "the slider stops at its 2.0, and 2 x 20 is under the 50 yd cap"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -4243,7 +4266,7 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_text_measurer(Box::new(SteppedFont(6.0)));
-    let s = harness_on(s);
+    let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
 
@@ -4708,7 +4731,7 @@ fn turtle_options_carry_every_graphics_row() {
     benilla_formats::wow_data_or_skip!();
     let s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["Interface\FrameXML\GlobalStrings.lua"]);
+    load_definers(&s, &[r"Interface\FrameXML\GlobalStrings.lua"]);
     // Turtle's shape (Options\Options.lua): a header row, then its categories. PIXEL_SHADERS
     // holds only rows the cut removes.
     s.run(

@@ -809,9 +809,12 @@
                 return string.format("%d%%",
                     math.floor((value - row.minv) / (row.maxv - row.minv) * 100 + 0.5))
             end
-            -- "yards": cameraDistanceMaxFactor over the 15 yd base.
+            -- "yards": the zoom limit, cameraDistanceMax x cameraDistanceMaxFactor held to [0, 50]
+            -- (`0x5112d6`).
             if row.fmt == "yards" then
-                return string.format("%d yd", math.floor(value * 15 + 0.5))
+                local base = tonumber(GetCVar("cameraDistanceMax")) or 15
+                local yards = math.min(math.max(value * base, 0), 50)
+                return string.format("%d yd", math.floor(yards + 0.5))
             end
             return string.format("%d%%", math.floor(value * 100 + 0.5))
         end
