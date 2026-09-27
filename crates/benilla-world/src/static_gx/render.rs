@@ -198,6 +198,11 @@ struct GxCellGpu {
     killed_applied: u32,
     /// The [`GxSel::fog`] the records were last written from; empty until the first sync.
     fog_applied: Vec<bool>,
+    /// Items held back because their texture was not resident at assembly, as a kill bitmap: a
+    /// region never waits whole on one texture, so its other items draw meanwhile.
+    unready: Vec<u64>,
+    /// The textures behind [`Self::unready`]; the region re-assembles once all are resident.
+    waiting: Vec<AssetId<Image>>,
 }
 
 #[derive(Resource, Default)]
@@ -484,13 +489,17 @@ fn prepare_static_gx(
     for vis in &gx.visible {
         match vis {
             GxDoodadVis::Cell(cell) => {
-                if cache.cells.contains_key(cell) {
+                if cache
+                    .cells
+                    .get(cell)
+                    .is_some_and(|g| !g.wants_reassembly(&images))
+                {
                     continue;
                 }
                 let Some(draw) = gx.cells.get(cell) else {
                     continue;
                 };
-                if let Some(gpu) = assemble_region(
+                let gpu = assemble_region(
                     draw,
                     &mut pool,
                     &pipes,
@@ -498,18 +507,21 @@ fn prepare_static_gx(
                     &render_device,
                     &render_queue,
                     &images,
-                ) {
-                    cache.cells.insert(*cell, gpu);
-                }
+                );
+                cache.cells.insert(*cell, gpu);
             }
             GxDoodadVis::Prop(entity, _) => {
-                if cache.props.contains_key(entity) {
+                if cache
+                    .props
+                    .get(entity)
+                    .is_some_and(|g| !g.wants_reassembly(&images))
+                {
                     continue;
                 }
                 let Some(draw) = gx.props.get(entity) else {
                     continue;
                 };
-                if let Some(gpu) = assemble_region(
+                let gpu = assemble_region(
                     draw,
                     &mut pool,
                     &pipes,
@@ -517,20 +529,23 @@ fn prepare_static_gx(
                     &render_device,
                     &render_queue,
                     &images,
-                ) {
-                    cache.props.insert(*entity, gpu);
-                }
+                );
+                cache.props.insert(*entity, gpu);
             }
         }
     }
     for (entity, _) in &gx.visible_wmos {
-        if cache.wmos.contains_key(entity) {
+        if cache
+            .wmos
+            .get(entity)
+            .is_some_and(|g| !g.wants_reassembly(&images))
+        {
             continue;
         }
         let Some(draw) = gx.wmos.get(entity) else {
             continue;
         };
-        if let Some(gpu) = assemble_region(
+        let gpu = assemble_region(
             draw,
             &mut pool,
             &pipes,
@@ -538,9 +553,8 @@ fn prepare_static_gx(
             &render_device,
             &render_queue,
             &images,
-        ) {
-            cache.wmos.insert(*entity, gpu);
-        }
+        );
+        cache.wmos.insert(*entity, gpu);
     }
     pool.drain_pending(&render_device, &render_queue);
 
@@ -556,12 +570,13 @@ fn prepare_static_gx(
         if gpu.killed_applied == draw.killed_rev {
             continue;
         }
+        let hidden = hidden_bits(&draw.killed, &gpu.unready);
         for (i, rec) in gpu.records.iter_mut().enumerate() {
             // Column w also carries the probe slot and fog bit: rewrite bit 0 alone.
-            rec[3] = (rec[3] & !1) | kill_bit(&draw.killed, i);
+            rec[3] = (rec[3] & !1) | kill_bit(&hidden, i);
         }
         render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
-        gpu.runs = build_runs(&draw.draws, &gpu.item_slot, &draw.killed);
+        gpu.runs = build_runs(&draw.draws, &gpu.item_slot, &hidden);
         gpu.killed_applied = draw.killed_rev;
     }
 
@@ -595,8 +610,10 @@ fn prepare_static_gx(
     }
 }
 
-/// Assemble one region's GPU state against the shared pool; `None`, and undrawn this frame, while
-/// any member texture is not resident (slots already assigned stay assigned).
+/// Assemble one region's GPU state against the shared pool. An item whose texture is not resident
+/// yet is held back ([`GxCellGpu::unready`]) and the rest draw, as an entity-path part draws the
+/// moment its own material is ready: one slow or missing texture must not blank a whole cell or
+/// building while its colliders and picks stand.
 fn assemble_region(
     draw: &GxCellDraw,
     pool: &mut GxTexturePool,
@@ -605,19 +622,34 @@ fn assemble_region(
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
     images: &RenderAssets<GpuImage>,
-) -> Option<GxCellGpu> {
-    // Each item's pool slot, deduped by texture id; untextured items take the white class.
+) -> GxCellGpu {
+    // Each item's pool slot, deduped by texture id; untextured items take the white class, and so
+    // does a held-back item, whose slot is never sampled.
     let mut white: Option<u16> = None;
     let mut item_class_layer: Vec<(u16, u16)> = Vec::with_capacity(draw.draws.len());
-    for item in &draw.draws {
-        item_class_layer.push(match item.texture {
-            Some(tex) => pool.assign(tex, images.get(tex)?, render_device),
-            None => {
-                let w = *white.get_or_insert_with(|| pool.white(render_device, render_queue));
-                (w, 0)
+    let mut unready = vec![0u64; draw.draws.len().div_ceil(64)];
+    let mut waiting: Vec<AssetId<Image>> = Vec::new();
+    for (i, item) in draw.draws.iter().enumerate() {
+        let resident = item.texture.map(|tex| (tex, images.get(tex)));
+        item_class_layer.push(match resident {
+            Some((tex, Some(gpu))) => pool.assign(tex, gpu, render_device),
+            Some((tex, None)) => {
+                unready[i / 64] |= 1u64 << (i % 64);
+                if !waiting.contains(&tex) {
+                    waiting.push(tex);
+                }
+                (
+                    *white.get_or_insert_with(|| pool.white(render_device, render_queue)),
+                    0,
+                )
             }
+            None => (
+                *white.get_or_insert_with(|| pool.white(render_device, render_queue)),
+                0,
+            ),
         });
     }
+    let hidden = hidden_bits(&draw.killed, &unready);
     // The per-item record table, indexed by the word's low bits: [layer, batch-order nudge, SIDN,
     // flags]. Flags: bit 0 the kill bit, re-synced by revision (hence COPY_DST); bits 1..=13 the
     // probe slot, 13 bits being `MAX_PROP_PROBES` exactly.
@@ -632,7 +664,7 @@ fn assemble_region(
                 u32::from(item.sidn[0])
                     | (u32::from(item.sidn[1]) << 8)
                     | (u32::from(item.sidn[2]) << 16),
-                kill_bit(&draw.killed, i) | (u32::from(item.slot) << 1),
+                kill_bit(&hidden, i) | (u32::from(item.slot) << 1),
             ]
         })
         .collect();
@@ -671,8 +703,8 @@ fn assemble_region(
         };
         item_slot.push(u16::try_from(slot).expect("gx region under u16 slots"));
     }
-    let runs = build_runs(&draw.draws, &item_slot, &draw.killed);
-    Some(GxCellGpu {
+    let runs = build_runs(&draw.draws, &item_slot, &hidden);
+    GxCellGpu {
         mesh: draw.mesh.id(),
         bind_groups,
         record_table,
@@ -683,7 +715,25 @@ fn assemble_region(
         killed_applied: draw.killed_rev,
         // Empty, so the first fog sync always writes.
         fog_applied: Vec::new(),
-    })
+        unready,
+        waiting,
+    }
+}
+
+impl GxCellGpu {
+    /// Whether every texture this region held items back for is resident now, so a re-assembly
+    /// can draw them; a complete region never re-assembles.
+    fn wants_reassembly(&self, images: &RenderAssets<GpuImage>) -> bool {
+        !self.waiting.is_empty() && self.waiting.iter().all(|&tex| images.get(tex).is_some())
+    }
+}
+
+/// The items a region does not draw: the fader exiles' kill bits and the held-back ones.
+fn hidden_bits(killed: &[u64], unready: &[u64]) -> Vec<u64> {
+    let n = killed.len().max(unready.len());
+    (0..n)
+        .map(|w| killed.get(w).copied().unwrap_or(0) | unready.get(w).copied().unwrap_or(0))
+        .collect()
 }
 
 /// Coalesce adjacent live items sharing (slot, bucket, group) into draw runs; a killed item is
@@ -1030,6 +1080,23 @@ mod tests {
         assert_eq!(runs[1].index_range, 6..9);
         // Kill everything: nothing is submitted.
         assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
+    }
+
+    /// A held-back item (texture not resident) hides alone: the fader kills and the unready bits
+    /// both hide, and every other item of the region still draws.
+    #[test]
+    fn an_unready_texture_hides_its_own_items_not_the_region() {
+        let draws = vec![item(0..3, false), item(3..6, false), item(6..9, false)];
+        let slots = vec![0, 0, 0];
+        let killed = [0b001u64];
+        let unready = [0b100u64];
+        let hidden = hidden_bits(&killed, &unready);
+        assert_eq!(hidden, vec![0b101u64]);
+        let runs = build_runs(&draws, &slots, &hidden);
+        assert_eq!(runs.len(), 1, "the one ready, live item draws");
+        assert_eq!(runs[0].index_range, 3..6);
+        // Bitmaps of different lengths: a region with no faders has an empty kill bitmap.
+        assert_eq!(hidden_bits(&[], &[0b1u64, 0b10]), vec![0b1u64, 0b10]);
     }
 }
 
