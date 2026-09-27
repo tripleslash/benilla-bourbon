@@ -56,6 +56,16 @@ cargo run --release -p wenilla-host -- --www web/dist --packs web/packs
 # then open http://127.0.0.1:8090/
 ```
 
+Project Reforged's `patch-Y` (the night sky, on every realm) is laid over the built corpus rather
+than packed into it: `append` writes its files into new packs after the corpus's own, supersedes the
+one it replaces (`Environments\Stars\Stars.m2`) and rewrites the index, so no existing object
+changes and an upload carries two packs and the side files:
+
+```bash
+cargo run --release -p benilla-packer --bin benilla-pack -- \
+    append --packs web/packs --data "/path/to/TurtleWoW/Data/patch-Y.MPQ"
+```
+
 `--packs` serves the container as plain files, exactly as a static host would. `--no-ranges`
 additionally strips every request's `Range` header, which is what a static host measurably does — the
 only way to exercise the client's whole-object path locally, and worth doing before any upload,
@@ -67,25 +77,38 @@ hour packing a container, and it goes away once the container path has run in an
 
 ### The optional updated-character-model layer
 
-`patch-A.MPQ` — HD player models and their skins, backported to 1.12's own formats — is packed
-into its **own** container and served beside the corpus at `/data-hd`. The client mounts it only
-when the player ticks *Use updated character models* on the Graphics page (`hdCharacterModels`, off
-by default), and with the box off the page never fetches so much as the layer's index.
+`patch-A.MPQ` — HD player models and their skins, backported to 1.12's own formats — with Project
+Reforged's `patch-T.mpq` character textures laid over it where they improve on it, is packed into
+its **own** container and served beside the corpus at `/data-hd`, on 1.12.1 and Turtle WoW realms
+alike. The client mounts it only while *Use updated character models* is ticked on the Graphics
+page (`hdCharacterModels`), and with the box off the page never fetches so much as the layer's
+index.
 
 Building it is three steps, and the middle one is the reason it is not one:
 
 ```bash
-# 1. the layer's character art as loose files
-cargo run --release -p benilla-packer --bin benilla-pack -- \
-    extract --data "/path/to/WoW 1.12.1/Data/patch-A.mpq" --prefix "Character\\" --out /tmp/hd-char
-# 2. resample it to 2x, in place (~7k textures, a few minutes)
-python scripts/upscale-hd-textures.py /tmp/hd-char
-# 3. pack the archive, taking those names from the loose tree instead
-cargo run --release -p benilla-packer --bin benilla-pack -- \
-    build --data "/path/to/WoW 1.12.1/Data/patch-A.mpq" --out web/packs-hd --replace-from /tmp/hd-char
+# 1. the layer: patch-A's keys, and patch-T's Character\ files where they are the same art at
+#    exactly twice patch-A's size (or a name patch-A lacks); the composite inputs still not at 2x
+cargo run --release -p benilla-packer --bin benilla-pack -- merge \
+    --base "/path/to/TurtleWoW/Data/patch-A.mpq" --over "/path/to/TurtleWoW/Data/patch-T.mpq" \
+    --out target/hd-merge
+# 2. resample those to 2x, in place
+python scripts/upscale-hd-textures.py target/hd-merge/compose --targets target/hd-merge/compose.tsv
+# 3. pack the two archives, each key from the archive merge.tsv pins it to
+cargo run --release -p benilla-packer --bin benilla-pack -- build \
+    --data "/path/to/TurtleWoW/Data/patch-A.mpq" --data "/path/to/TurtleWoW/Data/patch-T.mpq" \
+    --only target/hd-merge/merge.tsv --pins target/hd-merge/merge.tsv \
+    --replace-from target/hd-merge/compose --require-size target/hd-merge/compose.tsv \
+    --out web/packs-hd
 
 cargo run --release -p wenilla-host -- --www web/dist --packs web/packs --packs-hd web/packs-hd
 ```
+
+`merge` measures rather than assumes the improvement: of the 6,506 `Character\` textures both
+archives ship, patch-T carries 6,217 at exactly twice patch-A's size — the same art, sharper; it
+says the factor itself in `VanillaHelpers\ResizeCharacterSkin.txt` (`2`) — and those replace
+patch-A's; the 105 it ships at patch-A's size or smaller (half-size scalp strips, 256-square Tauren
+fur where patch-A has 512) keep patch-A's. Its 687 names patch-A lacks are taken.
 
 **Why the upscale.** `characters::sections` composites a body from a base skin plus up to fifteen
 overlays, and its tile table is authored at `UPSCALE_FACTOR = 2` — a 512-square atlas over the
@@ -93,14 +116,12 @@ reference's 256-square partition. The compositor copies a source texel to a dest
 clamps, so every input has to already be at its tile's size. The vanilla corpus satisfies that
 because `patch-U`/`patch-V` resample the character tree to 2x; `patch-A` does not (256-square skins,
 128x32 and 128x64 overlays — exactly 1x), so an unscaled layer renders a character with no
-armour, no underwear and an unpainted head strip. Step 2 brings the layer up to the same 2x
-everything else already speaks, which is why the compositor needs no changes at all.
-
-`Character\` only, and that bound matters: the composite reads its base skin and every overlay from
-there, while `Textures\` is the models' own bound art, already 512-1024, and doubling it would take
-the container somewhere nobody should download. The resample is Lanczos — `upscale_rgba` in the
-script is the one seam a neural upscaler drops into, if the weights and a runtime ever land in the
-tree.
+armour, no underwear and an unpainted head strip. patch-T's textures are already 2x, and step 2
+brings the rest of the composite inputs (patch-A's own 1x skins and strips, `CharSections.dbc`'s
+names) up to the same 2x everything else already speaks, which is why the compositor needs no
+changes at all. Model-bound art keeps its own size: resampling it would make it larger and no
+sharper. The resample is Lanczos — `upscale_rgba` in the script is the one seam a neural upscaler
+drops into, if the weights and a runtime ever land in the tree.
 
 A second container rather than more entries in the first, and the reason is in the data: **4,115 of
 the layer's 16,156 names already exist in the corpus** — every character `.m2`, all seven

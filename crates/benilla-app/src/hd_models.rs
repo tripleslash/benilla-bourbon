@@ -6,10 +6,14 @@
 //! one layer: mount or unmount it, drop the chain art the sprite cache holds, rerun
 //! [`benilla_assets::DataLoad`] (the layer carries seven character tables), drop every display and
 //! skin cache ([`benilla_assets::ChainDataChanged`]) and reload the loaded assets the layer holds.
-//! The character bodies on screen keep the old art until those reloads land, then rebuild as a
-//! display swap does ([`crate::entities::rebuild_character_bodies`]), so a body never stands on a
-//! half-arrived model. Natively a chain decides its archives as it opens, and the change takes
-//! effect at the next start ([`crate::cvars::apply_boot_layers`]).
+//! The character bodies on screen keep the old model until the reloaded models land, then rebuild
+//! as a display swap does ([`crate::entities::rebuild_character_bodies`]). A body waiting on the
+//! old model stays whole because its rig holds the bindposes it was built with
+//! (`benilla_world::rig_palette::RigSkin::bindposes`): the model's own are a sub-asset the reload
+//! replaces in place the frame the new model lands. Textures are not waited for: a material holds
+//! its image by handle and shows the new bytes as they land, and the skin composite waits for its
+//! own inputs. Natively a chain decides its archives as it opens, and the change takes effect at
+//! the next start ([`crate::cvars::apply_boot_layers`]).
 //!
 //! Nothing here runs per frame: the observer fires on a change of the CVar, and the rebuild wait
 //! runs only while a switch is waiting.
@@ -21,9 +25,9 @@ use bevy::prelude::*;
 
 use crate::cvars::CvarChanged;
 
-/// How long the bodies wait for the reloaded models and skins before they rebuild on whatever
-/// arrived: the web build fetches the layer's packs on first use, and a stalled fetch must not keep
-/// the old art up forever.
+/// How long the bodies wait for the reloaded models before they rebuild on whatever arrived: the
+/// web build fetches the layer's packs on first use, and a stalled fetch must not keep the old art
+/// up forever.
 const REBUILD_WAIT_SECS: f64 = 60.0;
 
 pub(crate) struct HdModelsPlugin;
@@ -37,8 +41,8 @@ impl Plugin for HdModelsPlugin {
     }
 }
 
-/// A switch waiting for its reloads: the assets that have not landed yet, and when the bodies
-/// rebuild regardless.
+/// A switch waiting for its reloaded models: the ones that have not landed yet, and when the
+/// bodies rebuild regardless.
 #[derive(Resource)]
 struct PendingRebuild {
     reloading: HashSet<UntypedAssetId>,
@@ -86,17 +90,24 @@ fn switch(world: &mut World, on: bool) {
     let reloading: Vec<UntypedAssetId> = layer.map_or_else(Vec::new, |in_layer| {
         benilla_assets::reload_chain_assets(world, in_layer)
     });
+    // The models are what the bodies are built from; everything else lands in place.
+    let models: Vec<UntypedAssetId> = reloading
+        .iter()
+        .copied()
+        .filter(|id| id.type_id() == std::any::TypeId::of::<benilla_assets::M2Model>())
+        .collect();
     info!(
         "hdCharacterModels: {} — catalogs rebuilt, chain art forgotten, {} loaded asset(s) \
-         reloading; the character bodies rebuild once they land",
+         reloading; the character bodies rebuild once its {} model(s) land",
         if on { "on" } else { "off" },
-        reloading.len()
+        reloading.len(),
+        models.len()
     );
     let now = world
         .get_resource::<Time<Real>>()
         .map_or(0.0, |t| t.elapsed_secs_f64());
     // A switch back before the last one's reloads landed waits for both.
-    let mut waiting: HashSet<UntypedAssetId> = reloading.into_iter().collect();
+    let mut waiting: HashSet<UntypedAssetId> = models.into_iter().collect();
     if let Some(earlier) = world.remove_resource::<PendingRebuild>() {
         waiting.extend(earlier.reloading);
     }
@@ -127,21 +138,15 @@ fn mount(_on: bool) -> anyhow::Result<Option<fn(&str) -> bool>> {
     anyhow::bail!("the updated character models are not a live mount on this build")
 }
 
-/// While a switch waits: strike each reloaded asset as its new bytes land or its load fails, and
-/// once none is left, or the wait runs out, rebuild the character bodies on the new art.
+/// While a switch waits: strike each reloaded model as its new bytes land or its load fails, and
+/// once none is left, or the wait runs out, rebuild the character bodies on the new models.
 fn rebuild_when_reloaded(
     mut pending: ResMut<PendingRebuild>,
-    mut images: MessageReader<AssetEvent<Image>>,
     mut models: MessageReader<AssetEvent<benilla_assets::M2Model>>,
     server: Res<AssetServer>,
     time: Res<Time<Real>>,
     mut commands: Commands,
 ) {
-    for event in images.read() {
-        if let AssetEvent::Modified { id } = event {
-            pending.reloading.remove(&id.untyped());
-        }
-    }
     for event in models.read() {
         if let AssetEvent::Modified { id } = event {
             pending.reloading.remove(&id.untyped());
@@ -156,7 +161,7 @@ fn rebuild_when_reloaded(
     }
     if timed_out {
         warn!(
-            "hdCharacterModels: {} reloaded asset(s) had not landed after {REBUILD_WAIT_SECS} s — \
+            "hdCharacterModels: {} reloaded model(s) had not landed after {REBUILD_WAIT_SECS} s — \
              rebuilding the character bodies on what arrived",
             pending.reloading.len()
         );
@@ -181,31 +186,40 @@ mod tests {
         app
     }
 
-    /// The bodies wait for every reloaded asset's new bytes, and rebuild the frame the last one
-    /// lands.
+    /// A model the switch reloads, as the store holds it before its new bytes land.
+    fn reloading_model(app: &mut App) -> bevy::asset::AssetId<benilla_assets::M2Model> {
+        app.world()
+            .resource::<Assets<benilla_assets::M2Model>>()
+            .reserve_handle()
+            .id()
+    }
+
+    /// The bodies wait for every reloaded model's new bytes, and rebuild the frame the last one
+    /// lands; a texture landing does not end the wait.
     #[test]
-    fn the_rebuild_waits_for_the_reloads_to_land() {
+    fn the_rebuild_waits_for_the_reloaded_models_to_land() {
         let mut app = app();
+        let model = reloading_model(&mut app);
+        app.update();
+        app.world_mut().insert_resource(PendingRebuild {
+            reloading: HashSet::from([model.untyped()]),
+            deadline: f64::MAX,
+        });
+        app.update();
         let image = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
             .add(Image::default());
-        app.update();
-        app.world_mut().insert_resource(PendingRebuild {
-            reloading: HashSet::from([image.id().untyped()]),
-            deadline: f64::MAX,
-        });
-        app.update();
+        app.world_mut()
+            .write_message(AssetEvent::<Image>::Modified { id: image.id() });
         app.update();
         assert!(
             app.world().contains_resource::<PendingRebuild>(),
-            "nothing has landed: the old bodies stay up"
+            "no model has landed: the old bodies stay up"
         );
-        // The reload's re-insert, as the asset server makes it.
-        let _ = app
-            .world_mut()
-            .resource_mut::<Assets<Image>>()
-            .get_mut(image.id());
+        // The reload landing, as the asset server announces it.
+        app.world_mut()
+            .write_message(AssetEvent::<benilla_assets::M2Model>::Modified { id: model });
         app.update();
         assert!(!app.world().contains_resource::<PendingRebuild>());
     }
@@ -214,13 +228,10 @@ mod tests {
     #[test]
     fn a_stalled_reload_rebuilds_at_the_deadline() {
         let mut app = app();
-        let image = app
-            .world_mut()
-            .resource_mut::<Assets<Image>>()
-            .add(Image::default());
+        let model = reloading_model(&mut app);
         app.update();
         app.world_mut().insert_resource(PendingRebuild {
-            reloading: HashSet::from([image.id().untyped()]),
+            reloading: HashSet::from([model.untyped()]),
             deadline: 0.0,
         });
         app.update();

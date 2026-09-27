@@ -522,9 +522,30 @@ pub struct RigSkin {
     len: u32,
     pub(crate) joints: Vec<Entity>,
     pub(crate) ibp: Handle<SkinnedMeshInverseBindposes>,
+    /// The bindposes this rig skins with, taken from `ibp` the first time it skins
+    /// ([`Self::bindposes`]).
+    bindposes: std::sync::OnceLock<Arc<[Mat4]>>,
 }
 
 impl RigSkin {
+    /// The inverse bindposes this rig skins with: the asset behind [`Self::ibp`] as it was the
+    /// first time the rig skinned, which is the frame it was built.
+    ///
+    /// Held, not re-read: the asset is a labelled sub-asset of the model, and a reload (a layer
+    /// mounted or unmounted) replaces it in place the frame the new model lands. A rig built from
+    /// the old model keeps the old joints, pose and meshes until its body is rebuilt, and skinning
+    /// those with the new model's bindposes pulls every vertex toward another skeleton's bone.
+    pub fn bindposes<'a>(
+        &'a self,
+        ibps: &Assets<SkinnedMeshInverseBindposes>,
+    ) -> Option<&'a [Mat4]> {
+        if let Some(held) = self.bindposes.get() {
+            return Some(held);
+        }
+        let now = ibps.get(&self.ibp)?;
+        Some(self.bindposes.get_or_init(|| Arc::from(&now[..])))
+    }
+
     /// The rig's allocated bone count; the collapsed lane has no joint list to measure.
     pub fn bones(&self) -> u32 {
         self.len
@@ -568,6 +589,7 @@ impl RigSkin {
                 len: bones,
                 joints,
                 ibp,
+                bindposes: std::sync::OnceLock::new(),
             }),
             None => {
                 palettes.denied += 1;
@@ -627,7 +649,7 @@ fn compute_rig_palettes(
         let Ok(rig) = rigs.get(root) else {
             continue; // allocation failed at spawn (bind-pose fallback) or already torn down
         };
-        let Some(ibp) = ibps.get(&rig.ibp) else {
+        let Some(ibp) = rig.bindposes(&ibps) else {
             continue;
         };
         // The holder's translation is the origin, so the rows come out rig-sized; any origin is
@@ -972,6 +994,29 @@ pub fn spawn_joints(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rig skins with the bindposes of the model it was built from: the asset replaced in place
+    /// by a reload does not reach it, and a rig built after the reload takes the new ones.
+    #[test]
+    fn a_rig_keeps_the_bindposes_it_was_built_with() {
+        let mut ibps = Assets::<SkinnedMeshInverseBindposes>::default();
+        let old = vec![Mat4::IDENTITY; 2];
+        let handle = ibps.add(SkinnedMeshInverseBindposes::from(old.clone()));
+        let mut palettes = RigPalettes::default();
+        let built = RigSkin::allocate_bones(&mut palettes, 2, handle.clone()).unwrap();
+        assert_eq!(built.bindposes(&ibps), Some(&old[..]));
+
+        let new = vec![Mat4::from_translation(Vec3::X); 3];
+        ibps.insert(handle.id(), SkinnedMeshInverseBindposes::from(new.clone()))
+            .unwrap();
+        assert_eq!(
+            built.bindposes(&ibps),
+            Some(&old[..]),
+            "a body still standing on the old model skins with the old model's bindposes"
+        );
+        let rebuilt = RigSkin::allocate_bones(&mut palettes, 3, handle).unwrap();
+        assert_eq!(rebuilt.bindposes(&ibps), Some(&new[..]));
+    }
 
     #[test]
     fn alloc_free_coalesce_roundtrip() {

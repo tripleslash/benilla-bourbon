@@ -315,3 +315,48 @@ fn keys_are_emitted_in_ascending_order() {
         assert!(idx.locate(k).is_some());
     }
 }
+
+/// Laying packs over a built container: the old packs keep their ids and objects, a key the new
+/// pack also holds reads the new bytes, every other key still reads the old ones, and the build id
+/// moves so a client's cache of the old index is dropped.
+#[test]
+fn an_appended_pack_supersedes_only_the_keys_it_holds() {
+    let root = scratch("append");
+    let mut b = PackSetBuilder::new(&root, 10);
+    let old = vec![(1u64, noise(1, 4000)), (2u64, noise(2, 4000))];
+    b.add(&PackPlan {
+        blobs: old.clone(),
+        prefer: PackClass::Rangeable,
+    })
+    .unwrap();
+    let first = Index::parse(std::fs::read(b.finish().unwrap()).unwrap()).unwrap();
+    let old_wire = read_pack(&root, 0);
+
+    let mut b = PackSetBuilder::from_index(&root, 10, &first).unwrap();
+    let new = vec![(2u64, noise(20, 3000)), (3u64, noise(3, 3000))];
+    assert_eq!(
+        b.add(&PackPlan {
+            blobs: new.clone(),
+            prefer: PackClass::Rangeable,
+        })
+        .unwrap(),
+        1,
+        "the new pack takes the next id"
+    );
+    let idx = Index::parse(std::fs::read(b.finish().unwrap()).unwrap()).unwrap();
+    assert_eq!((idx.pack_count(), idx.len()), (2, 3));
+    assert_eq!(read_pack(&root, 0), old_wire, "the old object is untouched");
+    assert_ne!(idx.build_id(), first.build_id());
+    for (key, want, pack) in [
+        (1u64, &old[0].1, 0u32),
+        (2, &new[0].1, 1),
+        (3, &new[1].1, 1),
+    ] {
+        let at = idx.locate(key).unwrap();
+        assert_eq!(at.pack_id, pack, "key {key}");
+        let meta = idx.pack(at.pack_id).unwrap();
+        let wire = read_pack(&root, at.pack_id);
+        let body = decode_pack_body(pack_body(&wire, at.pack_id).unwrap(), &meta).unwrap();
+        assert_eq!(&frame_from_body(&body, &at).unwrap(), want, "key {key}");
+    }
+}

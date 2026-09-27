@@ -72,7 +72,7 @@ pub const COMPOSE_LIST: &str = "compose.tsv";
 pub const ADD_DIR: &str = "add";
 
 /// Archive bookkeeping entries: never game content, never packed.
-const METADATA: [&str; 3] = ["(listfile)", "(attributes)", "(signature)"];
+pub(crate) const METADATA: [&str; 3] = ["(listfile)", "(attributes)", "(signature)"];
 
 #[derive(Parser)]
 pub struct OverlayArgs {
@@ -100,6 +100,14 @@ pub struct OverlayArgs {
     /// `index.bpi`): a key it holds that the layer ships at the 1.12.1 bytes is kept.
     #[arg(long, value_name = "DIR")]
     pub over: Vec<PathBuf>,
+    /// Leave out every key whose name starts with this, any case — a tree of the layer's patches
+    /// another layer carries (`patch-T`'s `Character\` textures, in the HD layer).
+    #[arg(long, value_name = "PREFIX")]
+    pub leave_out_prefix: Vec<String>,
+    /// Leave out every key this archive holds: a patch the reference mounts above the layer's that
+    /// is served from another container (`patch-Y`, laid into the corpus), whose copy must answer.
+    #[arg(long, value_name = "MPQ")]
+    pub under: Vec<PathBuf>,
 }
 
 /// One archive entry a composite resolved a key to.
@@ -211,7 +219,7 @@ struct Row {
 /// Whether a key's bytes are a file this client's readers take, by its extension: a model the M2
 /// reader or a WMO the group walk would refuse, or a texture the BLP decoder would, is not layered
 /// over art that works. Other kinds pass unread.
-fn readable(name: Option<&str>, bytes: &[u8]) -> std::result::Result<(), String> {
+pub(crate) fn readable(name: Option<&str>, bytes: &[u8]) -> std::result::Result<(), String> {
     let Some(name) = name else { return Ok(()) };
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".m2") {
@@ -241,7 +249,7 @@ fn readable(name: Option<&str>, bytes: &[u8]) -> std::result::Result<(), String>
 /// base skins at 256 (the whole partition, `0x475c50`) and its head strips (face, facial hair, the
 /// hair row's scalp columns) and underwear at 128, the width of their tiles. Every table `chains`
 /// answers counts, so a layer under another's `CharSections` still sizes that one's names.
-fn composite_refs(chains: &[&Chain]) -> HashMap<u64, u32> {
+pub(crate) fn composite_refs(chains: &[&Chain]) -> HashMap<u64, u32> {
     // `(sectionType, column, 1× width)`: 0 skin, 1 face, 2 facial hair, 3 hair, 4 underwear. The
     // skin's second column and the hair row's first are bound to the model uncomposited.
     const COLUMNS: [(u32, usize, u32); 9] = [
@@ -301,7 +309,7 @@ fn composite_refs(chains: &[&Chain]) -> HashMap<u64, u32> {
 /// 1× width ([`composite_refs`], and 128 for a region under one of the eight
 /// `Item\TextureComponents\` directories the compositor reads or a guild emblem half), its height
 /// scaled to match. `None` for a file that is not a composite input or is at 2×.
-fn composite_target(
+pub(crate) fn composite_target(
     name: &str,
     (w, h): (u32, u32),
     refs: &HashMap<u64, u32>,
@@ -414,11 +422,39 @@ pub fn overlay(a: OverlayArgs) -> Result<()> {
     eprintln!("{} composite inputs named by CharSections.dbc", refs.len());
     let over = over_keys(&a.over)?;
 
+    // Keys another container answers for this layer: a later patch's, or a tree carried elsewhere.
+    let mut above: HashSet<u64> = HashSet::new();
+    for path in &a.under {
+        let ar = Archive::open(path).with_context(|| format!("opening {}", path.display()))?;
+        above.extend(ar.entries().filter(|e| !e.is_delete_marker).map(|e| e.key));
+    }
+    let prefixes: Vec<String> = a
+        .leave_out_prefix
+        .iter()
+        .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+        .collect();
+    let left_out = |k: &u64| {
+        above.contains(k)
+            || names.get(k).is_some_and(|n| {
+                let n = n.replace('/', "\\").to_ascii_lowercase();
+                prefixes.iter().any(|p| n.starts_with(p.as_str()))
+            })
+    };
     let mut keys: Vec<u64> = layer
         .iter()
         .filter(|(k, s)| !s.tomb && !metadata.contains(k))
         .map(|(k, _)| *k)
         .collect();
+    let before = keys.len();
+    keys.retain(|k| !left_out(k));
+    if keys.len() != before {
+        eprintln!(
+            "{} layer keys left out (--under {} archive(s), --leave-out-prefix {:?})",
+            before - keys.len(),
+            a.under.len(),
+            a.leave_out_prefix
+        );
+    }
     keys.sort_unstable();
     let tombs: Vec<u64> = layer
         .iter()
@@ -716,11 +752,18 @@ fn write_list(path: &Path, rows: &[Row]) -> Result<()> {
 /// `compose.tsv`: each kept file in `compose/` and the size it is resampled to, `name width
 /// height`, for `scripts/upscale-hd-textures.py --targets` and `build --require-size`.
 fn write_compose_list(path: &Path, rows: &[Row]) -> Result<()> {
+    let targets: Vec<(String, (u32, u32))> = rows
+        .iter()
+        .filter_map(|r| Some((r.name.clone()?, r.target?)))
+        .collect();
+    write_compose_targets(path, &targets)
+}
+
+/// `compose.tsv` from `(name, 2× size)` pairs — the one writer `overlay` and `merge` share.
+pub(crate) fn write_compose_targets(path: &Path, targets: &[(String, (u32, u32))]) -> Result<()> {
     let mut text = String::from("# name\twidth\theight\n");
-    for r in rows {
-        if let (Some(name), Some((w, h))) = (r.name.as_deref(), r.target) {
-            text.push_str(&format!("{name}\t{w}\t{h}\n"));
-        }
+    for (name, (w, h)) in targets {
+        text.push_str(&format!("{name}\t{w}\t{h}\n"));
     }
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }

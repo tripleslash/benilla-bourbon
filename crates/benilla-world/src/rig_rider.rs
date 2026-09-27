@@ -70,7 +70,7 @@ pub(crate) fn write_rig_riders(
             .ok()
             .filter(|own| !own.model.is_empty())
             .zip(skins.get(entity).ok())
-            .and_then(|(own, skin)| Some((own, skin, ibps.get(&skin.ibp)?)));
+            .and_then(|(own, skin)| Some((own, skin, skin.bindposes(&ibps)?)));
         match posed {
             Some((own, skin, ibp)) => {
                 scratch.clear();

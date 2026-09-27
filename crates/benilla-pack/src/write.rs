@@ -41,6 +41,9 @@ pub struct PackSetBuilder {
     packs: Vec<PackMeta>,
     /// `(key, pack_id, frame_off, frame_len)`, sorted at [`PackSetBuilder::finish`].
     entries: Vec<(u64, u32, u32, u32)>,
+    /// How many of `entries` came from [`PackSetBuilder::from_index`]: a key a later entry also
+    /// holds is dropped from these at [`PackSetBuilder::finish`].
+    seeded: usize,
     corpus_bytes: u64,
 }
 
@@ -52,8 +55,40 @@ impl PackSetBuilder {
             max_object_bytes: MAX_OBJECT_BYTES,
             packs: Vec::new(),
             entries: Vec::new(),
+            seeded: 0,
             corpus_bytes: 0,
         }
+    }
+
+    /// Start from a container already on disk at `root`: its packs keep their ids, its objects are
+    /// not touched, and packs committed after this take the next ids. A key a later pack also holds
+    /// is answered from the later pack; the earlier copy stays in its object, unreferenced. This is
+    /// how an archive is laid over a built corpus without re-packing (and re-uploading) the corpus.
+    ///
+    /// The index's corpus total is carried as it was and grows by each new blob; a superseded blob
+    /// is not subtracted (the index does not record its raw length), so the total may overstate by
+    /// what was superseded.
+    pub fn from_index(root: impl AsRef<Path>, level: i32, index: &crate::Index) -> Result<Self> {
+        let packs = (0..index.pack_count())
+            .map(|id| {
+                index
+                    .pack(id)
+                    .ok_or_else(|| Error::BadIndex(format!("pack {id} has no readable row")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let entries: Vec<_> = index
+            .iter()
+            .map(|(k, at)| (k, at.pack_id, at.frame_off, at.frame_len))
+            .collect();
+        Ok(Self {
+            root: root.as_ref().to_path_buf(),
+            level,
+            max_object_bytes: MAX_OBJECT_BYTES,
+            seeded: entries.len(),
+            packs,
+            entries,
+            corpus_bytes: index.corpus_bytes(),
+        })
     }
 
     /// Lower the object cap (tests use this to exercise the overflow path without building 24 MiB
@@ -127,6 +162,18 @@ impl PackSetBuilder {
     /// `(name_a, name_b)` pair means two files the archive itself cannot tell apart, which is
     /// something to be told about, not to paper over.
     pub fn finish(mut self) -> Result<PathBuf> {
+        // A seeded entry a new pack also holds is superseded by it.
+        if self.seeded > 0 {
+            let fresh: std::collections::HashSet<u64> =
+                self.entries[self.seeded..].iter().map(|e| e.0).collect();
+            let seeded = self.seeded;
+            let mut i = 0;
+            self.entries.retain(|e| {
+                let keep = i >= seeded || !fresh.contains(&e.0);
+                i += 1;
+                keep
+            });
+        }
         self.entries.sort_unstable_by_key(|e| e.0);
         if let Some(w) = self.entries.windows(2).find(|w| w[0].0 == w[1].0) {
             return Err(Error::BadIndex(format!(

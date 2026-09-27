@@ -209,6 +209,21 @@ impl Chain {
         Ok(Self { archives })
     }
 
+    /// A chain of exactly these archives, in ascending priority (a later one wins), whatever
+    /// directories they sit in — for the pack builder, whose layers stack archives from more than
+    /// one install (`patch-A.mpq` under `patch-T.mpq`). The mount law has no say here: naming the
+    /// archives is the order.
+    pub fn open_archives(paths: &[std::path::PathBuf]) -> Result<Self> {
+        if paths.is_empty() {
+            bail!("no archives to mount");
+        }
+        let archives = paths
+            .iter()
+            .map(|p| Archive::open(p).with_context(|| format!("opening MPQ {}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { archives })
+    }
+
     /// The highest-priority archive with an entry for `name`, a delete marker included, as a
     /// tombstone shadows every lower copy: check [`Archive::is_delete_marker`] for a readable file.
     fn resolve(&self, name: &str) -> Option<&Archive> {

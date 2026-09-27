@@ -12,8 +12,10 @@
 //! benilla-pack verify --data "C:\WoW-1.12.1\Data" --packs web/packs
 //! ```
 
+mod append;
 mod group;
 mod inspect;
+mod merge;
 mod overlay;
 mod plan;
 mod sidecars;
@@ -63,6 +65,12 @@ enum Cmd {
     /// compositor is built at `UPSCALE_FACTOR = 2`, so `scripts/upscale-hd-textures.py` has to see
     /// the BLPs. Extract, upscale in place, then `build --replace-from` the same directory.
     Extract(ExtractArgs),
+    /// Work out the updated-character-model layer: an HD archive with a later archive's files laid
+    /// over it where they improve on it, as the key list and archive pins `build` packs. See
+    /// `merge.rs`.
+    Merge(merge::MergeArgs),
+    /// Lay an archive over a built container without re-packing it. See `append.rs`.
+    Append(append::AppendArgs),
     /// Work out the Turtle WoW 1.18.1 layer: what a Turtle install's numbered patches add to or
     /// change over the 1.12.1 corpus, as the key list `build --only` packs. See `overlay.rs`.
     Overlay(overlay::OverlayArgs),
@@ -88,9 +96,10 @@ struct ExtractArgs {
 
 #[derive(Parser)]
 struct BuildArgs {
-    /// The install's `Data` directory (or a single `.MPQ`).
-    #[arg(long)]
-    data: PathBuf,
+    /// The install's `Data` directory, or one or more single `.MPQ`s mounted in the order given (a
+    /// later one wins) — a layer stacked from more than one install.
+    #[arg(long, required = true)]
+    data: Vec<PathBuf>,
     /// Where the container goes. Created if absent.
     #[arg(long)]
     out: PathBuf,
@@ -154,6 +163,11 @@ struct BuildArgs {
     /// above it (`overlay` reads it the same way).
     #[arg(long, value_name = "ARCHIVE")]
     top: Option<String>,
+    /// Read each key this list (`merge`'s `merge.tsv`) names from the archive it names, rather than
+    /// from whichever mounted archive is highest: a layer that takes a later archive's file only
+    /// where it improves on the earlier one's.
+    #[arg(long, value_name = "LIST")]
+    pins: Option<PathBuf>,
     /// Plan and report, but write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -164,8 +178,9 @@ struct BuildArgs {
 
 #[derive(Parser)]
 struct VerifyArgs {
-    #[arg(long)]
-    data: PathBuf,
+    /// As `build --data`.
+    #[arg(long, required = true)]
+    data: Vec<PathBuf>,
     #[arg(long)]
     packs: PathBuf,
     /// Check every Nth named entry. 1 checks all of them (slow, and the right thing before a
@@ -186,6 +201,9 @@ struct VerifyArgs {
     /// Read the chain only through this archive — see `build --top`.
     #[arg(long, value_name = "ARCHIVE")]
     top: Option<String>,
+    /// As `build --pins`.
+    #[arg(long, value_name = "LIST")]
+    pins: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -206,6 +224,8 @@ fn main() -> Result<()> {
         Cmd::Inspect(a) => inspect::inspect(a),
         Cmd::Extract(a) => extract(a),
         Cmd::Overlay(a) => overlay::overlay(a),
+        Cmd::Merge(a) => merge::merge(a),
+        Cmd::Append(a) => append::append(a),
         Cmd::Sidecars(a) => {
             let index =
                 Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
@@ -304,18 +324,65 @@ fn check_size(replacement: &[u8], want: (u32, u32)) -> Result<()> {
     Ok(())
 }
 
-/// Open the chain a `build`/`verify` reads, through `--top` when one is named.
-fn open_chain(data: &Path, top: Option<&str>) -> Result<Chain> {
-    let mut chain = Chain::open(data).with_context(|| format!("opening {}", data.display()))?;
+/// Open the chain a `build`/`verify` reads — one `Data` directory or `.MPQ`, or several `.MPQ`s
+/// stacked in order — through `--top` when one is named.
+fn open_chain(data: &[PathBuf], top: Option<&str>) -> Result<Chain> {
+    let mut chain = match data {
+        [one] => Chain::open(one).with_context(|| format!("opening {}", one.display()))?,
+        many => Chain::open_archives(many)?,
+    };
     if let Some(top) = top {
         if !chain.truncate_after(top) {
-            bail!(
-                "--top {top}: no such archive mounted from {}",
-                data.display()
-            );
+            bail!("--top {top}: no such archive mounted");
         }
     }
     Ok(chain)
+}
+
+/// The index of the mounted archive whose file name is `name`, any case.
+fn archive_named(chain: &Chain, name: &str) -> Result<usize> {
+    chain
+        .archives()
+        .iter()
+        .position(|a| {
+            a.path()
+                .file_name()
+                .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+        })
+        .with_context(|| format!("--pins names {name}, which is not mounted"))
+}
+
+/// `--pins`: re-resolve each pinned key against the archive its pin names.
+fn apply_pins(chain: &Chain, blobs: &mut [Blob], pins: &HashMap<u64, String>) -> Result<usize> {
+    let mut by_archive: HashMap<usize, HashMap<u64, (u32, u32, bool)>> = HashMap::new();
+    for name in pins.values().collect::<std::collections::BTreeSet<_>>() {
+        let i = archive_named(chain, name)?;
+        by_archive.insert(
+            i,
+            chain.archives()[i]
+                .entries()
+                .map(|e| (e.key, (e.block_index, e.file_size, e.is_delete_marker)))
+                .collect(),
+        );
+    }
+    let mut moved = 0;
+    for b in blobs.iter_mut() {
+        let Some(pin) = pins.get(&b.key) else {
+            continue;
+        };
+        let i = archive_named(chain, pin)?;
+        let Some(&(block, len, tomb)) = by_archive[&i].get(&b.key) else {
+            bail!("{:#018x} is pinned to {pin}, which does not hold it", b.key);
+        };
+        if tomb {
+            bail!("{:#018x} is pinned to {pin}, which deletes it", b.key);
+        }
+        if b.archive != i {
+            moved += 1;
+        }
+        (b.archive, b.block, b.len) = (i, block, len);
+    }
+    Ok(moved)
 }
 
 /// The loose path a chain name takes on disk: backslashes become separators, everything else is
@@ -464,6 +531,10 @@ fn build(a: BuildArgs) -> Result<()> {
     };
 
     let mut blobs = resolve(&chain);
+    if let Some(list) = &a.pins {
+        let moved = apply_pins(&chain, &mut blobs, &merge::read_pins(list)?)?;
+        eprintln!("--pins: {moved} keys read from a lower archive than the one mounted highest");
+    }
     let mut names = name_hints(&chain);
     if let Some(list) = &a.only {
         let keep = overlay::read_list(list)?;
@@ -690,6 +761,10 @@ fn verify(a: VerifyArgs) -> Result<()> {
         Some(list) => overlay::read_compose_list(list)?,
         None => HashMap::new(),
     };
+    let pins = match &a.pins {
+        Some(list) => merge::read_pins(list)?,
+        None => HashMap::new(),
+    };
     let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!(
@@ -719,13 +794,20 @@ fn verify(a: VerifyArgs) -> Result<()> {
         .par_iter()
         .step_by(a.stride.max(1))
         .try_for_each(|name| -> Result<()> {
-            let want = match chain.read(name) {
+            let key = name_key(name);
+            // A pinned key is the pinned archive's bytes, not the highest mounted copy's.
+            let read = match pins.get(&key) {
+                Some(pin) => chain.archives()[archive_named(&chain, pin)?]
+                    .read_file(name)
+                    .map_err(|e| anyhow::anyhow!("{e}")),
+                None => chain.read(name),
+            };
+            let want = match read {
                 Ok(b) => b,
                 // A name the listfile has but the chain cannot read is a tombstone; the container
                 // correctly omits those, so it is not a mismatch.
                 Err(_) => return Ok(()),
             };
-            let key = name_key(name);
             let Some(at) = index.locate(key) else {
                 missing.fetch_add(1, Ordering::Relaxed);
                 bail!("{name} ({key:#018x}) is in the chain but not in the container");

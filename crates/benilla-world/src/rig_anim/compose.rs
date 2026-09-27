@@ -203,7 +203,7 @@ pub fn finalize_rig_worlds(
             let root_rel = crate::rig_palette::rebase_global(root_g, origin);
             let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
             if let Some(skin) = skin {
-                if let Some(ibp) = ibps.get(&skin.ibp) {
+                if let Some(ibp) = skin.bindposes(&ibps) {
                     palettes.write_rig_worlds(skin, &worlds, ibp, origin);
                 }
             }
