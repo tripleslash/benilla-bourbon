@@ -399,7 +399,8 @@ pub(super) fn spawn_menagerie(
     // layout. `layouts` is [static plain, skinned plain, static colours, skinned colours].
     let (plain_mesh, plain_aabb, _) = layouts[0].clone();
     let (colours_mesh, colours_aabb, _) = layouts[2].clone();
-    let posuv = meshes.add(warm_pos_uv_mesh());
+    let posuv = meshes.add(warm_pos_uv_mesh(false));
+    let posuv2 = meshes.add(warm_pos_uv_mesh(true));
     let liquid_mesh = meshes.add(warm_liquid_mesh(false));
     let liquid_mesh_colored = meshes.add(warm_liquid_mesh(true));
     // Celestial discs and glares (`sun::setup` quads: position, normal, UV).
@@ -414,9 +415,11 @@ pub(super) fn spawn_menagerie(
             &mut count,
         );
     }
-    // Stars: `Stars.m2` patches carry position and UV; the assetless fallback adds normals.
+    // Stars: `Stars.m2` patches carry position and UV, a two-texture batch a second UV set; the
+    // assetless fallback adds normals.
     for mat in lane_handles(&mut lanes.stars) {
         spawn_lane_rig(commands, cam, None, &posuv, None, mat.clone(), &mut count);
+        spawn_lane_rig(commands, cam, None, &posuv2, None, mat.clone(), &mut count);
         spawn_lane_rig(
             commands,
             cam,
@@ -644,9 +647,9 @@ fn spawn_lane_rig<M: Material>(
     *count += 1;
 }
 
-/// A tiny triangle with POSITION + UV_0 only, the `Stars.m2` layout. Main-world-resident, so
-/// `calculate_bounds` covers it.
-fn warm_pos_uv_mesh() -> Mesh {
+/// A tiny triangle with POSITION + UV_0, plus UV_1 when `uv1` is set: the `Stars.m2` layouts.
+/// Main-world-resident, so `calculate_bounds` covers it.
+fn warm_pos_uv_mesh(uv1: bool) -> Mesh {
     let mut m = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -655,10 +658,11 @@ fn warm_pos_uv_mesh() -> Mesh {
         Mesh::ATTRIBUTE_POSITION,
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
     );
-    m.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-    );
+    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+    if uv1 {
+        m.insert_attribute(Mesh::ATTRIBUTE_UV_1, uvs.clone());
+    }
+    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     m.insert_indices(Indices::U32(vec![0, 1, 2]));
     m
 }
@@ -746,6 +750,7 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         rgb_seq: None,
         wmo_batch: None,
         section: None,
+        stage2: None,
     }
 }
 

@@ -35,6 +35,19 @@ pub(crate) fn sky_pipeline_state(descriptor: &mut RenderPipelineDescriptor) {
 
 /// Stars, the sky pass's first draw (`0x6d4a3f`): the ladder's lowest rung.
 pub(crate) const STARS_BIAS: f32 = -1.0e6;
+/// One star batch's step up [`STARS_BIAS`], in authored batch order: the f32 ulp there.
+const STAR_BATCH_STEP: f32 = 0.0625;
+/// The star rung's floor: every batch step up to [`STAR_BATCH_CAP`] truncates to one pipeline-key
+/// integer (`depth_bias as i32` is a key axis), as `STARS_BIAS` itself does.
+const STAR_BATCH_FLOOR: f32 = STARS_BIAS - 0.875;
+/// The highest step: batches past index 13 tie (patch-Y's `Stars.m2` has 12).
+const STAR_BATCH_CAP: f32 = 0.8125;
+
+/// Star batch `i`'s sort slot: [`STARS_BIAS`]'s pipeline key, ordered by batch.
+pub(crate) fn star_batch_bias(i: usize) -> f32 {
+    STAR_BATCH_FLOOR + (i as f32 * STAR_BATCH_STEP).min(STAR_BATCH_CAP)
+}
+
 /// The WMO skybox ([`crate::skybox`]), which replaces this ladder while it draws: an ordinary
 /// blended M2, so its camera-anchored batches need a rung under every world transparent (the
 /// deepest, [`FAR_SIDE_BIAS`] at the far plane, ≈ −4.3e4), and no deeper, so its batch-order step
@@ -165,6 +178,27 @@ const _: () = {
     // Above the WMO-skybox band at any distance, measured from the band's floor, the ring.
     assert!(Rung::RING + WORLD_VIEW_Z_FLOOR - WMO_SKYBOX_BIAS > 1.0e3);
 };
+
+/// The star batches share [`STARS_BIAS`]'s pipeline key and still sort apart, in batch order.
+#[test]
+fn star_batches_keep_one_pipeline_key_in_batch_order() {
+    let key = STARS_BIAS as i32;
+    for i in 0..32 {
+        assert_eq!(
+            star_batch_bias(i) as i32,
+            key,
+            "batch {i} leaves the star key"
+        );
+    }
+    for i in 0..13 {
+        assert!(
+            star_batch_bias(i + 1) > star_batch_bias(i),
+            "batches {i} and {} tie",
+            i + 1
+        );
+    }
+    assert!(SUN_DISC_BIAS - star_batch_bias(usize::MAX) > 1.0e4);
+}
 
 /// The depth law, in the shaders: the shared vertex stage pins the far depth (without it stars
 /// show through distant hills), every sky material draws through it, and no fragment rewrites it.

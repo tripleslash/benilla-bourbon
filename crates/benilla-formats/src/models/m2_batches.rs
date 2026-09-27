@@ -17,7 +17,7 @@ use super::tex_anim;
 use super::{le_u16, le_u32, model_path, remap_submesh};
 use super::{
     AlphaAnim, Billboard, BillboardKind, BoneScaleAnim, CharSkinSlot, FogPolicy, ModelBlend,
-    RenderSubmesh,
+    RenderSubmesh, TextureStage,
 };
 
 fn parent_dir(path: &str) -> &str {
@@ -402,6 +402,22 @@ pub fn parse_m2_render_submeshes(
         // `texCoordSet (+0x12) → texture_unit_lookup (0x9c)` above 2 is a generated environment
         // coordinate, as the reference gates it at `0x70b8bd`; stage 0 only, one texture a batch.
         let env_map = model.stage_is_env_mapped(batch, 0);
+        // Stage 1 of a two-texture batch: its record and coordinate set (set 0 or 1; an
+        // environment-mapped stage is not built).
+        let stage2_src = (batch.texture_count >= 2)
+            .then(|| {
+                let record = model
+                    .raw_data
+                    .texture_lookup_table
+                    .get(batch.texture_combo_index as usize + 1)
+                    .and_then(|&ti| model.textures.get(ti as usize))?;
+                let texture = resolve_texture(record, dir, skins).0?;
+                let set = *model
+                    .texture_unit_lookup
+                    .get(batch.texture_coord_combo_index as usize + 1)?;
+                (set <= 1).then_some((texture, record.wrap_x, record.wrap_y, set == 1))
+            })
+            .flatten();
         // Render flag 0x01, unlit: full texture brightness (lamp glass, glow cards).
         let emissive = material.is_some_and(|m| m.flags.bits() & 0x01 != 0);
         // Render flags 0x10 (no depth write) and 0x08 (no depth test): the reference keys depth
@@ -557,6 +573,21 @@ pub fn parse_m2_render_submeshes(
                 })
             });
             sub.env_map = env_map;
+            sub.stage2 = stage2_src.as_ref().map(|(texture, wrap_x, wrap_y, set1)| {
+                Box::new(TextureStage {
+                    texture: texture.clone(),
+                    wrap_x: *wrap_x,
+                    wrap_y: *wrap_y,
+                    uvs: globals
+                        .iter()
+                        .map(|&g| {
+                            let v = &model.vertices[g as usize];
+                            let uv = if *set1 { v.tex_coords2 } else { v.tex_coords };
+                            [uv.x, uv.y]
+                        })
+                        .collect(),
+                })
+            });
             sub.additive = additive;
             sub.no_depth_write = no_depth_write;
             sub.no_depth_test = no_depth_test;

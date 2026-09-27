@@ -60,6 +60,8 @@ struct StarDome {
     /// The patch's authored transparency weight (`Stars.m2` keys 1.0 to 0.25 over its seven
     /// batches, `A = colorAlpha × weight`), under the star-curve alpha; 1.0 for the fallback.
     weight: f32,
+    /// Stage 0's texture-transform translation loop (patch-Y's nebulae drift), `None` when still.
+    scroll: Option<benilla_formats::UvAnim>,
 }
 
 /// The celestial layer: spawns the sun, moons and stars at startup and places them each frame.

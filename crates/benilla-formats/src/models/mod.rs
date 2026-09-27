@@ -100,6 +100,7 @@ fn remap_submesh(
             wmo_batch: None,
             env_map: false,
             section: None,
+            stage2: None,
         },
         globals,
     )

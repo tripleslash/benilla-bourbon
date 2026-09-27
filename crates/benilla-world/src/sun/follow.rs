@@ -6,6 +6,7 @@
 
 use bevy::camera::Projection;
 use bevy::ecs::system::SystemParam;
+use bevy::math::Affine2;
 use bevy::prelude::*;
 
 use crate::clouds::{occ1_moon, occ1_sun, CloudCoverage};
@@ -482,11 +483,13 @@ pub(super) fn follow_moons(
 }
 
 /// Anchor the star dome and fade it by the model-global byte `trunc(curve·254 + 1)`, the draw
-/// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`].
+/// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`]; drift a
+/// scrolling batch's stage 0 on its global-sequence clock.
 pub(super) fn follow_stars(
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     light: Res<WowLighting>,
     debug: Res<DebugState>,
+    time: Res<Time>,
     mut star_mats: ResMut<Assets<StarMaterial>>,
     mut stars: Query<
         (
@@ -511,6 +514,18 @@ pub(super) fn follow_stars(
     } else {
         byte / 255.0
     };
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (star.wgsl).
+    let linear = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
+        1.0
+    } else {
+        0.0
+    };
+    // A capture holds the drift at its seed, as the shared-clock material lanes do.
+    let gseq_now = if crate::dev_state::deterministic_run() {
+        0.0
+    } else {
+        time.elapsed_secs_f64()
+    };
     for (mut tf, mut gt, mat, dome) in &mut stars {
         tf.translation = cam_gt.translation();
         tf.scale = Vec3::splat(far * 0.88);
@@ -523,11 +538,27 @@ pub(super) fn follow_stars(
             1.0,
             benilla_assets::quantize(global * dome.weight, 255.0),
         );
+        // `uv + t` (`uv_transform` with no rotation or scale), in 1/4096 steps for the write gate.
+        let uv = dome.scroll.as_ref().map_or(Affine2::IDENTITY, |a| {
+            let [x, y] = a.sample(a.clock(0.0, gseq_now));
+            Affine2::from_translation(Vec2::new(
+                benilla_assets::quantize(x, 4096.0),
+                benilla_assets::quantize(y, 4096.0),
+            ))
+        });
         benilla_assets::write_gated(
             &mut star_mats,
             &mat.0,
-            |m| m.base.base_color != color,
-            |m| m.base.base_color = color,
+            |m| {
+                m.base.base_color != color
+                    || m.base.uv_transform != uv
+                    || m.extension.params.z != linear
+            },
+            |m| {
+                m.base.base_color = color;
+                m.base.uv_transform = uv;
+                m.extension.params.z = linear;
+            },
         );
     }
 }

@@ -350,6 +350,21 @@ pub struct RenderSubmesh {
     /// (`texture_unit_lookup[texCoordSet] > 2`): `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5`.
     /// Such a mesh parks its UVs at one point (`GnomeSubwayGlass.m2`).
     pub env_map: bool,
+    /// The batch's second texture stage (`textureCount` 2), which the reference modulates over
+    /// the first. Only the star dome draws it; every other lane draws stage 0 alone.
+    pub stage2: Option<Box<TextureStage>>,
+}
+
+/// A batch's second texture stage: the record through `textureComboIndex + 1`, sampled through
+/// the coordinate set `texture_unit_lookup[texCoordComboIndex + 1]` names. An environment-mapped
+/// stage is not built.
+#[derive(Debug, Clone)]
+pub struct TextureStage {
+    pub texture: String,
+    pub wrap_x: bool,
+    pub wrap_y: bool,
+    /// Parallel to [`RenderSubmesh::positions`].
+    pub uvs: Vec<[f32; 2]>,
 }
 
 /// A flat ground-plane quad: four vertices on one horizontal plane at or just above z = 0 (hover
@@ -416,6 +431,7 @@ impl Default for RenderSubmesh {
             wmo_batch: None,
             env_map: false,
             section: None,
+            stage2: None,
         }
     }
 }
