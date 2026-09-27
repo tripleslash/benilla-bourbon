@@ -154,7 +154,8 @@ struct LiquidParams {
     // spike's gain.
     look_b: vec4<f32>,
     // x = the reflectance at grazing (the Fresnel's cap), y = the power of its climb, z = the share
-    // of the reference's combine blended over the clear surface; w spare.
+    // of the reference's combine blended over the clear surface, w = the wind ripples' RMS slope
+    // (`wind_ripples`).
     look_c: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
@@ -606,6 +607,71 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
+// fork: modern lighting — the experimental tier's wind ripples: how many trains, the longest wavelength
+// (yd), the step down to the next, how much the long ones outweigh the short (slope ∝ wavelength to
+// this power), the share of deep-water dispersion they travel at, and the phase change per pixel
+// (radians) over which a train fades. The fade is the reference shot's: at every distance the finest
+// octave left has a ~7-13 px period along the view, which puts its start near 2π/12 and its end near
+// 2π/5.
+const RIPPLE_TRAINS: u32 = 13u;
+const RIPPLE_LONGEST: f32 = 12.0;
+const RIPPLE_STEP: f32 = 0.78;
+const RIPPLE_TILT: f32 = 0.35;
+const RIPPLE_PACE: f32 = 0.6;
+const RIPPLE_ALIAS_START: f32 = 0.5;
+const RIPPLE_ALIAS_END: f32 = 1.2;
+
+/// fork: modern lighting — **the wind ripples**, a slope layer under the swell, normalised to a unit
+/// RMS slope (the caller scales it by `look_c.w`). Nothing shades them: they tilt the normal, and the
+/// Fresnel, the reflection and the glint the surface already has turn a face toward the eye into the
+/// water's own dark and a face away into the sky it reflects — at a grazing look, foreshortened into
+/// the reference shot's streaks laid across the view.
+///
+/// A sea's spectrum, sampled: `RIPPLE_TRAINS` trains a geometric step apart from `RIPPLE_LONGEST`
+/// down, the long ones a little steeper (`RIPPLE_TILT`). Their headings scatter about the wind by the
+/// golden angle, the long ones within ~50° of it and the short ones from every side. Two noise taps
+/// (~16 yd and ~5 yd) bend each train's crests and gather it into wave groups of its own, so no two
+/// patches of water carry the same pattern.
+///
+/// Each train fades on the pixel's LARGER world footprint (`foot_x`/`foot_y`), whatever its heading,
+/// as a mip level is chosen: at a grazing look that is the foreshortened extent along the view, so
+/// the octaves finer than it go across the view too, and the ones that stay are drawn out into the
+/// reference shot's long streaks (~90 % of its ripple power has crests within 20° of across the
+/// view, 6-15 times longer than they are deep). The many octaves are what keeps that true at every
+/// distance: there is always one at the edge of what the pixels resolve.
+fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> vec2<f32> {
+    let t = anim_time();
+    let coarse = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.015 + vec2<f32>(t * 0.004, 0.0), fract(t * 0.003)), 0.0).rgb - vec3<f32>(0.5);
+    let fine = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.05 - vec2<f32>(0.0, t * 0.01), fract(t * 0.006 + 0.5)), 0.0).rgb - vec3<f32>(0.5);
+    let wd = sunshadow::wind_dir();
+    var slope = vec2<f32>(0.0);
+    var energy = 0.0;
+    let foot = max(length(foot_x), length(foot_y));
+    for (var i = 0u; i < RIPPLE_TRAINS; i = i + 1u) {
+        let fi = f32(i);
+        let octave = fi / f32(RIPPLE_TRAINS - 1u);
+        let wl = RIPPLE_LONGEST * pow(RIPPLE_STEP, fi) * (1.0 + 0.08 * sin(fi * 5.1));
+        let turn = mix(0.55, 1.0, octave) * 1.5707963 * (fract(fi * 0.618034 + 0.13) * 2.0 - 1.0);
+        let dir = vec2<f32>(wd.x * cos(turn) - wd.y * sin(turn), wd.x * sin(turn) + wd.y * cos(turn));
+        let kw = 6.2831853 / wl;
+        let omega = sqrt(10.7 * kw) * RIPPLE_PACE;
+        // The long trains follow the coarse field, the short ones the fine one.
+        let n = mix(coarse, fine, octave);
+        let basis = vec3<f32>(cos(fi * 2.4), sin(fi * 2.4), cos(fi * 3.7));
+        let shift = dot(n.rg, basis.xy) * 3.2;
+        let group = clamp(1.0 + 2.6 * dot(n, basis.yzx), 0.1, 1.9);
+        let phase = dot(dir, xz) * kw + shift - omega * t + fi * 1.37;
+        let fade = 1.0 - smoothstep(RIPPLE_ALIAS_START, RIPPLE_ALIAS_END, kw * foot);
+        let weight = pow(wl / RIPPLE_LONGEST, RIPPLE_TILT);
+        // Crest sharpened as `sunshadow::wind_swell`'s.
+        let c = cos(phase);
+        slope = slope + dir * (weight * group * fade * c * (1.0 + 0.35 * sin(phase)));
+        energy = energy + weight * weight;
+    }
+    // The unfaded layer's RMS slope (a half per train from the cosine), so a faded train only calms the
+    // water rather than being renormalised back up.
+    return slope / sqrt(energy * 0.5);
+}
 
 /// fork: modern lighting — **stylised clear water**, above the water, in linear radiance. Replaces
 /// the classic COMBINE on a modern frame at the Modern (Experimental) water tier (`waterDetail 3`,
@@ -715,6 +781,14 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // only a modern frame has (the wind sea, the cascades, the HDR glitter, the froxel fog) it takes
     // there; a classic frame keeps its own fog and the reference's sun specular.
     let experimental = !below && w.optics.w > 0.5;
+    // fork: modern lighting — the experimental tier's wind ripples, read here in uniform control flow
+    // for the pixel footprint's derivatives.
+    var ripples = vec2<f32>(0.0);
+    if (experimental && w.look_c.w > 0.0) {
+        ripples = w.look_c.w * wind_ripples(
+            in.world_position.xz, dpdx(in.world_position.xz), dpdy(in.world_position.xz),
+        );
+    }
 
     // The swell, plus whatever a body wading nearby has pushed into the water. The two are summed
     // as SLOPES and normalised once — see `bump_gradient`.
@@ -737,10 +811,10 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     }
     if (experimental) {
         // The experimental tier's water is calm: the sea keeps its whole sea, a river or lake
-        // `look_b.x` of it (its authored bump is its own), and water with little under it goes
-        // near glassy — a hand-deep stream does not carry a 17-yard swell.
+        // `look_b.x` of it (its authored bump is its own) with the wind's ripples over it, and water
+        // with little under it goes near glassy — a hand-deep stream does not carry a 17-yard swell.
         let keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
-        swell = (swell + wind * keep) * mix(w.look_b.y, 1.0, smoothstep(0.0, MODERN_WAVE_FULL_DEPTH, column_v));
+        swell = (swell + wind * keep + ripples) * mix(w.look_b.y, 1.0, smoothstep(0.0, MODERN_WAVE_FULL_DEPTH, column_v));
     }
     let grad = normalize(vec3<f32>(
         swell + ripple_slope(in.world_position.xz, swell),

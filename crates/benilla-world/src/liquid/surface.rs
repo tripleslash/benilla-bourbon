@@ -662,15 +662,16 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
 /// * `look_a` = (bed filter, its onset depth in yd, head-on reflectance, reflection pulled to the body);
 /// * `look_b` = (wind swell a river keeps, swell over no depth, refraction bend per yd, glitter spike);
 /// * `look_c` = (reflectance at grazing, the power of the climb to it, share of the reference
-///   combine blended over the clear surface, spare).
+///   combine blended over the clear surface, the wind ripples' RMS slope).
 ///
 /// The Fresnel is the reference combine's shape (`0.1 + 0.5 · fres²`) rather than water's: a floor
 /// that keeps the sky in a river looked down on, and a cap that stops the water toward the horizon
 /// becoming a solid sheet. Rapids keep more of their chop in the shallows (white water is the point
-/// of them) and the sea keeps its whole wind sea whatever `look_b.x` says. Magma and slime never
-/// reach the lane.
+/// of them) and the sea keeps its whole wind sea whatever `look_b.x` says. The ripples are a light
+/// wind's: a real surface's RMS slope runs ~0.1-0.2 at a few yards a second of wind. Magma and slime
+/// never reach the lane.
 fn cata_water_look(kind: LiquidKind) -> [Vec4; 3] {
-    let fresnel = Vec4::new(0.35, 2.0, 0.5, 0.0);
+    let fresnel = Vec4::new(0.35, 2.0, 0.5, 0.2);
     match kind {
         LiquidKind::Ocean => [
             Vec4::new(0.35, 1.0, 0.08, 0.3),
@@ -1148,11 +1149,12 @@ pub(super) fn sync_water_tier(
 }
 
 /// fork: modern lighting — the live override of the Modern (Experimental) tier's look
-/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to eleven comma-separated values over
+/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to twelve comma-separated values over
 /// [`cata_water_look`]'s lanes in order — `bed_filter, filter_depth, reflect_f0, reflect_body,
-/// wind_keep, shallow_keep, refract_bend, glint_spike, reflect_grazing, fresnel_power, cata_share`. An empty or unparsable entry keeps the kind's
-/// own value, so `,,0.3` moves only the reflection. For calibrating against a reference shot without
-/// a rebuild; the settled numbers belong in [`cata_water_look`].
+/// wind_keep, shallow_keep, refract_bend, glint_spike, reflect_grazing, fresnel_power, cata_share,
+/// ripple_slope`. An empty or unparsable entry keeps the kind's own value, so `,,0.3` moves only
+/// the reflection. For calibrating against a reference shot without a rebuild; the settled numbers
+/// belong in [`cata_water_look`].
 ///
 /// Registered only when the session is launched with the knob set (`liquid`'s plugin), so a production
 /// run pays nothing for it; within such a session it is value-watched on the string, and the
@@ -1180,7 +1182,7 @@ pub(super) fn sync_water_look(
             continue;
         };
         let mut look = cata_water_look(key.kind);
-        for (i, v) in over.iter().enumerate().take(11) {
+        for (i, v) in over.iter().enumerate().take(12) {
             if let Some(v) = v {
                 look[i / 4][i % 4] = *v;
             }
