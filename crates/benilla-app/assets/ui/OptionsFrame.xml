@@ -3399,7 +3399,6 @@
                 SIMPLE_CHAT_TEXT = 1, HIDE_OUTDOOR_WORLD_STATE_TEXT = 1,
                 SHOW_PLAYER_CHALLENGES_TEXT = 1,
             }
-            -- A category left with no row goes too (VIDEO's Miscellaneous).
             for i = getn(GameOptions), 1, -1 do
                 local category = GameOptions[i]
                 if ( category.options ) then
@@ -3415,9 +3414,6 @@
                             -- slider of this name drives.
                             option.cvar = "WorldDetail"
                         end
-                    end
-                    if ( getn(category.options) == 0 ) then
-                        tremove(GameOptions, i)
                     end
                 end
             end
@@ -3461,11 +3457,25 @@
             -- The first category of a name: DISPLAY is both a VIDEO and an interface category,
             -- and VIDEO's comes first.
             for _, entry in ipairs(rows) do
+                local placed
                 for _, category in ipairs(GameOptions) do
                     if ( category.options and category.name == entry.category ) then
                         tinsert(category.options, entry.row)
+                        placed = 1
                         break
                     end
+                end
+                if ( not placed ) then
+                    error("Turtle options: no category " .. tostring(entry.category)
+                        .. " for " .. entry.row.name)
+                end
+            end
+            -- A category left with no row goes, once ours are in: PIXEL_SHADERS loses every
+            -- Turtle row to the cut but holds our lighting rows; VIDEO's Miscellaneous goes.
+            for i = getn(GameOptions), 1, -1 do
+                local category = GameOptions[i]
+                if ( category.options and getn(category.options) == 0 ) then
+                    tremove(GameOptions, i)
                 end
             end
             -- Turtle's OnLoad listed the categories before the cut: list them again.
