@@ -4,7 +4,7 @@
 //! additions, its interface rows — applies only while [`ClientFlavor`] is `Turtle`.
 //!
 //! The flavor changes at one edge, entering a realm ([`enter_realm`]), and only when the realm's
-//! flavor differs from the one in force. The switch mounts or unmounts the Turtle layer, reruns
+//! flavor differs from the one in force; an entry whose world dial fails changes it back. The switch mounts or unmounts the Turtle layer, reruns
 //! [`benilla_assets::DataLoad`] so every catalog is rebuilt from the new data, drops every cache of
 //! chain-derived art ([`benilla_assets::ChainDataChanged`]), reloads the server-held assets the
 //! layer names and reinstalls the boot VM, and only then answers the realm park. Nothing here runs
@@ -66,11 +66,49 @@ pub(crate) fn playable(realm: &RealmInfo) -> bool {
     !ClientFlavor::of(realm).is_turtle() || benilla_formats::layers::turtle_available()
 }
 
+/// The flavor of the last realm whose world handshake held (its roster arrived): the one a failed
+/// entry falls back to. Vanilla until a first roster.
+#[derive(Resource, Default)]
+struct Committed(ClientFlavor);
+
 pub(crate) struct FlavorPlugin;
 
 impl Plugin for FlavorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ClientFlavor>();
+        app.init_resource::<ClientFlavor>()
+            .init_resource::<Committed>()
+            .add_systems(
+                Update,
+                settle_entry.after(benilla_world::schedule::WorldStage::Net),
+            );
+    }
+}
+
+/// A roster commits the flavor its realm was entered under. A login failure after an entry that
+/// switched it (the Turtle realm's world server unreachable) switches back, so the realm list and
+/// the next realm are never served the failed realm's data.
+fn settle_entry(
+    mut rosters: MessageReader<crate::net::CharListMessage>,
+    mut failures: MessageReader<crate::net::LoginFailedMessage>,
+    flavor: Res<ClientFlavor>,
+    mut committed: ResMut<Committed>,
+    mut commands: Commands,
+) {
+    if rosters.read().last().is_some() {
+        committed.0 = *flavor;
+    }
+    if failures.read().last().is_some() && *flavor != committed.0 {
+        let to = committed.0;
+        commands.queue(move |world: &mut World| {
+            let from = *world.resource::<ClientFlavor>();
+            if from == to {
+                return;
+            }
+            match switch(world, to) {
+                Ok(()) => info!("flavor: {from:?} → {to:?}, the realm entry failed"),
+                Err(e) => warn!("flavor: no way back to {to:?} after a failed entry — {e:#}"),
+            }
+        });
     }
 }
 

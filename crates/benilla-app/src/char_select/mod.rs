@@ -94,6 +94,7 @@ impl Plugin for CharSelectPlugin {
                         back_on_logout,
                         back_on_login_refused,
                         back_on_disconnect,
+                        back_on_entry_failed,
                         // Last and ungated: it mirrors the pick the frame ended with, and world
                         // entry is reached from the create screen too.
                         persist_last_character,
@@ -437,6 +438,27 @@ fn back_on_disconnect(
     // With no reconnect coming, a kept pick would auto-answer the next roster.
     roster.pending_pick = None;
     next.set(ClientState::Login);
+}
+
+/// Change Realm whose world dial failed: `ConnectToRealm` (`0x46b210`) dropped the old realm's
+/// session before dialling and the IO thread re-parks pre-logon, so select has nothing left to
+/// stand on and returns to the login screen, where the failure's dialog shows.
+fn back_on_entry_failed(
+    mut msgs: MessageReader<crate::net::LoginFailedMessage>,
+    state: Res<State<ClientState>>,
+    mut roster: ResMut<Roster>,
+    mut next: ResMut<NextState<ClientState>>,
+) {
+    if msgs.read().last().is_none() {
+        return;
+    }
+    if matches!(
+        state.get(),
+        ClientState::CharSelect | ClientState::CharCreate
+    ) {
+        roster.pending_pick = None;
+        next.set(ClientState::Login);
+    }
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: back to select with the refusal in the glue dialog. The IO

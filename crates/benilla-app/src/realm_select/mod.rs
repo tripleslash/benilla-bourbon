@@ -29,7 +29,9 @@ pub(crate) use load::pvp_rp;
 use bevy::prelude::*;
 
 use crate::flavor::ClientFlavor;
-use crate::net::{RealmChoice, RealmListMessage, RealmRequest};
+use crate::net::{
+    CharListMessage, LoginFailedMessage, RealmChoice, RealmListMessage, RealmRequest,
+};
 use benilla_protocol::RealmInfo;
 
 /// The persisted 1.12 CVar naming the last realm connected to (`0x83f2d0`); the SavedVariables
@@ -62,6 +64,8 @@ pub(crate) struct Realms {
     /// Ours is set when we answer a park and seeded from the persisted CVar, because benilla
     /// writes `realmName` only at world entry (`benilla_ui::script::UiScript::set_realm_name`).
     current: Option<String>,
+    /// The realm answered for whose roster has not arrived yet.
+    entering: Option<String>,
     /// Seconds until the next refresh request.
     refresh_in: f32,
     /// `WOW_REALM`, read once.
@@ -213,7 +217,25 @@ impl Realms {
             .find(|r| r.name == name)
             .map_or(ClientFlavor::Vanilla, ClientFlavor::of);
         self.current = Some(name.clone());
+        self.entering = Some(name.clone());
         crate::flavor::enter_realm(commands, name, flavor);
+    }
+
+    /// The entered realm's roster arrived: the entry held.
+    fn entry_held(&mut self) {
+        self.entering = None;
+    }
+
+    /// The login failed with an entry in flight: that realm is not the session's, so the next list
+    /// falls through to the remembered `realmName`, the last realm the world was entered on,
+    /// instead of dialling the failed one again.
+    fn entry_failed(&mut self) {
+        let Some(name) = self.entering.take() else {
+            return;
+        };
+        if self.current.as_deref() == Some(name.as_str()) {
+            self.current = None;
+        }
     }
 
     /// Raise the dialog again over a refused realm ([`crate::flavor`]), keeping the highlight.
@@ -256,6 +278,7 @@ impl Plugin for RealmSelectPlugin {
         app.init_resource::<Realms>().add_systems(
             Update,
             (
+                settle_entry,
                 apply_realm_policy,
                 // Ungated by state: the dialog stands over login and character select alike.
                 screen::drive_screen,
@@ -274,6 +297,20 @@ impl Plugin for RealmSelectPlugin {
                 .after(benilla_world::schedule::WorldStage::Net)
                 .before(crate::glue::GlueVisuals),
         );
+    }
+}
+
+/// Close the entry in flight: held by its roster, failed by a login failure before one.
+fn settle_entry(
+    mut rosters: MessageReader<CharListMessage>,
+    mut failures: MessageReader<LoginFailedMessage>,
+    mut realms: ResMut<Realms>,
+) {
+    if rosters.read().last().is_some() {
+        realms.entry_held();
+    }
+    if failures.read().last().is_some() {
+        realms.entry_failed();
     }
 }
 
@@ -661,6 +698,37 @@ mod tests {
             Some("Classic (1.12.1.5875)"),
             "unattended takes the realm it can play"
         );
+    }
+
+    /// A realm whose entry failed stops being the session's: the next list returns to the realm
+    /// the world was last entered on. A failure with no entry in flight, and a held entry, keep it.
+    #[test]
+    fn a_failed_entry_falls_back_to_the_remembered_realm() {
+        let mut r = list(vec![
+            realm("Classic", 1, 0, 0, 0, 1.0),
+            realm("TurtleWoW", 1, 0, 0, 0, 1.0),
+        ]);
+        r.current = Some("TurtleWoW".into());
+        r.entry_failed();
+        assert_eq!(
+            r.current.as_deref(),
+            Some("TurtleWoW"),
+            "a logon refusal is no failed entry"
+        );
+
+        r.entering = Some("TurtleWoW".into());
+        r.entry_failed();
+        assert_eq!(r.current, None);
+        assert_eq!(
+            auto_answer(&r, Some("Classic"), false).as_deref(),
+            Some("Classic")
+        );
+
+        r.current = Some("TurtleWoW".into());
+        r.entering = Some("TurtleWoW".into());
+        r.entry_held();
+        r.entry_failed();
+        assert_eq!(r.current.as_deref(), Some("TurtleWoW"), "the entry held");
     }
 
     /// The reference disables an offline realm's Okay.
