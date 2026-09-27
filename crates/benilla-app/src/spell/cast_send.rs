@@ -102,6 +102,10 @@ pub(crate) enum TargetedBind {
     Item(u64),
     /// The world click's GameObject guid: a chest, door, vein or herb.
     Object(u64),
+    /// The world click's unit guid.
+    Unit(u64),
+    /// The world click's corpse guid and the corpse bit `BindTarget`'s corpse arm bound.
+    Corpse(u64, benilla_protocol::messages::CorpseTarget),
 }
 
 impl CastLadder<'_, '_> {
@@ -127,6 +131,15 @@ impl CastLadder<'_, '_> {
                 TargetedBind::Object(go_guid) => {
                     ClientCommand::CastSpellGameObject { spell_id, go_guid }
                 }
+                TargetedBind::Unit(unit_guid) => ClientCommand::CastSpell {
+                    spell_id,
+                    target: Some(unit_guid),
+                },
+                TargetedBind::Corpse(corpse_guid, target) => ClientCommand::CastSpellCorpse {
+                    spell_id,
+                    target,
+                    corpse_guid,
+                },
             },
             CastCommit::Item {
                 bag_index,
@@ -142,6 +155,8 @@ impl CastLadder<'_, '_> {
                     TargetedBind::Source(src) => UseItemTarget::Source(src),
                     TargetedBind::Item(guid) => UseItemTarget::Item(guid),
                     TargetedBind::Object(guid) => UseItemTarget::Object(guid),
+                    TargetedBind::Unit(guid) => UseItemTarget::Unit(guid),
+                    TargetedBind::Corpse(guid, target) => UseItemTarget::Corpse(target, guid),
                 },
             },
         };
@@ -405,18 +420,7 @@ fn send_spell_cast(
     if let Some(d) = def {
         if target.is_some() && target == ctx.selection_guid && target != ctx.self_guid {
             let row = spells.and_then(|s| s.ranges.get(d.range_index));
-            let dist_sq = ctx
-                .range
-                .self_pos
-                .zip(ctx.range.target_pos)
-                .map(|(a, b)| a.distance_squared(b));
-            if let Some(reason) = validator::cast_range_refusal(
-                d,
-                row,
-                ctx.range.self_reach,
-                ctx.range.target_reach,
-                dist_sq,
-            ) {
+            if let Some(reason) = ctx.range.refusal(d, row) {
                 debug!("ui_action: cast {spell_id} refused locally — range ({reason:#x})");
                 cast_errors.push_local(spell_id, reason);
                 return;
@@ -724,6 +728,7 @@ mod tests {
             auto_self_cast: false,
             rel: cast_target::TargetRelations {
                 target_store: None,
+                target_owner_store: None,
                 self_store: None,
                 factions: None,
                 reputations: &EMPTY_REPUTATIONS,

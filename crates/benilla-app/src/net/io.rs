@@ -26,7 +26,7 @@ use std::time::Duration;
 // .now()` in a page.
 use bevy::platform::time::Instant;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
     host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
@@ -167,21 +167,6 @@ impl PingClock {
 /// Cap on send warnings per connection, so a movement stream during an outage cannot flood the log.
 pub(super) const SEND_WARN_CAP: u32 = 8;
 
-/// The per-process connection parameters. Credentials and address ride each [`LoginRequest`];
-/// `$WOW_HOST` is read by `Realmlist::default()`.
-pub(super) struct NetConfig {
-    /// `WOW_CHAR`: here only the name of the starter character on an empty account.
-    character: Option<String>,
-}
-
-impl NetConfig {
-    pub(super) fn from_env() -> Self {
-        NetConfig {
-            character: crate::webenv::var("WOW_CHAR"),
-        }
-    }
-}
-
 /// What one wake-up at the character park asked for, so every jump out is made outside `select!`.
 enum Parked {
     /// `CMSG_PLAYER_LOGIN` with this guid.
@@ -238,7 +223,7 @@ pub(super) struct NetHandles {
 
 /// Spawns the sequencer with its park and cycle loop: natively on a read thread beside the one
 /// long-lived write thread, on wasm32 as a `spawn_local` task.
-pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
+pub(super) fn spawn_net(connect: bool) -> NetHandles {
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (pick_tx, pick_rx) = async_channel::unbounded::<CharRequest>();
@@ -278,7 +263,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     );
                     // Every await in the sequencer is a blocking socket read on this thread.
                     futures_lite::future::block_on(sequencer(
-                        cfg, events_tx, writer_tx, parks, abandon, read_clock,
+                        events_tx, writer_tx, parks, abandon, read_clock,
                     ));
                 })
                 .expect("spawn wow-net thread");
@@ -290,7 +275,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
             let abandon = Arc::clone(&login_abandon);
             let read_clock = Arc::clone(&ping_clock);
             wasm_bindgen_futures::spawn_local(sequencer(
-                cfg, events_tx, writer_tx, parks, abandon, read_clock,
+                events_tx, writer_tx, parks, abandon, read_clock,
             ));
         }
     }
@@ -315,7 +300,6 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
 /// both spawns — a thread under `block_on` natively, a `spawn_local` task on the web — so the two
 /// targets cannot drift on what a lost connection or a clean logout means.
 async fn sequencer(
-    cfg: NetConfig,
     events_tx: Sender<SessionEvent>,
     writer_tx: Sender<WorldWriter>,
     parks: Parks,
@@ -336,7 +320,6 @@ async fn sequencer(
         // stale writer.)
         ping_clock.lock_recover().clear();
         match run(
-            &cfg,
             &events_tx,
             &writer_tx,
             &parks,
@@ -391,7 +374,6 @@ async fn sequencer(
 /// dies, the character logs out or the app exits. A pre-roster failure emits
 /// [`SessionEvent::LoginFailed`] and re-parks; any retry is the app's.
 async fn run(
-    cfg: &NetConfig,
     events_tx: &Sender<SessionEvent>,
     writer_tx: &Sender<WorldWriter>,
     parks: &Parks,
@@ -592,39 +574,10 @@ async fn run(
             return Ok(Cycle::Repark);
         }
 
-        // The roster, creating a starter character on an empty account so `PLAYER_LOGIN` has a
-        // target. Failures here are still pre-roster. An immediately-awaited block, so the
-        // sequence borrows `session` only for its own duration.
-        let roster = async {
-            let mut characters = session.char_enum_async().await?;
-            if characters.is_empty() {
-                let name = cfg.character.as_deref().unwrap_or("One");
-                let starter = messages::CharCreateReq {
-                    name: name.to_string(),
-                    race: messages::RACE_HUMAN,
-                    class: messages::CLASS_WARRIOR,
-                    gender: messages::GENDER_MALE,
-                    skin: 0,
-                    face: 0,
-                    hair_style: 0,
-                    hair_color: 0,
-                    facial_hair: 0,
-                    challenge_mask: realm
-                        .as_ref()
-                        .and_then(|r| r.version)
-                        .filter(|v| v.is_turtle())
-                        .map(|_| 0),
-                };
-                match session.create_character_async(&starter).await? {
-                    messages::CHAR_CREATE_SUCCESS | messages::CHAR_CREATE_NAME_IN_USE => {}
-                    other => bail!("character creation failed: result {other:#x}"),
-                }
-                characters = session.char_enum_async().await?;
-            }
-            Ok::<Vec<benilla_protocol::Character>, anyhow::Error>(characters)
-        }
-        .await;
-        let mut characters = match roster {
+        // The roster as the account holds it, an empty one included: the reference builds
+        // `CMSG_CHAR_CREATE` in one place (`0x5aac50`), reached only from the create screen.
+        // Failures here are still pre-roster.
+        let mut characters = match session.char_enum_async().await {
             Ok(c) => c,
             Err(e) => {
                 if canceled() {
@@ -1198,6 +1151,11 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             count,
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
+        ClientCommand::CastSpellCorpse {
+            spell_id,
+            target,
+            corpse_guid,
+        } => w.cast_spell_corpse(spell_id, target, corpse_guid),
         ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
         ClientCommand::CastSpellAtSource { spell_id, src } => w.cast_spell_at_source(spell_id, src),
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
@@ -1572,6 +1530,10 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.activate_taxi_express(guid, total_cost, &nodes),
     }
 }
+
+// Loopback sockets and a blocked thread: native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod cycle_tests;
 
 #[cfg(test)]
 mod rtt_tests {

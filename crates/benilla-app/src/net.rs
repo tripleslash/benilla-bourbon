@@ -69,7 +69,7 @@ impl Plugin for NetPlugin {
         crate::query_cache::register::<crate::names::NameCache>(app);
         crate::query_cache::register::<crate::go_templates::GameObjectTemplates>(app);
         crate::query_cache::register::<crate::items::Items>(app);
-        let handles = io::spawn_net(io::NetConfig::from_env(), self.connect);
+        let handles = io::spawn_net(self.connect);
         if !self.connect {
             app.insert_resource(NetOffline);
         }
@@ -989,6 +989,12 @@ pub(crate) enum ClientCommand {
     CastSpell {
         spell_id: u32,
         target: Option<u64>,
+    },
+    /// `CMSG_CAST_SPELL` at a corpse: its bit and packed guid, a resurrection on a released player.
+    CastSpellCorpse {
+        spell_id: u32,
+        target: benilla_protocol::messages::CorpseTarget,
+        corpse_guid: u64,
     },
     /// `CMSG_CAST_SPELL` with `TARGET_FLAG_DEST_LOCATION`; `dest` in WoW coordinates.
     CastSpellAtDest {

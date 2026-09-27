@@ -12,7 +12,7 @@
 #                           not optional — the `rust-std-wasm32-unknown-unknown` component rustup
 #                           ships is compiled WITHOUT atomics, so std itself has to be rebuilt from
 #                           source with the same target features as everything else. `rust-toolchain.toml`
-#                           stays on `stable`: native builds and the whole test suite are unaffected
+#                           stays on its stable pin: native builds and the whole test suite are unaffected
 #                           by any of this, and pinning the tree to nightly to serve one target would
 #                           be the tail wagging the dog.
 #   CARGO_UNSTABLE_BUILD_STD the config-file key `[unstable] build-std` as an environment override,

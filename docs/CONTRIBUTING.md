@@ -9,8 +9,10 @@ fork, and forks are welcome.
 
 The [issues](https://github.com/samwhosung/benilla/issues) the maintainers file are checked
 against 1.12.1 first: each says what 1.12.1 does, what benilla does instead, and where in the
-code, and any of them is a place to start. Before you start one, look for an open pull request
-that already covers it, and say `Fixes #N` in yours.
+code, and any of them is a place to start. One labelled `in progress` is taken: someone is
+working on it or a pull request is open for it, so pick another. Once you start one, open a draft
+pull request that says `Fixes #N` as soon as you have a first commit, so the issue shows it is
+taken.
 
 ## What gets in
 
@@ -62,8 +64,10 @@ that already covers it, and say `Fixes #N` in yours.
   `localhost:3724`). A scripted run has no default account: `WOW_USER`, `WOW_PASS` and
   `WOW_CHAR` name a test account on your server whose login kicks nobody, all three, either in
   the environment or in a `.probe-identity` file at the repo root (one per line, never
-  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. The probes
-  drive the body with GM commands, so give that account the top GM level.
+  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. `WOW_CHAR`
+  must already be on the account, since the client creates a character only when asked:
+  `WOW_PROBE_CHARCREATE=<name> WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`, makes it.
+  The probes drive the body with GM commands, so give that account the top GM level.
 - **Running it unattended.** The rules are `docs/METHOD.md`, "The local server", and the `probe` skill
   in `.claude/skills/` is the procedure; these are the switches.
   - `WOW_UNATTENDED=1` reconnects instead of waiting at a dialog, and exits non-zero on a login

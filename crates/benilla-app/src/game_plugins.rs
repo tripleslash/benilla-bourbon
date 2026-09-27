@@ -670,7 +670,12 @@ pub(crate) mod schedule_tests {
     ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
     /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
     ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
-    ///   those two do not write, and a chat line commutes with their pushes.
+    ///   those two do not write, and a chat line commutes with their pushes;
+    /// - `spell::targeting::drain_spell_target_unit` against the lone `.after(UiInput)` cast
+    ///   drains over the `CastLadder`, and the party, pet-book and chat drains over the unit-token
+    ///   resolver: the class `drop_item_on_unit` and the world click's legs already carry, as none
+    ///   of those drains orders against the target chain. A cast press and a unit-frame bind in one
+    ///   frame take either order until the cast drains share a set that does.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -679,7 +684,7 @@ pub(crate) mod schedule_tests {
     /// This fork's own systems add their pairs on top of upstream's count: the modern lighting
     /// model, the liquid reflection camera and ripple clock, SSILVB, the character shadow map, and
     /// the web build's writer pump and stutter probe. Declaring those orders is fork-side work.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_705;
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_723;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

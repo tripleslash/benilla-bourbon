@@ -103,6 +103,11 @@ serde_json = "1"
 benilla-pack = { path = "../benilla-pack" }
 benilla-mpq = { path = "../benilla-mpq" }
 
+# The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
+benilla-srp = { path = "../benilla-srp" }
+num-bigint = "0.4.6"
+sha1.workspace = true
+
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]

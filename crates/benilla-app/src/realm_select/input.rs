@@ -15,8 +15,8 @@ use super::{is_down, Realms};
 /// The double-click window, the interval the character select screen uses.
 const DOUBLE_CLICK_SECS: f32 = 0.4;
 
-/// Clicks: a row selects (a second one enters), the column headers sort, Okay enters, Cancel and
-/// the close X leave.
+/// Clicks: a row selects (a second one enters), a tab fronts its category, the column headers
+/// sort, Okay enters, Cancel and the close X leave.
 pub(super) fn clicks(
     buttons: Query<(Entity, &RealmAction)>,
     hits: Res<crate::glue::GlueClicks>,
@@ -51,6 +51,9 @@ pub(super) fn clicks(
                     enter = true;
                 }
             }
+            // The front tab is `Disable()`d (`GlueTemplates_SelectTab`) and takes no click.
+            RealmAction::Tab(ordinal) if ordinal != realms.category() => realms.click_tab(ordinal),
+            RealmAction::Tab(_) => {}
             RealmAction::Ok => enter = true,
             RealmAction::Cancel => leave = Some(true),
             RealmAction::Close => leave = Some(false),
@@ -183,6 +186,7 @@ fn try_enter(realms: &mut Realms, commands: &mut Commands, sounds: &mut MessageW
     let name = realm.name.clone();
     sounds.write(GlueSound("gsLoginChangeRealmOK"));
     realms.hide();
+    realms.store_front_category();
     realms.enter(commands, name);
 }
 

@@ -91,9 +91,9 @@ pub struct UnitState {
     pub charmed: bool,
     /// `UnitIsGhost`: `PLAYER_FLAGS` bit `0x10`, so players only.
     pub ghost: bool,
-    /// The reaction toward the player on `UnitReaction`'s scale, 1 hated to 7 honored-and-better
-    /// (the client's own ceiling), 0 unknown (nil). Fed for the tokens naming another unit;
-    /// `"player"` and `"pet"` stay 0.
+    /// The reaction toward the player on `UnitReaction`'s scale, 1 hated to 7 revered, which
+    /// Exalted reads too (`0x606439` caps the rank), 0 unknown (nil). Fed for the tokens naming
+    /// another unit; `"player"` and `"pet"` stay 0.
     pub reaction: u8,
     /// `UnitRace`'s localized first return, from `UNIT_FIELD_BYTES_0` byte 0; `None` answers
     /// `nil, nil`.
@@ -411,6 +411,11 @@ impl super::UiScript {
     /// the held item (`0x48d960`).
     pub fn take_drop_item_on_unit(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().drop_item_on_unit)
+    }
+
+    /// Drain `SpellTargetUnit` calls for the host's pending unit-target spell binder.
+    pub fn take_spell_target_unit(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().spell_target_unit)
     }
 }
 

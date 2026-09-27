@@ -1,6 +1,7 @@
 //! The cursor while a cast waits for its click: the ground point's range verdict
 //! (`CheckGroundPointInRange 0x6e6810`, in `0x4820f0`), the hovered object's validity (`0x6e6460`,
-//! in `0x4828d0`) and the reticle's radius (`GetCurrentCastRadius 0x6e6350`).
+//! in `0x4828d0`: a GameObject, a unit or a corpse) and the reticle's radius
+//! (`GetCurrentCastRadius 0x6e6350`).
 
 use bevy::prelude::*;
 
@@ -75,12 +76,14 @@ pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: 
 /// its ray (`0x4812c8`) and the world cursor stays grey.
 ///
 /// The object arm is `0x6e6460`'s GameObject leg: `word & 0x4800`, the lock predicate `0x5f8260`,
-/// then the same min/max range test through `GetMinMaxRange 0x6e3480`. Its unit, world-item and
-/// corpse legs are unreachable here: a unit-target spell never enters targeting mode.
+/// then the same min/max range test through `GetMinMaxRange 0x6e3480`. Its unit leg is
+/// [`SpellTargeting::can_target_unit`] and its corpse leg [`SpellTargeting::can_target_corpse`],
+/// over a corpse the pick admitted under a word in `0x8600`. The world-item leg is not built.
 ///
 /// Every seam shows the `Cast` kind, so this reads the whole-word [`SpellTargeting::spell`].
 pub(crate) fn drive_targeting_cursor(
     targeting: Res<SpellTargeting>,
+    checks: super::BindChecks,
     occlusion: Res<PickOcclusion>,
     hovered: Res<crate::target::Hovered>,
     hovered_object: Res<crate::target::HoveredObject>,
@@ -102,8 +105,8 @@ pub(crate) fn drive_targeting_cursor(
     };
     let row = range_row(spells.as_deref(), spell_id);
     let me = self_tf.single().ok().map(|tf| tf.translation);
-    // "A GameObject is the nearest pick" is the same test the click uses
-    // ([`super::world::commit_object_cast_on_click`]).
+    // The arm the click would take ([`super::world::commit_object_cast_on_click`]): a GameObject
+    // word's nearest GameObject, else the picked unit or corpse, else the terrain.
     let able = if targeting.wants(TargetingWants::GameObject)
         && crate::target::go_is_nearest(&hovered, &hovered_object)
     {
@@ -116,6 +119,16 @@ pub(crate) fn drive_targeting_cursor(
             row,
             me,
         )
+    } else if let Some(unit) = hovered
+        .target
+        .filter(|_| targeting.wants(TargetingWants::Unit))
+    {
+        targeting.can_target_unit(unit, &checks)
+    } else if let Some(corpse) = hovered
+        .corpse
+        .filter(|_| targeting.wants(TargetingWants::Corpse))
+    {
+        targeting.can_target_corpse(corpse, &checks)
     } else if targeting.wants(TargetingWants::Location) {
         // `0x4820f0`. No ground hit (sky, mouselook) is state 0, UnableCast.
         match (occlusion.point, me) {
@@ -289,6 +302,7 @@ mod tests {
             world.init_resource::<crate::go_templates::GameObjectTemplates>();
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
+            world.insert_resource(crate::net::Reputations(Vec::new()));
             world.insert_resource(PickOcclusion {
                 distance: 10.0,
                 point,
@@ -340,5 +354,163 @@ mod tests {
 
         // A lock word that also carries DEST (`0x4840`) keeps its terrain handler off a GameObject.
         assert!(verdict(0x4840, Some(Vec3::ZERO), None));
+    }
+
+    /// `0x6e6460`'s unit leg over a hovered unit: the relation checks, then min² ≤ d² ≤ max²
+    /// (`6e677c`–`6e6802`). Row 5 is 0 to 30 yd and row 114 is 8 to 35 yd, both padded by the two
+    /// 1.5 combat reaches: 0 to 33 and 11 to 38.
+    #[test]
+    fn the_unit_leg_is_grey_out_of_range_or_off_relation() {
+        use bevy::ecs::system::RunSystemOnce;
+        use std::collections::HashMap;
+
+        const HEAL: u32 = 2050;
+        const SHOT: u32 = 75;
+        let verdict_for = |spell: u32, word: u16, distance: f32| {
+            let mut world = World::new();
+            world.init_resource::<WorldCursor>();
+            world.init_resource::<SpellTargeting>();
+            world.init_resource::<crate::target::HoveredObject>();
+            world.init_resource::<crate::go_templates::GameObjectTemplates>();
+            world.init_resource::<crate::items::Items>();
+            world.init_resource::<crate::net::GuidIndex>();
+            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.init_resource::<PickOcclusion>();
+            let display = |range_index| benilla_formats::SpellDisplay {
+                range_index,
+                ..Default::default()
+            };
+            let row = |min, max| SpellRange { min, max, flags: 0 };
+            let mut spells = Spells::empty_for_tests();
+            spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+                (HEAL, display(5)),
+                (SHOT, display(114)),
+            ]));
+            spells.ranges = benilla_formats::SpellRangeCatalog::from_rows(HashMap::from([
+                (5, row(0.0, 30.0)),
+                (114, row(8.0, 35.0)),
+            ]));
+            world.insert_resource(spells);
+            let empty = || crate::net::ObjectStore(benilla_protocol::ObjectFields::default());
+            world.spawn((
+                SelfPlayer,
+                Transform::default(),
+                GlobalTransform::default(),
+                empty(),
+            ));
+            let unit = world
+                .spawn((
+                    GlobalTransform::from_translation(Vec3::new(distance, 0.0, 0.0)),
+                    empty(),
+                ))
+                .id();
+            world.insert_resource(crate::target::Hovered {
+                target: Some(unit),
+                guid: Some(0xF130_0000_0000_0001),
+                distance: 5.0,
+                ..Default::default()
+            });
+            world.resource_mut::<SpellTargeting>().enter(
+                spell,
+                crate::spell::CastCommit::Spell,
+                word,
+            );
+            world
+                .run_system_once(drive_targeting_cursor)
+                .expect("the targeting cursor drives");
+            !world.resource::<WorldCursor>().unable
+        };
+        let verdict = |word, distance| verdict_for(HEAL, word, distance);
+
+        // `TARGET_FLAG_UNIT` (0x2) binds any unit, so only range decides.
+        assert!(verdict(0x0002, 10.0), "a valid unit in range → Cast");
+        assert!(
+            !verdict(0x0002, 40.0),
+            "the same unit out of range → UnableCast"
+        );
+        // An assist word over a unit with no faction catalog: neutral, not assistable.
+        assert!(
+            !verdict(0x0100, 10.0),
+            "a unit that fails the relation → UnableCast"
+        );
+        // Inside the minimum is out of range too.
+        assert!(verdict_for(SHOT, 0x0002, 20.0), "inside the band → Cast");
+        assert!(
+            !verdict_for(SHOT, 0x0002, 5.0),
+            "inside the minimum → UnableCast"
+        );
+    }
+
+    /// `0x6e6460`'s corpse leg over a hovered corpse: bones, a hostile corpse under the ally bit
+    /// and a corpse out of range are grey. The range pads a corpse by the caster's reach twice
+    /// (`6e3605`–`6e361e`): Resurrection's 30 yd with a 3.0 reach is 36.
+    #[test]
+    fn the_corpse_leg_is_grey_for_bones_a_hostile_corpse_or_out_of_range() {
+        use super::super::corpse_fixture as fx;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let verdict = |word: u16, corpse: crate::net::ObjectStore, distance: f32| {
+            let mut world = World::new();
+            world.init_resource::<WorldCursor>();
+            world.init_resource::<SpellTargeting>();
+            world.init_resource::<crate::target::HoveredObject>();
+            world.init_resource::<crate::go_templates::GameObjectTemplates>();
+            world.init_resource::<crate::items::Items>();
+            world.init_resource::<crate::net::GuidIndex>();
+            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.init_resource::<PickOcclusion>();
+            world.insert_resource(fx::spells());
+            world.insert_resource(fx::factions());
+            world.spawn((
+                SelfPlayer,
+                Transform::default(),
+                GlobalTransform::default(),
+                fx::caster(3.0),
+            ));
+            let body = world
+                .spawn((
+                    GlobalTransform::from_translation(Vec3::new(distance, 0.0, 0.0)),
+                    corpse,
+                ))
+                .id();
+            world.insert_resource(crate::target::Hovered {
+                corpse: Some(body),
+                corpse_guid: Some(fx::CORPSE),
+                distance: 5.0,
+                ..Default::default()
+            });
+            world.resource_mut::<SpellTargeting>().enter(
+                fx::RESURRECTION,
+                crate::spell::CastCommit::Spell,
+                word,
+            );
+            world
+                .run_system_once(drive_targeting_cursor)
+                .expect("the targeting cursor drives");
+            !world.resource::<WorldCursor>().unable
+        };
+        let friend = || fx::corpse(fx::HUMAN, false);
+
+        assert!(verdict(0x8000, friend(), 10.0), "a friend's corpse → Cast");
+        assert!(
+            !verdict(0x8000, fx::corpse(fx::HUMAN, true), 10.0),
+            "bones → UnableCast"
+        );
+        assert!(
+            !verdict(0x8000, fx::corpse(fx::ORC, false), 10.0),
+            "a hostile corpse under the ally bit → UnableCast"
+        );
+        assert!(
+            verdict(0x0200, fx::corpse(fx::ORC, false), 10.0),
+            "which the enemy bit takes"
+        );
+        // Past the bare 30 and past 30 + 3.0 + 1.5, inside 30 + 2 × 3.0.
+        assert!(verdict(0x8000, friend(), 35.0), "inside the padded range");
+        assert!(
+            !verdict(0x8000, friend(), 37.0),
+            "out of range → UnableCast"
+        );
+        // A word outside `0x8600` has no corpse leg: the heal word over a corpse is state 0.
+        assert!(!verdict(0x0002, friend(), 10.0));
     }
 }

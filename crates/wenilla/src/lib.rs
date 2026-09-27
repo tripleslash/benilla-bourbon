@@ -42,6 +42,8 @@ pub fn start() {
     // AppExit` (where the return value IS the process exit code) has no wasm32 equivalent: a
     // browser tab has no exit code for a page to report.
     let build = BuildId {
+        version: env!("CARGO_PKG_VERSION"),
+        describe: env!("BENILLA_GIT_DESCRIBE"),
         sha: env!("BENILLA_GIT_SHA"),
         short: env!("BENILLA_GIT_SHORT"),
         date: env!("BENILLA_GIT_DATE"),
