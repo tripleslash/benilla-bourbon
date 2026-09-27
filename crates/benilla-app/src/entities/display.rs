@@ -217,7 +217,11 @@ pub(super) fn new_creature_display(
 ) -> DisplayModel {
     match catalog.model(display_id) {
         Some(m) if m.scale > 0.0 => DisplayModel {
-            handle: ModelHandle::M2(asset_server.load(m2_url(&m.model_path))),
+            handle: {
+                // A server entity is within visibility range: its model outranks the scenery.
+                benilla_formats::web::mark_urgent_model(&m.model_path);
+                ModelHandle::M2(asset_server.load(m2_url(&m.model_path)))
+            },
             dir: model_dir(&m.model_path).to_string(),
             skins: m.textures,
             npc_appearance: m.npc_appearance,
@@ -240,6 +244,9 @@ pub(super) fn new_gameobject_display(
     let Some(path) = catalog.model_path(display_id) else {
         return empty_display();
     };
+    // A server entity is within visibility range: its model outranks the scenery, and a Turtle
+    // building spawned as a GameObject is otherwise walk-through until the zone's doodads land.
+    benilla_formats::web::mark_urgent_model(path);
     let handle = if path.to_ascii_lowercase().ends_with(".wmo") {
         ModelHandle::Wmo(asset_server.load(wmo_url(path)))
     } else {

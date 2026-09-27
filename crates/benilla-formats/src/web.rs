@@ -92,7 +92,13 @@ pub fn warm_priority(name: &str) -> u8 {
     }
     const GEOMETRY: [&str; 3] = ["wmo", "m2", "mdx"];
     if GEOMETRY.iter().any(|g| is(g)) {
-        PRIORITY_GEOMETRY
+        // A model a server entity wears is within the server's visibility range of the player,
+        // where a scenery placement can be a tile away: it outranks the scenery queue.
+        if is_urgent_model(name) {
+            PRIORITY_TERRAIN_NEAR
+        } else {
+            PRIORITY_GEOMETRY
+        }
     } else {
         PRIORITY_NORMAL
     }
@@ -200,6 +206,52 @@ pub fn clear_terrain_focus() {
 pub fn terrain_focus() -> Option<TerrainFocus> {
     TERRAIN_FOCUS.read().ok().and_then(|f| f.clone())
 }
+
+/// A model name's identity for [`mark_urgent_model`]: lowercased, backslash-separated, without its
+/// extension, and a WMO group (`<root>_NNN.wmo`) folded onto its root, so marking a root covers
+/// every group file its loader reads after it.
+fn model_stem(name: &str) -> String {
+    let mut s = name.to_ascii_lowercase().replace('/', "\\");
+    if let Some(rest) = s.strip_prefix("mpq:\\\\") {
+        s = rest.to_string();
+    }
+    let Some((stem, ext)) = s.rsplit_once('.') else {
+        return s;
+    };
+    if ext == "wmo" {
+        if let Some((root, group)) = stem.rsplit_once('_') {
+            if group.len() == 3 && group.bytes().all(|b| b.is_ascii_digit()) {
+                return root.to_string();
+            }
+        }
+    }
+    if matches!(ext, "wmo" | "m2" | "mdx") {
+        stem.to_string()
+    } else {
+        s
+    }
+}
+
+/// Mark `path`'s model urgent: its root and group files warm at [`PRIORITY_TERRAIN_NEAR`], ahead
+/// of the scenery queue. For the model a server entity (a GameObject, a creature) wears, which is
+/// within visibility range; Turtle WoW spawns whole buildings as GameObjects, and at
+/// [`PRIORITY_GEOMETRY`] one waits behind every doodad of the zones around, its collider with it.
+pub fn mark_urgent_model(path: &str) {
+    if let Ok(mut set) = URGENT_MODELS.write() {
+        set.insert(model_stem(path));
+    }
+}
+
+fn is_urgent_model(name: &str) -> bool {
+    URGENT_MODELS
+        .read()
+        .is_ok_and(|set| !set.is_empty() && set.contains(&model_stem(name)))
+}
+
+/// The stems [`mark_urgent_model`] marked. Never cleared: a stem stays small, the set is bounded
+/// by the entity displays a session meets, and a model once near is the one likeliest near again.
+static URGENT_MODELS: std::sync::LazyLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The one published focus. A `RwLock` rather than the thread-local this would be on wasm alone:
 /// the writer is a Bevy system, and on native that is whichever worker thread the scheduler
@@ -770,6 +822,53 @@ mod priority_tests {
         assert_eq!(
             warm_priority(r"World\Maps\Azeroth\Azeroth_32_48.adt"),
             PRIORITY_TERRAIN
+        );
+    }
+
+    /// A WMO group folds onto its root and case and separators do not split a stem, so marking the
+    /// root a GameObject names covers the group files its loader reads next.
+    #[test]
+    fn a_model_stem_folds_groups_onto_their_root() {
+        let root = model_stem(r"World\wmo\Azeroth\Buildings\HumanTwoStory\HumanTwoStory.wmo");
+        assert_eq!(
+            root,
+            r"world\wmo\azeroth\buildings\humantwostory\humantwostory"
+        );
+        assert_eq!(
+            model_stem("world/wmo/azeroth/buildings/humantwostory/humantwostory_002.wmo"),
+            root
+        );
+        assert_eq!(
+            model_stem(r"Creature\Wolf\Wolf.mdx"),
+            model_stem(r"creature\wolf\wolf.m2")
+        );
+        // Not a group number: the name is its own stem.
+        assert_ne!(
+            model_stem(r"World\wmo\X\Tower_A.wmo"),
+            model_stem(r"World\wmo\X\Tower.wmo")
+        );
+    }
+
+    /// An entity's model rises above the scenery queue; an unmarked model and a texture do not.
+    #[test]
+    fn a_marked_entity_model_outranks_the_scenery() {
+        let root = r"World\wmo\Test\UrgentOnly\UrgentOnly.wmo";
+        assert_eq!(warm_priority(root), PRIORITY_GEOMETRY);
+        mark_urgent_model(root);
+        assert_eq!(warm_priority(root), PRIORITY_TERRAIN_NEAR);
+        assert_eq!(
+            warm_priority(r"world\wmo\test\urgentonly\urgentonly_004.wmo"),
+            PRIORITY_TERRAIN_NEAR,
+            "its group files follow the root"
+        );
+        assert_eq!(
+            warm_priority(r"World\wmo\Test\UrgentOnly\Other.wmo"),
+            PRIORITY_GEOMETRY
+        );
+        assert_eq!(
+            warm_priority(r"World\wmo\Test\UrgentOnly\UrgentOnly.blp"),
+            PRIORITY_NORMAL,
+            "only model files are lifted"
         );
     }
 }
