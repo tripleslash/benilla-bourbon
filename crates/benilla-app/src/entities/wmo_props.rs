@@ -180,9 +180,9 @@ pub(super) fn spawn_wmo_gameobject_props(
             };
             // Priority 0, the entity lane's, like any creature walking into view.
             let ready = if benilla_world::doodad_anim::wants_rig(m) {
-                forms.require_rigged(&prop.handle, 0)
+                forms.require_rigged(&prop.handle, &m.submeshes, 0)
             } else {
-                forms.require_static(&prop.handle, 0)
+                forms.require_static(&prop.handle, &m.submeshes, 0)
             };
             if !ready {
                 return true; // forms still building

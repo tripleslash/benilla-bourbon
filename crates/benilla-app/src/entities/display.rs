@@ -343,7 +343,7 @@ pub(super) fn build_parts(
             };
             // Every M2 lane can rig, so both forms are requested; static instances and billboard
             // cards draw the static one.
-            if !forms.require_rigged(h, 0) {
+            if !forms.require_rigged(h, &model.submeshes, 0) {
                 return; // forms still building
             }
             emitters = model.emitters.clone();
@@ -447,7 +447,7 @@ pub(super) fn build_parts(
                 return;
             };
             // WMO-display GameObjects never skin: static forms only.
-            if !forms.require_static(h, 0) {
+            if !forms.require_static(h, &model.submeshes, 0) {
                 return;
             }
             if gameobject {

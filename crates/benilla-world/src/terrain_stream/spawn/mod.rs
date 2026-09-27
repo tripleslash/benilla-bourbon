@@ -139,6 +139,7 @@ pub(super) fn spawn_loaded_placements(
                     let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
                     if !forms.require(
                         key,
+                        &m.submeshes,
                         kinds,
                         placement_priority(&streamer, p.transform.translation),
                     ) {
@@ -299,7 +300,7 @@ pub(super) fn spawn_loaded_placements(
                     // Static forms only: WMO group geometry never skins.
                     let key = ModelKey::from(h);
                     let prio = placement_priority(&streamer, p.transform.translation);
-                    if !forms.require(key, WANT_STATIC, prio) {
+                    if !forms.require(key, &m.submeshes, WANT_STATIC, prio) {
                         continue;
                     }
                     let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
@@ -565,6 +566,7 @@ pub(super) fn spawn_loaded_placements(
             let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
             if !forms.require(
                 key,
+                &m.submeshes,
                 kinds,
                 placement_priority(&streamer, d.transform.translation),
             ) {
