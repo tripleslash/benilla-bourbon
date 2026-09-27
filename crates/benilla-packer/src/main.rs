@@ -144,6 +144,16 @@ struct BuildArgs {
     /// through renders a character with quarter-size armour and nothing to point at.
     #[arg(long, requires = "replace_from")]
     require_doubled: bool,
+    /// Refuse a `--replace-from` texture whose size is not the one this list (`overlay`'s
+    /// `compose.tsv`) names for it — `--require-doubled` for a tree whose files are rescaled to the
+    /// compositor's 2× from any size, not only doubled from 1×.
+    #[arg(long, value_name = "LIST", requires = "replace_from")]
+    require_size: Option<PathBuf>,
+    /// Read the chain only through this archive (its file name, e.g. `patch-9.mpq`): the
+    /// composite as it stood there, for a layer cut from an install that has more patches mounted
+    /// above it (`overlay` reads it the same way).
+    #[arg(long, value_name = "ARCHIVE")]
+    top: Option<String>,
     /// Plan and report, but write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -169,6 +179,13 @@ struct VerifyArgs {
     /// its chain original rather than byte-equal to it.
     #[arg(long, value_name = "DIR")]
     replace_from: Option<PathBuf>,
+    /// The sizes the replacements were rescaled to (`overlay`'s `compose.tsv`), checked instead of
+    /// exactly 2x.
+    #[arg(long, value_name = "LIST", requires = "replace_from")]
+    require_size: Option<PathBuf>,
+    /// Read the chain only through this archive — see `build --top`.
+    #[arg(long, value_name = "ARCHIVE")]
+    top: Option<String>,
 }
 
 #[derive(Parser)]
@@ -268,6 +285,37 @@ fn check_doubled(original: &[u8], replacement: &[u8]) -> Result<()> {
         bail!("{rw}x{rh} is not twice the original {ow}x{oh} (still 1x? run the upscale first)");
     }
     Ok(())
+}
+
+/// `--require-size`: a replacement texture is exactly the size its list names.
+fn check_size(replacement: &[u8], want: (u32, u32)) -> Result<()> {
+    let got = benilla_blp::dimensions(replacement)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("the replacement is not a BLP2")?;
+    if got != want {
+        bail!(
+            "{}x{} is not the listed {}x{} (run the rescale first)",
+            got.0,
+            got.1,
+            want.0,
+            want.1
+        );
+    }
+    Ok(())
+}
+
+/// Open the chain a `build`/`verify` reads, through `--top` when one is named.
+fn open_chain(data: &Path, top: Option<&str>) -> Result<Chain> {
+    let mut chain = Chain::open(data).with_context(|| format!("opening {}", data.display()))?;
+    if let Some(top) = top {
+        if !chain.truncate_after(top) {
+            bail!(
+                "--top {top}: no such archive mounted from {}",
+                data.display()
+            );
+        }
+    }
+    Ok(chain)
 }
 
 /// The loose path a chain name takes on disk: backslashes become separators, everything else is
@@ -408,8 +456,12 @@ fn name_hints(chain: &Chain) -> HashMap<u64, String> {
 }
 
 fn build(a: BuildArgs) -> Result<()> {
-    let chain = Chain::open(&a.data).with_context(|| format!("opening {}", a.data.display()))?;
+    let chain = open_chain(&a.data, a.top.as_deref())?;
     eprintln!("mounted {} archives", chain.archives().len());
+    let sizes = match &a.require_size {
+        Some(list) => overlay::read_compose_list(list)?,
+        None => HashMap::new(),
+    };
 
     let mut blobs = resolve(&chain);
     let mut names = name_hints(&chain);
@@ -538,6 +590,13 @@ fn build(a: BuildArgs) -> Result<()> {
                             check_doubled(&read_blob(archives, b, &names)?, &bytes)
                                 .with_context(|| format!("override {}", path.display()))?;
                         }
+                        if a.require_size.is_some() {
+                            let want = sizes.get(&b.key).with_context(|| {
+                                format!("override {} is not in --require-size", path.display())
+                            })?;
+                            check_size(&bytes, *want)
+                                .with_context(|| format!("override {}", path.display()))?;
+                        }
                         return Ok((b.key, bytes));
                     }
                     Ok((b.key, read_blob(archives, b, &names)?))
@@ -626,7 +685,11 @@ fn build(a: BuildArgs) -> Result<()> {
 /// Read the container back and compare against the chain, which is the only check that matters:
 /// the client must see exactly the bytes the native build sees.
 fn verify(a: VerifyArgs) -> Result<()> {
-    let chain = Chain::open(&a.data)?;
+    let chain = open_chain(&a.data, a.top.as_deref())?;
+    let sizes = match &a.require_size {
+        Some(list) => overlay::read_compose_list(list)?,
+        None => HashMap::new(),
+    };
     let index = Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!(
@@ -676,7 +739,11 @@ fn verify(a: VerifyArgs) -> Result<()> {
             let body = decode_pack_body(body, &meta).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
             let got = frame_from_body(&body, &at).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
             if replaced.contains_key(&key) {
-                check_doubled(&want, &got).with_context(|| format!("{name}: replacement"))?;
+                match sizes.get(&key) {
+                    Some(size) => check_size(&got, *size),
+                    None => check_doubled(&want, &got),
+                }
+                .with_context(|| format!("{name}: replacement"))?;
                 doubled.fetch_add(1, Ordering::Relaxed);
             } else if got != want {
                 bail!(
@@ -693,7 +760,7 @@ fn verify(a: VerifyArgs) -> Result<()> {
         })?;
 
     eprintln!(
-        "\rverified {} blobs against the chain: {} byte-for-byte, {} replacements exactly 2x ({} missing)",
+        "\rverified {} blobs against the chain: {} byte-for-byte, {} replacements at their 2x size ({} missing)",
         checked.load(Ordering::Relaxed),
         checked.load(Ordering::Relaxed) - doubled.load(Ordering::Relaxed),
         doubled.load(Ordering::Relaxed),

@@ -40,6 +40,12 @@ USAGE
 
 Rewrites every `.blp` under <dir> in place. Idempotent only in the sense that re-running doubles
 again — extract fresh before each run.
+
+A layer cut by `benilla-pack overlay` lists its composite inputs with the exact 2x size each needs
+(`compose.tsv`: some ship at 1x, some at half that, some above 2x), and `--targets` resamples each
+listed file to that size instead of by `--factor`:
+
+    python scripts/upscale-hd-textures.py <out>/compose --targets <out>/compose.tsv
 """
 
 from __future__ import annotations
@@ -311,15 +317,17 @@ def choose_format(img: Image.Image, meta: dict) -> tuple[bytes, int, int]:
     return b"DXT1", ALPHA_TYPE_DXT1, 0
 
 
-def process(path: str, factor: int) -> tuple[str, int, int, str | None]:
+def process(path: str, factor: int, size: tuple[int, int] | None = None) -> tuple[str, int, int, str | None]:
+    """Resample one file in place: by `factor`, or to exactly `size` when one is given."""
     try:
         before = os.path.getsize(path)
         with open(path, "rb") as f:
             data = f.read()
         img, meta = read_blp(data)
-        if img.width * factor > 4096 or img.height * factor > 4096:
+        want = size or (img.width * factor, img.height * factor)
+        if want[0] > 4096 or want[1] > 4096:
             return path, before, before, "skipped: would exceed the decoder's dimension cap"
-        big = upscale_rgba(img, factor)
+        big = img if img.size == want else resample(img, want)
         fourcc, alpha_type, alpha_bits = choose_format(big, meta)
         out = write_blp(big, fourcc, alpha_type, alpha_bits)
         # Prove it before replacing the input: a file that will not read back is worse than one that
@@ -343,26 +351,42 @@ def main() -> int:
                     help="resample factor; 2 is what UPSCALE_FACTOR expects (default: 2)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--limit", type=int, default=0, help="stop after N files (a smoke run)")
+    ap.add_argument("--targets", metavar="TSV",
+                    help="`benilla-pack overlay`'s compose.tsv: resample each listed file to the "
+                         "exact size it names (`name width height`, the name a path under root) "
+                         "instead of by --factor, up or down")
     args = ap.parse_args()
 
-    files = []
-    for dirpath, _, names in os.walk(args.root):
-        for n in names:
-            if n.lower().endswith(".blp"):
-                files.append(os.path.join(dirpath, n))
-    files.sort()
+    # path -> the exact size it is resampled to, or None for `--factor`.
+    sizes: dict[str, tuple[int, int] | None] = {}
+    if args.targets:
+        with open(args.targets, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\r\n")
+                if not line or line.startswith("#"):
+                    continue
+                name, w, h = line.split("\t")
+                path = os.path.join(args.root, *[p for p in name.replace("/", "\\").split("\\") if p])
+                sizes[path] = (int(w), int(h))
+    else:
+        for dirpath, _, names in os.walk(args.root):
+            for n in names:
+                if n.lower().endswith(".blp"):
+                    sizes[os.path.join(dirpath, n)] = None
+    files = sorted(sizes)
     if args.limit:
         files = files[: args.limit]
     if not files:
         print(f"no .blp under {args.root}", file=sys.stderr)
         return 1
 
-    print(f"upscaling {len(files)} textures {args.factor}x on {args.jobs} workers", flush=True)
+    how = "to their listed sizes" if args.targets else f"{args.factor}x"
+    print(f"resampling {len(files)} textures {how} on {args.jobs} workers", flush=True)
     ok = failed = 0
     before_total = after_total = 0
     errors: list[str] = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(process, f, args.factor) for f in files]
+        futures = [pool.submit(process, f, args.factor, sizes[f]) for f in files]
         for i, fut in enumerate(as_completed(futures), 1):
             path, before, after, err = fut.result()
             if err:
@@ -377,7 +401,7 @@ def main() -> int:
                 print(f"  {i}/{len(files)}", flush=True)
 
     mib = lambda b: b / (1024 * 1024)
-    print(f"\n{ok} upscaled, {failed} failed")
+    print(f"\n{ok} resampled, {failed} failed")
     print(f"{mib(before_total):.1f} MiB -> {mib(after_total):.1f} MiB "
           f"({after_total / max(before_total, 1):.2f}x)")
     for e in errors:

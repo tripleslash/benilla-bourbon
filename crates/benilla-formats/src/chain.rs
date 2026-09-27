@@ -257,6 +257,22 @@ impl Chain {
         &self.archives
     }
 
+    /// Unmount every archive above the one whose file name is `name` (any case), so the chain
+    /// answers as the install did at that archive: a layer packed from some of an install's
+    /// patches must not read the patches mounted over them. `false`, with nothing unmounted, when
+    /// no mounted archive has that name. For the pack builder; nothing on the read path uses it.
+    pub fn truncate_after(&mut self, name: &str) -> bool {
+        let Some(at) = self.archives.iter().position(|a| {
+            a.path()
+                .file_name()
+                .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+        }) else {
+            return false;
+        };
+        self.archives.truncate(at + 1);
+        true
+    }
+
     /// [`Self::read`] in the shape the web target needs — see [`TryRead`]. Here it is a plain read:
     /// a local archive has no "not yet", so this only ever answers `Ready` or `Missing` (a failed
     /// read folding into the latter), and the call sites that use it behave on native exactly as
