@@ -129,7 +129,7 @@ impl GlueLook {
 pub(crate) enum GlueScene {
     /// `UI_MainMenu`, the login screen's burning gate (`AccountLogin.xml`'s ModelFFX).
     MainMenu,
-    /// A race's `UI_<Race>` stage (Gnome uses Dwarf's, Troll uses Orc's).
+    /// A race's `UI_<Race>` stage, by [`race_scene_token`].
     Race(u8),
 }
 
@@ -220,19 +220,30 @@ struct PendingSwap {
 /// The bound on that hold, so a look whose assembly never completes cannot freeze the screen.
 const GLUE_SWAP_HOLD_SECS: f32 = 2.0;
 
-/// The scene's model-name token, `Interface\Glues\Models\UI_<token>\UI_<token>.mdx`. The race
-/// mapping is `GlueParent.lua`'s `SetBackgroundModel`; the main menu is `AccountLogin.xml`'s.
+/// The scene's model-name token, `Interface\Glues\Models\UI_<token>\UI_<token>.mdx`: a race's by
+/// [`race_scene_token`] under the flavor in force, the main menu's `AccountLogin.xml`'s.
 fn scene_token(scene: GlueScene) -> &'static str {
     match scene {
         GlueScene::MainMenu => "MainMenu",
-        GlueScene::Race(race) => match race {
-            2 | 8 => "Orc",   // Troll shares Orc's scene
-            3 | 7 => "Dwarf", // Gnome shares Dwarf's
-            4 => "NightElf",
-            5 => "Scourge",
-            6 => "Tauren",
-            _ => "Human",
-        },
+        GlueScene::Race(race) => race_scene_token(race, crate::flavor::turtle()),
+    }
+}
+
+/// `GlueParent.lua`'s `SetBackgroundModel`. 1.12.1's folds Gnome into Dwarf and Troll into Orc;
+/// Turtle WoW's (`turtle`) folds only Troll, into `UI_CharacterSelect`, and every other race takes
+/// its own file string's scene: `UI_Gnome`, `UI_Goblin` and High Elf's `UI_BloodElf`.
+fn race_scene_token(race: u8, turtle: bool) -> &'static str {
+    match (race, turtle) {
+        (2, _) | (8, false) => "Orc",
+        (3, _) | (7, false) => "Dwarf",
+        (4, _) => "NightElf",
+        (5, _) => "Scourge",
+        (6, _) => "Tauren",
+        (7, true) => "Gnome",
+        (8, true) => "CharacterSelect",
+        (9, true) => "Goblin",
+        (10, true) => "BloodElf",
+        _ => "Human",
     }
 }
 
@@ -328,17 +339,19 @@ fn scene_light_blob(
 }
 
 /// The per-scene fog, colour and far (near is 0): the race rows are `GlueParent.lua`'s
-/// `CharModelFogInfo`; the main menu's is `AccountLogin.xml`'s `<FogColor>` and `fogFar`.
-fn scene_fog(token: &str) -> ([f32; 3], f32) {
-    match token {
+/// `CharModelFogInfo`, and a scene with no row clears the fog (`ClearFog`), as Turtle WoW's own
+/// scenes have none; the main menu's is `AccountLogin.xml`'s `<FogColor>` and `fogFar`.
+fn scene_fog(token: &str) -> Option<([f32; 3], f32)> {
+    Some(match token {
         "MainMenu" => ([0.25, 0.06, 0.015], 1200.0),
+        "Human" => ([0.8, 0.65, 0.73], 222.0),
         "Orc" => ([0.5, 0.5, 0.5], 270.0),
         "Dwarf" => ([0.85, 0.88, 1.0], 500.0),
         "NightElf" => ([0.25, 0.22, 0.55], 611.0),
         "Scourge" => ([0.0, 0.22, 0.22], 26.0),
         "Tauren" => ([1.0, 0.61, 0.42], 153.0),
-        _ => ([0.8, 0.65, 0.73], 222.0), // Human
-    }
+        _ => return None,
+    })
 }
 
 /// One assembled preview mesh, the tuple-driven counterpart of [`super::PortraitPart`].
@@ -664,11 +677,12 @@ pub(super) fn sync_glue_scene(
 
     let token = scene_token(which);
     // A race stage fogs at create and not at select (`0x472110` replaces the fog callback); the
-    // main menu always fogs.
-    let fog = match which {
-        GlueScene::MainMenu => true,
-        GlueScene::Race(_) => matches!(preview.look, Some(GlueLook::Create(_))),
-    };
+    // main menu always fogs. A scene with no fog row never does.
+    let fog = scene_fog(token).is_some()
+        && match which {
+            GlueScene::MainMenu => true,
+            GlueScene::Race(_) => matches!(preview.look, Some(GlueLook::Create(_))),
+        };
     // The ghost light fork (`0x472150`, [`ghost_rig`]), shared by the scene, character and pet.
     let ghost = matches!(
         preview.look,
@@ -734,7 +748,7 @@ pub(super) fn sync_glue_scene(
             } else {
                 scene_rig(&model.lights)
             };
-            let (fog_rgb, fog_far) = scene_fog(token);
+            let (fog_rgb, fog_far) = scene_fog(token).unwrap_or_default();
             scene_light_blob(&rig, fog_rgb, fog_far, fog).write(&queue, &light);
             scene.ghost = ghost;
             // The character and the pet re-bake onto the rewritten buffer.
@@ -767,7 +781,7 @@ pub(super) fn sync_glue_scene(
         } else {
             scene_rig(&model.lights)
         };
-        let (fog_rgb, fog_far) = scene_fog(token);
+        let (fog_rgb, fog_far) = scene_fog(token).unwrap_or_default();
         let blob = scene_light_blob(&rig, fog_rgb, fog_far, fog);
         let light = scene
             .light
@@ -1528,6 +1542,37 @@ mod tests {
     use super::*;
     use benilla_assets::ModelLight;
     use benilla_formats::M2Light;
+
+    /// 1.12.1 folds Gnome into Dwarf and Troll into Orc; Turtle WoW gives Gnome, Goblin and High Elf
+    /// their own scenes, Troll `UI_CharacterSelect`, and none of those four a fog row.
+    #[test]
+    fn a_race_scene_follows_its_clients_background_model() {
+        let vanilla: Vec<_> = (1..=8).map(|r| race_scene_token(r, false)).collect();
+        assert_eq!(
+            vanilla,
+            ["Human", "Orc", "Dwarf", "NightElf", "Scourge", "Tauren", "Dwarf", "Orc"]
+        );
+        let turtle: Vec<_> = (1..=10).map(|r| race_scene_token(r, true)).collect();
+        assert_eq!(
+            turtle,
+            [
+                "Human",
+                "Orc",
+                "Dwarf",
+                "NightElf",
+                "Scourge",
+                "Tauren",
+                "Gnome",
+                "CharacterSelect",
+                "Goblin",
+                "BloodElf"
+            ]
+        );
+        for token in ["Gnome", "CharacterSelect", "Goblin", "BloodElf"] {
+            assert!(scene_fog(token).is_none(), "{token} clears the fog");
+        }
+        assert_eq!(scene_fog("Human"), Some(([0.8, 0.65, 0.73], 222.0)));
+    }
 
     /// `petDisplayId == 0` is the client's whole gate: the server zeroes the triple for all but a
     /// living hunter or warlock (vmangos `Player::BuildEnumData`).
