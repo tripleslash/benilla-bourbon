@@ -25,8 +25,9 @@ use benilla_world::view::WorldCamera;
 
 use crate::creature_anim::wrap_pi;
 
-use super::camera::{CameraControl, FlyCam, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT};
+use super::camera::{CameraControl, FlyCam, CAM_PITCH_LIMIT};
 use super::camera_saved::{pitch_from_file, pitch_to_file};
+use super::camera_zoom::{CAM_DIST_MAX, CAM_DIST_MIN};
 use super::Player;
 
 /// The reference's five views, through the UI crate's constant so the Lua range check agrees.
@@ -262,7 +263,7 @@ fn drain_view_requests(
             CameraViewRequest::Zoom(yards) => {
                 // `0x50fc60`/`0x50fcd0`: a glide the other way stops where it is (`0x50fd90`), one
                 // the same way runs on, and the zoom moves `yards` at the rig's speed from there.
-                // The max re-clamps every frame (`camera::apply_zoom_scroll`).
+                // The max re-clamps every frame (`camera_zoom::apply_zoom_scroll`).
                 let rig = &mut targets.rig;
                 let against = (rig.target_distance - rig.distance) * yards > 0.0;
                 let from = if against {

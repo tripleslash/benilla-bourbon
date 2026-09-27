@@ -1,17 +1,20 @@
-//! **The updated-character-model layer authors geosets 1.12 has no law for** — and until this
-//! test they were all hidden, which took the feet off ten of its bodies and the waistline off
+//! **The updated-character-model layer authors geosets above 1700, which 1.12.1 never switches
+//! off** (`0x477520` disables only 0..=1700) — and until this test they were all hidden, which took the feet off ten of its bodies and the waistline off
 //! eight (reported 2026-09-08 against the hosted page: HD orcs standing on stumps, an HD human
 //! with a gap where the belt goes).
 //!
 //! A real-data difftest over both corpora, because the fix is a claim about DATA and not about
 //! code: the shipped 1.12.1 bodies author nothing above the sixteen managed groups, the layer's
-//! bodies do, and `benilla_formats::geoset_shown` is what tells the two apart. Skips when the
+//! bodies do, and `VisibleGeosets::contains` is what tells the two apart. Skips when the
 //! client is not present, and again when the optional layer is not in its `Data` folder.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use benilla_formats::{geoset_shown, Chain, CharacterGeosets, EquipGeosets, UNMANAGED_GEOSET_BASE};
+use benilla_formats::{Chain, CharacterGeosets, EquipGeosets};
+
+/// The last geoset id the compositor switches off (`0x477520`, through `0x7110d0`).
+const LAST_MANAGED_GEOSET: u16 = 1700;
 
 /// Every `.m2` under `Character\` in the chain as it stands, with the geoset ids it authors.
 fn bodies(chain: &mut Chain) -> Vec<(String, BTreeSet<u16>)> {
@@ -47,14 +50,14 @@ fn the_layer_s_unmanaged_geosets_are_drawn_and_the_shipped_art_has_none() {
     let shipped = bodies(&mut vanilla);
     assert!(!shipped.is_empty(), "the install has character models");
 
-    // Half one, and the reason `geoset_shown` needs no `hd_character_models()` check: on the art
-    // 1.12 shipped, the rule it adds can never fire. Nothing above the managed groups is authored,
+    // Half one, and the reason the selection needs no `hd_character_models()` check: on the art
+    // 1.12 shipped, the above-1700 rule can never fire. Nothing above the managed groups is authored,
     // so every goldens-bearing body renders exactly as it did.
     for (name, ids) in &shipped {
         let high: Vec<u16> = ids
             .iter()
             .copied()
-            .filter(|i| *i >= UNMANAGED_GEOSET_BASE)
+            .filter(|i| *i > LAST_MANAGED_GEOSET)
             .collect();
         assert!(
             high.is_empty(),
@@ -69,7 +72,7 @@ fn the_layer_s_unmanaged_geosets_are_drawn_and_the_shipped_art_has_none() {
         return;
     }
 
-    // Half two: what the layer actually authors up there, and that the predicate draws all of it.
+    // Half two: what the layer actually authors up there, and that the selection draws all of it.
     // The naked set is the strictest case - nothing worn can be blamed for a hidden body part.
     let geosets = CharacterGeosets::load(&mut layered).expect("the customization DBCs");
     let naked = EquipGeosets::default();
@@ -78,14 +81,10 @@ fn the_layer_s_unmanaged_geosets_are_drawn_and_the_shipped_art_has_none() {
         // Race/sex do not reach the groups in question at all - they choose hair and facial hair -
         // so one look stands for every body here.
         let visible = geosets.visible_geosets(1, 0, 0, 0, &naked);
-        for id in ids.iter().copied().filter(|i| *i >= UNMANAGED_GEOSET_BASE) {
+        for id in ids.iter().copied().filter(|i| *i > LAST_MANAGED_GEOSET) {
             seen.insert(id);
             assert!(
-                !visible.contains(&id),
-                "{name}: geoset {id} is in a group the law does not manage, so the allowlist                  must not carry it - the predicate is what draws it"
-            );
-            assert!(
-                geoset_shown(&visible, id),
+                visible.contains(&id),
                 "{name}: geoset {id} is body this model always draws, and it is hidden"
             );
         }

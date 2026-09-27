@@ -135,7 +135,7 @@ pub(in crate::entities) fn redress_player_looks(
             worn.helm,
             worn.tabard_preview,
         );
-        let visible: Option<Vec<u16>> = look.as_ref().and_then(|l| {
+        let visible = look.as_ref().and_then(|l| {
             let cg = characters.as_deref()?;
             Some(cg.0.visible_geosets(l.race, l.sex, l.hair_style, l.facial_hair, &eg))
         });
@@ -170,11 +170,7 @@ pub(in crate::entities) fn redress_player_looks(
             continue;
         }
         // No look (a druid form on a beast display) means no geoset filter, as at build.
-        let shows = |geoset: u16| {
-            visible
-                .as_ref()
-                .is_none_or(|v| benilla_formats::geoset_shown(v, geoset))
-        };
+        let shows = |geoset: u16| visible.as_ref().is_none_or(|v| v.contains(&geoset));
         // A standing group survives only if the new grouping keeps its member set; keyed by the
         // first member, the standing entity's `DressedPart::index`.
         let groups = merge::guard_groups(

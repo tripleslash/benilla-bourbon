@@ -5,13 +5,15 @@
 //!
 //! DBC layouts follow the client's record readers: CharSections `0x575540`, the geoset tables
 //! `0x5753b0`/`0x575a80`.
+//! The compositor disables geosets 0..=1700; higher IDs keep their model visibility through
+//! [`VisibleGeosets::contains`].
 
 mod customization;
 mod geosets;
 mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
-pub use geosets::{geoset_shown, CharacterGeosets, EquipGeosets, UNMANAGED_GEOSET_BASE};
+pub use geosets::{CharacterGeosets, EquipGeosets, VisibleGeosets};
 pub use sections::{
     composite_input_at_1x, equip_blits, equip_column, equip_region_candidates, equip_tex_dir,
     equip_tile, forearm_dressed, BlitSource, CharSections, CompositeBlobs, CompositePlan,

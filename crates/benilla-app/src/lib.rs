@@ -112,6 +112,7 @@ mod realmlist;
 mod run_mode;
 mod screen_fade;
 mod screenshot;
+mod script_calls;
 mod shaders;
 
 /// Every boot-time reader of the chain rebuilds with it or says why not; read off the source.

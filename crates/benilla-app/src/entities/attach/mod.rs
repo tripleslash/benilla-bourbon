@@ -536,7 +536,7 @@ pub(super) fn attach_entity_visuals(
                 worn.helm,
                 worn.tabard_preview,
             );
-            let visible_geosets: Option<Vec<u16>> = look.as_ref().and_then(|l| {
+            let visible_geosets = look.as_ref().and_then(|l| {
                 let cg = characters.as_deref()?;
                 Some(cg.0.visible_geosets(
                     l.race,
@@ -611,7 +611,7 @@ pub(super) fn attach_entity_visuals(
                     .filter(|part| {
                         visible_geosets
                             .as_ref()
-                            .is_none_or(|vis| benilla_formats::geoset_shown(vis, part.geoset_id))
+                            .is_none_or(|vis| vis.contains(&part.geoset_id))
                     })
                     .filter_map(|part| part.billboard.as_ref().map(|b| b.bone))
                     .filter_map(|bone| {
@@ -645,7 +645,7 @@ pub(super) fn attach_entity_visuals(
             let shows = |part: &super::EntityPart| {
                 visible_geosets
                     .as_ref()
-                    .is_none_or(|vis| benilla_formats::geoset_shown(vis, part.geoset_id))
+                    .is_none_or(|vis| vis.contains(&part.geoset_id))
             };
             let groups = merge::guard_groups(merge::group_parts(parts, shows), parts, &char_mats);
             for group in &groups {
