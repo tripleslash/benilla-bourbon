@@ -12,8 +12,8 @@ use bevy::window::PrimaryWindow;
 use crate::char_select::wow_font;
 use crate::glue::art::{GlueArt, BACKDROP, GOLD};
 use crate::glue::widgets::{
-    abs, glue_button, glue_edit_box, outlined_text, overlay, paint_glue_field, ArtSwap,
-    GlueBtnKind, GlueFieldPart, GlueText, Hilight,
+    abs, glue_button, glue_edit_box, outlined_text, outlined_text_centered, overlay,
+    paint_glue_field, ArtSwap, GlueBtnKind, GlueFieldPart, GlueText, Hilight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{PortraitImages, PortraitSource, GLUE_SLOT};
@@ -193,7 +193,8 @@ fn spawn_screen(
                     ));
                 });
         }
-        outlined_text(
+        // No `justifyH`, so CENTER: each line of a two-line disclaimer (Turtle WoW's) centres.
+        outlined_text_centered(
             ui,
             Node {
                 position_type: PositionType::Absolute,
