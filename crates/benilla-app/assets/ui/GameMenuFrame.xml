@@ -8,17 +8,8 @@
         to end; `Quit()` and the QUIT countdown stay for `/quit`.
     -->
     <Script><![CDATA[
-        -- Label strings as `X = X or "..."`, so a stock GlobalStrings value wins where one exists.
-        MAIN_MENU = MAIN_MENU or "Main Menu"
-        HUD_EDIT_MODE_MENU = HUD_EDIT_MODE_MENU or "Edit Mode"
-        GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"
-        MACROS = MACROS or "Macros"
-        LOGOUT = LOGOUT or "Logout"
-        RETURN_TO_GAME = RETURN_TO_GAME or "Return to Game"
-        CANCEL = CANCEL or "Cancel"
-
         -- A rung with nothing behind it yet (Edit Mode, Support), disabled.
-        function GameMenuButton_Pending(button, text)
+        function BenillaGameMenuButton_Pending(button, text)
             button:SetText(text)
             button:Disable()
         end
@@ -77,7 +68,7 @@
     ]]></Script>
 
     <!-- The era's header font, which 1.12's Fonts.xml lacks. -->
-    <Font name="GameFontNormalMed1" inherits="GameFontNormal" virtual="true">
+    <Font name="BenillaGameFontNormalMed1" inherits="GameFontNormal" virtual="true">
         <FontHeight><AbsValue val="13"/></FontHeight>
     </Font>
 
@@ -99,7 +90,7 @@
                     <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="12"/></Offset></Anchor></Anchors>
                 </Texture>
                 <!-- The era's 13px font on the 1.12 seat, within half a unit of the era's. -->
-                <FontString name="GameMenuFrameTitle" inherits="GameFontNormalMed1" text="MAIN_MENU">
+                <FontString name="BenillaGameMenuFrameTitle" inherits="BenillaGameFontNormalMed1" text="MAIN_MENU">
                     <Anchors>
                         <Anchor point="TOP" relativeTo="GameMenuFrameHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
                     </Anchors>
@@ -144,21 +135,21 @@
                 </Scripts>
             </Button>
 
-            <Button name="GameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
+            <Button name="BenillaGameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, HUD_EDIT_MODE_MENU)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaGameMenuButton_Pending(this, "Edit Mode")</OnLoad></Scripts>
             </Button>
-            <Button name="GameMenuButtonSupport" inherits="GameMenuButtonTemplate">
+            <Button name="BenillaGameMenuButtonSupport" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonEditMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="BenillaGameMenuButtonEditMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, GAMEMENU_SUPPORT)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaGameMenuButton_Pending(this, "Support")</OnLoad></Scripts>
             </Button>
             <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate" text="MACROS">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="BenillaGameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <!-- GameMenuFrame.xml:118-122. -->
                 <Scripts>
@@ -179,9 +170,9 @@
                 <Scripts>
                     <OnShow>
                         if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
-                            self:Enable()
+                            this:Enable()
                         else
-                            self:Disable()
+                            this:Disable()
                         end
                     </OnShow>
                     <OnClick>
@@ -206,9 +197,9 @@
         <!-- The reference's OnShow/OnHide, guarded for a test that loads no action bar. -->
         <Scripts>
             <OnShow>
-                -- ERA_WINDOW_SCALE (OptionsFrame.xml) stands in for the era's UIParent scale. A
-                -- second OnShow on this frame would replace this one.
-                this:SetScale(ERA_WINDOW_SCALE or 1)
+                -- BENILLA_ERA_WINDOW_SCALE (OptionsFrame.xml) stands in for the era's UIParent
+                -- scale. A second OnShow on this frame would replace this one.
+                this:SetScale(BENILLA_ERA_WINDOW_SCALE or 1)
                 if UpdateMicroButtons then UpdateMicroButtons() end
                 if Disable_BagButtons then Disable_BagButtons() end
             </OnShow>
@@ -223,8 +214,8 @@
         -- taller.
         if ( BENILLA_TURTLE_OPTIONS ) then
             GameMenuButtonKeybindings:Show()
-            GameMenuButtonEditMode:ClearAllPoints()
-            GameMenuButtonEditMode:SetPoint("TOPLEFT", GameMenuButtonKeybindings, "BOTTOMLEFT", 0, -20)
+            BenillaGameMenuButtonEditMode:ClearAllPoints()
+            BenillaGameMenuButtonEditMode:SetPoint("TOPLEFT", GameMenuButtonKeybindings, "BOTTOMLEFT", 0, -20)
             GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + GameMenuButtonKeybindings:GetHeight())
         end
     ]]></Script>

@@ -707,71 +707,6 @@ fn every_texture_frame_outranks_its_status_bars() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The boot phase is inert: `Fonts.xml`, the only file loaded at `Startup`, is a pure registry and
-/// materializes no frames.
-#[test]
-fn the_boot_phase_materializes_no_frames() {
-    benilla_formats::wow_data_or_skip!();
-    let mut s = benilla_ui::script::UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    // Manifest entry 0, off the chain; `load_ui` fails on any loader error.
-    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    assert_eq!(
-        frames, 0,
-        "the boot-phase load materialized {frames} frame(s) — the login screen is meant to carry none"
-    );
-}
-
-/// The boot-time font registry alone declares every (font, height, outline) the whole manifest
-/// does; a failure is a font object outside `Fonts.xml` with a new height or an outline.
-#[test]
-fn the_font_registry_alone_covers_the_whole_bake_plan() {
-    benilla_formats::wow_data_or_skip!();
-    let plan = |whole: bool| -> std::collections::BTreeSet<(String, String, String)> {
-        let mut s = benilla_ui::script::UiScript::new().unwrap();
-        s.set_screen_size(1024.0, 768.0);
-        if whole {
-            // The in-game UI loads on world entry, so a player always exists by then.
-            s.set_unit(
-                "player",
-                Some(benilla_ui::script::UnitState {
-                    exists: true,
-                    name: Some("Probefour".into()),
-                    level: 60,
-                    ..Default::default()
-                }),
-            );
-            let _ = super::load_default_ui(&s);
-        } else {
-            let _ = super::load_font_registry(&s);
-        }
-        s.font_objects()
-            .iter()
-            .map(|f| {
-                (
-                    f.font.clone().unwrap_or_default().to_ascii_lowercase(),
-                    format!("{:?}", f.height),
-                    format!("{:?}", f.outline),
-                )
-            })
-            .collect()
-    };
-    let whole = plan(true);
-    let registry_only = plan(false);
-    let missing: Vec<_> = whole.difference(&registry_only).collect();
-    assert!(
-        missing.is_empty(),
-        "these (font, height, outline) combinations exist in the full manifest but NOT in the \
-         boot-time font registry, so the atlas would never bake them: {missing:#?}"
-    );
-    // Never let this pass by finding nothing on both sides.
-    assert!(
-        registry_only.len() >= 19,
-        "only {} combinations swept — the registry sweep broke",
-        registry_only.len()
-    );
-}
-
 /// The shipped UI takes `VARIABLES_LOADED`, which the saved-variables load fires at every launch
 /// before any window has shown, without a script error.
 #[test]
@@ -801,8 +736,8 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 }
 
 /// Every `<Font name=…>` the manifest declares is a `Font` global answering the FontInstance
-/// getters, in manifest order: `publish_global` never overwrites, so a same-named frame loaded
-/// first would keep a font unpublished.
+/// getters, in the production order: `publish_global` never overwrites, so a same-named frame
+/// loaded first would keep a font unpublished.
 #[test]
 fn every_shipped_font_object_is_published_as_a_lua_global() {
     benilla_formats::wow_data_or_skip!();
@@ -1989,10 +1924,9 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
 }
 
 /// benilla's own interface is one layer, and it does not grow: `layer.toc` names exactly these
-/// files, all ours (none off the chain), and `assets/ui` holds nothing else but the two manifests.
-/// A window is migrated, not authored: point `benilla.toc` at
-/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file
-/// calls; what changes the stock UI goes in one of these files.
+/// files, all ours (none off the chain), and `assets/ui` holds nothing else but that manifest. The
+/// core loads every stock window the player's `FrameXML.toc` lists; what changes the stock UI goes
+/// in one of these files.
 #[test]
 fn the_layer_does_not_grow() {
     const LAYER: &[&str] = &[
@@ -2023,26 +1957,84 @@ fn the_layer_does_not_grow() {
     found.sort();
     let mut shipped: Vec<String> = LAYER
         .iter()
-        .chain(&["benilla.toc", "layer.toc"])
+        .chain(&["layer.toc"])
         .map(|s| s.to_string())
         .collect();
     shipped.sort();
     assert_eq!(
         found, shipped,
-        "assets/ui holds the two manifests and the layer's files, nothing else"
+        "assets/ui holds the layer's manifest and its files, nothing else"
     );
 }
 
-/// The core is the stock UI: `benilla.toc` names only the reference's own files off the chain.
+/// The layer speaks the 1.12 dialect: a handler body is the chunk itself (`0x704c70`), so it reads
+/// its frame from `this`, never `self`; the loader reads no `function=`; the strata table
+/// (`0x8119f8`) has no `BLIZZARD`; `SetDrawLayer` (`0x79a780`) takes a layer name alone; and a
+/// button's state textures take a texture, never a colour (`0x781970`).
 #[test]
-fn the_core_toc_names_no_file_of_ours() {
-    let core = super::addons::Addon::core().toc.files;
-    let ours: Vec<&String> = core
-        .iter()
-        .filter(|f| !super::reference_ui::is_chain_entry(f))
-        .collect();
-    assert!(
-        ours.is_empty(),
-        "benilla.toc names a file of ours ({ours:?}): benilla's own interface is the layer          (layer.toc), which loads after every stock file"
-    );
+fn the_layer_speaks_the_1_12_dialect() {
+    fn handlers(el: &benilla_ui::framexml::Element, out: &mut Vec<(String, String)>) {
+        if el.tag == "Scripts" {
+            for h in &el.children {
+                out.push((h.tag.clone(), h.body.clone()));
+                assert!(
+                    h.attr("function").is_none(),
+                    "<{} function=…> is no 1.12 form",
+                    h.tag
+                );
+            }
+        }
+        for c in &el.children {
+            handlers(c, out);
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let files = super::addons::Addon::layer().toc.files;
+    assert!(files.len() >= 8, "the layer's toc lists {files:?}");
+    let word = |text: &str, w: &str| {
+        text.match_indices(w).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + w.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
+    for file in files {
+        let text = std::fs::read_to_string(dir.join(&file)).expect("read");
+        let doc = benilla_ui::framexml::parse(&text).expect("parses");
+        let mut found = Vec::new();
+        for item in &doc.items {
+            use benilla_ui::framexml::TopLevel;
+            if let TopLevel::Template(el) | TopLevel::Instance(el) = item {
+                handlers(el, &mut found);
+            }
+        }
+        for (tag, body) in found {
+            assert!(!word(&body, "self"), "{file}: <{tag}> reads `self`: {body}");
+        }
+        assert!(!text.contains("BLIZZARD"), "{file}: BLIZZARD strata");
+        for line in text.lines().filter(|l| l.contains("SetDrawLayer(")) {
+            assert_eq!(
+                line.matches(',').count(),
+                0,
+                "{file}: SetDrawLayer takes the layer alone: {line}"
+            );
+        }
+        for verb in [
+            "SetNormalTexture(",
+            "SetPushedTexture(",
+            "SetHighlightTexture(",
+            "SetDisabledTexture(",
+            "SetCheckedTexture(",
+            "SetDisabledCheckedTexture(",
+        ] {
+            for line in text.lines().filter(|l| l.contains(verb)) {
+                let args = line.split(verb).nth(1).unwrap_or_default();
+                assert!(
+                    !args.trim_start().starts_with(|c: char| c.is_ascii_digit()),
+                    "{file}: {verb} takes a texture, never a colour: {line}"
+                );
+            }
+        }
+    }
 }

@@ -151,8 +151,6 @@ pub(crate) struct Model {
     pub(crate) layout_rounds: u64,
     /// Per frame, rasterized links `(y-up rect, link, full |H…|h markup)` for `OnHyperlinkClick`.
     pub(crate) link_spans: HashMap<FrameHandle, Vec<(Rect, String, String)>>,
-    /// Tab was pressed in the chat edit box (`BenillaChatTabPressed`), for the whisper cycle.
-    pub(crate) chat_tab: bool,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`).
@@ -270,6 +268,13 @@ pub(crate) struct Model {
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
     /// `SetRaidRosterSelection`'s raid row index, client-side only.
     pub(crate) raid_selection: i64,
+    /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
+    /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
+    pub(crate) now: f64,
+    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks.
+    pub(crate) game_time: (u32, u32),
+    /// The zone caches the four zone-text getters and `GetZonePVPInfo` read.
+    pub(crate) zone: super::ZoneTexts,
     /// The current map's `Map.dbc` `InstanceType`, all `IsInInstance()` reads; `None` for no row.
     pub(crate) instance_type: Option<u32>,
     /// `CanShowResetInstances()`, the reference's four-term predicate (`0x495c90`), app-computed.
@@ -679,8 +684,8 @@ pub(crate) struct Model {
     pub(crate) bind_on_use_confirms: u32,
 
     /// The open loot, the row clicks and whether `CloseLoot` ran. A click is the reference's take
-    /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (the C `CLootButton`,
-    /// here `BenillaTakeLootSlot`); `LootSlot` passes 1 (`0x4c2e70`), taking it after the confirm.
+    /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (a `LootButton`'s own
+    /// click, `0x4c1820`); `LootSlot` passes 1 (`0x4c2e70`), taking it after the confirm.
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
     /// `LootSlot(slot)` rows, 1-based, apart from clicks for the reference's pending-slot gate.
@@ -887,7 +892,7 @@ pub(crate) struct Model {
     /// Reputation calls queued, applied locally first because none of the three sends is acked.
     pub(crate) reputation_sends: Vec<reputation::ReputationSend>,
 
-    /// Lines the chat box submitted (`SubmitChatInput`), for the app's slash-command parser.
+    /// Lines for the app's slash-command parser: a probe's, or a host `SlashCmdList` row's.
     pub(crate) chat_input: Vec<String>,
 
     /// The world map's pushed catalog and feed, and its selection.
@@ -1036,7 +1041,6 @@ impl Model {
             layout_rounds: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),
-            chat_tab: false,
             region_data: HashMap::new(),
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
@@ -1086,6 +1090,9 @@ impl Model {
             ready_check: party::ReadyCheckState::default(),
             saved_instances: Vec::new(),
             raid_selection: 0,
+            now: 0.0,
+            game_time: (0, 0),
+            zone: Default::default(),
             instance_type: None,
             can_reset_instances: false,
             reset_instance_asks: 0,

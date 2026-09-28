@@ -120,16 +120,13 @@ fn game_time_session(hour: u32, minute: u32) -> UiScript {
     s.run("function GetMinimapZoneText() return '' end")
         .unwrap();
     s.run("function PlaySound() end").unwrap();
-    s.run(&format!(
-        "__benilla_game_hour = {hour}; __benilla_game_minute = {minute}"
-    ))
-    .unwrap();
+    s.set_game_time(hour, minute);
     // `GameTime.lua` reads `TwentyFourHourTime`, which `LocalizeFrames` sets; the reference calls
     // that on `VARIABLES_LOADED` (`UIParent.lua:231-232`), and this session has no UIParent.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "Interface\\FrameXML\\Localization.xml");
     s.run("LocalizeFrames()").unwrap();
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     // `TEXT()`, which the tooltip formatting goes through.
     load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -162,8 +159,7 @@ fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
     let day = (0.0, 50.0 / 128.0, 0.0, 50.0 / 64.0);
     assert_eq!(tod_window(&s), day, "mid-morning shows the sun half");
 
-    s.run("__benilla_game_hour = 21; __benilla_game_minute = 0")
-        .unwrap();
+    s.set_game_time(21, 0);
     s.tick(0.016);
     assert_eq!(
         tod_window(&s),
@@ -171,11 +167,10 @@ fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
         "9:00 PM sharp is the moon half"
     );
 
-    s.run("__benilla_game_hour = 5; __benilla_game_minute = 29")
-        .unwrap();
+    s.set_game_time(5, 29);
     s.tick(0.016);
     assert_eq!(tod_window(&s).0, 0.5, "5:29 AM is still the moon");
-    s.run("__benilla_game_minute = 30").unwrap();
+    s.set_game_time(5, 30);
     s.tick(0.016);
     assert_eq!(tod_window(&s), day, "5:30 AM sharp flips to the sun");
 }
@@ -209,7 +204,7 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
     assert_eq!(text(&s), "21:07");
 
     // While owned, `GameTimeFrame_Update` refreshes the tooltip (`GameTime.lua:20-22`).
-    s.run("__benilla_game_minute = 8").unwrap();
+    s.set_game_time(21, 8);
     s.tick(0.016);
     assert_eq!(text(&s), "21:08", "the owned tooltip follows the clock");
 
@@ -352,11 +347,11 @@ fn the_meeting_stone_icon_follows_the_queue_across_meetingstone_changed() {
         .unwrap();
     s.run("function PlaySound() end").unwrap();
     for f in [
-        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\Localization.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
         r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",

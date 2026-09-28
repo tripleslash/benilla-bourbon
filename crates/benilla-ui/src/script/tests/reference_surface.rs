@@ -1,13 +1,23 @@
-//! The 1.12 surface as a gate: every global benilla's VM exposes is one the 1.12.1 client has
-//! (`reference/1.12-globals.tsv`) or a listed exception, since addons branch on a global's
-//! presence; what 1.12 has and benilla lacks is `scripts/api-coverage.sh`'s count.
+//! The 1.12 surface as a gate: every global the engine puts in a bare VM is one the 1.12.1 client
+//! has (`reference/1.12-globals.tsv`) or a commented entry on [`BEYOND_1_12`], since addons branch
+//! on a global's presence; no prefix excuses an engine name, as a host seam belongs in Rust. The
+//! production load, core and layer, is `benilla-app`'s `ui_script::surface_gate`; what 1.12 has
+//! and benilla lacks is `scripts/api-coverage.sh`'s count.
 
 use std::collections::HashSet;
 
 use super::common::script;
 
-/// `reference/1.12-globals.tsv`, as `name -> origin`.
-fn reference() -> Vec<(String, String)> {
+/// Globals the engine exposes that 1.12 does not, each with its reason. The list is exact.
+const BEYOND_1_12: &[&str] = &[
+    // Our Lua runtime is 5.1 where 1.12's is 5.0: 1.12's base library does not export `_G` (an
+    // addon reaches the globals with `getfenv(0)`); ours does, as our `getglobal`/`setglobal` are
+    // written over it.
+    "_G",
+];
+
+/// `reference/1.12-globals.tsv`'s names.
+fn reference() -> HashSet<String> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../reference/1.12-globals.tsv"
@@ -15,119 +25,244 @@ fn reference() -> Vec<(String, String)> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!("reading {path}: {e} — regenerate with scripts/gen-reference-globals.py")
     });
-    text.lines()
+    let names: HashSet<String> = text
+        .lines()
         .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| {
-            let mut f = l.split('\t');
-            Some((f.next()?.to_string(), f.nth(1)?.to_string()))
-        })
+        .filter_map(|l| l.split('\t').next().map(str::to_string))
+        .collect();
+    assert!(
+        names.len() > 19_000,
+        "the reference table looks truncated ({} names) — regenerate it",
+        names.len()
+    );
+    names
+}
+
+/// The string keys of a bare VM's `_G`.
+fn engine_globals() -> HashSet<String> {
+    script()
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for k in pairs(getfenv(0)) do if type(k) == 'string' then table.insert(out, k) end end \
+             return out",
+        )
+        .expect("dump _G")
+        .into_iter()
         .collect()
 }
 
-/// Globals benilla exposes that 1.12 does not. `Benilla*` (the host bridge our own UI files call)
-/// and `__benilla_*` (the tick's pushed state) pass by prefix.
-fn allowed_beyond_1_12() -> HashSet<&'static str> {
-    [
-        // ── our Lua runtime is 5.1 where 1.12's is 5.0 ──
-        // 1.12's base library does not export `_G` (an addon reaches the globals with
-        // `getfenv(0)`); ours does, as our `getglobal`/`setglobal` are written over it.
-        "_G",
-        // ── WoW API past 1.12 ──
-        // Only `SubmitChatInput` is called from our UI files (`ScriptLogFrame.xml`'s slash
-        // commands); each of the rest awaits its 1.12 equivalent, removal or a reason.
-        "CancelUnitBuff",
-        "GetCursorInfo",
-        "GetInventoryItemID",
-        "GetPlayerFacing",
-        "GetTradePartnerName",
-        "IsGossipOptionCoded",
-        "SubmitChatInput",
-        "UnitAura",
-        "UnitIsAFK",
-        "UnitIsDND",
-    ]
-    .into_iter()
-    .collect()
-}
-
-/// Every global benilla's VM exposes is one 1.12 has, or a listed exception.
+/// Every global the engine exposes is one 1.12 has, or a listed exception.
 #[test]
-fn our_globals_stay_inside_the_1_12_surface() {
-    let reference = reference();
-    let known: HashSet<&str> = reference.iter().map(|(n, _)| n.as_str()).collect();
-    assert!(
-        known.len() > 19_000,
-        "the reference table looks truncated ({} names) — regenerate it",
-        known.len()
-    );
-    let allowed = allowed_beyond_1_12();
-
-    let ours: Vec<String> = script()
-        .eval(
-            "local out = {} \
-             for k in pairs(_G) do if type(k) == 'string' then table.insert(out, k) end end \
-             return out",
-        )
-        .expect("dump _G");
-
-    let mut unlisted: Vec<&str> = ours
-        .iter()
-        .map(String::as_str)
-        .filter(|n| !known.contains(n))
-        .filter(|n| !allowed.contains(n))
-        .filter(|n| !n.starts_with("Benilla") && !n.starts_with("__benilla_"))
+fn the_engine_adds_no_global_past_1_12() {
+    let known = reference();
+    let mut beyond: Vec<String> = engine_globals()
+        .into_iter()
+        .filter(|n| !known.contains(n) && !BEYOND_1_12.contains(&n.as_str()))
         .collect();
-    unlisted.sort_unstable();
-
+    beyond.sort_unstable();
     assert!(
-        unlisted.is_empty(),
-        "benilla exposes {} global(s) the 1.12.1 client does not, and they are not listed as \
-         exceptions:\n    {}\n\n\
-         1.12 is the target. Either give it its 1.12 spelling, or add it to \
-         `allowed_beyond_1_12` in this file WITH the reason it has to stay — an addon that \
+        beyond.is_empty(),
+        "the engine exposes {} global(s) the 1.12.1 client does not:\n    {}\n\n\
+         1.12 is the target. Give it its 1.12 spelling, move a host seam into Rust, or add it to \
+         `BEYOND_1_12` in this file WITH the reason it has to stay — an addon that \
          feature-detects an unexplained superset takes a path we cannot honour.",
-        unlisted.len(),
-        unlisted.join(" ")
+        beyond.len(),
+        beyond.join(" ")
     );
 }
 
 /// The exception list is exact: no entry outlives its global, and none excuses a 1.12 name.
 #[test]
-fn the_exception_list_has_no_dead_entries() {
-    let known: HashSet<String> = reference().into_iter().map(|(n, _)| n).collect();
-    let ours: HashSet<String> = script()
-        .eval::<Vec<String>>(
-            "local out = {} \
-             for k in pairs(_G) do if type(k) == 'string' then table.insert(out, k) end end \
-             return out",
-        )
-        .expect("dump _G")
-        .into_iter()
+fn the_exception_list_is_exact() {
+    let known = reference();
+    let ours = engine_globals();
+    let wrong: Vec<&str> = BEYOND_1_12
+        .iter()
+        .copied()
+        .filter(|n| known.contains(*n) || !ours.contains(*n))
         .collect();
-
-    let mut dead: Vec<&str> = allowed_beyond_1_12()
-        .into_iter()
-        .filter(|n| !ours.contains(*n))
-        .collect();
-    dead.sort_unstable();
-    assert!(
-        dead.is_empty(),
-        "these are excused as beyond-1.12 but benilla no longer exposes them — drop them from \
-         `allowed_beyond_1_12`:\n    {}",
-        dead.join(" ")
-    );
-
-    let mut wrong: Vec<&str> = allowed_beyond_1_12()
-        .into_iter()
-        .filter(|n| known.contains(*n))
-        .collect();
-    wrong.sort_unstable();
     assert!(
         wrong.is_empty(),
-        "these are excused as beyond-1.12 but the 1.12.1 client DOES have them — they need no \
-         excuse:\n    {}",
-        wrong.join(" ")
+        "excused as beyond 1.12, but 1.12 has them or the engine no longer exposes them: {wrong:?}"
     );
+}
+
+/// The globals 1.12.1 does not have, each once benilla's: the Era verbs (the 1.12 way in each
+/// comment) and the host hooks with no caller. An addon that tests for one takes a path 1.12 never
+/// does.
+#[test]
+fn the_era_globals_and_the_uncalled_hooks_are_absent() {
+    let s = script();
+    for (name, instead) in [
+        (
+            "UnitAura",
+            "UnitBuff/UnitDebuff (0x519500, 0x5198f0), GetPlayerBuff (0x4e45d0)",
+        ),
+        ("CancelUnitBuff", "CancelPlayerBuff (0x4e49a0)"),
+        (
+            "GetCursorInfo",
+            "CursorHasItem/CursorHasSpell/CursorHasMoney (0x4895d0..0x489630)",
+        ),
+        (
+            "GetInventoryItemID",
+            "the id inside GetInventoryItemLink (0x4c8c10)",
+        ),
+        ("GetPlayerFacing", "the minimap arrow model's GetFacing"),
+        (
+            "GetTradePartnerName",
+            r#"UnitName("NPC") (TradeFrame.lua:43)"#,
+        ),
+        (
+            "IsGossipOptionCoded",
+            "GOSSIP_ENTER_CODE, then SelectGossipOption(index, code)",
+        ),
+        ("UnitIsAFK", "no unit AFK predicate"),
+        ("UnitIsDND", "no unit DND predicate"),
+        (
+            "BenillaGetContainerItemID",
+            "the id inside GetContainerItemLink",
+        ),
+        ("BenillaGetItemStats", "no caller"),
+        ("BenillaGetMerchantItemStats", "no caller"),
+        ("BenillaGetBuybackItemStats", "no caller"),
+        ("BenillaSetBoothTexture", "no caller; SetPortraitTexture"),
+        ("BenillaTakeLootSlot", "a LootButton's own click (0x4c1820)"),
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} == nil")).unwrap(),
+            "{name} is a global; 1.12 has {instead}"
+        );
+    }
+}
+
+/// The strata table (`0x8119f8`) has eight rows, `BACKGROUND` to `TOOLTIP`, walked by `0x6f17d0`:
+/// `SetFrameStrata("BLIZZARD")` raises `%s:SetFrameStrata(): Unknown frame strata: %s` naming the
+/// frame or `<unnamed>` (`0x774450`) and leaves the stratum, and the XML attribute warns and skips
+/// (`0x769978`).
+#[test]
+fn blizzard_is_no_frame_strata() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "StrataProbe") f:SetFrameStrata("HIGH") g = CreateFrame("Frame")"#)
+        .unwrap();
+    for (call, who) in [
+        (r#"f:SetFrameStrata("BLIZZARD")"#, "StrataProbe"),
+        (r#"g:SetFrameStrata("BLIZZARD")"#, "<unnamed>"),
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(
+            e.contains(&format!(
+                "{who}:SetFrameStrata(): Unknown frame strata: BLIZZARD"
+            )),
+            "{call}: {e}"
+        );
+    }
+    assert_eq!(
+        s.eval::<String>("return f:GetFrameStrata()").unwrap(),
+        "HIGH",
+        "the stratum stays"
+    );
+    assert!(crate::script::object::strata_from_str("BLIZZARD").is_none());
+    assert!(crate::script::object::strata_from_str("tooltip").is_some());
+}
+
+/// `SetDrawLayer` (`0x79a780`) reads the layer name alone against the five-row table (`0x811a80`):
+/// a third argument orders nothing, and a name off the table raises the Usage line (`0x87c42c`).
+#[test]
+fn set_draw_layer_reads_the_layer_alone() {
+    let s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "LayerProbe")
+        a = f:CreateTexture("LayerProbeA", "ARTWORK")
+        b = f:CreateTexture("LayerProbeB", "ARTWORK")
+        a:SetDrawLayer("ARTWORK", 7)
+        b:SetDrawLayer("ARTWORK", -7)
+        "#,
+    )
+    .unwrap();
+    let sub = |name: &str| {
+        let rh = {
+            let t: mlua::Table = s.lua().globals().get(name).unwrap();
+            crate::script::region::region_handle_of(s.lua(), &t).unwrap()
+        };
+        s.model_ref().arena.region(rh).unwrap().sub_level
+    };
+    assert_eq!((sub("LayerProbeA"), sub("LayerProbeB")), (0, 0));
+    assert_eq!(
+        s.eval::<String>("return a:GetDrawLayer()").unwrap(),
+        "ARTWORK"
+    );
+    for (call, who) in [
+        (r#"a:SetDrawLayer("NOPE")"#, "LayerProbeA"),
+        ("a:SetDrawLayer(2)", "LayerProbeA"),
+        ("f:CreateTexture():SetDrawLayer()", "<unnamed>"),
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(
+            e.contains(&format!(r#"Usage: {who}:SetDrawLayer("layer")"#)),
+            "{call}: {e}"
+        );
+    }
+    assert_eq!(
+        s.eval::<String>("return a:GetDrawLayer()").unwrap(),
+        "ARTWORK",
+        "a refused name leaves the layer"
+    );
+}
+
+/// `Set<State>Texture` has no colour form (`0x781970`): a number takes the path leg through
+/// `lua_isstring` (`0x781b23`) and loads as its decimal name, so `SetNormalTexture(1, 1, 1, 0)`
+/// is the file `"1"`; a boolean or no argument raises the Usage line (`0x87a1b4`, the highlight
+/// setter's own at `0x87a240`).
+#[test]
+fn a_state_texture_setter_reads_a_number_as_a_path() {
+    let s = script();
+    s.run(
+        r#"
+        b = CreateFrame("Button", "StateProbe")
+        b:SetNormalTexture(1, 1, 1, 0)
+        c = CreateFrame("CheckButton", "CheckProbe")
+        c:SetCheckedTexture(3)
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return b:GetNormalTexture():GetTexture()")
+            .unwrap(),
+        "1",
+        "the path \"1\", not a solid white fill"
+    );
+    assert_eq!(
+        s.eval::<String>("return c:GetCheckedTexture():GetTexture()")
+            .unwrap(),
+        "3"
+    );
+    for (call, usage) in [
+        (
+            "b:SetPushedTexture(true)",
+            r#"Usage: StateProbe:SetPushedTexture(texture or "texture" or nil)"#,
+        ),
+        (
+            "b:SetDisabledTexture()",
+            r#"Usage: StateProbe:SetDisabledTexture(texture or "texture" or nil)"#,
+        ),
+        (
+            "CreateFrame('Button'):SetHighlightTexture(false)",
+            r#"Usage: <unnamed>:SetHighlightTexture(texture or "texture" or nil [, "blendmode")"#,
+        ),
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(e.contains(usage), "{call}: {e}");
+    }
+}
+
+/// `PickupContainerItem` (`0x4f9b30`) returns nothing on every path.
+#[test]
+fn pickup_container_item_answers_nothing() {
+    let s = script();
+    for call in ["PickupContainerItem(0, 1)", "PickupContainerItem(4, 16)"] {
+        assert_eq!(s.arity(call).unwrap(), 0, "{call}");
+    }
 }
 
 /// `Texture:GetTexture()` (`0x79ba70`/`0x79baf0`/`0x835708`): one value, nil when unset, the path
@@ -1461,56 +1596,86 @@ fn the_pfui_hdgraphic_extended_arm_runs() {
 
 /// `ShowNameplates 0x489450`, `HideNameplates 0x489460`, `ShowFriendNameplates 0x489470` and
 /// `HideFriendNameplates 0x489480` read no argument and return nothing: four 10-byte bodies over
-/// two setters, differing only in an `or`/`and` mask.
+/// two setters, differing only in an `or`/`and` mask. They write bits `0x1` and `0x8` of the
+/// runtime dword `[0xc4da34]` and no CVar: 1.12 registers none (no `0x63db90` site names a plate).
 #[test]
-fn the_nameplate_verbs_ignore_their_arguments_and_return_nothing() {
-    let s = script();
-    s.register_cvars([
-        (crate::script::CVAR_NAMEPLATE_ENEMIES, "1"),
-        (crate::script::CVAR_NAMEPLATE_FRIENDS, "0"),
-    ]);
+fn the_nameplate_verbs_write_two_runtime_bits_and_no_cvar() {
+    use crate::script::{PLATE_BIT_ENEMY as ENEMY, PLATE_BIT_FRIEND as FRIEND};
+    let mut s = script();
 
-    let get = |s: &crate::script::UiScript, n: &str| s.cvar(n);
-    assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
-        Some("1")
+    s.run("ShowNameplates()").unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(0), ENEMY);
+    assert!(
+        s.take_nameplate_bit_writes().is_empty(),
+        "a drain empties the queue"
     );
 
     s.run("HideNameplates()").unwrap();
     assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
-        Some("0")
-    );
-    assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_FRIENDS).as_deref(),
-        Some("0"),
+        s.take_nameplate_bit_writes().apply(ENEMY | FRIEND),
+        FRIEND,
         "the friendly bit is a separate setter — hiding enemies must not touch it"
     );
     s.run("ShowFriendNameplates()").unwrap();
     assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_FRIENDS).as_deref(),
-        Some("1")
-    );
-    assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
-        Some("0"),
+        s.take_nameplate_bit_writes().apply(0),
+        FRIEND,
         "...and back the other way"
     );
+    s.run("HideFriendNameplates()").unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(FRIEND), 0);
+
+    // In call order, the last write per bit standing, as the setters `or`/`and` the live dword.
+    s.run("ShowFriendNameplates() HideFriendNameplates() HideNameplates() ShowNameplates()")
+        .unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(FRIEND), ENEMY);
+    // The frame loop's latches, bits `0x2` and `0x4`, are no verb's to touch.
+    s.run("HideNameplates() HideFriendNameplates()").unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(0xff), !(ENEMY | FRIEND));
 
     s.run("ShowNameplates(false)").unwrap();
     assert_eq!(
-        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
-        Some("1"),
+        s.take_nameplate_bit_writes().apply(0),
+        ENEMY,
         "the verb IS the value — a falsy argument does not invert it"
     );
     for call in ["HideNameplates(1, 2, 3)", "ShowFriendNameplates({})"] {
         s.run(call)
             .unwrap_or_else(|e| panic!("{call} must not raise: {e}"));
     }
+    let _ = s.take_nameplate_bit_writes();
 
     assert_eq!(
         s.arity("ShowNameplates()").unwrap(),
         0,
         "zero values — observably different from nil for a caller that counts"
     );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "no CVar written: the dword is not a setting"
+    );
+    for name in ["nameplateShowEnemies", "nameplateShowFriends"] {
+        assert_eq!(s.cvar(name), None, "{name}: no plate CVar is registered");
+    }
+}
+
+/// The host seams benilla's own interface used are gone, now that it speaks 1.12 alone: the key
+/// capture, the error-log reads, the chat forwarders and the uncalled binding-set probe.
+#[test]
+fn the_layers_host_seams_are_gone() {
+    let s = script();
+    for name in [
+        "BenillaBindCapture",
+        "BenillaCharacterBindingsExist",
+        "BenillaGetNumScriptErrors",
+        "BenillaGetScriptErrorInfo",
+        "BenillaClearScriptErrors",
+        "SubmitChatInput",
+        "BenillaChatTabPressed",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} == nil")).unwrap(),
+            "{name} is still a global"
+        );
+    }
 }

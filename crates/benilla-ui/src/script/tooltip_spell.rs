@@ -540,10 +540,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetPlayerBuff",
         lua.create_function(|lua, (this, index): (Table, i64)| {
-            let now = {
-                let g = lua.globals();
-                g.get::<f64>("__benilla_now").unwrap_or(0.0)
-            };
+            let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let hit = usize::try_from(index)
@@ -729,10 +726,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     },
                     None,
                 ),
-                0x80 => {
-                    let f: mlua::Function = this.get("BenillaSetItemById")?;
-                    f.call::<()>((this.clone(), a.action))
-                }
+                0x80 => super::tooltip_item::render_by_id(lua, &this, a.action, None, None),
                 0x40 => {
                     let h = frame_handle_of(lua, &this)?;
                     let name = {
@@ -772,8 +766,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // The item builder (`0x52b650`), with no fallback name: id 0 or a template in
                 // flight renders empty, the builder's own early-out.
                 TrainerTooltip::Item(item_id) => {
-                    let f: mlua::Function = this.get("BenillaSetItemById")?;
-                    f.call::<()>((this.clone(), item_id))
+                    super::tooltip_item::render_by_id(lua, &this, item_id, None, None)
                 }
                 TrainerTooltip::Spell {
                     spell_id,
@@ -811,8 +804,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             match subject {
                 CraftTooltip::Item(item_id) => {
-                    let f: mlua::Function = this.get("BenillaSetItemById")?;
-                    f.call::<()>((this.clone(), item_id))
+                    super::tooltip_item::render_by_id(lua, &this, item_id, None, None)
                 }
                 CraftTooltip::Spell(spell_id) => {
                     set_spell_by_id(lua, &this, spell_id, None, SpellRenderOpts::default(), None)

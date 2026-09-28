@@ -1,18 +1,14 @@
-//! The in-game interface: the core manifest, [`MANIFEST`], loaded in two phases, then benilla's
-//! layer, [`LAYER_MANIFEST`]. A core entry with a path is the reference's own file off the
-//! player's patch chain, a bare filename one we ship, and the manifest's order is the load order
-//! across both; every layer entry is ours and loads after the whole core.
+//! The in-game interface: the core, the player's own stock FrameXML as their chain's
+//! `FrameXML.toc` lists it ([`reference_ui::core`]), then benilla's layer, [`LAYER_MANIFEST`],
+//! every entry of which is ours and loads after the whole core. On a Turtle WoW realm the chain
+//! answers Turtle's own `FrameXML.toc`, so its core is Turtle's rows in Turtle's order.
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{UiFlavor, UiScript};
-use benilla_ui::toc::Toc;
+use benilla_ui::script::UiScript;
 
 use super::addons::Addon;
 use super::reference_ui;
-
-/// The core interface's manifest, relative to `assets/ui`.
-pub(super) const MANIFEST: &str = "benilla.toc";
 
 /// benilla's own interface, one layer on the stock one, relative to `assets/ui`.
 pub(super) const LAYER_MANIFEST: &str = "layer.toc";
@@ -31,28 +27,17 @@ pub(super) fn layer_enabled_by(dev_build: bool, stock_ui: Option<&str>) -> bool 
     !(dev_build && stock_ui == Some("1"))
 }
 
-/// `/errors`: toggles the layer's script error log; a no-op when the run boots without the layer.
-pub(crate) const ERRORS_TOGGLE: &str =
-    "if BenillaScriptLog_Toggle then BenillaScriptLog_Toggle() end";
-
-/// `/errors clear`: empties the layer's script error log, or does nothing without the layer.
-pub(crate) const ERRORS_CLEAR: &str = "if BenillaScriptLog_Clear then BenillaScriptLog_Clear() end";
-
-/// Hands a chord the layer's Keybindings page is capturing (`BenillaBindCapture`), a bind string
-/// such as `CTRL-J`, to its handler; a no-op without the layer.
-pub(crate) fn host_key_capture(chord: &str) -> String {
-    format!("if KeyBindings_OnHostKey then KeyBindings_OnHostKey(\"{chord}\") end")
-}
-
-/// Every entry in load order: the core's, then the layer's.
+/// Every entry in load order: the core's rows, none without an install, then the layer's.
 #[cfg(test)]
 pub(super) fn manifest_files() -> Vec<String> {
-    let mut files = Addon::core().toc.files;
+    let mut files = reference_ui::core()
+        .map(|core| core.toc.files)
+        .unwrap_or_default();
     files.extend(Addon::layer().toc.files);
     files
 }
 
-/// The manifest's entries that name a file we ship rather than one off the player's install.
+/// The entries that name a file we ship rather than one off the player's install: the layer's.
 #[cfg(test)]
 pub(super) fn shipped_manifest_files() -> Vec<String> {
     manifest_files()
@@ -61,133 +46,69 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
         .collect()
 }
 
-/// The reference's own FrameXML load order, on the chain.
-const FRAMEXML_TOC: &str = "Interface\\FrameXML\\FrameXML.toc";
-
-/// The in-game manifest for the VM's flavor: [`MANIFEST`]'s entries, and in a Turtle WoW VM the
-/// rows Turtle's own `FrameXML.toc` adds to the stock one, spliced in ([`splice_flavor_rows`]).
-/// Read once, at the entry edge; a 1.12.1 VM reads nothing.
-pub(super) fn ingame_manifest(script: &UiScript) -> Vec<String> {
-    let files = Addon::core().toc.files;
-    if script.flavor() != UiFlavor::Turtle {
-        return files;
-    }
-    let toc = |bytes: Vec<u8>| Toc::parse(&String::from_utf8_lossy(&bytes)).files;
-    let stock = reference_ui::read_stock(FRAMEXML_TOC).map(toc);
-    let flavor = reference_ui::read(FRAMEXML_TOC).map(toc);
-    match (stock, flavor) {
-        (Some(stock), Some(flavor)) => splice_flavor_rows(&files, &stock, &without_shop(flavor)),
-        _ => {
-            warn!(
-                "ui_script: a FrameXML.toc is missing from the chain, so Turtle WoW's own \
-                 interface rows do not load"
-            );
-            files
-        }
-    }
-}
+/// The stock ESC menu's row, which the core leaves to the layer's own `GameMenuFrame.xml`.
+const STOCK_MENU: &str = "gamemenuframe.xml";
 
 /// The folder of Turtle WoW's donation shop in its `FrameXML.toc`: `Turtle_ShopUI.xml` builds
 /// `ShopFrame`, the minimap's `MinimapShopFrame` and `/shop`, and its templates file.
 const SHOP_FOLDER: &str = "turtle_shopui\\";
 
-/// `flavor` without Turtle WoW's donation shop rows ([`SHOP_FOLDER`]).
-/// Deviation (this fork): the shop does not load. It sells Turtle WoW's own donation rewards, which
-/// no other server offers; nothing else in its FrameXML reads it, and the layer's ESC menu has no
-/// Donation Rewards rung to open it.
-fn without_shop(flavor: Vec<String>) -> Vec<String> {
-    flavor
-        .into_iter()
+/// The core this run loads: the chain's own `FrameXML.toc` ([`reference_ui::core`]) less the rows
+/// [`fork_rows`] leaves out, or `None` when the chain has no toc.
+pub(super) fn core(layer: bool) -> Option<Addon> {
+    let mut core = reference_ui::core()?;
+    core.toc.files = fork_rows(std::mem::take(&mut core.toc.files), layer);
+    Some(core)
+}
+
+/// `rows` without two sets of the chain's rows.
+/// Deviation (this fork): with the layer, no stock `GameMenuFrame.xml`: the layer's own
+/// `GameMenuFrame.xml` is the ESC menu, on a Turtle WoW realm too, where it opens Turtle's options
+/// window. A run without the layer keeps the stock row, as the stock `ToggleGameMenu` and
+/// `UpdateMicroButtons` read `GameMenuFrame` unguarded.
+/// Deviation (this fork): no Turtle WoW donation shop ([`SHOP_FOLDER`]). It sells Turtle WoW's own
+/// donation rewards, which no other server offers; nothing else in its FrameXML reads it, and the
+/// layer's ESC menu has no Donation Rewards rung to open it.
+fn fork_rows(rows: Vec<String>, layer: bool) -> Vec<String> {
+    rows.into_iter()
         .filter(|row| {
-            !row.replace('/', "\\")
-                .to_ascii_lowercase()
-                .starts_with(SHOP_FOLDER)
+            let key = row.replace('/', "\\").to_ascii_lowercase();
+            let leaf = key.strip_prefix("interface\\framexml\\").unwrap_or(&key);
+            !(layer && leaf == STOCK_MENU) && !leaf.starts_with(SHOP_FOLDER)
         })
         .collect()
 }
 
-/// Every in-game entry in load order: [`ingame_manifest`], then the layer's files when `layer` is
-/// set. A layer file is a bare name, so [`load_manifest`] reads it from the shipped tree as it
-/// reads the core's own; the sliced entry load (`lifecycle`) walks this list one file a step.
+/// Every in-game entry in load order, for the sliced entry load (`lifecycle`), which walks it one
+/// file a step through [`load_entry`]: the core's rows ([`core`]), then the layer's files when
+/// `layer` is set. A chain without the toc is reported as [`load_core_with`] reports it.
 pub(super) fn ingame_entries(script: &UiScript, layer: bool) -> Vec<String> {
-    let mut files = ingame_manifest(script);
+    let mut files = match core(layer) {
+        Some(core) => core.toc.files,
+        None => {
+            report_missing_core(script);
+            Vec::new()
+        }
+    };
     if layer {
         files.extend(Addon::layer().toc.files);
-    } else {
-        with_stock_menu(&mut files);
     }
     files
 }
 
-/// The stock ESC menu, which the core leaves to the layer's own `GameMenuFrame.xml`.
-const STOCK_MENU: &str = "Interface\\FrameXML\\GameMenuFrame.xml";
-
-/// `files` with the stock menu at its `FrameXML.toc` row, right after `UIPanelTemplates.xml`, for
-/// a run without the layer: the stock UI's `ToggleGameMenu` and `UpdateMicroButtons` read
-/// `GameMenuFrame` unguarded. Nothing is added when that row is missing.
-fn with_stock_menu(files: &mut Vec<String>) {
-    let seat = files
-        .iter()
-        .position(|f| f.eq_ignore_ascii_case("Interface\\FrameXML\\UIPanelTemplates.xml"));
-    if let Some(i) = seat {
-        files.insert(i + 1, STOCK_MENU.to_string());
-    }
+/// Loads one of [`ingame_entries`]: a core row off the chain, a bare name from the layer's shipped
+/// tree ([`reference_ui::is_chain_entry`]).
+pub(super) fn load_entry(script: &UiScript, entry: &str) -> Vec<String> {
+    let file = [entry.to_string()];
+    let from = if reference_ui::is_chain_entry(entry) {
+        reference_ui::addon(file.to_vec())
+    } else {
+        Addon::layer()
+    };
+    from.load_files(script, &file)
 }
 
-/// `ours` with every row of the `flavor` toc that the `stock` toc lacks, as an
-/// `Interface\FrameXML\` entry, and without every stock row the flavor drops, which its client
-/// never runs (Turtle WoW's drops `SoundOptionsFrame.xml` and `UIOptionsFrame.xml`, whose scripts
-/// call the stock `OptionsFrame.lua` Turtle replaced). Each added row goes after the latest of
-/// `ours` among the stock rows the flavor loads before it, so everything the flavor's client has
-/// loaded by then is loaded here too, and rows seated at one place keep the flavor's order. With
-/// no such row it goes after `GlobalStrings.lua`, and never ahead of entry 0, the font registry.
-/// Rows compare case-insensitively; one `ours` already lists is not added twice.
-pub(super) fn splice_flavor_rows(
-    ours: &[String],
-    stock: &[String],
-    flavor: &[String],
-) -> Vec<String> {
-    let key = |row: &str| row.replace('/', "\\").to_ascii_lowercase();
-    let chain_key = |row: &str| key(&format!("Interface\\FrameXML\\{row}"));
-    let at: std::collections::HashMap<String, usize> =
-        ours.iter().enumerate().map(|(i, r)| (key(r), i)).collect();
-    let stock: std::collections::HashSet<String> = stock.iter().map(|r| key(r)).collect();
-    let listed: std::collections::HashSet<String> = flavor.iter().map(|r| key(r)).collect();
-    let dropped: std::collections::HashSet<String> = stock
-        .iter()
-        .filter(|r| !listed.contains(*r))
-        .map(|r| chain_key(r))
-        .collect();
-    let home = at
-        .get(&chain_key("GlobalStrings.lua"))
-        .copied()
-        .unwrap_or(0);
-
-    // Walking the flavor's order: the latest of ours among the stock rows seen so far.
-    let mut latest = home;
-    let mut seated: Vec<Vec<String>> = vec![Vec::new(); ours.len()];
-    for row in flavor {
-        if stock.contains(&key(row)) {
-            if let Some(&i) = at.get(&chain_key(row)) {
-                latest = latest.max(i);
-            }
-        } else if !at.contains_key(&chain_key(row)) {
-            if let Some(slot) = seated.get_mut(latest) {
-                slot.push(format!("Interface\\FrameXML\\{row}"));
-            }
-        }
-    }
-    ours.iter()
-        .zip(seated)
-        .flat_map(|(row, after)| {
-            let kept = (!dropped.contains(&key(row))).then(|| row.clone());
-            kept.into_iter().chain(after)
-        })
-        .collect()
-}
-
-/// Runs `UIParent_ManageFramePositions` after the manifest has loaded, then installs the load-time
-/// repairs below. Never after `Fonts.xml` alone: `UIParent.lua` defines the pass.
+/// Runs `UIParent_ManageFramePositions` after the interface has loaded, then the buff pass below.
 pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
     if let Err(e) = script.run("UIParent_ManageFramePositions()") {
         error!("ui_script: managed-positions bootstrap: {e}");
@@ -273,9 +194,8 @@ pub(super) fn silenced_ui_load<S: std::borrow::Borrow<UiScript>, R>(
     out
 }
 
-/// Loads every [`MANIFEST`] entry at once, then the layer unless [`layer_enabled`] says no, then
-/// the load-time repairs. Production splits this load at boot ([`load_font_registry`],
-/// [`load_ingame_ui`]), so the callers are the tests and [`crate::addon_harness`]. Returns every
+/// Loads the core, then the layer unless [`layer_enabled`] says no, then the load-time repairs:
+/// [`load_ingame_ui`] without the addons, for the tests and [`crate::addon_harness`]. Returns every
 /// failure; a loader error is tagged `"<Addon>/<file>: <error>"`.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     // The client's CVar table first: the stock `UIOptionsFrame.xml` reads CVars in its OnLoads,
@@ -284,11 +204,7 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     script.register_cvars(crate::cvars::registered_pairs());
     let layer = layer_enabled();
     let mut failures = silenced_ui_load(&mut &*script, |script| {
-        let mut core = Addon::core().toc.files;
-        if !layer {
-            with_stock_menu(&mut core);
-        }
-        let mut failures = load_manifest(script, &core);
+        let mut failures = load_core_with(script, layer);
         if layer {
             failures.extend(load_layer(script));
         }
@@ -306,32 +222,34 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     failures
 }
 
-/// Loads a slice of [`MANIFEST`] entries, each from its own store and one at a time, so the
-/// manifest's order is the load order across both.
-/// Both stores answer `<Include>` / `<Script file=>` the same way: the loader resolves a reference
-/// against the *including document's own* directory in its source's path space (1186), which for a
-/// chain document means `Interface\FrameXML\ContainerFrame.xml`'s `<Script
-/// file="ContainerFrame.lua"/>` reaches `Interface\FrameXML\ContainerFrame.lua` without anything
-/// here knowing about it.
-pub(super) fn load_manifest(script: &UiScript, files: &[String]) -> Vec<String> {
-    let core = Addon::core();
-    let reference = reference_ui::addon(
-        files
-            .iter()
-            .filter(|f| reference_ui::is_chain_entry(f))
-            .cloned()
-            .collect(),
+/// [`load_core_with`] under [`layer_enabled`], for the tests.
+#[cfg(test)]
+pub(super) fn load_core(script: &UiScript) -> Vec<String> {
+    load_core_with(script, layer_enabled())
+}
+
+/// The core: every row of the chain's `FrameXML.toc` [`core`] keeps under `layer`, in its order,
+/// each file in document order. A chain without the toc builds no stock interface: the runner
+/// reports `"Couldn't open %s"` (`0x846ff4`) at severity 2 (`0x6edc3f`) and returns 0, which
+/// `UI_Init` never reads (`0x48fff2`), going on to `Bindings.xml` and the addons. benilla goes on
+/// the same way and reports it as a load failure, an `ERROR` line and a row in `/errors`.
+fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
+    let Some(core) = core(layer) else {
+        return vec![report_missing_core(script)];
+    };
+    core.load_files(script, &core.toc.files)
+}
+
+/// Reports a chain without `FrameXML.toc` as [`load_core_with`] documents, and returns the
+/// failure.
+fn report_missing_core(script: &UiScript) -> String {
+    let e = format!(
+        "{}: not found — the stock interface is not built",
+        reference_ui::TOC
     );
-    let mut failures = Vec::new();
-    for file in files {
-        let from = if reference_ui::is_chain_entry(file) {
-            &reference
-        } else {
-            &core
-        };
-        failures.extend(from.load_files(script, std::slice::from_ref(file)));
-    }
-    failures
+    error!("ui_script: {e}");
+    script.report_load_failure(&e);
+    e
 }
 
 /// Every [`LAYER_MANIFEST`] entry, in order, after the whole core: the layer loads as more of the
@@ -341,17 +259,10 @@ fn load_layer(script: &UiScript) -> Vec<String> {
     layer.load_files(script, &layer.toc.files)
 }
 
-/// The font-object registry alone, `Fonts.xml`, loaded at `Startup`.
-/// Deviation: it loads before the login screen because benilla's glue screens share its glyph
-/// atlas; the reference's glue has its own `GlueFonts.xml`. The font objects declared outside it
-/// (FRIZQT 13, 14 and 20, un-outlined) repeat combinations it has, so the atlas plan loses nothing.
-pub(crate) fn load_font_registry(script: &UiScript) -> Vec<String> {
-    load_manifest(script, Addon::core().toc.files.get(..1).unwrap_or_default())
-}
-
-/// The in-game UI, every core entry after `Fonts.xml`, then the layer unless [`layer_enabled`]
-/// says no, then every third-party addon, on entering the world. The reference loads both in `CGGameUI::Initialize` (`0x48fbf0`), reached only from world
-/// entry (`0x401570` from `0x46c236`), its addons at `0x4900a3` (`0x51f600`).
+/// The in-game UI, the core, then the layer unless [`layer_enabled`] says no, then every
+/// third-party addon, on entering the world. The reference loads both in `CGGameUI::Initialize`
+/// (`0x48fbf0`), reached only from world entry (`0x401570` from `0x46c236`): `FrameXML.toc` at
+/// `0x48ffed`, its addons at `0x4900a3` (`0x51f600`).
 ///
 /// `identity`, `(realm, character)`, names the character's AddOn enable-state file, as the
 /// reference keys `AddOns.txt` per character; `roster`, the realm's characters, decides an addon
@@ -377,10 +288,10 @@ pub(super) fn load_ingame_ui_with(
     // Bounded, addons included: a chunk that never returns fails as a load error instead of
     // freezing the loading screen. The caller disarms the budget once the edge is done.
     script.set_instruction_budget(super::addons::LOAD_INSTRUCTION_BUDGET);
-    let mut failures = load_manifest(
-        script,
-        ingame_entries(script, layer).get(1..).unwrap_or_default(),
-    );
+    let mut failures = load_core_with(script, layer);
+    if layer {
+        failures.extend(load_layer(script));
+    }
     failures.extend(bootstrap_positions(script));
     // Each addon's `ADDON_LOADED` fires as that addon finishes, as the reference does (`0x51f5ad`).
     failures.extend(super::addons::load_third_party(
@@ -395,131 +306,229 @@ pub(super) fn load_ingame_ui_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_script::reference_ui::fixture;
 
-    /// `Fonts.xml` must stay entry 0: [`load_font_registry`] loads entry 0 at startup and
-    /// [`load_ingame_ui`] the rest.
+    /// A chain whose `FrameXML.toc` lists `rows`, each a `.lua` that appends its own letter to
+    /// `LOAD_LOG`, and one `.xml` whose `<Script file=>` does the same.
+    fn lay_letters(toc: &str) -> fixture::Guard {
+        const B: &[u8] = b"LOAD_LOG = (LOAD_LOG or '') .. 'b'";
+        const A: &[u8] = b"LOAD_LOG = (LOAD_LOG or '') .. 'a'";
+        const X: &[u8] = br#"<Ui><Script file="x.lua"/></Ui>"#;
+        const XL: &[u8] = b"LOAD_LOG = (LOAD_LOG or '') .. 'x'";
+        fixture::lay(&[
+            (reference_ui::TOC, Some(toc.as_bytes())),
+            (r"Interface\FrameXML\b.lua", Some(B)),
+            (r"Interface\FrameXML\a.lua", Some(A)),
+            (r"Interface\FrameXML\x.xml", Some(X)),
+            (r"Interface\FrameXML\x.lua", Some(XL)),
+        ])
+    }
+
+    /// The core's load list is the chain's `FrameXML.toc`: every file line, in its order, under the
+    /// toc's own directory; directives, comments and blank lines load nothing.
     #[test]
-    fn the_manifest_is_a_toc_that_starts_with_the_font_registry() {
-        let toc = Addon::core().toc;
-        assert_eq!(toc.interface_versions(), vec![11200]);
-        assert_eq!(toc.directive("Title"), Some("benilla"));
+    fn the_cores_load_list_is_the_chain_tocs_rows_in_order() {
+        let _chain =
+            lay_letters("## Interface: 11200\r\n# a comment\r\nb.lua\r\n\r\nx.xml\r\na.lua\r\n");
+        let core = reference_ui::core().expect("the laid toc");
         assert_eq!(
-            toc.files.first().map(String::as_str),
-            Some("Interface\\FrameXML\\Fonts.xml"),
-            "the font registry is the manifest's first entry — the loader splits there"
+            core.toc.files,
+            [
+                r"Interface\FrameXML\b.lua",
+                r"Interface\FrameXML\x.xml",
+                r"Interface\FrameXML\a.lua"
+            ]
         );
     }
 
-    fn rows(list: &[&str]) -> Vec<String> {
-        list.iter().map(|r| r.to_string()).collect()
+    /// The load follows the toc: the same files under a reordered toc load in the new order, each
+    /// `.xml` running its own `<Script file=>` in place.
+    #[test]
+    fn a_reordered_toc_reorders_the_load() {
+        for (toc, want) in [
+            ("b.lua\nx.xml\na.lua\n", "bxa"),
+            ("a.lua\nb.lua\nx.xml\n", "abx"),
+        ] {
+            let _chain = lay_letters(toc);
+            let s = UiScript::new().unwrap();
+            let failures = load_core(&s);
+            assert!(failures.is_empty(), "{toc:?}: {failures:#?}");
+            assert_eq!(
+                s.eval::<String>("return LOAD_LOG").unwrap(),
+                want,
+                "{toc:?}"
+            );
+        }
     }
 
-    /// Turtle WoW's donation shop rows come off its toc, in either separator and any case; the
-    /// rows around them stay, in order.
+    /// A chain without `FrameXML.toc` builds no stock interface and says so, once, as a load
+    /// failure: the reference's runner reports `"Couldn't open %s"` at severity 2 (`0x6edc3f`).
     #[test]
-    fn turtle_s_shop_does_not_load() {
-        let turtle = rows(&[
-            "GameMenuFrame.xml",
-            "Turtle_BarbershopUI\\Turtle_Barbershop.xml",
-            "Turtle_ShopUI\\Turtle_ShopUITemplates.xml",
-            "turtle_shopui/Turtle_ShopUI.xml",
-            "Turtle_TransmogUI\\Turtle_TransmogUI.xml",
-        ]);
-        assert_eq!(
-            without_shop(turtle),
-            rows(&[
-                "GameMenuFrame.xml",
-                "Turtle_BarbershopUI\\Turtle_Barbershop.xml",
-                "Turtle_TransmogUI\\Turtle_TransmogUI.xml",
-            ])
+    fn a_chain_without_the_toc_builds_no_core_and_says_so() {
+        let _chain = fixture::lay(&[(reference_ui::TOC, None)]);
+        assert!(reference_ui::core().is_none());
+        let s = UiScript::new().unwrap();
+        let failures = load_core(&s);
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(
+            failures[0].contains(reference_ui::TOC) && failures[0].contains("not found"),
+            "{failures:?}"
+        );
+        assert!(
+            s.diagnostics().iter().any(|d| {
+                d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Load
+                    && d.message.contains(reference_ui::TOC)
+            }),
+            "the player's /errors carries it"
         );
     }
 
-    /// Turtle WoW's rows go after the latest of ours among the stock rows its toc loads before
-    /// them; rows seated together keep its order; entry 0 stays the font registry; a stock row
-    /// its toc drops is not loaded.
+    /// The core never reads our tree: a toc row that names one of the layer's files loads the
+    /// chain's file of that name or reports it missing, never ours.
     #[test]
-    fn a_flavor_s_own_rows_follow_every_stock_row_it_loads_before_them() {
-        let ours = rows(&[
-            "Interface\\FrameXML\\Fonts.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\UIParent.xml",
-            "Ours.xml",
-            "Interface\\FrameXML\\PartyFrame.xml",
-            "Interface\\FrameXML\\Minimap.xml",
-            "Interface\\FrameXML\\SoundOptionsFrame.xml",
-            "Interface\\FrameXML\\TutorialFrame.xml",
-            "GameMenuFrame.xml",
+    fn the_core_never_loads_a_file_of_ours() {
+        let ours = Addon::layer().toc.files;
+        let row = ours
+            .iter()
+            .find(|f| f.as_str() == "ScrollTemplates.xml")
+            .expect("the layer ships ScrollTemplates.xml");
+        let toc = format!("{row}\n");
+        let _chain = fixture::lay(&[
+            (reference_ui::TOC, Some(toc.as_bytes())),
+            (&format!(r"Interface\FrameXML\{row}"), None),
         ]);
-        let stock = rows(&[
-            "GlobalStrings.lua",
-            "Fonts.xml",
-            "UIParent.xml",
-            "Minimap.xml",
-            "PartyFrame.xml",
-            "SoundOptionsFrame.xml",
-            "TutorialFrame.xml",
-            "GameMenuFrame.xml",
-            "StatsFrame.xml",
-        ]);
-        let turtle = rows(&[
-            "GlobalStrings.lua",
-            "Globals.lua",
-            "Overrides.lua",
-            "Fonts.xml",
-            "UIParent.xml",
-            "Minimap.xml",
-            "PartyFrame.xml",
-            "json.lua",
-            "TutorialFrame.xml",
-            "GameMenuFrame.xml",
-            "StatsFrame.xml",
-            "Hooks.lua",
-            "LFT/LFT.lua",
-            "LFT\\LFT.xml",
-        ]);
-        assert_eq!(
-            splice_flavor_rows(&ours, &stock, &turtle),
-            rows(&[
-                "Interface\\FrameXML\\Fonts.xml",
-                "Interface\\FrameXML\\GlobalStrings.lua",
-                "Interface\\FrameXML\\Globals.lua",
-                "Interface\\FrameXML\\Overrides.lua",
-                "Interface\\FrameXML\\UIParent.xml",
-                "Ours.xml",
-                "Interface\\FrameXML\\PartyFrame.xml",
-                "Interface\\FrameXML\\Minimap.xml",
-                // After Minimap.xml, which ours loads after PartyFrame.xml; SoundOptionsFrame.xml,
-                // which the flavor drops, is gone.
-                "Interface\\FrameXML\\json.lua",
-                "Interface\\FrameXML\\TutorialFrame.xml",
-                "Interface\\FrameXML\\Hooks.lua",
-                "Interface\\FrameXML\\LFT/LFT.lua",
-                "Interface\\FrameXML\\LFT\\LFT.xml",
-                "GameMenuFrame.xml",
-            ])
+        let s = UiScript::new().unwrap();
+        let failures = load_core(&s);
+        assert!(
+            failures.len() == 1 && failures[0].contains("not found"),
+            "{failures:#?}"
+        );
+        assert!(
+            !s.eval::<bool>("return BenillaScrollBar_Step ~= nil")
+                .unwrap(),
+            "the core loaded the layer's own ScrollTemplates.xml"
         );
     }
 
-    /// The stock toc against itself splices nothing, so a 1.12.1 manifest is unchanged; a row
-    /// ours already lists is never doubled.
+    /// Against the player's own install: the core's load list is their `FrameXML.toc`'s file
+    /// lines, read here byte by byte, in order, and every one resolves off their chain.
     #[test]
-    fn the_stock_toc_against_itself_changes_nothing() {
-        let ours = Addon::core().toc.files;
-        let stock = rows(&["GlobalStrings.lua", "Fonts.xml", "UIParent.xml"]);
-        assert_eq!(splice_flavor_rows(&ours, &stock, &stock), ours);
-        let listed = rows(&["GlobalStrings.lua", "UIParent.xml"]);
-        assert_eq!(splice_flavor_rows(&ours, &stock[..1], &listed), ours);
+    fn the_cores_load_list_is_the_players_own_toc() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let bytes = reference_ui::read(reference_ui::TOC).expect("the player's FrameXML.toc");
+        let text = String::from_utf8_lossy(&bytes);
+        let want: Vec<String> = text
+            .trim_start_matches('\u{feff}')
+            .split("\r\n")
+            .flat_map(|l| l.split('\n'))
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| format!(r"Interface\FrameXML\{l}"))
+            .collect();
+        let core = reference_ui::core().expect("the player's FrameXML.toc");
+        assert_eq!(core.toc.files, want);
+        assert!(want.len() >= 90, "only {} rows parsed", want.len());
+        for row in &core.toc.files {
+            assert!(
+                reference_ui::read(row).is_some(),
+                "FrameXML.toc lists {row}, which the chain does not hold"
+            );
+        }
     }
 
-    /// A 1.12.1 VM's manifest is benilla.toc as written, with no chain read for a toc.
+    /// Order shows: the frames registered for one event run in registration order (`SignalEvent`,
+    /// `0x703e50`, walks its tail-appended list), so the toc's row order is their handlers' order.
+    /// `ExhaustionTick` (`MainMenuBar.lua:13`) and `PlayerFrame` (`PlayerFrame.lua:17`) both take
+    /// `PLAYER_UPDATE_RESTING`, and the toc lists `MainMenuBar.xml` above `PlayerFrame.xml`.
     #[test]
-    fn a_vanilla_vm_loads_the_manifest_as_written() {
-        let script = UiScript::new().unwrap();
-        assert_eq!(ingame_manifest(&script), Addon::core().toc.files);
+    fn two_stock_frames_on_one_event_run_in_the_tocs_order() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let toc = reference_ui::read(reference_ui::TOC).expect("the player's FrameXML.toc");
+        let toc = String::from_utf8_lossy(&toc);
+        let at = |leaf: &str| {
+            toc.lines()
+                .position(|l| l.trim() == leaf)
+                .unwrap_or_else(|| panic!("FrameXML.toc lists {leaf}"))
+        };
+        assert!(
+            at("MainMenuBar.xml") < at("PlayerFrame.xml"),
+            "the stock toc's order"
+        );
+        let (mut s, failures) =
+            super::super::layer_tests::production_load_with("event-order", false, "", |_| {});
+        assert!(failures.is_empty(), "load failures: {failures:#?}");
+        s.run(
+            r#"EVENT_ORDER = {}
+            for _, name in ipairs({ "PlayerFrame", "ExhaustionTick" }) do
+                local who = name
+                getglobal(who):SetScript("OnEvent", function() table.insert(EVENT_ORDER, who) end)
+            end"#,
+        )
+        .unwrap();
+        s.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+        let order: Vec<String> = s.eval("return EVENT_ORDER").unwrap();
+        assert_eq!(order, ["ExhaustionTick", "PlayerFrame"]);
     }
 
-    /// A shipped `.xml` the manifest does not list never loads, with no error to say so.
+    /// With the layer, the core leaves the stock ESC menu to the layer's own; without it, the
+    /// stock row stays in the toc's place. Turtle WoW's donation shop rows never load, in either
+    /// separator and any case; the rows around them keep their order.
+    #[test]
+    fn the_core_leaves_the_stock_menu_to_the_layer_and_turtles_shop_out() {
+        let toc =
+            "UIPanelTemplates.xml\nGameMenuFrame.xml\nTurtle_BarbershopUI\\Turtle_Barbershop.xml\n\
+                   Turtle_ShopUI\\Turtle_ShopUITemplates.xml\nturtle_shopui/Turtle_ShopUI.xml\n\
+                   Turtle_TransmogUI\\Turtle_TransmogUI.xml\n";
+        let _chain = fixture::lay(&[(reference_ui::TOC, Some(toc.as_bytes()))]);
+        let rows = |layer| core(layer).expect("the laid toc").toc.files;
+        assert_eq!(
+            rows(true),
+            [
+                r"Interface\FrameXML\UIPanelTemplates.xml",
+                r"Interface\FrameXML\Turtle_BarbershopUI\Turtle_Barbershop.xml",
+                r"Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUI.xml",
+            ]
+        );
+        assert_eq!(
+            rows(false),
+            [
+                r"Interface\FrameXML\UIPanelTemplates.xml",
+                r"Interface\FrameXML\GameMenuFrame.xml",
+                r"Interface\FrameXML\Turtle_BarbershopUI\Turtle_Barbershop.xml",
+                r"Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUI.xml",
+            ]
+        );
+    }
+
+    /// The sliced entry load's list is the core's rows then the layer's files, and walking it one
+    /// entry at a time loads what the one-shot core load does, in the same order.
+    #[test]
+    fn the_sliced_entries_load_as_the_one_shot_core_does() {
+        let _chain = lay_letters("b.lua\nx.xml\na.lua\n");
+        let s = UiScript::new().unwrap();
+        let entries = ingame_entries(&s, false);
+        assert_eq!(
+            entries,
+            [
+                r"Interface\FrameXML\b.lua",
+                r"Interface\FrameXML\x.xml",
+                r"Interface\FrameXML\a.lua"
+            ]
+        );
+        for entry in &entries {
+            let failures = load_entry(&s, entry);
+            assert!(failures.is_empty(), "{entry}: {failures:#?}");
+        }
+        assert_eq!(s.eval::<String>("return LOAD_LOG").unwrap(), "bxa");
+        let layered = ingame_entries(&s, true);
+        assert_eq!(&layered[..3], &entries[..]);
+        assert_eq!(&layered[3..], &Addon::layer().toc.files[..]);
+    }
+
+    /// A shipped `.xml` the layer does not list never loads, with no error to say so.
     #[test]
     fn the_manifest_lists_every_shipped_file_and_nothing_else() {
         let mut listed = shipped_manifest_files();
@@ -540,112 +549,6 @@ mod tests {
             assert!(
                 !reference_ui::is_chain_entry(name),
                 "assets/ui is flat, but ships {name}: a separator makes it a file off the install"
-            );
-        }
-    }
-
-    /// Every chain entry the manifest names is in the player's 1.12 patch chain.
-    #[test]
-    fn every_chain_entry_resolves_off_the_players_install() {
-        let _data = benilla_formats::wow_data_or_skip!();
-        let chain: Vec<String> = manifest_files()
-            .into_iter()
-            .filter(|f| reference_ui::is_chain_entry(f))
-            .collect();
-        for entry in &chain {
-            assert!(
-                reference_ui::read(entry).is_some(),
-                "benilla.toc sources {entry} off the patch chain, which does not hold it"
-            );
-        }
-    }
-
-    /// The stock pass (`UIParent.lua:1592-1775`) indexes these frames unguarded, so a file that
-    /// runs it at load must follow every file it reads, as the reference's toc orders them.
-    #[test]
-    fn every_load_time_runner_of_the_managed_pass_follows_what_it_reads() {
-        let files = manifest_files();
-        let at = |leaf: &str| {
-            files
-                .iter()
-                .position(|f| f.ends_with(&format!("\\{leaf}")))
-                .unwrap_or_else(|| panic!("the manifest lists {leaf}"))
-        };
-        // What the pass reads by name (`UIParent.lua:1598-1775`), and the file that declares it.
-        const READS: &[(&str, &str)] = &[
-            (
-                "MultiBarLeft / MultiBarRight / MultiBarBottomLeft",
-                "MultiActionBars.xml",
-            ),
-            (
-                "PetActionBarFrame + SlidingActionBarTexture0/1",
-                "PetActionBarFrame.xml",
-            ),
-            ("ReputationWatchBar", "ReputationFrame.xml"),
-            (
-                "MainMenuExpBar / MainMenuBarMaxLevelBar / MainMenuBar",
-                "MainMenuBar.xml",
-            ),
-            ("CastingBarFrame", "CastingBarFrame.xml"),
-            ("QuestTimerFrame", "QuestTimerFrame.xml"),
-            ("QuestWatchFrame", "QuestLogFrame.xml"),
-            ("DurabilityFrame + its three glyphs", "DurabilityFrame.xml"),
-            ("MinimapCluster", "Minimap.xml"),
-            (
-                "ChatFrame1 / ChatFrame2 (+ FCF_DockUpdate)",
-                "FloatingChatFrame.xml",
-            ),
-            // The shapeshift arm (l.1705-1732): the stance bar's file declares these and also runs
-            // the pass, so it must precede the other runner.
-            (
-                "ShapeshiftBarLeft / Middle / Right",
-                "BonusActionBarFrame.xml",
-            ),
-        ];
-        // Who runs it at load: an OnLoad, or the OnShow of a frame its OnLoad shows.
-        const RUNNERS: &[(&str, &str)] = &[
-            (
-                "ShapeshiftBar_OnLoad → Show → OnShow",
-                "BonusActionBarFrame.xml",
-            ),
-            ("WorldStateAlwaysUpFrame OnLoad", "WorldStateFrame.xml"),
-        ];
-        for (what, runner) in RUNNERS {
-            for (name, read) in READS {
-                if read == runner {
-                    continue; // its own declarations precede its own OnLoad
-                }
-                assert!(
-                    at(read) < at(runner),
-                    "{runner} ({what}) loads at {} but reads {name}, declared by {read} at {} — \
-                     the pass raises at load and never seats the frame it was run for. Move the \
-                     runner below the read, as the reference's toc has it.",
-                    at(runner),
-                    at(read)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn nothing_declares_a_uiparent_child_before_uiparent_itself_loads() {
-        let files = manifest_files();
-        let at = files
-            .iter()
-            .position(|f| f == r"Interface\FrameXML\UIParent.xml")
-            .expect("the manifest lists UIParent.xml");
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
-        for early in &files[..at] {
-            // A chain entry is a stock file off the player's install, not one on disk here.
-            if reference_ui::is_chain_entry(early) {
-                continue;
-            }
-            let text = std::fs::read_to_string(dir.join(early)).unwrap();
-            assert!(
-                !text.contains(r#"parent="UIParent""#),
-                "{early} loads before UIParent.xml (position {at}) but declares a \
-                 UIParent child — the loader would warn and silently drop it. Move \
-                 UIParent.xml up, or the declaration down."
             );
         }
     }

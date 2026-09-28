@@ -442,10 +442,11 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
 
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
-    let (kind, id) = s
-        .eval::<(String, i64)>("local k, id = GetCursorInfo() return k, id")
-        .unwrap();
-    assert_eq!((kind.as_str(), id), ("item", 1234));
+    assert!(
+        matches!(s.cursor_payload(), Some(benilla_ui::script::CursorPayload::Item(c)) if c.item_id == 1234),
+        "the cursor holds item 1234: {:?}",
+        s.cursor_payload()
+    );
     assert!(
         s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap(),
         "the picked slot locks"
@@ -1082,20 +1083,20 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     // `PanelTemplates_SelectTab` asks `GameTooltip:IsOwned(tab)` (`UIPanelTemplates.lua:130`).
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\CharacterFrameTemplates.xml"); // the window tab
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
-    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
     // Tabs named `<frame>Tab1..N`, as `PanelTemplates_UpdateTabs` looks them up, each with its id.
     s.run(

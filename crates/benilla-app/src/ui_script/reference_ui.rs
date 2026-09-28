@@ -2,9 +2,10 @@
 //! [`super::addons::Source`]; the parse, `<Include>` and `<Script file=>` resolution and chunk
 //! naming are [`super::addons::Addon`]'s.
 //!
-//! `assets/ui/benilla.toc` is the core's load order, and `layer.toc` follows it. An entry with a
-//! path separator comes off the chain, a bare filename is a file we ship ([`is_chain_entry`]), and
-//! a name defined by both goes to the later line. Without client data the chain files are absent, and the log says so once.
+//! The core is the chain's own `FrameXML.toc` ([`core`]), its rows in its order, as `UI_Init`
+//! walks it; benilla's layer (`assets/ui/layer.toc`) follows it. An entry with a path separator
+//! comes off the chain, a bare filename is a file we ship ([`is_chain_entry`]). Without client
+//! data the chain files are absent, and the log says so once.
 
 use std::sync::OnceLock;
 
@@ -19,10 +20,34 @@ use super::addons::{Addon, Source};
 /// does, so an addon's `\AddOns\` debugstack pattern never matches a FrameXML frame.
 pub(super) const NAME: &str = "FrameXML";
 
-/// Whether a manifest entry comes off the player's chain: it has a path separator. Decidable
-/// because `assets/ui` is flat, which `manifest::tests` pins.
+/// Whether an entry (the sliced entry load's, or a test kit's) comes off the player's chain: it
+/// has a path separator. Decidable because `assets/ui` is flat, which `manifest::tests` pins.
 pub(super) fn is_chain_entry(entry: &str) -> bool {
     entry.contains('\\') || entry.contains('/')
+}
+
+/// The stock interface's table of contents, which `UI_Init` (`0x48fbf0`) hands to the `.toc`
+/// runner (`0x6edb90`) at `0x48ffed`, once per UI build, `ReloadUI` included.
+pub(super) const TOC: &str = r"Interface\FrameXML\FrameXML.toc";
+
+/// The core interface: the chain's own [`TOC`], patched or not, as an [`Addon`] over the chain, or
+/// `None` when the chain has no such file.
+pub(super) fn core() -> Option<Addon> {
+    read(TOC).map(|bytes| core_from(&benilla_ui::source::decode(&bytes)))
+}
+
+/// The core over `toc`'s text: each file line prefixed with the toc's own directory, in the toc's
+/// order, as the runner builds its paths (`0x6edbe5`, `0x6edcf4`, `0x6edd0c`) and dispatches each
+/// in turn (`0x6edd51`).
+pub(super) fn core_from(toc: &str) -> Addon {
+    let dir = TOC.rsplit_once('\\').map_or("", |(d, _)| d);
+    addon(
+        Toc::parse(toc)
+            .files
+            .iter()
+            .map(|f| format!("{dir}\\{f}"))
+            .collect(),
+    )
 }
 
 /// The stock interface as an [`Addon`] over the chain; `files` are full chain paths.
@@ -40,6 +65,10 @@ pub(super) fn addon(files: Vec<String>) -> Addon {
 /// One file's bytes off the player's patch chain, by internal path. Bytes, not a string: Lua
 /// takes a chunk as stored, and a cp1252 file is not valid UTF-8.
 pub(super) fn read(req: &str) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if let Some(overlaid) = fixture::read(req) {
+        return overlaid;
+    }
     let chain = chain()?;
     match chain.read(req) {
         Ok(bytes) => Some(bytes),
@@ -47,25 +76,6 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
             debug!("ui_script: {req} is not in the patch chain: {e:#}");
             None
         }
-    }
-}
-
-/// One file's bytes off the 1.12.1 corpus alone, under any Turtle WoW layer: the stock file a layer's
-/// own may replace. Native mounts no layer, so it is [`read`] there.
-pub(super) fn read_stock(req: &str) -> Option<Vec<u8>> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        match chain()?.store().read_sync(req) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                debug!("ui_script: {req} is not in the 1.12.1 corpus: {e:#}");
-                None
-            }
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        read(req)
     }
 }
 
@@ -78,7 +88,7 @@ pub(super) fn read_stock(req: &str) -> Option<Vec<u8>> {
 /// read is a file read, and `true` for a name the container does not hold — a miss is a miss now,
 /// not later, and the caller should go ahead and get its `None` from [`read`].
 ///
-/// The caller is the sliced entry load ([`super::lifecycle`]), which walks the manifest in order.
+/// The caller is the sliced entry load ([`super::lifecycle`]), which walks its rows in order.
 pub(super) fn ready(req: &str) -> bool {
     chain().is_none_or(|chain| chain.ready(req))
 }
@@ -92,9 +102,9 @@ fn chain() -> Option<&'static Chain> {
         .get_or_init(|| {
             let Some(data) = benilla_formats::wow_data() else {
                 warn!(
-                    "ui_script: no client data — every interface file this client SOURCES off the \
-                     player's install (benilla.toc's `Interface\\…` entries) is absent, so the \
-                     windows they build do not exist and addons that call their globals will raise"
+                    "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
+                     file it lists, is absent off the player's install, so its windows do not \
+                     exist and addons that call their globals will raise"
                 );
                 return None;
             };
@@ -107,6 +117,48 @@ fn chain() -> Option<&'static Chain> {
             }
         })
         .as_ref()
+}
+
+/// Files a test lays over the chain, per test thread: an entry with bytes reads as a chain file,
+/// one with `None` as a file the chain lacks, and any other path falls through to the chain.
+#[cfg(test)]
+pub(super) mod fixture {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static OVERLAY: RefCell<HashMap<String, Option<Vec<u8>>>> = RefCell::new(HashMap::new());
+    }
+
+    fn key(path: &str) -> String {
+        path.replace('/', "\\").to_ascii_lowercase()
+    }
+
+    /// Lays `files` over the chain until the guard drops.
+    pub(in crate::ui_script) fn lay(files: &[(&str, Option<&[u8]>)]) -> Guard {
+        OVERLAY.with(|o| {
+            let mut o = o.borrow_mut();
+            o.clear();
+            for (path, bytes) in files {
+                o.insert(key(path), bytes.map(<[u8]>::to_vec));
+            }
+        });
+        Guard
+    }
+
+    /// The overlay's answer for `path`, `None` when it has no entry.
+    pub(super) fn read(path: &str) -> Option<Option<Vec<u8>>> {
+        OVERLAY.with(|o| o.borrow().get(&key(path)).cloned())
+    }
+
+    /// Clears the overlay on drop.
+    pub(in crate::ui_script) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERLAY.with(|o| o.borrow_mut().clear());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -382,7 +434,8 @@ mod tests {
             .map(str::to_string)
             .collect();
 
-        let migrated: Vec<String> = super::super::addons::Addon::core()
+        let migrated: Vec<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()
@@ -587,7 +640,8 @@ mod tests {
             "the method probe is not working — it answered {got:?} for {control:?}"
         );
 
-        let migrated: std::collections::HashSet<String> = super::super::addons::Addon::core()
+        let migrated: std::collections::HashSet<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()
@@ -1348,43 +1402,6 @@ mod tests {
         );
     }
 
-    /// The core's chain rows are the reference's own `FrameXML.toc` rows, every one, but the stock
-    /// `GameMenuFrame.xml`, which the layer's own menu stands in for (this fork's deviation). A
-    /// row the stock toc lacks runs a file the reference does not, or twice: `UIParent.xml:4`
-    /// sources `LocaleProperties.lua`, which has no row.
-    #[test]
-    fn the_cores_chain_rows_are_the_stock_tocs_rows() {
-        let _data = benilla_formats::wow_data_or_skip!();
-        let toc = String::from_utf8_lossy(
-            &super::read("Interface\\FrameXML\\FrameXML.toc").expect("the reference's own toc"),
-        )
-        .into_owned();
-        let mut stock: Vec<String> = toc
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .filter(|l| !l.eq_ignore_ascii_case("GameMenuFrame.xml"))
-            .map(|l| format!("interface\\framexml\\{}", l.to_ascii_lowercase()))
-            .collect();
-        let mut core: Vec<String> = super::super::addons::Addon::core()
-            .toc
-            .files
-            .iter()
-            .filter(|f| super::is_chain_entry(f))
-            .map(|f| f.to_ascii_lowercase())
-            .collect();
-        stock.sort();
-        core.sort();
-        let missing: Vec<&String> = stock.iter().filter(|r| !core.contains(r)).collect();
-        let extra: Vec<&String> = core.iter().filter(|r| !stock.contains(r)).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "benilla.toc against the stock FrameXML.toc — stock rows it does not load: \
-             {missing:?}; rows the stock toc does not have: {extra:?}"
-        );
-        assert_eq!(core, stock, "a stock row listed twice");
-    }
-
     /// A chain `.xml` that does not source its own `.lua` needs the `.lua` as a manifest line too,
     /// as the stock toc lists `MoneyInputFrame.lua` and `TextStatusBar.lua` (lines 11 and 32).
     /// Without it every global the file should define reads nil, and nothing errors.
@@ -1664,7 +1681,8 @@ mod tests {
     /// Every chain file the shipped interface loads, in load order: the manifest's chain entries,
     /// then each reached addon's files in its own toc order.
     fn gated_chain_entries() -> Vec<String> {
-        let mut out: Vec<String> = super::super::addons::Addon::core()
+        let mut out: Vec<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()

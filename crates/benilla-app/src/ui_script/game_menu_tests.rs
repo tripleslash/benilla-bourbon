@@ -8,32 +8,26 @@ use benilla_ui::script::{
 use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
 
 /// The menu over what it needs (`GameMenuButtonTemplate` is `UIPanelTemplates.xml:403`), with
-/// `extra` in its way, deduped so no file loads twice.
+/// `extra` in its way, each file once, in the production order.
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let files: Vec<&str> = [
+    const MENU: &[&str] = &[
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
         // Before the menu: its `parent="UIParent"` resolves at load.
         r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
-        "Interface\\FrameXML\\BasicControls.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-    ]
-    .into_iter()
-    .chain(extra.iter().copied())
-    .chain(std::iter::once("GameMenuFrame.xml"))
-    .collect();
-    let mut loaded = std::collections::HashSet::new();
-    for file in files {
-        if loaded.insert(file) {
-            load_xml(&s, file);
-        }
+        "GameMenuFrame.xml",
+    ];
+    for file in super::test_ui::production_order(&[MENU, extra]) {
+        load_xml(&s, file);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
@@ -43,14 +37,9 @@ fn harness() -> UiScript {
     harness_with(&[])
 }
 
-/// [`harness_with`] over the stock bag stack, with `before` ahead of it and `after` behind.
-fn bag_harness_with(before: &[&str], after: &[&str]) -> UiScript {
-    let files: Vec<&str> = before
-        .iter()
-        .copied()
-        .chain(BAG_UI.iter().copied())
-        .chain(after.iter().copied())
-        .collect();
+/// [`harness_with`] over the stock bag stack and `extra`.
+fn bag_harness_with(extra: &[&str]) -> UiScript {
+    let files: Vec<&str> = BAG_UI.iter().chain(extra).copied().collect();
     harness_with(&files)
 }
 
@@ -59,8 +48,8 @@ fn bag_harness_with(before: &[&str], after: &[&str]) -> UiScript {
 /// and (this fork) without Exit Game, as a browser tab has no process for it to end.
 const LADDER: [&str; 6] = [
     "GameMenuButtonOptions",
-    "GameMenuButtonEditMode",
-    "GameMenuButtonSupport",
+    "BenillaGameMenuButtonEditMode",
+    "BenillaGameMenuButtonSupport",
     "GameMenuButtonMacros",
     "GameMenuButtonLogout",
     "GameMenuButtonContinue",
@@ -114,7 +103,10 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
-    for name in ["GameMenuButtonEditMode", "GameMenuButtonSupport"] {
+    for name in [
+        "BenillaGameMenuButtonEditMode",
+        "BenillaGameMenuButtonSupport",
+    ] {
         assert!(
             !s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
                 .unwrap(),
@@ -133,10 +125,10 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
             "{name} is live"
         );
     }
-    // Edit Mode reads the era's `HUD_EDIT_MODE_MENU` and Continue 1.12's `RETURN_TO_GAME`; Options
+    // Edit Mode is the era's literal and Continue 1.12's `RETURN_TO_GAME`; Options
     // is a literal, as 1.12's `OPTIONS_MENU` is "Options Menu".
     assert_eq!(
-        s.eval::<String>("return GameMenuButtonEditMode:GetText()")
+        s.eval::<String>("return BenillaGameMenuButtonEditMode:GetText()")
             .unwrap(),
         "Edit Mode"
     );
@@ -157,14 +149,11 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 #[test]
 fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(
-        &[],
-        &[
-            "ScrollTemplates.xml",
-            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-            "Interface\\FrameXML\\MerchantFrame.xml",
-        ],
-    );
+    let mut s = bag_harness_with(&[
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+        "ScrollTemplates.xml",
+    ]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
 
@@ -197,14 +186,11 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
 #[test]
 fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(
-        &[],
-        &[
-            "ScrollTemplates.xml",
-            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-            "Interface\\FrameXML\\MerchantFrame.xml",
-        ],
-    );
+    let mut s = bag_harness_with(&[
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+        "ScrollTemplates.xml",
+    ]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -227,26 +213,23 @@ fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
 #[test]
 fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = bag_harness_with(
-        &[],
-        &[
-            "ScrollTemplates.xml",
-            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-            "Interface\\FrameXML\\MerchantFrame.xml",
-            // The stock loot window, as `test_ui::LOOT_UI`.
-            "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
-            "Interface\\FrameXML\\UnitPopup.xml",
-            "Interface\\FrameXML\\TextStatusBar.lua",
-            "Interface\\FrameXML\\TextStatusBar.xml",
-            "Interface\\FrameXML\\UnitFrame.xml",
-            "Interface\\FrameXML\\BuffFrame.xml",
-            "Interface\\FrameXML\\PartyFrame.xml",
-            "Interface\\FrameXML\\ItemButtonTemplate.xml",
-            "Interface\\FrameXML\\LootFrame.xml",
-        ],
-    );
+    let mut s = bag_harness_with(&[
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+        // The stock loot window, as `test_ui::LOOT_UI`.
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitPopup.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\PartyFrame.xml",
+        "Interface\\FrameXML\\ItemButtonTemplate.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+        "Interface\\FrameXML\\LootFrame.xml",
+        "ScrollTemplates.xml",
+    ]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -507,19 +490,19 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
     let s = harness_with(&[
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml", // the map's zone pickers initialize at OnLoad
-        "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        // The map calls `UpdateMicroButtons` unguarded (`WorldMapFrame.xml:599`, `:606`).
-        "Interface\\FrameXML\\Cooldown.xml",
-        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
         "Interface\\FrameXML\\MainMenuBar.xml",
+        // The map calls `UpdateMicroButtons` unguarded (`WorldMapFrame.xml:599`, `:606`).
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         r"Interface\FrameXML\WorldMapFrame.xml",
+        "ScrollTemplates.xml",
     ]);
 
     s.run("ToggleWorldMap()").unwrap();
@@ -560,34 +543,32 @@ fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
 fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness_with(&[
-        "Interface\\FrameXML\\GameTooltip.xml",
-        "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "ScrollTemplates.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        // The action bar the micro buttons sit on: the map calls `UpdateMicroButtons` unguarded.
-        "Interface\\FrameXML\\Cooldown.xml",
-        "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "Interface\\FrameXML\\TextStatusBar.lua",
-        "Interface\\FrameXML\\TextStatusBar.xml",
-        "Interface\\FrameXML\\MainMenuBar.xml",
-        "Interface\\FrameXML\\ActionBarFrame.xml",
-        "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
-        r"Interface\FrameXML\WorldMapFrame.xml",
-        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-        "Interface\\FrameXML\\MerchantFrame.xml",
         // The stock loot window, as `test_ui::LOOT_UI`.
         "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
-        "Interface\\FrameXML\\UnitPopup.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",
         "Interface\\FrameXML\\TextStatusBar.xml",
-        "Interface\\FrameXML\\UnitFrame.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        // The action bar the micro buttons sit on: the map calls `UpdateMicroButtons` unguarded.
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BuffFrame.xml",
+        "Interface\\FrameXML\\UnitPopup.xml",
+        "Interface\\FrameXML\\UnitFrame.xml",
         "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\ItemButtonTemplate.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
         "Interface\\FrameXML\\LootFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        r"Interface\FrameXML\WorldMapFrame.xml",
+        "ScrollTemplates.xml",
     ]);
     s.run("ToggleWorldMap()").unwrap();
 
@@ -616,26 +597,22 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
 fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     let _data = benilla_formats::wow_data_or_skip!();
     // The action bar, whose `MainMenuBarArtFrame` parents the bag bar, ahead of the bag stack.
-    let mut s = bag_harness_with(
-        &[
-            "Interface\\FrameXML\\Cooldown.xml",
-            "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "Interface\\FrameXML\\TextStatusBar.lua",
-            "Interface\\FrameXML\\TextStatusBar.xml",
-            "Interface\\FrameXML\\Fonts.xml",
-            r"Interface\FrameXML\UIParent.xml",
-            "ScrollTemplates.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\MainMenuBar.xml",
-            "Interface\\FrameXML\\GameTooltip.xml",
-            "Interface\\FrameXML\\ActionBarFrame.xml",
-            "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        ],
-        &[
-            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-            "Interface\\FrameXML\\MerchantFrame.xml",
-        ],
-    );
+    let mut s = bag_harness_with(&[
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
+        "Interface\\FrameXML\\ActionBarFrame.xml",
+        "Interface\\FrameXML\\BonusActionBarFrame.xml",
+        "ScrollTemplates.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+    ]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.resolve();
@@ -747,17 +724,17 @@ fn backpack() -> ContainerState {
     }
 }
 
-/// The menu wears the options window's `ERA_WINDOW_SCALE` on show, as the era client draws the two
-/// at one density; loaded with OptionsFrame.xml, which defines it.
+/// The menu wears the options window's `BENILLA_ERA_WINDOW_SCALE` on show, as the era client draws
+/// the two at one density; loaded with OptionsFrame.xml, which defines it.
 #[test]
 fn the_menu_rides_the_shared_era_window_scale() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness_with(&[
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
-        "ScrollTemplates.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
+        "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
     ]);
@@ -765,7 +742,7 @@ fn the_menu_rides_the_shared_era_window_scale() {
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     let k = s.eval::<f64>("return GameMenuFrame:GetScale()").unwrap();
-    let want = s.eval::<f64>("return ERA_WINDOW_SCALE").unwrap();
+    let want = s.eval::<f64>("return BENILLA_ERA_WINDOW_SCALE").unwrap();
     assert!((k - want).abs() < 1e-6, "menu scale {k} != knob {want}");
     assert!((want - 0.78).abs() < 1e-6, "the knob itself moved: {want}");
 }

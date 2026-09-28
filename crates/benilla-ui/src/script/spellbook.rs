@@ -445,7 +445,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellCooldown",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellCooldown")?;
-            let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
+            let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let cooldown = book_slot(&model, id, &book_type).and_then(|s| s.cooldown);
             Ok(match cooldown {
@@ -896,14 +896,14 @@ mod tests {
         s.run(r#"picked = PickupSpell(1, BOOKTYPE_SPELL)"#).unwrap();
         assert!(s.eval::<bool>("return picked").unwrap());
         assert!(s.cursor_payload().is_some());
-        let (kind, book_id, book, spell_id) = s
-            .eval::<(String, i64, String, i64)>(
-                "local k, slot, book, id = GetCursorInfo() return k, slot, book, id",
-            )
-            .unwrap();
-        assert_eq!(
-            (kind.as_str(), book_id, book.as_str(), spell_id),
-            ("spell", 1, "spell", 133)
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Spell(c))
+                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
 
         // Tick first to flush the first pickup's `CURSOR_UPDATE`, so the count below is the
@@ -926,12 +926,14 @@ mod tests {
             "refused pickup fires no CURSOR_UPDATE"
         );
         // Still holding the first pickup: a refusal never clobbers it.
-        assert_eq!(
-            s.eval::<(String, i64, String, i64)>(
-                "local k, slot, book, id = GetCursorInfo() return k, slot, book, id"
-            )
-            .unwrap(),
-            ("spell".to_string(), 1, "spell".to_string(), 133)
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Spell(c))
+                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
     }
 
@@ -950,10 +952,13 @@ mod tests {
             .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_SPELL)"#)
             .unwrap());
         // The original (action) payload survives untouched.
-        assert_eq!(
-            s.eval::<String>("local k = GetCursorInfo() return k")
-                .unwrap(),
-            "action"
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Action(_))
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
     }
 

@@ -376,22 +376,22 @@ fn channel_notices_compose_by_the_notice_law() {
 pub(super) fn chat_vm() -> benilla_ui::script::UiScript {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     // The chat tabs call the dropdown kit (`CloseDropDownMenus` on a click), which reads
-    // `TOOLTIP_DEFAULT_COLOR`: both load ahead of ChatFrame.xml, as in `benilla.toc`.
+    // `TOOLTIP_DEFAULT_COLOR`: both load ahead of ChatFrame.xml, as in `FrameXML.toc`.
     for file in [
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
-        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "Interface\\FrameXML\\UIMenu.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
-        "Interface\\FrameXML\\BasicControls.xml",
-        "Interface\\FrameXML\\ChatFrame.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
         "Interface\\FrameXML\\UIPanelTemplates.lua",
         "Interface\\FrameXML\\UIPanelTemplates.xml",
-        r"Interface\FrameXML\UIParent.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
+        "Interface\\FrameXML\\ChatFrame.xml",
         "Interface\\FrameXML\\FloatingChatFrame.xml",
     ] {
         crate::ui_script::load_ui_for_test(&s, file);
@@ -1437,7 +1437,11 @@ fn real_alias_table_resolves_the_shipped_commands() {
         );
     }
     assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
-    assert_eq!(parse_line("/convertraid"), ParsedChat::ConvertRaid);
+    // 1.12 has none of these: `/convertraid` (the Raid tab's button converts), and benilla's
+    // `/reload` and `/errors`, which are its layer's `SlashCmdList` rows, not this table's.
+    for line in ["/convertraid", "/reload", "/errors", "/err"] {
+        assert_eq!(parse_line(line), ParsedChat::Unknown, "{line}");
+    }
     // `/console` from a line that skipped the stock edit box forwards to the stock handler's verb.
     assert_eq!(
         parse_line("/console fpsJournal 1"),
@@ -1476,9 +1480,8 @@ fn real_alias_table_resolves_the_shipped_commands() {
         }
     }
     // The shipped surface: 68 distinct aliases over 36 `SlashCmdList` indices and 225 emote
-    // commands over 169 `EmotesText` names (aliases repeat; EMOTE27 "UNUSED" has no row). Then
-    // benilla's own `/reload`, `/errors`, `/err` and `/convertraid`, which are not 1.12 commands,
-    // in every build, and 7 instrument aliases, in dev builds only.
+    // commands over 169 `EmotesText` names (aliases repeat; EMOTE27 "UNUSED" has no row), then 7
+    // instrument aliases, in dev builds only.
     let instruments = if crate::run_mode::dev_affordances() {
         7
     } else {
@@ -1486,8 +1489,8 @@ fn real_alias_table_resolves_the_shipped_commands() {
     };
     assert_eq!(
         table.counts(),
-        (68, 225, 4, instruments),
-        "(slash, emote, benilla addition, instrument) aliases"
+        (68, 225, instruments),
+        "(slash, emote, instrument) aliases"
     );
 }
 
