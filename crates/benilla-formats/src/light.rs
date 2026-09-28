@@ -157,11 +157,44 @@ fn dbc_to_world(x: f32, y: f32, z: f32) -> [f32; 3] {
     ]
 }
 
+/// The fog end (yd) of a table that authors none: the reference's farthest farclip (`farclip`
+/// tops out at 777), so the pushed end is the view distance the player picked.
+const UNAUTHORED_FOG_END: f32 = 777.0;
+
+/// The raw fog end stamped on most `LightFloatBand` fog-end rows, if one is. 1.12 authors a
+/// distance per zone (Durotar 32000, Orgrimmar 12000; no value is on more than 11% of the rows);
+/// Turtle WoW 1.18 stamps 15000 on 585 of 593 (Durotar's 889 yd cut to 417), so a row carrying
+/// the stamp authors no fog distance.
+fn blanket_fog_end(float_bands: &HashMap<u32, Band<f32>>) -> Option<f32> {
+    let ends: Vec<f32> = float_bands
+        .iter()
+        .filter(|(k, b)| (*k - 1) % 6 == FB_FOG_END && !b.values.is_empty())
+        .filter_map(|(_, b)| {
+            let v = b.values[0];
+            b.values.iter().all(|&x| x == v).then_some(v)
+        })
+        .collect();
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for v in &ends {
+        *counts.entry(v.to_bits()).or_default() += 1;
+    }
+    let total = float_bands
+        .iter()
+        .filter(|(k, b)| (*k - 1) % 6 == FB_FOG_END && !b.values.is_empty())
+        .count();
+    counts
+        .into_iter()
+        .find(|&(_, n)| n * 2 > total)
+        .map(|(bits, _)| f32::from_bits(bits))
+}
+
 /// Parsed lighting tables; query with [`LightCatalog::sample`].
 pub struct LightCatalog {
     lights: Vec<Light>,
     int_bands: HashMap<u32, Band<u32>>,
     float_bands: HashMap<u32, Band<f32>>,
+    /// The raw fog end a repack stamped on most rows, which authors no distance ([`blanket_fog_end`]).
+    blanket_fog_end: Option<f32>,
     /// `LightParams` id → glow ([`LP_GLOW`]), the per-zone bloom composite weight.
     light_params_glow: HashMap<u32, f32>,
     /// `LightParams` id → `highlightSky` as 0.0/1.0, gating the dawn and dusk sky-dome warp.
@@ -338,6 +371,7 @@ impl LightCatalog {
         Ok(LightCatalog {
             lights,
             int_bands,
+            blanket_fog_end: blanket_fog_end(&float_bands),
             float_bands,
             light_params_glow,
             light_params_highlight,
@@ -709,10 +743,18 @@ impl LightCatalog {
         // `0x6d6160` → `0x6d6100` runs `0x6d6090`, × 1/36 at `0x7ff9d0`, on rows with
         // `rowIndex % 6 == 0`); scaling the interpolated value here is the same. A 0 end (params 9
         // and 93) stays 0, kept finite by the shaders' `max(end − start, 0.001)`.
-        let fog_end = fb(FB_FOG_END)
-            .and_then(|b| sample_float(b, t))
-            .map(|v| v / POS_SCALE)
-            .unwrap_or(ZERO_KEY_SCALAR);
+        let end_band = fb(FB_FOG_END);
+        let stamped = end_band
+            .zip(self.blanket_fog_end)
+            .is_some_and(|(b, s)| !b.values.is_empty() && b.values.iter().all(|&v| v == s));
+        let fog_end = if stamped {
+            UNAUTHORED_FOG_END
+        } else {
+            end_band
+                .and_then(|b| sample_float(b, t))
+                .map(|v| v / POS_SCALE)
+                .unwrap_or(ZERO_KEY_SCALAR)
+        };
         let fog_start_frac = fb(FB_FOG_START_MULT)
             .and_then(|b| sample_float(b, t))
             .unwrap_or(ZERO_KEY_SCALAR);

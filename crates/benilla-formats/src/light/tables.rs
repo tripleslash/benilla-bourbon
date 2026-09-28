@@ -15,7 +15,7 @@ pub(super) const DAY: u32 = 2880;
 /// One band row: parallel (time, value) pairs across the day, ascending in `times`.
 pub(super) struct Band<T> {
     times: Vec<u32>,
-    values: Vec<T>,
+    pub(super) values: Vec<T>,
 }
 
 /// The shared band record: `ID, num, time[16], value[16]`, 34 fields, 136 bytes.
