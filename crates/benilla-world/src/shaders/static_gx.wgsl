@@ -368,7 +368,9 @@ struct GxVertex {
 }
 
 struct GxVsOut {
-    @builtin(position) position: vec4<f32>,
+    // `@invariant`: the depth prepass (`prepass_vertex`) must land on exactly this depth, since the
+    // colour pass tests `Equal` against what it wrote.
+    @builtin(position) @invariant position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
@@ -394,19 +396,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.color = vec4<f32>(1.0);
         return out;
     }
-    // Camera-relative for f32 precision: the recentred vertex plus (cell origin - camera).
-    let p_cam = v.position + (cell.origin.xyz - view.world_position);
     let world = v.position + cell.origin.xyz;
     out.world_position = vec4<f32>(world, 1.0);
-    let view_rot = mat3x3<f32>(
-        view.view_from_world[0].xyz,
-        view.view_from_world[1].xyz,
-        view.view_from_world[2].xyz,
-    );
-    out.position = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
-    // Authored MOBA batch order (record y, 0 on cells): a later coplanar batch wins reverse-Z
-    // GreaterEqual in any draw order, because the draw sort does not keep authored order.
-    out.position.z *= 1.0 + f32(recs[v.word & 0xffffu].y) * 1.1920929e-7;
+    out.position = gx_clip_position(v.position, v.word);
     out.world_normal = v.normal;
     out.uv = v.uv;
     out.word = v.word;
@@ -422,66 +414,166 @@ fn vertex(v: GxVertex) -> GxVsOut {
         // both the defined value and the reference's answer for these lanes.
         out.point_sel = vec3<u32>(0u);
     } else {
+#ifdef WOW_MODERN
+        // A modern fragment never reads the Gouraud sum (`point_light_eval` or the grid replaces
+        // it), and reads the three-nearest selection only where the grid does not answer — so
+        // neither walk of the whole light table runs per vertex for nothing.
+        out.point_lit = vec3<f32>(0.0);
+        if (locallight::grid_live(modern_block.lights)
+            && !sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
+            out.point_sel = vec3<u32>(0u);
+        } else {
+            out.point_sel = point_light_select(v.anchor);
+        }
+#else
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
         out.point_sel = point_light_select(v.anchor);
+#endif
     }
     return out;
+}
+
+// The clip position both vertex entries write: camera-relative for f32 precision (the recentred
+// vertex plus (cell origin - camera)), and the authored MOBA batch order (record y, 0 on cells)
+// folded into depth so a later coplanar batch wins reverse-Z in any draw order, because the draw
+// sort does not keep authored order. One function, so the prepass and the colour pass compute it
+// with the same operations in the same order.
+fn gx_clip_position(position: vec3<f32>, word: u32) -> vec4<f32> {
+    let p_cam = position + (cell.origin.xyz - view.world_position);
+    let view_rot = mat3x3<f32>(
+        view.view_from_world[0].xyz,
+        view.view_from_world[1].xyz,
+        view.view_from_world[2].xyz,
+    );
+    var clip = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
+    clip.z *= 1.0 + f32(recs[word & 0xffffu].y) * 1.1920929e-7;
+    return clip;
+}
+
+// The item's texel through the sampler matching its wrap flags. Both-repeat and both-clamp ride
+// real samplers (exact parity); the rare MIXED batch keeps the repeat sampler plus the half-texel
+// inset clamp on its clamped axis (0763's silhouette clamp, per axis). Explicit gradients, so the
+// one sample the flags pick may sit in a per-fragment branch and the other two are never fetched.
+fn gx_sample(uv: vec2<f32>, word: u32, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> vec4<f32> {
+    let layer = i32(recs[word & 0xffffu].x);
+    let wrap_x = (word & WORD_WRAP_X) != 0u;
+    let wrap_y = (word & WORD_WRAP_Y) != 0u;
+    if (wrap_x && wrap_y) {
+        return textureSampleGrad(tex_array, samp_repeat, uv, layer, uv_dx, uv_dy);
+    }
+    if (!wrap_x && !wrap_y) {
+        return textureSampleGrad(tex_array, samp_clamp, uv, layer, uv_dx, uv_dy);
+    }
+    let dims = vec2<f32>(textureDimensions(tex_array).xy);
+    let inset = 0.5 / dims;
+    var uv_mixed = uv;
+    if (!wrap_x) {
+        uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
+    }
+    if (!wrap_y) {
+        uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
+    }
+    return textureSampleGrad(tex_array, samp_repeat, uv_mixed, layer, uv_dx, uv_dy);
+}
+
+// ---- the depth prepass (modern frames) ----
+//
+// The colour pass's modern lanes (the probe field, the cascades, the sky map, the light grid) cost
+// far more per fragment than the geometry does, and alpha-keyed foliage overdraws several layers
+// deep with a `discard` that keeps the hardware from rejecting hidden fragments early. So a modern
+// frame lays the static world's depth first — the same clip position, the same farclip wall and
+// the same alpha key — and the colour pass then tests `Equal` with no `discard` at all, shading
+// each visible pixel once.
+
+struct GxPrepassVertex {
+    @location(0) position: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) word: u32,
+}
+
+struct GxPrepassOut {
+    @builtin(position) @invariant position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) word: u32,
+    // Planar eye-Z, for the farclip wall: linear in the position, so interpolating it is the
+    // colour pass's per-pixel value.
+    @location(2) eye_z: f32,
+}
+
+@vertex
+fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
+    var out: GxPrepassOut;
+    out.uv = v.uv;
+    out.word = v.word;
+    if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
+        out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        out.eye_z = 0.0;
+        return out;
+    }
+    let world = v.position + cell.origin.xyz;
+    out.eye_z = -(view.view_from_world * vec4<f32>(world, 1.0)).z;
+    out.position = gx_clip_position(v.position, v.word);
+    return out;
+}
+
+@fragment
+fn prepass_fragment(in: GxPrepassOut) {
+    if (wow_light.fog_params.w > 0.0 && in.eye_z > wow_light.fog_params.w) {
+        discard;
+    }
+#ifdef GX_CUTOUT
+    // The colour pass's own sample: the same texel through the same gradients, so the key agrees.
+    let grad_scale = exp2(view.mip_bias);
+    let uv_dx = dpdx(in.uv) * grad_scale;
+    let uv_dy = dpdy(in.uv) * grad_scale;
+    if ((in.word & WORD_TEXTURED) != 0u) {
+        if (gx_sample(in.uv, in.word, uv_dx, uv_dy).a < VANILLA_ALPHA_KEY) {
+            discard;
+        }
+    }
+#endif
 }
 
 @fragment
 fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // The hard farclip wall: per-pixel planar eye-Z, the same plane as the entity path.
     let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
+    // Behind the prepass the depth test already holds the wall and the alpha key (`Equal` passes
+    // only the surface the prepass kept), so this pass never discards and every hidden fragment is
+    // rejected before it shades.
+#ifndef GX_PREPASSED
     if (wow_light.fog_params.w > 0.0 && eye_z > wow_light.fog_params.w) {
         discard;
     }
+#endif
     // Sample: the item's array layer through the sampler matching its wrap flags. Both-repeat
     // and both-clamp ride real samplers (exact parity); the rare MIXED batch keeps the repeat
     // sampler plus the half-texel inset clamp on its clamped axis (0763's silhouette clamp,
     // per axis). The derivatives are taken unconditionally (see below) and the select
     // is per fragment.
     var base = vec4<f32>(1.0);
-    let wrap_x = (in.word & WORD_WRAP_X) != 0u;
-    let wrap_y = (in.word & WORD_WRAP_Y) != 0u;
-    // The samples below sit inside a per-fragment branch (`WORD_TEXTURED` is per vertex), where
-    // WGSL's uniformity rule forbids implicit derivatives — naga lets it through, the browser's
-    // compiler does not. So the derivatives are taken HERE, in uniform flow, and the samples use
+    // The sample sits inside a per-fragment branch (`WORD_TEXTURED` is per vertex), where WGSL's
+    // uniformity rule forbids implicit derivatives — naga lets it through, the browser's compiler
+    // does not. So the derivatives are taken HERE, in uniform flow, and `gx_sample` uses
     // `textureSampleGrad`; `mip_bias` folds in as a scale of 2^bias on the footprint, which is
     // exactly what the bias form does to the LOD.
+    // `view.mip_bias` (decision 1639) — the render-scale LOD compensation, 0.0 at native. Carried
+    // here as well as in wow_model.wgsl because this lane draws the same statics through its own
+    // sampler rather than through `pbr_input_from_standard_material`, which applies the bias for
+    // free; a lane that skipped it would blur out of step with the entity path drawing the
+    // identical art.
     let grad_scale = exp2(view.mip_bias);
     let uv_dx = dpdx(in.uv) * grad_scale;
     let uv_dy = dpdy(in.uv) * grad_scale;
     if ((in.word & WORD_TEXTURED) != 0u) {
-        let layer = i32(recs[in.word & 0xffffu].x);
-        let dims = vec2<f32>(textureDimensions(tex_array).xy);
-        let inset = 0.5 / dims;
-        var uv_mixed = in.uv;
-        if (!wrap_x) {
-            uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
-        }
-        if (!wrap_y) {
-            uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
-        }
-        // `view.mip_bias` (decision 1639) — the render-scale LOD compensation, 0.0 at native.
-        // Carried here as well as in wow_model.wgsl because this lane draws the same statics
-        // through its own sampler rather than through `pbr_input_from_standard_material`, which
-        // applies the bias for free; a lane that skipped it would blur out of step with the
-        // entity path drawing the identical art.
-        let c_repeat = textureSampleGrad(tex_array, samp_repeat, in.uv, layer, uv_dx, uv_dy);
-        let c_clamp = textureSampleGrad(tex_array, samp_clamp, in.uv, layer, uv_dx, uv_dy);
-        let c_mixed = textureSampleGrad(tex_array, samp_repeat, uv_mixed, layer, uv_dx, uv_dy);
-        if (wrap_x && wrap_y) {
-            base = c_repeat;
-        } else if (!wrap_x && !wrap_y) {
-            base = c_clamp;
-        } else {
-            base = c_mixed;
-        }
+        base = gx_sample(in.uv, in.word, uv_dx, uv_dy);
     }
 #ifdef GX_CUTOUT
+#ifndef GX_PREPASSED
     if (base.a < VANILLA_ALPHA_KEY) {
         discard;
     }
+#endif
 #endif
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
@@ -499,9 +591,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // selection loop and then threw it away.
     var point_lit_px = in.point_lit;
 #ifdef WOW_MODERN
-    point_lit_px = point_light_eval(in.point_sel, in.world_position.xyz, n_lit);
     // fork: modern lighting (FORK.md, P6) — the binned local-light grid replaces
-    // that three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
+    // the three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
     // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
     // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
     if (locallight::grid_live(modern_block.lights) && !modern_lite) {
@@ -511,6 +602,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             (in.word & WORD_INTERIOR) != 0u,
             modern_lite,
         );
+    } else {
+        point_lit_px = point_light_eval(in.point_sel, in.world_position.xyz, n_lit);
     }
 #endif
     // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,

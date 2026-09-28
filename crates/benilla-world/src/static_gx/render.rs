@@ -221,6 +221,10 @@ struct GxPipelines {
     sampler_clamp: Sampler,
     /// Keyed `(cutout, two_sided)`, re-specialized if the world view's (samples, format) changes.
     pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
+    /// The depth prepass's twins of [`Self::pipelines`], same keys — empty when the pass has no
+    /// prepass (a classic frame, or `$WOW_STATIC_GX_PREPASS=0`), and then the colour pipelines
+    /// write depth and discard themselves.
+    prepass: HashMap<(bool, bool), CachedRenderPipelineId>,
     /// fork: modern lighting — the latched model joins the key, so a latch edge re-specializes.
     /// Without it the four pipelines would keep whichever lighting model the session opened on.
     specialized_for: Option<(u32, TextureFormat, bool)>,
@@ -297,8 +301,18 @@ fn init_pipelines(
         sampler: make("static_gx_repeat", AddressMode::Repeat),
         sampler_clamp: make("static_gx_clamp", AddressMode::ClampToEdge),
         pipelines: HashMap::default(),
+        prepass: HashMap::default(),
         specialized_for: None,
     });
+}
+
+/// fork: does a modern frame lay the static world's depth before shading it (`static_gx.wgsl`'s
+/// prepass)? On by default; `$WOW_STATIC_GX_PREPASS=0` (browser `?static_gx_prepass=0`) is the A/B
+/// lever. Classic frames never take it: their fragment is cheap, and their pixels stay the
+/// reference's byte for byte.
+fn prepass_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| crate::launch_env::var("WOW_STATIC_GX_PREPASS").as_deref() != Some("0"))
 }
 
 /// The world view's pipeline-key inputs.
@@ -393,6 +407,8 @@ fn prepare_static_gx(
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
         pipes.pipelines.clear();
+        pipes.prepass.clear();
+        let prepassed = modern && prepass_enabled();
         for cutout in [false, true] {
             for two_sided in [false, true] {
                 let mut defs = vec![];
@@ -415,6 +431,56 @@ fn prepare_static_gx(
                 // light buffer — so the def can decide the path outright, as `MODERN_FRAME`.
                 if modern {
                     defs.push(ShaderDefVal::from("WOW_MODERN"));
+                }
+                if prepassed {
+                    defs.push(ShaderDefVal::from("GX_PREPASSED"));
+                    // The depth-only twin: the same cull mode as the colour pipeline, or a face
+                    // only one of them drew would leave depth with no colour on it.
+                    let pre = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                        label: Some(
+                            format!(
+                                "static_gx_prepass c{} t{}",
+                                u8::from(cutout),
+                                u8::from(two_sided)
+                            )
+                            .into(),
+                        ),
+                        layout: vec![
+                            pipes.view_layout.clone(),
+                            pipes.cell_layout.clone(),
+                            pipes.light_layout.clone(),
+                        ],
+                        vertex: VertexState {
+                            shader: shader.clone(),
+                            shader_defs: defs.clone(),
+                            entry_point: Some("prepass_vertex".into()),
+                            buffers: vec![vertex_layout()],
+                        },
+                        // Every variant keeps a fragment stage: the farclip wall is per pixel.
+                        fragment: Some(FragmentState {
+                            shader: shader.clone(),
+                            shader_defs: defs.clone(),
+                            entry_point: Some("prepass_fragment".into()),
+                            targets: vec![],
+                        }),
+                        primitive: PrimitiveState {
+                            cull_mode: (!two_sided).then_some(Face::Back),
+                            ..Default::default()
+                        },
+                        depth_stencil: Some(DepthStencilState {
+                            format: CORE_3D_DEPTH_FORMAT,
+                            depth_write_enabled: true,
+                            depth_compare: CompareFunction::GreaterEqual,
+                            stencil: StencilState::default(),
+                            bias: DepthBiasState::default(),
+                        }),
+                        multisample: MultisampleState {
+                            count: msaa.samples(),
+                            ..Default::default()
+                        },
+                        ..default()
+                    });
+                    pipes.prepass.insert((cutout, two_sided), pre);
                 }
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(
@@ -445,10 +511,16 @@ fn prepare_static_gx(
                         cull_mode: (!two_sided).then_some(Face::Back),
                         ..Default::default()
                     },
+                    // Behind the prepass: `Equal` against the depth it laid, no write — only the
+                    // surface it kept shades, and a hidden fragment is rejected before it runs.
                     depth_stencil: Some(DepthStencilState {
                         format: CORE_3D_DEPTH_FORMAT,
-                        depth_write_enabled: true,
-                        depth_compare: CompareFunction::GreaterEqual,
+                        depth_write_enabled: !prepassed,
+                        depth_compare: if prepassed {
+                            CompareFunction::Equal
+                        } else {
+                            CompareFunction::GreaterEqual
+                        },
                         stencil: StencilState::default(),
                         bias: DepthBiasState::default(),
                     }),
@@ -905,18 +977,17 @@ impl ViewNode for StaticGxNode {
                 None => return Ok(()),
             }
         }
-        let depth_attachment = depth.get_attachment(StoreOp::Store);
-        let color_attachment = target.get_color_attachment();
-        // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
-        let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("static_gx"),
-            color_attachments: &[Some(color_attachment)],
-            depth_stencil_attachment: Some(depth_attachment),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "static_gx");
+        // …and the prepass with them: a colour pipeline testing `Equal` against depth nobody laid
+        // would draw nothing at all.
+        let mut ready_pre: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
+        for (k, id) in &pipes.prepass {
+            match pipeline_cache.get_render_pipeline(*id) {
+                Some(p) => {
+                    ready_pre.insert(*k, p);
+                }
+                None => return Ok(()),
+            }
+        }
         let mut view_offsets = vec![
             view_offset.offset,
             view_lights.offset,
@@ -928,45 +999,98 @@ impl ViewNode for StaticGxNode {
         if let Some(oit) = maybe_oit {
             view_offsets.push(oit.offset);
         }
-        pass.set_bind_group(0, &view_bind.main, &view_offsets);
-        for (gpu, draw, sel) in &resolved {
-            let Some(mesh) = meshes.get(draw.mesh.id()) else {
-                continue;
-            };
-            let (Some(vslice), Some(islice)) = (
-                allocator.mesh_vertex_slice(&draw.mesh.id()),
-                allocator.mesh_index_slice(&draw.mesh.id()),
-            ) else {
-                continue;
-            };
-            let index_format = match &mesh.buffer_info {
-                bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                    *index_format
-                }
-                bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
-            };
-            pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-            pass.set_index_buffer(islice.buffer.slice(..), index_format);
-            for run in &gpu.runs {
-                // A region's run draws only if its selection key is admitted; a cell run always.
-                if let (Some(sel), Some(group)) = (sel, run.group) {
-                    if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
-                        continue;
-                    }
-                }
-                pass.set_render_pipeline(ready[&(run.cutout, run.two_sided)]);
-                pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-                pass.set_bind_group(2, &light_bind.0, &[]);
-                pass.draw_indexed(
-                    (islice.range.start + run.index_range.start)
-                        ..(islice.range.start + run.index_range.end),
-                    i32::try_from(vslice.range.start).unwrap_or(0),
-                    0..1,
-                );
-            }
+        // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
+        let diagnostics = render_context.diagnostic_recorder();
+        // fork: the depth prepass — the same draws in the same order through the depth-only twins,
+        // in a pass of its own (it takes the depth clear; the colour pass below then loads it).
+        if !ready_pre.is_empty() {
+            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("static_gx_prepass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
+            pass.set_bind_group(0, &view_bind.main, &view_offsets);
+            draw_resolved(
+                &mut pass,
+                &resolved,
+                meshes,
+                allocator,
+                &ready_pre,
+                &light_bind.0,
+            );
+            span.end(&mut pass);
         }
+        let depth_attachment = depth.get_attachment(StoreOp::Store);
+        let color_attachment = target.get_color_attachment();
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("static_gx"),
+            color_attachments: &[Some(color_attachment)],
+            depth_stencil_attachment: Some(depth_attachment),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        let span = diagnostics.pass_span(&mut pass, "static_gx");
+        pass.set_bind_group(0, &view_bind.main, &view_offsets);
+        draw_resolved(
+            &mut pass,
+            &resolved,
+            meshes,
+            allocator,
+            &ready,
+            &light_bind.0,
+        );
         span.end(&mut pass);
         Ok(())
+    }
+}
+
+/// Every admitted run of the resolved cells, regions and props, through `pipes` keyed
+/// `(cutout, two_sided)` — the one draw loop the prepass and the colour pass share, so the two can
+/// never disagree about what was drawn.
+fn draw_resolved<'w>(
+    pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
+    resolved: &[(&'w GxCellGpu, &'w GxCellDraw, Option<&'w GxSel>)],
+    meshes: &'w RenderAssets<RenderMesh>,
+    allocator: &'w MeshAllocator,
+    pipes: &HashMap<(bool, bool), &'w RenderPipeline>,
+    light_bind: &'w BindGroup,
+) {
+    for (gpu, draw, sel) in resolved {
+        let Some(mesh) = meshes.get(draw.mesh.id()) else {
+            continue;
+        };
+        let (Some(vslice), Some(islice)) = (
+            allocator.mesh_vertex_slice(&draw.mesh.id()),
+            allocator.mesh_index_slice(&draw.mesh.id()),
+        ) else {
+            continue;
+        };
+        let index_format = match &mesh.buffer_info {
+            bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => *index_format,
+            bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+        };
+        pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+        pass.set_index_buffer(islice.buffer.slice(..), index_format);
+        for run in &gpu.runs {
+            // A region's run draws only if its selection key is admitted; a cell run always.
+            if let (Some(sel), Some(group)) = (sel, run.group) {
+                if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
+                    continue;
+                }
+            }
+            pass.set_render_pipeline(pipes[&(run.cutout, run.two_sided)]);
+            pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+            pass.set_bind_group(2, light_bind, &[]);
+            pass.draw_indexed(
+                (islice.range.start + run.index_range.start)
+                    ..(islice.range.start + run.index_range.end),
+                i32::try_from(vslice.range.start).unwrap_or(0),
+                0..1,
+            );
+        }
     }
 }
 
