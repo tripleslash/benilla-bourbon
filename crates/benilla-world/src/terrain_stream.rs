@@ -153,9 +153,12 @@ pub(crate) struct Placements {
     /// By registry key: the MDDF/MODF uniqueId, or [`Placements::key_for`]'s own key for a
     /// placement whose uniqueId another placement already holds.
     by_id: HashMap<u32, Placement>,
-    /// Those own keys, by `(uniqueId, placement_print)`, so every tile listing the placement
-    /// finds the same one; dropped with the placement.
-    aliases: HashMap<(u32, u64), u32>,
+    /// Those own keys by the uniqueId they share, so every tile listing such a placement finds
+    /// the same one; each leaves with its placement.
+    aliases: HashMap<u32, Vec<u32>>,
+    /// Every registered placement's key by [`PlacementIdent::spot`], so an exact double listed
+    /// under another uniqueId joins it rather than stacking on it.
+    spots: HashMap<PlacementSpot, u32>,
     /// The material dedup, so submeshes sharing a look share one handle and batch.
     materials: MaterialCache,
     /// Placements awaiting their model plus WMO props awaiting their M2s; at zero the spawner skips
@@ -167,30 +170,70 @@ impl Placements {
     /// The registry key for an authored placement, and whether it is already registered.
     ///
     /// A uniqueId names one placement across every tile that lists it, so it is the key — unless a
-    /// different placement (another model or position, [`placement_print`]) holds it. Stock 1.12.1
-    /// data never reuses an id (none on either continent), but a custom map does (Turtle WoW's
-    /// Azeroth: 20k M2 ids), and a residency window wider than the reference's load radius holds
-    /// both users at once: the first to register would hide the other for the session. That one
-    /// takes a key of its own, counted down from below [`GLOBAL_WMO_UID`] past any key in use.
-    fn key_for(&mut self, uid: u32, print: u64) -> (u32, bool) {
-        let primary = self.by_id.get(&uid).map(|p| p.print);
-        if primary == Some(print) {
+    /// different placement holds it ([`PlacementIdent::same_placement`]). Stock 1.12.1 data never
+    /// reuses an id (none on either continent), but a custom map does (Turtle WoW's Azeroth: 20k M2
+    /// ids), and a residency window wider than the reference's load radius holds both users at
+    /// once: the first to register would hide the other for the session. That one takes a key of
+    /// its own, counted down from below [`GLOBAL_WMO_UID`] past any key in use.
+    ///
+    /// Deviates: an exact double under another uniqueId (the same model, spot, turn, scale and
+    /// sets) joins the placement already there, where the reference draws both. Stock data has
+    /// eight such pairs, all small props; Turtle WoW's two continents 1,075 (trees stacked up to
+    /// seven deep). A double is the same pixels twice, darker where it blends and out of step
+    /// where it animates.
+    fn key_for(&mut self, uid: u32, ident: &PlacementIdent) -> (u32, bool) {
+        let holds = |key: &u32| {
+            self.by_id
+                .get(key)
+                .is_some_and(|p| p.ident.same_placement(ident))
+        };
+        if holds(&uid) {
             return (uid, true);
         }
-        if let Some(&key) = self.aliases.get(&(uid, print)) {
+        if let Some(&key) = self
+            .aliases
+            .get(&uid)
+            .and_then(|keys| keys.iter().find(|k| holds(k)))
+        {
+            return (key, true);
+        }
+        if let Some(&key) = self.spots.get(&ident.spot()) {
             if self.by_id.contains_key(&key) {
                 return (key, true);
             }
         }
-        if primary.is_none() {
+        if !self.by_id.contains_key(&uid) {
             return (uid, false);
         }
         let mut key = GLOBAL_WMO_UID - 1;
         while self.by_id.contains_key(&key) {
             key -= 1;
         }
-        self.aliases.insert((uid, print), key);
+        self.aliases.entry(uid).or_default().push(key);
         (key, false)
+    }
+
+    /// File a new placement under `key`, as [`Self::key_for`] handed it out.
+    fn insert(&mut self, key: u32, placement: Placement) {
+        self.spots.entry(placement.ident.spot()).or_insert(key);
+        self.by_id.insert(key, placement);
+        self.pending_spawns += 1;
+    }
+
+    /// Take the placement filed under `key` out of the registry and its indexes.
+    fn remove(&mut self, key: u32) -> Option<Placement> {
+        let p = self.by_id.remove(&key)?;
+        if let Some(keys) = self.aliases.get_mut(&p.uid) {
+            keys.retain(|&k| k != key);
+            if keys.is_empty() {
+                self.aliases.remove(&p.uid);
+            }
+        }
+        let spot = p.ident.spot();
+        if self.spots.get(&spot) == Some(&key) {
+            self.spots.remove(&spot);
+        }
+        Some(p)
     }
 
     /// Every entity a registered placement owns; a placed part outside it is a doubled prop.
@@ -207,8 +250,8 @@ struct Placement {
     /// The authored MDDF/MODF uniqueId, which is also the key unless [`Placements::key_for`]
     /// gave the placement its own.
     uid: u32,
-    /// [`placement_print`]: what tells two placements sharing a uniqueId apart.
-    print: u64,
+    /// What tells two placements sharing a uniqueId apart, and an exact double from a neighbour.
+    ident: PlacementIdent,
     model: ModelHandle,
     transform: Transform,
     /// Spawned submesh entities, WMO prop submeshes included so they despawn together.
@@ -1086,22 +1129,66 @@ fn tile_drop_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
-/// A placement's identity beside its uniqueId: the model path and the position to 1/8 yd. Every
-/// tile listing one placement authors the same row, so its copies agree; a reused id does not.
-fn placement_print(model: &str, position: [f32; 3]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    for b in model.bytes() {
-        h.write_u8(if b == b'\\' {
-            b'/'
-        } else {
-            b.to_ascii_lowercase()
-        });
+/// How far apart (yd) two tiles' copies of one uniqueId may stand and still be one placement. A
+/// placement's copies agree, save a custom map's drifted edit (Turtle WoW: Orgrimmar's WMO at
+/// 0.23 yd, a Redridge rowboat at 3 yd); a reused id lands far off (none within 200 yd).
+const SAME_PLACEMENT_YD: f32 = 32.0;
+
+/// A placement's identity beside its uniqueId: its model, where it stands, how it is turned and
+/// scaled and, for a WMO, which doodad and name sets it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PlacementIdent {
+    /// The model path, case- and separator-folded, hashed.
+    model: u64,
+    /// The authored position (WoW yards).
+    at: [f32; 3],
+    /// The authored rotation in 1/100 degree.
+    turn: [i32; 3],
+    /// The scale in 1/1024 (MDDF's own unit).
+    scale: i32,
+    /// A WMO's doodad set and name set, `(set << 16) | name_set`; 0 for an M2.
+    sets: u32,
+}
+
+/// [`PlacementIdent::spot`]: model, position to 1/8 yd, turn, scale and sets.
+type PlacementSpot = (u64, [i32; 3], [i32; 3], i32, u32);
+
+impl PlacementIdent {
+    fn new(model: &str, at: [f32; 3], rotation: [f32; 3], scale: f32, sets: u32) -> Self {
+        use std::hash::Hasher;
+        let mut h = std::hash::DefaultHasher::new();
+        for b in model.bytes() {
+            h.write_u8(if b == b'\\' {
+                b'/'
+            } else {
+                b.to_ascii_lowercase()
+            });
+        }
+        Self {
+            model: h.finish(),
+            at,
+            turn: rotation.map(|r| (r * 100.0).round() as i32),
+            scale: (scale * 1024.0).round() as i32,
+            sets,
+        }
     }
-    for v in position {
-        ((v * 8.0).round() as i32).hash(&mut h);
+
+    /// Two tiles' copies of one uniqueId: the same model within [`SAME_PLACEMENT_YD`].
+    fn same_placement(&self, other: &Self) -> bool {
+        self.model == other.model
+            && Vec3::from(self.at).distance(Vec3::from(other.at)) <= SAME_PLACEMENT_YD
     }
-    h.finish()
+
+    /// The exact-double key: everything that decides the pixels.
+    fn spot(&self) -> PlacementSpot {
+        (
+            self.model,
+            self.at.map(|v| (v * 8.0).round() as i32),
+            self.turn,
+            self.scale,
+            self.sets,
+        )
+    }
 }
 
 /// Register one M2 doodad placement, or bump its refcount if already known; the registry key,
@@ -1112,8 +1199,8 @@ fn register_doodad(
     d: &Doodad,
     tile: (i32, i32),
 ) -> u32 {
-    let print = placement_print(&d.model, d.position);
-    let (key, known) = placements.key_for(d.unique_id, print);
+    let ident = PlacementIdent::new(&d.model, d.position, d.rotation, d.scale, 0);
+    let (key, known) = placements.key_for(d.unique_id, &ident);
     if known {
         if let Some(p) = placements.by_id.get_mut(&key) {
             p.refs += 1;
@@ -1121,11 +1208,11 @@ fn register_doodad(
         return key;
     }
     let handle: Handle<M2Model> = asset_server.load(m2_url(&d.model));
-    placements.by_id.insert(
+    placements.insert(
         key,
         Placement {
             uid: d.unique_id,
-            print,
+            ident,
             model: ModelHandle::M2(handle),
             transform: Transform {
                 translation: wow_to_bevy(d.position),
@@ -1146,15 +1233,15 @@ fn register_doodad(
             bounds: None,
         },
     );
-    placements.pending_spawns += 1;
     key
 }
 
 /// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale. The
 /// registry key, as [`register_doodad`].
 fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) -> u32 {
-    let print = placement_print(&w.model, w.position);
-    let (key, known) = placements.key_for(w.unique_id, print);
+    let sets = (u32::from(w.doodad_set) << 16) | u32::from(w.name_set);
+    let ident = PlacementIdent::new(&w.model, w.position, w.rotation, 1.0, sets);
+    let (key, known) = placements.key_for(w.unique_id, &ident);
     if known {
         if let Some(p) = placements.by_id.get_mut(&key) {
             p.refs += 1;
@@ -1162,11 +1249,11 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
         return key;
     }
     let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
-    placements.by_id.insert(
+    placements.insert(
         key,
         Placement {
             uid: w.unique_id,
-            print,
+            ident,
             model: ModelHandle::Wmo(handle),
             transform: Transform {
                 translation: wow_to_bevy(w.position),
@@ -1184,7 +1271,6 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             bounds: w.bounds,
         },
     );
-    placements.pending_spawns += 1;
     key
 }
 
@@ -1473,10 +1559,7 @@ fn release_placement(
         None => false,
     };
     if drop_it {
-        if let Some(p) = placements.by_id.remove(&uid) {
-            if uid != p.uid {
-                placements.aliases.remove(&(p.uid, p.print));
-            }
+        if let Some(p) = placements.remove(uid) {
             // Its unspawned model and props leave the pending count with it.
             placements.pending_spawns -=
                 usize::from(!p.spawned) + p.doodads.iter().filter(|d| !d.spawned).count();
@@ -1577,7 +1660,7 @@ mod straddler_tests {
     fn straddler(owner: (i32, i32), entities: Vec<Entity>) -> Placement {
         Placement {
             uid: 0,
-            print: 0,
+            ident: PlacementIdent::default(),
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities,
@@ -1592,43 +1675,67 @@ mod straddler_tests {
         }
     }
 
-    /// A reused uniqueId splits into two placements, while every copy of one placement shares its
-    /// key, including after the id's first holder is released.
+    /// A reused uniqueId splits into two placements, every copy of one placement shares its key
+    /// (a drifted copy included, and after the id's first holder is released), and an exact double
+    /// under another uniqueId joins the placement it would stack on.
     #[test]
-    fn a_reused_unique_id_keys_a_second_placement_of_its_own() {
+    fn placements_key_by_what_they_are_not_only_by_unique_id() {
         let mut placements = Placements::default();
-        let fence = placement_print("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0]);
-        let far = placement_print(r"World\Elwynn\Fence.m2", [-9548.0, -1412.0, 56.0]);
-        let insert = |placements: &mut Placements, key: u32, uid: u32, print: u64| {
-            let mut p = straddler((0, 0), Vec::new());
-            (p.uid, p.print) = (uid, print);
-            placements.by_id.insert(key, p);
+        let m2 = |model: &str, at: [f32; 3], turn: f32| {
+            PlacementIdent::new(model, at, [0.0, turn, 0.0], 1.0, 0)
         };
-        assert_eq!(placements.key_for(7, fence), (7, false));
-        insert(&mut placements, 7, 7, fence);
+        let fence = m2("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0], 90.0);
+        let file = |placements: &mut Placements, uid: u32, ident: PlacementIdent| {
+            let (key, known) = placements.key_for(uid, &ident);
+            if !known {
+                let mut p = straddler((0, 0), Vec::new());
+                (p.uid, p.ident) = (uid, ident);
+                placements.insert(key, p);
+            }
+            (key, known)
+        };
+        assert_eq!(file(&mut placements, 7, fence), (7, false));
         assert_eq!(
-            placements.key_for(7, fence),
+            file(&mut placements, 7, fence),
             (7, true),
             "a straddler's copy"
         );
-        let (other, known) = placements.key_for(7, far);
+        let drifted = m2(r"WORLD\ELWYNN\FENCE.M2", [-8937.0, -107.0, 83.23], 90.0);
+        assert_eq!(
+            file(&mut placements, 7, drifted),
+            (7, true),
+            "a copy whose height drifted, in another case and separator, is the same placement"
+        );
+        let far = m2("world/elwynn/fence.m2", [-9548.0, -1412.0, 56.0], 90.0);
+        let (other, known) = file(&mut placements, 7, far);
         assert!(
             !known && other != 7,
             "a different placement under the same id"
         );
-        insert(&mut placements, other, 7, far);
-        assert_eq!(placements.key_for(7, far), (other, true));
+        assert_eq!(file(&mut placements, 7, far), (other, true));
         assert_eq!(
-            placement_print(r"WORLD\ELWYNN\FENCE.M2", [-8937.02, -107.0, 83.0]),
-            fence,
-            "the path's case and separators and a sub-1/8-yd drift are one placement"
+            file(&mut placements, 9, fence),
+            (7, true),
+            "an exact double under another id joins the first"
         );
-        placements.by_id.remove(&7);
+        let turned = m2("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0], 0.0);
         assert_eq!(
-            placements.key_for(7, far),
+            file(&mut placements, 10, turned),
+            (10, false),
+            "a second fence on the same spot, turned, is its own placement"
+        );
+        placements.remove(7);
+        assert_eq!(
+            file(&mut placements, 7, far),
             (other, true),
             "the alias outlives the id's first holder"
         );
+        placements.remove(other);
+        assert!(
+            placements.aliases.is_empty(),
+            "each alias leaves with its placement"
+        );
+        assert!(!placements.spots.values().any(|&k| k == 7 || k == other));
     }
 
     fn run_handoff(world: &mut World, dead: (i32, i32), uids: Vec<u32>, merge_on: bool) {
