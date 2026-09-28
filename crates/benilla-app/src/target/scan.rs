@@ -52,7 +52,7 @@ fn tab_trace_on() -> bool {
 
 /// The reference's scan mode: the `TargetNearest*` shims (`0x489a80` enemy 1, `0x489aa0` friend 2,
 /// `0x489ac0`/`0x489ae0` party and raid 3/4) all call one cycler, `0x493f60(reverse, mode)`, and
-/// the mode reaches only the per-candidate filter `0x493e40`. Modes 3 and 4 are not built.
+/// the mode reaches only the per-candidate filter `0x493e40`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScanSide {
     /// Mode 1 (`0x493e73`): alive by the reads-dead triple `0x605f90`, and `CanAttack 0x606980`.
@@ -61,6 +61,25 @@ pub(crate) enum ScanSide {
     /// `IsPvP 0x605ff0` leg refuses a creature without `UNIT_FLAG_PVP`; then health > 0 with no
     /// dynflag leg, so a feigning ally counts.
     Friend,
+    /// Mode 3 (`0x493eed`): not us, then `0x4e7f70`, a member of our party slots. No health, dead
+    /// or reaction leg.
+    Party,
+    /// Mode 4 (`0x493f15`): not us, then `0x4918e0`, party (`0x4e7f70`) or raid roster
+    /// (`0x4baee0`).
+    Raid,
+}
+
+impl ScanSide {
+    /// The side a `TargetNearest*` call's mode names.
+    pub(crate) fn of(mode: benilla_ui::script::NearestMode) -> Self {
+        use benilla_ui::script::NearestMode;
+        match mode {
+            NearestMode::Enemy => Self::Enemy,
+            NearestMode::Friend => Self::Friend,
+            NearestMode::PartyMember => Self::Party,
+            NearestMode::RaidMember => Self::Raid,
+        }
+    }
 }
 
 /// `score`, lower is better, includes the fighting-me bonus; `on_screen` is the tier-1 gate.
@@ -199,6 +218,8 @@ pub(crate) struct TargetScan<'w, 's> {
     stores: Query<'w, 's, &'static ObjectStore>,
     /// The owner chase's guid → entity map; `Option` because a UI-only harness has no net stack.
     index: Option<Res<'w, GuidIndex>>,
+    /// The party slots and raid roster modes 3 and 4 test; `Option` for the same harnesses.
+    group: Option<Res<'w, crate::ui_party::GroupState>>,
 }
 
 impl TargetScan<'_, '_> {
@@ -206,6 +227,7 @@ impl TargetScan<'_, '_> {
     fn is_valid(
         &self,
         side: ScanSide,
+        guid: u64,
         store: Option<&ObjectStore>,
         self_store: Option<&ObjectStore>,
     ) -> bool {
@@ -232,6 +254,16 @@ impl TargetScan<'_, '_> {
                     |owner| self.store_of(owner).cloned(),
                 ) && !store.is_some_and(|s| s.0.unit_is_dead())
             }
+            // Modes 3 and 4 open on `cmp esi,ecx`, the candidate is not us, which our own body's
+            // absence from [`Self::units`] already gives.
+            ScanSide::Party => self
+                .group
+                .as_ref()
+                .is_some_and(|g| g.party_slots().any(|m| m.guid == guid)),
+            ScanSide::Raid => self.group.as_ref().is_some_and(|g| {
+                g.party_slots().any(|m| m.guid == guid)
+                    || (g.group_type == 1 && g.members.iter().any(|m| m.guid == guid))
+            }),
         }
     }
 
@@ -255,33 +287,6 @@ impl TargetScan<'_, '_> {
 
     fn store_at(&self, entity: Entity) -> Option<&ObjectStore> {
         self.stores.get(entity).ok()
-    }
-
-    /// `0x6130a3`'s keep test: the actor's reaction to the held guid alone (`0x61309b`), not the
-    /// final gate's `CanAttack`; an unstreamed guid is not hostile (`0x613099`). Actor → target is
-    /// [`reaction_from_player`] (the at-war bit), never `ring_reaction`. The reference's actor is
-    /// the caller, a pet on the pet arm (`0x4bd40d`), which vmangos gives its owner's faction
-    /// (`Pet.cpp:248`).
-    fn reaction_hostile(&self, guid: u64) -> bool {
-        let self_store = self.self_store();
-        self.units
-            .iter()
-            .find(|(_, _, g, _, _)| g.0 == guid)
-            .is_some_and(|(_, _, _, _, store)| {
-                reaction_from_player(
-                    self.factions.as_deref(),
-                    &self.reputations,
-                    store,
-                    self_store,
-                ) < 4
-            })
-    }
-
-    fn unit_by_guid(&self, guid: u64) -> Option<(Entity, Option<&ObjectStore>)> {
-        self.units
-            .iter()
-            .find(|(_, _, g, _, _)| g.0 == guid)
-            .map(|(e, _, _, _, store)| (e, store))
     }
 
     /// Filter, project, score and sort every known unit, fresh each press.
@@ -323,13 +328,15 @@ impl TargetScan<'_, '_> {
             if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
                 continue;
             }
-            if !self.is_valid(side, store, self_store) {
+            if !self.is_valid(side, guid_c.0, store, self_store) {
                 trace_unit(
                     guid_c.0,
                     tf,
                     match side {
                         ScanSide::Enemy => "REJECT dead-or-unattackable",
                         ScanSide::Friend => "REJECT dead-or-unassistable",
+                        ScanSide::Party => "REJECT not-in-party",
+                        ScanSide::Raid => "REJECT not-in-party-or-raid",
                     },
                 );
                 continue;
@@ -457,6 +464,8 @@ pub(super) fn commit(
         return CommitOutcome::default(); // the setter's dedup
     }
     let had_old = selection.guid.is_some();
+    // The last-target stamp (`0x49361d`-`0x493628`), past the two early outs.
+    selection.last = selection.guid;
     if let Some(old) = selection.guid {
         // The old target's teardown (`0x4936cc` → `0x493910`) closes its loot first.
         seam.close_loot_on(old);
@@ -601,73 +610,101 @@ pub(super) fn tab_target(
     );
 }
 
-/// The attack acquire (`0x6130b5`) is `TargetNearestEnemy()` itself, `0x493f60(0, 1)`, so it moves
-/// the player's target. Deviation: a repeated acquire returns the same head, where the reference's
-/// cursor walks on, because this module re-scores the live world on every call.
-fn acquire_nearest_enemy(
-    scan: &TargetScan,
-    selection: &mut Selection,
-    seam: &mut crate::creature_anim::AttackSeam,
-    errors: &mut crate::ui_action::UiErrorKeys,
-) -> Option<(Entity, u64)> {
-    let cands = scan.build(ScanSide::Enemy);
-    let Some(c) = cands.first() else {
-        // `0x6130d9`: still nothing after the acquire, error `0xa0`.
-        debug!("attack acquire: nothing to attack (ERR_NO_ATTACK_TARGET)");
-        errors
-            .0
-            .push(crate::ui_action::UiError::key("ERR_NO_ATTACK_TARGET"));
-        return None;
-    };
-    // Not engaged: every path here held no selection or a non-hostile one.
-    commit(
-        selection,
-        seam,
-        c.entity,
-        c.guid,
-        scan.store_at(c.entity),
-        false,
-        scan.self_guid(),
-        false,
-    );
-    Some((c.entity, c.guid))
+/// The target half of the attack validator `0x612df0` (`0x61305d`–`0x613198`), shared by the
+/// player's Attack (`0x6131aa`) and the pet bar's (`0x4bd40d`): what it reads beyond the
+/// selection, the cycler it runs as `TargetNearestEnemy` (`0x6130b5`, `0x493f60(0, 1)`), and
+/// whether we are swinging, which that cycle's selection switch reads.
+#[derive(SystemParam)]
+pub(crate) struct AttackPick<'w, 's> {
+    scan: TargetScan<'w, 's>,
+    history: ResMut<'w, TabHistory>,
+    time: Res<'w, Time>,
+    engaged: Query<'w, 's, (), (With<Engaged>, With<SelfPlayer>)>,
 }
 
-/// `0x612df0`'s target arm: the selection (`0x61306b`) if the actor is hostile to it (`0x6130a3`),
-/// else an acquire (`0x6130b5`), then the final gate (`0x613167`). The result is the guid
-/// `CMSG_PET_ACTION` carries (`0x4bd491`); a dead selection is `ERR_INVALID_ATTACK_TARGET`, not a
-/// reason to acquire.
-pub(crate) fn attack_order_target(
-    scan: &TargetScan,
-    selection: &mut Selection,
-    seam: &mut crate::creature_anim::AttackSeam,
-    errors: &mut crate::ui_action::UiErrorKeys,
-) -> Option<u64> {
-    let guid = match keeps_held_target(selection.guid, |g| scan.reaction_hostile(g)) {
-        Some(kept) => kept,
-        None => acquire_nearest_enemy(scan, selection, seam, errors)?.1,
-    };
-    // `0x613167`'s target legs; its actor legs (`0x61312e`) ran in the caller.
-    let store = scan.unit_by_guid(guid).and_then(|(_, s)| s);
-    if !attack_target_valid(
-        store,
-        scan.factions.as_deref(),
-        &scan.reputations,
-        scan.self_store(),
-    ) {
-        debug!("attack order: {guid:#x} fails the final gate (ERR_INVALID_ATTACK_TARGET)");
-        errors
-            .0
-            .push(crate::ui_action::UiError::key("ERR_INVALID_ATTACK_TARGET"));
-        return None;
+impl AttackPick<'_, '_> {
+    /// Whether we are attacking (`0x60ecb0`), as the server last echoed it.
+    pub(crate) fn engaged(&self) -> bool {
+        !self.engaged.is_empty()
     }
-    Some(guid)
-}
 
-/// `0x6130a3`: keep a selection the actor is hostile to. A friendly or neutral one is dropped
-/// (`0x6130a8`) and the acquire runs, so pet-Attack with a quest giver selected retargets a mob.
-fn keeps_held_target(selection: Option<u64>, hostile: impl Fn(u64) -> bool) -> Option<u64> {
-    selection.filter(|&g| hostile(g))
+    /// Our own descriptor and guid, the actor of the player's Attack.
+    pub(crate) fn player(&self) -> (Option<&ObjectStore>, Option<u64>) {
+        (self.scan.self_store(), self.scan.self_guid())
+    }
+
+    /// The guid the swing or the pet's order goes at, or `None` once the refusal is raised. The
+    /// candidate is the selection (`0x61306b`): `AttackTarget` passes none (`0x489b50` →
+    /// `0x6131a0(0,0)`), nor does the pet bar (`0x4be42b`). An empty selection (`0x61307f`) or a
+    /// held unit the actor is friendly toward (`0x6130a3`, dropped at `0x6130a8`) runs
+    /// `TargetNearestEnemy` (`0x6130b5`), which commits its pick before this returns, so a call
+    /// after this one reads it. The target is then the selection as it stands (`0x6130c1`): a
+    /// fruitless scan leaves a friendly unit selected for the final gate to refuse, and only an
+    /// empty selection is `ERR_NO_ATTACK_TARGET` (`0x6130d9`).
+    pub(crate) fn target(
+        &mut self,
+        selection: &mut Selection,
+        seam: &mut crate::creature_anim::AttackSeam,
+        errors: &mut crate::ui_action::UiErrorKeys,
+    ) -> Option<u64> {
+        if !selection.guid.is_some_and(|g| self.keeps(g)) {
+            let engaged = self.engaged();
+            cycle(
+                ScanSide::Enemy,
+                false,
+                self.time.elapsed_secs_f64(),
+                &self.scan,
+                &mut self.history,
+                selection,
+                seam,
+                engaged,
+            );
+        }
+        let Some(guid) = selection.guid else {
+            debug!("attack: nothing to attack (ERR_NO_ATTACK_TARGET)");
+            errors
+                .0
+                .push(crate::ui_action::UiError::key("ERR_NO_ATTACK_TARGET"));
+            return None;
+        };
+        // `0x613118`, the second resolve: a miss refuses with no message (`0x613123`).
+        let Some(store) = self.scan.store_of(guid) else {
+            debug!("attack: {guid:#x} does not resolve, refused silently");
+            return None;
+        };
+        // The final gate's target legs; its actor legs (`0x61312e`, `0x613139`) repeat phase A's
+        // dead and mounted refusals, which the caller ran.
+        if !attack_target_valid(
+            Some(store),
+            self.scan.factions.as_deref(),
+            &self.scan.reputations,
+            self.scan.self_store(),
+        ) {
+            debug!("attack: {guid:#x} fails the final gate (ERR_INVALID_ATTACK_TARGET)");
+            errors
+                .0
+                .push(crate::ui_action::UiError::key("ERR_INVALID_ATTACK_TARGET"));
+            return None;
+        }
+        Some(guid)
+    }
+
+    /// `0x6130a3`'s keep test: the actor's reaction to the held unit alone (`0x61309b`), not the
+    /// final gate's `CanAttack`, so a neutral mob is kept. A guid that does not resolve
+    /// (`0x613099`) is kept as well, for the second resolve to refuse. Actor → target is
+    /// [`reaction_from_player`] (the at-war bit), never `ring_reaction`. The reference's actor is
+    /// the caller, a pet on the pet arm (`0x4bd40d`), which vmangos gives its owner's faction
+    /// (`Pet.cpp:248`).
+    fn keeps(&self, guid: u64) -> bool {
+        self.scan.store_of(guid).is_none_or(|store| {
+            reaction_from_player(
+                self.scan.factions.as_deref(),
+                &self.scan.reputations,
+                Some(store),
+                self.scan.self_store(),
+            ) < 4
+        })
+    }
 }
 
 /// The final gate's target legs (`0x613152`–`0x613169`): alive, where a zero-health target passes
@@ -685,48 +722,9 @@ fn attack_target_valid(
     alive && can_attack(store, factions, reputations, self_store)
 }
 
-/// The attack action fired with no selection: acquire and swing (`0x612df0` at `0x6130b5`).
+/// The melee probe's press with nothing selected: the player's Attack, which acquires.
 #[derive(Message)]
 pub(crate) struct AttackNearestRequest;
-
-/// Acquire the best candidate and start attacking it; the TAB history is untouched.
-pub(super) fn acquire_and_attack(
-    mut requests: MessageReader<AttackNearestRequest>,
-    scan: TargetScan,
-    mut selection: ResMut<Selection>,
-    mut seam: crate::creature_anim::AttackSeam,
-    self_store: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
-    mut ui_error_keys: ResMut<crate::ui_action::UiErrorKeys>,
-) {
-    if requests.read().last().is_none() {
-        return;
-    }
-    if selection.guid.is_some() {
-        return; // selected since the action: the normal path owns it
-    }
-    // `0x612df0`'s actor checks precede the acquire: a mounted, stunned or dead press never scans.
-    let self_guid = scan
-        .self_q
-        .iter()
-        .next()
-        .and_then(|(_, _, g)| g)
-        .map(|g| g.0);
-    if crate::ui_action::attack_actor_refusal(
-        self_store.iter().next(),
-        self_guid,
-        &mut ui_error_keys,
-    ) {
-        return;
-    }
-    let Some((_, guid)) =
-        acquire_nearest_enemy(&scan, &mut selection, &mut seam, &mut ui_error_keys)
-    else {
-        return;
-    };
-    debug!("attack acquire: best candidate {guid:#x} → select + swing");
-    // `0x6131a0`: StartAttack through the seam, with no stop in flight.
-    seam.start(guid, false, false);
-}
 
 /// `TargetLastEnemy`'s memory, the reference's last-attackable guid `[0xb4e2e8]`, read at
 /// `0x489b45` and written at `0x49377d` in `SetSelection`. Never cleared: an unresolved guid is a
@@ -1135,15 +1133,6 @@ mod tests {
         assert_eq!(pick_forward(&[], &[], None), None);
     }
 
-    /// `0x6130a3`: a friendly selection is a reason to acquire, not an error.
-    #[test]
-    fn phase_b_keeps_only_a_hostile_selection() {
-        let hostile = |g: u64| g == 0xBAD;
-        assert_eq!(keeps_held_target(Some(0xBAD), hostile), Some(0xBAD));
-        assert_eq!(keeps_held_target(Some(0x600D), hostile), None, "friendly");
-        assert_eq!(keeps_held_target(None, hostile), None, "no selection");
-    }
-
     /// `0x613152`–`0x613169`: a zero-health target is invalid unless dynamic-flag bit 5 is set.
     #[test]
     fn the_attack_orders_final_gate_reads_health_then_can_attack() {
@@ -1314,6 +1303,72 @@ mod tests {
         assert_eq!(pool(&mut world, ScanSide::Enemy), [MOB]);
         // Mode 2: with no camera the order is pure distance.
         assert_eq!(pool(&mut world, ScanSide::Friend), [ALLY, ALLY_FEIGN]);
+    }
+
+    /// Modes 3 and 4 (`0x493eed`, `0x493f15`): the party slots, then party or raid roster, with no
+    /// health or reaction leg, so a dead party member counts and a stranger never does.
+    #[test]
+    fn the_party_and_raid_modes_take_only_the_roster() {
+        use benilla_protocol::messages::GroupMemberEntry;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const PARTY: u64 = 0x11;
+        const PARTY_DEAD: u64 = 0x12;
+        const RAID: u64 = 0x13;
+        const STRANGER: u64 = 0x14;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<NameCache>();
+        world.spawn((
+            SelfPlayer,
+            Transform::default(),
+            Guid(1),
+            store(&[(F_HEALTH, 100)]),
+        ));
+        for (guid, x, health) in [
+            (PARTY, 5.0, 100),
+            (PARTY_DEAD, 6.0, 0),
+            (RAID, 7.0, 100),
+            (STRANGER, 3.0, 100),
+        ] {
+            world.spawn((
+                NetEntity {
+                    kind: EntityKind::Player,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                Guid(guid),
+                Transform::from_xyz(x, 0.0, 0.0),
+                store(&[(F_HEALTH, health), (F_MAXHEALTH, 100)]),
+            ));
+        }
+        let member = |guid, flags| GroupMemberEntry {
+            name: String::new(),
+            guid,
+            status: 1,
+            flags,
+        };
+        // A raid: our subgroup 0 holds PARTY and PARTY_DEAD; RAID is in subgroup 1.
+        world.insert_resource(crate::ui_party::GroupState {
+            in_group: true,
+            group_type: 1,
+            members: vec![member(PARTY, 0), member(PARTY_DEAD, 0), member(RAID, 1)],
+            ..Default::default()
+        });
+        let pool = |world: &mut World, side: ScanSide| {
+            world
+                .run_system_once(move |scan: TargetScan| {
+                    scan.build(side).iter().map(|c| c.guid).collect::<Vec<_>>()
+                })
+                .expect("the scan runs as a one-shot system")
+        };
+        assert_eq!(pool(&mut world, ScanSide::Party), [PARTY, PARTY_DEAD]);
+        assert_eq!(pool(&mut world, ScanSide::Raid), [PARTY, PARTY_DEAD, RAID]);
+        // Out of a raid, mode 4's raid half has no roster: it is the party test.
+        world
+            .resource_mut::<crate::ui_party::GroupState>()
+            .group_type = 0;
+        assert_eq!(pool(&mut world, ScanSide::Raid), [PARTY, PARTY_DEAD]);
     }
 
     #[test]

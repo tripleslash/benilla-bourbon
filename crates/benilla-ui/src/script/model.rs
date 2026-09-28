@@ -62,6 +62,11 @@ pub(crate) struct Model {
     /// Lowercased names `SMSG_ADDON_INFO` marked `status = 2`; `None` until the reply arrives, and
     /// until then `GetNumAddOns()` is 0, as in the reference (`[0xbe1b90]`, reset at `0x51fad1`).
     pub(crate) addon_info_hidden: Option<Vec<String>>,
+    /// The current character's enable hash, which every enable verb writes through and the
+    /// shutdown writer (`0x490c88` into `0x51ef20`) saves only while dirty.
+    pub(crate) addon_enable: super::EnableHash,
+    /// The hash as the host read it from the file, what `ResetDisabledAddOns` reloads (`0x48e830`).
+    pub(crate) addon_enable_saved: super::EnableHash,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for chain-sourced addon files; without one such an addon is `MISSING`.
@@ -233,8 +238,14 @@ pub(crate) struct Model {
     /// Each unit token's state as pushed this frame, keyed lowercased because 1.12's resolver
     /// (`0x515970`) matches with `SStrCmpI`: read it only through `unit`, where the fold lives.
     pub(crate) units_by_lower: HashMap<String, UnitState>,
-    /// Per unit token, auras in display order: the player's by insertion, the rest by aura slot.
-    pub(crate) auras: HashMap<String, Vec<AuraState>>,
+    /// The player's auras in the reference cache's insertion order (`0xbc6040`), durations joined:
+    /// the `GetPlayerBuff` family's list, and any token naming the player's.
+    pub(crate) player_auras: Vec<AuraState>,
+    /// Every other unit's auras by guid, ascending aura slot: one list per unit, whatever token
+    /// names it.
+    pub(crate) unit_auras: HashMap<u64, Vec<AuraState>>,
+    /// The unit-token resolver's inputs (`0x515970`), which the aura bindings resolve through.
+    pub(crate) unit_guids: super::UnitGuids,
     /// Spell ids the cancel verbs queued (`CancelPlayerBuff`, `CancelTrackingBuff`, …), one
     /// `CMSG_CANCEL_AURA` each.
     pub(crate) cancel_aura_requests: Vec<u32>,
@@ -242,6 +253,8 @@ pub(crate) struct Model {
     pub(crate) tracking: Option<super::aura::TrackingState>,
     /// The calls that touch the selection, the cast or the targeting cursor, in call order.
     pub(crate) script_calls: Vec<super::calls::ScriptCall>,
+    /// The binding functions' queue, gate depth and mouselook state.
+    pub(crate) input: super::input_verbs::InputState,
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
     pub(crate) drop_item_on_unit: Vec<String>,
 
@@ -290,6 +303,8 @@ pub(crate) struct Model {
     pub(crate) chat_colors_changed: bool,
     /// The languages this character knows, in `Languages.dbc` row order.
     pub(crate) known_languages: Vec<String>,
+    /// `Languages.dbc`'s `(ID, Name_lang)` rows in file order, whatever the character knows.
+    pub(crate) language_table: Vec<(u32, String)>,
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
@@ -583,8 +598,10 @@ pub(crate) struct Model {
 
     /// The open vendor's stock, the `BuyMerchantItem` calls and whether `CloseMerchant` ran.
     pub(crate) merchant: Option<merchant::MerchantState>,
-    /// `GetRepairAllCost`'s total, which the app pushes every frame a vendor is open.
+    /// `GetRepairAllCost`'s total; 0 unless a repairer is open.
     pub(crate) repair_all_cost: u32,
+    /// The repair costs `SetInventoryItem` and `SetBagItem` return.
+    pub(crate) repair_costs: merchant::RepairCosts,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
     /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
     pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
@@ -977,6 +994,8 @@ impl Model {
             addons: Vec::new(),
             addon_index: Vec::new(),
             addon_info_hidden: None,
+            addon_enable: Default::default(),
+            addon_enable_saved: Default::default(),
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,
@@ -1046,10 +1065,13 @@ impl Model {
             // 1024x768 until the host calls `set_screen_size`; y-up `[bottom, left, top, right]`.
             screen: Rect::new(0.0, 0.0, 768.0, 1024.0),
             units_by_lower: HashMap::new(),
-            auras: HashMap::new(),
+            player_auras: Vec::new(),
+            unit_auras: HashMap::new(),
+            unit_guids: Default::default(),
             cancel_aura_requests: Vec::new(),
             tracking: None,
             script_calls: Vec::new(),
+            input: Default::default(),
             drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
@@ -1075,6 +1097,7 @@ impl Model {
             chat_colors: super::chat_types::seed(),
             chat_colors_changed: false,
             known_languages: Vec::new(),
+            language_table: Vec::new(),
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
@@ -1206,6 +1229,7 @@ impl Model {
             gossip_quest_selects: Vec::new(),
             merchant: None,
             repair_all_cost: 0,
+            repair_costs: Default::default(),
             merchant_buys: Vec::new(),
             merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),

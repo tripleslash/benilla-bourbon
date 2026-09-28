@@ -163,12 +163,14 @@ fn emoting_at_your_own_selection_sends_an_untargeted_emote() {
     let sel = Selection {
         target: Some(me),
         guid: Some(0xdead_beef),
+        ..Default::default()
     };
     assert_eq!(emote_target(&sel, Some(me)), 0);
 
     let sel = Selection {
         target: Some(them),
         guid: Some(0xdead_beef),
+        ..Default::default()
     };
     assert_eq!(emote_target(&sel, Some(me)), 0xdead_beef);
 
@@ -177,6 +179,7 @@ fn emoting_at_your_own_selection_sends_an_untargeted_emote() {
     let sel = Selection {
         target: Some(them),
         guid: Some(0xdead_beef),
+        ..Default::default()
     };
     assert_eq!(emote_target(&sel, None), 0xdead_beef);
 }
@@ -370,7 +373,7 @@ fn channel_notices_compose_by_the_notice_law() {
 // ── the Lua face: the CHAT_MSG_* fire ───────────────────────────────────────────────────────────
 
 /// A fresh VM with the chat stack the app loads, so `ChatFrame1` is the real window.
-fn chat_vm() -> benilla_ui::script::UiScript {
+pub(super) fn chat_vm() -> benilla_ui::script::UiScript {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     // The chat tabs call the dropdown kit (`CloseDropDownMenus` on a click), which reads
     // `TOOLTIP_DEFAULT_COLOR`: both load ahead of ChatFrame.xml, as in `benilla.toc`.
@@ -401,7 +404,7 @@ fn chat_vm() -> benilla_ui::script::UiScript {
 
 /// An addon that records a `CHAT_MSG_*` fire: the count, the event and `arg1..arg10` joined with
 /// `|`, which raises on a `nil` in any slot.
-const SPY: &str = r#"
+pub(super) const SPY: &str = r#"
     SpyN, SpyEvent, SpyLine = 0, "", ""
     Spy = CreateFrame("Frame", "BenillaChatSpy")
     Spy:SetScript("OnEvent", function()
@@ -413,7 +416,7 @@ const SPY: &str = r#"
 "#;
 
 /// How many lines `ChatFrame1` is holding (`GetNumMessages`).
-fn lines_in_window(s: &benilla_ui::script::UiScript) -> i64 {
+pub(super) fn lines_in_window(s: &benilla_ui::script::UiScript) -> i64 {
     s.eval::<i64>("return ChatFrame1:GetNumMessages()").unwrap()
 }
 
@@ -2453,6 +2456,56 @@ fn afk_then_dnd_clears_the_afk_first() {
     assert!(!world.resource::<super::away::AfkMirror>().is_afk());
 }
 
+/// `SendChatMessage`'s language through the real drain: the id the binding resolved rides every
+/// type's packet (`0x49f6f9`) but AFK's, whose `SetAFK` (`0x5eb740`) never reads it.
+#[test]
+fn a_named_language_rides_the_chat_command() {
+    use crate::net::{ChatKind, ClientCommand, NetCommands};
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut world = bevy::prelude::World::new();
+    let mut script = benilla_ui::script::UiScript::new().expect("VM");
+    script.set_language_table(vec![(2, "Darnassian".into()), (7, "Common".into())]);
+    world.insert_non_send_resource(script);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    world.insert_resource(NetCommands(tx));
+    world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<super::away::AfkMirror>();
+    world.init_resource::<crate::cvars::Cvars>();
+    world.init_resource::<super::edit::ChannelState>();
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            r#"
+            SendChatMessage("ishnu", "SAY", "darnassian")
+            SendChatMessage("hi", "WHISPER", "Darnassian", "Bob")
+            SendChatMessage("hi")
+            DEFAULT_AFK_MESSAGE = "Away from Keyboard"
+            SendChatMessage("brb", "AFK", "Darnassian")
+            "#,
+        )
+        .expect("lua");
+    world
+        .run_system_once(super::input::drain_addon_chat_sends)
+        .expect("drain");
+    let sent: Vec<(ChatKind, Option<u32>)> = rx
+        .try_iter()
+        .map(|c| match c {
+            ClientCommand::Chat { kind, language, .. } => (kind, language),
+            other => panic!("unexpected command {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (ChatKind::Say, Some(2)),
+            (ChatKind::Whisper, Some(2)),
+            (ChatKind::Say, None),
+            (ChatKind::Afk, None),
+        ]
+    );
+}
+
 /// `SendChatMessage`'s `CHANNEL` target through the real drain: `SStrToInt` into `0x49be50`
 /// (`0x49f4d9`-`0x49f4ea`), so the packet carries the numbered slot's name, and a number naming
 /// no confirmed slot, or a name, sends nothing at all.
@@ -2505,7 +2558,9 @@ fn a_channel_send_carries_the_numbered_slots_name() {
     let sent: Vec<(ChatKind, Option<String>, String)> = rx
         .try_iter()
         .map(|c| match c {
-            ClientCommand::Chat { kind, target, text } => (kind, target, text),
+            ClientCommand::Chat {
+                kind, target, text, ..
+            } => (kind, target, text),
             other => panic!("unexpected command {other:?}"),
         })
         .collect();

@@ -62,10 +62,10 @@ pub(crate) use flash::CombatFlash;
 pub(crate) use price_discount::vendor_price_discount;
 #[cfg(test)]
 pub(crate) use price_discount::{stormwind_fixture, HUMAN_WARRIOR};
-// The attack-with-no-target request, and the same nearest-enemy core called synchronously for the
-// pet bar's Attack, whose order must leave in the frame it was pressed.
 pub(crate) use relations::{can_assist, can_attack, can_interact, corpse_friendly};
-pub(crate) use scan::{attack_order_target, AttackNearestRequest, TargetScan};
+// The attack validator's target half, run in the call that asks, for the player's Attack and the
+// pet bar's; the melee probe's press with nothing selected.
+pub(crate) use scan::{AttackNearestRequest, AttackPick};
 // The chat layer's by-name asks (`/target`, `/assist`).
 pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
 // The reaction decode and its faction catalog, which also tint the target frame
@@ -81,6 +81,10 @@ pub(crate) use click::DeselectGuid;
 pub(crate) struct Selection {
     pub(crate) target: Option<Entity>,
     pub(crate) guid: Option<u64>,
+    /// The last-target pair `[0xb4e2e0]` that `TargetLastTarget` reads: `SetSelection` stamps the
+    /// outgoing selection, none included, on every change it makes, a select or a deselect
+    /// (`0x49361d`-`0x493628`); a teardown clear (`0x493910` alone) leaves it.
+    pub(crate) last: Option<u64>,
 }
 
 /// This frame's character-model pick, by [`hover::update_hover`]. At most one slot is set: the
@@ -324,10 +328,11 @@ impl Plugin for TargetPlugin {
                     )
                         .chain(),
                     scan::auto_acquire_attacker,
-                    // The TAB cycler (`0x493f60`, mode 1); `TargetNearestFriend`, mode 2, is a
-                    // script call.
+                    // The TAB keys' cycler (`0x493f60`, mode 1); the `TargetNearest*` Lua calls
+                    // run the same cycle as script calls.
                     scan::tab_target,
-                    scan::acquire_and_attack,
+                    // The ATTACKTARGET binding and the melee probe's press, the player's Attack.
+                    crate::ui_action::attack_target_binding,
                     flash::drive_flash,
                     // The last-enemy stamp before the ring's death-clear, so a hostile that dies
                     // selected is still remembered (the reference's `TargetLastEnemy` has no

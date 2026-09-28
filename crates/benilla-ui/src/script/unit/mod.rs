@@ -4,7 +4,7 @@
 
 use mlua::Lua;
 
-use super::{Model, ScriptCall};
+use super::{Model, NearestMode, ScriptCall};
 
 /// A selection ask from Lua, queued in call order for the app to resolve and commit. The reference
 /// routes `TargetUnit`, `AssistUnit` and `TargetLastEnemy` through one helper (`0x489a40`: commit,
@@ -394,12 +394,12 @@ impl super::UiScript {
         })
     }
 
-    /// Take the `TargetNearestFriend([reverse])` calls out of the call stream, `true` for reverse.
-    /// It names no unit: the reference runs the TAB cycler (`0x493f60`, mode 2) straight into
+    /// Take the `TargetNearest*([reverse])` calls out of the call stream, `true` for reverse.
+    /// They name no unit: the reference runs the TAB cycler (`0x493f60`) straight into
     /// `SetSelection`.
-    pub fn take_target_nearest_friend_requests(&mut self) -> Vec<bool> {
+    pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::TargetNearestFriend { reverse } => Some(*reverse),
+            ScriptCall::TargetNearest { mode, reverse } => Some((*mode, *reverse)),
             _ => None,
         })
     }
@@ -444,33 +444,7 @@ fn pick_unit_token(a: &Option<String>, b: &Option<String>) -> Option<String> {
     }
 }
 
-/// The token prefixes the resolver (`0x515970`) tests, in its order (`partypet` before `party`).
-/// Each is a prefix test, so `"playerfoo"` is recognised; `npc`, its one full-string compare, is
-/// tested apart.
-const UNIT_TOKEN_PREFIXES: [&str; 8] = [
-    "player",
-    "pet",
-    "target",
-    "partypet",
-    "party",
-    "raidpet",
-    "raid",
-    "mouseover",
-];
-
-/// Whether the resolver recognises the token, not whether it names a unit: `"party5"` solo is
-/// recognised and answers nil, and only a token none of its nine compares match raises.
-pub(crate) fn token_recognised(token: &str) -> bool {
-    // `npc` full-string, the rest prefixes, all folded as `_strnicmp` folds: ASCII only.
-    token.eq_ignore_ascii_case("npc")
-        || UNIT_TOKEN_PREFIXES
-            .iter()
-            // Bytes, not a `str` slice, which panics mid-character on a multibyte token.
-            .any(|p| {
-                token.len() >= p.len()
-                    && token.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-            })
-}
+use resolve::token_recognised;
 
 /// The resolver's token check: an unrecognised token raises `Unknown unit name`, as `0x515970`
 /// ends in `luaL_error`; `""`, an absent token and a recognised one naming nothing pass. Whether
@@ -515,7 +489,10 @@ fn unit_predicate(
 
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
+mod resolve;
 #[cfg(test)]
 mod tests;
+
+pub use resolve::UnitGuids;
 
 pub(super) use bindings::install;

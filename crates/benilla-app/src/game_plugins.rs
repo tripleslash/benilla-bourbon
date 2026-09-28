@@ -686,7 +686,7 @@ pub(crate) mod schedule_tests {
     /// This fork's own systems add their pairs on top of upstream's count: the modern lighting
     /// model, the liquid reflection camera and ripple clock, SSILVB, the character shadow map, and
     /// the web build's writer pump and stutter probe. Declaring those orders is fork-side work.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_198;
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_132;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

@@ -49,6 +49,7 @@ mod editbox;
 pub mod instance;
 pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
+mod addon_enable;
 pub mod addon_gate;
 mod client;
 mod cvars;
@@ -69,6 +70,7 @@ pub use handler_prof::HandlerRow;
 
 mod surface;
 pub use surface::widget_method_census;
+mod input_verbs;
 mod inspect;
 mod item_stats;
 mod item_text;
@@ -139,9 +141,10 @@ mod worn_display;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
 pub use addon::AddOnInfo;
+pub use addon_enable::EnableHash;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
-    AuctionBid, AuctionCategory, AuctionItemRow, AuctionListState, AuctionQuery,
+    AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
 pub use aura::{AuraState, TrackingState};
@@ -151,7 +154,7 @@ pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
-pub use calls::ScriptCall;
+pub use calls::{NearestMode, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, ZoneChannelRow};
 pub use char_stats::{
@@ -188,6 +191,7 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use input_verbs::{BindingInput, FiredInput, HeldInput};
 pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
@@ -209,7 +213,7 @@ pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
 pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
 pub use measure::TextMeasure;
-pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
+pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
 pub use model::{FontProbe, TextureProbe, TextureSizeProbe};
@@ -253,7 +257,7 @@ pub use types::{
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{
     grey_band, level_reads_unknown, power_token, unit_is_grey, PlayerRecord, SelectionRequest,
-    UnitState,
+    UnitGuids, UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
@@ -529,6 +533,7 @@ impl UiScript {
         duel::install(&lua)?;
         follow::install(&lua)?;
         camera_view::install(&lua)?;
+        input_verbs::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
         worn_display::install(&lua)?;

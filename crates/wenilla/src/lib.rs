@@ -48,6 +48,7 @@ pub fn start() {
         short: env!("BENILLA_GIT_SHORT"),
         date: env!("BENILLA_GIT_DATE"),
         profile: env!("BENILLA_PROFILE"),
+        ..Default::default()
     };
     // `?worldview=1` — the engine with no game attached, over the same packs (fork-owned; the
     // browser twin of `benilla-worldview`, used to look at the lighting work without a login).

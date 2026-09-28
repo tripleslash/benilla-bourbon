@@ -313,6 +313,21 @@ pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
     script.set_default_language(langs.0.name(u32::from(row.race), 0).map(str::to_string));
 }
 
+/// Seed a new VM with `Languages.dbc`, the static table `SendChatMessage` resolves its language
+/// name against (`0x49f8a0`); locale column 0, as [`feed_default_language`] reads.
+pub(crate) fn seed_language_table(world: &World, script: &mut UiScript) {
+    let Some(langs) = world.get_resource::<LanguagesRes>() else {
+        return;
+    };
+    script.set_language_table(
+        langs
+            .0
+            .names(0)
+            .map(|(id, name)| (id, name.to_string()))
+            .collect(),
+    );
+}
+
 /// Push `GetDefaultLanguage()`'s string on a change of race; `None` is the reference's zero value.
 /// Locale column 0 (the client's slot is `[0xc0e080]`): only enUS is populated in the 1.12 data.
 fn feed_default_language(
@@ -782,10 +797,12 @@ pub(crate) fn unit_reaction(
     ring_reaction(factions, reputations, Some(store), self_store) + 1
 }
 
-/// Build a unit snapshot from a streamed descriptor, its cached name and its `UnitReaction`
-/// (`1..=7`, or `0` where none is resolved, as for `"player"`); `classes` feeds the relic column.
+/// Build a unit snapshot from a streamed descriptor, its guid, its cached name and its
+/// `UnitReaction` (`1..=7`, or `0` where none is resolved, as for `"player"`); `classes` feeds the
+/// relic column.
 pub(crate) fn snapshot(
     store: &ObjectStore,
+    guid: u64,
     name: Option<String>,
     reaction: u8,
     classes: Option<&ChrClasses>,
@@ -798,6 +815,8 @@ pub(crate) fn snapshot(
         exists: true,
         // A live descriptor is `0x468460` having succeeded, all of `UnitIsVisible` (`0x516030`).
         has_object: true,
+        // What the token resolver `0x515970` yields, and `UnitIsUnit` (`0x516070`) compares.
+        guid,
         name,
         // The UI getters: `UNIT_DYNFLAG_DEAD` (feign death) zeroes `UnitHealth` (`0x5174d0`) and
         // `UnitMana` (`0x517670`) but not the maxima, so its edge fires the reference's pair
@@ -1199,12 +1218,11 @@ fn feed_units(
         let name = names
             .resolve_unit(guid.0, Some(store), &commands)
             .map(str::to_string);
-        let mut s = snapshot(store, name, 0, chr);
+        let mut s = snapshot(store, guid.0, name, 0, chr);
         s.is_player = true;
         // Every token pushed here is streamed, so connected; real link-death rides only the group
         // roster's status byte, which the party feed reads for its own tokens.
         s.is_connected = true;
-        s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
         s.faction_group_localized = faction_group_localized(store, factions.as_deref());
@@ -1238,8 +1256,7 @@ fn feed_units(
             store,
             self_pair.map(|(s, _)| s),
         );
-        let mut s = snapshot(store, name, reaction, chr);
-        s.guid = guid;
+        let mut s = snapshot(store, guid, name, reaction, chr);
         s.is_connected = true;
         s.raid_target = group.raid_target_index(guid);
         s.faction_group = faction_group(store, factions.as_deref());
@@ -1282,8 +1299,7 @@ fn feed_units(
                 store,
                 self_pair.map(|(s, _)| s),
             );
-            let mut s = snapshot(store, name, reaction, chr);
-            s.guid = guid;
+            let mut s = snapshot(store, guid, name, reaction, chr);
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
@@ -1350,8 +1366,7 @@ fn feed_units(
                 store,
                 self_pair.map(|(s, _)| s),
             );
-            let mut s = snapshot(store, name, reaction, chr);
-            s.guid = guid;
+            let mut s = snapshot(store, guid, name, reaction, chr);
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
@@ -1654,6 +1669,7 @@ mod tests {
         let team = |fields: &[(u16, u32)]| {
             snapshot(
                 &ObjectStore(ObjectFields::from_pairs(fields)),
+                0,
                 None,
                 0,
                 None,
@@ -1682,6 +1698,42 @@ mod tests {
             -1,
             "and a template is not one"
         );
+    }
+
+    /// A new VM is seeded with the shipped `Languages.dbc`, so each race's own tongue resolves by
+    /// name to the id vmangos keys `KnowsLanguage` on (`SharedDefines.h:253-269`).
+    #[test]
+    fn a_new_vm_resolves_every_racial_language_by_name() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let mut world = World::new();
+        world.insert_resource(LanguagesRes(
+            benilla_formats::load_languages(&mut chain).expect("Languages.dbc"),
+        ));
+        let mut script = UiScript::new().expect("VM");
+        seed_language_table(&world, &mut script);
+        let want = [
+            ("Orcish", 1),
+            ("Darnassian", 2),
+            ("Taurahe", 3),
+            ("Dwarvish", 6),
+            ("Common", 7),
+            ("Gnomish", 13),
+            ("Troll", 14),
+            ("Gutterspeak", 33),
+        ];
+        for (name, _) in want {
+            script
+                .run(&format!(r#"SendChatMessage("hi", "SAY", "{name}")"#))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        let got: Vec<Option<u32>> = script
+            .take_chat_sends()
+            .iter()
+            .map(|c| c.language)
+            .collect();
+        let ids: Vec<Option<u32>> = want.iter().map(|&(_, id)| Some(id)).collect();
+        assert_eq!(got, ids);
     }
 
     /// [`race_pvp_team`] against the shipped DBCs, walked as `0x5efe00` walks them.
@@ -2171,6 +2223,7 @@ mod tests {
             app.insert_resource(Selection {
                 target: Some(target),
                 guid: Some(guid),
+                ..Default::default()
             });
 
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
@@ -2314,6 +2367,7 @@ mod tests {
             app.insert_resource(Selection {
                 target: Some(target),
                 guid: Some(guid),
+                ..Default::default()
             });
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut().run_system_once(feed_units).unwrap();
@@ -2385,6 +2439,7 @@ mod tests {
         ];
         let alive = snapshot(
             &ObjectStore(ObjectFields::from_pairs(&vitals)),
+            0,
             Some("Hunter".into()),
             0,
             None,
@@ -2397,6 +2452,7 @@ mod tests {
             &ObjectStore(ObjectFields::from_pairs(
                 &[vitals.as_slice(), &[(DYNFLAGS, 0x20)]].concat(),
             )),
+            0,
             Some("Hunter".into()),
             0,
             None,

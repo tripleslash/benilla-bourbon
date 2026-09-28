@@ -148,6 +148,15 @@ fn row_of(model: &Model, key: &AddonKey) -> Option<usize> {
     }
 }
 
+/// The enable setter (`0x51ea20`), the one write every enable verb makes, for the current
+/// character's row: the registry bit the gate reads, and the character's enable hash, which the
+/// setter dirties only when the row changes or is new.
+fn set_enabled(model: &mut Model, i: usize, on: bool) {
+    model.addons[i].enabled = on;
+    let name = model.addons[i].name.clone();
+    model.addon_enable.set(&name, on);
+}
+
 /// The registry as [`super::addon_gate`] rows, the one input every verb's verdict reads.
 fn gate_rows(model: &Model) -> Vec<GateRow<'_>> {
     model
@@ -329,29 +338,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let key = addon_key(lua, &model, &key, usage)?;
                 if let Some(i) = row_of(&model, &key) {
-                    model.addons[i].enabled = on;
+                    set_enabled(&mut model, i, on);
                 }
                 Ok(())
             })?,
         )?;
     }
 
-    // No arguments read (`0x48e720`, `0x48e7f0`).
+    // No arguments read (`0x48e720`, `0x48e7f0`). The loop runs over the Lua index array, not the
+    // registry: bound `0x51def0`, each name from `0x51df00`, into the setter `0x51ea20`. The array
+    // leaves out what `SMSG_ADDON_INFO` hid (`0x51dc4f`), which is every `Blizzard_*` addon on a
+    // server that hides them (vmangos `AddonHandler.cpp:129`), so their state is never touched.
     for (name, on) in [("EnableAllAddOns", true), ("DisableAllAddOns", false)] {
         g.set(
             name,
             lua.create_function(move |lua, _: MultiValue| {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                for a in &mut model.addons {
-                    a.enabled = on;
+                for k in 0..model.addon_index.len() {
+                    let i = model.addon_index[k];
+                    set_enabled(&mut model, i, on);
                 }
                 Ok(())
             })?,
         )?;
     }
 
-    // `0x48e830` reloads the enable state from `AddOns.txt`, which is unchanged until the shutdown
-    // write, so reverting to the state as registered is the same thing.
+    // `0x48e830` reloads the enable hash from `AddOns.txt`, clean (`0x51ec59`), and the file is
+    // unchanged until the shutdown write, so reverting to the state as registered is the same.
     g.set(
         "ResetDisabledAddOns",
         lua.create_function(|lua, ()| {
@@ -359,6 +372,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             for a in &mut model.addons {
                 a.enabled = a.saved_enabled;
             }
+            model.addon_enable = model.addon_enable_saved.clone();
             Ok(())
         })?,
     )?;
@@ -728,12 +742,17 @@ impl super::UiScript {
         }
     }
 
-    /// `(name, enabled)` per registered addon, in order: what the host writes to `AddOns.txt`.
-    pub fn addon_enable_states(&self) -> Vec<(String, bool)> {
-        self.model_ref()
-            .addons
-            .iter()
-            .map(|a| (a.name.clone(), a.enabled))
-            .collect()
+    /// Seat the current character's enable hash as the loader read it from `AddOns.txt`
+    /// (`0x51ebe0`, re-read at every UI boot, `0x48ff2a`).
+    pub fn set_addon_enable_hash(&mut self, hash: super::EnableHash) {
+        let mut model = self.model_mut();
+        model.addon_enable_saved = hash.clone();
+        model.addon_enable = hash;
+    }
+
+    /// The shutdown writer's rows (`0x490c88` into `0x51ef20`): the current character's whole
+    /// enable hash when a verb changed it this session, else `None`, and nothing is written.
+    pub fn take_addon_enable_rows(&self) -> Option<Vec<(String, bool)>> {
+        self.model_mut().addon_enable.take_dirty()
     }
 }

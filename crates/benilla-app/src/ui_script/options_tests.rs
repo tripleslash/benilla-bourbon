@@ -4729,7 +4729,7 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
 #[test]
 fn turtle_options_carry_every_graphics_row() {
     benilla_formats::wow_data_or_skip!();
-    let s = audio_harness();
+    let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
     load_definers(&s, &[r"Interface\FrameXML\GlobalStrings.lua"]);
     // Turtle's shape (Options\Options.lua): a header row, then its categories. PIXEL_SHADERS
