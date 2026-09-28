@@ -326,6 +326,7 @@ pub fn run_worldview(build: BuildId) -> AppExit {
     benilla_world::launch_env::set_live_reader(webenv::var);
     // fork: `?turtle=1` looks at the world as a Turtle WoW realm serves it, the Turtle layer and
     // the reforged art over it (per the player's setting), mounted before any chain reads.
+    benilla_formats::layers::set_reforged_models(crate::cvars::reforged_models_setting());
     #[cfg(target_arch = "wasm32")]
     if webenv::var("WOW_TURTLE").as_deref() == Some("1") {
         match benilla_formats::web::mount_turtle_layer() {

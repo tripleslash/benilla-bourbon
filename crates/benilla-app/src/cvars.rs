@@ -1784,11 +1784,20 @@ pub(crate) fn apply_boot_layers() {
     benilla_formats::set_hd_character_models(hd);
     // The reforged art mounts later, with the Turtle layer, but on this read: the session keeps
     // what the page loaded with, and a change of the row waits for the next load.
-    let reforged = boot_cvar("reforgedModels")
-        .or_else(|| registered_default("reforgedModels").map(str::to_string))
+    benilla_formats::layers::set_reforged_models(reforged_models_setting());
+}
+
+/// The player's `reforgedModels` as the page loads, `$WOW_REFORGED_MODELS` (`?reforged_models=`)
+/// ahead of it: the client's boot read, and the world viewer's, which has no CVar host of its own.
+pub(crate) fn reforged_models_setting() -> bool {
+    crate::webenv::var("WOW_REFORGED_MODELS")
         .and_then(|v| benilla_formats::layers::layer_switch(&v))
-        .unwrap_or(false);
-    benilla_formats::layers::set_reforged_models(reforged);
+        .unwrap_or_else(|| {
+            boot_cvar("reforgedModels")
+                .or_else(|| registered_default("reforgedModels").map(str::to_string))
+                .and_then(|v| benilla_formats::layers::layer_switch(&v))
+                .unwrap_or(false)
+        })
 }
 
 /// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
