@@ -784,9 +784,10 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // there; a classic frame keeps its own fog and the reference's sun specular.
     let experimental = !below && w.optics.w > 0.5;
     // fork: modern lighting — the experimental tier's wind ripples, read here in uniform control flow
-    // for the pixel footprint's derivatives.
+    // for the pixel footprint's derivatives. Only the sea carries them; a river, a lake and a WMO's
+    // liquid keep the cata bump's own octaves.
     var ripples = vec2<f32>(0.0);
-    if (experimental && w.look_c.w > 0.0) {
+    if (experimental && w.kind.y > 0.5 && w.look_c.w > 0.0) {
         ripples = w.look_c.w * wind_ripples(
             in.world_position.xz, dpdx(in.world_position.xz), dpdy(in.world_position.xz),
         );
