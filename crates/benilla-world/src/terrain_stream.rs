@@ -150,8 +150,12 @@ struct TileState {
 /// Doodad and WMO placements, spawned once and refcounted across the tiles that list them.
 #[derive(Resource, Default)]
 pub(crate) struct Placements {
-    /// By MDDF/MODF uniqueId.
+    /// By registry key: the MDDF/MODF uniqueId, or [`Placements::key_for`]'s own key for a
+    /// placement whose uniqueId another placement already holds.
     by_id: HashMap<u32, Placement>,
+    /// Those own keys, by `(uniqueId, placement_print)`, so every tile listing the placement
+    /// finds the same one; dropped with the placement.
+    aliases: HashMap<(u32, u64), u32>,
     /// The material dedup, so submeshes sharing a look share one handle and batch.
     materials: MaterialCache,
     /// Placements awaiting their model plus WMO props awaiting their M2s; at zero the spawner skips
@@ -160,6 +164,35 @@ pub(crate) struct Placements {
 }
 
 impl Placements {
+    /// The registry key for an authored placement, and whether it is already registered.
+    ///
+    /// A uniqueId names one placement across every tile that lists it, so it is the key — unless a
+    /// different placement (another model or position, [`placement_print`]) holds it. Stock 1.12.1
+    /// data never reuses an id (none on either continent), but a custom map does (Turtle WoW's
+    /// Azeroth: 20k M2 ids), and a residency window wider than the reference's load radius holds
+    /// both users at once: the first to register would hide the other for the session. That one
+    /// takes a key of its own, counted down from below [`GLOBAL_WMO_UID`] past any key in use.
+    fn key_for(&mut self, uid: u32, print: u64) -> (u32, bool) {
+        let primary = self.by_id.get(&uid).map(|p| p.print);
+        if primary == Some(print) {
+            return (uid, true);
+        }
+        if let Some(&key) = self.aliases.get(&(uid, print)) {
+            if self.by_id.contains_key(&key) {
+                return (key, true);
+            }
+        }
+        if primary.is_none() {
+            return (uid, false);
+        }
+        let mut key = GLOBAL_WMO_UID - 1;
+        while self.by_id.contains_key(&key) {
+            key -= 1;
+        }
+        self.aliases.insert((uid, print), key);
+        (key, false)
+    }
+
     /// Every entity a registered placement owns; a placed part outside it is a doubled prop.
     pub(crate) fn owned(&self) -> std::collections::HashSet<Entity> {
         self.by_id
@@ -171,6 +204,11 @@ impl Placements {
 
 /// A shared placement: its model, transform and spawned entities.
 struct Placement {
+    /// The authored MDDF/MODF uniqueId, which is also the key unless [`Placements::key_for`]
+    /// gave the placement its own.
+    uid: u32,
+    /// [`placement_print`]: what tells two placements sharing a uniqueId apart.
+    print: u64,
     model: ModelHandle,
     transform: Transform,
     /// Spawned submesh entities, WMO prop submeshes included so they despawn together.
@@ -899,12 +937,12 @@ fn stream_terrain(
         // Placements register by uniqueId; their ground shade resolves at spawn by a global lookup,
         // since a doodad's origin may lie on another tile.
         for d in &adt.doodads {
-            register_doodad(placements, &asset_server, d, (tx, ty));
-            tile.placements.push(d.unique_id);
+            let key = register_doodad(placements, &asset_server, d, (tx, ty));
+            tile.placements.push(key);
         }
         for w in &adt.wmos {
-            register_wmo(placements, &asset_server, w);
-            tile.placements.push(w.unique_id);
+            let key = register_wmo(placements, &asset_server, w);
+            tile.placements.push(key);
         }
 
         let mut liquid_ents = Vec::new();
@@ -1048,21 +1086,46 @@ fn tile_drop_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
-/// Register one M2 doodad placement, or bump its refcount if already known.
+/// A placement's identity beside its uniqueId: the model path and the position to 1/8 yd. Every
+/// tile listing one placement authors the same row, so its copies agree; a reused id does not.
+fn placement_print(model: &str, position: [f32; 3]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    for b in model.bytes() {
+        h.write_u8(if b == b'\\' {
+            b'/'
+        } else {
+            b.to_ascii_lowercase()
+        });
+    }
+    for v in position {
+        ((v * 8.0).round() as i32).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Register one M2 doodad placement, or bump its refcount if already known; the registry key,
+/// which the tile lists and releases.
 fn register_doodad(
     placements: &mut Placements,
     asset_server: &AssetServer,
     d: &Doodad,
     tile: (i32, i32),
-) {
-    if let Some(p) = placements.by_id.get_mut(&d.unique_id) {
-        p.refs += 1;
-        return;
+) -> u32 {
+    let print = placement_print(&d.model, d.position);
+    let (key, known) = placements.key_for(d.unique_id, print);
+    if known {
+        if let Some(p) = placements.by_id.get_mut(&key) {
+            p.refs += 1;
+        }
+        return key;
     }
     let handle: Handle<M2Model> = asset_server.load(m2_url(&d.model));
     placements.by_id.insert(
-        d.unique_id,
+        key,
         Placement {
+            uid: d.unique_id,
+            print,
             model: ModelHandle::M2(handle),
             transform: Transform {
                 translation: wow_to_bevy(d.position),
@@ -1084,18 +1147,26 @@ fn register_doodad(
         },
     );
     placements.pending_spawns += 1;
+    key
 }
 
-/// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale.
-fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) {
-    if let Some(p) = placements.by_id.get_mut(&w.unique_id) {
-        p.refs += 1;
-        return;
+/// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale. The
+/// registry key, as [`register_doodad`].
+fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) -> u32 {
+    let print = placement_print(&w.model, w.position);
+    let (key, known) = placements.key_for(w.unique_id, print);
+    if known {
+        if let Some(p) = placements.by_id.get_mut(&key) {
+            p.refs += 1;
+        }
+        return key;
     }
     let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
     placements.by_id.insert(
-        w.unique_id,
+        key,
         Placement {
+            uid: w.unique_id,
+            print,
             model: ModelHandle::Wmo(handle),
             transform: Transform {
                 translation: wow_to_bevy(w.position),
@@ -1114,6 +1185,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
         },
     );
     placements.pending_spawns += 1;
+    key
 }
 
 /// Drop every streamed tile and the placements they reference, on a cross-map teleport or on
@@ -1402,6 +1474,9 @@ fn release_placement(
     };
     if drop_it {
         if let Some(p) = placements.by_id.remove(&uid) {
+            if uid != p.uid {
+                placements.aliases.remove(&(p.uid, p.print));
+            }
             // Its unspawned model and props leave the pending count with it.
             placements.pending_spawns -=
                 usize::from(!p.spawned) + p.doodads.iter().filter(|d| !d.spawned).count();
@@ -1501,6 +1576,8 @@ mod straddler_tests {
 
     fn straddler(owner: (i32, i32), entities: Vec<Entity>) -> Placement {
         Placement {
+            uid: 0,
+            print: 0,
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities,
@@ -1513,6 +1590,45 @@ mod straddler_tests {
             owner,
             bounds: None,
         }
+    }
+
+    /// A reused uniqueId splits into two placements, while every copy of one placement shares its
+    /// key, including after the id's first holder is released.
+    #[test]
+    fn a_reused_unique_id_keys_a_second_placement_of_its_own() {
+        let mut placements = Placements::default();
+        let fence = placement_print("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0]);
+        let far = placement_print(r"World\Elwynn\Fence.m2", [-9548.0, -1412.0, 56.0]);
+        let insert = |placements: &mut Placements, key: u32, uid: u32, print: u64| {
+            let mut p = straddler((0, 0), Vec::new());
+            (p.uid, p.print) = (uid, print);
+            placements.by_id.insert(key, p);
+        };
+        assert_eq!(placements.key_for(7, fence), (7, false));
+        insert(&mut placements, 7, 7, fence);
+        assert_eq!(
+            placements.key_for(7, fence),
+            (7, true),
+            "a straddler's copy"
+        );
+        let (other, known) = placements.key_for(7, far);
+        assert!(
+            !known && other != 7,
+            "a different placement under the same id"
+        );
+        insert(&mut placements, other, 7, far);
+        assert_eq!(placements.key_for(7, far), (other, true));
+        assert_eq!(
+            placement_print(r"WORLD\ELWYNN\FENCE.M2", [-8937.02, -107.0, 83.0]),
+            fence,
+            "the path's case and separators and a sub-1/8-yd drift are one placement"
+        );
+        placements.by_id.remove(&7);
+        assert_eq!(
+            placements.key_for(7, far),
+            (other, true),
+            "the alias outlives the id's first holder"
+        );
     }
 
     fn run_handoff(world: &mut World, dead: (i32, i32), uids: Vec<u32>, merge_on: bool) {
