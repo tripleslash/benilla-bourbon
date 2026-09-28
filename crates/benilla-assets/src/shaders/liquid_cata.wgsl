@@ -607,13 +607,15 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
-// fork: modern lighting — the experimental tier's wind ripples: how many trains, the longest wavelength
-// (yd), the step down to the next, how much the long ones outweigh the short (slope ∝ wavelength to
+// fork: modern lighting — the experimental tier's wind ripples: how many trains (only the long, high-
+// amplitude end of the ladder, so water seen up close keeps the Modern swell), the rungs the ladder
+// was cut from, the longest wavelength (yd), the step down to the next, how much the long ones outweigh the short (slope ∝ wavelength to
 // this power), the share of deep-water dispersion they travel at, and the phase change per pixel
 // (radians) over which a train fades. The fade is the reference shot's: at every distance the finest
 // octave left has a ~7-13 px period along the view, which puts its start near 2π/12 and its end near
 // 2π/5.
-const RIPPLE_TRAINS: u32 = 13u;
+const RIPPLE_TRAINS: u32 = 4u;
+const RIPPLE_LADDER: f32 = 12.0;
 const RIPPLE_LONGEST: f32 = 12.0;
 const RIPPLE_STEP: f32 = 0.78;
 const RIPPLE_TILT: f32 = 0.35;
@@ -627,8 +629,8 @@ const RIPPLE_ALIAS_END: f32 = 1.2;
 /// water's own dark and a face away into the sky it reflects — at a grazing look, foreshortened into
 /// the reference shot's streaks laid across the view.
 ///
-/// A sea's spectrum, sampled: `RIPPLE_TRAINS` trains a geometric step apart from `RIPPLE_LONGEST`
-/// down, the long ones a little steeper (`RIPPLE_TILT`). Their headings scatter about the wind by the
+/// The long end of a sea's spectrum, sampled: `RIPPLE_TRAINS` trains a geometric step apart from
+/// `RIPPLE_LONGEST` down (~12 to ~6 yd; the finer rungs were too busy up close), the long ones a little steeper (`RIPPLE_TILT`). Their headings scatter about the wind by the
 /// golden angle, the long ones within ~50° of it and the short ones from every side. Two noise taps
 /// (~16 yd and ~5 yd) bend each train's crests and gather it into wave groups of its own, so no two
 /// patches of water carry the same pattern.
@@ -649,7 +651,7 @@ fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> vec2<f32
     let foot = max(length(foot_x), length(foot_y));
     for (var i = 0u; i < RIPPLE_TRAINS; i = i + 1u) {
         let fi = f32(i);
-        let octave = fi / f32(RIPPLE_TRAINS - 1u);
+        let octave = fi / RIPPLE_LADDER;
         let wl = RIPPLE_LONGEST * pow(RIPPLE_STEP, fi) * (1.0 + 0.08 * sin(fi * 5.1));
         let turn = mix(0.55, 1.0, octave) * 1.5707963 * (fract(fi * 0.618034 + 0.13) * 2.0 - 1.0);
         let dir = vec2<f32>(wd.x * cos(turn) - wd.y * sin(turn), wd.x * sin(turn) + wd.y * cos(turn));
