@@ -76,7 +76,7 @@ pub(super) fn ingame_manifest(script: &UiScript) -> Vec<String> {
     let stock = reference_ui::read_stock(FRAMEXML_TOC).map(toc);
     let flavor = reference_ui::read(FRAMEXML_TOC).map(toc);
     match (stock, flavor) {
-        (Some(stock), Some(flavor)) => splice_flavor_rows(&files, &stock, &flavor),
+        (Some(stock), Some(flavor)) => splice_flavor_rows(&files, &stock, &without_shop(flavor)),
         _ => {
             warn!(
                 "ui_script: a FrameXML.toc is missing from the chain, so Turtle WoW's own \
@@ -85,6 +85,25 @@ pub(super) fn ingame_manifest(script: &UiScript) -> Vec<String> {
             files
         }
     }
+}
+
+/// The folder of Turtle WoW's donation shop in its `FrameXML.toc`: `Turtle_ShopUI.xml` builds
+/// `ShopFrame`, the minimap's `MinimapShopFrame` and `/shop`, and its templates file.
+const SHOP_FOLDER: &str = "turtle_shopui\\";
+
+/// `flavor` without Turtle WoW's donation shop rows ([`SHOP_FOLDER`]).
+/// Deviation (this fork): the shop does not load. It sells Turtle WoW's own donation rewards, which
+/// no other server offers; nothing else in its FrameXML reads it, and the layer's ESC menu has no
+/// Donation Rewards rung to open it.
+fn without_shop(flavor: Vec<String>) -> Vec<String> {
+    flavor
+        .into_iter()
+        .filter(|row| {
+            !row.replace('/', "\\")
+                .to_ascii_lowercase()
+                .starts_with(SHOP_FOLDER)
+        })
+        .collect()
 }
 
 /// Every in-game entry in load order: [`ingame_manifest`], then the layer's files when `layer` is
@@ -393,6 +412,27 @@ mod tests {
 
     fn rows(list: &[&str]) -> Vec<String> {
         list.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// Turtle WoW's donation shop rows come off its toc, in either separator and any case; the
+    /// rows around them stay, in order.
+    #[test]
+    fn turtle_s_shop_does_not_load() {
+        let turtle = rows(&[
+            "GameMenuFrame.xml",
+            "Turtle_BarbershopUI\\Turtle_Barbershop.xml",
+            "Turtle_ShopUI\\Turtle_ShopUITemplates.xml",
+            "turtle_shopui/Turtle_ShopUI.xml",
+            "Turtle_TransmogUI\\Turtle_TransmogUI.xml",
+        ]);
+        assert_eq!(
+            without_shop(turtle),
+            rows(&[
+                "GameMenuFrame.xml",
+                "Turtle_BarbershopUI\\Turtle_Barbershop.xml",
+                "Turtle_TransmogUI\\Turtle_TransmogUI.xml",
+            ])
+        );
     }
 
     /// Turtle WoW's rows go after the latest of ours among the stock rows its toc loads before
