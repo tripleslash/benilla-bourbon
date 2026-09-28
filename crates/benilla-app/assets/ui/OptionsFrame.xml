@@ -3388,10 +3388,11 @@
                 DESKTOP_GAMMA = 1, MULTISAMPLE = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
                 HARDWARE_CURSOR = 1, FIX_LAG = 1,
                 -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
-                -- `lod`, `shadowLevel`, `baseMip`, `spellEffectLevel`, the 1.12 shader switches,
-                -- `movieSubtitle`, `autointeract` and its camera style, `UnitNamePlayerPVPTitle`.
+                -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`,
+                -- `autointeract` and its camera style, `UnitNamePlayerPVPTitle`. Spell Detail
+                -- (`spellEffectLevel`) stays: it drives the particle and shard rates.
                 USE_UISCALE = 1, WORLD_LOD = 1, TERRAIN_MIP = 1, TEXTURE_DETAIL = 1,
-                SPELL_DETAIL = 1, ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
+                ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
                 FULL_SCREEN_GLOW = 1, DEATH_EFFECT = 1, VERTEX_ANIMATION_SHADERS = 1,
                 PHONG_SHADING = 1, USE_WEATHER_SHADER = 1, CINEMATIC_SUBTITLES = 1,
                 CLICK_TO_MOVE = 1, CLICK_CAMERA_STYLE = 1, SHOW_PLAYER_TITLES = 1,

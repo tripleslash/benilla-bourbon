@@ -2,9 +2,9 @@
 //! [`super::addons::Source`]; the parse, `<Include>` and `<Script file=>` resolution and chunk
 //! naming are [`super::addons::Addon`]'s.
 //!
-//! `assets/ui/benilla.toc` is the one load order. An entry with a path separator comes off the
-//! chain, a bare filename is a file we ship ([`is_chain_entry`]), and a name defined by both goes
-//! to the later line. Without client data the chain files are absent, and the log says so once.
+//! `assets/ui/benilla.toc` is the core's load order, and `layer.toc` follows it. An entry with a
+//! path separator comes off the chain, a bare filename is a file we ship ([`is_chain_entry`]), and
+//! a name defined by both goes to the later line. Without client data the chain files are absent, and the log says so once.
 
 use std::sync::OnceLock;
 
@@ -382,7 +382,7 @@ mod tests {
             .map(str::to_string)
             .collect();
 
-        let migrated: Vec<String> = super::super::addons::Addon::builtin()
+        let migrated: Vec<String> = super::super::addons::Addon::core()
             .toc
             .files
             .iter()
@@ -587,7 +587,7 @@ mod tests {
             "the method probe is not working — it answered {got:?} for {control:?}"
         );
 
-        let migrated: std::collections::HashSet<String> = super::super::addons::Addon::builtin()
+        let migrated: std::collections::HashSet<String> = super::super::addons::Addon::core()
             .toc
             .files
             .iter()
@@ -903,7 +903,7 @@ mod tests {
         };
 
         // Every function each chain entry and its same-name `.lua` define.
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         // Load order: each manifest entry at its line, ours included (`ours_wins` reads both
         // sides), then each reached addon's files after everything.
         let chain = gated_chain_entries();
@@ -1348,13 +1348,50 @@ mod tests {
         );
     }
 
+    /// The core's chain rows are the reference's own `FrameXML.toc` rows, every one, but the stock
+    /// `GameMenuFrame.xml`, which the layer's own menu stands in for (this fork's deviation). A
+    /// row the stock toc lacks runs a file the reference does not, or twice: `UIParent.xml:4`
+    /// sources `LocaleProperties.lua`, which has no row.
+    #[test]
+    fn the_cores_chain_rows_are_the_stock_tocs_rows() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let toc = String::from_utf8_lossy(
+            &super::read("Interface\\FrameXML\\FrameXML.toc").expect("the reference's own toc"),
+        )
+        .into_owned();
+        let mut stock: Vec<String> = toc
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| !l.eq_ignore_ascii_case("GameMenuFrame.xml"))
+            .map(|l| format!("interface\\framexml\\{}", l.to_ascii_lowercase()))
+            .collect();
+        let mut core: Vec<String> = super::super::addons::Addon::core()
+            .toc
+            .files
+            .iter()
+            .filter(|f| super::is_chain_entry(f))
+            .map(|f| f.to_ascii_lowercase())
+            .collect();
+        stock.sort();
+        core.sort();
+        let missing: Vec<&String> = stock.iter().filter(|r| !core.contains(r)).collect();
+        let extra: Vec<&String> = core.iter().filter(|r| !stock.contains(r)).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "benilla.toc against the stock FrameXML.toc — stock rows it does not load: \
+             {missing:?}; rows the stock toc does not have: {extra:?}"
+        );
+        assert_eq!(core, stock, "a stock row listed twice");
+    }
+
     /// A chain `.xml` that does not source its own `.lua` needs the `.lua` as a manifest line too,
     /// as the stock toc lists `MoneyInputFrame.lua` and `TextStatusBar.lua` (lines 11 and 32).
     /// Without it every global the file should define reads nil, and nothing errors.
     #[test]
     fn every_chain_xml_brings_its_own_lua() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         let listed: std::collections::HashSet<&str> = toc
             .iter()
             .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
@@ -1496,7 +1533,7 @@ mod tests {
     #[test]
     fn nothing_we_ship_is_shadowed_by_a_later_chain_entry() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         let mut ours: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut shadowed: Vec<String> = Vec::new();
         for entry in toc.iter() {
@@ -1526,7 +1563,7 @@ mod tests {
     #[test]
     fn every_template_the_manifest_inherits_is_declared_by_the_manifest() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
 
         let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut wanted: Vec<(String, String)> = Vec::new();
@@ -1599,7 +1636,7 @@ mod tests {
     fn reached_addons() -> Vec<String> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
         let mut out: Vec<String> = Vec::new();
-        for entry in &super::super::addons::Addon::builtin().toc.files {
+        for entry in &super::super::manifest::manifest_files() {
             let texts = if super::is_chain_entry(entry) {
                 entry_sources(entry)
             } else {
@@ -1627,7 +1664,7 @@ mod tests {
     /// Every chain file the shipped interface loads, in load order: the manifest's chain entries,
     /// then each reached addon's files in its own toc order.
     fn gated_chain_entries() -> Vec<String> {
-        let mut out: Vec<String> = super::super::addons::Addon::builtin()
+        let mut out: Vec<String> = super::super::addons::Addon::core()
             .toc
             .files
             .iter()

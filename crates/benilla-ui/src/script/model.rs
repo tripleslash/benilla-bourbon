@@ -387,6 +387,9 @@ pub(crate) struct Model {
     /// `(name, default)` per addon `RegisterCVar` that created a slot.
     pub(crate) cvar_registrations: Vec<(String, String)>,
     pub(crate) cvars_warned: HashSet<String>,
+    /// The lowercased names a Lua `SetCVar` refuses, the reference's flag bit2 (`rec+0x1c & 4`,
+    /// `CVar::SetReadOnly 0x63e030`). Kept beside the rows, so a host re-seed never clears it.
+    pub(crate) cvars_read_only: HashSet<String>,
 
     /// The adapter's multisample formats in dropdown order, the reference's list `[0xb4b444]` of
     /// `{colorBits, depthBits, multisample}` (count `[0xb4b440]`, built by `0x48c3e0`).
@@ -784,6 +787,8 @@ pub(crate) struct Model {
     /// Spell id to its tooltip view, and the misses asked for.
     pub(crate) spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) spell_tooltip_asks: HashSet<u32>,
+    /// The tooltips whose spell render missed its view, re-rendered when the app answers.
+    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
     /// `CollapseQuestHeader`/`ExpandQuestHeader` as `(1-based entry, collapse)`, entry 0 for all.
     pub(crate) quest_log_collapses: Vec<(u32, bool)>,
     /// Watched quest ids in watch order, pruned when a quest leaves the log.
@@ -909,6 +914,8 @@ pub(crate) struct Model {
     pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
     pub(crate) played_time_asks: u32,
+    /// `OpeningCinematic()` calls, one empty `CMSG_OPENING_CINEMATIC` each.
+    pub(crate) opening_cinematic_asks: u32,
     /// `Screenshot()` calls, one capture each.
     pub(crate) screenshot_asks: u32,
     /// `GetRealmName()`: `""` until pushed, never nil, since addons index tables with it at load.
@@ -1134,6 +1141,7 @@ impl Model {
             cvar_changes: Vec::new(),
             cvar_registrations: Vec::new(),
             cvars_warned: HashSet::new(),
+            cvars_read_only: HashSet::new(),
             multisample_formats: Vec::new(),
             screen_resolutions: Vec::new(),
             current_resolution: None,
@@ -1336,6 +1344,7 @@ impl Model {
             player_req: PlayerReqState::default(),
             spell_tooltips: HashMap::new(),
             spell_tooltip_asks: HashSet::new(),
+            spell_tooltip_waits: HashMap::new(),
             quest_log_collapses: Vec::new(),
             quest_log_watched: Vec::new(),
             server_unix_time: None,
@@ -1349,6 +1358,7 @@ impl Model {
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
+            opening_cinematic_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),
             player_record: super::PlayerRecord::default(),

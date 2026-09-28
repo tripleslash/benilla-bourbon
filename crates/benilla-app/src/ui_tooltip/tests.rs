@@ -518,17 +518,14 @@ fn the_spell_feed_runs_after_the_trainer_feed() {
     ));
 }
 
-/// The hover pushes `"mouseover"` with the hovered guid, the pair `0x492890` writes to
-/// `0xb4e2c8`/`0xb4e2cc`: `UnitIsUnit` (`0x516070`) resolves both tokens through `0x515970` and
-/// compares guids, so hovering the target answers 1 and hovering anyone else nil.
-#[test]
-fn the_mouseover_token_carries_the_hovered_guid() {
-    use benilla_protocol::ObjectFields;
-    use bevy::ecs::system::RunSystemOnce;
+const ME: u64 = 0x77;
+const WOLF: u64 = 0xF130_0000_4500_0001;
+const BOAR: u64 = 0xF130_0000_4600_0002;
 
-    const ME: u64 = 0x77;
-    const WOLF: u64 = 0xF130_0000_4500_0001;
-    const BOAR: u64 = 0xF130_0000_4600_0002;
+/// The world-hover driver over a bare VM holding `"player"` (us) and `"target"` (the wolf), each
+/// with its guid, as the unit feed pushes them; returns the app, the wolf and the boar.
+fn mouseover_app() -> (App, Entity, Entity) {
+    use benilla_protocol::ObjectFields;
 
     let mut app = App::new();
     let (tx, _rx) = crossbeam_channel::unbounded();
@@ -541,19 +538,17 @@ fn the_mouseover_token_carries_the_hovered_guid() {
         .init_resource::<crate::net::GuidIndex>()
         .init_resource::<crate::go_templates::GameObjectTemplates>()
         .init_resource::<Items>()
-        .init_resource::<PlayerActions>();
+        .init_resource::<PlayerActions>()
+        .add_systems(Update, drive_mouseover_tooltip);
     app.world_mut()
         .spawn((SelfPlayer, ObjectStore(ObjectFields::default())));
-    let wolf = app
-        .world_mut()
-        .spawn(ObjectStore(ObjectFields::default()))
-        .id();
-    let boar = app
-        .world_mut()
-        .spawn(ObjectStore(ObjectFields::default()))
-        .id();
+    let mut unit = || {
+        app.world_mut()
+            .spawn(ObjectStore(ObjectFields::default()))
+            .id()
+    };
+    let (wolf, boar) = (unit(), unit());
 
-    // `"player"` and `"target"` as the unit feed pushes them, each with its guid.
     let mut script = UiScript::new().unwrap();
     for (token, guid) in [("player", ME), ("target", WOLF)] {
         script.set_unit(
@@ -567,29 +562,51 @@ fn the_mouseover_token_carries_the_hovered_guid() {
         );
     }
     app.insert_non_send_resource(script);
+    (app, wolf, boar)
+}
 
-    let hover = |app: &mut App, entity: Entity, guid: u64| {
-        *app.world_mut().resource_mut::<Hovered>() = Hovered {
-            target: Some(entity),
-            guid: Some(guid),
-            ..Default::default()
-        };
-        app.world_mut()
-            .run_system_once(drive_mouseover_tooltip)
-            .unwrap();
+/// Set this frame's pick and run the driver.
+fn hover(app: &mut App, pick: Hovered, object: HoveredObject) {
+    *app.world_mut().resource_mut::<Hovered>() = pick;
+    *app.world_mut().resource_mut::<HoveredObject>() = object;
+    app.update();
+}
+
+fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
+    let pick = Hovered {
+        target: Some(entity),
+        guid: Some(guid),
+        distance: 10.0,
+        ..Default::default()
     };
-    let is_unit = |app: &mut App, other: &str| -> Option<i64> {
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .eval::<Option<i64>>(&format!(r#"return UnitIsUnit("mouseover", "{other}")"#))
-            .unwrap()
+    hover(app, pick, HoveredObject::default());
+}
+
+fn eval(app: &mut App, lua: &str) -> Option<i64> {
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .eval::<Option<i64>>(lua)
+        .unwrap()
+}
+
+/// The hover pushes `"mouseover"` with the hovered guid, the pair `0x492890` writes to
+/// `0xb4e2c8`/`0xb4e2cc`: `UnitIsUnit` (`0x516070`) resolves both tokens through `0x515970` and
+/// compares guids, so hovering the target answers 1 and hovering anyone else nil.
+#[test]
+fn the_mouseover_token_carries_the_hovered_guid() {
+    let (mut app, wolf, boar) = mouseover_app();
+    let is_unit = |app: &mut App, other: &str| {
+        eval(
+            app,
+            &format!(r#"return UnitIsUnit("mouseover", "{other}")"#),
+        )
     };
 
-    hover(&mut app, wolf, WOLF);
+    hover_unit(&mut app, wolf, WOLF);
     assert_eq!(is_unit(&mut app, "target"), Some(1), "hovering the target");
     assert_eq!(is_unit(&mut app, "player"), None, "the target is not us");
 
-    hover(&mut app, boar, BOAR);
+    hover_unit(&mut app, boar, BOAR);
     assert_eq!(
         is_unit(&mut app, "target"),
         None,
@@ -599,5 +616,185 @@ fn the_mouseover_token_carries_the_hovered_guid() {
         is_unit(&mut app, "mouseover"),
         Some(1),
         "the token is itself"
+    );
+}
+
+/// Once no unit wins the pick, `"mouseover"` names nobody: the publisher `0x492890` zeroes the pair
+/// (`0x4928e8`, `0x4928f2`) and writes a null, corpse or GameObject guid, which the resolver
+/// rejects as a unit (`0x515bca mov ecx,8`, `0x515bd9 je`). Empty ground, a corpse and a nearer
+/// GameObject each clear it, in the frame the hover leaves the unit.
+#[test]
+fn the_mouseover_token_clears_when_no_unit_is_hovered() {
+    use benilla_protocol::ObjectFields;
+
+    let (mut app, wolf, _) = mouseover_app();
+    let corpse = app
+        .world_mut()
+        .spawn(ObjectStore(ObjectFields::default()))
+        .id();
+    let chest = app
+        .world_mut()
+        .spawn(ObjectStore(ObjectFields::default()))
+        .id();
+    let named = |app: &mut App| {
+        (
+            eval(app, r#"return UnitExists("mouseover")"#),
+            eval(app, r#"return UnitIsUnit("mouseover", "target")"#),
+        )
+    };
+    let empty = Hovered::default();
+    let on_corpse = Hovered {
+        corpse: Some(corpse),
+        corpse_guid: Some(0xF100_0000_0000_0003),
+        distance: 10.0,
+        ..Default::default()
+    };
+    let under_chest = Hovered {
+        target: Some(wolf),
+        guid: Some(WOLF),
+        distance: 10.0,
+        ..Default::default()
+    };
+    let chest_nearer = HoveredObject {
+        target: Some(chest),
+        guid: Some(0xF110_0000_0000_0004),
+        distance: 5.0,
+    };
+    for (leave, object, what) in [
+        (empty, HoveredObject::default(), "empty ground"),
+        (on_corpse, HoveredObject::default(), "a corpse"),
+        (under_chest, chest_nearer, "a nearer GameObject"),
+    ] {
+        hover_unit(&mut app, wolf, WOLF);
+        assert_eq!(
+            named(&mut app),
+            (Some(1), Some(1)),
+            "over the wolf, before {what}"
+        );
+        hover(&mut app, leave, object);
+        assert_eq!(named(&mut app), (None, None), "after {what}");
+    }
+}
+
+/// A quest panel that opens this frame is hoverable in its tick.
+#[test]
+fn the_spell_feed_runs_after_the_quest_feed() {
+    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::ui_quest::feed_quest,
+        feed_spell_tooltips
+    ));
+}
+
+/// The pet bar, Beast Training and target-of-target hovers are whole on the first hover.
+#[test]
+fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
+    use benilla_ui::script::{
+        AuraState, CraftRecipe, CraftState, CraftTooltip, PetActionView, TradeSkillDifficulty,
+    };
+    let spell = |name: &str, description: &str| benilla_formats::SpellDisplay {
+        name: name.into(),
+        description: Some(description.into()),
+        ..Default::default()
+    };
+    let catalog = std::collections::HashMap::from([
+        (3110, spell("Firebolt", "Deals Fire damage.")),
+        (17253, spell("Bite", "Bite the enemy.")),
+        (589, spell("Shadow Word: Pain", "Shadow damage over time.")),
+    ]);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.insert_resource(Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(catalog),
+        ..Spells::empty_for_tests()
+    })
+    .insert_resource(NetCommands(tx))
+    .init_resource::<Items>()
+    .init_resource::<crate::net::GuidIndex>()
+    .init_resource::<crate::spell::SpellModifiers>()
+    .add_systems(Update, feed_spell_tooltips);
+
+    let mut script = UiScript::new().unwrap();
+    script.set_pet_actions(
+        true,
+        true,
+        true,
+        vec![PetActionView {
+            name: Some("Firebolt".into()),
+            spell_id: Some(3110),
+            ..Default::default()
+        }],
+    );
+    script.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![CraftRecipe {
+            spell_id: 24599,
+            tooltip: CraftTooltip::Spell(17253),
+            name: "Bite".into(),
+            sub_name: String::new(),
+            difficulty: TradeSkillDifficulty::Optimal,
+            num_available: 1,
+            icon: None,
+            description: None,
+            needs_item_target: false,
+            reagents: vec![],
+            tools: vec![],
+            spell_level: 0,
+        }],
+    }));
+    // We target a mob that targets party1, whose list the VM holds by guid.
+    const ME: u64 = 0x10;
+    const MOB: u64 = 0xF130_0000_0000_0001;
+    const TOT: u64 = 0x21;
+    script.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: ME,
+        target: MOB,
+        party: [TOT, 0, 0, 0],
+        held: std::collections::HashMap::from([(ME, MOB), (MOB, TOT), (TOT, 0)]),
+        ..Default::default()
+    });
+    script.set_unit_auras(
+        TOT,
+        Some(vec![AuraState {
+            spell_id: 589,
+            name: Some("Shadow Word: Pain".into()),
+            ..Default::default()
+        }]),
+    );
+    app.insert_non_send_resource(script);
+    app.update();
+
+    let script = app.world().non_send_resource::<UiScript>();
+    script
+        .run(
+            r#"
+            local a = CreateFrame("Button", "B"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+            CreateFrame("GameTooltip", "TT")
+            local function lines()
+                local t = {}
+                for i = 1, TT:NumLines() do t[i] = getglobal("TTTextLeft" .. i):GetText() end
+                return table.concat(t, " | ")
+            end
+            TT:SetOwner(B, "ANCHOR_RIGHT"); TT:SetPetAction(1); PET = lines()
+            TT:SetOwner(B, "ANCHOR_RIGHT"); TT:SetCraftSpell(1); CRAFT = lines()
+            TT:SetOwner(B, "ANCHOR_RIGHT"); TT:SetUnitDebuff("targettarget", 1); TOT = lines()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        script.eval::<String>("return PET").unwrap(),
+        "Firebolt | Deals Fire damage."
+    );
+    assert_eq!(
+        script.eval::<String>("return CRAFT").unwrap(),
+        "Bite | Bite the enemy."
+    );
+    assert_eq!(
+        script.eval::<String>("return TOT").unwrap(),
+        "Shadow Word: Pain | Shadow damage over time."
     );
 }

@@ -153,6 +153,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("modern::lights::emissive::glow_anchor", "wall"),
     ("modern::lights::emissive::glow_of_geometry", "wall"),
     ("modkeys::SyntheticHold", "wall"),
+    ("particles::ParticleTuning", "record"),
     ("particles::ViewThrottled", "record"),
     ("particles::render::EFFECT_DRAW_STATS", "record"),
     ("particles::spawn_emitter", "record"),

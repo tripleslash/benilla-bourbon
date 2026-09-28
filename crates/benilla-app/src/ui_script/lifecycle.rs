@@ -359,15 +359,16 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 // path's does.
                 script.push_sound_suppression();
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
-                let files = super::manifest::ingame_manifest(&script);
+                let files =
+                    super::manifest::ingame_entries(&script, super::manifest::layer_enabled());
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.identity = identity;
                 pending.roster = roster;
                 pending.version_check = version_check;
                 pending.covering = covering;
                 pending.started = Some(frame_start);
-                // manifest entries after index 0 (the font registry, loaded at boot) + positions
-                // + addons + finish. The reference's own files are manifest entries too (1751),
+                // manifest entries after index 0 (the font registry, loaded at boot), the layer's
+                // included, + positions + addons + finish. The reference's own files are manifest entries too (1751),
                 // so they slice like ours.
                 pending.total = files.len().saturating_sub(1) + 3;
                 pending.done = 0;
@@ -528,6 +529,13 @@ fn entry_prepare(
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
+    // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
+    // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's
+    // own realm writes are engine writes, which the flag does not stop.
+    for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+        script.set_cvar_read_only(name, true);
+    }
     // The player too, before the addon walk. The record first: the reference's
     // `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only a copy of the char-enum row made at the
     // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. The

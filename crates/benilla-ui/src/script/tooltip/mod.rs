@@ -271,9 +271,12 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         t.num_lines = 0;
         t.min_width = 0.0;
-        t.unit_token = None;
+        // Clear drops the subject and unregisters its health watcher (`0x5300ad`, `0x53007c`).
+        t.unit_guid = None;
         t.world_owned = false;
     }
+    // New content replaces a spell render still waiting on its view.
+    model.spell_tooltip_waits.remove(&h);
     // The `<name>StatusBar` health bar is unit content: it hides with the lines, and the next
     // unit render re-shows it.
     let bar = model

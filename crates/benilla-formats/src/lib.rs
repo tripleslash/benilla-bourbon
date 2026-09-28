@@ -22,7 +22,10 @@ mod tga;
 pub use tga::tga_to_rgba;
 /// Where the WoW install is; [`Chain`] opens it.
 mod install;
-pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wow_data};
+pub use install::{
+    addon_corpus, addon_corpus_candidates, candidates, project_folder, set_project_folder, skipped,
+    wow_data,
+};
 mod characters;
 /// Web-target HTTP plumbing (bytes and byte ranges, in place of a filesystem). Always compiled
 /// (`encode_name` is plain Rust and tested natively); the browser-only pieces are gated to `wasm32`

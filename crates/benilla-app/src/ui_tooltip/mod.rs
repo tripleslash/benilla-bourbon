@@ -26,11 +26,13 @@ impl Plugin for UiTooltipPlugin {
             Update,
             (
                 drive_mouseover_tooltip.in_set(UnitFeed),
-                // After the trainer feed, so a list that lands this frame is hoverable in its tick;
-                // outside `UnitFeed`, which the trainer feed follows, so it takes that set's gate.
+                // After the trainer and quest feeds, so a list that lands this frame is hoverable
+                // in its tick; outside `UnitFeed`, which the trainer feed follows, so it takes that
+                // set's gate.
                 feed_spell_tooltips
                     .in_set(UiFeed)
                     .after(TrainerFeed)
+                    .after(crate::ui_quest::feed_quest)
                     .run_if(crate::ui_script::ingame_ui_up),
             ),
         );
@@ -331,15 +333,13 @@ struct SpellTooltipSources<'w> {
 }
 
 /// Push a view for every spell the UI can hover (the book, the class's talent ranks, the open
-/// trainer's services, the auras) before it is hovered, as the reference reads them all locally;
-/// an ask for any other id too.
+/// trainer's services, and what the VM holds: the pet's spells, the quest rewards, the craft's
+/// subjects, every unit's auras and the tracking spell) before it is hovered, as the reference
+/// reads them all locally; an ask for any other id too.
 fn feed_spell_tooltips(
     script: Option<NonSendMut<UiScript>>,
     actions: Option<Res<PlayerActions>>,
     spell_sources: SpellTooltipSources,
-    auras: Option<Res<crate::ui_aura::PlayerAuraCache>>,
-    selection: Res<crate::target::Selection>,
-    stores: Query<&ObjectStore>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     // The auto-attack target, the melee range cell's second reach.
     engaged_q: Query<&crate::creature_anim::Engaged, With<SelfPlayer>>,
@@ -369,6 +369,13 @@ fn feed_spell_tooltips(
         return;
     };
     let mut wanted: Vec<u32> = script.take_spell_tooltip_asks();
+    // What the VM holds for a hover: pet spells, quest rewards, craft subjects, auras, tracking.
+    wanted.extend(
+        script
+            .spell_tooltip_subjects()
+            .into_iter()
+            .filter(|s| !memory.pushed.contains(s)),
+    );
     if let Some(actions) = actions.as_deref() {
         wanted.extend(
             actions
@@ -402,28 +409,6 @@ fn feed_spell_tooltips(
                 );
             }
         }
-    }
-    if let Some(auras) = auras.as_deref() {
-        wanted.extend(auras.spell_ids().filter(|s| !memory.pushed.contains(s)));
-    }
-    // `SetTrackingSpell`: the display cache leaves the tracking aura out, so read the raw auras.
-    if let Ok(store) = self_q.single() {
-        wanted.extend(
-            store
-                .0
-                .unit_auras()
-                .map(|a| a.spell_id)
-                .filter(|s| !memory.pushed.contains(s)),
-        );
-    }
-    if let Some(store) = selection.target.and_then(|e| stores.get(e).ok()) {
-        wanted.extend(
-            store
-                .0
-                .unit_auras()
-                .map(|a| a.spell_id)
-                .filter(|s| !memory.pushed.contains(s)),
-        );
     }
     let home_area: Option<String> = home_bind
         .as_deref()
@@ -497,6 +482,9 @@ fn feed_spell_tooltips(
         memory.reagents = reagent_state;
         wanted.extend(memory.pushed.drain());
     }
+    // The sources overlap (a self-buff is in the book and on the player): build each id once.
+    wanted.sort_unstable();
+    wanted.dedup();
     // Build, then push: the build's borrow of the VM's strings ends before the store is written.
     let mut built: Vec<(u32, benilla_ui::script::SpellTooltipView)> = Vec::new();
     {
@@ -565,6 +553,8 @@ pub(crate) struct HoverMemo<'s> {
     last_lines: Local<'s, crate::ui_script::VmMemo<Option<UnitState>>>,
     /// The hover probe's last trace line, so a stationary probe logs it once.
     trace: Local<'s, String>,
+    /// Whether the VM holds a `"mouseover"` unit, so the clear is pushed once.
+    published: Local<'s, crate::ui_script::VmMemo<bool>>,
 }
 
 fn lines_view(s: &UnitState) -> UnitState {
@@ -619,10 +609,11 @@ fn drive_mouseover_tooltip(
     let (last, last_lines, trace) = (&mut memo.last, &mut memo.last_lines, &mut *memo.trace);
     let last = last.get(&script);
     let last_lines = last_lines.get(&script);
+    let published = memo.published.get(&script);
     let self_store = self_q.iter().next();
     let chr = classes.as_deref().map(|t| &t.0);
 
-    let unit = hovered.target.zip(hovered.guid).and_then(|(entity, guid)| {
+    let unit = hovered.mouseover(&hovered_go).and_then(|(entity, guid)| {
         let store = stores.get(entity).ok()?;
         let name = names
             .resolve_unit(guid, Some(store), &commands)
@@ -648,17 +639,26 @@ fn drive_mouseover_tooltip(
         (unit.is_none() && hovered.corpse.is_none()) || go_is_nearest(&hovered, &hovered_go)
     });
 
-    if let Some((guid, state)) = unit.filter(|_| go.is_none()) {
+    if let Some((guid, state)) = unit {
         // Push first: the builder reads the token. Rebuild on a new target or a late name or
         // creature answer; health and power stay out of the key, since the watcher drives the bar.
         let key = lines_view(&state);
         script.set_unit("mouseover", Some(state));
+        *published = true;
         if *last != LastHover::Unit(guid) || last_lines.as_ref() != Some(&key) {
             script.world_tooltip_unit("mouseover");
             *last = LastHover::Unit(guid);
             *last_lines = Some(key);
         }
         return;
+    }
+    // No unit won the pick: the publisher's teardown zeroes the mouseover pair (`0x4928e8`,
+    // `0x4928f2`) and writes a null, corpse or GameObject guid, none of which resolves as a unit,
+    // so `"mouseover"` names nobody from this frame. A fading plate keeps its lines and its bar,
+    // which follows the unit's guid, not the token; the null publish fires no event (the sole
+    // `UPDATE_MOUSEOVER_UNIT` is the unit arm's, `0x4929b3`).
+    if std::mem::take(published) {
+        script.set_unit("mouseover", None);
     }
     // The corpse plate, "Corpse of <owner>" (`0x52aef0`): a name and nothing else, corner-seated.
     // The publisher fires no event for a corpse, so `UnitName("mouseover")` on one stays nil.
@@ -830,7 +830,7 @@ fn drive_mouseover_tooltip(
         return;
     }
     if !matches!(*last, LastHover::None) {
-        // Hover lost: arm the fade. The `mouseover` state stays, so the fading plate keeps it.
+        // Hover lost: arm the fade (`0x492909` → `0x530ae0`).
         script.world_tooltip_fade();
         *last = LastHover::None;
     }

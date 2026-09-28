@@ -79,13 +79,6 @@ pub(crate) struct PlayerAuraCache {
     auras: Vec<CachedAura>,
 }
 
-impl PlayerAuraCache {
-    /// The live aura spell ids, pre-fed to `ui_tooltip` for a buff-bar hover's `SetPlayerBuff`.
-    pub(crate) fn spell_ids(&self) -> impl Iterator<Item = u32> + '_ {
-        self.auras.iter().map(|a| a.spell_id)
-    }
-}
-
 /// [`feed_auras`] fires `PLAYER_AURAS_CHANGED` and `UNIT_AURA` inline, so a feed whose state their
 /// handlers re-read (the stance feed) runs `.before(AuraEvents)` or they read last frame's.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -393,6 +386,7 @@ struct AuraUnits<'w> {
     // anyone.
     group: Option<Res<'w, crate::ui_party::GroupState>>,
     hovered: Option<Res<'w, crate::target::Hovered>>,
+    hovered_go: Option<Res<'w, crate::target::HoveredObject>>,
     interact: Option<Res<'w, crate::ui_session::InteractNpc>>,
 }
 
@@ -548,8 +542,10 @@ fn feed_auras(
             mouseover: units
                 .hovered
                 .as_deref()
-                .and_then(|h| h.target.and(h.guid))
-                .unwrap_or(0),
+                .and_then(|h| {
+                    h.mouseover(&units.hovered_go.as_deref().copied().unwrap_or_default())
+                })
+                .map_or(0, |(_, guid)| guid),
             npc: units.interact.as_deref().and_then(|i| i.1).unwrap_or(0),
             held,
             buffs_visible,

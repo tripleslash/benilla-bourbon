@@ -823,7 +823,7 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 
     // The names come from the manifest's own entries, chain files included.
     let mut names: Vec<String> = Vec::new();
-    for entry in &super::addons::Addon::builtin().toc.files {
+    for entry in &super::manifest::manifest_files() {
         if !entry.to_ascii_lowercase().ends_with(".xml") {
             continue;
         }
@@ -1453,6 +1453,54 @@ fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
     );
 }
 
+/// The stock Sound window's boxes write `this:GetChecked()` as is (`SoundOptionsFrame.lua:82`),
+/// which is nil once unticked, and `SetCVar` stores that as "0" (`0x488c98`); its sliders write
+/// `GetValue()`, a single-precision number stored as Lua's `%.14g` text (`0x6f7c80`).
+#[test]
+fn the_stock_sound_window_turns_a_box_off_and_stores_a_slider_as_lua_text() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.set_cvar_host("EnableMusic", "1");
+    s.run("this = SoundOptionsFrameOkay SoundOptionsFrame_Load()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+    let checked = "return SoundOptionsFrameCheckButton5:GetChecked() and true or false";
+    assert!(s.eval::<bool>(checked).unwrap(), "Enable Music starts on");
+
+    s.run("SoundOptionsFrameCheckButton5:Click()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(!s.eval::<bool>(checked).unwrap());
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("EnableMusic".to_string(), "0".to_string())],
+        "the unticked box turns music off"
+    );
+    s.run("SoundOptionsFrameCheckButton5:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("EnableMusic".to_string(), "1".to_string())]
+    );
+
+    s.run("SoundOptionsFrameSlider3:SetValue(0.4)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"MusicVolume\")").unwrap(),
+        "0.40000000596046"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The stock Video Options window loads hidden (`OptionsFrame.xml:5`) and owns the `OptionsFrame`
 /// name; ours is `BenillaOptionsFrame`, which the ESC menu opens and the stock "options window
 /// open?" consumers see only through the `GameMenuFrame.xml` wrappers.
@@ -1940,21 +1988,31 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
     );
 }
 
-/// `assets/ui` does not grow: the interface is the stock 1.12 FrameXML off the player's own patch
-/// chain, and a new file means a window was authored rather than migrated. Point `benilla.toc` at
-/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file calls.
+/// benilla's own interface is one layer, and it does not grow: `layer.toc` names exactly these
+/// files, all ours (none off the chain), and `assets/ui` holds nothing else but the two manifests.
+/// A window is migrated, not authored: point `benilla.toc` at
+/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file
+/// calls; what changes the stock UI goes in one of these files.
 #[test]
-fn assets_ui_does_not_grow() {
-    const SHIPPED: &[&str] = &[
-        "ContainerFrameAdapters.xml",
-        "GameMenuFrame.xml",
+fn the_layer_does_not_grow() {
+    const LAYER: &[&str] = &[
+        "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
-        "ScriptLogFrame.xml",
-        "ScrollTemplates.xml",
+        // Deviation (this fork): our own ESC menu in place of the stock one, which carries the
+        // Turtle WoW rungs and no Exit Game rung.
+        "GameMenuFrame.xml",
+        "ContainerFrameAdapters.xml",
         "SpellBookAdapters.xml",
-        "benilla.toc",
+        "ScriptLogFrame.xml",
+        "FrameXMLFixes.xml",
     ];
+    assert_eq!(
+        super::addons::Addon::layer().toc.files,
+        LAYER,
+        "layer.toc changed. The layer does not grow (docs/METHOD.md): a file that retired comes \
+         off this list; a new one needs a reason this list can name."
+    );
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .expect("assets/ui")
@@ -1963,11 +2021,28 @@ fn assets_ui_does_not_grow() {
         .filter(|n| !n.starts_with('.'))
         .collect();
     found.sort();
-    let mut shipped: Vec<String> = SHIPPED.iter().map(|s| s.to_string()).collect();
+    let mut shipped: Vec<String> = LAYER
+        .iter()
+        .chain(&["benilla.toc", "layer.toc"])
+        .map(|s| s.to_string())
+        .collect();
     shipped.sort();
     assert_eq!(
         found, shipped,
-        "assets/ui changed. It does not grow: a window is migrated, not authored (docs/METHOD.md). \
-         A file that retired comes off this list; a new one needs a reason this list can name."
+        "assets/ui holds the two manifests and the layer's files, nothing else"
+    );
+}
+
+/// The core is the stock UI: `benilla.toc` names only the reference's own files off the chain.
+#[test]
+fn the_core_toc_names_no_file_of_ours() {
+    let core = super::addons::Addon::core().toc.files;
+    let ours: Vec<&String> = core
+        .iter()
+        .filter(|f| !super::reference_ui::is_chain_entry(f))
+        .collect();
+    assert!(
+        ours.is_empty(),
+        "benilla.toc names a file of ours ({ours:?}): benilla's own interface is the layer          (layer.toc), which loads after every stock file"
     );
 }

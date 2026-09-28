@@ -1404,6 +1404,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
         ClientCommand::Logout => w.logout_request(),
         ClientCommand::LogoutCancel => w.logout_cancel(),
+        ClientCommand::OpeningCinematic => w.opening_cinematic(),
         ClientCommand::CompleteCinematic => w.complete_cinematic(),
         ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
         ClientCommand::MoveModeAck {
