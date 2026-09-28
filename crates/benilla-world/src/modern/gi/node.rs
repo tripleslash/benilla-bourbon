@@ -42,7 +42,10 @@ struct GiPipelines {
     trace_layout: BindGroupLayoutDescriptor,
     blend_layout: BindGroupLayoutDescriptor,
     classify: CachedComputePipelineId,
+    /// The trace's three stages (`gi_trace.wgsl`): per probe, per ray, per probe again.
+    setup: CachedComputePipelineId,
     trace: CachedComputePipelineId,
+    sum: CachedComputePipelineId,
     blend: CachedComputePipelineId,
 }
 
@@ -58,6 +61,9 @@ struct GiFrame {
     uniform: Option<Buffer>,
     scratch: Option<Buffer>,
     scratch_probes: usize,
+    /// The trace's per-probe setup records and per-ray results, sized for a frame's listed cap.
+    setups: Option<Buffer>,
+    rays: Option<Buffer>,
     /// The work list `gi_classify.wgsl` packs — a count, then one probe index per listed probe —
     /// and the indirect dispatch it grows. Both are reset every frame before the passes run.
     work: Option<Buffer>,
@@ -90,6 +96,9 @@ fn init_pipelines(
                 storage_buffer_sized(false, None),
                 // The work list.
                 storage_buffer_read_only_sized(false, None),
+                // The setup records and the ray results.
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
             ),
         ),
     );
@@ -139,11 +148,23 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/gi_classify.wgsl",
         "classify_probes",
     );
+    let setup = compute(
+        "modern_gi_setup",
+        &trace_layout,
+        "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+        "setup_probes",
+    );
     let trace = compute(
         "modern_gi_trace",
         &trace_layout,
         "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
-        "trace_probes",
+        "trace_rays",
+    );
+    let sum = compute(
+        "modern_gi_sum",
+        &trace_layout,
+        "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+        "sum_probes",
     );
     let blend = compute(
         "modern_gi_blend",
@@ -156,7 +177,9 @@ fn init_pipelines(
         trace_layout,
         blend_layout,
         classify,
+        setup,
         trace,
+        sum,
         blend,
     });
 }
@@ -264,6 +287,31 @@ fn prepare_gi(
     let Some(scratch) = frame.scratch.clone() else {
         return;
     };
+    // A frame lists at most `total / period` probes (`probegi::listed_cap`): one setup record each
+    // (64 bytes, `GiSetup`) and two rows a ray (32 bytes).
+    let cap = (probes / gi.tier.period.max(1) as usize).max(1) as u64;
+    let sized = |b: &Option<Buffer>, bytes: u64| b.as_ref().is_some_and(|b| b.size() == bytes);
+    let setup_bytes = cap * 64;
+    if !sized(&frame.setups, setup_bytes) {
+        frame.setups = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("modern_gi_setups"),
+            size: setup_bytes,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
+    }
+    let ray_bytes = cap * u64::from(gi.tier.rays) * 32;
+    if !sized(&frame.rays, ray_bytes) {
+        frame.rays = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("modern_gi_rays"),
+            size: ray_bytes,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
+    }
+    let (Some(setups), Some(ray_out)) = (frame.setups.clone(), frame.rays.clone()) else {
+        return;
+    };
     // The work list holds at most every probe of the allocation, so it is sized once and never
     // re-created by a tier change; the dispatch is three words. Both are reset here, every frame the
     // passes run: `write_buffer` lands before the frame's command buffers, so the classify pass
@@ -325,6 +373,8 @@ fn prepare_gi(
             uniform.as_entire_binding(),
             scratch.as_entire_binding(),
             work.as_entire_binding(),
+            setups.as_entire_binding(),
+            ray_out.as_entire_binding(),
         )),
     ));
     frame.blend_bind = Some(device.create_bind_group(
@@ -376,9 +426,11 @@ impl Node for GiTraceNode {
         }
         let pipes = world.resource::<GiPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let (Some(classify), Some(trace), Some(blend)) = (
+        let (Some(classify), Some(setup), Some(trace), Some(sum), Some(blend)) = (
             pipeline_cache.get_compute_pipeline(pipes.classify),
+            pipeline_cache.get_compute_pipeline(pipes.setup),
             pipeline_cache.get_compute_pipeline(pipes.trace),
+            pipeline_cache.get_compute_pipeline(pipes.sum),
             pipeline_cache.get_compute_pipeline(pipes.blend),
         ) else {
             return Ok(());
@@ -405,9 +457,12 @@ impl Node for GiTraceNode {
                 timestamp_writes: None,
             });
             let span = diagnostics.pass_span(&mut pass, "modern_gi_trace");
-            pass.set_pipeline(trace);
             pass.set_bind_group(0, trace_bind, &[]);
-            pass.dispatch_workgroups_indirect(dispatch, 0);
+            // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
+            for stage in [setup, trace, sum] {
+                pass.set_pipeline(stage);
+                pass.dispatch_workgroups_indirect(dispatch, 0);
+            }
             span.end(&mut pass);
         }
         {

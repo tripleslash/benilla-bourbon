@@ -730,6 +730,15 @@ fn prepare_gi_voxels(
     scene.albedo = Some(albedo);
     scene.normal = Some(normal);
     scene.height = Some(height);
+    // fork: the highest voxel the clipmap can hold — the top of every caster it holds, plus two of
+    // the coarsest voxels for a box's rounding out to whole voxels. A ray rising above it and the
+    // ground (`probegi::march`) can hit nothing more, and ends as the sky it would have reached.
+    clip.bounds.y = state
+        .casters
+        .values()
+        .map(|c| c.center.y + c.half.y)
+        .fold(crate::modern::gi::NO_TERRAIN, f32::max)
+        + 2.0 * tier.voxel[tier.levels - 1];
     scene.clip = clip;
     // The probes trace as soon as there is a clipmap to trace against — an empty one only means an
     // open sky, which is what the sky-occlusion map says there too.

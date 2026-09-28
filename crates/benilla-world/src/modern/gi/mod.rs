@@ -281,6 +281,9 @@ pub struct ModernGi {
     pub tier: GiTier,
     pub camera: Vec3,
     pub forward: Vec3,
+    /// The view's half-diagonal field of view (radians): the cone `gi_classify.wgsl` holds a probe
+    /// to its full update rate inside. Pi (everything in view) without a perspective camera.
+    pub view_half: f32,
     pub frame: u32,
     /// A teleport or a model switch: every probe is traced and replaced this frame.
     pub cut: bool,
@@ -303,6 +306,7 @@ impl Default for ModernGi {
             tier: GiTier::OFF,
             camera: Vec3::ZERO,
             forward: Vec3::NEG_Z,
+            view_half: std::f32::consts::PI,
             frame: 0,
             cut: true,
             gain: 1.0,
@@ -445,7 +449,7 @@ pub(super) fn plugin(app: &mut App) {
 fn update_gi(
     active: Res<ActiveLighting>,
     lighting: Res<WowLighting>,
-    cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    cameras: Query<(&GlobalTransform, Option<&bevy::camera::Projection>), With<WorldCamera>>,
     // fork: modern lighting (P6) — the camera's room, and the building it belongs to.
     claim: Option<Res<crate::wmo_portal::CameraInteriorClaim>>,
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
@@ -501,8 +505,18 @@ fn update_gi(
         hist.camera = None;
         return;
     }
-    let Some(camera) = cameras.iter().next() else {
+    let Some((camera, projection)) = cameras.iter().next() else {
         return;
+    };
+    // The cone a probe keeps its full update rate in: the frustum's half-diagonal.
+    let view_half = match projection {
+        Some(bevy::camera::Projection::Perspective(p)) => {
+            let v = (p.fov * 0.5).tan();
+            (v * v * (1.0 + p.aspect_ratio * p.aspect_ratio))
+                .sqrt()
+                .atan()
+        }
+        _ => std::f32::consts::PI,
     };
     let cam = camera.translation();
     // The interior sub-grid coming or going is not a cut: it is stored behind the exterior ladder
@@ -541,6 +555,7 @@ fn update_gi(
         tier,
         camera: cam,
         forward: camera.forward().as_vec3(),
+        view_half,
         frame: hist.frame,
         cut,
         gain: gi_gain(),
@@ -594,7 +609,7 @@ pub fn trace_bytes(gi: &ModernGi, params: &GiParams, clip: &GiClip) -> Vec<u8> {
     let mut row = |v: Vec4| out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
     row(gi.camera.extend(if gi.cut { 1.0 } else { 0.0 }));
     row(gi.forward.extend(gi.history));
-    row(gi.rot.row(0).extend(0.0));
+    row(gi.rot.row(0).extend(gi.view_half));
     row(gi.rot.row(1).extend(0.0));
     row(gi.rot.row(2).extend(0.0));
     // The sun bias is a voxel of the finest level; the ray's own start offset keeps a probe sitting

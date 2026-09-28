@@ -53,6 +53,23 @@ struct GiWork {
 }
 @group(0) @binding(9) var<storage, read> work: GiWork;
 
+// fork: what the setup stage leaves for a listed probe (`setup_probes`), by its place in the list.
+struct GiSetup {
+    // xyz = the probe's position, w = its validity before the backface test.
+    pos: vec4<f32>,
+    // x = its probe index, y = the level its rays start in, z = its near lights' count, w = 1 when
+    // it is fresh (scrolled in, never traced, or a cut).
+    info: vec4<u32>,
+    near: vec4<u32>,
+    // x = its interior class.
+    cls: vec4<f32>,
+}
+@group(0) @binding(10) var<storage, read_write> setups: array<GiSetup>;
+// fork: every ray's contribution (`trace_rays`), two rows a ray, ray-major: `rgb` = the radiance
+// and `w` = the share that reached the sky; then x = whether it left a surface by its back and y =
+// its hit distance.
+@group(0) @binding(11) var<storage, read_write> ray_out: array<vec4<f32>>;
+
 // P6: the local lights near a probe, picked once and then evaluated at every ray's hit — walking the
 // whole table per hit would be 24 rays x 256 lights a probe.
 const NEAR_LIGHTS: u32 = 4u;
@@ -61,20 +78,26 @@ const FOLIAGE_GAP: f32 = 0.45;
 var<private> near_light: array<u32, 4>;
 var<private> near_count: u32;
 
-// fork: P8b — **one thread per RAY, not one per probe.**
+// fork: P8b — **one thread per RAY, not one per probe**, and since then **a warp per ray
+// DIRECTION, not per probe.**
 //
-// The trace used to give each probe one thread and loop it over all of that probe's rays. A frame
-// traces a few thousand probes (High: ~6k), so the whole pass was ~100 workgroups — a handful of
-// warps per SM on a GPU that holds dozens — and every one of them walked a ray at a time through
-// dependent texture loads with nothing else resident to hide the latency behind. Measured at
-// Darnassus it was two thirds of the frame on every tier from High up.
+// The trace used to give each probe one thread and loop it over all of that probe's rays; P8b gave
+// each ray a lane, a probe a workgroup. But a warp runs as long as its longest lane, and a probe's
+// rays span the sphere: in nearly every probe one ray runs level and walks its whole step budget
+// while its neighbours hit the ground in a handful, so every warp paid for its slowest direction.
+// Measured at the worldview's pose, a quarter of the step budget took the pass from 6.0 to 2.7 ms,
+// and early-outs that shortened the average ray moved nothing.
 //
-// So a workgroup now traces one probe with one lane per ray (two probes when a probe has 32 rays or
-// fewer, `group_probes`), and the probe's sums are made afterwards by its first lane, **adding the
-// rays' contributions in ray order** — the order the old loop added them in, so a probe comes out as
-// it did, to float rounding. The per-probe work around the rays is split the same way: every lane of
-// a probe tests its share of the light table, and the first lane then takes the four nearest from
-// that in table order, exactly as the old sequential walk chose them.
+// So the work is three stages over the same list and the same indirect dispatch:
+//
+// - `setup_probes`: per probe, as before — its lights (every lane of a probe testing its share of
+//   the table, the first lane taking the four nearest in table order), its validity and its class,
+//   left in `setups`.
+// - `trace_rays`: ONE RAY INDEX ACROSS CONSECUTIVE PROBES per warp — the same direction (one
+//   rotation for the frame), so lanes that start together mostly end together.
+// - `sum_probes`: per probe, its rays added **in ray order**, exactly as the old loop added them, so
+//   a probe comes out as it did. The SH weightings are the ray's radiance times its direction,
+//   recomputed from the same direction with the same arithmetic.
 const LANES: u32 = 64u;
 // Probes one workgroup can hold — the per-probe shared arrays below are sized for it, and a tier
 // with fewer than 16 rays simply leaves lanes idle rather than overflow them.
@@ -83,18 +106,6 @@ const MAX_GROUP_PROBES: u32 = 4u;
 const MAX_LIGHTS: u32 = 256u;
 // Per probe of the group: every table light's squared distance, or -1 when out of reach.
 var<workgroup> wg_light_d2: array<f32, 1024>;
-// Per probe of the group: the chosen near lights and how many there are.
-var<workgroup> wg_near: array<u32, 16>;
-var<workgroup> wg_near_count: array<u32, 4>;
-// Per probe of the group: x = validity before the backface test, y = the interior class.
-var<workgroup> wg_probe: array<vec2<f32>, 4>;
-// Per lane, its ray's contribution: `rgb` = the radiance and its three SH weightings; `w` = the
-// share of the ray that reached the sky, whether it hit a back face, its hit distance and that
-// distance squared.
-var<workgroup> wg_rad: array<vec4<f32>, 64>;
-var<workgroup> wg_shx: array<vec4<f32>, 64>;
-var<workgroup> wg_shy: array<vec4<f32>, 64>;
-var<workgroup> wg_shz: array<vec4<f32>, 64>;
 
 // Probes per workgroup for `rays` rays a probe. The classify pass sizes the indirect dispatch with
 // the same arithmetic (`gi_classify.wgsl`), so the two can never disagree.
@@ -179,58 +190,49 @@ fn bounce_at(g: probegi::GiParams, p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
     return max(e, vec3<f32>(0.0)) * trace.tune.w;
 }
 
+// This frame's listed probes, as far as the cap lets the trace read (`probegi::listed_cap`).
+fn listed_count() -> u32 {
+    return min(work.count, probegi::listed_cap(trace.gi));
+}
+
+// The ray a stage-two lane walks: its index in the list's ray-major order.
+fn ray_slot(r: u32, item: u32, count: u32) -> u32 {
+    return 2u * (r * count + item);
+}
+
 @compute @workgroup_size(64)
-fn trace_probes(
+fn setup_probes(
     @builtin(workgroup_id) group_id: vec3<u32>,
     @builtin(num_workgroups) groups: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
 ) {
-    // Read straight off the uniform, so the early-out is uniform across the workgroup (the barriers
-    // below require it).
+    // Read straight off the uniform, so the early-out is uniform across the workgroup (the barrier
+    // below requires it).
     if (trace.gi.params.x < 0.5) {
         return;
     }
-    var g = trace.gi;
-    // The sky's radiance and the key are read from the rows the surface lanes light with, never from
-    // a second copy of them: a probe has to substitute for the ambient row exactly.
-    g.sky = vec4<f32>(light.rows[0].xyz, g.sky.w);
-    let rays = clamp(u32(trace.gi.misc.x), 1u, LANES);
+    let g = trace.gi;
+    let rays = clamp(u32(g.misc.x), 1u, LANES);
     let per_group = group_probes(rays);
-    // Which of this workgroup's probes this lane serves, and which of that probe's rays it walks.
+    // Which of this workgroup's probes this lane serves, and which share of its light table.
     let slot = lane / rays;
     let ray = lane % rays;
-    // The dispatch is rows of workgroups (`gi_classify.wgsl`'s `GROUP_ROW`); this is the row-major
-    // workgroup index, and a row's tail past the list simply finds no probe.
+    // The dispatch is rows of workgroups (`gi_classify.wgsl`'s `GROUP_ROW`).
     let item = (group_id.y * groups.x + group_id.x) * per_group + slot;
-    // `gi_classify.wgsl` already decided every listed probe is due (scrolled in, never traced, a
-    // cut, or its turn in the period). A lane past the list, or past this group's probes, does no
-    // work — but it still reaches every barrier.
-    // fork: the list holds at most `listed_cap` probes; the count may run past it (the classify pass
-    // counts every due probe before it drops the excess).
-    let busy = slot < per_group && item < min(work.count, probegi::listed_cap(trace.gi));
+    let busy = slot < per_group && item < listed_count();
 
     var idx = 0u;
     var cascade = 0u;
     var w = vec3<i32>(0);
     var p = vec3<f32>(0.0);
     if (busy) {
-        idx = work.items[item];
+        idx = work.items[item] & 0x7fffffffu;
         let per_cascade = u32(g.params.y);
         cascade = probegi::logical_cascade(g, idx / per_cascade);
         // The world probe this slot currently holds (the grid is toroidal).
         w = probegi::slot_probe(g, cascade, idx % per_cascade);
         p = probegi::probe_pos(g, cascade, w);
     }
-    let previous = modern_block.probes[idx];
-    let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
-    // Never traced — not "invalid": an invalid probe used to count as cold, so it was re-traced
-    // every frame under a new ray rotation, flipping between valid and invalid (and between classes)
-    // frame to frame. That flip was the blinking on trunks, canopies and interior walls.
-    let cold = previous.depth.w < 0.5;
-    let reset = trace.cam.w > 0.5;
-    let fresh = scrolled || cold || reset;
-
-    // ---- per probe: its lights, its validity, its class ----
     let count = min(u32(light.rows[20].x), MAX_LIGHTS);
     if (busy) {
         // This lane's share of the light table.
@@ -243,120 +245,160 @@ fn trace_probes(
             let reach = pos_range.w + 8.0;
             wg_light_d2[slot * MAX_LIGHTS + i] = select(d2, -1.0, d2 > reach * reach);
         }
-        if (ray == 0u) {
-            // A probe under the terrain, or inside a wall, lights nothing: it is marked invalid
-            // and the receivers around it fall back on their neighbours (and, with none, on the
-            // sky map).
-            var valid = 1.0;
-            if (p.y < probegi::terrain_height(hf_map, trace.clip, p) - 0.25) {
-                valid = 0.0;
-            }
-            // P6: how enclosed this probe is. It decides two things — what a ray that reaches
-            // nothing sees (the room's own ambient, not the sky), and which receivers may read
-            // this probe at all (`probegi::accum`'s class match).
-            //
-            // TWO signals, because the top-down map alone is not enough: a forest canopy shades
-            // it as hard as a roof does, so the map by itself would classify a wood as indoors
-            // and the class match would then throw P5's canopy bounce away. What separates them
-            // is sideways: a probe under leaves still gets rays out to the sky, a probe in a room
-            // does not, and the probe's own last sky share is exactly that number. A probe with
-            // no history — cold, or just scrolled in — counts as outdoors, which is the direction
-            // that self-corrects invisibly: a room reads one update period too bright on entry,
-            // where the other way round a moving dark patch would follow the camera through a
-            // wood.
-            let sky_here = sunshadow::sky_visibility(shadow_map, shadow_samp, modern_block.cascades, p);
-            let seen_before = select(previous.sh_x.w, 1.0, fresh);
-            let interior_class = (1.0 - smoothstep(0.0, 0.25, sky_here))
-                * (1.0 - smoothstep(0.02, 0.20, seen_before));
-            wg_probe[slot] = vec2<f32>(valid, interior_class);
-        }
     }
     workgroupBarrier();
-    if (busy && ray == 0u) {
-        pick_near_lights(slot, count);
-        wg_near_count[slot] = near_count;
-        for (var k = 0u; k < NEAR_LIGHTS; k = k + 1u) {
-            wg_near[slot * NEAR_LIGHTS + k] = near_light[k];
-        }
-    }
-    workgroupBarrier();
-
-    // ---- per ray ----
-    if (busy) {
-        near_count = wg_near_count[slot];
-        for (var k = 0u; k < NEAR_LIGHTS; k = k + 1u) {
-            near_light[k] = wg_near[slot * NEAR_LIGHTS + k];
-        }
-        let state = wg_probe[slot];
-        let valid = state.x;
-        let interior_class = state.y;
-        let start_level = min(cascade, u32(trace.clip.info.x) - 1u);
-        let to_sun = -normalize(light.rows[2].xyz);
-        let key = light.rows[1].xyz * light.rows[2].w;
-
-        let dir = rotate(fib_dir(ray, f32(rays)));
-        var radiance = vec3<f32>(0.0);
-        var sky_seen = 0.0;
-        var backface = 0.0;
-        var hit_dist = 0.0;
-        var hit_dist_sq = 0.0;
-        if (valid > 0.0) {
-            let hit = probegi::march(
-                vox_albedo,
-                vox_normal,
-                hf_map,
-                trace.clip,
-                p + dir * trace.tune.z,
-                dir,
-                start_level,
-            );
-            hit_dist = hit.dist;
-            hit_dist_sq = hit.dist * hit.dist;
-            if (hit.kind < 0.5) {
-                radiance = probegi::miss_radiance(g, dir, interior_class);
-                sky_seen = 1.0;
-            } else {
-                let albedo = select(hit.albedo, g.ground.xyz, hit.kind > 1.5);
-                var nrm = hit.nrm;
-                let facing = dot(nrm, -dir);
-                var gap = 0.0;
-                if (hit.two_sided > 0.5) {
-                    // Foliage is lit through: its shading normal turns to meet the ray.
-                    nrm = select(nrm, -nrm, facing < 0.0);
-                    // A leaf voxel is not a solid wall: a share of the ray slips between the
-                    // leaves to the sky. Without it a canopy reads as a roof and the ground
-                    // under a tree goes black.
-                    gap = FOLIAGE_GAP;
-                } else if (facing < 0.0) {
-                    backface = 1.0;
-                }
-                let lift = hit.pos + nrm * trace.tune.y;
-                // Placed by the map that holds it, never by where the camera looks: a hit behind
-                // the player is as shaded as one in front (`sun_visibility_anywhere`).
-                let sun_vis = sunshadow::sun_visibility_anywhere(
-                    shadow_map,
-                    shadow_samp,
-                    modern_block.cascades,
-                    lift,
-                );
-                let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
-                // P6: the local lights too, so a room whose only light is a hearth still bounces.
-                radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));
-                radiance = mix(radiance, probegi::miss_radiance(g, dir, interior_class), gap);
-                sky_seen = gap;
-            }
-        }
-        wg_rad[lane] = vec4<f32>(radiance, sky_seen);
-        wg_shx[lane] = vec4<f32>(radiance * dir.x, backface);
-        wg_shy[lane] = vec4<f32>(radiance * dir.y, hit_dist);
-        wg_shz[lane] = vec4<f32>(radiance * dir.z, hit_dist_sq);
-    }
-    workgroupBarrier();
-
-    // ---- per probe again: its first lane sums the rays, in ray order ----
     if (!busy || ray != 0u) {
         return;
     }
+    let previous = modern_block.probes[idx];
+    let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
+    // Never traced — not "invalid": an invalid probe used to count as cold, so it was re-traced
+    // every frame under a new ray rotation, flipping between valid and invalid (and between classes)
+    // frame to frame. That flip was the blinking on trunks, canopies and interior walls.
+    let cold = previous.depth.w < 0.5;
+    let reset = trace.cam.w > 0.5;
+    let fresh = scrolled || cold || reset;
+    // A probe under the terrain, or inside a wall, lights nothing: it is marked invalid and the
+    // receivers around it fall back on their neighbours (and, with none, on the sky map).
+    var valid = 1.0;
+    if (p.y < probegi::terrain_height(hf_map, trace.clip, p) - 0.25) {
+        valid = 0.0;
+    }
+    // P6: how enclosed this probe is. It decides two things — what a ray that reaches nothing sees
+    // (the room's own ambient, not the sky), and which receivers may read this probe at all
+    // (`probegi::accum`'s class match).
+    //
+    // TWO signals, because the top-down map alone is not enough: a forest canopy shades it as hard
+    // as a roof does, so the map by itself would classify a wood as indoors and the class match
+    // would then throw P5's canopy bounce away. What separates them is sideways: a probe under
+    // leaves still gets rays out to the sky, a probe in a room does not, and the probe's own last
+    // sky share is exactly that number. A probe with no history — cold, or just scrolled in —
+    // counts as outdoors, which is the direction that self-corrects invisibly: a room reads one
+    // update period too bright on entry, where the other way round a moving dark patch would follow
+    // the camera through a wood.
+    let sky_here = sunshadow::sky_visibility(shadow_map, shadow_samp, modern_block.cascades, p);
+    let seen_before = select(previous.sh_x.w, 1.0, fresh);
+    let interior_class = (1.0 - smoothstep(0.0, 0.25, sky_here))
+        * (1.0 - smoothstep(0.02, 0.20, seen_before));
+    pick_near_lights(slot, count);
+    var out: GiSetup;
+    out.pos = vec4<f32>(p, valid);
+    out.info = vec4<u32>(
+        idx,
+        min(cascade, u32(trace.clip.info.x) - 1u),
+        near_count,
+        select(0u, 1u, fresh),
+    );
+    out.near = vec4<u32>(near_light[0], near_light[1], near_light[2], near_light[3]);
+    out.cls = vec4<f32>(interior_class, 0.0, 0.0, 0.0);
+    setups[item] = out;
+}
+
+@compute @workgroup_size(64)
+fn trace_rays(
+    @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) groups: vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+) {
+    let g0 = trace.gi;
+    if (g0.params.x < 0.5) {
+        return;
+    }
+    let rays = clamp(u32(g0.misc.x), 1u, LANES);
+    let count = listed_count();
+    // Rows of workgroups (`gi_classify.wgsl`), every lane one ray: the same indirect dispatch the
+    // setup stage ran, whose `group_probes` rows always hold at least `count * rays` lanes.
+    let global = (group_id.y * groups.x + group_id.x) * LANES + lane;
+    if (count == 0u || global >= count * rays) {
+        return;
+    }
+    // Ray-major: consecutive lanes are consecutive probes under the same ray direction.
+    let ray = global / count;
+    let item = global % count;
+    let setup = setups[item];
+    var g = g0;
+    // The sky's radiance and the key are read from the rows the surface lanes light with, never from
+    // a second copy of them: a probe has to substitute for the ambient row exactly.
+    g.sky = vec4<f32>(light.rows[0].xyz, g.sky.w);
+    near_count = setup.info.z;
+    near_light = array<u32, 4>(setup.near.x, setup.near.y, setup.near.z, setup.near.w);
+    let p = setup.pos.xyz;
+    let valid = setup.pos.w;
+    let interior_class = setup.cls.x;
+    let to_sun = -normalize(light.rows[2].xyz);
+    let key = light.rows[1].xyz * light.rows[2].w;
+
+    let dir = rotate(fib_dir(ray, f32(rays)));
+    var radiance = vec3<f32>(0.0);
+    var sky_seen = 0.0;
+    var backface = 0.0;
+    var hit_dist = 0.0;
+    if (valid > 0.0) {
+        let hit = probegi::march(
+            vox_albedo,
+            vox_normal,
+            hf_map,
+            trace.clip,
+            p + dir * trace.tune.z,
+            dir,
+            setup.info.y,
+        );
+        hit_dist = hit.dist;
+        if (hit.kind < 0.5) {
+            radiance = probegi::miss_radiance(g, dir, interior_class);
+            sky_seen = 1.0;
+        } else {
+            let albedo = select(hit.albedo, g.ground.xyz, hit.kind > 1.5);
+            var nrm = hit.nrm;
+            let facing = dot(nrm, -dir);
+            var gap = 0.0;
+            if (hit.two_sided > 0.5) {
+                // Foliage is lit through: its shading normal turns to meet the ray.
+                nrm = select(nrm, -nrm, facing < 0.0);
+                // A leaf voxel is not a solid wall: a share of the ray slips between the leaves to
+                // the sky. Without it a canopy reads as a roof and the ground under a tree goes
+                // black.
+                gap = FOLIAGE_GAP;
+            } else if (facing < 0.0) {
+                backface = 1.0;
+            }
+            let lift = hit.pos + nrm * trace.tune.y;
+            // Placed by the map that holds it, never by where the camera looks: a hit behind the
+            // player is as shaded as one in front (`sun_visibility_anywhere`).
+            let sun_vis = sunshadow::sun_visibility_anywhere(
+                shadow_map,
+                shadow_samp,
+                modern_block.cascades,
+                lift,
+            );
+            let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
+            // P6: the local lights too, so a room whose only light is a hearth still bounces.
+            radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));
+            radiance = mix(radiance, probegi::miss_radiance(g, dir, interior_class), gap);
+            sky_seen = gap;
+        }
+    }
+    let at = ray_slot(ray, item, count);
+    ray_out[at] = vec4<f32>(radiance, sky_seen);
+    ray_out[at + 1u] = vec4<f32>(backface, hit_dist, 0.0, 0.0);
+}
+
+@compute @workgroup_size(64)
+fn sum_probes(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(num_workgroups) groups: vec3<u32>,
+) {
+    if (trace.gi.params.x < 0.5) {
+        return;
+    }
+    let rays = clamp(u32(trace.gi.misc.x), 1u, LANES);
+    let count = listed_count();
+    // Rows of workgroups, as the blend reads the same dispatch: one thread per listed probe.
+    let item = id.y * (groups.x * LANES) + id.x;
+    if (item >= count) {
+        return;
+    }
+    let setup = setups[item];
     var dc = vec3<f32>(0.0);
     var sh_x = vec3<f32>(0.0);
     var sh_y = vec3<f32>(0.0);
@@ -365,20 +407,19 @@ fn trace_probes(
     var backfaces = 0.0;
     var hit_dist = 0.0;
     var hit_dist_sq = 0.0;
-    let first = slot * rays;
     for (var r = 0u; r < rays; r = r + 1u) {
-        let a = wg_rad[first + r];
-        let x = wg_shx[first + r];
-        let y = wg_shy[first + r];
-        let z = wg_shz[first + r];
+        let at = ray_slot(r, item, count);
+        let a = ray_out[at];
+        let b = ray_out[at + 1u];
+        let dir = rotate(fib_dir(r, f32(rays)));
         dc = dc + a.rgb;
-        sh_x = sh_x + x.rgb;
-        sh_y = sh_y + y.rgb;
-        sh_z = sh_z + z.rgb;
+        sh_x = sh_x + a.rgb * dir.x;
+        sh_y = sh_y + a.rgb * dir.y;
+        sh_z = sh_z + a.rgb * dir.z;
         sky_seen = sky_seen + a.w;
-        backfaces = backfaces + x.w;
-        hit_dist = hit_dist + y.w;
-        hit_dist_sq = hit_dist_sq + z.w;
+        backfaces = backfaces + b.x;
+        hit_dist = hit_dist + b.y;
+        hit_dist_sq = hit_dist_sq + b.y * b.y;
     }
 
     let inv_rays = 1.0 / f32(rays);
@@ -386,15 +427,14 @@ fn trace_probes(
     // limit: with 24 rotating rays the share jitters, and a hard cut turned that jitter into a probe
     // popping in and out of the field.
     let back_share = backfaces * inv_rays;
-    let state = wg_probe[slot];
-    let valid = state.x * (1.0 - smoothstep(trace.tune.x * 0.7, trace.tune.x * 1.3, back_share));
+    let valid = setup.pos.w * (1.0 - smoothstep(trace.tune.x * 0.7, trace.tune.x * 1.3, back_share));
     var out: probegi::GiProbe;
     // E(n) / pi = dc + sh . n, from a uniform-sphere estimate of the radiance field.
     out.dc = vec4<f32>(dc * inv_rays, valid);
     out.sh_x = vec4<f32>(sh_x * (2.0 * inv_rays), sky_seen * inv_rays);
-    out.sh_y = vec4<f32>(sh_y * (2.0 * inv_rays), select(1.0, 2.0, fresh));
+    out.sh_y = vec4<f32>(sh_y * (2.0 * inv_rays), select(1.0, 2.0, setup.info.w == 1u));
     out.sh_z = vec4<f32>(sh_z * (2.0 * inv_rays), 0.0);
     // P6: the two distance moments the Chebyshev test reads, and the class the receivers match on.
-    out.depth = vec4<f32>(hit_dist * inv_rays, hit_dist_sq * inv_rays, state.y, 1.0);
-    scratch[idx] = out;
+    out.depth = vec4<f32>(hit_dist * inv_rays, hit_dist_sq * inv_rays, setup.cls.x, 1.0);
+    scratch[setup.info.x] = out;
 }

@@ -312,7 +312,9 @@ struct GiClip {
     // resident terrain cell's box, so no texel of the map can stand above it. A ray point above it
     // cannot be under the terrain, so `march` skips the map read there — and a ray climbing above it
     // past the clipmap can never come down to it, so the far walk ends. Exact, not a shortcut.
-    // yzw spare.
+    // y = the highest voxel the clipmap can hold (world Y, yd): the top of every caster in it, with
+    // a margin for whole voxels. A ray rising above both can hit nothing; `march` ends it there as
+    // the miss it would have walked to. zw spare.
     bounds: vec4<f32>,
 }
 
@@ -400,8 +402,14 @@ fn march(
     let istep = vec3<i32>(stepv);
     let ni = i32(n);
     let ground_top = clip.bounds.x;
+    // Above this, going up, nothing is left to hit (`GiClip::bounds`).
+    let ceiling = max(clip.bounds.y, ground_top);
+    let rising = dir.y >= 0.0;
 
     while (lvl < levels && t < reach && budget > 0) {
+        if (rising && origin.y + dir.y * t >= ceiling) {
+            return miss(reach);
+        }
         let vs = clip.level[lvl].w;
         let base = clip.level[lvl].xyz;
         var p = origin + dir * t;
@@ -418,10 +426,35 @@ fn march(
         // compare, where `voxel_texel`'s six integer modulos a step were most of the loop's ALU.
         var wt = voxel_texel(clip, lvl, vec3<i32>(w)) - vec3<i32>(0, 0, i32(lvl) * ni);
         let layer = i32(lvl) * ni;
+        // fork: the walk loads each voxel one step AHEAD of testing it. The next voxel's address is
+        // pure DDA arithmetic, independent of what this one holds, so its load is issued before
+        // this voxel's hit and terrain tests run and lands while they do — two loads in flight a
+        // lane instead of one, on a loop that is otherwise waiting on memory. The walk, its tests
+        // and their order are unchanged; a load past a hit is simply never read.
+        var a = textureLoad(vox_albedo, vec3<i32>(wt.x, wt.y, wt.z + layer), 0);
         while (budget > 0) {
             budget = budget - 1;
             let texel = vec3<i32>(wt.x, wt.y, wt.z + layer);
-            let a = textureLoad(vox_albedo, texel, 0);
+            // The next voxel along the axis whose slab boundary is nearest.
+            let seg = min(min(tmax.x, tmax.y), tmax.z);
+            var w_next = w;
+            var tmax_next = tmax;
+            var wt_next = wt;
+            if (tmax.x <= tmax.y && tmax.x <= tmax.z) {
+                w_next.x = w.x + stepv.x;
+                tmax_next.x = tmax.x + tdelta.x;
+                wt_next.x = wrap_step(wt.x + istep.x, ni);
+            } else if (tmax.y <= tmax.z) {
+                w_next.y = w.y + stepv.y;
+                tmax_next.y = tmax.y + tdelta.y;
+                wt_next.y = wrap_step(wt.y + istep.y, ni);
+            } else {
+                w_next.z = w.z + stepv.z;
+                tmax_next.z = tmax.z + tdelta.z;
+                wt_next.z = wrap_step(wt.z + istep.z, ni);
+            }
+            // Always a texel of this level's slab (the wrap keeps it in range), read or not.
+            let a_next = textureLoad(vox_albedo, vec3<i32>(wt_next.x, wt_next.y, wt_next.z + layer), 0);
             if (a.a > 0.5) {
                 let packed = textureLoad(vox_normal, texel, 0);
                 var face = packed.xyz * 2.0 - vec3<f32>(1.0);
@@ -432,7 +465,6 @@ fn march(
                 return GiHit(1.0, t, hit_pos, a.rgb, normalize(face), 1.0 - packed.w);
             }
             // The terrain under this voxel, sampled at the segment's midpoint.
-            let seg = min(min(tmax.x, tmax.y), tmax.z);
             let mid = origin + dir * (t + seg * 0.5);
             // Above the highest ground there is nothing to find in the map (`GiClip::bounds`).
             var h = -1e9;
@@ -455,29 +487,19 @@ fn march(
                 let hit_pos = origin + dir * hi;
                 return GiHit(2.0, hi, hit_pos, vec3<f32>(0.0), terrain_normal(hf_map, clip, hit_pos), 0.0);
             }
-            // Advance one voxel along the axis whose slab boundary is nearest.
+            // Advance one voxel, onto the one already loaded.
             t = t + seg;
-            if (t >= reach) {
+            if (t >= reach || (rising && origin.y + dir.y * t >= ceiling)) {
                 return miss(reach);
             }
-            if (tmax.x <= tmax.y && tmax.x <= tmax.z) {
-                w.x = w.x + stepv.x;
-                tmax.x = tmax.x + tdelta.x;
-                wt.x = wrap_step(wt.x + istep.x, ni);
-            } else if (tmax.y <= tmax.z) {
-                w.y = w.y + stepv.y;
-                tmax.y = tmax.y + tdelta.y;
-                wt.y = wrap_step(wt.y + istep.y, ni);
-            } else {
-                w.z = w.z + stepv.z;
-                tmax.z = tmax.z + tdelta.z;
-                wt.z = wrap_step(wt.z + istep.z, ni);
-            }
-            tmax = tmax - vec3<f32>(seg);
+            w = w_next;
+            tmax = tmax_next - vec3<f32>(seg);
+            wt = wt_next;
             if (any(w < base) || any(w >= base + n)) {
                 lvl = lvl + 1u;
                 break;
             }
+            a = a_next;
         }
     }
 

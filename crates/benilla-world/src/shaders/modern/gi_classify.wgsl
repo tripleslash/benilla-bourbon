@@ -73,7 +73,24 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
     let cold = previous.depth.w < 0.5;
     let period = max(u32(g.misc.y), 1u);
-    let scheduled = ((idx * 7u + u32(g.misc.z)) % period) == 0u;
+    // fork: a probe no receiver on screen can read keeps a quarter of the rate. The field is an
+    // ease with a 6.6 s time constant (`gi::SETTLE_SECS`), so one updated every four periods is
+    // under a second behind it when the camera turns onto it, and on its full schedule again from
+    // then; a cut is never throttled. "On screen" is the view cone (`trace.rot_x.w`, its
+    // half-diagonal) widened by two probe spacings — the eight probes around any receiver, and the
+    // normal bias it samples along, are inside it — and every probe within those two spacings of
+    // the camera. Four periods stay coprime with the 7 (every tier's period is 3·2^k·…), so the
+    // schedule still visits every probe.
+    let spacing = g.grid[cascade].w;
+    let d = probegi::probe_pos(g, cascade, w) - trace.cam.xyz;
+    let dist = length(d);
+    let margin = 2.0 * spacing;
+    var seen = trace.cam.w > 0.5 || dist <= margin;
+    if (!seen) {
+        let off_axis = acos(clamp(dot(d, trace.fwd.xyz) / dist, -1.0, 1.0));
+        seen = off_axis <= trace.rot_x.w + asin(min(margin / dist, 1.0));
+    }
+    let scheduled = ((idx * 7u + u32(g.misc.z)) % select(4u * period, period, seen)) == 0u;
     // fork: a cut is no longer a reason to list a probe — it lists the whole field at once. The CPU
     // holds the cut for `period` frames instead (`gi::update_gi`), and the trace REPLACES every
     // probe it takes during that window, so each probe's scheduled turn in it is its reset.
@@ -86,7 +103,8 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     if (slot >= probegi::listed_cap(g)) {
         return;
     }
-    work.items[slot] = idx;
+    // Bit 31 marks a throttled probe, whose blend eases four updates' worth at once.
+    work.items[slot] = idx | select(0x80000000u, 0u, seen);
     // The trace spends one workgroup per `group_probes(rays)` listed probes — one lane per ray
     // (`gi_trace.wgsl`, whose arithmetic this repeats) — so every that-many-th probe listed adds a
     // workgroup, and every `GROUP_ROW`-th workgroup opens a new row of the dispatch. The blend reuses

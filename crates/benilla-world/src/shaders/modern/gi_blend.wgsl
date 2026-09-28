@@ -47,7 +47,8 @@ fn blend_probes(
     if (t >= min(work.count, probegi::listed_cap(g))) {
         return;
     }
-    let idx = work.items[t];
+    let item = work.items[t];
+    let idx = item & 0x7fffffffu;
     let per_cascade = u32(g.params.y);
     let fresh = scratch[idx];
     let cascade = probegi::logical_cascade(g, idx / per_cascade);
@@ -62,6 +63,12 @@ fn blend_probes(
     // RELATIVE change every update — which used to throw the history away and let each probe jump to
     // its latest noisy estimate every period: the field sparkled.
     var history = blend.fwd.w;
+    // A probe off screen is traced every fourth period (`gi_classify.wgsl`), so each of its updates
+    // eases as far as four would: the same time constant, on or off screen.
+    if ((item & 0x80000000u) != 0u) {
+        history = history * history;
+        history = history * history;
+    }
     let reseed = fresh.sh_y.w > 1.5 || old.depth.w < 0.5;
     if (reseed) {
         history = 0.0;
