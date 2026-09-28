@@ -324,6 +324,20 @@ pub fn run_worldview(build: BuildId) -> AppExit {
     seed_launch_env();
     // fork: modern lighting — dev tuning knobs follow the live query string.
     benilla_world::launch_env::set_live_reader(webenv::var);
+    // fork: `?turtle=1` looks at the world as a Turtle WoW realm serves it, the Turtle layer and
+    // the reforged art over it (per the player's setting), mounted before any chain reads.
+    #[cfg(target_arch = "wasm32")]
+    if webenv::var("WOW_TURTLE").as_deref() == Some("1") {
+        match benilla_formats::web::mount_turtle_layer() {
+            Ok(()) if benilla_formats::layers::reforged_models() => {
+                if let Err(e) = benilla_formats::web::mount_reforged_layer() {
+                    warn!("worldview: the reforged layer could not be mounted — {e:#}");
+                }
+            }
+            Ok(()) => {}
+            Err(e) => warn!("worldview: the Turtle layer could not be mounted — {e:#}"),
+        }
+    }
     webprogress::signal_ready_once();
     benilla_world::worldview::run(build)
 }
