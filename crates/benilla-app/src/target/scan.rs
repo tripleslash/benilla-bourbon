@@ -583,33 +583,6 @@ pub(super) fn cycle(
     }
 }
 
-/// The `TARGETNEARESTENEMY` and `TARGETPREVIOUSENEMY` bindings (TAB, SHIFT-TAB); the dispatch has
-/// already applied the typing gate and the modifier match.
-pub(super) fn tab_target(
-    binds: Res<crate::bindings::BindingsState>,
-    time: Res<Time>,
-    scan: TargetScan,
-    mut history: ResMut<TabHistory>,
-    mut selection: ResMut<Selection>,
-    mut seam: crate::creature_anim::AttackSeam,
-    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
-) {
-    let reverse = binds.fired(crate::bindings::cmd::TARGET_PREVIOUS_ENEMY);
-    if !reverse && !binds.fired(crate::bindings::cmd::TARGET_NEAREST_ENEMY) {
-        return;
-    }
-    cycle(
-        ScanSide::Enemy,
-        reverse,
-        time.elapsed_secs_f64(),
-        &scan,
-        &mut history,
-        &mut selection,
-        &mut seam,
-        !engaged.is_empty(),
-    );
-}
-
 /// The target half of the attack validator `0x612df0` (`0x61305d`–`0x613198`), shared by the
 /// player's Attack (`0x6131aa`) and the pet bar's (`0x4bd40d`): what it reads beyond the
 /// selection, the cycler it runs as `TargetNearestEnemy` (`0x6130b5`, `0x493f60(0, 1)`), and
@@ -633,21 +606,24 @@ impl AttackPick<'_, '_> {
         (self.scan.self_store(), self.scan.self_guid())
     }
 
-    /// The guid the swing or the pet's order goes at, or `None` once the refusal is raised. The
-    /// candidate is the selection (`0x61306b`): `AttackTarget` passes none (`0x489b50` →
-    /// `0x6131a0(0,0)`), nor does the pet bar (`0x4be42b`). An empty selection (`0x61307f`) or a
-    /// held unit the actor is friendly toward (`0x6130a3`, dropped at `0x6130a8`) runs
-    /// `TargetNearestEnemy` (`0x6130b5`), which commits its pick before this returns, so a call
-    /// after this one reads it. The target is then the selection as it stands (`0x6130c1`): a
-    /// fruitless scan leaves a friendly unit selected for the final gate to refuse, and only an
-    /// empty selection is `ERR_NO_ATTACK_TARGET` (`0x6130d9`).
+    /// The guid the swing, the pet's order or the cast goes at, or `None` once the refusal is
+    /// raised. The candidate is the guid the caller passed, else the selection (`0x61306b`):
+    /// `AttackTarget` passes none (`0x489b50` → `0x6131a0(0,0)`), nor does the pet bar
+    /// (`0x4be42b`); TryCast passes the caster on a self-cast press (`0x4e610e`). An empty
+    /// candidate (`0x61307f`) or a unit the actor is friendly toward (`0x6130a3`, dropped at
+    /// `0x6130a8`), the caster included, runs `TargetNearestEnemy` (`0x6130b5`), which commits its
+    /// pick before this returns, so a call after this one reads it. The target is then the
+    /// selection as it stands (`0x6130c1`): a fruitless scan leaves a friendly unit selected for
+    /// the final gate to refuse, and only an empty selection is `ERR_NO_ATTACK_TARGET`
+    /// (`0x6130d9`).
     pub(crate) fn target(
         &mut self,
+        passed: Option<u64>,
         selection: &mut Selection,
         seam: &mut crate::creature_anim::AttackSeam,
         errors: &mut crate::ui_action::UiErrorKeys,
     ) -> Option<u64> {
-        if !selection.guid.is_some_and(|g| self.keeps(g)) {
+        if !passed.or(selection.guid).is_some_and(|g| self.keeps(g)) {
             let engaged = self.engaged();
             cycle(
                 ScanSide::Enemy,
@@ -694,8 +670,12 @@ impl AttackPick<'_, '_> {
     /// (`0x613099`) is kept as well, for the second resolve to refuse. Actor → target is
     /// [`reaction_from_player`] (the at-war bit), never `ring_reaction`. The reference's actor is
     /// the caller, a pet on the pet arm (`0x4bd40d`), which vmangos gives its owner's faction
-    /// (`Pet.cpp:248`).
+    /// (`Pet.cpp:248`). The reaction to oneself is 4 before any faction rung (`0x606200`), so a
+    /// passed caster is never kept, FFA flag or not.
     fn keeps(&self, guid: u64) -> bool {
+        if self.scan.self_guid() == Some(guid) {
+            return false;
+        }
         self.scan.store_of(guid).is_none_or(|store| {
             reaction_from_player(
                 self.scan.factions.as_deref(),

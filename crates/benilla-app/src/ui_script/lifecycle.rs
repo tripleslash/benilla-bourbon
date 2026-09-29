@@ -174,6 +174,11 @@ pub(crate) struct PendingEntryUiLoad {
     version_check: bool,
     /// The core's rows and the layer's files, resolved once at the first step.
     files: Vec<String>,
+    /// How many of `files` are the core's (`None` for a chain without `FrameXML.toc`), and the
+    /// core's `FrameXML.toc` load record, filled one row a step and closed, with the chain's
+    /// `Bindings.xml` loaded, once the walk passes the core ([`super::manifest::close_core`]).
+    core_rows: Option<usize>,
+    core_toc: Option<benilla_ui::status::Status>,
     /// Frames the current step has spent waiting for its chain entry's pack to arrive
     /// (web only — see [`ENTRY_CHAIN_WAIT_FRAMES`]). Reset on every step that runs.
     waited: u32,
@@ -381,9 +386,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 // path's does.
                 script.push_sound_suppression();
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
-                let files =
+                let (files, core_rows) =
                     super::manifest::ingame_entries(&script, super::manifest::layer_enabled());
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                pending.core_rows = core_rows;
+                pending.core_toc = Some(benilla_ui::status::Status::default());
                 pending.identity = identity;
                 pending.roster = roster;
                 pending.version_check = version_check;
@@ -405,6 +412,28 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
             }
             EntryStage::Builtin { next } => {
                 let pending = world.resource::<PendingEntryUiLoad>();
+                // The core's close, once, before the layer's first file (or at the end without
+                // one): its `FrameXML.toc` record, then the chain's `Bindings.xml`, whose pack is
+                // waited for as a row's is. Without a toc only the bindings load, as `UI_Init`
+                // goes on to them (`0x48fff9`).
+                if pending.core_toc.is_some() && next >= pending.core_rows.unwrap_or(0) {
+                    if pending.waited < ENTRY_CHAIN_WAIT_FRAMES
+                        && !super::reference_ui::ready(super::reference_ui::BINDINGS)
+                    {
+                        world.resource_mut::<PendingEntryUiLoad>().waited += 1;
+                        break; // resume next frame, same step
+                    }
+                    let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                    let toc = pending.core_toc.take().unwrap_or_default();
+                    let has_core = pending.core_rows.is_some();
+                    pending.waited = 0;
+                    let _ = if has_core {
+                        super::manifest::close_core(&script, toc)
+                    } else {
+                        super::manifest::load_core_bindings(&script)
+                    };
+                    continue;
+                }
                 if next < pending.files.len() {
                     let entry = pending.files[next].clone();
                     // A chain entry whose pack has not arrived is *waited for*, not read: the
@@ -421,8 +450,16 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     }
                     // Errors are logged by the loader itself and retained for `/errors`; the
                     // one-shot path discards them too.
-                    let _ = super::manifest::load_entry(&script, &entry);
+                    let mut toc = world
+                        .resource_mut::<PendingEntryUiLoad>()
+                        .core_toc
+                        .take()
+                        .unwrap_or_default();
+                    let _ = super::manifest::load_entry(&script, &entry, &mut toc);
                     let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                    if next < pending.core_rows.unwrap_or(0) {
+                        pending.core_toc = Some(toc);
+                    }
                     pending.done += 1;
                     pending.stage = EntryStage::Builtin { next: next + 1 };
                     pending.waited = 0;
@@ -502,6 +539,8 @@ fn warm_chain_entries(world: &mut World) {
     {
         let _ = super::reference_ui::ready(entry);
     }
+    // The core's close reads the chain's `Bindings.xml` after the last row.
+    let _ = super::reference_ui::ready(super::reference_ui::BINDINGS);
 }
 
 /// The entry load's opening — everything that has to be on the VM before the first interface file
@@ -599,7 +638,7 @@ fn entry_prepare(
 }
 
 /// The entry load's closing — everything after the files: the dev commands, the minimap zoom
-/// seed, saved variables + `VARIABLES_LOADED` with the chat-cache restore inside it, the failure
+/// seed, saved variables + `VARIABLES_LOADED` with the chat-cache restore inside it, the load log,
 /// lines, the damage-text font, the budget disarm, the identity record. Same sharing arrangement
 /// as [`entry_prepare`].
 fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(String, String)>) {
@@ -637,25 +676,10 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
             crate::ui_chat::restore_chat_looks(world, script);
         },
     );
-    // Deviation: each failed addon file is reported in chat, one line apiece, because otherwise
-    // an addon that does not load says nothing on screen: a failure that never raised reaches no
-    // error handler, so the `/errors` log cannot hold it. Read from the engine's deduplicated
-    // record after the whole load edge (handlers included); the VM is fresh, so every `Load` row
-    // is this load's.
-    if let Some(mut chat) = world.get_resource_mut::<crate::ui_chat::ChatLog>() {
-        for row in script
-            .diagnostics()
-            .iter()
-            .filter(|d| d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Load)
-        {
-            let head = row.message.lines().next().unwrap_or_default();
-            // Queued: the chat feed drains `ChatLog` once the UI is up.
-            chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                crate::ui_chat::ChatEventKind::System,
-                format!("Addon load failure: {head}"),
-            ));
-        }
-    }
+    // The load's record goes to `Logs\FrameXML.log` (`0x490187`-`0x4901b6`), after any
+    // `LoadAddOn` block the load ran; nothing reaches chat.
+    script.finish_ui_load_log();
+    super::load_log::write(script.take_load_log_writes());
     // `DAMAGE_TEXT_FONT` binds at the end of the load, after every addon's `ADDON_LOADED` (where
     // MikScrollingBattleText and pfUI assign it). The reference reads it eagerly, once per world
     // entry (`0x6c8470`, called at `0x401620` in `0x401570`, after the UI load at `0x401602`),

@@ -30,6 +30,12 @@ pub(super) fn is_chain_entry(entry: &str) -> bool {
 /// runner (`0x6edb90`) at `0x48ffed`, once per UI build, `ReloadUI` included.
 pub(super) const TOC: &str = r"Interface\FrameXML\FrameXML.toc";
 
+/// The stock key-binding commands, which `UI_Init` loads after the [`TOC`] walk (`0x490018`).
+pub(super) const BINDINGS: &str = r"Interface\FrameXML\Bindings.xml";
+
+/// The default key set, which `UI_Init` reads through `0x4b62b0` (`0x4900c7`).
+pub(super) const DEFAULT_BINDINGS: &str = r"WTF\DefaultBindings.wtf";
+
 /// The core interface: the chain's own [`TOC`], patched or not, as an [`Addon`] over the chain, or
 /// `None` when the chain has no such file.
 pub(super) fn core() -> Option<Addon> {
@@ -1195,14 +1201,6 @@ mod tests {
         // refuses an entry whose gap has closed.
         const KNOWN: &[(&str, &str, &str)] = &[
             (
-                "ContainerFrame.xml",
-                "KeyRingButtonIDToInvSlotID",
-                "an engine binding (`1.12-globals.tsv`). `ContainerFrame.lua:617` hovers a KEYRING \
-                 slot with it, so the raise needs the keyring open and a key hovered. Ours drives \
-                 keyring tooltips through `ContainerFrameAdapters.xml`'s wrapper, which is \
-                 why nothing has hit it — the wrapper answers first for our own rows.",
-            ),
-            (
                 "SkillFrame.xml",
                 "BuySkillTier",
                 "a 5875 binding (`0x4d3e50`: marshals and delegates to a C++ \
@@ -1228,13 +1226,6 @@ mod tests {
                  that button shows only while `UnitCharacterPoints`'s second value or a row's \
                  step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
                  skill-point wire exists; not built.",
-            ),
-            (
-                "DurabilityFrame.xml",
-                "UpdateInventoryAlertStatus",
-                "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
-                 update; our `inventory_alerts` snapshot is recomputed on every inventory push \
-                 instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
             (
                 "Blizzard_GMSurveyUI.xml",

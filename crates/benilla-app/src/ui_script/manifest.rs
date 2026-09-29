@@ -1,7 +1,8 @@
 //! The in-game interface: the core, the player's own stock FrameXML as their chain's
-//! `FrameXML.toc` lists it ([`reference_ui::core`]), then benilla's layer, [`LAYER_MANIFEST`],
-//! every entry of which is ours and loads after the whole core. On a Turtle WoW realm the chain
-//! answers Turtle's own `FrameXML.toc`, so its core is Turtle's rows in Turtle's order.
+//! `FrameXML.toc` lists it ([`reference_ui::core`]) and then its `Bindings.xml`
+//! ([`load_core_bindings`]), then benilla's layer, [`LAYER_MANIFEST`], every entry of which is
+//! ours and loads after the whole core. On a Turtle WoW realm the chain answers Turtle's own
+//! `FrameXML.toc`, so its core is Turtle's rows in Turtle's order.
 
 use bevy::prelude::*;
 
@@ -81,31 +82,40 @@ fn fork_rows(rows: Vec<String>, layer: bool) -> Vec<String> {
 
 /// Every in-game entry in load order, for the sliced entry load (`lifecycle`), which walks it one
 /// file a step through [`load_entry`]: the core's rows ([`core`]), then the layer's files when
-/// `layer` is set. A chain without the toc is reported as [`load_core_with`] reports it.
-pub(super) fn ingame_entries(script: &UiScript, layer: bool) -> Vec<String> {
-    let mut files = match core(layer) {
-        Some(core) => core.toc.files,
+/// `layer` is set; and how many of them are the core's, `None` for a chain without the toc, which
+/// is reported as [`load_core_with`] reports it. After the core's last row the walk runs
+/// [`close_core`], or [`load_core_bindings`] alone without a toc, as [`load_core_with`] does.
+pub(super) fn ingame_entries(script: &UiScript, layer: bool) -> (Vec<String>, Option<usize>) {
+    let (mut files, core_rows) = match core(layer) {
+        Some(core) => {
+            let n = core.toc.files.len();
+            (core.toc.files, Some(n))
+        }
         None => {
             report_missing_core(script);
-            Vec::new()
+            (Vec::new(), None)
         }
     };
     if layer {
         files.extend(Addon::layer().toc.files);
     }
-    files
+    (files, core_rows)
 }
 
-/// Loads one of [`ingame_entries`]: a core row off the chain, a bare name from the layer's shipped
-/// tree ([`reference_ui::is_chain_entry`]).
-pub(super) fn load_entry(script: &UiScript, entry: &str) -> Vec<String> {
+/// Loads one of [`ingame_entries`]: a core row off the chain, reporting into `toc`, the core's
+/// `FrameXML.toc` record, or a bare name from the layer's shipped tree
+/// ([`reference_ui::is_chain_entry`]), whose record is dropped as [`load_layer`] drops it.
+pub(super) fn load_entry(
+    script: &UiScript,
+    entry: &str,
+    toc: &mut benilla_ui::status::Status,
+) -> Vec<String> {
     let file = [entry.to_string()];
-    let from = if reference_ui::is_chain_entry(entry) {
-        reference_ui::addon(file.to_vec())
+    if reference_ui::is_chain_entry(entry) {
+        reference_ui::addon(file.to_vec()).load_files_into(script, &file, toc)
     } else {
-        Addon::layer()
-    };
-    from.load_files(script, &file)
+        Addon::layer().load_files(script, &file)
+    }
 }
 
 /// Runs `UIParent_ManageFramePositions` after the interface has loaded, then the buff pass below.
@@ -229,19 +239,104 @@ pub(super) fn load_core(script: &UiScript) -> Vec<String> {
 }
 
 /// The core: every row of the chain's `FrameXML.toc` [`core`] keeps under `layer`, in its order,
-/// each file in document order. A chain without the toc builds no stock interface: the runner
-/// reports `"Couldn't open %s"` (`0x846ff4`) at severity 2 (`0x6edc3f`) and returns 0, which
-/// `UI_Init` never reads (`0x48fff2`), going on to `Bindings.xml` and the addons. benilla goes on
-/// the same way and reports it as a load failure, an `ERROR` line and a row in `/errors`.
+/// each file in document order, then the chain's `Bindings.xml` ([`close_core`]). A chain without
+/// the toc builds no stock interface: the runner reports `"Couldn't open %s"` (`0x846ff4`) at
+/// severity 2 (`0x6edc3f`) and returns 0, which `UI_Init` never reads (`0x48fff2`), going on to
+/// `Bindings.xml` and the addons. benilla goes on the same way and reports it as a load failure,
+/// an `ERROR` line and a row in `/errors`.
 fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
     let Some(core) = core(layer) else {
-        return vec![report_missing_core(script)];
+        let mut failures = vec![report_missing_core(script)];
+        failures.extend(load_core_bindings(script));
+        return failures;
     };
-    core.load_files(script, &core.toc.files)
+    let mut toc = benilla_ui::status::Status::default();
+    let mut failures = core.load_files_into(script, &core.toc.files, &mut toc);
+    failures.extend(close_core(script, toc));
+    failures
+}
+
+/// The core's close after its last row, shared with the sliced entry load (`lifecycle`): the
+/// toc's record under its banner into the UI load's (`0x6eddc8`), then the chain's `Bindings.xml`
+/// ([`load_core_bindings`]).
+pub(super) fn close_core(script: &UiScript, toc: benilla_ui::status::Status) -> Vec<String> {
+    let mut log = benilla_ui::status::Status::default();
+    let banner = benilla_ui::status::toc_banner(reference_ui::TOC);
+    toc.close_into(&mut log, script.framexml_debug(), banner);
+    script.report_load_status(log);
+    load_core_bindings(script)
+}
+
+/// The stock key-binding commands, `UI_Init`'s next step after the toc walk: the chain's
+/// `Interface\FrameXML\Bindings.xml` (`0x842f9c`), when the chain has it (`0x48fff9`), through
+/// the loader addons' files go through (`0x4b6f70`, called at `0x490018` here and `0x51f443` for
+/// an addon). Every command benilla has is a row of this file, its body the file's own Lua.
+pub(super) fn load_core_bindings(script: &UiScript) -> Vec<String> {
+    let Some(bytes) = reference_ui::read(reference_ui::BINDINGS) else {
+        warn!(
+            "ui_script: {} is not in the patch chain — no key binding has a command",
+            reference_ui::BINDINGS
+        );
+        return Vec::new();
+    };
+    match benilla_ui::bindings_xml::parse(&benilla_ui::source::decode(&bytes)) {
+        Ok(bindings) => {
+            script.register_bindings(&bindings);
+            info!(
+                "bindings: {} commands registered from {}",
+                bindings.len(),
+                reference_ui::BINDINGS
+            );
+            Vec::new()
+        }
+        // `"Couldn't parse XML in %s"` (`0x846fd8`) at severity 2 (`0x4b700c`).
+        Err(e) => {
+            let e = format!("{}: {e}", reference_ui::BINDINGS);
+            error!("ui_script: {e}");
+            script.report_load_failure(&e);
+            vec![e]
+        }
+    }
+}
+
+/// The defaults, set 0, off the player's chain: `WTF\DefaultBindings.wtf` (`0x846e44`), which
+/// `0x4b62b0` reads line by line (`0x4b6140`); empty when the chain lacks it.
+pub(crate) fn default_bindings() -> Vec<benilla_ui::script::keybind::KeyBinding> {
+    match reference_ui::read(reference_ui::DEFAULT_BINDINGS) {
+        Some(bytes) => {
+            benilla_ui::script::keybind::parse_bindings_wtf(&String::from_utf8_lossy(&bytes))
+        }
+        None => {
+            warn!(
+                "ui_script: {} is not in the patch chain — every command ships unbound",
+                reference_ui::DEFAULT_BINDINGS
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// The chain's `Bindings.xml` text, for the tests that hold benilla against it.
+#[cfg(test)]
+pub(crate) fn stock_bindings_file() -> Option<String> {
+    reference_ui::read(reference_ui::BINDINGS)
+        .map(|bytes| benilla_ui::source::decode(&bytes).into_owned())
+}
+
+/// The stock bindings on a VM a test built by hand: the defaults loaded live, as a first login's
+/// account set is, and the core's commands.
+#[cfg(test)]
+pub(crate) fn load_stock_bindings(script: &mut UiScript) {
+    script.set_default_bindings(default_bindings());
+    script.load_binding_set(1);
+    assert!(
+        load_core_bindings(script).is_empty(),
+        "the stock Bindings.xml loads"
+    );
 }
 
 /// Reports a chain without `FrameXML.toc` as [`load_core_with`] documents, and returns the
-/// failure.
+/// failure. The caller loads `Bindings.xml` after it, as `UI_Init` does.
 fn report_missing_core(script: &UiScript) -> String {
     let e = format!(
         "{}: not found — the stock interface is not built",
@@ -249,6 +344,13 @@ fn report_missing_core(script: &UiScript) -> String {
     );
     error!("ui_script: {e}");
     script.report_load_failure(&e);
+    // Into the UI load's own record, before any banner (`0x6edc3f`).
+    let mut log = benilla_ui::status::Status::default();
+    log.report(
+        benilla_ui::status::FAILURE,
+        benilla_ui::status::missing(reference_ui::TOC, false),
+    );
+    script.report_load_status(log);
     e
 }
 
@@ -509,7 +611,7 @@ mod tests {
     fn the_sliced_entries_load_as_the_one_shot_core_does() {
         let _chain = lay_letters("b.lua\nx.xml\na.lua\n");
         let s = UiScript::new().unwrap();
-        let entries = ingame_entries(&s, false);
+        let (entries, core_rows) = ingame_entries(&s, false);
         assert_eq!(
             entries,
             [
@@ -518,12 +620,16 @@ mod tests {
                 r"Interface\FrameXML\a.lua"
             ]
         );
+        assert_eq!(core_rows, Some(3));
+        let mut toc = benilla_ui::status::Status::default();
         for entry in &entries {
-            let failures = load_entry(&s, entry);
+            let failures = load_entry(&s, entry, &mut toc);
             assert!(failures.is_empty(), "{entry}: {failures:#?}");
         }
+        // The core's close: its toc record and the chain's `Bindings.xml`, as the one-shot's.
+        let _ = close_core(&s, toc);
         assert_eq!(s.eval::<String>("return LOAD_LOG").unwrap(), "bxa");
-        let layered = ingame_entries(&s, true);
+        let (layered, _) = ingame_entries(&s, true);
         assert_eq!(&layered[..3], &entries[..]);
         assert_eq!(&layered[3..], &Addon::layer().toc.files[..]);
     }
@@ -551,5 +657,118 @@ mod tests {
                 "assets/ui is flat, but ships {name}: a separator makes it a file off the install"
             );
         }
+    }
+
+    /// A patched chain's `Bindings.xml`, rows reordered, a body edited, and the loader's skips.
+    const PATCHED_BINDINGS: &[u8] = br#"<Bindings>
+    <Binding name="TOGGLEBACKPACK" header="INTERFACE">Probe("bag")</Binding>
+    <Binding name="JUMP" header="MOVEMENT">Probe("edited jump")</Binding>
+    <Binding name="TOGGLESTATS" hidden="true" debug="true">Probe("debug")</Binding>
+    <Binding name="EMPTYROW"></Binding>
+    <Bindings><Binding name="NESTEDROW">Probe("nested")</Binding></Bindings>
+    <Binding name="ITUNES_PLAYPAUSE" header="ITUNES_REMOTE" platform="mac">Probe("mac")</Binding>
+</Bindings>"#;
+
+    /// The core's commands are the chain's `Bindings.xml`, loaded after the toc's files (which
+    /// see none) as `UI_Init` does (`0x48ffed`, then `0x490018`): its order, its headers and its
+    /// bodies are what registers and runs, the defaults are the chain's `DefaultBindings.wtf`, and
+    /// a debug, an empty, a nested and a Mac row are no commands.
+    #[test]
+    fn the_cores_commands_are_the_chain_bindings_xml() {
+        const TOC_LUA: &[u8] =
+            b"TOC_SAW = GetNumBindings() function Probe(n) PROBED = (PROBED or '') .. n end";
+        let _chain = fixture::lay(&[
+            (reference_ui::TOC, Some(b"a.lua\r\n")),
+            (r"Interface\FrameXML\a.lua", Some(TOC_LUA)),
+            (reference_ui::BINDINGS, Some(PATCHED_BINDINGS)),
+            (
+                reference_ui::DEFAULT_BINDINGS,
+                Some(b"bind J JUMP\r\nbind B TOGGLEBACKPACK\r\nbind CTRL-Y TOGGLESTATS\r\n"),
+            ),
+        ]);
+        let mut s = UiScript::new().unwrap();
+        s.set_default_bindings(default_bindings());
+        s.load_binding_set(1);
+        let failures = load_core(&s);
+        assert!(failures.is_empty(), "{failures:#?}");
+        assert_eq!(s.eval::<i64>("return TOC_SAW").unwrap(), 0);
+        let rows: Vec<Vec<String>> = s
+            .eval(
+                "local out = {} \
+                 for i = 1, GetNumBindings() do out[i] = { GetBinding(i) } end \
+                 return out",
+            )
+            .unwrap();
+        let row = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [
+                row(&["HEADER_INTERFACE"]),
+                row(&["TOGGLEBACKPACK", "B"]),
+                row(&["HEADER_MOVEMENT"]),
+                row(&["JUMP", "J"]),
+            ]
+        );
+        assert!(s.execute_binding("JUMP", true).unwrap());
+        assert_eq!(s.eval::<String>("return PROBED").unwrap(), "edited jump");
+        for skipped in ["TOGGLESTATS", "EMPTYROW", "NESTEDROW", "ITUNES_PLAYPAUSE"] {
+            assert!(
+                !s.execute_binding(skipped, true).unwrap(),
+                "{skipped} is no command"
+            );
+        }
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("CTRL-Y")"#)
+                .unwrap(),
+            "TOGGLESTATS",
+            "a default key on a command the file never declared is still the key table's"
+        );
+    }
+
+    /// A chain without `Bindings.xml` loads no command and fails nothing (`0x48fff9` skips it).
+    #[test]
+    fn a_chain_without_bindings_xml_declares_no_command() {
+        let _chain = fixture::lay(&[
+            (reference_ui::TOC, Some(b"")),
+            (reference_ui::BINDINGS, None),
+        ]);
+        let s = UiScript::new().unwrap();
+        assert!(load_core(&s).is_empty());
+        assert_eq!(s.eval::<i64>("return GetNumBindings()").unwrap(), 0);
+    }
+
+    /// The install's own file read as the loader reads it: 219 commands once the nine debug rows
+    /// are skipped, the Mac rows among them for the Mac build alone; the six `MOVEVIEW*` rows sit
+    /// in an XML comment.
+    #[test]
+    fn the_installs_bindings_xml_reads_as_the_loader_reads_it() {
+        benilla_formats::wow_data_or_skip!();
+        let binds = benilla_ui::bindings_xml::parse(&stock_bindings_file().unwrap()).unwrap();
+        assert_eq!(binds.len(), 219);
+        assert_eq!(binds.iter().filter(|b| b.run_on_up).count(), 94);
+        assert_eq!(binds.iter().filter(|b| b.header.is_some()).count(), 13);
+        assert_eq!(binds.iter().filter(|b| b.hidden).count(), 3);
+        assert_eq!(binds.iter().filter(|b| b.platform.is_some()).count(), 5);
+        let names: Vec<&str> = binds.iter().map(|b| b.name.as_str()).collect();
+        for gone in ["TOGGLESTATS", "RESETPERFORMANCEVALUES", "MOVEVIEWIN"] {
+            assert!(!names.contains(&gone), "{gone}");
+        }
+        for kept in [
+            "MOVEANDSTEER",
+            "PITCHUP",
+            "TURNORACTION",
+            "TOGGLEUI",
+            "RAIDTARGETNONE",
+        ] {
+            assert!(names.contains(&kept), "{kept}");
+        }
+        assert_eq!(binds[0].header.as_deref(), Some("MOVEMENT"));
+
+        // Registered on this client, the PC build: every row but the five Mac ones, so the list
+        // walks 211 visible commands and 12 headers, `ITUNES_REMOTE` riding on a Mac row.
+        let mut s = UiScript::new().unwrap();
+        load_stock_bindings(&mut s);
+        assert_eq!(s.eval::<i64>("return GetNumBindings()").unwrap(), 223);
+        assert!(!s.execute_binding("ITUNES_PLAYPAUSE", true).unwrap());
     }
 }

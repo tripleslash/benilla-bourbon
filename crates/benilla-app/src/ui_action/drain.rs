@@ -11,7 +11,7 @@ use benilla_ui::script::UiScript;
 
 use crate::net::{ClientCommand, NetCommands};
 
-use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::spell::{cast_target, CastLadder};
 
 use super::{attack_actor_refusal, PlayerActions, UiErrorKeys, SPELL_ATTACK};
 
@@ -55,15 +55,13 @@ pub(super) fn item_action_route(
     }
 }
 
-/// The ATTACKTARGET binding (default T), whose stock body is `AttackTarget()`, and the melee
-/// probe's press with nothing selected: both the player's Attack ([`AttackPress::attack_target`]).
-pub(crate) fn attack_target_binding(
-    binds: Res<crate::bindings::BindingsState>,
+/// The melee probe's press with nothing selected, the player's Attack
+/// ([`AttackPress::attack_target`]), as the ATTACKTARGET binding's `AttackTarget()` is.
+pub(crate) fn attack_nearest_probe(
     mut probe: MessageReader<crate::target::AttackNearestRequest>,
     mut press: AttackPress,
 ) {
-    let probed = probe.read().last().is_some() && press.selection.guid.is_none();
-    if binds.fired(crate::bindings::cmd::ATTACK_TARGET) || probed {
+    if probe.read().last().is_some() && press.selection.guid.is_none() {
         press.attack_target();
     }
 }
@@ -85,19 +83,10 @@ impl AttackPress<'_, '_> {
     /// (`0x5ecb70`). Only the start cancels auto-repeat (`0x5ecd8c`), so stopping melee leaves
     /// Auto Shot running.
     pub(crate) fn attack_target(&mut self) {
-        let Self {
-            pick,
-            selection,
-            seam,
-            ui_errors,
-        } = self;
-        let (me, my_guid) = pick.player();
-        if attack_actor_refusal(me, my_guid, ui_errors) {
-            return;
-        }
-        let Some(guid) = pick.target(selection, seam, ui_errors) else {
+        let Some(guid) = self.validate(None) else {
             return;
         };
+        let Self { pick, seam, .. } = self;
         let Ok(e) = seam.me.single() else {
             return;
         };
@@ -116,6 +105,29 @@ impl AttackPress<'_, '_> {
             &mut seam.ecs,
             &seam.net,
         );
+    }
+
+    /// TryCast's attack pick (`0x6e4efb`) for a spell press held there
+    /// ([`crate::spell::HeldForPick`]): the validator alone, with no swing after it. Whether the
+    /// cast goes on, at the unit the pick left selected.
+    pub(crate) fn pick_for_cast(&mut self, held: crate::spell::HeldCast) -> bool {
+        let caster = self.pick.player().1.filter(|_| held.on_self);
+        self.validate(caster).is_some()
+    }
+
+    /// The attack validator `0x612df0`: its actor checks, then its target pick.
+    fn validate(&mut self, passed: Option<u64>) -> Option<u64> {
+        let Self {
+            pick,
+            selection,
+            seam,
+            ui_errors,
+        } = self;
+        let (me, my_guid) = pick.player();
+        if attack_actor_refusal(me, my_guid, ui_errors) {
+            return None;
+        }
+        pick.target(passed, selection, seam, ui_errors)
     }
 }
 
@@ -265,10 +277,10 @@ pub(crate) fn use_action(
                 selection.guid,
                 if press.on_self { ", on self" } else { "" }
             );
-            ladder.send(
+            ladder.send_spell(
                 b.action,
                 &self_bound(targeting.context(), press),
-                CastCommit::Spell,
+                press.on_self,
             );
         }
         // An item action names an entry, so the click finds a copy. A miss only logs, with no

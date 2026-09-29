@@ -71,8 +71,9 @@ impl ChatLogFiles {
     }
 }
 
-/// `M/D HH:MM:SS.mmm` of now, UTC.
-fn stamp() -> String {
+/// `M/D HH:MM:SS.mmm` of now, UTC: the reference's log-line stamp (`"%u/%u %02u:%02u:%02u.%03u  "`,
+/// `0x866aa0`, from `GetLocalTime` at `0x65a871`), which `crate::ui_script::load_log` shares.
+pub(crate) fn stamp() -> String {
     // `web_time`, not `std`: std's wall clock panics on wasm32. The log files themselves never
     // open there (the page has no filesystem, so `create_dir_all` fails and the slot stays
     // `None`), but a stamp taken before that check would panic before the check could save it.

@@ -31,7 +31,7 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/lib.rs` | `pub mod modern;` | P0 |
 | `benilla-world/src/world_plugins.rs` | `.add(crate::modern::ModernLightingPlugin)` after `SsilvbPlugin` | P0 |
 | `benilla-world/src/shaders.rs` | `modern_libraries()`: `load_shader_library!` for `shaders/modern/*.wgsl` | P0 |
-| `benilla-app/src/cvars.rs` | the `lightingModel` / `lightingQuality` rows, the "fork-owned block" markers, the `lightingmodel`/`lightingquality` apply arms, the `KnobParams`/`Knobs` `lighting` field, the `GetCVar` seed rows, the `WOW_LIGHTING*` session-owned env keys | P0 |
+| `benilla-app/src/cvars/{mod,table}.rs` | the `lightingModel` / `lightingQuality` rows, the "fork-owned block" markers, the `lightingmodel`/`lightingquality` apply arms, the `KnobParams`/`Knobs` `lighting` field, the `GetCVar` seed rows, the `WOW_LIGHTING*` session-owned env keys | P0 |
 | `benilla-world/src/lib.rs` | `pub mod launch_env;` (fork-owned module) | P0 |
 | `benilla-world/src/worldview.rs` | `view_start` reads `WOW_WORLDVIEW_AT` through `crate::launch_env::var` | P0 |
 | `benilla-app/src/lib.rs` | `run_worldview` wrapper (was a `pub use`) + `wants_worldview` | P0 |
@@ -116,9 +116,9 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/liquid/mod.rs` | `WATER_DETAIL_SSR` (= 1, the reference's medium slot); `from_cvar` maps (0, 1.5) to it; `WaterDetail::has_planar_reflection`; `WOW_WATER_DETAIL` read through `launch_env` | P6 fix |
 | `benilla-world/src/liquid/reflect.rs` | `sync_reflection_camera`: the mirror runs only when `has_planar_reflection()` | P6 fix |
 | `benilla-app/assets/ui/OptionsFrame.xml` | Water Detail dropdown gains "Modern (SSR)" = `1`; the tooltip names it | P6 fix |
-| `benilla-app/src/cvars.rs`, `ui_script/options_tests.rs` | the `waterDetail 1` assertions (SSR tier, no mirror; three dropdown entries) | P6 fix |
+| `benilla-app/src/cvars/{mod,table}.rs`, `ui_script/options_tests.rs` | the `waterDetail 1` assertions (SSR tier, no mirror; three dropdown entries) | P6 fix |
 | `benilla-app/src/lib.rs` | `seed_launch_env()` (the old `run_worldview` key list, plus `WOW_WATER_DETAIL`) is called from `run` as well as `run_worldview`, so `?lighting=modern` reaches the client | P6 fix |
-| `benilla-app/src/cvars.rs` | the `WOW_LIGHTING*` / `WOW_WATER_DETAIL` session-owned checks read `benilla_world::launch_env::var` (the browser's query) instead of `std::env` | P6 fix |
+| `benilla-app/src/cvars/{mod,table}.rs` | the `WOW_LIGHTING*` / `WOW_WATER_DETAIL` session-owned checks read `benilla_world::launch_env::var` (the browser's query) instead of `std::env` | P6 fix |
 | `benilla-app/assets/ui/OptionsFrame.xml`, `ui_script/options_tests.rs` | Graphics page `RowLightingModel` (`lightingModel`, Classic/Modern) and `RowLightingQuality` (`lightingQuality`, Low…Ultra) dropdowns between Water Detail and Render Scale, their `BENILLA_TOOLTIP_LIGHTING_*` strings, and the tooltip census (82 → 84) | P6 fix |
 | `benilla-assets/src/materials.rs` | `WowModelKey.modern` from `MODERN_MODEL_PIPELINES`; `specialize` pushes `WOW_MODERN` to both stages; `LiquidCataExt.modern_shadow` at 121 (texture only, no sampler) | P6 fix |
 | `wow_model.wgsl` | every modern block (room light, cascades, foliage, sky/GI ambient, window emitter, per-pixel points, linear decode + froxel fog, debug views, the vertex `point_sel`) sits under `#ifdef WOW_MODERN` with a classic `#else` value: a classic pipeline compiling that code dead drew Chrome/Metal leaf-card holes black (bisected to P3 step 4's `wow_model` hunk) | P6 fix |
@@ -137,12 +137,12 @@ The race also fires from data alone: the sun arc moving the sky was enough. So `
 | `benilla-world/src/terrain_stream/spawn/fx.rs` | `spawn_emissive_light_for` + `emitter_centroid` beside `spawn_lights_for`; a no-op unless `modern::emissive_lights_on()` | P8 |
 | `benilla-world/src/terrain_stream/spawn/mod.rs` | the ADT-doodad and WMO-doodad placement walks each call `spawn_emissive_light_for` after `spawn_lights_for` | P8 |
 | `benilla-app/src/entities/item_glow.rs` | `attach_item_glows` accumulates the glow models' emitters across the visual's slots and spawns one `WorldPointLight` child of the item root | P8 |
-| `benilla-app/src/cvars.rs`, `assets/ui/OptionsFrame.xml` | `lightingQuality` reaches 4; a "Cinematic" dropdown row and the tooltip paragraph for it | P8 |
+| `benilla-app/src/cvars/{mod,table}.rs`, `assets/ui/OptionsFrame.xml` | `lightingQuality` reaches 4; a "Cinematic" dropdown row and the tooltip paragraph for it | P8 |
 | `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_MODERN_EMISSIVE` (`?modern_emissive=0`) | P8 |
 | `liquid_cata.wgsl` | `LiquidParams.optics` (xyz = absorption per yard, w = the experimental tier); `modern_water` (the bed through Beer–Lambert toward the DEEP row), the soft surf band, and the glare/sheen skip — all under `experimental` (above water, `optics.w`), so plain Modern keeps the reference's combine | water tier |
 | `benilla-assets/src/materials.rs` | `LiquidCataExt.optics` | water tier |
 | `benilla-world/src/liquid/{mod,surface}.rs` | `WATER_DETAIL_EXPERIMENTAL` (= 3); `from_cvar` maps [2.5, 3.5) to it; `WaterDetail::is_experimental`; `cata_optics`; `sync_water_tier` (`Update`) flips `optics.w` on the shared cata materials | water tier |
-| `benilla-app/assets/ui/OptionsFrame.xml`, `src/cvars.rs`, `ui_script/options_tests.rs` | Water Detail gains "Modern (Experimental)" = `3` (four entries) and a tooltip paragraph; the `waterDetail 3` assertions | water tier |
+| `benilla-app/assets/ui/OptionsFrame.xml`, `src/cvars/{mod,table}.rs`, `ui_script/options_tests.rs` | Water Detail gains "Modern (Experimental)" = `3` (four entries) and a tooltip paragraph; the `waterDetail 3` assertions | water tier |
 | `liquid_cata.wgsl` | the modern sun shadow on water is read down the unrefracted view ray at the bed (`WATER_SHADOW_PROBE` yd at most, `WATER_SHADOW_BED_LIFT` short of it; the surface from below) instead of at the surface shifted by the wave slope — both modern water tiers | Forever water |
 | `liquid_cata.wgsl` | the experimental tier (`waterDetail 3`) is Forever's stylised clear water and runs under either lighting model: `LiquidParams.look_a/b/c`; the water column is read before the normal; calm swell (`look_b.x` of the wind sea off the ocean, `look_b.y` over no depth); refraction proportional to the water crossed; the bed filtered toward the DEEP row's hue; a capped stylised Fresnel (`look_a.z` → `look_c.x`); the reference's mirror/trace lookup with `sky_dome(r)` in the horizon constant's place; a `look_c.z` blend with the reference combine over one shared bed read; the glitter spike scaled by `look_b.w`; a classic frame keeps the Blinn specular and decodes the scene copy for the linear combine; a multi-octave wind-ripple slope layer under the calm swell, faded on the pixel footprint like a mip level, `look_c.w` its RMS slope (`wind_ripples`) | Forever water |
 | `benilla-assets/src/materials.rs` | `LiquidCataExt.look_a` / `look_b` / `look_c` | Forever water |

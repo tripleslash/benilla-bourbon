@@ -524,7 +524,7 @@
                 "RowBackgroundSound",
             },
             Graphics = {
-                "RowUiScale", "RowFarclip", "RowWorldDetail", "RowBrightness",
+                "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
                 "RowWeatherDensity",
                 -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
                 -- window states and the window's own title-bar control already moves between
@@ -696,15 +696,16 @@
         -- UIOptionsFrame.lua:193-227 re-applies saved uvars, so this window has no load ladder.
 
         -- OptionsFrameSliders is the stock table (OptionsFrame.lua:24-34), which addons write.
-        -- Holes at 4, 5, 7 and 8, so the OnShow loop uses the pairs form: ipairs would stop at 3.
+        -- Holes at 4, 5 and 7, so the OnShow loop uses the pairs form: ipairs would stop at 3.
         BENILLA_GRAPHICS_SLIDER_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail",
-            [6] = "RowBrightness", [9] = "RowWeatherDensity",
+            [6] = "RowBrightness", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
         }
 
         -- A graphics row's bounds: the stock table's row. Turtle WoW's OptionsFrame.lua has no
         -- OptionsFrameSliders; its Options\Options.lua carries the same bounds for these rows
-        -- (UI_SCALE, FARCLIP, ENVIRONMENT_DETAIL, GAMMA, WEATHER_DETAIL), read here without it.
+        -- (UI_SCALE, FARCLIP, ENVIRONMENT_DETAIL, GAMMA, WEATHER_DETAIL), read here without it;
+        -- Spell Detail takes 1.12's own row 8 grid, 0 to 2, one apart.
         function BenillaGraphicsSliderInfo(i)
             if ( OptionsFrameSliders ) then
                 return OptionsFrameSliders[i]
@@ -715,6 +716,7 @@
                 { minValue = lo, maxValue = hi, valueStep = (hi - lo) / 10 },
                 { minValue = 0, maxValue = 2, valueStep = 1 },
                 [6] = { minValue = -0.5, maxValue = 0.5, valueStep = 0.1 },
+                [8] = { minValue = 0, maxValue = 2, valueStep = 1 },
                 [9] = { minValue = 0, maxValue = 3, valueStep = 1 },
             }
             return bounds[i]
@@ -2024,13 +2026,31 @@
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- On the CVar, as 1.12's slider 8 lands: there is no
+                                             SetspellEffectLevel global. -->
+                                        <Frame name="$parentRowSpellDetail" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "spellEffectLevel", SPELL_DETAIL,
+                                                    "OPTION_TOOLTIP_SPELL_DETAIL")
+                                                -- Our names for the handler's emission scalars
+                                                -- 0.33, 0.66 and 1.0 (`0x689510`).
+                                                local info = BenillaGraphicsSliderInfo(8)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
+                                                    { "Low", "Medium", "High" })
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <!-- An API row over GetGamma/SetGamma, whose unit is
                                              `1 - gamma`; writing `gamma` would invert the
                                              control. -->
                                         <Frame name="$parentRowBrightness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- OptionsFrame_SetDefaults' default (l.444-445);

@@ -18,6 +18,7 @@ pub(crate) mod extract;
 mod input;
 #[cfg(test)]
 mod layer_tests;
+mod load_log;
 mod manifest;
 
 /// The stock FrameXML this client runs off the player's own patch chain; its header is the rule.
@@ -32,8 +33,11 @@ pub(crate) mod gate;
 pub(crate) use session::VmMemo;
 
 // Not test-only: the addon harness loads the whole shipped interface under each addon.
+pub(crate) use manifest::default_bindings;
 pub(crate) use manifest::load_default_ui;
 pub(crate) use manifest::load_ingame_ui;
+#[cfg(test)]
+pub(crate) use manifest::{load_stock_bindings, stock_bindings_file};
 
 /// Whether the pointer is over any UI (the egui dev overlay or a player-UI frame), combined by
 /// [`arbitrate_pointer_over_ui`]; gameplay reads it, so it is not the dev plugin's.
@@ -661,18 +665,16 @@ pub(crate) fn fire_chat_login(s: &mut benilla_ui::script::UiScript) {
     }
 }
 
-/// The `benilla_formats::TokenContext::text` seam: a `GlobalStrings` key, its `%d` holes filled.
-pub(crate) fn token_text(
-    script: &benilla_ui::script::UiScript,
-) -> impl Fn(&str, &[i64]) -> Option<String> + '_ {
-    |key: &str, args: &[i64]| {
-        let template = benilla_ui::strings::global(script.lua(), key)?;
-        let args: Vec<_> = args
-            .iter()
-            .map(|n| benilla_ui::strings::Arg::D(*n))
-            .collect();
-        Some(benilla_ui::strings::fill(&template, &args))
-    }
+/// The `benilla_formats::TokenContext::printf` seam: `SStrPrintf` over the template filler.
+pub(crate) fn token_printf(template: &str, args: &[benilla_formats::TokenNumber]) -> String {
+    let args: Vec<_> = args
+        .iter()
+        .map(|n| match n {
+            benilla_formats::TokenNumber::Int(v) => benilla_ui::strings::Arg::D(*v),
+            benilla_formats::TokenNumber::Float(v) => benilla_ui::strings::Arg::F(*v),
+        })
+        .collect();
+    benilla_ui::strings::fill(template, &args)
 }
 
 /// [`test_ui::load_ui`] for a test module outside `ui_script`, such as `ui_action::feed_tests`.

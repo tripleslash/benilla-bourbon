@@ -1,9 +1,7 @@
 //! The battleground list and queue verbs of `BattlefieldFrame.lua` and `Minimap.xml`. They read
 //! the reference's instance list (`0xb6e860`, filled by `0x4aa6c0`), its three queue slots
 //! (`0xb6e9d0`, written by `0x4aa850`) and the selected instance id (`[0xb6eba0]`); the app pushes
-//! the list and the slots, clock values in ms, and the VM owns the selection. An in-range slot the
-//! app has not pushed yet answers as a cleared one (`"none", nil, 0, 0, 0`), because the
-//! reference's array is fixed and always holds three.
+//! the list and the slots, clock values in ms, and the VM owns the selection.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -15,7 +13,8 @@ use super::Model;
 pub struct BattlefieldQueueSlot {
     /// `+0x00`, the Map.dbc row id; 0 is a cleared slot, its name looked up like any other.
     pub map_id: u32,
-    /// The localized map name, or `None` when the id has no row (a real `nil`).
+    /// The localized map name, or `None` when the id has no row (a real `nil`). The VM holds no
+    /// Map.dbc, so a slot not yet pushed answers `nil` where the reference names row 0.
     pub map_name: Option<String>,
     /// `+0x04`: `0` none, `1` queued, `2` confirm, `3` active; anything else answers `"error"`.
     pub status: u32,
@@ -104,7 +103,7 @@ impl super::UiScript {
     /// clock getters move.
     pub fn set_battlefield_queue(
         &mut self,
-        slots: Vec<BattlefieldQueueSlot>,
+        slots: [BattlefieldQueueSlot; 3],
         instance_expiration_ms: u32,
     ) {
         let mut model = self.model_mut();
@@ -227,27 +226,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // Five values on every leg (`0x4ab5c7`): `(nil, nil, 0, 0, 0)` off slots 1..3.
-    //
-    // **The gate and the lookup are separate, and that separation is the whole of B-battlefield.**
-    // The reference's queue is a FIXED three-slot array (§2.2), so an index that passes the gate
-    // always finds a slot — a cleared one is `status = 0`, which `status_text` answers `"none"`
-    // for. Ours arrives as a `Vec` the app pushes each frame, and it is EMPTY until the first
-    // `feed_battlefield` runs: on a `/reload` the model is rebuilt from scratch, and anything that
-    // asks before that frame used to fall into the off-index leg and get a **nil status** for an
-    // in-range slot.
-    //
-    // Stock `BattlefieldFrame_Update` cannot survive that. It loops `i = 1, MAX_BATTLEFIELD_QUEUES`
-    // (= 3, so always in range) and its guard is `queueStatus ~= "none"` — a nil status passes it,
-    // and the very next term is `queueMapName.." "..queueInstanceID`:
-    // `BattlefieldFrame.lua:242: attempt to concatenate local 'queueMapName' (a nil value)`, on
-    // the first `PARTY_LEADER_CHANGED` (l.44) after a reload. `"none"` is what makes that guard
-    // do its job, so an in-range index answers the zeroed slot the reference's array already holds.
     g.set(
         "GetBattlefieldStatus",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldStatus(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(i) = slot_index(index, 3) else {
+            let Some(slot) = slot_index(index, 3).and_then(|i| model.battlefield_slots.get(i))
+            else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -256,8 +241,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Number(0.0),
                 ]));
             };
-            let cleared = BattlefieldQueueSlot::default();
-            let slot = model.battlefield_slots.get(i).unwrap_or(&cleared);
             let name = match &slot.map_name {
                 Some(n) => Value::String(lua.create_string(n)?),
                 None => Value::Nil,
@@ -516,7 +499,7 @@ mod tests {
     #[test]
     fn get_battlefield_status_answers_five_values_on_every_leg() {
         let mut s = UiScript::new().unwrap();
-        s.set_battlefield_queue(vec![slot(489, 1, 5), slot(0, 0, 0), slot(529, 9, 2)], 0);
+        s.set_battlefield_queue([slot(489, 1, 5), slot(0, 0, 0), slot(529, 9, 2)], 0);
         let n = |s: &mut UiScript, i: &str| s.arity(&format!("GetBattlefieldStatus({i})")).unwrap();
         assert_eq!(n(&mut s, "1"), 5);
         assert_eq!(n(&mut s, "0"), 5);
@@ -550,7 +533,7 @@ mod tests {
         assert!(err.contains("Usage: GetBattlefieldStatus(index)"), "{err}");
         let mut empty = slot(0, 0, 0);
         empty.map_name = None;
-        s.set_battlefield_queue(vec![empty], 0);
+        s.set_battlefield_queue([empty, Default::default(), Default::default()], 0);
         assert!(
             s.eval::<bool>("local _, name = GetBattlefieldStatus(1) return name == nil")
                 .unwrap(),
@@ -558,73 +541,26 @@ mod tests {
         );
     }
 
-    /// **An in-range slot the app has not pushed yet is CLEARED, not out of range** — the reload
-    /// raise (`BattlefieldFrame.lua:242: attempt to concatenate local 'queueMapName'`).
-    ///
-    /// The model is rebuilt empty on every `/reload` and the app fills it on its next frame, so
-    /// anything the interface does in between asks a `Vec` that is shorter than the reference's
-    /// fixed three-slot array. Answering the off-index leg there hands Lua a **nil status**, and
-    /// stock `BattlefieldFrame_Update` guards its concatenation with `queueStatus ~= "none"` —
-    /// a guard nil walks straight through, on a loop that runs `1..MAX_BATTLEFIELD_QUEUES` and is
-    /// therefore always in range. `"none"` is the only answer that makes the stock guard work.
-    ///
-    /// Off-index (`0`, `4`) still answers nil: that leg is the reference's own and is untouched.
     #[test]
-    fn an_unpushed_in_range_slot_reads_none_not_nil() {
-        let mut s = UiScript::new().unwrap();
-        // Nothing pushed at all — the state a fresh VM is in until `feed_battlefield` runs once.
+    fn every_slot_answers_none_before_the_first_push() {
+        let s = UiScript::new().unwrap();
         for i in 1..=3 {
-            let got = s
-                .eval::<String>(&format!(
-                    "local st, name, id, lo, hi = GetBattlefieldStatus({i})                      return st .. '|' .. tostring(name) .. '|' .. id .. lo .. hi"
-                ))
-                .unwrap();
-            assert_eq!(got, "none|nil|000", "slot {i} of an unpushed queue");
+            assert_eq!(
+                s.eval::<String>(&format!("return (GetBattlefieldStatus({i}))"))
+                    .unwrap(),
+                "none",
+                "slot {i}"
+            );
         }
-        // The guard is load-bearing, proved rather than asserted: the stock line with a NIL
-        // status really does raise, so answering "none" is what stops it — not a nicety.
-        let raised = s
-            .run(
-                "local queueStatus, queueMapName, queueInstanceID = nil, nil, 0                  if ( queueStatus ~= 'none' and queueMapName .. ' ' .. queueInstanceID == 'x' )                  then end"
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(
-            raised.contains("concatenate"),
-            "a nil status is BattlefieldFrame.lua:242's raise — got {raised}"
-        );
-        // The stock window's own line, verbatim, against what the binding actually answers.
-        assert!(
-            s.eval::<bool>(
-                "local queueStatus, queueMapName, queueInstanceID = GetBattlefieldStatus(1)                  if ( queueStatus ~= 'none' and queueMapName .. ' ' .. queueInstanceID == 'x' )                  then return false end return true"
-            )
-            .unwrap(),
-            "BattlefieldFrame.lua:242 must short-circuit on the status"
-        );
-        // A SHORT push is the same case: slot 1 real, 2 and 3 never sent.
-        s.set_battlefield_queue(vec![slot(489, 1, 5)], 0);
-        assert_eq!(
-            s.eval::<String>("return (GetBattlefieldStatus(1))")
-                .unwrap(),
-            "queued"
-        );
-        assert_eq!(
-            s.eval::<String>("return (GetBattlefieldStatus(3))")
-                .unwrap(),
-            "none",
-            "a slot past the pushed end is cleared, not out of range"
-        );
-        // …and the genuinely out-of-range leg is unchanged.
-        let off = s
-            .eval::<String>("local st = GetBattlefieldStatus(4) return tostring(st)")
-            .unwrap();
-        assert_eq!(off, "nil");
     }
 
     #[test]
     fn the_time_getters_read_the_pushed_milliseconds() {
         let mut s = UiScript::new().unwrap();
-        s.set_battlefield_queue(vec![slot(489, 1, 5)], 120_000);
+        s.set_battlefield_queue(
+            [slot(489, 1, 5), Default::default(), Default::default()],
+            120_000,
+        );
         assert_eq!(
             s.eval::<i64>("return GetBattlefieldPortExpiration(1)")
                 .unwrap(),
@@ -675,7 +611,7 @@ mod tests {
     #[test]
     fn show_battlefield_list_gates_on_a_queued_slot() {
         let mut s = UiScript::new().unwrap();
-        s.set_battlefield_queue(vec![slot(489, 1, 5), slot(529, 2, 1), slot(0, 1, 0)], 0);
+        s.set_battlefield_queue([slot(489, 1, 5), slot(529, 2, 1), slot(0, 1, 0)], 0);
         s.run("ShowBattlefieldList(1) ShowBattlefieldList(2) ShowBattlefieldList(3) ShowBattlefieldList(4)")
             .unwrap();
         assert_eq!(s.take_battlefield_list_requests(), vec![489]);
