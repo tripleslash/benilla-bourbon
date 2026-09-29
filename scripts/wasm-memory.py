@@ -66,6 +66,9 @@ while True:
                       f"min={mn} pages ({mn*64//1024} MiB) "
                       f"max={mx if mx is None else f'{mx} pages ({mx*64//1024} MiB)'}")
             elif kind == 0x03: f.read(1); f.read(1)
+            # A tag (the exception-handling proposal): an attribute byte and a type index. Unread,
+            # the walk loses its place and misses a memory imported after it.
+            elif kind == 0x04: f.read(1); uleb(f)
     elif sid == 5:  # memory
         for _ in range(uleb(f)):
             flags, mn, mx = limits(f)

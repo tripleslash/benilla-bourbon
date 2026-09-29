@@ -567,6 +567,9 @@ mod tests {
             Collider::trimesh(verts, tris),
             Transform::default(),
         ));
+        // avian 0.7 registers its spatial-query diagnostics in `finish`, which `run` would call.
+        app.finish();
+        app.cleanup();
         // One frame builds Position/Rotation and the spatial-query trees.
         app.update();
         app

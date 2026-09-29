@@ -65,8 +65,13 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         // ScenePlugin (avian's collider backend reads `SceneSpawner`); the ForwardDecal family is
         // registered inside `PbrPlugin::build`, so it cannot be disabled on its own.
         //
-        // M2/WMO/ADT load through our own `mpq://` loaders; there is no glTF.
+        // M2/WMO/ADT load through our own `mpq://` loaders; there is no glTF. `PbrPlugin`'s glTF
+        // material hook needs `GltfPlugin`'s handler registry, so it goes with it.
         .disable::<bevy::gltf::GltfPlugin>()
+        .set(bevy::pbr::PbrPlugin {
+            gltf_enable_standard_materials: false,
+            ..default()
+        })
         // No bevy AA: no Fxaa/TAA/SMAA/CAS component anywhere (MSAA is core render, unaffected).
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse.

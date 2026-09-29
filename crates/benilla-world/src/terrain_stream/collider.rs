@@ -524,6 +524,9 @@ mod tests {
                     ));
                 }
             }
+            // avian 0.7 registers its spatial-query diagnostics in `finish`, which `run` would call.
+            app.finish();
+            app.cleanup();
             app.update(); // builds Position/Rotation and the spatial-query trees
             app.world_mut()
                 .run_system_once(move |world: crate::collision::WorldCollision| {

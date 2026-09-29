@@ -641,6 +641,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
                     in.world_position,
                     n_lit,
                     view_z,
+                    // Bevy 0.19: the pixel seeds the filter's per-fragment rotation.
+                    in.position.xy,
                 );
                 break;
             }

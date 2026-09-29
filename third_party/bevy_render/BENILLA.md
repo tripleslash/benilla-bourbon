@@ -31,12 +31,23 @@ What it misses is `src/batching/gpu_preprocessing.rs`. `write_batched_instance_b
 `scope.spawn`. On native that is correct and fast — the pool's threads run it and wgpu is genuinely
 `Send`. On a threaded browser build it is the panic above, on the first frame that draws anything.
 
+## The second delta: `Skip` cameras keep their output attachment
+
+`prepare_view_attachments` in 0.19.1 skips every `CameraOutputMode::Skip` camera, and
+`prepare_view_targets` then removes the `ViewTarget` of any camera with no output attachment and a
+clear colour: such a camera never renders. 0.18.1 attached every camera's target. benilla's world
+camera (its target a size-carrier image) and player-UI camera (the window; `ui_gamma` writes the
+swapchain itself) are both `Skip` and clear, so on unpatched 0.19.1 the client and
+`benilla-worldview`'s FSR mode draw nothing (found live, `WOW_FSR_DEBUG=views`: the world view
+`target=false`). The hunk removes the three-line `Skip` early-out, restoring 0.18.1's loop.
+
 ## The delta, and the command that proves it
 
-**Three lines changed, one module added. No logic is touched.**
+**Three lines changed and three removed, one module added.**
 
 | file | change |
 |---|---|
+| `src/view/mod.rs` | `prepare_view_attachments`: the `CameraOutputMode::Skip` early-out goes (above) |
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/lib.rs` | `mod wasm_serial;` |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
@@ -72,8 +83,8 @@ mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_render/b
 diff -r third_party/bevy_render /tmp/upstream/bevy_render-0.19.1
 ```
 
-That must print exactly a `diff` for `src/batching/gpu_preprocessing.rs` (three lines) and
-`src/lib.rs` (the `mod`), `Only in third_party/bevy_render/src: wasm_serial.rs`, `Only in
+That must print exactly a `diff` for `src/batching/gpu_preprocessing.rs` (three lines),
+`src/view/mod.rs` (the `Skip` early-out) and `src/lib.rs` (the `mod`), `Only in third_party/bevy_render/src: wasm_serial.rs`, `Only in
 third_party/bevy_render: BENILLA.md`, and `Only in <upstream>: .cargo_vcs_info.json`,
 `Cargo.lock`, `Cargo.toml.orig` — cargo's packaging metadata, dropped the same way the other
 `third_party` forks drop it.

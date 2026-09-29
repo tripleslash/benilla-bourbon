@@ -81,6 +81,8 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("KeyCode", Plumbing),
     ("MouseButton", Plumbing),
     ("MouseScrollUnit", Plumbing),
+    // Bevy 0.19's `MouseWheel::phase`: a field of a swallowed event, named where one is built.
+    ("TouchPhase", Plumbing),
     ("NativeKey", Plumbing),
     ("ExitCondition", Plumbing),
     ("Monitor", Plumbing),

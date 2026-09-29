@@ -22,7 +22,7 @@
 //! # `default-features = false`, or `--no-default-features` still builds benilla-app with `dev`.
 //! benilla-app = { git = "https://github.com/samwhosung/benilla", default-features = false }
 //! # benilla's version, adding no features: bevy's defaults bring its audio stack back.
-//! bevy = { version = "0.18.1", default-features = false }
+//! bevy = { version = "0.19.1", default-features = false }
 //!
 //! [build-dependencies]
 //! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
@@ -40,6 +40,8 @@
 //! bevy_render = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! event-listener = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! parking = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! # fork: wgpu 29 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
+//! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //!
 //! [profile.dev]
 //! opt-level = 1

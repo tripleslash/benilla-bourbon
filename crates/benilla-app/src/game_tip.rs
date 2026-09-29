@@ -479,6 +479,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
         crate::text_reshape::harness::add_text_plugins(&mut app);
+        // The app-wide net the dismiss relies on (`empty_tip`), as the client installs it.
+        app.add_plugins(crate::text_reshape::TextReshapePlugin);
         app.init_resource::<crate::cvars::Cvars>();
         app.init_resource::<GameTipSetting>();
         app.insert_resource(GameTips {

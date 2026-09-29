@@ -878,6 +878,9 @@ mod tests {
             Collider::trimesh(verts, tris),
             Transform::default(),
         ));
+        // `update()` never runs plugin `finish()`, where avian adds its diagnostics resources.
+        app.finish();
+        app.cleanup();
         app.update(); // one frame builds Position/Rotation and the spatial-query trees
         app
     }

@@ -456,6 +456,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
                     in.world_position,
                     normalize(in.world_normal),
                     view_z,
+                    // Bevy 0.19: the pixel seeds the filter's per-fragment rotation.
+                    in.clip_position.xy,
                 );
                 break;
             }

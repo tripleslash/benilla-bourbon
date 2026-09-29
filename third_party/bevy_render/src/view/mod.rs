@@ -1148,10 +1148,9 @@ pub fn prepare_view_attachments(
             continue;
         };
 
-        if matches!(camera.output_mode, bevy_camera::CameraOutputMode::Skip) {
-            continue;
-        }
-
+        // benilla: every camera's target, `Skip` included, as 0.18 did (`BENILLA.md`). Without
+        // it `prepare_view_targets` drops a clearing `Skip` camera's `ViewTarget`, and benilla's
+        // world and player-UI cameras, both `Skip`, never render.
         match view_target_attachments.entry(target.clone()) {
             Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {

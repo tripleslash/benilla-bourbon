@@ -782,7 +782,10 @@ pub(super) fn register(app: &mut App) {
             Update,
             (advance_clock, collect_stamps, pack_ripple_data).chain(),
         )
-        .add_systems(Update, pack_sky_rows);
+        .add_systems(
+            Update,
+            pack_sky_rows.in_set(crate::lighting::LightingConsumeSet),
+        );
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;

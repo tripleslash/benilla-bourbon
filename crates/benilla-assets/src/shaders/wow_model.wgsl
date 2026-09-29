@@ -1019,6 +1019,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                         vec4<f32>(anchor, 1.0),
                         vec3<f32>(0.0, 1.0, 0.0),
                         view_z,
+                        // Bevy 0.19: the pixel seeds the filter's per-fragment rotation.
+                        in.position.xy,
                     );
                 }
 #else
@@ -1027,6 +1029,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                     in.world_position,
                     wow_normalize(in.world_normal),
                     view_z,
+                    // Bevy 0.19: the pixel seeds the filter's per-fragment rotation.
+                    in.position.xy,
                 );
 #endif
                 break;

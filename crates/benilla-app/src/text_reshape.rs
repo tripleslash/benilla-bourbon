@@ -24,14 +24,15 @@ impl Plugin for TextReshapePlugin {
     }
 }
 
-/// Marks a `Text` root changed when it loses its `Children`.
+/// Marks a `Text` root's `TextLayout` changed when it loses its `Children`: 0.19's detector reads
+/// a root's `TextFont`, `TextLayout` and `Children`, never its `Text`.
 fn reshape_emptied_text_roots(
     mut emptied: RemovedComponents<Children>,
-    mut roots: Query<&mut Text>,
+    mut roots: Query<&mut TextLayout, With<Text>>,
 ) {
     for entity in emptied.read() {
-        if let Ok(mut text) = roots.get_mut(entity) {
-            text.set_changed();
+        if let Ok(mut layout) = roots.get_mut(entity) {
+            layout.set_changed();
         }
     }
 }

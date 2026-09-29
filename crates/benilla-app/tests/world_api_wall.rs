@@ -462,7 +462,7 @@ fn measure() -> BTreeMap<String, BTreeSet<String>> {
             .strip_prefix(&src)
             .unwrap()
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         // Without the world crate the file's module decides its side; with it, every file here
         // is on the game side.
         if (!split && is_engine(&rel)) || tests.contains(&rel) {
@@ -509,7 +509,7 @@ fn measure_back() -> BTreeMap<String, BTreeSet<String>> {
             .strip_prefix(&src)
             .unwrap()
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         if tests.contains(&rel) {
             continue;
         }
@@ -561,7 +561,7 @@ fn test_module_files(src: &Path) -> BTreeSet<String> {
                                 cand.strip_prefix(src)
                                     .unwrap()
                                     .to_string_lossy()
-                                    .to_string(),
+                                    .replace('\\', "/"),
                             );
                         }
                     }
