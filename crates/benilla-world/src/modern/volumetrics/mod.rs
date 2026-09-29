@@ -40,7 +40,7 @@ mod node;
 pub(crate) use node::FroxelLabel;
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 18 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 19 * 16;
 /// The cloud-shadow grid's cells per side.
 pub const CLOUD_CELLS: usize = 32;
 /// Everything this module writes behind the cascades in the modern storage block.
@@ -82,6 +82,14 @@ const NIGHT_GLOW: f32 = 5.0;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
+/// fork: **moonlit ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN
+/// night, and their height falloff (yd) above the ground under the camera. `froxel_scatter.wgsl`
+/// breaks them into patches and lights them with the shaft haze's key; zero by day.
+const BANK_EXTINCTION: f32 = 0.035;
+const BANK_FALLOFF: f32 = 5.0;
+/// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
+/// the banks carry the night instead of a veil over everything.
+const MOON_VEIL: f32 = 0.4;
 const SHAFT_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -189,6 +197,7 @@ pub struct FroxelFog {
     pub room_media: Vec4,
     pub room_ambient: Vec4,
     pub room_sun: Vec4,
+    pub night: Vec4,
 }
 
 impl FroxelFog {
@@ -219,6 +228,7 @@ impl FroxelFog {
             self.room_media,
             self.room_ambient,
             self.room_sun,
+            self.night,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -380,6 +390,8 @@ struct VolumeHistory {
     prev_grid: UVec3,
     frame: u32,
     reference_height: Option<f32>,
+    /// The ground under the camera the night's banks lie on, eased like the reference.
+    bank_ground: Option<f32>,
     log_timer: f32,
     /// The room whose air is still fading ([`fading_room`]).
     room: Option<(Vec3, f32)>,
@@ -504,6 +516,15 @@ fn update_volume(
         _ => ground,
     };
     hist.reference_height = Some(reference_height);
+    let here = wdl
+        .as_deref()
+        .and_then(|w| w.height_under(cam))
+        .map_or(ground, |h| h.min(cam.y));
+    let bank_ground = match hist.bank_ground {
+        Some(y) if (y - here).abs() < 400.0 => y + (here - y) * (dt / 2.0).min(1.0),
+        _ => here,
+    };
+    hist.bank_ground = Some(bank_ground);
 
     // Dev (`?modern_foglog=1`): the solved medium every two seconds.
     if crate::launch_env::var("WOW_MODERN_FOGLOG").as_deref() == Some("1") {
@@ -511,7 +532,8 @@ fn update_volume(
         if hist.log_timer <= 0.0 {
             hist.log_timer = 2.0;
             info!(
-                "modern fog: density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2} room_density {:.5} wmo_fog {:.0}..{:.0}",
+                "modern fog: night {:.2} moon_key {:.2} cam_y {:.0} bank_ground {:.0} density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2} room_density {:.5} wmo_fog {:.0}..{:.0}",
+                l.sidn_night, super::sun_arc::moon_key(), cam.y, bank_ground,
                 media.density, media.near_clear, reference_height, media.key_in, media.ambient_in,
                 l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color,
                 room, room_w, room_media.map_or(0.0, |m| m.density), l.wmo_fog_start, l.wmo_fog_end
@@ -521,7 +543,9 @@ fn update_volume(
 
     let shaft_key = shaft_key(l.diffuse, &look.0);
     let night = l.sidn_night.clamp(0.0, 1.0);
-    let night_glow = Vec3::from(l.fog_color.map(super::srgb_to_linear)) * (NIGHT_GLOW * night);
+    let veil = 1.0 + (MOON_VEIL - 1.0) * super::sun_arc::moon_key();
+    let night_glow =
+        Vec3::from(l.fog_color.map(super::srgb_to_linear)) * (NIGHT_GLOW * night * veil);
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
@@ -618,6 +642,12 @@ fn update_volume(
             .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.glow))
             .unwrap_or_default()
             .extend(night_glow.z),
+        night: Vec4::new(
+            BANK_EXTINCTION * night,
+            bank_ground,
+            1.0 / BANK_FALLOFF,
+            0.0,
+        ),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -650,11 +680,11 @@ fn fading_room(
     *latched
 }
 
-/// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded) times the zone's
-/// key scattering, glow and shaft gain — not the medium's key term, which is normalized to the fog
+/// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded, and the moon's
+/// harder scattering, `look::key_scatter_gain`) times the zone's key scattering, glow and shaft gain — not the medium's key term, which is normalized to the fog
 /// colour and would tint every beam with the zone's fog hue.
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
-    let horizon = super::sun_arc::key_horizon();
+    let horizon = super::sun_arc::key_horizon() * super::look::key_scatter_gain();
     let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
     Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
 }
@@ -744,7 +774,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 480);
+        assert_eq!(FOG_BYTES, 496);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,

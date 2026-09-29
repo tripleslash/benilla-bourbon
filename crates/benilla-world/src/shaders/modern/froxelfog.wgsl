@@ -61,6 +61,9 @@ struct FroxelFog {
     room_ambient: vec4<f32>,
     // rgb = the room's key-light in-scatter radiance; w = the night air's glow (b).
     room_sun: vec4<f32>,
+    // fork: the night's ground banks. x = extinction at the ground (1/yd, 0 by day); y = the ground
+    // under the camera (world y); z = 1 / height falloff (yd); w = unused.
+    night: vec4<f32>,
 }
 
 // Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).

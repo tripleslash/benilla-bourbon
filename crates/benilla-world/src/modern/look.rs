@@ -223,13 +223,35 @@ pub fn key_tint() -> [f32; 3] {
     [0, 1, 2].map(|i| f32::from_bits(KEY_TINT[i].load(Ordering::Relaxed)))
 }
 
+/// fork: **a moonlit night.** While the moon keys, every zone takes one night key and a thinner
+/// fill instead of its day ratio: the authored night rows sit key and fill close together, which
+/// under a risen moon read as a flat blue wash with no shadow in it. Ramped by
+/// [`super::sun_arc::moon_key`], so it comes in with the moonrise and leaves with the moonset.
+pub const MOON_KEY: f32 = 0.85;
+/// The fill's multiplier under a full moon: the shadowed side falls toward the night floor.
+pub const MOON_FILL: f32 = 0.45;
+/// The moonlight's scattering into the air against the sun's: a beam reads from its contrast with
+/// the dark air around it, and the moon's key is a fraction of the sun's.
+pub const MOON_SCATTER: f32 = 2.5;
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 /// The key and fill gains for the shared light's rows (1, 1 in a classic session).
 pub fn key_fill() -> (f32, f32) {
+    let moon = super::sun_arc::moon_key();
     (
         // The key also fades with its body's elevation (`sun_arc::key_horizon`, 1 in classic).
-        f32::from_bits(KEY.load(Ordering::Relaxed)) * super::sun_arc::key_horizon(),
-        f32::from_bits(FILL.load(Ordering::Relaxed)),
+        lerp(f32::from_bits(KEY.load(Ordering::Relaxed)), MOON_KEY, moon)
+            * super::sun_arc::key_horizon(),
+        f32::from_bits(FILL.load(Ordering::Relaxed)) * lerp(1.0, MOON_FILL, moon),
     )
+}
+
+/// The gain on the key light's scattering into the air (1 by day, [`MOON_SCATTER`] under the moon).
+pub fn key_scatter_gain() -> f32 {
+    lerp(1.0, MOON_SCATTER, super::sun_arc::moon_key())
 }
 
 /// The post's exposure for a modern frame.

@@ -51,6 +51,30 @@ fn shaft_key(f: froxelfog::FroxelFog) -> vec3<f32> {
     return vec3<f32>(f.medium.z, f.ambient.w, f.wind.w);
 }
 
+// fork: **moonlit ground fog.** Overnight the air near the ground gathers into banks (`fog.night`):
+// dense within a few yards of the ground under the camera (pooling in the low ground below it),
+// broken into patches by the drifting noise at a coarse scale, and lit by the key as hard as the
+// shaft haze, so a moonbeam reads brightest where it crosses a bank.
+// The patches' feature size (yd), and the noise band that is bank: below the low edge is clear air.
+const BANK_SCALE: f32 = 150.0;
+const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
+// A bank's in-scatter: the key as the shaft haze takes it, and this share of the sky.
+const BANK_KEY_GAIN: f32 = 1.6;
+const BANK_SKY_SHARE: f32 = 0.5;
+
+// The ground banks' extinction at `p` (1/yd).
+fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    let core = f.night.x;
+    if (core <= 0.0) {
+        return 0.0;
+    }
+    let above = max(p.y - f.night.y, 0.0);
+    let height = exp(-min(above * f.night.z, 24.0));
+    let q = vec3<f32>(p.x, p.y * 0.25, p.z) + f.wind.xyz * 0.5;
+    let n = textureSampleLevel(noise_tex, repeat_samp, q / BANK_SCALE + vec3<f32>(0.37, 0.11, 0.73), 0.0).r;
+    return core * height * smoothstep(BANK_EDGE.x, BANK_EDGE.y, n);
+}
+
 // How far around a froxel the canopy cover is gathered (yd).
 const CANOPY_REACH: f32 = 7.0;
 
@@ -151,7 +175,9 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let sigma_fog = ext.x;
     let sigma_haze = ext.y;
     let sigma_night = ext.z;
-    let sigma = sigma_fog + sigma_haze + sigma_night;
+    // fork: the ground banks (outside rooms: a building's air is its own).
+    let sigma_bank = ground_banks(f, p) * (1.0 - room);
+    let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -197,6 +223,8 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
+    let lum_bank = f.ambient.rgb * (sky_term * BANK_SKY_SHARE)
+        + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * BANK_KEY_GAIN);
     var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
 
     // The point lights, isotropic, with the surface lanes' WoW falloff and range window.
@@ -237,7 +265,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var cur = vec4<f32>(
         lum_fog * sigma_fog + lum_haze * sigma_haze + (lum_haze + froxelfog::night_glow(f)) * sigma_night
-            + points.medium * sigma + points.lamp,
+            + lum_bank * sigma_bank + points.medium * sigma + points.lamp,
         sigma,
     );
 

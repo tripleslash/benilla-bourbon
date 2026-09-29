@@ -4,8 +4,11 @@
 //! disc (`celestial_sun_direction`) does rise and set, but only along one compass bearing. A
 //! modern session keeps the reference's *elevation timing* — so the DBC colours, which are keyed
 //! to it, stay in step — and sweeps the bearing east → south → west over the day. The moon takes
-//! the mirrored arc by night. The key light (`WowLighting::sun_dir`, which the light buffer, the
-//! classic lanes' N·L and the shadow cascades all read) follows whichever body is up.
+//! its own arc by night, from the minute the sun's light goes out to the minute it returns
+//! ([`MOONRISE_MINUTE`], [`MOONSET_MINUTE`]); the reference moon rises only at 22:18 and sets at
+//! 04:00, which left every evening from 20:36 and every pre-dawn without a key light. The key
+//! light (`WowLighting::sun_dir`, which the light buffer, the classic lanes' N·L and the shadow
+//! cascades all read) follows whichever body lights more.
 
 use std::f32::consts::PI;
 
@@ -22,8 +25,18 @@ pub const SUNSET_MINUTE: f32 = 1290.0;
 pub const MAX_ELEVATION: f32 = 62.0 * PI / 180.0;
 /// Floor on the KEY light's elevation: a body on the horizon would stretch shadows to infinity.
 pub const MIN_KEY_ELEVATION: f32 = 4.0 * PI / 180.0;
-/// Below this elevation the sun hands the key to the moon.
-const HANDOFF_ELEVATION: f32 = -2.0 * PI / 180.0;
+/// The minutes the reference sun's light reaches zero ([`KEY_ZERO_ELEVATION`] on the elevation
+/// table `0xce8d64`): 20:36 on the setting leg, 06:07 on the rising one. The moon's arc spans
+/// them, so its light grows as the sun's dies and the key never goes dark.
+pub const MOONRISE_MINUTE: f32 = 1236.5;
+pub const MOONSET_MINUTE: f32 = 366.5;
+/// The moon's culmination: high enough to light a valley floor, low enough to cast shadows.
+pub const MOON_PEAK_ELEVATION: f32 = 50.0 * PI / 180.0;
+/// Where the moon waits by day: the reference's parked 10° below the horizon.
+const MOON_PARKED_ELEVATION: f32 = -10.0 * PI / 180.0;
+/// The rise's shape: `sin^k` with `k < 1` clears the horizon in minutes (9° after 11) instead of
+/// the half hour a plain sine takes, so dusk dims only briefly between the two bodies.
+const MOON_RISE_SHAPE: f32 = 0.6;
 
 /// The key light's strength against its body's TRUE elevation (the key's direction is floored at
 /// [`MIN_KEY_ELEVATION`], its energy is not): full from 8° up, nothing once the body is below the
@@ -34,9 +47,17 @@ const KEY_ZERO_ELEVATION: f32 = -PI / 180.0;
 
 static KEY_HORIZON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
 
+static MOON_KEY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// The key light's horizon factor (1 in a classic frame, or with the arc switched off).
 pub fn key_horizon() -> f32 {
     f32::from_bits(KEY_HORIZON.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// How much of the key light is the moon's: its horizon factor while it keys, else 0 (0 in a
+/// classic frame). The zone look's moonlit night and the shafts ramp in on it.
+pub fn moon_key() -> f32 {
+    f32::from_bits(MOON_KEY.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn horizon_factor(elevation: f32) -> f32 {
@@ -73,15 +94,34 @@ pub fn day_phase(minute: f32) -> f32 {
     ((minute - SUNRISE_MINUTE) / (SUNSET_MINUTE - SUNRISE_MINUTE)).clamp(0.0, 1.0)
 }
 
-/// The moon's progress along its mirrored arc (0 at sunset, 1 at sunrise, clamped).
+/// Whether `minute` falls between moonrise and moonset.
+fn moon_is_up(minute: f32) -> bool {
+    minute >= MOONRISE_MINUTE || minute <= MOONSET_MINUTE
+}
+
+/// The moon's progress along its arc (0 at moonrise, 1 at moonset, clamped).
 pub fn night_phase(minute: f32) -> f32 {
-    let night = 1440.0 - (SUNSET_MINUTE - SUNRISE_MINUTE);
-    ((minute - SUNSET_MINUTE).rem_euclid(1440.0) / night).clamp(0.0, 1.0)
+    let night = 1440.0 - (MOONRISE_MINUTE - MOONSET_MINUTE);
+    ((minute - MOONRISE_MINUTE).rem_euclid(1440.0) / night).clamp(0.0, 1.0)
+}
+
+/// The moon's elevation at `minute` (radians): on the horizon at moonrise and moonset,
+/// [`MOON_PEAK_ELEVATION`] at the night's midpoint, parked below the horizon by day.
+pub fn moon_elevation(minute: f32) -> f32 {
+    if !moon_is_up(minute) {
+        return MOON_PARKED_ELEVATION;
+    }
+    (PI * night_phase(minute))
+        .sin()
+        .max(0.0)
+        .powf(MOON_RISE_SHAPE)
+        * MOON_PEAK_ELEVATION
 }
 
 fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
     if !super::frame_is_modern() || !super::sun_arc_enabled() {
         KEY_HORIZON.store(1.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        MOON_KEY.store(0, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let Some(clock) = clock else {
@@ -94,33 +134,30 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
         .y
         .clamp(-1.0, 1.0)
         .asin();
-    let moon_elev = lighting
-        .moon_dir_white
-        .normalize_or_zero()
-        .y
-        .clamp(-1.0, 1.0)
-        .asin();
+    let moon_elev = moon_elevation(minute);
 
     let sun = arc_to_body(day_phase(minute), sun_elev);
     let moon = arc_to_body(night_phase(minute), moon_elev);
     lighting.celestial_dir = sun;
     lighting.moon_dir_white = moon;
 
-    let (to_key, key_elev) = if sun_elev > HANDOFF_ELEVATION {
+    // The brighter body keys; at moonrise and moonset both are at zero, so the swap never pops.
+    let (sun_light, moon_light) = (horizon_factor(sun_elev), horizon_factor(moon_elev));
+    let (to_key, key_light, moon_key) = if sun_light >= moon_light {
         (
             arc_to_body(day_phase(minute), sun_elev.max(MIN_KEY_ELEVATION)),
-            sun_elev,
+            sun_light,
+            0.0f32,
         )
     } else {
         (
             arc_to_body(night_phase(minute), moon_elev.max(MIN_KEY_ELEVATION)),
-            moon_elev,
+            moon_light,
+            moon_light,
         )
     };
-    KEY_HORIZON.store(
-        horizon_factor(key_elev).to_bits(),
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    MOON_KEY.store(moon_key.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    KEY_HORIZON.store(key_light.to_bits(), std::sync::atomic::Ordering::Relaxed);
     // `sun_dir` is the direction light TRAVELS.
     lighting.sun_dir = -to_key;
 }
@@ -159,7 +196,51 @@ mod tests {
         assert_eq!(day_phase(0.0), 0.0);
         assert_eq!(day_phase(1439.0), 1.0);
         assert!((day_phase((SUNRISE_MINUTE + SUNSET_MINUTE) / 2.0) - 0.5).abs() < 1e-6);
-        assert!(night_phase(SUNSET_MINUTE) < 1e-6);
-        assert!((night_phase(SUNRISE_MINUTE - 1e-3) - 1.0).abs() < 1e-3);
+        assert!(night_phase(MOONRISE_MINUTE) < 1e-6);
+        assert!((night_phase(MOONSET_MINUTE - 1e-3) - 1.0).abs() < 1e-3);
+    }
+
+    /// The reference sun's elevation (`0xce8d64`: polar 100° at 05:30 and 21:30, 5° across noon).
+    fn reference_sun_elevation(minute: f32) -> f32 {
+        let dp = minute / 1440.0;
+        let polar = if dp < 0.2291667 || dp > 0.8958333 {
+            100.0
+        } else if dp < 0.4965278 {
+            100.0 - 95.0 * (dp - 0.2291667) / (0.4965278 - 0.2291667)
+        } else if dp < 0.5034722 {
+            5.0
+        } else {
+            5.0 + 95.0 * (dp - 0.5034722) / (0.8958333 - 0.5034722)
+        };
+        (90.0f32 - polar).to_radians()
+    }
+
+    #[test]
+    fn the_moon_rises_as_the_sun_goes_dark_and_sets_as_it_returns() {
+        for m in [MOONRISE_MINUTE, MOONSET_MINUTE] {
+            let e = reference_sun_elevation(m);
+            assert!(
+                (e - KEY_ZERO_ELEVATION).abs() < 0.05f32.to_radians(),
+                "{m}: {e}"
+            );
+        }
+        // Every minute of the day one of the two bodies lights the key, except at each swap,
+        // where both pass through zero together.
+        for m in 0..1440 {
+            let m = m as f32;
+            let sun = horizon_factor(reference_sun_elevation(m));
+            let lit = sun.max(horizon_factor(moon_elevation(m)));
+            let at_swap = (m - MOONRISE_MINUTE).abs() < 2.0 || (m - MOONSET_MINUTE).abs() < 2.0;
+            assert!(at_swap || lit > 0.0, "{m}: key {lit}");
+        }
+        // The moon is at full light a quarter hour after it rises.
+        assert!(horizon_factor(moon_elevation(MOONRISE_MINUTE + 15.0)) > 0.99);
+        // The dusk the reference left dark: 21:00 and 22:00 have the moon well up.
+        assert!(moon_elevation(1260.0) > 12f32.to_radians());
+        assert!(moon_elevation(1320.0) > 25f32.to_radians());
+        // Culminates at the night's midpoint, parked by day.
+        let mid = (MOONRISE_MINUTE + (1440.0 - MOONRISE_MINUTE + MOONSET_MINUTE) / 2.0) % 1440.0;
+        assert!((moon_elevation(mid) - MOON_PEAK_ELEVATION).abs() < 1e-4);
+        assert!(moon_elevation(720.0) < 0.0);
     }
 }

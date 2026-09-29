@@ -47,7 +47,7 @@ pub const MAX_LEVELS: usize = 4;
 /// Size of [`GiParams::std430`] — `probegi.wgsl`'s `GiParams`. Chosen so that the light grid behind
 /// it starts at a 256-byte offset inside the block, which is what lets the binning pass bind it (and
 /// the probe array behind THAT stays 256-aligned for the blend pass).
-pub const GI_PARAMS_BYTES: usize = 25 * 16;
+pub const GI_PARAMS_BYTES: usize = 24 * 16;
 /// Size of one `probegi::GiProbe`.
 pub const PROBE_BYTES: usize = 96;
 
@@ -343,8 +343,8 @@ impl GiParams {
         row(self.misc);
         row(self.interior);
         // `spare`: P7's grading, and the padding that aligns the light grid behind this block —
-        // 14 rows since the froxel block's room fog pushed it 64 bytes off the 256 grid.
-        for _ in 0..14 {
+        // 13 rows since the froxel block's room fog and night banks pushed it 80 bytes off the grid.
+        for _ in 0..13 {
             row(Vec4::ZERO);
         }
     }
