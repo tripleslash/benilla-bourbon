@@ -94,6 +94,26 @@ pub fn day_phase(minute: f32) -> f32 {
     ((minute - SUNRISE_MINUTE) / (SUNSET_MINUTE - SUNRISE_MINUTE)).clamp(0.0, 1.0)
 }
 
+/// The stars' fade (minutes): in over the hour after the sun's light goes out, out over the hour
+/// before it returns. The reference star curve (`0xce9a98`) starts only at 22:30 and is full only
+/// at midnight, so under the modern night's moon a `Stars.m2` sky (patch-Y's nebulae) stayed at a
+/// fifth of its strength until 23:00.
+const STARS_FADE: f32 = 60.0;
+
+/// The star field's alpha in a modern frame at `minute`: never below the reference curve's
+/// `reference`, full from an hour after moonrise to an hour before moonset.
+pub fn star_alpha(minute: f32, reference: f32) -> f32 {
+    let after_rise = (minute - MOONRISE_MINUTE).rem_euclid(1440.0);
+    let before_set = (MOONSET_MINUTE - minute).rem_euclid(1440.0);
+    let night = 1440.0 - (MOONRISE_MINUTE - MOONSET_MINUTE);
+    let fade = if after_rise <= night {
+        (after_rise.min(before_set) / STARS_FADE).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    reference.max(fade)
+}
+
 /// Whether `minute` falls between moonrise and moonset.
 fn moon_is_up(minute: f32) -> bool {
     minute >= MOONRISE_MINUTE || minute <= MOONSET_MINUTE
@@ -135,6 +155,7 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
         .clamp(-1.0, 1.0)
         .asin();
     let moon_elev = moon_elevation(minute);
+    lighting.star_alpha = star_alpha(minute, lighting.star_alpha);
 
     let sun = arc_to_body(day_phase(minute), sun_elev);
     let moon = arc_to_body(night_phase(minute), moon_elev);
@@ -198,6 +219,18 @@ mod tests {
         assert!((day_phase((SUNRISE_MINUTE + SUNSET_MINUTE) / 2.0) - 0.5).abs() < 1e-6);
         assert!(night_phase(MOONRISE_MINUTE) < 1e-6);
         assert!((night_phase(MOONSET_MINUTE - 1e-3) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_stars_come_out_with_the_moon() {
+        assert_eq!(star_alpha(MOONRISE_MINUTE, 0.0), 0.0);
+        assert!((star_alpha(MOONRISE_MINUTE + 30.0, 0.0) - 0.5).abs() < 1e-4);
+        // 22:50, where the reference curve is at a fifth: full.
+        assert_eq!(star_alpha(1370.0, 0.22), 1.0);
+        assert!((star_alpha(MOONSET_MINUTE - 30.0, 0.0) - 0.5).abs() < 1e-4);
+        assert_eq!(star_alpha(720.0, 0.0), 0.0);
+        // Never below the reference.
+        assert_eq!(star_alpha(720.0, 0.3), 0.3);
     }
 
     /// The reference sun's elevation (`0xce8d64`: polar 100° at 05:30 and 21:30, 5° across noon).
