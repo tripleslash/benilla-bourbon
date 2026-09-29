@@ -454,7 +454,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // Static-scene transform tracking pinned on: the default threshold re-decides every frame with
     // two full scans of the rows the tracking exists to skip, and this scene is static-heavy. It
     // costs more only when most rows move in one frame (a load burst into a near-empty world).
-    app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
+    app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::Enabled);
     // Update runs single-threaded: most per-frame Update systems are non-Send (mlua's `UiScript`,
     // kira's audio handles) and serialize through the multi-threaded executor anyway, so its
     // dispatch is pure overhead (measured faster, tails flat). `WOW_MT_UPDATE=1` restores it.

@@ -1455,7 +1455,7 @@ mod tests {
             Guid(0x2A),
             SelfPlayer,
         ));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(
             Update,
             (
@@ -1466,17 +1466,14 @@ mod tests {
                 .chain(),
         );
         let run = |app: &mut App, lua: &str| {
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .run(lua)
-                .unwrap();
+            app.world_mut().non_send_mut::<UiScript>().run(lua).unwrap();
         };
 
         app.update();
         run(&mut app, "SelectQuestLogEntry(4); SetAbandonQuest()");
         assert_eq!(
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<String>("return GetAbandonQuestName()")
                 .unwrap(),
             "B"
@@ -1538,7 +1535,7 @@ mod tests {
                 SelfPlayer,
             ))
             .id();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_quest_log);
 
         app.update();
@@ -1560,7 +1557,7 @@ mod tests {
         );
         assert!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .take_sounds()
                 .is_empty(),
             "the sound is the accept row's, played with its line"

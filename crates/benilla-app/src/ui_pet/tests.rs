@@ -797,12 +797,12 @@ fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
         "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     let seen = |app: &mut App| -> Vec<String> {
         app.update();
         let mut s = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         s.resolve();
         let out = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -826,7 +826,7 @@ fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
     );
     let (start, duration, enable): (f64, f64, i32) = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval("return GetPetActionCooldown(4)")
         .unwrap();
     assert!(

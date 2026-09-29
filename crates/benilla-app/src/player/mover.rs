@@ -855,7 +855,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();

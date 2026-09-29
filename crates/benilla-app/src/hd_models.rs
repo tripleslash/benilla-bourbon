@@ -132,9 +132,13 @@ fn mount(on: bool) -> anyhow::Result<Option<impl Fn(&str) -> bool>> {
     Ok(store.map(|s| move |name: &str| s.contains(name)))
 }
 
+/// A mounted layer's membership test.
+#[cfg(not(target_arch = "wasm32"))]
+type LayerContains = fn(&str) -> bool;
+
 /// Native has no live layer; [`switch`] returns before it asks.
 #[cfg(not(target_arch = "wasm32"))]
-fn mount(_on: bool) -> anyhow::Result<Option<fn(&str) -> bool>> {
+fn mount(_on: bool) -> anyhow::Result<Option<LayerContains>> {
     anyhow::bail!("the updated character models are not a live mount on this build")
 }
 

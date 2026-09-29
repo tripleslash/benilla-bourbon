@@ -284,11 +284,17 @@ mod ordering_tests {
                 (|mut p: ResMut<Probe>| p.0 += 1).in_set(LightingResolveSet),
             ),
         );
-        app.update();
-        let warnings = app
-            .get_schedule(Update)
-            .expect("Update schedule")
-            .warnings()
+        let world = app.world_mut();
+        let mut schedule = world
+            .resource_mut::<Schedules>()
+            .remove(Update)
+            .expect("Update schedule");
+        let built = schedule
+            .initialize(world)
+            .expect("Update builds")
+            .expect("a first build returns its metadata");
+        let warnings = built
+            .warnings
             .iter()
             .filter(|w| matches!(w, ScheduleBuildWarning::Ambiguity(_)))
             .count();

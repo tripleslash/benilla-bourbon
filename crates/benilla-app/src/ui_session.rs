@@ -34,7 +34,7 @@ impl Plugin for UiSessionPlugin {
 /// interact-range test against a latched guid. Each NPC window registers
 /// [`close_npc_session_out_of_range::<T>`] ahead of its feed so the close fires its `*_CLOSED` the
 /// same frame; trade does not, as its cancel is server-driven.
-pub(crate) trait NpcSession: Resource {
+pub(crate) trait NpcSession: Resource<Mutability = bevy::ecs::component::Mutable> {
     /// The bound NPC's guid; `None` when no window is open.
     fn npc(&self) -> Option<u64>;
     /// The window's client-side close, with no packet: the same clear its close button does.

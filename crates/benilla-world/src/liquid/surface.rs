@@ -1178,7 +1178,7 @@ pub(super) fn sync_water_look(
         if key.kind.is_fullbright() {
             continue;
         }
-        let Some(material) = materials.get_mut(&entry.cata) else {
+        let Some(mut material) = materials.get_mut(&entry.cata) else {
             continue;
         };
         let mut look = cata_water_look(key.kind);

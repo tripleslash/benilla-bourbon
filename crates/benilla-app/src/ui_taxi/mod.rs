@@ -317,7 +317,7 @@ mod tests {
     fn unit_on_taxi_reads_the_taxi_flight_flag() {
         let mut app = App::new();
         app.add_systems(Update, feed_on_taxi);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let me = app
             .world_mut()
             .spawn((
@@ -327,7 +327,7 @@ mod tests {
             .id();
         let on_taxi = |app: &mut App| -> bool {
             app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             s.eval::<Option<i64>>(r#"return UnitOnTaxi("player")"#)
                 .unwrap()
                 .is_some()
@@ -383,7 +383,7 @@ mod tests {
             .insert_resource(catalogs)
             .insert_resource(factions)
             .insert_resource(reps)
-            .insert_non_send_resource(UiScript::new().unwrap());
+            .insert_non_send(UiScript::new().unwrap());
         app.world_mut().spawn((
             SelfPlayer,
             ObjectStore(ObjectFields::from_pairs(&[
@@ -414,7 +414,7 @@ mod tests {
 
         let node = |app: &mut App, name: &str| -> (i64, i64) {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval(&format!(
                     "for i = 1, NumTaxiNodes() do \
                        if TaxiNodeName(i) == {name:?} then return i, TaxiNodeCost(i) end \
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(shown, 136);
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!("TakeTaxiNode({thelsamar})"))
             .unwrap();
         app.world_mut().run_system_once(drain_taxi).unwrap();

@@ -14,7 +14,7 @@
 //! on top every frame.
 
 use bevy::app::SubApp;
-use bevy::pbr::graph::NodePbr;
+use bevy::pbr::{per_view_shadow_pass, LATE_SHADOW_PASS};
 use bevy::render::render_resource::binding_types::uniform_buffer;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::storage::GpuShaderBuffer;
@@ -873,10 +873,7 @@ fn prepare_entity_shadows(
     ));
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct GxShadowLabel;
-
-fn gx_shadow_pass(
+pub(crate) fn gx_shadow_pass(
     world: &World,
     view: ViewQuery<&StaticGxView>,
     mut render_context: RenderContext,
@@ -1303,8 +1300,8 @@ fn gx_shadow_pass(
         // atlas. Every face is static content lit by a light that does not move, so the whole layer
         // is redrawn only when the chosen set or the static world changes; a settled room pays
         // nothing at all after the first frame.
-        self.draw_local_atlas(
-            render_context,
+        draw_local_atlas(
+            &mut render_context,
             world,
             frame,
             &casters,
@@ -1314,556 +1311,550 @@ fn gx_shadow_pass(
             meshes,
             allocator,
         );
-}
+    }
 }
 
-impl GxShadowNode {
-    /// fork: modern lighting (P6, extended by P8) — the shadowed local lights' cube atlas.
-    ///
-    /// **P6** drew only the retained static world here, once, and cached the whole layer against the
-    /// chosen set and the static fingerprint: a torch does not move, a wall does not move, and a
-    /// settled room paid nothing after its first frame.
-    ///
-    /// Since the lamp shadows went soft it is **strictly two phases**, per slot:
-    ///
-    /// - **Static.** A slot's six faces over the retained static world, drawn ONCE — and only after
-    ///   the lamp's anchor and the static casters inside its reach have held still for
-    ///   [`ATLAS_SETTLE_FRAMES`], so a street that is still streaming in is not redrawn cell by cell.
-    ///   On a tier with a dynamic phase they are drawn into the static cache, never the working
-    ///   layer. The main world is told when a slot is built (`modern::lights::publish_built`) and
-    ///   only then fades its shadow in.
-    /// - **Dynamic** (`LightTier::dynamic_casters`). The entity casters within
-    ///   [`crate::modern::lights::DYNAMIC_REACH`] of the light — and never the model the light lives
-    ///   in ([`HOST_MAX_RADIUS`]) — fingerprinted per slot. Only when that fingerprint changes is the
-    ///   slot's working copy put back from the cache (six tile rectangles, `depth_fill.wgsl`) and the
-    ///   entities drawn over it. A lamp nobody is walking past redraws nothing at all.
-    ///
-    /// **The culling is per FACE, not per light.** A cube's six faces are six render passes' worth
-    /// of state, and most of them look at nothing: a sconce against a wall has three faces that see
-    /// only the wall, and a lamp on open ground has one that sees only sky. A face with no casters
-    /// is skipped entirely, which is cheaper than the viewport, scissor and bind-group churn of
-    /// drawing nothing.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_local_atlas(
-        &self,
-        render_context: &mut RenderContext<'_>,
-        world: &World,
-        frame: &ModernShadowFrame,
-        casters: &[(&GxCellGpu, &GxCellDraw)],
-        static_hash: u64,
-        ready: Option<(&RenderPipeline, &RenderPipeline)>,
-        pipeline_cache: &PipelineCache,
-        meshes: &RenderAssets<RenderMesh>,
-        allocator: &MeshAllocator,
-    ) {
-        let (Some(lights), Some(view_bind)) =
-            (world.get_resource::<ModernLights>(), frame.bind.as_ref())
-        else {
-            return;
-        };
-        let Some((opaque, cutout)) = ready else {
-            return;
-        };
-        if lights.shadowed.is_empty() || frame.local_offsets.len() < lights.shadowed.len() * 6 {
-            return;
+/// fork: modern lighting (P6, extended by P8) — the shadowed local lights' cube atlas.
+///
+/// **P6** drew only the retained static world here, once, and cached the whole layer against the
+/// chosen set and the static fingerprint: a torch does not move, a wall does not move, and a
+/// settled room paid nothing after its first frame.
+///
+/// Since the lamp shadows went soft it is **strictly two phases**, per slot:
+///
+/// - **Static.** A slot's six faces over the retained static world, drawn ONCE — and only after
+///   the lamp's anchor and the static casters inside its reach have held still for
+///   [`ATLAS_SETTLE_FRAMES`], so a street that is still streaming in is not redrawn cell by cell.
+///   On a tier with a dynamic phase they are drawn into the static cache, never the working
+///   layer. The main world is told when a slot is built (`modern::lights::publish_built`) and
+///   only then fades its shadow in.
+/// - **Dynamic** (`LightTier::dynamic_casters`). The entity casters within
+///   [`crate::modern::lights::DYNAMIC_REACH`] of the light — and never the model the light lives
+///   in ([`HOST_MAX_RADIUS`]) — fingerprinted per slot. Only when that fingerprint changes is the
+///   slot's working copy put back from the cache (six tile rectangles, `depth_fill.wgsl`) and the
+///   entities drawn over it. A lamp nobody is walking past redraws nothing at all.
+///
+/// **The culling is per FACE, not per light.** A cube's six faces are six render passes' worth
+/// of state, and most of them look at nothing: a sconce against a wall has three faces that see
+/// only the wall, and a lamp on open ground has one that sees only sky. A face with no casters
+/// is skipped entirely, which is cheaper than the viewport, scissor and bind-group churn of
+/// drawing nothing.
+#[allow(clippy::too_many_arguments)]
+fn draw_local_atlas(
+    render_context: &mut RenderContext<'_, '_>,
+    world: &World,
+    frame: &ModernShadowFrame,
+    casters: &[(&GxCellGpu, &GxCellDraw)],
+    static_hash: u64,
+    ready: Option<(&RenderPipeline, &RenderPipeline)>,
+    pipeline_cache: &PipelineCache,
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &MeshAllocator,
+) {
+    let (Some(lights), Some(view_bind)) =
+        (world.get_resource::<ModernLights>(), frame.bind.as_ref())
+    else {
+        return;
+    };
+    let Some((opaque, cutout)) = ready else {
+        return;
+    };
+    if lights.shadowed.is_empty() || frame.local_offsets.len() < lights.shadowed.len() * 6 {
+        return;
+    }
+    // The tile's stride in the atlas, and the square of it a face is actually drawn into
+    // (`LightTier::tile_use`).
+    let tile = (
+        SHADOW_MAP_SIZE / ATLAS_TILES,
+        crate::modern::lights::face_px(&lights.tier, SHADOW_MAP_SIZE),
+    );
+    let pipes = world.get_resource::<GxShadowPipelines>();
+    // fork: P8b — the tile clear that lets one slot be redrawn without the other five. Until it
+    // is compiled nothing is drawn: a slot is only ever redrawn alone.
+    let Some(fill) = pipes.and_then(|p| pipeline_cache.get_render_pipeline(p.fill)) else {
+        return;
+    };
+    let restore = pipes.and_then(|p| {
+        Some((
+            pipeline_cache.get_render_pipeline(p.restore)?,
+            &p.restore_layout,
+        ))
+    });
+    let (Some(cache), Some(working)) = (frame.cache.as_ref(), frame.texture.as_ref()) else {
+        return;
+    };
+    let entities = lights
+        .tier
+        .dynamic_casters
+        .then(|| world.get_resource::<EntityShadowFrame>())
+        .flatten()
+        .filter(|e| e.draw_bind.is_some() && e.skin_bind.is_some());
+    let mut atlas = frame
+        .atlas
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    for layer_index in 0..lights.tier.atlas_layers() {
+        let slots = layer_index * PER_ATLAS_LAYER
+            ..((layer_index + 1) * PER_ATLAS_LAYER).min(lights.shadowed.len());
+        if slots.is_empty() {
+            continue;
         }
-        // The tile's stride in the atlas, and the square of it a face is actually drawn into
-        // (`LightTier::tile_use`).
-        let tile = (
-            SHADOW_MAP_SIZE / ATLAS_TILES,
-            crate::modern::lights::face_px(&lights.tier, SHADOW_MAP_SIZE),
-        );
-        let pipes = world.get_resource::<GxShadowPipelines>();
-        // fork: P8b — the tile clear that lets one slot be redrawn without the other five. Until it
-        // is compiled nothing is drawn: a slot is only ever redrawn alone.
-        let Some(fill) = pipes.and_then(|p| pipeline_cache.get_render_pipeline(p.fill)) else {
-            return;
+        let array_layer = LOCAL_LAYER + layer_index;
+        let Some(view) = frame.layers.get(array_layer) else {
+            continue;
         };
-        let restore = pipes.and_then(|p| {
-            Some((
-                pipeline_cache.get_render_pipeline(p.restore)?,
-                &p.restore_layout,
-            ))
-        });
-        let (Some(cache), Some(working)) = (frame.cache.as_ref(), frame.texture.as_ref()) else {
-            return;
-        };
-        let entities = lights
+        // Where the static phase draws: into the cache when a dynamic phase copies from it, else
+        // the working layer itself.
+        let cached = lights
             .tier
             .dynamic_casters
-            .then(|| world.get_resource::<EntityShadowFrame>())
-            .flatten()
-            .filter(|e| e.draw_bind.is_some() && e.skin_bind.is_some());
-        let mut atlas = frame
-            .atlas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .then(|| {
+                frame
+                    .cache_targets
+                    .get(array_layer)
+                    .zip(frame.cache_views.get(array_layer))
+            })
+            .flatten();
+        let static_target = cached.map_or(view, |(target, _)| target);
 
-        for layer_index in 0..lights.tier.atlas_layers() {
-            let slots = layer_index * PER_ATLAS_LAYER
-                ..((layer_index + 1) * PER_ATLAS_LAYER).min(lights.shadowed.len());
-            if slots.is_empty() {
+        // ---- The static phase: settle, then draw once. -------------------------------------
+        let mut build = 0u32;
+        for s in slots.clone() {
+            let held = lights.shadowed[s].map(|h| h.light);
+            let light_key = held.as_ref().map_or(ATLAS_HOLE, ShadowLight::map_key);
+            let slot = &mut atlas.slots[s];
+            if slot.light != light_key || slot.world != static_hash {
+                slot.casters = held.as_ref().map_or(0, |l| atlas_casters_key(casters, l));
+                slot.light = light_key;
+                slot.world = static_hash;
+            }
+            let wanted = slot.wanted();
+            if slot.drawn == wanted {
                 continue;
             }
-            let array_layer = LOCAL_LAYER + layer_index;
-            let Some(view) = frame.layers.get(array_layer) else {
+            if held.is_none() {
+                // A hole is never read — its light faded to zero before letting go — so its
+                // tiles stay as they are until the next light draws over them.
+                slot.drawn = wanted;
+                crate::modern::lights::publish_built(s, 0);
                 continue;
-            };
-            // Where the static phase draws: into the cache when a dynamic phase copies from it, else
-            // the working layer itself.
-            let cached = lights
-                .tier
-                .dynamic_casters
-                .then(|| {
-                    frame
-                        .cache_targets
-                        .get(array_layer)
-                        .zip(frame.cache_views.get(array_layer))
-                })
-                .flatten();
-            let static_target = cached.map_or(view, |(target, _)| target);
-
-            // ---- The static phase: settle, then draw once. -------------------------------------
-            let mut build = 0u32;
+            }
+            if slot.pending != wanted {
+                slot.pending = wanted;
+                slot.waited = 0;
+                slot.attempts = 0;
+            }
+            slot.waited += 1;
+            if slot.waited >= ATLAS_SETTLE_FRAMES {
+                build |= 1 << (s - slots.start);
+            }
+        }
+        if build != 0 {
+            let complete = draw_atlas_statics(
+                render_context,
+                frame,
+                static_target,
+                view_bind,
+                &lights.shadowed[slots.clone()],
+                slots.start,
+                tile,
+                casters,
+                (opaque, cutout),
+                meshes,
+                allocator,
+                build,
+                fill,
+            );
             for s in slots.clone() {
-                let held = lights.shadowed[s].map(|h| h.light);
-                let light_key = held.as_ref().map_or(ATLAS_HOLE, ShadowLight::map_key);
+                let bit = 1 << (s - slots.start);
+                if build & bit == 0 {
+                    continue;
+                }
                 let slot = &mut atlas.slots[s];
-                if slot.light != light_key || slot.world != static_hash {
-                    slot.casters = held.as_ref().map_or(0, |l| atlas_casters_key(casters, l));
-                    slot.light = light_key;
-                    slot.world = static_hash;
+                if cached.is_some() {
+                    // The working tiles still hold the old faces: they take a fresh copy below.
+                    slot.dynamic = DYN_UNKNOWN;
                 }
-                let wanted = slot.wanted();
-                if slot.drawn == wanted {
-                    continue;
-                }
-                if held.is_none() {
-                    // A hole is never read — its light faded to zero before letting go — so its
-                    // tiles stay as they are until the next light draws over them.
-                    slot.drawn = wanted;
-                    crate::modern::lights::publish_built(s, 0);
-                    continue;
-                }
-                if slot.pending != wanted {
-                    slot.pending = wanted;
-                    slot.waited = 0;
-                    slot.attempts = 0;
-                }
-                slot.waited += 1;
-                if slot.waited >= ATLAS_SETTLE_FRAMES {
-                    build |= 1 << (s - slots.start);
-                }
-            }
-            if build != 0 {
-                let complete = self.draw_atlas_statics(
-                    render_context,
-                    frame,
-                    static_target,
-                    view_bind,
-                    &lights.shadowed[slots.clone()],
-                    slots.start,
-                    tile,
-                    casters,
-                    (opaque, cutout),
-                    meshes,
-                    allocator,
-                    build,
-                    fill,
+                slot.attempts += 1;
+                bevy::log::debug!(
+                    "lamp atlas: slot {s} static faces drawn at {:?} (complete {}, attempt {})",
+                    lights.shadowed[s].map(|h| h.light.pos),
+                    complete & bit != 0,
+                    slot.attempts
                 );
-                for s in slots.clone() {
-                    let bit = 1 << (s - slots.start);
-                    if build & bit == 0 {
-                        continue;
-                    }
-                    let slot = &mut atlas.slots[s];
-                    if cached.is_some() {
-                        // The working tiles still hold the old faces: they take a fresh copy below.
-                        slot.dynamic = DYN_UNKNOWN;
-                    }
-                    slot.attempts += 1;
-                    bevy::log::debug!(
-                        "lamp atlas: slot {s} static faces drawn at {:?} (complete {}, attempt {})",
-                        lights.shadowed[s].map(|h| h.light.pos),
-                        complete & bit != 0,
-                        slot.attempts
-                    );
-                    if complete & bit != 0 || slot.attempts >= ATLAS_ATTEMPTS {
-                        slot.drawn = slot.pending;
-                        crate::modern::lights::publish_built(s, slot.light);
-                    } else {
-                        // A caster was not resident yet: wait out another settle and try again.
-                        slot.drawn = 0;
-                        slot.waited = 0;
-                    }
+                if complete & bit != 0 || slot.attempts >= ATLAS_ATTEMPTS {
+                    slot.drawn = slot.pending;
+                    crate::modern::lights::publish_built(s, slot.light);
+                } else {
+                    // A caster was not resident yet: wait out another settle and try again.
+                    slot.drawn = 0;
+                    slot.waited = 0;
                 }
             }
-            let Some((_, cache_view)) = cached else {
+        }
+        let Some((_, cache_view)) = cached else {
+            continue;
+        };
+
+        // ---- The dynamic phase: per slot, only what stands right beside its light. ----------
+        // fork: per slot, a mask of the six FACES to restore and to redraw — only the faces a
+        // caster that arrived, left, moved or turned can be seen in. A body walking past a
+        // wall sconce dirties the one or two faces looking its way, not all six.
+        let mut near: Vec<Vec<&EntityDrawCmd>> = vec![Vec::new(); slots.len()];
+        let mut keys = [DYN_STATIC; PER_ATLAS_LAYER];
+        let mut restore_faces = [0u8; PER_ATLAS_LAYER];
+        let mut draw_faces = [0u8; PER_ATLAS_LAYER];
+        let AtlasCache {
+            slots: slot_state,
+            casters_drawn,
+        } = &mut *atlas;
+        for (i, s) in slots.clone().enumerate() {
+            let Some(light) = lights.shadowed[s].map(|h| h.light) else {
                 continue;
             };
-
-            // ---- The dynamic phase: per slot, only what stands right beside its light. ----------
-            // fork: per slot, a mask of the six FACES to restore and to redraw — only the faces a
-            // caster that arrived, left, moved or turned can be seen in. A body walking past a
-            // wall sconce dirties the one or two faces looking its way, not all six.
-            let mut near: Vec<Vec<&EntityDrawCmd>> = vec![Vec::new(); slots.len()];
-            let mut keys = [DYN_STATIC; PER_ATLAS_LAYER];
-            let mut restore_faces = [0u8; PER_ATLAS_LAYER];
-            let mut draw_faces = [0u8; PER_ATLAS_LAYER];
-            let AtlasCache {
-                slots: slot_state,
-                casters_drawn,
-            } = &mut *atlas;
-            for (i, s) in slots.clone().enumerate() {
-                let Some(light) = lights.shadowed[s].map(|h| h.light) else {
-                    continue;
-                };
-                let slot = &slot_state[s];
-                // Nothing to show until this light's static faces exist; nobody reads the slot.
-                if crate::modern::lights::built(s) != slot.light {
-                    continue;
-                }
-                if let Some(e) = entities {
-                    near[i] = dynamic_casters_for(&e.draws, &light);
-                }
-                keys[i] = if near[i].is_empty() {
-                    DYN_STATIC
-                } else {
-                    DYN_DRAWN
-                };
-                let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
-                let dirty = match slot.dynamic {
-                    DYN_STATIC => dirty_faces(light.pos, &[], &now),
-                    DYN_DRAWN => dirty_faces(light.pos, &casters_drawn[s], &now),
-                    _ => ALL_FACES,
-                };
-                if dirty == 0 {
-                    continue;
-                }
-                if slot.dynamic != DYN_STATIC {
-                    restore_faces[i] = dirty;
-                }
-                if keys[i] != DYN_STATIC {
-                    draw_faces[i] = dirty;
-                }
-            }
-            if restore_faces.iter().chain(&draw_faces).all(|&m| m == 0) {
+            let slot = &slot_state[s];
+            // Nothing to show until this light's static faces exist; nobody reads the slot.
+            if crate::modern::lights::built(s) != slot.light {
                 continue;
             }
-            bevy::log::debug!(
+            if let Some(e) = entities {
+                near[i] = dynamic_casters_for(&e.draws, &light);
+            }
+            keys[i] = if near[i].is_empty() {
+                DYN_STATIC
+            } else {
+                DYN_DRAWN
+            };
+            let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+            let dirty = match slot.dynamic {
+                DYN_STATIC => dirty_faces(light.pos, &[], &now),
+                DYN_DRAWN => dirty_faces(light.pos, &casters_drawn[s], &now),
+                _ => ALL_FACES,
+            };
+            if dirty == 0 {
+                continue;
+            }
+            if slot.dynamic != DYN_STATIC {
+                restore_faces[i] = dirty;
+            }
+            if keys[i] != DYN_STATIC {
+                draw_faces[i] = dirty;
+            }
+        }
+        if restore_faces.iter().chain(&draw_faces).all(|&m| m == 0) {
+            continue;
+        }
+        bevy::log::debug!(
                 "lamp atlas: layer {layer_index} dynamic phase — restore {restore_faces:?}, draw {draw_faces:?}"
             );
-            if restore_faces.iter().any(|&m| m != 0) {
-                match restore {
-                    Some((pipeline, layout)) => restore_atlas_slots(
-                        render_context,
-                        pipeline_cache,
-                        pipeline,
-                        layout,
-                        cache_view,
-                        view,
-                        slots.start,
-                        &restore_faces[..slots.len()],
-                        tile.0,
-                    ),
-                    None => {
-                        // No restore draw yet: the whole layer back, and every slot that has
-                        // entities beside it draws them again, every face.
-                        copy_layer(
-                            render_context.command_encoder(),
-                            cache,
-                            working,
-                            array_layer as u32,
-                        );
-                        for (i, s) in slots.clone().enumerate() {
-                            if crate::modern::lights::built(s) != slot_state[s].light {
-                                continue;
-                            }
-                            restore_faces[i] = ALL_FACES;
-                            if keys[i] != DYN_STATIC {
-                                draw_faces[i] = ALL_FACES;
-                            }
+        if restore_faces.iter().any(|&m| m != 0) {
+            match restore {
+                Some((pipeline, layout)) => restore_atlas_slots(
+                    render_context,
+                    pipeline_cache,
+                    pipeline,
+                    layout,
+                    cache_view,
+                    view,
+                    slots.start,
+                    &restore_faces[..slots.len()],
+                    tile.0,
+                ),
+                None => {
+                    // No restore draw yet: the whole layer back, and every slot that has
+                    // entities beside it draws them again, every face.
+                    copy_layer(
+                        render_context.command_encoder(),
+                        cache,
+                        working,
+                        array_layer as u32,
+                    );
+                    for (i, s) in slots.clone().enumerate() {
+                        if crate::modern::lights::built(s) != slot_state[s].light {
+                            continue;
+                        }
+                        restore_faces[i] = ALL_FACES;
+                        if keys[i] != DYN_STATIC {
+                            draw_faces[i] = ALL_FACES;
                         }
                     }
                 }
             }
-            if let (Some(entities), true) = (entities, draw_faces.iter().any(|&m| m != 0)) {
-                self.draw_atlas_entities(
-                    render_context,
-                    frame,
-                    view,
-                    view_bind,
-                    entities,
-                    &lights.shadowed[slots.clone()],
-                    &near,
-                    slots.start,
-                    &draw_faces[..slots.len()],
-                    tile,
-                    pipeline_cache,
-                    meshes,
-                    allocator,
-                );
-            }
-            for (i, s) in slots.clone().enumerate() {
-                if restore_faces[i] | draw_faces[i] != 0 {
-                    slot_state[s].dynamic = keys[i];
-                    let now: Vec<DrawnCaster> =
-                        near[i].iter().map(|c| DrawnCaster::of(c)).collect();
-                    let redrawn = if keys[i] == DYN_STATIC {
-                        ALL_FACES
-                    } else {
-                        draw_faces[i]
-                    };
-                    let light_pos = lights.shadowed[s].map_or(Vec3::ZERO, |h| h.light.pos);
-                    casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], &now, redrawn);
-                }
+        }
+        if let (Some(entities), true) = (entities, draw_faces.iter().any(|&m| m != 0)) {
+            draw_atlas_entities(
+                render_context,
+                frame,
+                view,
+                view_bind,
+                entities,
+                &lights.shadowed[slots.clone()],
+                &near,
+                slots.start,
+                &draw_faces[..slots.len()],
+                tile,
+                pipeline_cache,
+                meshes,
+                allocator,
+            );
+        }
+        for (i, s) in slots.clone().enumerate() {
+            if restore_faces[i] | draw_faces[i] != 0 {
+                slot_state[s].dynamic = keys[i];
+                let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+                let redrawn = if keys[i] == DYN_STATIC {
+                    ALL_FACES
+                } else {
+                    draw_faces[i]
+                };
+                let light_pos = lights.shadowed[s].map_or(Vec3::ZERO, |h| h.light.pos);
+                casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], &now, redrawn);
             }
         }
     }
+}
 
-    /// The static half of one atlas layer: clear the slots named in `redraw`, then replay the
-    /// retained world into each of their faces that has anything to see. Returns, as the same kind
-    /// of mask, the slots whose every caster was resident.
-    ///
-    /// fork: P8b — only the named slots' tiles are cleared (by drawing over them,
-    /// `depth_fill.wgsl`) and the rest of the layer is loaded untouched.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_atlas_statics(
-        &self,
-        render_context: &mut RenderContext<'_>,
-        frame: &ModernShadowFrame,
-        view: &TextureView,
-        view_bind: &BindGroup,
-        shadowed: &[Option<crate::modern::lights::HeldSlot>],
-        slot_base: usize,
-        tile: (u32, u32),
-        casters: &[(&GxCellGpu, &GxCellDraw)],
-        pipes: (&RenderPipeline, &RenderPipeline),
-        meshes: &RenderAssets<RenderMesh>,
-        allocator: &MeshAllocator,
-        redraw: u32,
-        fill: &RenderPipeline,
-    ) -> u32 {
-        let (opaque, cutout) = pipes;
-        let mut complete = 0u32;
-        let mut near: Vec<&(&GxCellGpu, &GxCellDraw)> = Vec::new();
-        let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("modern_local_shadow"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view,
-                depth_ops: Some(Operations {
-                    load: LoadOp::Load,
-                    store: StoreOp::Store,
-                }),
-                stencil_ops: None,
+/// The static half of one atlas layer: clear the slots named in `redraw`, then replay the
+/// retained world into each of their faces that has anything to see. Returns, as the same kind
+/// of mask, the slots whose every caster was resident.
+///
+/// fork: P8b — only the named slots' tiles are cleared (by drawing over them,
+/// `depth_fill.wgsl`) and the rest of the layer is loaded untouched.
+#[allow(clippy::too_many_arguments)]
+fn draw_atlas_statics(
+    render_context: &mut RenderContext<'_, '_>,
+    frame: &ModernShadowFrame,
+    view: &TextureView,
+    view_bind: &BindGroup,
+    shadowed: &[Option<crate::modern::lights::HeldSlot>],
+    slot_base: usize,
+    tile: (u32, u32),
+    casters: &[(&GxCellGpu, &GxCellDraw)],
+    pipes: (&RenderPipeline, &RenderPipeline),
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &MeshAllocator,
+    redraw: u32,
+    fill: &RenderPipeline,
+) -> u32 {
+    let (opaque, cutout) = pipes;
+    let mut complete = 0u32;
+    let mut near: Vec<&(&GxCellGpu, &GxCellDraw)> = Vec::new();
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("modern_local_shadow"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
             }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "modern_local_shadow");
-        for (i, light) in shadowed.iter().enumerate() {
-            let bit = 1u32 << i;
-            if redraw & bit == 0 {
-                continue;
-            }
-            let slot = slot_base + i;
-            // This slot's six tiles back to the far plane.
-            for face in 0..6usize {
-                set_atlas_tile(&mut pass, slot, face, (tile.0, tile.0));
-                pass.set_render_pipeline(fill);
-                pass.draw(0..3, 0..1);
-            }
-            // A hole's six tiles keep that clear, which reads as "nothing occludes" — exactly what
-            // an unheld slot should mean.
-            let Some(light) = light.map(|h| h.light) else {
-                complete |= bit;
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let span = diagnostics.pass_span(&mut pass, "modern_local_shadow");
+    for (i, light) in shadowed.iter().enumerate() {
+        let bit = 1u32 << i;
+        if redraw & bit == 0 {
+            continue;
+        }
+        let slot = slot_base + i;
+        // This slot's six tiles back to the far plane.
+        for face in 0..6usize {
+            set_atlas_tile(&mut pass, slot, face, (tile.0, tile.0));
+            pass.set_render_pipeline(fill);
+            pass.draw(0..3, 0..1);
+        }
+        // A hole's six tiles keep that clear, which reads as "nothing occludes" — exactly what
+        // an unheld slot should mean.
+        let Some(light) = light.map(|h| h.light) else {
+            complete |= bit;
+            continue;
+        };
+        let mut whole = true;
+        // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner test
+        // the cascades use flips sign behind the light. A torch reaches a handful of cells, so
+        // the six faces share one cheap list, which is then split by face below.
+        let reach = light.range;
+        near.clear();
+        near.extend(casters.iter().filter(|(_, draw)| {
+            let center = draw.origin + Vec3::from(draw.aabb.center);
+            let radius = Vec3::from(draw.aabb.half_extents).length();
+            center.distance(light.pos) <= reach + radius
+        }));
+        for face in 0..6usize {
+            let t = slot * 6 + face;
+            let Some(&offset) = frame.local_offsets.get(t) else {
+                whole = false;
                 continue;
             };
-            let mut whole = true;
-            // Sphere, not frustum: a cube face's clip is a perspective, and the planar corner test
-            // the cascades use flips sign behind the light. A torch reaches a handful of cells, so
-            // the six faces share one cheap list, which is then split by face below.
-            let reach = light.range;
-            near.clear();
-            near.extend(casters.iter().filter(|(_, draw)| {
-                let center = draw.origin + Vec3::from(draw.aabb.center);
-                let radius = Vec3::from(draw.aabb.half_extents).length();
-                center.distance(light.pos) <= reach + radius
-            }));
-            for face in 0..6usize {
-                let t = slot * 6 + face;
-                let Some(&offset) = frame.local_offsets.get(t) else {
+            // fork: P8 — the per-face cull, and the reason the tile is bound LAZILY: a caster
+            // reaches this face only if its box touches the face's 90° cone, and a face nothing
+            // touches must not pay for a viewport, a scissor and a bind group to draw nothing.
+            let mut set_up = false;
+            for (gpu, draw) in near.iter() {
+                if !face_sees(
+                    face,
+                    light.pos,
+                    draw.origin + Vec3::from(draw.aabb.center),
+                    Vec3::from(draw.aabb.half_extents).length(),
+                ) {
+                    continue;
+                }
+                let Some(mesh) = meshes.get(draw.mesh.id()) else {
                     whole = false;
                     continue;
                 };
-                // fork: P8 — the per-face cull, and the reason the tile is bound LAZILY: a caster
-                // reaches this face only if its box touches the face's 90° cone, and a face nothing
-                // touches must not pay for a viewport, a scissor and a bind group to draw nothing.
-                let mut set_up = false;
-                for (gpu, draw) in near.iter() {
-                    if !face_sees(
-                        face,
-                        light.pos,
-                        draw.origin + Vec3::from(draw.aabb.center),
-                        Vec3::from(draw.aabb.half_extents).length(),
-                    ) {
-                        continue;
+                let (Some(vslice), Some(islice)) = (
+                    allocator.mesh_vertex_slice(&draw.mesh.id()),
+                    allocator.mesh_index_slice(&draw.mesh.id()),
+                ) else {
+                    whole = false;
+                    continue;
+                };
+                let index_format = match &mesh.buffer_info {
+                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                        *index_format
                     }
-                    let Some(mesh) = meshes.get(draw.mesh.id()) else {
-                        whole = false;
-                        continue;
-                    };
-                    let (Some(vslice), Some(islice)) = (
-                        allocator.mesh_vertex_slice(&draw.mesh.id()),
-                        allocator.mesh_index_slice(&draw.mesh.id()),
-                    ) else {
-                        whole = false;
-                        continue;
-                    };
-                    let index_format = match &mesh.buffer_info {
-                        bevy::render::mesh::RenderMeshBufferInfo::Indexed {
-                            index_format, ..
-                        } => *index_format,
-                        bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
-                    };
-                    if !set_up {
-                        set_atlas_tile(&mut pass, slot, face, tile);
-                        pass.set_bind_group(0, view_bind, &[offset]);
-                        set_up = true;
-                    }
-                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    pass.set_index_buffer(islice.buffer.slice(..), index_format);
-                    for run in &gpu.runs {
-                        pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
-                        pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+                };
+                if !set_up {
+                    set_atlas_tile(&mut pass, slot, face, tile);
+                    pass.set_bind_group(0, view_bind, &[offset]);
+                    set_up = true;
+                }
+                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+                pass.set_index_buffer(islice.buffer.slice(..), index_format);
+                for run in &gpu.runs {
+                    pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
+                    pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                    pass.draw_indexed(
+                        (islice.range.start + run.index_range.start)
+                            ..(islice.range.start + run.index_range.end),
+                        i32::try_from(vslice.range.start).unwrap_or(0),
+                        0..1,
+                    );
+                }
+            }
+        }
+        if whole {
+            complete |= bit;
+        }
+    }
+    span.end(&mut pass);
+    complete
+}
+
+/// fork: the dynamic half — each slot's faces named in `faces` get its own pruned entity list
+/// (`near`, from [`dynamic_casters_for`]) drawn over their freshly restored static depth.
+#[allow(clippy::too_many_arguments)]
+fn draw_atlas_entities(
+    render_context: &mut RenderContext<'_, '_>,
+    frame: &ModernShadowFrame,
+    view: &TextureView,
+    view_bind: &BindGroup,
+    entities: &EntityShadowFrame,
+    shadowed: &[Option<crate::modern::lights::HeldSlot>],
+    near: &[Vec<&EntityDrawCmd>],
+    slot_base: usize,
+    faces: &[u8],
+    tile: (u32, u32),
+    pipeline_cache: &PipelineCache,
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &MeshAllocator,
+) {
+    let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
+        return;
+    };
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("modern_local_shadow_dynamic"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_dynamic");
+    for (i, light) in shadowed.iter().enumerate() {
+        let mask = faces.get(i).copied().unwrap_or(0);
+        if mask == 0 {
+            continue;
+        }
+        let (Some(light), Some(list)) = (light.map(|h| h.light), near.get(i)) else {
+            continue;
+        };
+        let slot = slot_base + i;
+        for face in 0..6usize {
+            if mask & (1 << face) == 0 {
+                continue;
+            }
+            let t = slot * 6 + face;
+            let Some(&offset) = frame.local_offsets.get(t) else {
+                continue;
+            };
+            let mut set_up = false;
+            for cmd in list {
+                if !face_sees(face, light.pos, cmd.center, cmd.radius) {
+                    continue;
+                }
+                let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
+                    continue;
+                };
+                let Some(mesh) = meshes.get(cmd.mesh) else {
+                    continue;
+                };
+                let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
+                    continue;
+                };
+                if !set_up {
+                    set_atlas_tile(&mut pass, slot, face, tile);
+                    pass.set_bind_group(0, view_bind, &[offset]);
+                    set_up = true;
+                }
+                pass.set_render_pipeline(pipeline);
+                pass.set_bind_group(
+                    1,
+                    if cmd.skinned { skin_bind } else { draw_bind },
+                    &[cmd.offset],
+                );
+                if let Some(cut) = &cmd.cutout {
+                    pass.set_bind_group(2, cut, &[]);
+                }
+                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+                match &mesh.buffer_info {
+                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                        let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
+                            continue;
+                        };
+                        pass.set_index_buffer(islice.buffer.slice(..), *index_format);
                         pass.draw_indexed(
-                            (islice.range.start + run.index_range.start)
-                                ..(islice.range.start + run.index_range.end),
+                            islice.range.clone(),
                             i32::try_from(vslice.range.start).unwrap_or(0),
                             0..1,
                         );
                     }
-                }
-            }
-            if whole {
-                complete |= bit;
-            }
-        }
-        span.end(&mut pass);
-        complete
-    }
-
-    /// fork: the dynamic half — each slot's faces named in `faces` get its own pruned entity list
-    /// (`near`, from [`dynamic_casters_for`]) drawn over their freshly restored static depth.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_atlas_entities(
-        &self,
-        render_context: &mut RenderContext<'_>,
-        frame: &ModernShadowFrame,
-        view: &TextureView,
-        view_bind: &BindGroup,
-        entities: &EntityShadowFrame,
-        shadowed: &[Option<crate::modern::lights::HeldSlot>],
-        near: &[Vec<&EntityDrawCmd>],
-        slot_base: usize,
-        faces: &[u8],
-        tile: (u32, u32),
-        pipeline_cache: &PipelineCache,
-        meshes: &RenderAssets<RenderMesh>,
-        allocator: &MeshAllocator,
-    ) {
-        let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
-            return;
-        };
-        let diagnostics = render_context.diagnostic_recorder();
-        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("modern_local_shadow_dynamic"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view,
-                depth_ops: Some(Operations {
-                    load: LoadOp::Load,
-                    store: StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_dynamic");
-        for (i, light) in shadowed.iter().enumerate() {
-            let mask = faces.get(i).copied().unwrap_or(0);
-            if mask == 0 {
-                continue;
-            }
-            let (Some(light), Some(list)) = (light.map(|h| h.light), near.get(i)) else {
-                continue;
-            };
-            let slot = slot_base + i;
-            for face in 0..6usize {
-                if mask & (1 << face) == 0 {
-                    continue;
-                }
-                let t = slot * 6 + face;
-                let Some(&offset) = frame.local_offsets.get(t) else {
-                    continue;
-                };
-                let mut set_up = false;
-                for cmd in list {
-                    if !face_sees(face, light.pos, cmd.center, cmd.radius) {
-                        continue;
-                    }
-                    let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
-                        continue;
-                    };
-                    let Some(mesh) = meshes.get(cmd.mesh) else {
-                        continue;
-                    };
-                    let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
-                        continue;
-                    };
-                    if !set_up {
-                        set_atlas_tile(&mut pass, slot, face, tile);
-                        pass.set_bind_group(0, view_bind, &[offset]);
-                        set_up = true;
-                    }
-                    pass.set_render_pipeline(pipeline);
-                    pass.set_bind_group(
-                        1,
-                        if cmd.skinned { skin_bind } else { draw_bind },
-                        &[cmd.offset],
-                    );
-                    if let Some(cut) = &cmd.cutout {
-                        pass.set_bind_group(2, cut, &[]);
-                    }
-                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    match &mesh.buffer_info {
-                        bevy::render::mesh::RenderMeshBufferInfo::Indexed {
-                            index_format, ..
-                        } => {
-                            let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
-                                continue;
-                            };
-                            pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                            pass.draw_indexed(
-                                islice.range.clone(),
-                                i32::try_from(vslice.range.start).unwrap_or(0),
-                                0..1,
-                            );
-                        }
-                        bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                            pass.draw(vslice.range.clone(), 0..1);
-                        }
+                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
+                        pass.draw(vslice.range.clone(), 0..1);
                     }
                 }
             }
         }
-        span.end(&mut pass);
     }
+    span.end(&mut pass);
 }
 
 /// fork: put the tiles `faces` names (per slot, a mask of its six faces) back from the static cache — the cascade
@@ -1871,7 +1862,7 @@ impl GxShadowNode {
 /// format, and a whole-layer copy is 16.8 MB to undo one character walking past one lamp.
 #[allow(clippy::too_many_arguments)]
 fn restore_atlas_slots(
-    render_context: &mut RenderContext<'_>,
+    render_context: &mut RenderContext<'_, '_>,
     pipeline_cache: &PipelineCache,
     pipeline: &RenderPipeline,
     layout: &BindGroupLayoutDescriptor,
@@ -1912,6 +1903,7 @@ fn restore_atlas_slots(
         &BindGroupEntries::sequential((cache_view, buffer.as_entire_binding())),
     );
     let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("modern_local_shadow_restore"),
         color_attachments: &[],
@@ -2293,14 +2285,11 @@ pub(super) fn build(render_app: &mut SubApp) {
             )
                 .in_set(RenderSystems::PrepareResources),
         )
-        .add_render_graph_node::<ViewNodeRunner<GxShadowNode>>(Core3d, GxShadowLabel)
-        .add_render_graph_edges(
+        .add_systems(
             Core3d,
-            (
-                NodePbr::LateShadowPass,
-                GxShadowLabel,
-                Node3d::StartMainPass,
-            ),
+            gx_shadow_pass
+                .after(per_view_shadow_pass::<LATE_SHADOW_PASS>)
+                .before(Core3dSystems::MainPass),
         );
 }
 

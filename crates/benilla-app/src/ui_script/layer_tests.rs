@@ -521,17 +521,14 @@ fn log_in(
     let mut app = App::new();
     app.add_systems(Update, crate::vplates::apply_plate_verbs)
         .insert_resource(before)
-        .insert_non_send_resource(s);
-    crate::ui_saved::load_saved_variables(
-        &mut app.world_mut().non_send_resource_mut::<UiScript>(),
-        |_| {},
-    );
+        .insert_non_send(s);
+    crate::ui_saved::load_saved_variables(&mut app.world_mut().non_send_mut::<UiScript>(), |_| {});
     app.update();
     if entry {
         crate::vplates::clear_at_world_entry(app.world_mut());
     }
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .fire_event("PLAYER_ENTERING_WORLD", vec![]);
     app.update();
     app
@@ -544,7 +541,7 @@ fn plates(app: &bevy::app::App) -> (bool, bool) {
 
 fn plate_globals(app: &bevy::app::App) -> (Option<i64>, Option<i64>) {
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return NAMEPLATES_ON, FRIENDNAMEPLATES_ON")
         .unwrap()
 }
@@ -604,7 +601,7 @@ fn with_the_layer_plates_turned_on_stay_on_after_entry_and_reload() {
     assert_eq!(plates(&app), (true, true), "both on after the entry");
 
     // The session's end writes the file, the friendly global included.
-    crate::ui_saved::save(&mut app.world_mut().non_send_resource_mut::<UiScript>());
+    crate::ui_saved::save(&mut app.world_mut().non_send_mut::<UiScript>());
     let file = std::fs::read_to_string(home.join("saved-variables.lua")).unwrap();
     for line in ["NAMEPLATES_ON = 1", "FRIENDNAMEPLATES_ON = 1"] {
         assert!(file.contains(line), "{line} saved: {file}");

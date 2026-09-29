@@ -127,10 +127,10 @@
 
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::Hdr;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 
 use super::screen::LiquidScreenTargets;
 use super::{Underwater, WaterDetail};

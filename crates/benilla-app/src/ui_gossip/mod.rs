@@ -447,7 +447,7 @@ mod tests {
             .add_systems(Update, (feed_gossip, drain_gossip).chain());
         let mut script = UiScript::new().unwrap();
         prepare(&mut script);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -458,7 +458,7 @@ mod tests {
     /// One frame, then the events the VM saw and `GetGossipText()` (`""` for nil).
     fn tick(app: &mut App) -> (Vec<String>, String) {
         app.update();
-        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let s = app.world_mut().non_send_mut::<UiScript>();
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
         let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -527,7 +527,7 @@ mod tests {
             );
         }
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("SelectGossipOption(1)")
             .unwrap();
         let _ = tick(&mut app);
@@ -547,7 +547,7 @@ mod tests {
             )
         );
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("SelectGossipOption(1)")
             .unwrap();
         let _ = tick(&mut app);
@@ -593,7 +593,7 @@ mod tests {
         });
         // What the window shows: visible?, the greeting, the first row's label, the kits played.
         let window = |app: &mut App| -> (bool, String, String, Vec<SoundRequest>) {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             (
                 s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
                 s.eval::<String>("return GossipGreetingText:GetText() or ''")

@@ -1100,7 +1100,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().spawn((SelfPlayer, crate::net::Guid(ME)));
         {
             let mut open = app.world_mut().resource_mut::<AuctionOpen>();
@@ -1112,7 +1112,7 @@ mod tests {
         let feed = app.world_mut().register_system(feed_auction);
         let step = |app: &mut App| -> (Vec<String>, Option<String>) {
             app.world_mut().run_system(feed).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();

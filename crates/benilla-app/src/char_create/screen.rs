@@ -76,11 +76,11 @@ const VANILLA_TOWER: TowerLayout = TowerLayout {
 };
 
 /// Turtle WoW 1.18.1's `CharacterCreate.xml`: the frame 19 higher (TOPLEFT (28,-55)), five 45²
-/// races a column (the second at button 1's RIGHT + 49), the gender pair at button 5's BOTTOMLEFT
-/// + (27,-25), 40² class and gender buttons under 55² shadows, four classes a row from the male
-/// button's BOTTOMLEFT + (-44,-15), the dials at class 6's BOTTOM + (20,-15), a 500-tall banner and
-/// a 228-tall bottom border. Its first border piece is authored upside down (top 1.0, bottom
-/// 0.1796875) and its middle one a single row stretched (top = bottom = 0.9375).
+/// races a column (the second at button 1's RIGHT + 49), the gender pair at button 5's
+/// BOTTOMLEFT + (27,-25), 40² class and gender buttons under 55² shadows, four classes a row from
+/// the male button's BOTTOMLEFT + (-44,-15), the dials at class 6's BOTTOM + (20,-15), a 500-tall
+/// banner and a 228-tall bottom border. Its first border piece is authored upside down (top 1.0,
+/// bottom 0.1796875) and its middle one a single row stretched (top = bottom = 0.9375).
 const TURTLE_TOWER: TowerLayout = TowerLayout {
     top: 55.0,
     borders: [
@@ -695,8 +695,8 @@ fn rotate_cluster(ui: &mut ChildSpawnerCommands, art: &GlueArt, font: &Handle<Fo
                             inner.spawn((
                                 Text::new(if flip { "<" } else { ">" }),
                                 TextFont {
-                                    font: font.clone(),
-                                    font_size: 16.0 * s,
+                                    font: font.clone().into(),
+                                    font_size: FontSize::Px(16.0 * s),
                                     ..default()
                                 },
                                 TextColor(GOLD),

@@ -23,15 +23,15 @@ mod pick;
 mod pool;
 mod render;
 
-/// The retained pass's render-graph label, re-exported for ONE reader: `crate::ssilvb`, whose
-/// gather must not run until this node has written the WMO and doodad cells into the depth buffer
-/// it reads. An ordering edge is the only thing outside this module that has any business naming
-/// the node, so the module itself stays private and only the label comes out.
+/// The retained pass's render system, re-exported for the passes that order against it: the
+/// gather, the fog composite and the water's scene copy must not run until it has written the WMO
+/// and doodad cells into the depth buffer they read. Ordering is the only thing outside this module
+/// that has any business naming the pass, so the module itself stays private.
 pub(crate) use render::static_gx_pass;
 // fork: modern lighting (FORK.md, P4) — the froxel pass reads the cascades this node draws.
-pub(crate) use render::GxShadowLabel;
+pub(crate) use render::gx_shadow_pass;
 // fork: modern lighting (FORK.md, P5) — the probe trace marches the voxels this node writes.
-pub(crate) use render::GxVoxelLabel;
+pub(crate) use render::gi_voxel_pass;
 
 /// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
 /// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the

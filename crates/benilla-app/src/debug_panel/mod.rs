@@ -65,7 +65,7 @@ fn strip_egui_tab_focus(mut inputs: Query<&mut EguiInput>) {
 
 fn track_pointer_over_ui(mut contexts: EguiContexts, mut over: ResMut<EguiPointerOver>) -> Result {
     let ctx = contexts.ctx_mut()?;
-    over.0 = ctx.is_pointer_over_area() || ctx.wants_pointer_input();
+    over.0 = ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input();
     Ok(())
 }
 
@@ -184,7 +184,7 @@ fn feed_gated_egui_output(
                 None => {
                     // `get_mut`: `get` needs bevy_egui's `immutable_ctx` feature. The font
                     // texture delta must reach the GPU exactly once, so the cache drops it.
-                    let out = ctx.get_mut().run(egui::RawInput::default(), |_| {});
+                    let out = ctx.get_mut().run_ui(egui::RawInput::default(), |_| {});
                     let mut keep = out.clone();
                     keep.textures_delta = Default::default();
                     keep.shapes.clear();

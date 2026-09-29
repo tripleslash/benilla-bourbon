@@ -251,7 +251,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiSca
 
 /// `/console reloadUI`: the same deferred rebuild `ReloadUI()` and `/reload` queue.
 fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
-    match world.get_non_send_resource_mut::<UiScript>() {
+    match world.get_non_send_mut::<UiScript>() {
         Some(mut script) => {
             script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
             Vec::new()

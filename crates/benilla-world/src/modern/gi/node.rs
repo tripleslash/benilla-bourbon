@@ -3,13 +3,10 @@
 //! samples, and before the froxels, which read the probes).
 
 use bevy::app::SubApp;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
-};
 use bevy::render::render_resource::binding_types::{
     sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d_array, texture_3d,
     texture_depth_2d, uniform_buffer_sized,
@@ -399,84 +396,72 @@ fn prepare_gi(
     );
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct GiTraceLabel;
-
-#[derive(Default)]
-struct GiTraceNode;
-
-impl Node for GiTraceNode {
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let frame = world.resource::<GiFrame>();
-        let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
-            &frame.classify_bind,
-            &frame.trace_bind,
-            &frame.blend_bind,
-            &frame.dispatch,
-        ) else {
-            return Ok(());
-        };
-        if frame.groups == 0 {
-            return Ok(());
-        }
-        let pipes = world.resource::<GiPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let (Some(classify), Some(setup), Some(trace), Some(sum), Some(blend)) = (
-            pipeline_cache.get_compute_pipeline(pipes.classify),
-            pipeline_cache.get_compute_pipeline(pipes.setup),
-            pipeline_cache.get_compute_pipeline(pipes.trace),
-            pipeline_cache.get_compute_pipeline(pipes.sum),
-            pipeline_cache.get_compute_pipeline(pipes.blend),
-        ) else {
-            return Ok(());
-        };
-        // The journal's `gpu_modern` column, where the device times passes.
-        let diagnostics = render_context.diagnostic_recorder();
-        let encoder = render_context.command_encoder();
-        // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
-        // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("modern_gi_classify"),
-                timestamp_writes: None,
-            });
-            let span = diagnostics.pass_span(&mut pass, "modern_gi_classify");
-            pass.set_pipeline(classify);
-            pass.set_bind_group(0, classify_bind, &[]);
-            pass.dispatch_workgroups(frame.groups, 1, 1);
-            span.end(&mut pass);
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("modern_gi_trace"),
-                timestamp_writes: None,
-            });
-            let span = diagnostics.pass_span(&mut pass, "modern_gi_trace");
-            pass.set_bind_group(0, trace_bind, &[]);
-            // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
-            for stage in [setup, trace, sum] {
-                pass.set_pipeline(stage);
-                pass.dispatch_workgroups_indirect(dispatch, 0);
-            }
-            span.end(&mut pass);
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("modern_gi_blend"),
-                timestamp_writes: None,
-            });
-            let span = diagnostics.pass_span(&mut pass, "modern_gi_blend");
-            pass.set_pipeline(blend);
-            pass.set_bind_group(0, blend_bind, &[]);
+/// The probe trace, once per `Core3d` camera as the graph node was.
+fn gi_trace_pass(world: &World, mut render_context: RenderContext) {
+    let frame = world.resource::<GiFrame>();
+    let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
+        &frame.classify_bind,
+        &frame.trace_bind,
+        &frame.blend_bind,
+        &frame.dispatch,
+    ) else {
+        return;
+    };
+    if frame.groups == 0 {
+        return;
+    }
+    let pipes = world.resource::<GiPipelines>();
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let (Some(classify), Some(setup), Some(trace), Some(sum), Some(blend)) = (
+        pipeline_cache.get_compute_pipeline(pipes.classify),
+        pipeline_cache.get_compute_pipeline(pipes.setup),
+        pipeline_cache.get_compute_pipeline(pipes.trace),
+        pipeline_cache.get_compute_pipeline(pipes.sum),
+        pipeline_cache.get_compute_pipeline(pipes.blend),
+    ) else {
+        return;
+    };
+    // The journal's `gpu_modern` column, where the device times passes.
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let encoder = render_context.command_encoder();
+    // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
+    // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("modern_gi_classify"),
+            timestamp_writes: None,
+        });
+        let span = diagnostics.pass_span(&mut pass, "modern_gi_classify");
+        pass.set_pipeline(classify);
+        pass.set_bind_group(0, classify_bind, &[]);
+        pass.dispatch_workgroups(frame.groups, 1, 1);
+        span.end(&mut pass);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("modern_gi_trace"),
+            timestamp_writes: None,
+        });
+        let span = diagnostics.pass_span(&mut pass, "modern_gi_trace");
+        pass.set_bind_group(0, trace_bind, &[]);
+        // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
+        for stage in [setup, trace, sum] {
+            pass.set_pipeline(stage);
             pass.dispatch_workgroups_indirect(dispatch, 0);
-            span.end(&mut pass);
         }
-        Ok(())
+        span.end(&mut pass);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("modern_gi_blend"),
+            timestamp_writes: None,
+        });
+        let span = diagnostics.pass_span(&mut pass, "modern_gi_blend");
+        pass.set_pipeline(blend);
+        pass.set_bind_group(0, blend_bind, &[]);
+        pass.dispatch_workgroups_indirect(dispatch, 0);
+        span.end(&mut pass);
     }
 }
 
@@ -486,15 +471,14 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_systems(RenderStartup, init_pipelines)
         // After the voxel pass, which owns the scene the trace marches through.
         .add_systems(Render, prepare_gi.in_set(RenderSystems::PrepareBindGroups))
-        .add_render_graph_node::<GiTraceNode>(Core3d, GiTraceLabel)
-        .add_render_graph_edges(Core3d, (GiTraceLabel, Node3d::StartMainPass))
-        // The trace samples this frame's cascades and this frame's voxels.
-        .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, GiTraceLabel)
-        .add_render_graph_edge(Core3d, crate::static_gx::GxVoxelLabel, GiTraceLabel)
-        // The froxels' ambient reads the probes.
-        .add_render_graph_edge(
+        // The trace samples this frame's cascades and this frame's voxels, and the froxels'
+        // ambient reads the probes.
+        .add_systems(
             Core3d,
-            GiTraceLabel,
-            crate::modern::volumetrics::FroxelLabel,
+            gi_trace_pass
+                .after(crate::static_gx::gx_shadow_pass)
+                .after(crate::static_gx::gi_voxel_pass)
+                .before(crate::modern::volumetrics::froxel_pass)
+                .before(Core3dSystems::MainPass),
         );
 }

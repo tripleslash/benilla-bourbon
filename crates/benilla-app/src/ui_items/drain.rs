@@ -833,7 +833,7 @@ mod tests {
 
         let script = UiScript::new().unwrap();
         script.run("UseContainerItem(0, 1)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         run_container_clicks(app.world_mut());
         (app, rx)
     }
@@ -876,7 +876,7 @@ mod tests {
             .resource_mut::<crate::ui_merchant::MerchantOpen>()
             .vendor = Some(VENDOR);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             let mut bag = benilla_ui::script::ContainerState {
                 num_slots: 16,
@@ -909,7 +909,7 @@ mod tests {
             })
         ));
         assert!(rx.try_recv().is_err(), "the repair alone: no use or sale");
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         assert_eq!(
             script.take_sounds(),
             vec![benilla_ui::script::SoundRequest::KitName(
@@ -942,7 +942,7 @@ mod tests {
                 (head + 1, (HELM >> 32) as u32),
             ])));
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             let mut slots: benilla_ui::script::InventorySlots = Default::default();
             slots[1] = Some(benilla_ui::script::InvSlotView {
@@ -967,7 +967,7 @@ mod tests {
                 item_guid: HELM
             })
         ));
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         assert_eq!(
             script.take_sounds(),
             vec![benilla_ui::script::SoundRequest::KitName(
@@ -1008,7 +1008,7 @@ mod tests {
             .entity_mut(me)
             .insert(player(slot_field, money));
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             record_errors(&script);
             script.set_merchant(Some(benilla_ui::script::MerchantState {
@@ -1043,7 +1043,7 @@ mod tests {
         }
         run_container_clicks(app.world_mut());
         let sounded = crate::ui_merchant::purse_fixture::sounded(app.world());
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         RepairClick {
             sent: rx.try_iter().collect(),
             sounds: script.take_sounds(),
@@ -1120,7 +1120,7 @@ mod tests {
             }),
         );
         {
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             script.run("UseContainerItem(0, 1)").unwrap();
         }
         run_container_clicks(app.world_mut());
@@ -1130,7 +1130,7 @@ mod tests {
             "the begin-wrap arm is purely local — nothing goes on the wire until a container \
              click spends it"
         );
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script.gift_wrap_armed(),
             Some(benilla_ui::script::PendingWrap { bag: 0, slot: 1 }),
@@ -1375,7 +1375,7 @@ mod bind_confirm_tests {
         // Pick up and drop on the main hand: a queued move and a pending CURSOR_UPDATE.
         script.run("PickupContainerItem(0, 1)").unwrap();
         script.run("PickupInventoryItem(16)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut()
             .run_system_once(drain_container_moves)
             .unwrap();
@@ -1384,7 +1384,7 @@ mod bind_confirm_tests {
 
     fn shown(app: &mut App, which: &str) -> bool {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<bool>(&format!(
                 "return StaticPopup_FindVisible(\"{which}\") ~= nil"
             ))
@@ -1408,16 +1408,14 @@ mod bind_confirm_tests {
         );
 
         // The next tick flushes the place's CURSOR_UPDATE, then the question.
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "EQUIP_BIND"),
             "the dialog survives its own place's CURSOR_UPDATE and shows"
         );
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<i64>("return StaticPopup_FindVisible(\"EQUIP_BIND\").data")
                 .unwrap(),
             0,
@@ -1425,14 +1423,12 @@ mod bind_confirm_tests {
         );
 
         // A quiet frame changes nothing.
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "EQUIP_BIND"), "and stays up");
 
         // A later cursor change retires it, and its OnHide cancels the record.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .fire_event("CURSOR_UPDATE", vec![]);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
@@ -1459,13 +1455,11 @@ mod bind_confirm_tests {
     fn accepting_re_issues_the_place_and_does_not_ask_again() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "EQUIP_BIND"));
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"EQUIP_BIND\"), 1)")
             .unwrap();
         app.world_mut()
@@ -1491,9 +1485,7 @@ mod bind_confirm_tests {
             0,
             "and frees its record — the OnHide's cancel finds nothing left to cancel"
         );
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
             "and no second question is queued: the re-issue was suppressed"
@@ -1506,16 +1498,14 @@ mod bind_confirm_tests {
     fn cancelling_sends_nothing_and_the_doubled_cancel_is_harmless() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"EQUIP_BIND\"), 2)")
             .unwrap();
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .take_pending_equip_answers()
                 .len(),
             2,
@@ -1538,9 +1528,7 @@ mod bind_confirm_tests {
             (4, "quest item"),
         ] {
             let (mut app, rx) = place_the_axe_with_bonding(bonding);
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .tick(0.01);
+            app.world_mut().non_send_mut::<UiScript>().tick(0.01);
             assert!(
                 !shown(&mut app, "EQUIP_BIND"),
                 "bonding {bonding} must not ask ({why})"
@@ -1556,9 +1544,7 @@ mod bind_confirm_tests {
     fn a_white_bind_on_equip_item_still_asks() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 1, false);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "EQUIP_BIND"),
             "quality 1 is irrelevant to the equip arm"
@@ -1571,9 +1557,7 @@ mod bind_confirm_tests {
     fn an_already_bound_item_places_without_asking() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, true);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
             "there is nothing left to bind"
@@ -1621,7 +1605,7 @@ mod bind_confirm_tests {
         script.set_container(0, Some(bag_with_the_axe(4)));
         script.run("PickupContainerItem(0, 1)").unwrap();
         script.run("AutoEquipCursorItem()").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut()
             .run_system_once(drain_container_autoequips)
             .unwrap();
@@ -1630,9 +1614,7 @@ mod bind_confirm_tests {
             rx.try_iter().next().is_none(),
             "the deferred equip sends nothing"
         );
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "AUTOEQUIP_BIND"),
             "the auto-equip arm raises its OWN dialog, not the placement one"
@@ -1643,7 +1625,7 @@ mod bind_confirm_tests {
         );
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AUTOEQUIP_BIND\"), 1)")
             .unwrap();
         app.world_mut()
@@ -1675,7 +1657,7 @@ mod bind_confirm_tests {
         let (mut app, rx) = place_the_axe_with(2, 4, false);
         // A real player level (the fixture's 0 declines to judge) and a template it refuses.
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.set_player_req_state(benilla_ui::script::PlayerReqState {
                 level: 10,
                 class_id: 1,
@@ -1694,7 +1676,7 @@ mod bind_confirm_tests {
         }
         // Re-run the place now that the item is out of reach.
         {
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             s.run("PickupContainerItem(0, 1)").unwrap();
             s.run("PickupInventoryItem(16)").unwrap();
         }
@@ -1702,9 +1684,7 @@ mod bind_confirm_tests {
         app.world_mut()
             .run_system_once(drain_container_moves)
             .unwrap();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
             "a level-60 axe on a level-10 player asks nothing"
@@ -1794,7 +1774,7 @@ mod bind_confirm_tests {
         load_ui(&script);
         script.set_container(0, Some(bag_with_the_axe(3)));
         script.run("UseContainerItem(0, 1)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         run_container_clicks(app.world_mut());
         (app, rx)
     }
@@ -1807,13 +1787,11 @@ mod bind_confirm_tests {
             rx.try_iter().next().is_none(),
             "the deferred use sends nothing"
         );
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "USE_BIND"), "USE_BIND is raised");
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<String>(
                     "return getglobal(StaticPopup_FindVisible(\"USE_BIND\"):GetName() .. \"Text\"):GetText()"
                 )
@@ -1824,7 +1802,7 @@ mod bind_confirm_tests {
 
         // Accept → ConfirmBindOnUse() → the use is re-issued with suppress set.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"USE_BIND\"), 1)")
             .unwrap();
         app.world_mut()
@@ -1840,9 +1818,7 @@ mod bind_confirm_tests {
     fn a_bind_on_use_item_with_no_on_use_spell_still_asks() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(true);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "USE_BIND"),
             "the reference's bind arm sits BELOW the on-use lookup's failure exits, not above them"

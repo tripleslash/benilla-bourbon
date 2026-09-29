@@ -824,7 +824,7 @@ fn mouseover_app() -> (App, Entity, Entity) {
             }),
         );
     }
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     (app, wolf, boar)
 }
 
@@ -847,7 +847,7 @@ fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
 
 fn eval(app: &mut App, lua: &str) -> Option<i64> {
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<Option<i64>>(lua)
         .unwrap()
 }
@@ -1028,10 +1028,10 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
             ..Default::default()
         }]),
     );
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.update();
 
-    let script = app.world().non_send_resource::<UiScript>();
+    let script = app.world().non_send::<UiScript>();
     script
         .run(
             r#"
@@ -1145,11 +1145,11 @@ fn the_feed_builds_the_pet_views_against_the_pet_and_rebuilds_them_on_its_level(
             "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     // The feed runs over the pet bar and book; the player's book's view is an ask on its hover.
     app.update();
     let descs = |app: &mut App| {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         let d = script
             .eval::<(String, String, Option<String>)>(
                 r#"return DESC(function() TT:SetPetAction(1) end),

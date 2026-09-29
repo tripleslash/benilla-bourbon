@@ -997,10 +997,10 @@ mod tests {
                 guid: Some(0x7), // high 16 bits 0: a player guid
                 ..Default::default()
             });
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("InitiateTrade('target')")
             .unwrap();
 
@@ -1032,7 +1032,7 @@ mod tests {
             .init_resource::<GuidIndex>()
             .insert_resource(names)
             .insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_trade);
         (app, rx)
     }
@@ -1040,7 +1040,7 @@ mod tests {
     /// The number of `TRADE_REQUEST_CANCEL`s a spy frame has seen.
     fn cancels_seen(app: &mut App) -> i64 {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>("return BENILLA_TEST_TRADE_CANCELS or 0")
             .unwrap()
     }
@@ -1049,7 +1049,7 @@ mod tests {
     fn canceled_fires_trade_request_cancel_and_the_siblings_do_not() {
         let (mut app, _rx) = feed_app();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"
                 local f = CreateFrame("Frame")
@@ -1425,10 +1425,10 @@ mod tests {
             .insert_resource(Selection::default());
         let mut vm = UiScript::new().unwrap();
         vm.set_money(20_000); // the purse `SetTradeMoney` is gated on
-        app.insert_non_send_resource(vm);
+        app.insert_non_send(vm);
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("SetTradeMoney(500)")
             .unwrap();
         app.world_mut().run_system_once(drain_trade).unwrap();
@@ -1440,7 +1440,7 @@ mod tests {
             trade.open_window();
         }
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("SetTradeMoney(12345)")
             .unwrap();
         app.world_mut().run_system_once(drain_trade).unwrap();
@@ -1465,7 +1465,7 @@ mod tests {
             .init_resource::<GuidIndex>()
             .insert_resource(NetCommands(tx))
             .insert_resource(Selection::default());
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         {
             let mut trade = app.world_mut().resource_mut::<TradeSession>();
             trade.begin(0x7);
@@ -1474,7 +1474,7 @@ mod tests {
 
         // Our slot 1 filled, then an empty-cursor click on it.
         {
-            let mut vm = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut vm = app.world_mut().non_send_mut::<UiScript>();
             let mut st = benilla_ui::script::TradeState::default();
             st.player.slots[0] = Some(benilla_ui::script::TradeSlotItem {
                 item_id: 2589,

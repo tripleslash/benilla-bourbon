@@ -852,7 +852,7 @@ pub(crate) fn new_target_image_sized(width: u32, height: u32) -> Image {
 pub(crate) fn booth_view_shape() -> impl Bundle {
     (
         Camera3d::default(),
-        bevy::render::view::Hdr,
+        bevy::camera::Hdr,
         Tonemapping::None,
         Msaa::Off,
         // No Bevy light reaches a booth, so skip the per-view cluster rebuild.

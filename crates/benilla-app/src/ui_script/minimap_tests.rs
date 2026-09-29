@@ -468,7 +468,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     );
 
     let mut app = App::new();
-    app.insert_non_send_resource(s);
+    app.insert_non_send(s);
     app.init_resource::<UiQuads>();
     // The pass's handover: the tick half writes it, the paint half reads it.
     app.init_resource::<crate::ui_script::UiPassState>();
@@ -592,7 +592,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     );
 
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         // `Minimap_OnUpdate` re-seats the frame from `GetPingPosition()` (`Minimap.lua:74`).
         script.set_minimap_ping((-0.125, 0.25));
         ping_at(&mut script, -0.125, 0.25);

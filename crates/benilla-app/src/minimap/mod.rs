@@ -124,12 +124,12 @@ fn minimap_day_tint(ambient: [f32; 3], diffuse: [f32; 3]) -> [f32; 3] {
 /// alpha-test arm decodes itself.
 fn load_tile(asset_server: &AssetServer) -> impl Fn(&str) -> Handle<Image> + '_ {
     move |hash: &str| {
-        asset_server.load_with_settings(
-            format!("mpq://textures/Minimap/{hash}"),
-            |s: &mut benilla_assets::BlpLoaderSettings| {
+        asset_server
+            .load_builder()
+            .with_settings(|s: &mut benilla_assets::BlpLoaderSettings| {
                 s.variant = benilla_assets::BlpVariant::MapTile;
-            },
-        )
+            })
+            .load(format!("mpq://textures/Minimap/{hash}"))
     }
 }
 

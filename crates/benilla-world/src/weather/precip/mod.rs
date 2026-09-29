@@ -215,10 +215,17 @@ fn setup_precip(
     commands.insert_resource(PrecipAssets {
         streak: asset_server.load("mpq://textures/weather/raindrop01.blp"),
         splash: asset_server
-            .load_with_settings("mpq://textures/weather/raindropsplash01.blp", effect),
+            .load_builder()
+            .with_settings(effect)
+            .load("mpq://textures/weather/raindropsplash01.blp"),
         flake: asset_server
-            .load_with_settings("mpq://textures/weather/snowflake01.blp", point_sprite),
-        mist: asset_server.load_with_settings("mpq://textures/weather/snowmist01.blp", effect),
+            .load_builder()
+            .with_settings(point_sprite)
+            .load("mpq://textures/weather/snowflake01.blp"),
+        mist: asset_server
+            .load_builder()
+            .with_settings(effect)
+            .load("mpq://textures/weather/snowmist01.blp"),
     });
     commands.insert_resource(Precip {
         rain: Pool::default(),

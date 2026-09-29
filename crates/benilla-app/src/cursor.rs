@@ -405,7 +405,7 @@ mod macos {
     /// Build every mode's `NSCursor`; exclusive, so it runs on the main thread.
     pub(super) fn setup(world: &mut World) {
         // Ahead of the early returns: `drive` reads it every frame.
-        world.insert_non_send_resource(PayloadCursors(HashMap::new()));
+        world.insert_non_send(PayloadCursors(HashMap::new()));
         // No client data: one warning, not one per stem.
         if world.get_resource::<WorldAssets>().is_none() {
             warn!("no client data — the OS cursor stands in for every mode cursor");
@@ -430,7 +430,7 @@ mod macos {
             warn!("no cursor BLPs available — using the OS cursor");
             return;
         }
-        world.insert_non_send_resource(NativeCursors(cursors));
+        world.insert_non_send(NativeCursors(cursors));
     }
 
     /// Disable the window's cursor rects once, set the payload or mode cursor while not looking,
@@ -608,7 +608,7 @@ mod tests {
         let mut app = App::new();
         let script = benilla_ui::script::UiScript::new().unwrap();
         script.run(lua).unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.insert_resource(if covered {
             crate::loading_screen::LoadingScreen::test_covering()
         } else {
@@ -726,7 +726,7 @@ mod tests {
             }),
         );
         script.run("ShowContainerSellCursor(0, 1)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.insert_resource(crate::loading_screen::LoadingScreen::default());
         app.insert_resource(CAST_GREY);
         app.insert_resource(crate::ui_script::PointerOverUi(true));

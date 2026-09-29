@@ -46,22 +46,18 @@
 //! because there are only ever a couple of dozen of them.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{
     sampler, texture_2d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::RenderContext;
+use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
@@ -259,9 +255,6 @@ pub(crate) fn resize_targets(
 }
 
 // ---------------------------------------------------------------- render world
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct LiquidScreenLabel;
 
 /// The three pipelines, per MSAA sample count.
 ///
@@ -515,7 +508,7 @@ pub(crate) fn liquid_screen_pass(
             pass.set_bind_group(0, group, &[view_offset.offset]);
             pass.draw(0..3, 0..1);
         }
-}
+    }
 }
 
 /// Wire the capture passes into the app. Called from [`super::LiquidPlugin`].
@@ -533,39 +526,16 @@ pub(crate) fn register(app: &mut App) {
             Render,
             specialize_pipelines.in_set(RenderSystems::PrepareResources),
         )
-        .add_render_graph_node::<ViewNodeRunner<LiquidScreenNode>>(Core3d, LiquidScreenLabel)
-        // After everything opaque — including the retained static pass and the indirect-lighting
-        // multiply — and before the transparent pass water itself draws in.
-        .add_render_graph_edges(
+        // After everything opaque — the retained static pass and the indirect-lighting multiply
+        // included, so the riverbed seen THROUGH the water is lit like the riverbed beside it — and
+        // before the transparent pass water itself draws in.
+        .add_systems(
             Core3d,
-            (
-                Node3d::MainOpaquePass,
-                LiquidScreenLabel,
-                Node3d::MainTransparentPass,
-            ),
-        )
-        // After the retained cell pass — which since 2016 runs ahead of the opaque one, so this
-        // edge is implied by the pair above rather than load-bearing; kept because Stormwind's
-        // walls belonging in the snapshot is the reason, not the order they happen to draw in.
-        // `StaticGxPlugin` is already built by the time `LiquidPlugin` is, so this edge can be
-        // declared here; the `Ssilvb` one cannot — see `register_late`.
-        .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, LiquidScreenLabel);
-}
-
-/// The one graph edge that cannot be declared in `build`.
-///
-/// `add_render_graph_edge` requires BOTH nodes to already exist, and `SsilvbPlugin` is added after
-/// `LiquidPlugin` in `world_plugins` — so declaring this edge during `build` panics with
-/// `InvalidNode(SsilvbLabel)` on every boot. `Plugin::finish` runs once every plugin has built,
-/// which is exactly the phase an inter-plugin edge belongs in.
-///
-/// The edge itself is not optional bookkeeping. Without it the two passes are only *both* ordered
-/// between the opaque and transparent passes, with nothing between them — so the scene copy could
-/// be taken before the indirect-lighting multiply, and the riverbed seen THROUGH the water would
-/// be lit differently from the riverbed seen beside it.
-pub(crate) fn register_late(app: &mut App) {
-    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-        return;
-    };
-    render_app.add_render_graph_edge(Core3d, crate::ssilvb::SsilvbLabel, LiquidScreenLabel);
+            liquid_screen_pass
+                .in_set(Core3dSystems::MainPass)
+                .after(main_opaque_pass_3d)
+                .after(crate::static_gx::static_gx_pass)
+                .after(crate::ssilvb::ssilvb_pass)
+                .before(main_transparent_pass_3d),
+        );
 }

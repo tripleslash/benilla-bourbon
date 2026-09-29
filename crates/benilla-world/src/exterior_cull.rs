@@ -111,7 +111,9 @@ pub(crate) fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Frustum {
         Vec4::new(0.0, 0.0, 1.0, 0.0),
         Vec4::new(-(x0 + x1) / w, -(y0 + y1) / h, 0.0, 1.0),
     );
-    Frustum::from_clip_from_world(&(rect_to_ndc * *clip_from_world))
+    Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        &(rect_to_ndc * *clip_from_world),
+    ))
 }
 
 /// [`window_frustum`] behind the open-world walk's entry gate: `0x682fa0` returns before touching a

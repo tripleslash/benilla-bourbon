@@ -461,8 +461,8 @@ fn spawn_screen(
                                 },
                                 Text::new("x"),
                                 TextFont {
-                                    font: font.clone(),
-                                    font_size: 14.0 * s,
+                                    font: font.clone().into(),
+                                    font_size: FontSize::Px(14.0 * s),
                                     ..default()
                                 },
                                 TextColor(GOLD),
@@ -473,8 +473,8 @@ fn spawn_screen(
                 row.spawn((
                     Text::new(strings.text("SAVE_ACCOUNT_NAME", "Remember Account Name")),
                     TextFont {
-                        font: font.clone(),
-                        font_size: 10.0 * s, // the authored FontHeight 10
+                        font: font.clone().into(),
+                        font_size: FontSize::Px(10.0 * s), // the authored FontHeight 10
                         ..default()
                     },
                     TextColor(GOLD),

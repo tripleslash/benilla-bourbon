@@ -50,7 +50,7 @@ pub use query::{
 pub use reflect::UNMIRRORED_RENDER_LAYER;
 // fork: modern lighting (FORK.md, P4) — the fog composite runs on the mirror and orders before the scene copy.
 pub(crate) use reflect::{LiquidReflectionCamera, ReflectionPlane};
-pub(crate) use screen::LiquidScreenLabel;
+pub(crate) use screen::liquid_screen_pass;
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
@@ -244,11 +244,5 @@ impl Plugin for LiquidPlugin {
         // node. Registered unconditionally: its camera stands itself down off `waterDetail` and
         // the submersion verdict, and the material binds the target either way.
         reflect::register(app);
-    }
-
-    /// The liquid screen pass's edge to `Ssilvb`, which can only be declared once every plugin has
-    /// built — see [`screen::register_late`].
-    fn finish(&self, app: &mut App) {
-        screen::register_late(app);
     }
 }

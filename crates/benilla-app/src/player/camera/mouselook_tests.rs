@@ -80,7 +80,7 @@ fn world(over_ui: bool) -> World {
     let mut window = Window::default();
     window.set_physical_cursor_position(Some(DVec2::new(100.0, 100.0)));
     world.spawn((window, CursorOptions::default(), PrimaryWindow));
-    world.insert_non_send_resource(UiScript::new().unwrap());
+    world.insert_non_send(UiScript::new().unwrap());
     world
 }
 
@@ -112,12 +112,12 @@ fn pointer(world: &mut World) -> Option<Vec2> {
 }
 
 fn lua(world: &mut World, chunk: &str) {
-    world.non_send_resource::<UiScript>().run(chunk).unwrap();
+    world.non_send::<UiScript>().run(chunk).unwrap();
 }
 
 fn is_mouselooking(world: &World) -> bool {
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<i64>>("return IsMouselooking()")
         .unwrap()
         == Some(1)

@@ -1162,7 +1162,7 @@ mod tests {
             script.mouse_button(125.0, 125.0, "LeftButton", false);
         }
         script.run(lua).unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().run_system_once(drain_loot).unwrap();
         (app, rx)
     }
@@ -1209,11 +1209,11 @@ mod tests {
             script
                 .run(r#"CreateFrame("Frame", "LootHost"):CreateTexture("LootTex")"#)
                 .unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
             app.update();
             let answered = app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>("return SetLootPortrait(LootTex) == 1")
                 .unwrap();
             assert_eq!(answered, expected, "unit source: {unit}");
@@ -1259,11 +1259,11 @@ mod tests {
                      f:SetScript(\"OnEvent\", function() OPENS = OPENS + 1 end)",
                 )
                 .unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
 
             let opens = |app: &mut App| {
                 app.world_mut()
-                    .non_send_resource_mut::<UiScript>()
+                    .non_send_mut::<UiScript>()
                     .eval::<i64>("return OPENS")
                     .unwrap()
             };
@@ -1297,7 +1297,7 @@ mod tests {
 
     /// The rows `LOOT_BIND_CONFIRM` has named so far, in order.
     fn confirms(app: &mut App) -> Vec<i64> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let n = script.eval::<i64>("return getn(BIND_CONFIRMS)").unwrap();
         (1..=n)
             .map(|i| {
@@ -1345,7 +1345,7 @@ mod tests {
 
         // A second accept over the same dialog: nothing left to complete.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("LootSlot(1)")
             .unwrap();
         app.world_mut().run_system_once(drain_loot).unwrap();
@@ -1409,7 +1409,7 @@ mod tests {
 
         // The accept, with the same number, reaches the right wire slot.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("LootSlot(2)")
             .unwrap();
         app.world_mut().run_system_once(drain_loot).unwrap();
@@ -1426,7 +1426,7 @@ mod tests {
         assert_eq!(pending_confirm(&app), Some(1));
 
         app.world_mut().resource_mut::<LootState>().remove_slot(2);
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         script.run("LootSlot(1)").unwrap();
         app.world_mut().run_system_once(drain_loot).unwrap();
 
@@ -1514,7 +1514,7 @@ mod tests {
                  f:SetScript(\"OnEvent\", function() tinsert(BIND_CONFIRMS, arg1) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().run_system_once(feed_loot).unwrap();
 
         assert_eq!(
@@ -2199,10 +2199,10 @@ mod tests {
                 })
                 .collect()
         };
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let close_loot = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("CloseLoot()")
                 .unwrap();
             app.update();

@@ -360,9 +360,9 @@ mod tests {
             .init_resource::<GroupState>()
             .insert_resource(NetCommands(tx))
             .add_plugins(super::super::UiAuraPlugin);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 r#"
                 SEEN = {}
@@ -423,7 +423,7 @@ mod tests {
     /// `UnitDebuff` (or `UnitBuff`) enumerates exactly that many, index 1 up to the nil.
     fn listed(app: &mut App, token: &str, harmful: bool) -> Vec<i64> {
         let verb = if harmful { "UnitDebuff" } else { "UnitBuff" };
-        let s = app.world_mut().non_send_resource::<UiScript>();
+        let s = app.world_mut().non_send::<UiScript>();
         let ids = s.aura_spell_ids(token, !harmful);
         let enumerated = s
             .eval::<usize>(&format!(
@@ -446,7 +446,7 @@ mod tests {
 
     fn seen(app: &mut App) -> Vec<String> {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("local s = SEEN SEEN = {} return s")
             .unwrap()
     }
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(listed(&mut app, "party1", true), [589]);
         let count = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>(r#"local _, count = UnitDebuff("party1", 1) return count"#)
             .unwrap();
         assert_eq!(count, 1);
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(listed(&mut app, "raid5", true), [589, 11976]);
         let count = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>(r#"local _, count = UnitDebuff("raid5", 1) return count"#)
             .unwrap();
         assert_eq!(count, 1);
@@ -846,7 +846,7 @@ mod tests {
         let versions = |app: &mut App| {
             app.world_mut()
                 .resource_scope(|world, mut mem: Mut<super::super::AuraFeedMemory>| {
-                    let script = world.non_send_resource::<UiScript>();
+                    let script = world.non_send::<UiScript>();
                     mem.vm.get(script).units.versions
                 })
         };

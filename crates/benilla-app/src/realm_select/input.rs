@@ -197,6 +197,7 @@ mod tests {
 
     fn ev(unit: MouseScrollUnit, y: f32) -> MouseWheel {
         MouseWheel {
+            phase: bevy::input::touch::TouchPhase::Moved,
             unit,
             x: 0.0,
             y,

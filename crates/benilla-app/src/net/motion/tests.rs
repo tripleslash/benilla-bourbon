@@ -988,7 +988,7 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
         MinimalPlugins,
         TransformPlugin,
         bevy::asset::AssetPlugin::default(),
-        bevy::scene::ScenePlugin,
+        bevy::world_serialization::WorldSerializationPlugin,
         avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
     ));
     app.init_asset::<Mesh>()

@@ -960,8 +960,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
         );
         app.world_mut().spawn((
             crate::view::WorldCamera,
@@ -1037,8 +1039,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(projection.get_clip_from_view() * GlobalTransform::from(far).affine().inverse()),
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(far).affine().inverse()),
+            ),
         );
         let cam = app
             .world_mut()
@@ -1091,13 +1095,15 @@ mod tests {
 
         // The snap: the seat writes the local next to the host, facing it; the global stays stale.
         let near = Transform::from_xyz(0.0, 0.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
-        let near_frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
-                far: 5000.0,
-                ..default()
-            })
-            .get_clip_from_view()
-                * GlobalTransform::from(near).affine().inverse()),
+        let near_frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+                    far: 5000.0,
+                    ..default()
+                })
+                .get_clip_from_view()
+                    * GlobalTransform::from(near).affine().inverse()),
+            ),
         );
         {
             let mut e = app.world_mut().entity_mut(cam);

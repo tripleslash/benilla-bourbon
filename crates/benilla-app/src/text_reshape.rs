@@ -1,9 +1,10 @@
 //! Re-shapes a `bevy_ui` text root whose last span was despawned, which upstream misses.
 //!
 //! Despawning the last `TextSpan` removes `Children` rather than changing it, so
-//! `detect_text_needs_rerender` never fires and the root keeps a multi-run buffer and a span list
-//! naming dead entities. The next re-layout without a re-shape, such as a window resize, indexes
-//! `glyph_info` past the shortened list and panics (`bevy_text-0.18.1/src/pipeline.rs:398`).
+//! `detect_text_needs_rerender` never fires and the root keeps its shaped layout and a span list
+//! naming the dead run. bevy_text 0.18 then panicked on the next re-layout (it indexed its glyph
+//! info past the shortened list); 0.19's Parley layout indexes nothing by span, so the despawned
+//! run's glyphs simply stay on screen until something else re-shapes the root.
 //!
 //! This is a net: the site that empties a node should still leave it coherent. It covers
 //! `bevy_ui` text only; `Text2d` has the same hole, but this tree spawns none.
@@ -18,7 +19,7 @@ impl Plugin for TextReshapePlugin {
         app.add_systems(
             PostUpdate,
             // The mark must land before the detector reads it.
-            reshape_emptied_text_roots.before(detect_text_needs_rerender::<Text>),
+            reshape_emptied_text_roots.before(detect_text_needs_rerender),
         );
     }
 }
@@ -43,15 +44,16 @@ pub(crate) mod harness {
     use bevy::image::TextureAtlasLayout;
     use bevy::prelude::*;
     use bevy::text::{
-        detect_text_needs_rerender, ComputedTextBlock, CosmicFontSystem, Font, FontAtlasSet,
-        FontHinting, SwashCache, TextBounds, TextLayoutInfo, TextPipeline,
+        ComputedTextBlock, Font, FontAtlasSet, FontCx, FontHinting, LayoutCx, ScaleCx, TextBounds,
+        TextLayoutInfo, TextPipeline,
     };
     use bevy::ui::widget::TextUiReader;
 
     /// Wide enough for one line; nothing depends on it.
     const BOUNDS: TextBounds = TextBounds::new(400.0, 200.0);
 
-    /// `TextPlugin` with its embedded default font, and the glyph atlas's asset stores.
+    /// `TextPlugin` with its embedded default font (and its `detect_text_needs_rerender`), and the
+    /// glyph atlas's asset stores.
     pub(crate) fn add_text_plugins(app: &mut App) {
         app.add_plugins(bevy::text::TextPlugin);
         app.init_asset::<TextureAtlasLayout>();
@@ -68,7 +70,7 @@ pub(crate) mod harness {
             .unwrap_or_default();
         for entity in core::iter::once(root).chain(spans) {
             if let Some(mut font) = app.world_mut().get_mut::<TextFont>(entity) {
-                font.bypass_change_detection().font = Handle::default();
+                font.bypass_change_detection().font = Handle::<Font>::default().into();
             }
         }
     }
@@ -85,11 +87,12 @@ pub(crate) mod harness {
         In(root): In<Entity>,
         mut pipeline: ResMut<TextPipeline>,
         fonts: Res<Assets<Font>>,
-        mut font_system: ResMut<CosmicFontSystem>,
-        mut blocks: Query<(&TextLayout, &mut ComputedTextBlock, &FontHinting)>,
+        mut font_cx: ResMut<FontCx>,
+        mut layout_cx: ResMut<LayoutCx>,
+        mut blocks: Query<(&TextLayout, &mut ComputedTextBlock)>,
         mut reader: TextUiReader,
     ) {
-        let (layout, mut computed, hinting) = blocks.get_mut(root).expect("a text root");
+        let (layout, mut computed) = blocks.get_mut(root).expect("a text root");
         pipeline
             .update_buffer(
                 &fonts,
@@ -99,8 +102,10 @@ pub(crate) mod harness {
                 BOUNDS,
                 1.0,
                 &mut computed,
-                &mut font_system,
-                *hinting,
+                &mut font_cx,
+                &mut layout_cx,
+                Vec2::new(1280.0, 720.0),
+                16.0,
             )
             .expect("the embedded default font shapes headless");
     }
@@ -112,7 +117,7 @@ pub(crate) mod harness {
         if app
             .world()
             .get::<ComputedTextBlock>(root)
-            .is_some_and(ComputedTextBlock::needs_rerender)
+            .is_some_and(|b| b.needs_rerender(false, false))
         {
             shape(app, root);
         }
@@ -125,37 +130,35 @@ pub(crate) mod harness {
         In(root): In<Entity>,
         mut pipeline: ResMut<TextPipeline>,
         mut atlas_set: ResMut<FontAtlasSet>,
-        mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
         mut images: ResMut<Assets<Image>>,
-        mut font_system: ResMut<CosmicFontSystem>,
-        mut swash_cache: ResMut<SwashCache>,
-        text_font_query: Query<&TextFont>,
-        mut blocks: Query<(&TextLayout, &mut TextLayoutInfo, &mut ComputedTextBlock)>,
+        mut scale_cx: ResMut<ScaleCx>,
+        mut blocks: Query<(
+            &TextLayout,
+            &mut TextLayoutInfo,
+            &mut ComputedTextBlock,
+            &FontHinting,
+        )>,
     ) {
-        let (layout, mut info, mut computed) = blocks.get_mut(root).expect("a text root");
+        let (layout, mut info, mut computed, hinting) = blocks.get_mut(root).expect("a text root");
         pipeline
             .update_text_layout_info(
                 &mut info,
-                text_font_query,
-                1.0,
                 &mut atlas_set,
-                &mut atlas_layouts,
                 &mut images,
                 &mut computed,
-                &mut font_system,
-                &mut swash_cache,
+                &mut scale_cx,
                 BOUNDS,
                 layout.justify,
+                *hinting,
             )
             .expect("the relayout succeeds");
     }
 
-    /// The text stack and the real detector; `net` installs [`super::TextReshapePlugin`].
+    /// The text stack and its real detector; `net` installs [`super::TextReshapePlugin`].
     pub(crate) fn text_app(net: bool) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
         add_text_plugins(&mut app);
-        app.add_systems(PostUpdate, detect_text_needs_rerender::<Text>);
         if net {
             app.add_plugins(super::TextReshapePlugin);
         }
@@ -217,15 +220,14 @@ mod tests {
             !app.world()
                 .get::<ComputedTextBlock>(root)
                 .expect("the block")
-                .needs_rerender(),
+                .needs_rerender(false, false),
             "upstream cannot see the removal — if this ever fails, bevy fixed it"
         );
     }
 
-    /// Without the net, `bevy_text` indexes `glyph_info[1]` of a one-entry list.
+    /// Without the net, the resize re-lays-out the stale block: the despawned run is still shaped.
     #[test]
-    #[should_panic(expected = "index out of bounds")]
-    fn without_the_net_the_resize_panics_inside_bevy_text() {
+    fn without_the_net_the_resize_keeps_the_despawned_run() {
         let mut app = text_app(false);
         let root = two_run_root(&mut app);
 
@@ -234,6 +236,13 @@ mod tests {
             .despawn_related::<Children>();
         app.update();
         resize_frame(&mut app, root);
+        assert_eq!(
+            app.world()
+                .get::<ComputedTextBlock>(root)
+                .map(|b| b.entities().len()),
+            Some(2),
+            "the stale block still names the despawned run"
+        );
     }
 
     #[test]
@@ -250,7 +259,7 @@ mod tests {
             app.world()
                 .get::<ComputedTextBlock>(root)
                 .expect("the block")
-                .needs_rerender(),
+                .needs_rerender(false, false),
             "the net marks the emptied root for a re-shape"
         );
 
@@ -274,7 +283,7 @@ mod tests {
             !app.world()
                 .get::<ComputedTextBlock>(root)
                 .expect("the block")
-                .needs_rerender(),
+                .needs_rerender(false, false),
             "nothing changed, so nothing is asked to re-shape"
         );
         resize_frame(&mut app, root);

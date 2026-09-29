@@ -14,19 +14,16 @@
 //! MSAA must be off (`WOW_MSAA=off`): a multisampled depth texture cannot be copied and has no
 //! single depth per pixel, so the probe refuses.
 
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, Extent3d, MapMode, Origin3d, TexelCopyBufferInfo,
     TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureUsages,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{ExtractedView, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
@@ -92,25 +89,21 @@ impl Plugin for DepthProbePlugin {
                     read_depth.after(RenderSystems::Render),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<DepthReadbackNode>>(Core3d, DepthReadbackLabel)
-            // After the opaque pass (`Opaque3d` and `AlphaMask3d`), before the transmissive one.
+            // After the opaque pass (`Opaque3d` and `AlphaMask3d`), before the transparent one.
             // The retained static pass draws before the opaque pass, so its walls are in the read.
             // `WOW_DEPTH_AFTER=1` copies after the transparent pass instead, to read the depth the
             // transparent pass itself wrote.
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
                 if std::env::var_os("WOW_DEPTH_AFTER").is_some() {
-                    (
-                        Node3d::MainTransparentPass,
-                        DepthReadbackLabel,
-                        Node3d::EndMainPass,
-                    )
+                    depth_readback_pass
+                        .in_set(Core3dSystems::MainPass)
+                        .after(main_transparent_pass_3d)
                 } else {
-                    (
-                        Node3d::MainOpaquePass,
-                        DepthReadbackLabel,
-                        Node3d::MainTransmissivePass,
-                    )
+                    depth_readback_pass
+                        .in_set(Core3dSystems::MainPass)
+                        .after(main_opaque_pass_3d)
+                        .before(main_transparent_pass_3d)
                 },
             );
     }
@@ -322,9 +315,6 @@ fn prepare_staging(
     });
 }
 
-#[derive(RenderLabel, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct DepthReadbackLabel;
-
 /// Copies the depth texture right after the opaque pass. Read at the end of the main pass instead,
 /// it also holds depth the transparent pass wrote, from something that tracks the camera.
 fn depth_readback_pass(
@@ -381,7 +371,7 @@ fn depth_readback_pass(
                 depth_or_array_layers: 1,
             },
         );
-}
+    }
 }
 
 /// How many frames [`read_depth`] has reported; a resource because the graph node reads it.

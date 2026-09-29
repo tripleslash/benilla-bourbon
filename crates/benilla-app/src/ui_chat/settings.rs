@@ -616,7 +616,7 @@ pub(crate) fn fold_dying_vm_chat_cache(world: &mut World) {
     // Lift the file out, leaving the VM and the roster as shared borrows of the world.
     world.resource_scope(|world, mut file: Mut<ChatWindowFile>| {
         let (Some(script), Some(channels)) = (
-            world.get_non_send_resource::<UiScript>(),
+            world.get_non_send::<UiScript>(),
             world.get_resource::<super::edit::ChannelState>(),
         ) else {
             return;
@@ -1044,7 +1044,7 @@ mod tests {
 
         // A Lua rename of window 1, which arms the debounce.
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetChatWindowName(1, "Reloaded")"#)
             .expect("rename");
         world
@@ -1069,7 +1069,7 @@ mod tests {
 
         // The rebuilt VM reads it back.
         let name = world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<String>("GetChatWindowInfo(1)")
             .unwrap_or_default();
         assert_eq!(
@@ -1161,7 +1161,7 @@ mod tests {
         // The server confirms the re-join (`YOU_JOINED`) through the real feed arm.
         world.resource_scope(
             |world, mut channels: Mut<super::super::edit::ChannelState>| {
-                let mut script = world.non_send_resource_mut::<UiScript>();
+                let mut script = world.non_send_mut::<UiScript>();
                 let mut windows = super::super::frames::ChatWindows::default();
                 let mut e = super::super::event::ChatEvent::text_only(
                     super::super::event::ChatEventKind::ChannelNotice,

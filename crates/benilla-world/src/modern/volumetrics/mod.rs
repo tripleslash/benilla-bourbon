@@ -37,7 +37,7 @@ pub mod media;
 mod node;
 
 // fork: modern lighting (FORK.md, P5) — the probe trace orders before this pass.
-pub(crate) use node::FroxelLabel;
+pub(crate) use node::froxel_pass;
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
 pub const FOG_BYTES: usize = 3 * 64 + 22 * 16;

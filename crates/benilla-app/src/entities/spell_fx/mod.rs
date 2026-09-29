@@ -87,7 +87,7 @@ pub(crate) fn tick_fx_tint(
     }
     let now = time.elapsed_secs();
     reg.0.retain(|id, (anim, origin)| {
-        let Some(mat) = materials.get_mut(*id) else {
+        let Some(mut mat) = materials.get_mut(*id) else {
             return false; // the instance despawned, and its clone with it
         };
         let rgb = anim.sample(now - *origin);

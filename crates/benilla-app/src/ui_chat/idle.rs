@@ -453,6 +453,7 @@ mod tests {
         assert_eq!(
             stamped(&|app| {
                 app.world_mut().write_message(MouseWheel {
+                    phase: bevy::input::touch::TouchPhase::Moved,
                     unit: MouseScrollUnit::Line,
                     x: 0.0,
                     y: 1.0,
@@ -522,7 +523,7 @@ mod tests {
                  button.\"",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -590,7 +591,7 @@ mod tests {
         assert!(rx.try_iter().next().is_none(), "and sends no chat packet");
         assert!(
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .take_session_requests()
                 == vec![benilla_ui::script::SessionRequest::Logout],
         );
@@ -643,7 +644,7 @@ mod tests {
 
             // The CAMP dialog's cancel: `CancelLogout` clears the byte, and idle continues.
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .queue_session_request(SessionRequest::CancelLogout);
             app.world_mut()
                 .run_system_once(crate::ui_logout::drain_logout)

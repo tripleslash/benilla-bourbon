@@ -1,10 +1,10 @@
 //! Startup: spawns the world camera and seeds the avatar resources [`super::control`] drives.
 
 use avian3d::prelude::*;
+use bevy::camera::Hdr;
 use bevy::camera::{CameraOutputMode, PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 
 use benilla_assets::coords::wow_to_bevy;
 

@@ -729,7 +729,7 @@ mod tests {
 
     fn enabled(app: &mut App) -> bool {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<bool>("return TutorialsEnabled() ~= nil")
             .unwrap()
     }
@@ -748,7 +748,7 @@ mod tests {
             .resource_mut::<Tutorials>()
             .apply_flags(&bank);
 
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         assert!(
             enabled(&mut app),
@@ -756,7 +756,7 @@ mod tests {
         );
 
         // `ReloadUI()`: a fresh VM, and nothing touches the app's banks.
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         assert!(
             !enabled(&mut app),
             "a fresh VM starts knowing no bank — this is the state the row used to load in"
@@ -772,11 +772,11 @@ mod tests {
         app.world_mut()
             .resource_mut::<Tutorials>()
             .apply_flags(&[0u8; 32]);
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         // Cleared behind the feed's back, a bank the VM was told stays cleared.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_tutorial_bank(None);
         app.update();
         assert!(!enabled(&mut app), "unchanged ⇒ nothing pushed");
@@ -811,7 +811,7 @@ mod tests {
         // boot VM with no frames.
         app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
         app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
-        app.insert_non_send_resource(UiScript::new().expect("the boot VM"));
+        app.insert_non_send(UiScript::new().expect("the boot VM"));
 
         {
             let mut t = app.world_mut().resource_mut::<Tutorials>();

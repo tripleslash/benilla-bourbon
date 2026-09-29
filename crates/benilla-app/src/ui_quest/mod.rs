@@ -1010,7 +1010,7 @@ mod tests {
         app.insert_resource(quest);
         let script = UiScript::new().unwrap();
         script.run(lua).unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, drain_quest);
         app.update();
         let sent = rx.try_iter().collect();

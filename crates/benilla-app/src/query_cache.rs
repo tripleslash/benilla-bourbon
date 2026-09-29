@@ -136,7 +136,7 @@ impl<K: Copy + Eq + Hash, V> QueryCache<K, V> {
 }
 
 /// A resource that owns one or more [`QueryCache`]s: what to forget on world entry.
-pub(crate) trait AskOnce: Resource {
+pub(crate) trait AskOnce: Resource<Mutability = bevy::ecs::component::Mutable> {
     fn clear_pending(&mut self);
 }
 

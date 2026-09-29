@@ -866,10 +866,10 @@ mod opening_cinematic {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, send_opening_cinematic);
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("OpeningCinematic() OpeningCinematic()")
             .unwrap();
         app.update();

@@ -512,10 +512,10 @@ impl RigPalettes {
 pub struct RigStarved;
 
 /// A registered rig, on the entity that owns its pose: its palette slot, joint entities and inverse
-/// bindposes. The slot is freed `on_replace`, not `on_remove`, because a gear or display rebuild
+/// bindposes. The slot is freed `on_discard`, not `on_remove`, because a gear or display rebuild
 /// overwrites this component on the same entity, and `on_remove` does not fire on an overwrite.
 #[derive(Component)]
-#[component(on_replace = free_rig_skin)]
+#[component(on_discard = free_rig_skin)]
 pub struct RigSkin {
     pub slot: u16,
     base: u32,

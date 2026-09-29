@@ -2,23 +2,20 @@
 //! fog composite. See the module docs one level up.
 
 use bevy::app::SubApp;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::FullscreenShader;
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::ecs::query::QueryItem;
-use bevy::pbr::graph::NodePbr;
+use bevy::pbr::{per_view_shadow_pass, LATE_SHADOW_PASS};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{
     sampler, storage_buffer_read_only_sized, texture_2d_array, texture_3d, texture_depth_2d,
     texture_depth_2d_multisampled, texture_storage_3d, uniform_buffer,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
@@ -279,9 +276,9 @@ fn prepare_froxels(
         );
         if let (Some(pipes), Some(light), Some(shadow), Some(integrated)) = inputs {
             let grid = volume.grid;
-            let allocated = integrated.size.width >= grid.x
-                && integrated.size.height >= grid.y
-                && integrated.size.depth_or_array_layers >= grid.z;
+            let allocated = integrated.texture_descriptor.size.width >= grid.x
+                && integrated.texture_descriptor.size.height >= grid.y
+                && integrated.texture_descriptor.size.depth_or_array_layers >= grid.z;
             let compiled = pipeline_cache.get_compute_pipeline(pipes.scatter).is_some()
                 && pipeline_cache
                     .get_compute_pipeline(pipes.integrate)
@@ -480,10 +477,7 @@ fn specialize_composites(
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct FroxelLabel;
-
-fn froxel_pass(
+pub(crate) fn froxel_pass(
     world: &World,
     view: ViewQuery<&ModernFogView>,
     mut render_context: RenderContext,
@@ -533,14 +527,8 @@ fn froxel_pass(
             pass.dispatch_workgroups(grid.x.div_ceil(8), grid.y.div_ceil(8), 1);
             span.end(&mut pass);
         }
+    }
 }
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct FogCompositeLabel;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct LampHaloLabel;
 
 /// The fullscreen fog passes' view query: both draw over the view target with the same bindings.
 type FogPassQuery = (
@@ -564,7 +552,7 @@ pub(crate) fn fog_composite_pass(
 
 /// fork: the nearest lamps' halos (`fog_composite.wgsl`'s `fs_halo`), added after the transparent
 /// pass so an alpha-blended tree behind a lamp cannot paint over its glow.
-fn lamp_halo_pass(
+pub(crate) fn lamp_halo_pass(
     world: &World,
     view: ViewQuery<FogPassQuery>,
     mut render_context: RenderContext,
@@ -683,35 +671,27 @@ pub(super) fn build(render_app: &mut SubApp) {
             prepare_froxels.in_set(RenderSystems::PrepareBindGroups),
         )
         // The volume samples this frame's cascades, so it runs after the modern shadow pass.
-        .add_render_graph_node::<ViewNodeRunner<FroxelNode>>(Core3d, FroxelLabel)
-        .add_render_graph_edges(
-            Core3d,
-            (NodePbr::LateShadowPass, FroxelLabel, Node3d::StartMainPass),
-        )
-        .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, FroxelLabel)
-        // After everything opaque (the retained cells and the SSILVB multiply included), before the
-        // transparent pass — and before the water's scene copy, so a riverbed seen through the water is
-        // fogged like the one beside it.
-        .add_render_graph_node::<ViewNodeRunner<FogCompositeNode>>(Core3d, FogCompositeLabel)
-        .add_render_graph_edges(
+        .add_systems(
             Core3d,
             (
-                Node3d::MainOpaquePass,
-                FogCompositeLabel,
-                Node3d::MainTransparentPass,
-            ),
-        )
-        .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, FogCompositeLabel)
-        .add_render_graph_edge(Core3d, crate::ssilvb::SsilvbLabel, FogCompositeLabel)
-        .add_render_graph_edge(Core3d, FogCompositeLabel, crate::liquid::LiquidScreenLabel)
-        // fork: the lamp halos, over everything the main pass drew, transparents included.
-        .add_render_graph_node::<ViewNodeRunner<LampHaloNode>>(Core3d, LampHaloLabel)
-        .add_render_graph_edges(
-            Core3d,
-            (
-                Node3d::MainTransparentPass,
-                LampHaloLabel,
-                Node3d::EndMainPass,
+                froxel_pass
+                    .after(per_view_shadow_pass::<LATE_SHADOW_PASS>)
+                    .after(crate::static_gx::gx_shadow_pass)
+                    .before(Core3dSystems::MainPass),
+                // After everything opaque (the retained cells and the SSILVB multiply included),
+                // before the transparent pass — and before the water's scene copy, so a riverbed
+                // seen through the water is fogged like the one beside it.
+                fog_composite_pass
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .after(crate::static_gx::static_gx_pass)
+                    .after(crate::ssilvb::ssilvb_pass)
+                    .before(crate::liquid::liquid_screen_pass)
+                    .before(main_transparent_pass_3d),
+                // fork: the lamp halos, over everything the main pass drew, transparents included.
+                lamp_halo_pass
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_transparent_pass_3d),
             ),
         );
 }

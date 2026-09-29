@@ -936,7 +936,7 @@ mod under_floor {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
@@ -1416,7 +1416,7 @@ mod server_moved_players {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
@@ -1786,7 +1786,7 @@ mod inside_a_hull {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();

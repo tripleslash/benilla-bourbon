@@ -107,7 +107,7 @@ fn log_in_as(world: &mut World, name: &str, guid: u64) {
 /// What the probe addon captured at file scope this session.
 fn probe_saw(world: &World) -> Option<String> {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<Option<String>>("SwitchProbeFileScope").ok())
         .flatten()
 }
@@ -115,7 +115,7 @@ fn probe_saw(world: &World) -> Option<String> {
 /// Is the named frame present in the live VM?
 fn frame_exists(world: &World, name: &str) -> bool {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<bool>(&format!("return {name} ~= nil")).ok())
         .unwrap_or(false)
 }
@@ -123,7 +123,7 @@ fn frame_exists(world: &World, name: &str) -> bool {
 /// How many times the probe's file scope ran in the live VM.
 fn probe_loads(world: &World) -> u32 {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<Option<u32>>("SwitchProbeLoads").ok())
         .flatten()
         .unwrap_or(0)
@@ -220,7 +220,7 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
     // Quit: `shutdown_on_exit`'s body, against the boot VM the logout left.
     let identity = world.resource::<super::AddOnIdentity>().0.clone();
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("a boot VM is live at the character screen");
     // `false`: at the character screen there is no active player.
     super::shutdown_ui_state(&mut script, identity.as_ref(), false);
@@ -282,7 +282,7 @@ fn the_realm_cvars_are_read_only_to_lua_only_in_the_world() {
     let mut world = booted_world();
     world.init_resource::<super::LeavingWorldArmed>();
     let set = |world: &World, chunk: &str| {
-        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        let s = world.non_send::<benilla_ui::script::UiScript>();
         // A bare test world has no registry to seed the VM from.
         s.register_cvars(crate::cvars::registered_pairs());
         s.run(chunk).map_err(|e| e.to_string())
@@ -325,7 +325,7 @@ fn a_quit_from_the_character_screen_fires_logout_without_leaving_world() {
     let (tmp, _c, _h) = hermetic_probe("quitsplit");
     let mut world = booted_world();
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("a boot VM is live at the character screen");
 
     script
@@ -403,7 +403,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
     );
     assert!(
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .is_some(),
         "a boot VM stays, for the feeds that resolve lines outside the world"
     );
@@ -427,7 +427,7 @@ fn reload_ui_is_a_fresh_login_in_place() {
 
     log_in_as(&mut world, "Onehunter", 1);
     let first_session = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .session();
 
@@ -445,7 +445,7 @@ fn reload_ui_is_a_fresh_login_in_place() {
     );
     assert_ne!(
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .expect("in-world VM")
             .session(),
         first_session,
@@ -480,7 +480,7 @@ fn a_disable_staged_in_the_session_applies_at_the_reload() {
         "the probe loaded to begin with"
     );
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .run("DisableAddOn('SwitchProbe')")
         .expect("DisableAddOn");
@@ -520,7 +520,7 @@ fn saved_variables_round_trip_through_a_reload() {
 
     log_in_as(&mut world, "Onehunter", 1);
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .run("SwitchProbeDB.mark = 41")
         .expect("mutate the saved table");
@@ -528,7 +528,7 @@ fn saved_variables_round_trip_through_a_reload() {
     reload(&mut world, crate::char_select::ClientState::InWorld);
 
     let mark = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .eval::<Option<u32>>("return SwitchProbeDB and SwitchProbeDB.mark")
         .expect("read back")
@@ -598,7 +598,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
 
     // The app's per-frame drain runs the dispatch; the test runs the same call.
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     script.dispatch_script_errors_to_handler();
     assert!(
@@ -644,7 +644,7 @@ fn a_looping_addon_cannot_freeze_world_entry() {
     );
     // The budget raise reaches the handler queue, so the dialog names the loop.
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     script.dispatch_script_errors_to_handler();
     let shown: String = script
@@ -821,7 +821,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 
     // A frame registered as FrameXML registers, in the VM that exists before the entry load.
     app.world()
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .run(
             "EnteringWorldSeen = 0 \
              local f = CreateFrame(\"Frame\") \
@@ -843,7 +843,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 
     let seen = |app: &App| -> i64 {
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .eval::<i64>("return EnteringWorldSeen")
             .expect("probe global")
     };
@@ -917,7 +917,7 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
     );
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
 
     // 1. Retained, tagged as a load failure.
@@ -1002,7 +1002,7 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
     log_in_as(&mut world, "Onehunter", 1);
 
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     let before = script.diagnostics().len();
     // The same failure through the engine's catch path: a slash command whose body raises.
@@ -1040,7 +1040,7 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
 /// target). Both flags: the cache applies position only to a movable frame, size to a resizable.
 fn place_a_window(world: &mut World) {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to place a window in")
         .run(
             "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
@@ -1146,7 +1146,7 @@ fn each_character_gets_its_own_layout_cache() {
 /// authored `movable`/`resizable` pair the cache's apply reads off the live frame.
 fn author_a_window(world: &mut World) {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to author a window in")
         .run(
             "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
@@ -1160,7 +1160,7 @@ fn author_a_window(world: &mut World) {
 /// The probe window's live geometry, as the player sees it.
 fn window_geometry(world: &World) -> (f32, f32, String, f32, f32) {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("a VM")
         .eval::<(f32, f32, String, f32, f32)>(
             "local p, _, _, x, y = LayoutProbe:GetPoint(1) \
@@ -1220,7 +1220,7 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
     world.init_resource::<crate::ui_chat::ChatLog>();
     log_in_as(&mut world, "Onehunter", 1);
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
 
     // Deviation: the `OnInputLanguageChanged` script slot (`ChatFrame.xml:121`, the IME language
@@ -1323,7 +1323,7 @@ MapProbeZones = table.getn({ GetMapZones(1) })
 
     let read = |expr: &str| {
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .and_then(|s| s.eval::<Option<u32>>(expr).ok())
             .flatten()
     };
@@ -1365,7 +1365,7 @@ BindProbeSet = SetBinding(\"J\", \"TOGGLEWORLDMAP\")
     log_in_as(&mut world, "Onewarrior", 1);
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     // The defaults are the install's `WTF\DefaultBindings.wtf`: none without one.
     assert_eq!(
@@ -1419,7 +1419,7 @@ JoinProbe.lua
     log_in_as(&mut world, "Onewarrior", 1);
 
     let queued = world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("VM")
         .take_channel_commands();
     assert!(
@@ -1462,7 +1462,7 @@ ScreenProbeHeight = GetScreenHeight()
     log_in_as(&mut world, "Onewarrior", 1);
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     let read = |expr: &str| script.eval::<Option<f32>>(expr).ok().flatten();
     let width = read("ScreenProbeWidth").expect("the probe ran at file scope");
@@ -1500,7 +1500,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
     );
 
     let mut script = world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM");
     // The feed's push when the name cache misses our own guid: a nameless snapshot.
     script.set_unit(
@@ -1547,7 +1547,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
 /// Every kit name the live VM has queued since the last drain.
 fn taken_kit_names(world: &mut World) -> Vec<String> {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .take_sounds()
         .into_iter()

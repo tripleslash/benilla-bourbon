@@ -270,7 +270,7 @@ mod unit_render_alpha_tests {
         build(&mut unit);
         let unit = unit.id();
         let mut state = SystemState::<UnitRenderAlpha>::new(&mut world);
-        let alpha = state.get(&world).get(unit);
+        let alpha = state.get(&world).unwrap().get(unit);
         alpha
     }
 
@@ -355,7 +355,7 @@ mod unit_render_alpha_tests {
         let gone = world.spawn_empty().id();
         world.despawn(gone);
         let mut state = SystemState::<UnitRenderAlpha>::new(&mut world);
-        assert_eq!(state.get(&world).get(gone), 1.0);
+        assert_eq!(state.get(&world).unwrap().get(gone), 1.0);
     }
 }
 
@@ -853,7 +853,7 @@ mod chain_tests {
 
     fn composed(app: &mut App, at: Entity) -> f32 {
         let mut sys = bevy::ecs::system::SystemState::<ModelAlphas>::new(app.world_mut());
-        let alphas = sys.get(app.world());
+        let alphas = sys.get(app.world()).unwrap();
         alphas.get(at)
     }
 
@@ -913,7 +913,7 @@ mod tests {
         world.despawn(gone);
 
         let mut state: SystemState<ModelAlphas> = SystemState::new(&mut world);
-        let alphas = state.get(&world);
+        let alphas = state.get(&world).unwrap();
         assert_eq!(alphas.get(wearer), 0.25, "the unit's own");
         assert_eq!(alphas.get(item), 0.25, "an item takes its wearer's");
         assert_eq!(alphas.get(glow), 0.25, "…and its glow takes the item's");
@@ -936,7 +936,7 @@ mod tests {
         world.entity_mut(a).insert(ParentModel(b));
 
         let mut state: SystemState<ModelAlphas> = SystemState::new(&mut world);
-        assert_eq!(state.get(&world).get(a), 1.0);
+        assert_eq!(state.get(&world).unwrap().get(a), 1.0);
     }
 
     /// `SystemState::apply` after a manual despawn recreates a wire destroy landing between the
@@ -963,7 +963,7 @@ mod tests {
             )>,
             Query<&mut UnitAppearFade>,
         )> = SystemState::new(&mut world);
-        let (time, viewer, commands, q, units) = state.get_mut(&mut world);
+        let (time, viewer, commands, q, units) = state.get_mut(&mut world).unwrap();
         arm_appear_fade(time, viewer, commands, q, units);
 
         world.despawn(doomed);

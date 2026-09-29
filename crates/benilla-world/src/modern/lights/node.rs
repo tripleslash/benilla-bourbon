@@ -3,13 +3,10 @@
 //! the cells it writes).
 
 use bevy::app::SubApp;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
-};
 use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, storage_buffer_sized,
 };
@@ -144,47 +141,34 @@ fn prepare_lights(
     );
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct LightBinLabel;
-
-#[derive(Default)]
-struct LightBinNode;
-
-impl Node for LightBinNode {
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let frame = world.resource::<LightFrame>();
-        let (Some(bind), true) = (&frame.bind, frame.groups > 0) else {
-            return Ok(());
-        };
-        let pipes = world.resource::<LightPipelines>();
-        let Some(pipeline) = world
-            .resource::<PipelineCache>()
-            .get_compute_pipeline(pipes.bin)
-        else {
-            return Ok(());
-        };
-        // The journal's `gpu_modern` column (`benilla-app` `perf::journal`), where the device times
-        // passes.
-        let diagnostics = render_context.diagnostic_recorder();
-        let mut pass =
-            render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("modern_light_bin"),
-                    timestamp_writes: None,
-                });
-        let span = diagnostics.pass_span(&mut pass, "modern_light_bin");
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, bind, &[]);
-        pass.dispatch_workgroups(frame.groups, 1, 1);
-        span.end(&mut pass);
-        Ok(())
-    }
+/// The binning pass, once per `Core3d` camera as the graph node was.
+fn light_bin_pass(
+    frame: Res<LightFrame>,
+    pipes: Res<LightPipelines>,
+    pipeline_cache: Res<PipelineCache>,
+    mut render_context: RenderContext,
+) {
+    let (Some(bind), true) = (&frame.bind, frame.groups > 0) else {
+        return;
+    };
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipes.bin) else {
+        return;
+    };
+    // The journal's `gpu_modern` column (`benilla-app` `perf::journal`), where the device times
+    // passes.
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let mut pass = render_context
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("modern_light_bin"),
+            timestamp_writes: None,
+        });
+    let span = diagnostics.pass_span(&mut pass, "modern_light_bin");
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.dispatch_workgroups(frame.groups, 1, 1);
+    span.end(&mut pass);
 }
 
 pub(super) fn build(render_app: &mut SubApp) {
@@ -195,14 +179,13 @@ pub(super) fn build(render_app: &mut SubApp) {
             Render,
             prepare_lights.in_set(RenderSystems::PrepareBindGroups),
         )
-        .add_render_graph_node::<LightBinNode>(Core3d, LightBinLabel)
-        .add_render_graph_edges(Core3d, (LightBinLabel, Node3d::StartMainPass))
-        // The atlas slots the cells name are the ones the shadow pass just drew.
-        .add_render_graph_edge(Core3d, crate::static_gx::GxShadowLabel, LightBinLabel)
-        // fork: P8b — the froxels take their point lights from this frame's cells.
-        .add_render_graph_edge(
+        // The atlas slots the cells name are the ones the shadow pass just drew; fork: P8b — the
+        // froxels take their point lights from this frame's cells.
+        .add_systems(
             Core3d,
-            LightBinLabel,
-            crate::modern::volumetrics::FroxelLabel,
+            light_bin_pass
+                .after(crate::static_gx::gx_shadow_pass)
+                .before(crate::modern::volumetrics::froxel_pass)
+                .before(Core3dSystems::MainPass),
         );
 }

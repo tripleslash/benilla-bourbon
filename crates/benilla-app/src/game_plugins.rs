@@ -369,9 +369,22 @@ pub(crate) mod schedule_tests {
             // `initialize` fills the systems' access (the build would run it anyway); done
             // first so pass 1 can read it while the graph still holds the systems.
             schedule.graph_mut().systems.initialize(world);
+            // Each system's access, read back by initializing it again: 0.19 keeps the stored
+            // access private, and a function system's `initialize` keeps its state and only
+            // recomputes the access.
+            let accesses: HashMap<_, _> = {
+                let systems = &mut schedule.graph_mut().systems;
+                let keys: Vec<_> = systems.iter().map(|(key, _, _)| key).collect();
+                keys.into_iter()
+                    .filter_map(|key| {
+                        let system = systems.get_mut(key)?;
+                        Some((key, bevy::ecs::system::System::initialize(system, world)))
+                    })
+                    .collect()
+            };
             let vm = world
                 .components()
-                .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+                .get_id(TypeId::of::<benilla_ui::script::UiScript>());
             // Pass 1, before the build: the graph still holds the systems.
             let graph = schedule.graph();
             let set_conditions: HashMap<_, Vec<String>> = graph
@@ -390,9 +403,9 @@ pub(crate) mod schedule_tests {
             let mut systems = HashMap::new();
             let mut holds_vm = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
-                if let (Some(vm), Some(with_access)) = (vm, graph.systems.get(key)) {
-                    let access = with_access.access.combined_access();
-                    if access.has_resource_read(vm) || access.has_resource_write(vm) {
+                if let (Some(vm), Some(access)) = (vm, accesses.get(&key)) {
+                    let access = access.combined_access();
+                    if access.has_read(vm) || access.has_write(vm) {
                         holds_vm.insert(key);
                     }
                 }
@@ -575,14 +588,14 @@ pub(crate) mod schedule_tests {
             let resolve = |rows: &[ClassRow]| -> HashSet<ComponentId> {
                 rows.iter()
                     .map(|(name, type_id)| {
-                        comps.get_resource_id(type_id()).unwrap_or_else(|| {
+                        comps.get_id(type_id()).unwrap_or_else(|| {
                             panic!("`{name}` is in the class table but is not a resource of this world")
                         })
                     })
                     .collect()
             };
             Self {
-                vm: comps.get_resource_id(TypeId::of::<benilla_ui::script::UiScript>()),
+                vm: comps.get_id(TypeId::of::<benilla_ui::script::UiScript>()),
                 non_send: comps
                     .iter_registered()
                     .filter(|info| !info.is_send_and_sync())

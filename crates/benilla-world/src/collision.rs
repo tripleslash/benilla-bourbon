@@ -315,7 +315,7 @@ mod liquid_trace_mask {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -372,7 +372,7 @@ mod liquid_trace_mask {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -608,7 +608,7 @@ mod contact_pipeline {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
         ));
         if broad_phase {
             app.add_plugins(physics);

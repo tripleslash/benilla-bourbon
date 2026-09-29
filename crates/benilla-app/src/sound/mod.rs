@@ -391,7 +391,7 @@ impl Plugin for SoundPlugin {
             };
             Some(probe::Probe::start(dir, rate, m.audio_pos()))
         });
-        app.insert_non_send_resource(SoundOutput {
+        app.insert_non_send(SoundOutput {
             mixer,
             channels: Vec::new(),
             probe,

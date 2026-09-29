@@ -1878,7 +1878,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -1889,7 +1889,7 @@ mod tests {
             .id();
         let seen = |app: &mut App| -> Vec<String> {
             app.update();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -2138,7 +2138,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -2163,7 +2163,7 @@ mod tests {
                     flags,
                 )]));
             app.world_mut().run_system_once(feed_units).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -2238,7 +2238,7 @@ mod tests {
             let mut app = App::new();
             app.init_resource::<crate::ui_party::GroupState>()
                 .init_resource::<Reputations>();
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
 
             let me = app
                 .world_mut()
@@ -2269,7 +2269,7 @@ mod tests {
 
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(expr)
                 .unwrap()
         }
@@ -2367,7 +2367,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         let store = |kind, pairs: &[(u16, u32)]| {
             ObjectStore(ObjectFields::from_pairs(pairs).into_created(kind))
@@ -2412,7 +2412,7 @@ mod tests {
             });
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut().run_system_once(feed_units).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -2759,7 +2759,7 @@ mod tests {
         app.add_message::<FieldChanged>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_units);
         // Two vendors, told apart by level alone.
         let mut vendor = |level: u32| {
@@ -2774,7 +2774,7 @@ mod tests {
         let dobbins = vendor(9);
         let eval = |app: &mut App, expr: &str| -> i64 {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<i64>(expr)
                 .unwrap()
         };
@@ -2817,9 +2817,9 @@ mod tests {
         app.add_message::<crate::net::WorldportMessage>()
             .init_resource::<crate::ui_script::LeavingWorldArmed>()
             .add_systems(Update, fire_leaving_world_on_worldport);
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 "Left = 0 \
                  local f = CreateFrame(\"Frame\") \
@@ -2829,7 +2829,7 @@ mod tests {
             .expect("probe frame");
         let left = |app: &mut App| -> i64 {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<i64>("return Left")
                 .unwrap()
         };

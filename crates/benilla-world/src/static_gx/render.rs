@@ -398,7 +398,10 @@ fn prepare_static_gx(
     let layout_key = MeshPipelineViewLayoutKey::from(*view_key);
     let key = (msaa.samples(), format, modern, layout_key);
     if pipes.specialized_for != Some(key) {
-        pipes.view_layout = mesh_pipeline.get_view_layout(layout_key).main_layout.clone();
+        pipes.view_layout = mesh_pipeline
+            .get_view_layout(layout_key)
+            .main_layout
+            .clone();
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
         pipes.pipelines.clear();
@@ -1190,6 +1193,6 @@ mod tests {
 
 // fork: modern lighting (FORK.md) — see `modern/HOOKS.md`.
 mod modern_shadow;
-pub(crate) use modern_shadow::GxShadowLabel;
+pub(crate) use modern_shadow::gx_shadow_pass;
 mod modern_gi;
-pub(crate) use modern_gi::GxVoxelLabel;
+pub(crate) use modern_gi::gi_voxel_pass;

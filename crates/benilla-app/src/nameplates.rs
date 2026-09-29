@@ -343,7 +343,7 @@ pub(crate) fn drive_nameplates(
     }
     // Written only while a flash is live, so an idle frame does not re-upload the material.
     if flash.unit.is_some() {
-        if let Some(mat) = plates
+        if let Some(mut mat) = plates
             .materials
             .get(&NamePaint::Flash)
             .and_then(|h| materials.get_mut(h))

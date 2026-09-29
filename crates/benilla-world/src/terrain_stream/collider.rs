@@ -73,7 +73,11 @@ pub(super) fn finish_colliders(
     let t0 = Instant::now();
     let mut ready: Vec<Entity> = Vec::new();
     let mut pending = 0usize;
-    for (entity, mut pc) in state.get_mut(world).iter_mut() {
+    // A plain query always validates.
+    let Ok(mut pending_colliders) = state.get_mut(world) else {
+        return;
+    };
+    for (entity, mut pc) in pending_colliders.iter_mut() {
         pending += 1;
         if let Some(task) = pc.task.as_mut() {
             if let Some(collider) = block_on(future::poll_once(task)) {
@@ -499,7 +503,7 @@ mod tests {
                 MinimalPlugins,
                 bevy::transform::TransformPlugin,
                 bevy::asset::AssetPlugin::default(),
-                bevy::scene::ScenePlugin,
+                bevy::world_serialization::WorldSerializationPlugin,
                 avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
             ));
             app.init_asset::<Mesh>();

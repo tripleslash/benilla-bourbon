@@ -197,9 +197,13 @@ fn mount(to: ClientFlavor) -> anyhow::Result<Option<impl Fn(&str) -> bool>> {
     }))
 }
 
+/// A mounted layer's membership test.
+#[cfg(not(target_arch = "wasm32"))]
+type LayerContains = fn(&str) -> bool;
+
 /// Native has no Turtle layer: a Turtle realm cannot be played, and Vanilla is all there is.
 #[cfg(not(target_arch = "wasm32"))]
-fn mount(to: ClientFlavor) -> anyhow::Result<Option<fn(&str) -> bool>> {
+fn mount(to: ClientFlavor) -> anyhow::Result<Option<LayerContains>> {
     match to {
         ClientFlavor::Turtle => anyhow::bail!("this build has no Turtle WoW layer (web only)"),
         ClientFlavor::Vanilla => Ok(None),

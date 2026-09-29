@@ -21,7 +21,6 @@ pub mod look;
 pub mod shadow;
 mod sky;
 pub mod sun_arc;
-mod tick_heal;
 pub mod volumetrics;
 
 /// The moonlight floor a modern night keeps (gamma, the ambient row's units), ramped in by the SIDN
@@ -326,7 +325,6 @@ impl Plugin for ModernLightingPlugin {
             .add_plugins((
                 sun_arc::plugin,
                 shadow::plugin,
-                tick_heal::plugin,
                 look::plugin,
                 sky::plugin,
                 volumetrics::plugin,

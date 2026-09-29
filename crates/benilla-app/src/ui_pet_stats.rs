@@ -611,13 +611,13 @@ mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         app.update();
 
         let saw: String = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return BENILLA_SAW")
             .unwrap();
         assert_eq!(

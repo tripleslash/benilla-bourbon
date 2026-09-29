@@ -996,7 +996,9 @@ fn compute_pvs_traced<T: FloodTrace>(
     // the flood's per-group callback without the recursion). Both legs run it: the camera-outside
     // seed `0x6b3dd0` forks on the same bit. Every arm frustum-tests the MOGI AABB first
     // (`0x6b3d9d`, `0x6b3f2d`, `call 0x682f60`).
-    let base = Frustum::from_clip_from_world(clip_from_world);
+    let base = Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        clip_from_world,
+    ));
     for (gi, g) in nav.iter().enumerate() {
         if flood.visible[gi] || g.flags & CALLBACK_PASS == 0 {
             continue;

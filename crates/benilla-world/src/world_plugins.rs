@@ -179,7 +179,7 @@ impl Plugin for WorldFoundation {
         }
         // Static transform tracking always on: movers are 1–3% of the world, so the adaptive
         // check's two full scans a frame could only ever conclude "track".
-        app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
+        app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::Enabled);
         // The retained static-world pass; `WOW_STATIC_GX=0` opts out, registering nothing.
         app.add_plugins(crate::static_gx::StaticGxPlugin);
         // `WOW_MERGE_CENSUS=1`: the merge census printer.

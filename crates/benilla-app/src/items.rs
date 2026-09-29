@@ -520,7 +520,7 @@ impl TestDeps {
     ) -> R {
         let (world, items, commands) = (&mut self.world, &self.items, &self.commands);
         let mut state = bevy::ecs::system::SystemState::<Objects>::new(world);
-        let objects = state.get(world);
+        let objects = state.get(world).expect("`Objects` validates");
         f(&objects, items, commands)
     }
 

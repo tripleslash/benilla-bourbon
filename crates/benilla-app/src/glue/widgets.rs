@@ -215,8 +215,8 @@ fn outlined_spans<W: Bundle, T: Bundle>(
         justify,
     };
     let tf = TextFont {
-        font: font.clone(),
-        font_size: size * s,
+        font: font.clone().into(),
+        font_size: FontSize::Px(size * s),
         ..default()
     };
     let flat: String = spans.iter().map(|(t, _)| t.as_str()).collect();
@@ -438,8 +438,8 @@ pub(crate) fn dial_arrow<A: Component>(
                 inner.spawn((
                     Text::new(fallback.to_string()),
                     TextFont {
-                        font: font.clone(),
-                        font_size: 14.0 * s,
+                        font: font.clone().into(),
+                        font_size: FontSize::Px(14.0 * s),
                         ..default()
                     },
                     TextColor(GOLD),
@@ -656,8 +656,8 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
                         part,
                         Text::new(""),
                         TextFont {
-                            font: edit_font.clone(),
-                            font_size: EDIT_FONT_SIZE * s, // GlueEditBoxFont
+                            font: edit_font.clone().into(),
+                            font_size: FontSize::Px(EDIT_FONT_SIZE * s), // GlueEditBoxFont
                             ..default()
                         },
                         // Its own component in Bevy 0.18, not a `TextFont` field.

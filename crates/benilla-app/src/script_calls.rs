@@ -228,7 +228,7 @@ mod tests {
                 }),
             );
         }
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         Frame { app, rx }
     }
 
@@ -236,7 +236,7 @@ mod tests {
     fn run(f: &mut Frame, lua: &str) {
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(lua)
             .expect("the script runs");
         f.app
@@ -554,7 +554,7 @@ mod tests {
         let mut f = frame(true);
         {
             let world = f.app.world_mut();
-            let script = world.non_send_resource::<UiScript>();
+            let script = world.non_send::<UiScript>();
             // `ChatFrame1`'s `EXECUTE_CHAT_LINE` handler (`ChatFrame.lua:1343`) sends the line
             // through the edit box; this one runs it as Lua, which is all the order needs.
             script

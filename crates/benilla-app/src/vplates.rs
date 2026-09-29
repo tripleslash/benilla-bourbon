@@ -217,7 +217,7 @@ pub(crate) fn apply_plate_verbs(
 /// whose `UI_Init` fires `VARIABLES_LOADED` at `0x4900b2`): the load's replay is cleared, and
 /// the one at `PLAYER_ENTERING_WORLD` decides. A `ReloadUI()` never reaches it.
 pub(crate) fn clear_at_world_entry(world: &mut World) {
-    if let Some(mut script) = world.get_non_send_resource_mut::<benilla_ui::script::UiScript>() {
+    if let Some(mut script) = world.get_non_send_mut::<benilla_ui::script::UiScript>() {
         let _ = script.take_nameplate_bit_writes();
     }
     if let Some(mut mode) = world.get_resource_mut::<VPlateMode>() {
@@ -718,13 +718,13 @@ mod tests {
         let mut app = App::new();
         app.add_systems(Update, apply_plate_verbs)
             .init_resource::<VPlateMode>()
-            .insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+            .insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         app
     }
 
     fn run(app: &mut App, lua: &str) {
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .run(lua)
             .unwrap();
         app.update();
@@ -737,7 +737,7 @@ mod tests {
 
     fn global(app: &App, name: &str) -> Option<i64> {
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .lua()
             .globals()
             .get::<Option<i64>>(name)
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(mode(&app), (true, true));
         // The load's replay, not yet drained when the entry clears.
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .run("ShowNameplates()")
             .unwrap();
         clear_at_world_entry(app.world_mut());
@@ -796,12 +796,12 @@ mod tests {
         crate::ui_script::load_stock_bindings(
             &mut app
                 .world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>(),
+                .non_send_mut::<benilla_ui::script::UiScript>(),
         );
         let key = |app: &mut App, command: &str| {
             assert!(app
                 .world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
+                .non_send::<benilla_ui::script::UiScript>()
                 .execute_binding(command, true)
                 .unwrap());
             app.update();
@@ -858,7 +858,7 @@ mod tests {
         );
         assert!(
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .take_cvar_changes()
                 .is_empty(),
             "no CVar: nothing reaches config.toml"

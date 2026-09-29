@@ -292,7 +292,10 @@ fn setup_drift(
         s.variant = benilla_assets::BlpVariant::PointSprite;
     };
     commands.insert_resource(DriftAssets {
-        motes: asset_server.load_with_settings("mpq://textures/waterpoop02.blp", point_sprite),
+        motes: asset_server
+            .load_builder()
+            .with_settings(point_sprite)
+            .load("mpq://textures/waterpoop02.blp"),
     });
 }
 

@@ -18,11 +18,11 @@ Every edit it needs inside a file that upstream benilla also edits is listed her
 
 ## Scheduling rule: add no systems to `PostUpdate`
 
-Bevy 0.18 schedules `check_entities_needing_specialization::<M>` in `PostUpdate`, unordered against upstream's material writers (`model_fade`, `straddle`, `zfill`, `model_render` lazy spawns, `static_gx` cull…). Adding any system there reshuffles the single-threaded executor's order. A writer can then land after the check, and the render world panics at `bevy_pbr` `material.rs:1061` in classic and modern alike (bisected 2026-09-15).
+Bevy 0.18 scheduled `check_entities_needing_specialization::<M>` in `PostUpdate`, unordered against upstream's material writers (`model_fade`, `straddle`, `zfill`, `model_render` lazy spawns, `static_gx` cull…). Adding any system there reshuffled the single-threaded executor's order; a writer could then land after the check, and the render world panicked at `bevy_pbr` `material.rs:1061` (a missing `EntitySpecializationTicks` entry) in classic and modern alike (bisected 2026-09-15). `modern::tick_heal` inserted the missing tick.
+
+Bevy 0.19 replaced the tick table with change lists: `specialize_material_meshes` skips an entity it has no entry for (`let … else continue`), and a writer that lands after the check is picked up by the next frame's `Changed<>` query. The panic path no longer exists, so `tick_heal` is deleted. The rule stands for the frame it would still cost: a late writer's mesh draws one frame late.
 
 Fork systems go in `PreUpdate`, `Update` or `Last`.
-
-The race also fires from data alone: the sun arc moving the sky was enough. So `modern::tick_heal` (always registered, classic too) inserts the missing tick just before `specialize_material_meshes`, and warns the first time it does.
 
 ## Live hooks
 

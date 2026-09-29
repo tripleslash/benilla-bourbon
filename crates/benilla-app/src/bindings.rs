@@ -655,6 +655,7 @@ mod tests {
     }
     fn wheel(app: &mut App, y: f32) {
         app.world_mut().write_message(MouseWheel {
+            phase: bevy::input::touch::TouchPhase::Moved,
             unit: MouseScrollUnit::Line,
             x: 0.0,
             y,
@@ -695,14 +696,14 @@ mod tests {
             .init_resource::<BindingsState>()
             .init_resource::<BindingDispatch>()
             .add_systems(Update, (sync_dispatch, latch_and_dispatch).chain());
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
     /// A counter a binding body left in the VM; `0` when the body never ran.
     fn lua_count(app: &App, global: &str) -> i64 {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>(&format!("return {global} or 0"))
             .expect("eval")
     }
@@ -710,7 +711,7 @@ mod tests {
     /// A string a binding body left in the VM; `""` when it never ran.
     fn lua_str(app: &App, global: &str) -> String {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>(&format!(r#"return {global} or """#))
             .expect("eval")
     }
@@ -1050,7 +1051,7 @@ mod tests {
 
         // Outside a binding body (a macro, `RunScript`, an addon's own code) nothing moves.
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("MoveForwardStart() Jump() ToggleAutoRun() RunBinding('MOVEFORWARD')")
             .expect("the calls answer");
         app.update();
@@ -1066,7 +1067,7 @@ mod tests {
         let mut app = harness();
         let run = |app: &mut App, lua: &str| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .run(lua)
                 .expect("the call answers");
             app.update();
@@ -1399,11 +1400,11 @@ mod tests {
         app.add_message::<bevy::input::keyboard::KeyboardFocusLost>();
         let script_starts = |app: &mut App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .execute_binding("MOVEANDSTEER", true)
                 .expect("runs");
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .execute_binding("MOVEFORWARD", true)
                 .expect("runs");
             app.update();
@@ -1467,7 +1468,7 @@ mod tests {
         // `IsBagOpen(id)` scans `ContainerFrame1..12`: which window a bag lands in varies.
         let open = |app: &App, id: i64| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return IsBagOpen({id}) ~= nil"))
                 .expect("eval")
         };

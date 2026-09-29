@@ -576,8 +576,8 @@ fn rotate_cluster(ui: &mut ChildSpawnerCommands, art: &GlueArt, font: &Handle<Fo
                             inner.spawn((
                                 Text::new(if flip { "<" } else { ">" }),
                                 TextFont {
-                                    font: font.clone(),
-                                    font_size: 16.0 * s,
+                                    font: font.clone().into(),
+                                    font_size: FontSize::Px(16.0 * s),
                                     ..default()
                                 },
                                 TextColor(GOLD),

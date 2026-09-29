@@ -443,7 +443,7 @@ pub(crate) struct UiModelsPlugin;
 impl Plugin for UiModelsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiModelTiles>()
-            .init_non_send_resource::<TileState>()
+            .init_non_send::<TileState>()
             .add_systems(Startup, setup_tiles)
             // Ahead of the extract, which publishes the tile requests (`paint_script`).
             .add_systems(

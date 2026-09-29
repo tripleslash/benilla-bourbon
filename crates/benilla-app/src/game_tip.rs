@@ -234,9 +234,9 @@ impl Plugin for GameTipPlugin {
 }
 
 /// Hides the tip node, drops its spans and re-inserts an empty `Text`. The re-insert matters:
-/// despawning a `Text` root's last `TextSpan` removes `Children` rather than changing it, bevy
-/// 0.18's `detect_text_needs_rerender` misses a removal, and the next resize re-lays-out a stale
-/// buffer and panics in `bevy_text`. [`crate::text_reshape`] guards the same hole app-wide.
+/// despawning a `Text` root's last `TextSpan` removes `Children` rather than changing it,
+/// `detect_text_needs_rerender` misses a removal, and the root keeps its stale shaped layout.
+/// [`crate::text_reshape`] guards the same hole app-wide.
 fn empty_tip(e: &mut EntityCommands, vis: &mut Visibility) {
     *vis = Visibility::Hidden;
     e.despawn_related::<Children>();
@@ -307,8 +307,8 @@ fn drive_game_tip(
     n.left = Val::Percent(left);
     n.bottom = Val::Percent(bottom);
     n.width = Val::Percent(width);
-    font.font = crate::char_select::wow_font(&assets);
-    font.font_size = l.font_size;
+    font.font = crate::char_select::wow_font(&assets).into();
+    font.font_size = FontSize::Px(l.font_size);
     shadow.offset = l.shadow;
     shadow.color = Color::BLACK;
     *vis = Visibility::Inherited;
@@ -479,7 +479,6 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
         crate::text_reshape::harness::add_text_plugins(&mut app);
-        app.add_systems(PostUpdate, bevy::text::detect_text_needs_rerender::<Text>);
         app.init_resource::<crate::cvars::Cvars>();
         app.init_resource::<GameTipSetting>();
         app.insert_resource(GameTips {
@@ -535,7 +534,8 @@ mod tests {
         assert_eq!(node.bottom, Val::Percent(geometry().1));
         assert_eq!(node.width, Val::Percent(geometry().2));
         assert!(
-            w.get::<TextFont>(tip).is_some_and(|f| f.font_size > 0.0),
+            w.get::<TextFont>(tip)
+                .is_some_and(|f| matches!(f.font_size, FontSize::Px(px) if px > 0.0)),
             "the font height is resolved from the window"
         );
         // The cursor moved with it: `gameTip` holds the next row.
@@ -587,8 +587,8 @@ mod tests {
     }
 
     /// After the dismiss the root holds no text and the block is marked for a re-shape, so a later
-    /// resize cannot index a despawned run (the loading screen's root is hidden, never despawned).
-    /// [`crate::text_reshape`] shows the re-shape is what stops the panic.
+    /// resize cannot keep a despawned run (the loading screen's root is hidden, never despawned).
+    /// [`crate::text_reshape`] shows the re-shape is what drops it.
     #[test]
     fn the_dismiss_leaves_the_node_reshapeable() {
         let (mut app, tip) = tip_app();
@@ -616,7 +616,7 @@ mod tests {
             app.world()
                 .get::<bevy::text::ComputedTextBlock>(tip)
                 .expect("the block")
-                .needs_rerender(),
+                .needs_rerender(false, false),
             "and the block is marked for the re-shape a later resize would otherwise skip"
         );
     }

@@ -31,21 +31,17 @@
 //! why its `ProcWaterAbove` lerps `.x` against `.y` before taking the gradient.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{
     sampler, storage_buffer_read_only_sized, texture_2d,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -586,9 +582,6 @@ pub(super) fn collect_stamps(
 
 // ---------------------------------------------------------------- render world
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct RippleLabel;
-
 #[derive(Resource)]
 struct RipplePipeline {
     layout: BindGroupLayoutDescriptor,
@@ -773,7 +766,7 @@ fn ripple_pass(
                 },
             );
         }
-}
+    }
 }
 
 /// Wire the ripple simulation into the app. Called from [`super::LiquidPlugin`].
@@ -800,17 +793,15 @@ pub(super) fn register(app: &mut App) {
             Render,
             upload_ripple.in_set(RenderSystems::PrepareResources),
         )
-        .add_render_graph_node::<ViewNodeRunner<RippleNode>>(Core3d, RippleLabel)
         // Before the transparent pass, where the water reads the field. It has no dependency on
         // anything the opaque pass produced — the sim is world-space and self-contained — so this
-        // edge is about being finished in time, not about ordering against a producer.
-        .add_render_graph_edges(
+        // order is about being finished in time, not about ordering against a producer.
+        .add_systems(
             Core3d,
-            (
-                Node3d::MainOpaquePass,
-                RippleLabel,
-                Node3d::MainTransparentPass,
-            ),
+            ripple_pass
+                .in_set(Core3dSystems::MainPass)
+                .after(main_opaque_pass_3d)
+                .before(main_transparent_pass_3d),
         );
 }
 

@@ -452,11 +452,11 @@ mod tests {
             .init_resource::<crate::net::Reputations>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_action_state);
         app.update();
 
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         let usable = |action: u32| {
             script
                 .eval::<bool>(&format!(
@@ -570,11 +570,11 @@ mod tests {
                     (PACK_SLOT_1, 0xF0),
                 ])),
             ));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.add_systems(Update, feed_action_state);
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>("return (IsUsableAction(1)) and true or false")
                 .unwrap()
         };

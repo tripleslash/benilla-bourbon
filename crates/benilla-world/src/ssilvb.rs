@@ -27,22 +27,18 @@
 //! Either at zero returns its half to an exact no-op; both at zero and this node never runs, which
 //! is the state a visual A/B is taken against.
 
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{
     texture_2d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
     uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
@@ -195,9 +191,6 @@ fn arm_depth_binding(
 }
 
 // ---------------------------------------------------------------- render world
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct SsilvbLabel;
 
 /// The two layouts and the four pipelines, **per MSAA sample count**.
 ///
@@ -385,7 +378,7 @@ fn build_variant(
 
 /// The gather target and its blur ping-pong, plus the 16-byte params uniform.
 #[derive(Component)]
-struct SsilvbTextures {
+pub(crate) struct SsilvbTextures {
     /// The gather writes here, and the vertical blur writes back into it — so this is what the
     /// composite reads.
     a: CachedTexture,
@@ -611,7 +604,7 @@ pub(crate) fn ssilvb_pass(
         pass.set_pipeline(composite);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
-}
+    }
 }
 
 pub struct SsilvbPlugin;
@@ -636,19 +629,16 @@ impl Plugin for SsilvbPlugin {
                 Render,
                 (prepare_textures, specialize_pipelines).in_set(RenderSystems::PrepareResources),
             )
-            .add_render_graph_node::<ViewNodeRunner<SsilvbNode>>(Core3d, SsilvbLabel)
-            .add_render_graph_edges(
+            // Between the opaque and transparent passes, and after the retained cell pass: without
+            // that the gather could run before Stormwind's walls had written any depth at all.
+            .add_systems(
                 Core3d,
-                (
-                    Node3d::MainOpaquePass,
-                    SsilvbLabel,
-                    Node3d::MainTransparentPass,
-                ),
-            )
-            // …and after the retained cell pass, which since 2016 draws ahead of the opaque one:
-            // without this edge the gather could run before Stormwind's walls had written any
-            // depth at all.
-            .add_render_graph_edge(Core3d, crate::static_gx::StaticGxLabel, SsilvbLabel);
+                ssilvb_pass
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .after(crate::static_gx::static_gx_pass)
+                    .before(main_transparent_pass_3d),
+            );
     }
 }
 

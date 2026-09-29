@@ -422,7 +422,7 @@ mod tests {
     /// Run the card resolve against a world's live `ChildOf` topology.
     fn resolve(world: &mut World, map: &EntityHashMap<u8>, follows: Option<Entity>) -> Option<u8> {
         let mut state: SystemState<Query<&ChildOf>> = SystemState::new(world);
-        card_root_shade(map, &state.get(world), follows)
+        card_root_shade(map, &state.get(world).unwrap(), follows)
     }
 
     #[test]

@@ -2105,14 +2105,14 @@ mod tests {
             }));
             script.run("ShowRepairCursor()").unwrap();
             assert!(script.repair_mode(), "the repair vendor arms repair mode");
-            world.insert_non_send_resource(script);
+            world.insert_non_send(script);
 
             world.run_system_once(latch_world_mouse).unwrap();
             world.run_system_once(send_world_right_press).unwrap();
             world
                 .run_system_once(crate::ui_merchant::end_repair_mode_on_right_press)
                 .unwrap();
-            world.non_send_resource::<UiScript>().repair_mode()
+            world.non_send::<UiScript>().repair_mode()
         };
 
         assert!(

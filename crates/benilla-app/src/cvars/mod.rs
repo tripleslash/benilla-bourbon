@@ -1142,7 +1142,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         return;
     }
     let (registrations, changes) = {
-        let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() else {
+        let Some(mut script) = world.get_non_send_mut::<UiScript>() else {
             return;
         };
         (script.take_cvar_registrations(), script.take_cvar_changes())
@@ -2014,7 +2014,7 @@ mod tests {
         assert_eq!(app.world().resource::<SoundConfig>().music, 0.1);
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .cvar("MusicVolume")
                 .as_deref(),
             Some("0.1")
@@ -2022,7 +2022,7 @@ mod tests {
 
         // The Lua write (what a settings slider will do) reaches the knob on the next frame…
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetCVar("MusicVolume", 0.75)"#)
             .unwrap();
         app.update();
@@ -2063,7 +2063,7 @@ mod tests {
         let mut app = cvar_app();
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetCVar("MusicVolume", 0.33)"#)
             .unwrap();
         app.update(); // sync_cvars drains the change and stamps last_change
@@ -2145,7 +2145,7 @@ mod tests {
         let mut app = cvar_app();
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetCVar("hdCharacterModels", 0)"#)
             .unwrap();
         app.update();
@@ -2233,7 +2233,7 @@ mod tests {
         for observer in ALL_OBSERVERS {
             observer(&mut app);
         }
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app
     }
 
@@ -2433,7 +2433,7 @@ mod tests {
             (z.outdoor, z.inside)
         };
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             assert_eq!(script.cvar("minimapZoom").as_deref(), Some("5"));
             // The widget is born first, then the persisted level is pushed into it: seeding a
             // widget that does not exist is a no-op.
@@ -2454,7 +2454,7 @@ mod tests {
         );
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("m:SetZoom(1)")
             .unwrap();
         app.update();

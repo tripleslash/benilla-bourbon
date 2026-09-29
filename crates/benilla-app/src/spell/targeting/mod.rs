@@ -548,7 +548,7 @@ mod tests {
         });
         let mut script = UiScript::new().expect("a VM");
         script.set_spell_targeting(true);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         (world, rx, ally)
     }
 
@@ -563,7 +563,7 @@ mod tests {
     /// Queue `SpellTargetUnit(token)` in the VM, then apply it.
     fn spell_target_unit(world: &mut World, token: &str) {
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!("SpellTargetUnit({token:?})"))
             .expect("a known token");
         world
@@ -661,7 +661,7 @@ mod tests {
                 .run_system_cached(feed_targeting_to_vm)
                 .expect("the feed runs");
             world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
                 .expect("a boolean")
         };

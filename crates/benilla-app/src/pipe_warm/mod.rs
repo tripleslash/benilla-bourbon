@@ -536,7 +536,7 @@ type ViewCamQuery<'w, 's> = Query<
         Option<&'static Name>,
         Option<&'static Projection>,
         Option<&'static Msaa>,
-        Has<bevy::render::view::Hdr>,
+        Has<bevy::camera::Hdr>,
     ),
     With<Camera3d>,
 >;
@@ -584,7 +584,7 @@ type AnchorViewQuery<'w, 's> = Query<
         Entity,
         Option<&'static Projection>,
         Option<&'static Msaa>,
-        Has<bevy::render::view::Hdr>,
+        Has<bevy::camera::Hdr>,
     ),
     With<Camera3d>,
 >;

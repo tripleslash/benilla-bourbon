@@ -222,14 +222,16 @@ fn ui_gamma_decode(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let scissor = out.scissor_rect();
-    let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
-        label: Some("ui_gamma_decode"),
-        color_attachments: &[Some(out.destination)],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("ui_gamma_decode"),
+            color_attachments: &[Some(out.destination)],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
     if let Some((x, y, w, h)) = scissor {
         pass.set_scissor_rect(x, y, w, h);
     }

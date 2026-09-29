@@ -416,10 +416,12 @@ mod tests {
         // In isolation: a bare `load()` of the same path would share the handle and its settings.
         let tile = "mpq://textures/Minimap/ea283abc0bf9637c3fad5e840a65b38b.blp";
         let server = app.world().resource::<AssetServer>().clone();
-        let sprite_h: Handle<Image> =
-            server.load_with_settings(tile, |s: &mut BlpLoaderSettings| {
+        let sprite_h: Handle<Image> = server
+            .load_builder()
+            .with_settings(|s: &mut BlpLoaderSettings| {
                 s.variant = BlpVariant::Sprite;
-            });
+            })
+            .load(tile);
 
         let mut sprite_fmt = None;
         // A generous ceiling: a parallel gate run starves the IO pool.
@@ -435,7 +437,7 @@ mod tests {
         assert_eq!(
             sprite_fmt,
             Some(TextureFormat::Rgba8UnormSrgb),
-            "load_with_settings(Sprite) must produce an sRGB tile on the async mpq:// path"
+            "load_builder().with_settings(Sprite) must produce an sRGB tile on the async mpq:// path"
         );
     }
 

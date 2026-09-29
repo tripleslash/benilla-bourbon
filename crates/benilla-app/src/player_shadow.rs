@@ -278,7 +278,7 @@ fn update_world_shadow(
                     // The light exists to populate a shadow map. WoW's existing shader lighting
                     // remains authoritative, so this light must not add a second diffuse term.
                     illuminance: 0.0,
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     // Keep enough separation from the receiver to avoid shadow-map acne on WMO
                     // floors, while staying small enough that the silhouette remains attached.
                     // The old 0.003/0.15 pair was below the useful texel-scale bias for Stormwind
@@ -353,8 +353,8 @@ fn update_world_shadow(
     // despawn under entity lifecycles this module cannot cheaply observe — the whole caster
     // population is collected fresh every frame.
     if let Some(handle) = runtime.dynamic_mesh.clone() {
-        if let Some(mesh) = meshes.get_mut(&handle) {
-            let (mut positions, mut indices) = take_mesh_buffers(mesh);
+        if let Some(mut mesh) = meshes.get_mut(&handle) {
+            let (mut positions, mut indices) = take_mesh_buffers(&mut mesh);
             let (admitted, rejected) = collect_world_geometry(
                 &parts,
                 &rigs,
@@ -366,7 +366,7 @@ fn update_world_shadow(
                 &mut indices,
             );
             let dynamic_tris = (indices.len() / 3) as u32;
-            restore_mesh_buffers(mesh, positions, indices);
+            restore_mesh_buffers(&mut mesh, positions, indices);
             if shadow_trace() {
                 let now = (dynamic_tris, admitted, rejected);
                 if runtime.traced != now {

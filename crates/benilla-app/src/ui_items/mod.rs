@@ -534,7 +534,7 @@ impl TestObjects {
     }
 
     pub(crate) fn get(&mut self) -> Objects<'_, '_> {
-        self.state.get(&self.world)
+        self.state.get(&self.world).expect("`Objects` validates")
     }
 }
 

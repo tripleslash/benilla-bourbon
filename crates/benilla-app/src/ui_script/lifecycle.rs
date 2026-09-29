@@ -26,7 +26,7 @@ fn install_boot_vm(world: &mut World) {
     };
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
 }
 
 /// A fresh VM on the process clock with the addon asset probes wired, or `None` (the world's VM
@@ -36,7 +36,7 @@ fn new_vm(world: &mut World) -> Option<UiScript> {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
-            world.remove_non_send_resource::<UiScript>();
+            world.remove_non_send::<UiScript>();
             return None;
         }
     };
@@ -250,8 +250,8 @@ pub(crate) struct ParkedBootVm(UiScript);
 /// `OnEnter(InWorld)`: arm the deferred entry load and park the boot VM.
 pub(crate) fn arm_entry_ui_load(world: &mut World) {
     world.insert_resource(PendingEntryUiLoad::default());
-    if let Some(vm) = world.remove_non_send_resource::<UiScript>() {
-        world.insert_non_send_resource(ParkedBootVm(vm));
+    if let Some(vm) = world.remove_non_send::<UiScript>() {
+        world.insert_non_send(ParkedBootVm(vm));
     }
 }
 
@@ -265,7 +265,7 @@ pub(crate) fn arm_entry_ui_load(world: &mut World) {
 fn mint_entry_vm(world: &mut World) {
     crate::cvars::fold_dying_vm_cvars(world);
     if let Some(script) = new_vm(world) {
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
     }
 }
 
@@ -279,8 +279,8 @@ pub(crate) fn reinstall_boot_vm(world: &mut World) {
 
 /// Put the parked boot VM back into the world, if one is parked.
 fn unpark_boot_vm(world: &mut World) {
-    if let Some(ParkedBootVm(vm)) = world.remove_non_send_resource::<ParkedBootVm>() {
-        world.insert_non_send_resource(vm);
+    if let Some(ParkedBootVm(vm)) = world.remove_non_send::<ParkedBootVm>() {
+        world.insert_non_send(vm);
     }
 }
 
@@ -364,9 +364,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // The parked VM first (`ParkedBootVm` — the ordinary path since 1978, and every slice after
     // the first), then the world's own: the freshly minted entry VM on the first slice.
     let parked = world
-        .remove_non_send_resource::<ParkedBootVm>()
+        .remove_non_send::<ParkedBootVm>()
         .map(|ParkedBootVm(vm)| vm);
-    let Some(mut script) = parked.or_else(|| world.remove_non_send_resource::<UiScript>()) else {
+    let Some(mut script) = parked.or_else(|| world.remove_non_send::<UiScript>()) else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         world.remove_resource::<PendingEntryUiLoad>();
         crate::vplates::clear_at_world_entry(world);
@@ -495,7 +495,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     .unwrap_or_default();
                 entry_finish(world, &mut script, pending.identity.clone());
                 script.pop_sound_suppression();
-                world.insert_non_send_resource(script);
+                world.insert_non_send(script);
                 arm_leaving_world(world);
                 // The world entry's own step after the UI load, which a `ReloadUI()` never takes.
                 crate::vplates::clear_at_world_entry(world);
@@ -510,7 +510,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     pending.frames,
                     pending.covering,
                     world
-                        .get_non_send_resource::<UiScript>()
+                        .get_non_send::<UiScript>()
                         .map_or(0, UiScript::session),
                 );
                 return;
@@ -523,7 +523,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // Back into the park, not into the world: the tree is still part-built, and 1978's whole
     // point is that no feed sees a VM in that state. `Finish` above is the one exit that
     // publishes it.
-    world.insert_non_send_resource(ParkedBootVm(script));
+    world.insert_non_send(ParkedBootVm(script));
 }
 
 /// Start every chain-sourced manifest entry's pack warming, and return at once.
@@ -743,7 +743,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         return;
     }
     mint_entry_vm(world);
-    let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
+    let Some(mut script) = world.remove_non_send::<UiScript>() else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
@@ -756,7 +756,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
         entry_finish(world, script, identity);
     });
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     arm_leaving_world(world);
 }
 
@@ -912,7 +912,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
         .get_resource_mut::<LeavingWorldArmed>()
         .is_some_and(|mut l| l.spend());
     if !ui_never_loaded {
-        if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+        if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
             shutdown_ui_state(&mut script, identity.as_ref(), leaving_world);
         }
     }
@@ -1138,21 +1138,21 @@ mod tests {
         let mut world = World::new();
         let boot = UiScript::new().unwrap();
         let session = boot.session();
-        world.insert_non_send_resource(boot);
+        world.insert_non_send(boot);
         arm_entry_ui_load(&mut world);
         assert!(
-            world.get_non_send_resource::<UiScript>().is_none(),
+            world.get_non_send::<UiScript>().is_none(),
             "no VM in the deferral window"
         );
         assert!(world.get_resource::<PendingEntryUiLoad>().is_some());
-        assert!(world.get_non_send_resource::<ParkedBootVm>().is_some());
+        assert!(world.get_non_send::<ParkedBootVm>().is_some());
         // Left the world before the load ran: the VM comes back, untouched.
         unpark_boot_vm(&mut world);
         let vm = world
-            .get_non_send_resource::<UiScript>()
+            .get_non_send::<UiScript>()
             .expect("the parked VM is back");
         assert_eq!(vm.session(), session, "the same VM, no session moved");
-        assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+        assert!(world.get_non_send::<ParkedBootVm>().is_none());
     }
 
     /// The plate bits clear at the world entry (`0x401639`, in the entry setup `0x401570`) and
@@ -1190,12 +1190,12 @@ mod tests {
         let mut world = World::new();
         let glue = UiScript::new().unwrap();
         let glue_session = glue.session();
-        world.insert_non_send_resource(glue);
+        world.insert_non_send(glue);
 
         mint_entry_vm(&mut world);
 
         let entry = world
-            .get_non_send_resource::<UiScript>()
+            .get_non_send::<UiScript>()
             .expect("the entry load has a VM to run on");
         assert_ne!(
             entry.session(),
@@ -1210,22 +1210,22 @@ mod tests {
     #[test]
     fn a_one_shot_spent_against_the_character_screens_vm_is_spent_again_after_the_entry() {
         let mut world = World::new();
-        world.insert_non_send_resource(UiScript::new().expect("a glue VM"));
+        world.insert_non_send(UiScript::new().expect("a glue VM"));
         let mut told: super::super::VmMemo<bool> = Default::default();
 
         assert!(
-            told.claim(world.non_send_resource::<UiScript>()),
+            told.claim(world.non_send::<UiScript>()),
             "the window: a feed fires its login one-shot at the frameless character-screen VM"
         );
         assert!(
-            !told.claim(world.non_send_resource::<UiScript>()),
+            !told.claim(world.non_send::<UiScript>()),
             "and the memo has it as told — which is correct for THAT VM"
         );
 
         mint_entry_vm(&mut world);
 
         assert!(
-            told.claim(world.non_send_resource::<UiScript>()),
+            told.claim(world.non_send::<UiScript>()),
             "the VM the in-game UI loads onto has never been told, so the feed tells it again — \
              no run condition, no ordering edge, and nothing the feed had to know about"
         );
@@ -1248,14 +1248,14 @@ mod tests {
         world.insert_resource(time);
         let mut dying = UiScript::new().unwrap();
         dying.set_now(90.0);
-        world.insert_non_send_resource(dying);
+        world.insert_non_send(dying);
         // No in-game UI was loaded, so the shutdown tail and its file writes are skipped.
         world.init_resource::<PendingEntryUiLoad>();
 
         end_ui_session(&mut world);
 
         let vm = world
-            .get_non_send_resource::<UiScript>()
+            .get_non_send::<UiScript>()
             .expect("the session end installs a fresh boot VM");
         assert_eq!(
             vm.now(),

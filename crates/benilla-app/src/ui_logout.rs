@@ -295,11 +295,11 @@ mod tests {
             .add_message::<LoggedOutMessage>()
             .insert_resource(SelfGuid(Some(0x4000_0000_0000_0009)))
             .insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
 
         let ask = |app: &mut App, request| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .queue_session_request(request);
             app.world_mut()
                 .run_system_once(drain_logout)

@@ -1175,12 +1175,12 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
     fn seen(app: &mut App) -> Vec<String> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let out = script.eval::<Vec<String>>("return SEEN").unwrap();
         script.run("SEEN = {}").unwrap();
         out
@@ -1309,7 +1309,7 @@ mod tests {
         let _ = seen(&mut app);
         assert!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(r#"return IsInventoryItemLocked(64) and true or false"#)
                 .unwrap(),
             "in flight, the slot reads locked"
@@ -1324,7 +1324,7 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         assert!(
             !app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(r#"return IsInventoryItemLocked(64) and true or false"#)
                 .unwrap(),
             "the unlock has to reach the VM in the same frame it happened"

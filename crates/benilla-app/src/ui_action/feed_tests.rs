@@ -62,7 +62,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
             ItemDisplayCatalog::from_displays(displays),
         ))
         .insert_resource(NetCommands(tx));
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     app.add_systems(Update, feed_actions);
     (app, rx)
 }
@@ -71,7 +71,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
 /// (`ActionButton.lua:157`); a nil hides the icon.
 fn fed_texture(app: &mut App) -> Option<String> {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<String>>(&format!("return GetActionTexture({JERKY_ACTION})"))
         .unwrap()
 }
@@ -80,7 +80,7 @@ fn fed_texture(app: &mut App) -> Option<String> {
 /// (`ActionButton.lua:287`): 1 or nil.
 fn fed_consumable(app: &mut App) -> Option<i64> {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<i64>>(&format!("return IsConsumableAction({JERKY_ACTION})"))
         .unwrap()
 }
@@ -295,13 +295,13 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         }],
         character: Vec::new(),
     });
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.add_systems(Update, feed_actions);
 
     app.update();
     let icon = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return GetActionTexture({ACTION})"))
             .unwrap()
     };
@@ -312,7 +312,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     );
 
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#)
         .unwrap();
     assert!(
@@ -331,12 +331,12 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     // fire nothing; the feed must re-fire the slot anyway.
     let events = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>("return BENILLA_TEST_SLOT_EVENTS or 0")
             .unwrap()
     };
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             local f = CreateFrame("Frame")
@@ -356,7 +356,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     );
     assert_eq!(
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return GetActionText({ACTION})"))
             .unwrap()
             .as_deref(),
@@ -375,7 +375,7 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
     benilla_formats::wow_data_or_skip!();
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_screen_size(1024.0, 768.0);
         // Stock files, read from the install.
         for file in [
@@ -397,7 +397,7 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
         "the feed drains the queue"
     );
 
-    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut script = app.world_mut().non_send_mut::<UiScript>();
     assert!(
         script.errors().is_empty(),
         "VM errors: {:?}",
@@ -483,7 +483,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
     script
         .run(r#"SPELL_FAILED_ROOTED = "You are unable to move";"#)
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.add_systems(Update, feed_actions);
     app.update();
 
@@ -502,7 +502,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
 fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         // The strings verbatim from 1.12's `GlobalStrings.lua`, and a recorder for the event.
         script
             .run(
@@ -522,7 +522,7 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
     }
     let line = |app: &mut App, i: usize| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return BENILLA_TEST_LINES[{i}]"))
             .unwrap()
     };

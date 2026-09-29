@@ -1432,7 +1432,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .add_message::<MeetingStoneUse>()
             .add_systems(Update, drain_meeting_stone_joins);
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.world_mut().spawn((
             SelfPlayer,
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
@@ -1486,7 +1486,7 @@ mod tests {
         app.update();
         assert_eq!(queries(&rx), 0, "no VM, no bring-up");
 
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         assert_eq!(queries(&rx), 1, "the first VM asks the server");
         app.update();
@@ -1498,7 +1498,7 @@ mod tests {
         app.world_mut().resource_mut::<MeetingStone>().dirty = false;
 
         // `ReloadUI()`: a fresh VM, with no world leave.
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         assert_eq!(
             queries(&rx),

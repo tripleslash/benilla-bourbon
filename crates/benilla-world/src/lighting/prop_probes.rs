@@ -234,18 +234,18 @@ pub(super) fn upload_prop_probes(
     }
 }
 
-/// On one entity per lit interior prop; its hook returns the slot to the table. `on_replace`, not
+/// On one entity per lit interior prop; its hook returns the slot to the table. `on_discard`, not
 /// `on_remove`: an insert over a live slot must free the old one, and `on_remove` never fires on
 /// an overwrite.
 #[derive(Component)]
-#[component(on_replace = free_prop_probe_slot)]
+#[component(on_discard = free_prop_probe_slot)]
 pub struct PropProbeSlot(pub u16);
 
 fn free_prop_probe_slot(mut world: DeferredWorld, ctx: HookContext) {
     let slot = world
         .get::<PropProbeSlot>(ctx.entity)
         .map(|s| s.0)
-        .expect("on_replace runs with the outgoing component still present");
+        .expect("on_discard runs with the outgoing component still present");
     world.resource_mut::<PropProbes>().release(slot);
 }
 

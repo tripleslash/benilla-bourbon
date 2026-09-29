@@ -147,7 +147,7 @@ mod tests {
         world.init_resource::<crate::names::NameCache>();
         world.init_resource::<scan::TabHistory>();
         world.init_resource::<Time>();
-        world.insert_non_send_resource(UiScript::new().expect("a bare VM"));
+        world.insert_non_send(UiScript::new().expect("a bare VM"));
 
         world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));
         // The basis is pointing at the victim; the victim points at nobody.
@@ -166,7 +166,7 @@ mod tests {
 
         let run = |world: &mut World, lua: &str| {
             world
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<()>(lua)
                 .expect("the binding runs");
             world

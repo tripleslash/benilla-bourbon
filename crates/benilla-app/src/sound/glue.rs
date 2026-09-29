@@ -271,15 +271,16 @@ fn report_stream_voices(music: NonSend<GlueMusic>, mut out: NonSendMut<super::So
 
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<GlueSound>()
-        .insert_non_send_resource(GlueMusic::default())
+        .insert_non_send(GlueMusic::default())
         .add_systems(
             Update,
             (
                 play_glue_sounds,
                 // The theme starts at the login screen (`AccountLogin_OnShow` sets the same
                 // `wow_main_theme`) and keeps across the glue screens.
-                start_glue_music
-                    .run_if(in_state(ClientState::Login).or(in_state(ClientState::CharSelect))),
+                start_glue_music.run_if(
+                    in_state(ClientState::Login).or_else(in_state(ClientState::CharSelect)),
+                ),
                 // No run condition: the theme plays into `InWorld`, and the entry load burst is
                 // the window the watch exists for.
                 hand_off_glue_music,

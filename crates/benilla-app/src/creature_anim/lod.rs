@@ -268,8 +268,12 @@ mod tests {
     /// at +Z are behind it.
     fn spawn_camera(app: &mut App) {
         let clip_from_world = Mat4::perspective_rh(1.2, 1.0, 0.1, 1000.0);
-        app.world_mut()
-            .spawn((WorldCamera, Frustum::from_clip_from_world(&clip_from_world)));
+        app.world_mut().spawn((
+            WorldCamera,
+            Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &clip_from_world,
+            )),
+        ));
     }
 
     fn app() -> App {

@@ -8,7 +8,7 @@
 use std::ops::Range;
 
 use bevy::asset::{AssetEvent, AssetId};
-use bevy::core_pipeline::core_3d::{Transparent3d, CORE_3D_DEPTH_FORMAT};
+use bevy::core_pipeline::core_3d::{Transparent3d, TransparentSortingInfo3d, CORE_3D_DEPTH_FORMAT};
 use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::ecs::system::SystemParamItem;
 use bevy::mesh::VertexBufferLayout;
@@ -17,7 +17,8 @@ use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::{
     AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-    RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
+    RenderCommandResult, SetItemPipeline, SortedRenderPhase, TrackedRenderPass,
+    ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{
     sampler, storage_buffer_read_only_sized, texture_2d, texture_3d, uniform_buffer,
@@ -35,9 +36,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::storage::GpuShaderBuffer; // fork: modern lighting (FORK.md, P4)
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{
-    ExtractedView, Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
-};
+use bevy::render::view::{ExtractedView, Msaa, ViewUniform, ViewUniformOffset, ViewUniforms};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
@@ -452,11 +451,19 @@ fn queue_effects(
                     no_depth_test: draw.no_depth_test,
                 },
             );
-            phase.add(Transparent3d {
-                // The material path's metric: the sort point's view z plus the rung.
-                distance: rangefinder.distance(&draw.anchor) + draw.bias,
+            // The material path's metric: the sort point's view z plus the rung. Bevy's
+            // `recalculate_sort_keys` recomputes `distance` from `sorting_info` before the sort.
+            let sorting_info = TransparentSortingInfo3d::Sorted {
+                mesh_center: draw.anchor,
+                depth_bias: draw.bias,
+            };
+            phase.add_transient(Transparent3d {
+                sorting_info,
+                distance: sorting_info.sort_distance(&rangefinder),
                 pipeline,
-                entity: (Entity::PLACEHOLDER, MainEntity::from(draw.main_entity)),
+                // The phase is keyed on `(render entity, main entity)` and one emitter owns many
+                // draws, so each draw gets its own key; no render command reads the entity.
+                entity: (effect_item_key(i), MainEntity::from(draw.main_entity)),
                 draw_function,
                 // The draw index, until the prepare walk rewrites it to a merged draw and span.
                 batch_range: (i as u32)..(i as u32 + 1),
@@ -465,6 +472,12 @@ fn queue_effects(
             });
         }
     }
+}
+
+/// The render-entity half of draw `i`'s phase key: unique per draw, counted down from the top of
+/// the index space, where no spawned entity lives.
+fn effect_item_key(i: usize) -> Entity {
+    Entity::from_raw_u32(u32::MAX - 1 - i as u32).unwrap_or(Entity::PLACEHOLDER)
 }
 
 /// What adjacent items must share to merge: pipeline, texture, light buffer and params row.
@@ -547,25 +560,25 @@ fn prepare_effects(
             continue;
         };
         let mut open: Option<(usize, u32, RunKey)> = None;
-        let close = |items: &mut Vec<Transparent3d>,
+        let close = |phase: &mut SortedRenderPhase<Transparent3d>,
                      open: &mut Option<(usize, u32, RunKey)>,
                      merged_len: usize| {
             if let Some((item_idx, run_len, _)) = open.take() {
                 let m = merged_len as u32 - 1;
-                items[item_idx].batch_range = m..m + run_len;
+                phase.items[item_idx].batch_range = m..m + run_len;
             }
         };
         for i in 0..phase.items.len() {
             let item = &phase.items[i];
             if item.draw_function != effect_fn {
-                close(&mut phase.items, &mut open, meta.merged.len());
+                close(phase, &mut open, meta.merged.len());
                 continue;
             }
             let (pipeline, draw_idx) = (item.pipeline, item.batch_range.start as usize);
             // `batch_range` is a draw index only while bevy's batcher leaves the item alone, which
             // it does while the main entity owns no mesh; otherwise skip the item, never panic.
             let Some(draw) = meta.draws.get(draw_idx) else {
-                close(&mut phase.items, &mut open, meta.merged.len());
+                close(phase, &mut open, meta.merged.len());
                 phase.items[i].batch_range = 0..0;
                 continue;
             };
@@ -621,7 +634,7 @@ fn prepare_effects(
                     *run_len += 1;
                 }
                 _ => {
-                    close(&mut phase.items, &mut open, meta.merged.len());
+                    close(phase, &mut open, meta.merged.len());
                     meta.merged.push(MergedDraw {
                         index_range: index_start..index_end,
                         texture: draw.texture,
@@ -632,7 +645,7 @@ fn prepare_effects(
                 }
             }
         }
-        close(&mut phase.items, &mut open, meta.merged.len());
+        close(phase, &mut open, meta.merged.len());
     }
     EFFECT_DRAW_STATS[0].store(n_items, std::sync::atomic::Ordering::Relaxed);
     EFFECT_DRAW_STATS[1].store(
@@ -707,7 +720,9 @@ fn prepare_effect_bind_groups(
         if effect_trace() {
             info!(
                 "effect bind: new group for tex {:?} ({}x{})",
-                draw.texture, image.size.width, image.size.height
+                draw.texture,
+                image.texture_descriptor.size.width,
+                image.texture_descriptor.size.height
             );
         }
         let light_buf = draw.light.as_ref().unwrap_or(&light.0);

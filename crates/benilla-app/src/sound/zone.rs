@@ -1388,7 +1388,7 @@ fn report_stream_voices(zone: NonSend<ZoneAudio>, mut out: NonSendMut<super::Sou
 }
 
 pub(super) fn plugin(app: &mut App) {
-    app.insert_non_send_resource(ZoneAudio::default())
+    app.insert_non_send(ZoneAudio::default())
         .add_data_loaders(load_area_sounds)
         .add_systems(
             Update,

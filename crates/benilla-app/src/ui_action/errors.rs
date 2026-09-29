@@ -476,7 +476,7 @@ mod shown_tests {
         let mut script = UiScript::new().expect("VM");
 
         {
-            let mut sink = state.get_mut(&mut world);
+            let mut sink = state.get_mut(&mut world).unwrap();
             super::show_messages(
                 &mut script,
                 &mut sink,

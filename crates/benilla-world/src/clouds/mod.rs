@@ -150,7 +150,7 @@ fn tick_clouds(
     });
     if changed || reformat {
         if let Some(layer) = clock.as_ref() {
-            if let Some(image) = images.get_mut(&layer.image) {
+            if let Some(mut image) = images.get_mut(&layer.image) {
                 if image.texture_descriptor.format != format {
                     image.texture_descriptor.format = format;
                 }

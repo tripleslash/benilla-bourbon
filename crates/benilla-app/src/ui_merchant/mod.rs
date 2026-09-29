@@ -1074,10 +1074,10 @@ mod tests {
             can_repair: true,
             ..Default::default()
         }));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         app.world_mut().run_system_once(feed_repair_costs).unwrap();
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let got = script.eval::<i64>("return (GetRepairAllCost())").unwrap();
         assert_eq!(got, i64::from(want), "the undiscounted total is {full}");
     }
@@ -1118,16 +1118,16 @@ mod tests {
             .spawn((SelfPlayer, Guid(0x5e1f), player(slot_field, money)));
         let script = UiScript::new().unwrap();
         record_errors(&script);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().run_system_once(feed_merchant).unwrap();
         while rx.try_recv().is_ok() {} // the feed's name query for the vendor
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("RepairAllItems()")
             .unwrap();
         app.world_mut().run_system_once(drain_merchant).unwrap();
         let sent = rx.try_iter().collect();
-        let lines = shown(app.world().non_send_resource::<UiScript>());
+        let lines = shown(app.world().non_send::<UiScript>());
         (sent, lines, sounded(app.world()))
     }
 
@@ -1208,10 +1208,10 @@ mod tests {
         let (full, discounted) = sword_prices();
         let priced = |slot_field: u16, read: &str| {
             let (mut app, _) = repair_app(slot_field);
-            app.insert_non_send_resource(sword_vm());
+            app.insert_non_send(sword_vm());
             let read_cost = |app: &mut App| {
                 app.world_mut().run_system_once(feed_repair_costs).unwrap();
-                let script = app.world().non_send_resource::<UiScript>();
+                let script = app.world().non_send::<UiScript>();
                 script.eval::<i64>(read).unwrap()
             };
             let at_vendor = read_cost(&mut app);
@@ -1260,7 +1260,7 @@ mod tests {
             can_repair: true,
             ..Default::default()
         }));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         let entity =
             |app: &App, guid: u64| app.world().resource::<crate::net::GuidIndex>().0[&guid];
@@ -1272,7 +1272,7 @@ mod tests {
         let frame = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(i64, i64, i64, i64)>(
                     r#"local _, _, worn = TT:SetInventoryItem("player", 16)
                        local _, carried = TT:SetBagItem(0, 1)

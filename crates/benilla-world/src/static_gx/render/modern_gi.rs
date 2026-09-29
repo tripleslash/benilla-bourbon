@@ -745,10 +745,7 @@ fn prepare_gi_voxels(
     scene.ready = true;
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub(crate) struct GxVoxelLabel;
-
-fn gi_voxel_pass(
+pub(crate) fn gi_voxel_pass(
     world: &World,
     view: ViewQuery<&StaticGxView>,
     mut render_context: RenderContext,
@@ -943,7 +940,7 @@ fn gi_voxel_pass(
                 timing.end(&mut pass);
             }
         }
-}
+    }
 }
 
 /// Wire the pass between the modern shadow pass and the probe trace (called from `render::build`).
@@ -960,8 +957,7 @@ pub(super) fn build(render_app: &mut SubApp) {
             Render,
             prepare_gi_voxels.in_set(RenderSystems::PrepareResources),
         )
-        .add_render_graph_node::<ViewNodeRunner<GiVoxelNode>>(Core3d, GxVoxelLabel)
-        .add_render_graph_edges(Core3d, (GxVoxelLabel, Node3d::StartMainPass));
+        .add_systems(Core3d, gi_voxel_pass.before(Core3dSystems::MainPass));
 }
 
 #[cfg(test)]

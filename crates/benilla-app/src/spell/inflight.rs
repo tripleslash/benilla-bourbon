@@ -728,7 +728,7 @@ mod tests {
         #[test]
         fn esc_cannot_stop_a_channel() {
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             let now = Instant::now();
             app.world_mut()
                 .resource_mut::<ActiveChannel>()
@@ -737,7 +737,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 None,
@@ -759,7 +759,7 @@ mod tests {
         fn esc_cancels_the_auto_repeat_first_and_the_cast_on_the_next_press() {
             const AUTO_SHOT: u32 = 75;
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut().resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
             app.world_mut()
                 .resource_mut::<PendingCast>()
@@ -770,7 +770,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 Some(1)
@@ -800,7 +800,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 Some(1)
@@ -827,7 +827,7 @@ mod tests {
                     ..Default::default()
                 },
             )]));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut()
                 .resource_mut::<QueuedMeleeSpell>()
                 .arm(HEROIC_STRIKE);
@@ -835,7 +835,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 Some(1),
@@ -895,7 +895,7 @@ mod tests {
         #[test]
         fn esc_takes_the_cast_first_and_the_strike_on_the_next_press() {
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut()
                 .resource_mut::<QueuedMeleeSpell>()
                 .arm(HEROIC_STRIKE);
@@ -907,7 +907,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 Some(1)
@@ -931,7 +931,7 @@ mod tests {
             app.world_mut().run_system_once(feed_cast_bar).unwrap();
             assert_eq!(
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<Option<i64>>("return SpellStopCasting()")
                     .unwrap(),
                 Some(1),

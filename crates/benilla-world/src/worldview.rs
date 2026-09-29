@@ -3,11 +3,11 @@
 //! so a game concept wired back into the engine breaks it. A crate boundary alone cannot hold that
 //! line: two Bevy systems couple through a runtime resource with no symbol crossing between them.
 
+use bevy::camera::Hdr;
 use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use benilla_assets::coords::wow_to_bevy;

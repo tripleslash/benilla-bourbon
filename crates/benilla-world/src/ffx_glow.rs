@@ -1016,7 +1016,7 @@ struct FfxBackdropClaims(Vec<Entity>);
 /// A backdrop camera's combine pair (its own target's format, the gamma-lane exit) and the world
 /// view it grounds on, if that view rendered this frame.
 #[derive(Component)]
-struct FfxBackdropView {
+pub struct FfxBackdropView {
     pair: FfxCombinePair,
     source: Option<Entity>,
 }
