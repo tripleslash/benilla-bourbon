@@ -231,6 +231,12 @@ fn emissive_enabled() -> bool {
     switch_on(&CELL, "WOW_MODERN_EMISSIVE")
 }
 
+/// The ground-fog banks' bisect lever (`$WOW_MODERN_BANKS=0`, browser `?modern_banks=0`).
+pub(crate) fn banks_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch_on(&CELL, "WOW_MODERN_BANKS")
+}
+
 /// Bisect switches (`$WOW_MODERN_SUNARC=0`, `$WOW_MODERN_CPUHOOKS=0`; browser `?modern_sunarc=0`,
 /// `?modern_cpuhooks=0`): turn one modern main-world behaviour off without a rebuild. Read once.
 fn switch_on(cell: &'static std::sync::OnceLock<bool>, key: &str) -> bool {

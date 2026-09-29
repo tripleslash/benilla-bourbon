@@ -64,6 +64,11 @@ struct FroxelFog {
     // fork: the night's ground banks. x = extinction at the ground (1/yd, 0 by day); y = the ground
     // under the camera (world y); z = 1 / height falloff (yd); w = unused.
     night: vec4<f32>,
+    // fork: the terrain heightfield the banks lie on (`probegi::GiClip`'s `hf_row_x`, `hf_row_y` and
+    // `hf`: x = enabled, y = lowest height, z = span, w = texels), written in the render world.
+    ground_x: vec4<f32>,
+    ground_y: vec4<f32>,
+    ground: vec4<f32>,
 }
 
 // Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).

@@ -65,6 +65,9 @@ pub struct ZoneLook {
     /// the reference grade does not carry (Durotar's noon sun is a deep orange where the reference
     /// shot's is near white).
     pub key_tint: [f32; 3],
+    /// fork: the ground-fog banks by day, as a share of the night's (`volumetrics`): 0 at night only,
+    /// 1 as thick at noon as at midnight.
+    pub ground_fog: f32,
 }
 
 impl ZoneLook {
@@ -93,6 +96,7 @@ impl ZoneLook {
         vignette: 0.3,
         toe: 1.03,
         key_tint: [1.0, 1.0, 1.0],
+        ground_fog: 0.0,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -118,6 +122,7 @@ impl ZoneLook {
             vignette: m(self.vignette, to.vignette),
             toe: m(self.toe, to.toe),
             key_tint: [0, 1, 2].map(|i| m(self.key_tint[i], to.key_tint[i])),
+            ground_fog: m(self.ground_fog, to.ground_fog),
         }
     }
 
@@ -138,6 +143,7 @@ impl ZoneLook {
             && d(self.saturation, other.saturation)
             && d(self.vignette, other.vignette)
             && d(self.toe, other.toe)
+            && d(self.ground_fog, other.ground_fog)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -151,7 +157,8 @@ impl ZoneLook {
 impl ZoneLook {
     /// fork: **the eerie look.** Duskwood's calibration, for every dark zone: a weak sun under a
     /// dimmed, greyer sky, the fill held so the key-to-fill ratio stays in band, muted colour and a
-    /// harder grade, and a thicker haze so the daylight comes through the canopy in cones. Exposure
+    /// harder grade, a thicker haze so the daylight comes through the canopy in cones, and the
+    /// night's ground-fog banks kept through the day. Exposure
     /// is untouched, so buildings keep their own light.
     pub const EERIE: Self = Self {
         key: 0.6,
@@ -162,6 +169,7 @@ impl ZoneLook {
         haze: 0.0034,
         shafts: 0.4,
         vignette: 0.38,
+        ground_fog: 0.7,
         ..Self::NEUTRAL
     };
 }
@@ -359,6 +367,7 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     for c in 0..3 {
         set(&mut look.key_tint[c], 27 + c);
     }
+    set(&mut look.ground_fog, 30);
     look
 }
 

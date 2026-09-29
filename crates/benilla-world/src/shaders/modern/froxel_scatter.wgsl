@@ -25,6 +25,8 @@ struct LightTable {
 @group(0) @binding(5) var repeat_samp: sampler;
 @group(0) @binding(6) var history_tex: texture_3d<f32>;
 @group(0) @binding(7) var scatter_out: texture_storage_3d<rgba16float, write>;
+// fork: the GI terrain heightfield (a 1-texel stand-in when GI is off), for the ground-fog banks.
+@group(0) @binding(8) var ground_map: texture_depth_2d;
 
 // Under full cover the ambient in-scatter keeps this share: skylight still arrives sideways. It
 // matches the surfaces' linear shade floor (`sunshadow::SHADE_FLOOR` 0.72 in gamma ≈ 0.49 on
@@ -51,10 +53,10 @@ fn shaft_key(f: froxelfog::FroxelFog) -> vec3<f32> {
     return vec3<f32>(f.medium.z, f.ambient.w, f.wind.w);
 }
 
-// fork: **moonlit ground fog.** Overnight the air near the ground gathers into banks (`fog.night`):
-// dense within a few yards of the ground under the camera (pooling in the low ground below it),
-// broken into patches by the drifting noise at a coarse scale, and lit by the key as hard as the
-// shaft haze, so a moonbeam reads brightest where it crosses a bank.
+// fork: **ground fog.** Overnight (and by day in the dark zones) the air near the ground gathers into
+// banks (`fog.night`): dense within a few yards of the terrain under each froxel, broken into
+// patches by the drifting noise at a coarse scale, and lit by the key as hard as the shaft haze, so
+// a beam reads brightest where it crosses a bank.
 // The patches' feature size (yd), and the noise band that is bank: below the low edge is clear air.
 const BANK_SCALE: f32 = 150.0;
 const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
@@ -62,13 +64,32 @@ const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
 const BANK_KEY_GAIN: f32 = 1.6;
 const BANK_SKY_SHARE: f32 = 0.5;
 
+// The terrain's height under `p` from the heightfield (`probegi::terrain_height`'s read), else the
+// ground under the camera.
+fn ground_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    if (f.ground.x < 0.5) {
+        return f.night.y;
+    }
+    let q = vec4<f32>(p, 1.0);
+    let uv = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return f.night.y;
+    }
+    let n = f.ground.w;
+    let d = textureLoad(ground_map, vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0))), 0);
+    if (d <= 0.0) {
+        return f.night.y;
+    }
+    return f.ground.y + d * f.ground.z;
+}
+
 // The ground banks' extinction at `p` (1/yd).
 fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     let core = f.night.x;
     if (core <= 0.0) {
         return 0.0;
     }
-    let above = max(p.y - f.night.y, 0.0);
+    let above = max(p.y - ground_under(f, p), 0.0);
     let height = exp(-min(above * f.night.z, 24.0));
     let q = vec3<f32>(p.x, p.y * 0.25, p.z) + f.wind.xyz * 0.5;
     let n = textureSampleLevel(noise_tex, repeat_samp, q / BANK_SCALE + vec3<f32>(0.37, 0.11, 0.73), 0.0).r;

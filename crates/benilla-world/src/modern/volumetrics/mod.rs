@@ -40,7 +40,10 @@ mod node;
 pub(crate) use node::FroxelLabel;
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 19 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 22 * 16;
+/// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
+/// addressing there (`node::prepare_froxels`), which only it knows.
+pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
 /// The cloud-shadow grid's cells per side.
 pub const CLOUD_CELLS: usize = 32;
 /// Everything this module writes behind the cascades in the modern storage block.
@@ -82,11 +85,14 @@ const NIGHT_GLOW: f32 = 5.0;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
-/// fork: **moonlit ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN
-/// night, and their height falloff (yd) above the ground under the camera. `froxel_scatter.wgsl`
-/// breaks them into patches and lights them with the shaft haze's key; zero by day.
-const BANK_EXTINCTION: f32 = 0.035;
-const BANK_FALLOFF: f32 = 5.0;
+/// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, and
+/// their height falloff (yd) above the terrain under each froxel (the GI heightfield; past it, the
+/// ground under the camera). `froxel_scatter.wgsl` breaks them into patches and lights them with
+/// the shaft haze's key. Every zone has them overnight; a zone look's `ground_fog` keeps a share by
+/// day. Anchored to one plane at the camera's ground, 0.035 filled Hillsbrad's low ground and left
+/// Gilneas's hills bare.
+const BANK_EXTINCTION: f32 = 0.022;
+const BANK_FALLOFF: f32 = 4.0;
 /// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
 /// the banks carry the night instead of a veil over everything.
 const MOON_VEIL: f32 = 0.4;
@@ -198,6 +204,11 @@ pub struct FroxelFog {
     pub room_ambient: Vec4,
     pub room_sun: Vec4,
     pub night: Vec4,
+    /// The terrain heightfield's world-to-uv rows and its `hf` row (`probegi::GiClip`), written in
+    /// the render world ([`GROUND_OFFSET`]); zero (off) as the main world packs it.
+    pub ground_x: Vec4,
+    pub ground_y: Vec4,
+    pub ground: Vec4,
 }
 
 impl FroxelFog {
@@ -229,6 +240,9 @@ impl FroxelFog {
             self.room_ambient,
             self.room_sun,
             self.night,
+            self.ground_x,
+            self.ground_y,
+            self.ground,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -643,11 +657,18 @@ fn update_volume(
             .unwrap_or_default()
             .extend(night_glow.z),
         night: Vec4::new(
-            BANK_EXTINCTION * night,
+            if super::banks_enabled() {
+                BANK_EXTINCTION * night.max(look.0.ground_fog)
+            } else {
+                0.0
+            },
             bank_ground,
             1.0 / BANK_FALLOFF,
             0.0,
         ),
+        ground_x: Vec4::ZERO,
+        ground_y: Vec4::ZERO,
+        ground: Vec4::ZERO,
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -774,7 +795,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 496);
+        assert_eq!(FOG_BYTES, 544);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,

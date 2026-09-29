@@ -69,6 +69,8 @@ struct FroxelTargets {
     scatter_bind: Option<BindGroup>,
     integrate_bind: Option<BindGroup>,
     ready: bool,
+    /// fork: a one-texel depth map the ground-fog banks read when the GI heightfield is absent.
+    ground_stub: Option<(Texture, TextureView)>,
 }
 
 fn init_pipelines(
@@ -89,6 +91,7 @@ fn init_pipelines(
                 sampler(SamplerBindingType::Filtering),
                 texture_3d(TextureSampleType::Float { filterable: true }),
                 texture_storage_3d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                texture_depth_2d(),
             ),
         ),
     );
@@ -225,6 +228,7 @@ fn prepare_froxels(
     light: Option<Res<SharedLightBuffer>>,
     pipes: Option<Res<FroxelPipelines>>,
     pipeline_cache: Res<PipelineCache>,
+    scene: Option<Res<crate::modern::gi::ModernGiScene>>,
     mut targets: ResMut<FroxelTargets>,
 ) {
     targets.ready = false;
@@ -235,6 +239,36 @@ fn prepare_froxels(
     };
     let modern = active.is_some_and(|a| a.is_modern());
     let mut tail = volume.block.clone();
+    // fork: the ground-fog banks lie on the GI terrain heightfield, whose addressing only this world
+    // knows: its rows go into the fog block here, and its map into the scatter bind group.
+    let ground = scene
+        .as_deref()
+        .filter(|s| s.clip.hf.x > 0.5)
+        .and_then(|s| s.height.as_ref().map(|(_, view)| (s.clip, view.clone())));
+    if let Some((clip, _)) = &ground {
+        for (i, row) in [clip.hf_row_x, clip.hf_row_y, clip.hf].iter().enumerate() {
+            let at = super::GROUND_OFFSET + i * 16;
+            tail[at..at + 16].copy_from_slice(bytemuck::cast_slice(&row.to_array()));
+        }
+    }
+    if targets.ground_stub.is_none() {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("modern_froxel_ground_stub"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        targets.ground_stub = Some((texture, view));
+    }
 
     if modern && volume.mode == FogMode::Froxel {
         let inputs = (
@@ -306,9 +340,12 @@ fn prepare_froxels(
                 let front = targets.front;
                 let write = &targets.scatter[front].1;
                 let history = &targets.scatter[1 - front].1;
-                let (Some((_, noise)), Some(repeat)) = (&targets.noise, &targets.repeat) else {
+                let (Some((_, noise)), Some(repeat), Some((_, stub))) =
+                    (&targets.noise, &targets.repeat, &targets.ground_stub)
+                else {
                     return;
                 };
+                let ground_view = ground.as_ref().map_or(stub, |(_, view)| view);
                 let scatter_bind = device.create_bind_group(
                     "modern_froxel_scatter",
                     &pipeline_cache.get_bind_group_layout(&pipes.scatter_layout),
@@ -321,6 +358,7 @@ fn prepare_froxels(
                         repeat,
                         history,
                         write,
+                        ground_view,
                     )),
                 );
                 let integrate_bind = device.create_bind_group(
@@ -653,7 +691,13 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_systems(RenderStartup, init_pipelines)
         .add_systems(
             Render,
-            (prepare_froxels, specialize_composites).in_set(RenderSystems::PrepareResources),
+            specialize_composites.in_set(RenderSystems::PrepareResources),
+        )
+        // fork: after `PrepareResources`, where the GI pass leaves this frame's terrain heightfield
+        // (`ModernGiScene`) for the ground-fog banks.
+        .add_systems(
+            Render,
+            prepare_froxels.in_set(RenderSystems::PrepareBindGroups),
         )
         // The volume samples this frame's cascades, so it runs after the modern shadow pass.
         .add_render_graph_node::<ViewNodeRunner<FroxelNode>>(Core3d, FroxelLabel)
