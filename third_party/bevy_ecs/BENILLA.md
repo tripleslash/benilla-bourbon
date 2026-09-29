@@ -1,6 +1,6 @@
 # benilla's `bevy_ecs` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_ecs 0.18.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.18.1 resolves to.
+Upstream: `bevy_ecs 0.19.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.19.1 resolves to.
 Wired in through `[patch.crates-io]` in the workspace root. It is the companion to
 `third_party/bevy_tasks`, and neither is any use without the other.
 
@@ -62,11 +62,12 @@ Both files carry a `**benilla fork.**` comment at their first rewritten site say
 ## Verifying against upstream
 
 ```sh
-# 0.18.1 is the pinned version; adjust the path if cargo's registry hash differs.
-diff -r third_party/bevy_ecs ~/.cargo/registry/src/*/bevy_ecs-0.18.1
+# The patched crate is never downloaded into cargo's registry, so fetch the pinned upstream.
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_ecs/bevy_ecs-0.19.1.crate   | tar xz -C /tmp/upstream
+diff -r third_party/bevy_ecs /tmp/upstream/bevy_ecs-0.19.1
 ```
 
 That must print exactly a `diff` for `src/query/par_iter.rs` and `src/query/state.rs`, plus
-`Only in <registry>: .cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's
-packaging metadata, dropped here the same way `third_party/kira` and `third_party/bevy_tasks` drop
-it. Anything else crept in.
+`Only in <upstream>: .cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's packaging
+metadata, dropped here the same way `third_party/kira` and `third_party/bevy_tasks` drop it, and
+`Only in third_party/bevy_ecs: BENILLA.md`. Anything else crept in.

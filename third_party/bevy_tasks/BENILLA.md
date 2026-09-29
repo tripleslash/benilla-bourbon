@@ -1,6 +1,6 @@
 # benilla's `bevy_tasks` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_tasks 0.18.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.18.1 resolves to.
+Upstream: `bevy_tasks 0.19.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.19.1 resolves to.
 Wired in through `[patch.crates-io]` in the workspace root. One patch entry covers the whole graph:
 every bevy crate depends on this one, so patching it here patches `bevy_ecs`'s executor,
 `bevy_asset`'s loader spawns and `bevy_app`'s `TaskPoolPlugin` at the same time.
@@ -20,20 +20,24 @@ every bevy crate depends on this one, so patching it here patches `bevy_ecs`'s e
 
 ## The delta, and the command that proves it
 
-**Four files: three hunked, one added.**
+**Three files: two hunked, one added.** Bevy 0.19 dropped its own web `Task` (it is
+`async_task::Task` on every target), so 0.18's `src/task.rs` hunk has nothing left to patch.
 
 | file | hunk | why |
 |---|---|---|
 | `src/lib.rs` | the `multi_threaded` alias predicate | Upstream: `all(not(target_arch = "wasm32"), feature = "multi_threaded")`. That makes "wasm" and "has no threads" the same statement, and shared memory ended that. Now `any(not(target_arch = "wasm32"), target_feature = "atomics")` — the honest question, unchanged on every other target. |
-| `src/lib.rs` | `block_on` takes the **spinning** implementation on wasm | `futures_lite`'s `block_on` parks through `Mutex`/`Condvar`, which lowers to `memory.atomic.wait32`. The browser's **main thread may not execute that instruction** — it does not throw, it **traps**, and a trap takes the module down. `TaskPool::scope` calls `block_on` on whatever thread entered the scope, and on the web that is always the thread that draws. Upstream's own busy-wait fallback is lifted out as `spin_block_on` and reused; the worker loop still names `futures_lite`'s parking version directly, because a worker *may* park and a spinning worker would burn a core. |
+| `src/lib.rs` | `block_on` is the **spinning** `spin_block_on` on wasm, `bevy_platform::future::block_on` elsewhere | A parking `block_on` lowers to `memory.atomic.wait32`. The browser's **main thread may not execute that instruction** — it does not throw, it **traps**, and a trap takes the module down. `TaskPool::scope` calls `block_on` on whatever thread entered the scope, and on the web that is always the thread that draws. `spin_block_on` is `bevy_platform`'s own busy-wait fallback, lifted out; the worker loop still names `futures_lite`'s parking version directly, because a worker *may* park and a spinning worker would burn a core. |
 | `src/lib.rs` | `available_parallelism` consults `thread_spawner::hinted_parallelism()` first | On wasm `std::thread::available_parallelism` is the `unsupported` stub and answers `Err`, so upstream's `unwrap_or(1)` would build one-worker pools on an eight-core machine. The real number is `navigator.hardwareConcurrency`, which only the page can read. Unset on every other target, where upstream's line runs unchanged. |
-| `src/lib.rs` | `mod thread_spawner;` + its four public re-exports | see below |
-| `src/task_pool.rs` | threads come from `thread_spawner::spawn` instead of `std::thread::Builder` | `std::thread::spawn` **does not exist on `wasm32-unknown-unknown` even with `+atomics`**: std's `sys/thread/mod.rs` gives that target `sleep` and takes `Thread`, `available_parallelism` and `yield_now` from `unsupported.rs`. A browser thread is a Web Worker, which only the page can create. The worker body itself is upstream's, unchanged. |
+| `src/lib.rs` | `mod thread_spawner;` + its public re-exports | see below |
+| `src/task_pool.rs` | threads come from `thread_spawner::spawn` instead of `std::thread::Builder` | `std::thread::spawn` **does not exist on `wasm32-unknown-unknown` even with `+atomics`**: std gives that target `sleep` and takes `Thread`, `available_parallelism` and `yield_now` from `unsupported.rs`. A browser thread is a Web Worker, which only the page can create. The worker body itself is upstream's, unchanged. |
 | `src/task_pool.rs` | a refused thread is survivable on wasm | Upstream `.expect("Failed to spawn thread.")`s. Here a refusal drops that one thread and the pool comes up smaller; on targets with real `std::thread` it still panics exactly as before. |
 | `src/task_pool.rs` | `scope` forces `tick_task_pool_executor` on wasm | The other half of the same guarantee: a zero-worker pool must do the work on the calling thread rather than wait forever for a worker that never started. |
-| `src/task_pool.rs` | `spawn` / `spawn_local` / `spawn_pooled` / `try_tick` | **The most important hunk. See below.** |
-| `src/task.rs` | `Task::wrap_pooled_future` | One added constructor, under `cfg::web` + `atomics`. Runs a `Send` future on the pool executor and delivers the result over the same `async_channel::Receiver` the web `Task` already is — which is what lets the threaded web build keep **one** `Task` representation instead of growing an enum. |
+| `src/task_pool.rs` | `spawn` / `spawn_local` / `spawn_pooled` / `try_tick` | **The most important hunk. See below.** On the threaded web build `spawn` and `spawn_local` go to `web_task::spawn_local` (the microtask queue, as upstream's single-threaded pool does); `spawn_pooled` returns the worker executor's own `Task`. |
 | `src/thread_spawner.rs` | new file | The spawner hook and the parallelism hint. Has its own header. |
+
+**A dropped `Task` cancels on the web since 0.19** (upstream's own change, migration guide
+"Dropping Tasks in Web Builds"). A `spawn_pooled` caller that means fire-and-forget must
+`.detach()` the task.
 
 ### The `spawn` / `spawn_pooled` split, which is the whole design
 
@@ -88,7 +92,7 @@ If a future hunk needs to ask about `std`, ask `crate::cfg::std!`.
 
 **This does not make wasm threads work by itself.** The crate still answers "no threads" unless a
 host installs a spawner, and it deliberately contains no `wasm-bindgen`, no `web-sys` and no
-knowledge of a page — which also keeps it clear of the tree's load-bearing `wasm-bindgen = "=0.2.122"`
+knowledge of a page — which also keeps it clear of the tree's load-bearing `wasm-bindgen = "=0.2.126"`
 pin. The browser half lives in benilla's own crates.
 
 It also does not touch `conditional_send`, `usages.rs`, or `single_threaded_task_pool.rs`. Native
@@ -98,18 +102,19 @@ routes through a `thread_spawner` whose default *is* `std::thread::Builder`.
 ## Verifying against upstream
 
 ```sh
-# 0.18.1 is the pinned version; adjust the path if cargo's registry hash differs.
-diff -r third_party/bevy_tasks ~/.cargo/registry/src/*/bevy_tasks-0.18.1
+# The patched crate is never downloaded into cargo's registry, so fetch the pinned upstream.
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_tasks/bevy_tasks-0.19.1.crate   | tar xz -C /tmp/upstream
+diff -r third_party/bevy_tasks /tmp/upstream/bevy_tasks-0.19.1
 ```
 
 That must print exactly:
 
-- `diff` for `src/lib.rs`, `src/task.rs` and `src/task_pool.rs` — the hunks in the table, each
-  carrying a `**benilla fork.**` comment saying why it is there;
-- `Only in third_party/bevy_tasks/src: thread_spawner.rs`;
-- `Only in <registry>: .cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's
-  own packaging metadata, dropped here the same way `third_party/kira` drops it.
+- `diff` for `src/lib.rs` and `src/task_pool.rs` — the hunks in the table, each carrying a
+  `**benilla fork.**` comment saying why it is there;
+- `Only in third_party/bevy_tasks/src: thread_spawner.rs` and `Only in third_party/bevy_tasks:
+  BENILLA.md`;
+- `Only in <upstream>: .cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's own
+  packaging metadata, dropped here the same way `third_party/kira` drops it.
 
-Anything else crept in. Note that the three hunked files are **rustfmt-formatted** (`--edition 2024`),
-which upstream's `task_pool.rs` is not by one import-ordering line; that is the only cosmetic
-difference in the set.
+Anything else crept in. The two hunked files are **rustfmt-formatted** (`--edition 2024`), which
+reorders one `use` list in `task_pool.rs`; that is the only cosmetic difference in the set.
