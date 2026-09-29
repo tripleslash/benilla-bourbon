@@ -70,6 +70,35 @@ pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Part
     }
 }
 
+/// fork: fsr (FORK.md) — each quad vertex's world displacement since the last world frame, in
+/// [`expand_quads`]'s vertex order: every quad a particle draws moves with its centre. A world-mode
+/// particle moved by its world velocity over `dt`; a model-mode one also rides the emitter from
+/// `prev_placement` to `placement`.
+pub(super) fn push_particle_motion(
+    def: &ParticleEmitterDef,
+    particles: &[Particle],
+    frame: &DrawFrame,
+    placement: &Transform,
+    prev_placement: &Transform,
+    dt: f32,
+    out: &mut Vec<[f32; 3]>,
+) {
+    let per = 4 * (usize::from(def.head_tail != 1) + usize::from(def.head_tail >= 1));
+    for p in particles {
+        if draw_gated(def, p) {
+            continue;
+        }
+        let delta = if frame.anchored {
+            frame.ride.dir_to_world(p.vel) * dt
+        } else {
+            let prev = p.pos - p.vel * dt;
+            placement.transform_point(wow_to_bevy(p.pos.to_array()))
+                - prev_placement.transform_point(wow_to_bevy(prev.to_array()))
+        };
+        out.extend(std::iter::repeat_n(delta.to_array(), per));
+    }
+}
+
 /// The twinklePercent draw gate; must match [`expand_quads`]'s `0x7b2adc` skip.
 pub(super) fn draw_gated(def: &ParticleEmitterDef, p: &Particle) -> bool {
     let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);

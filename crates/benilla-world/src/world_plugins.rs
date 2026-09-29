@@ -117,6 +117,9 @@ impl PluginGroup for WorldPlugins {
             // The fork's parallel lighting model (FORK.md). Classic by default,
             // and a classic session never reads anything it registers.
             .add(crate::modern::ModernLightingPlugin)
+            // fork: fsr (FORK.md) — FSR 3.1.5 upscaling and frame generation, inert until the app
+            // puts an `FsrView` on the world camera.
+            .add(crate::fsr::FsrPlugin)
             // fork: the perf rig. Registers nothing unless `WOW_PERF`/`?perf=` names a frame
             // count, so a shipped session carries the module and not one system.
             .add(crate::perf_probe::PerfProbePlugin)

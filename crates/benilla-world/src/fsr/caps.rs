@@ -130,6 +130,29 @@ mod tests {
         assert!(TEXTURE_FORMATS_TIER1.features_wgpu.is_empty());
     }
 
+    /// Without tier 1 every narrow target widens to a format WebGPU's core set can bind as write-only
+    /// storage, physics-rs's own fallback: `rgba16float` for the float targets, `rgba8unorm` for the
+    /// unorm ones, so each keeps its range and precision.
+    #[test]
+    fn the_fallback_is_core_storage_of_the_same_kind() {
+        let wide = Formats::new(false);
+        assert_eq!(
+            [wide.r16, wide.rg16, wide.r8, wide.rg8],
+            [
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba8Unorm,
+                TextureFormat::Rgba8Unorm,
+            ]
+        );
+        let narrow = Formats::new(true);
+        assert_eq!(
+            [narrow.r16, narrow.rg16, narrow.r8, narrow.rg8],
+            NARROW,
+            "tier 1: the reference's own widths"
+        );
+    }
+
     /// Every placeholder resolves, in both format sets, and no token survives.
     #[test]
     fn preprocessing_leaves_no_placeholder() {

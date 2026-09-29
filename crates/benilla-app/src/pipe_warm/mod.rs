@@ -10,6 +10,12 @@
 //! - [`watch_pipelines`]: the tripwire, a `warn!` for every pipeline compiled uncovered, which
 //!   means the menagerie has a coverage hole.
 //! - `WOW_PIPE_TRACE=<path>`: one line per pipeline created, with its full variant identity.
+//!
+//! fork: fsr (FORK.md) — FSR's lanes warm themselves at `RenderStartup`, behind the entry
+//! cover: the upscaler's and frame generation's compute chains queue there, `FgPresentPipeline`
+//! specialises the player-UI camera's one target, and `EffectVelocityPipeline` every coverage rule
+//! at the free-floating depth state. A model part's velocity pipeline keys on its mesh layout and
+//! compiles on first sight, which the menagerie's rigs give it while FSR is on during the pass.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -697,6 +703,7 @@ fn warm_effect_lane(
                             main_entity: cam,
                             light: None,
                             clip: None,
+                            motion: benilla_world::particles::buffer::EffectMotion::Static,
                         },
                     );
                 }
@@ -729,6 +736,7 @@ fn warm_effect_lane(
                 main_entity: cam,
                 light: None,
                 clip: None,
+                motion: benilla_world::particles::buffer::EffectMotion::Static,
             },
         );
     }

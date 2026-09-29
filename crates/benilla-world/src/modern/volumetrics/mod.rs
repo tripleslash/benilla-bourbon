@@ -38,6 +38,8 @@ mod node;
 
 // fork: modern lighting (FORK.md, P5) — the probe trace orders before this pass.
 pub(crate) use node::froxel_pass;
+// fork: fsr (FORK.md) — FSR's opaque copy and velocity pass order against these two.
+pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
 pub const FOG_BYTES: usize = 3 * 64 + 22 * 16;

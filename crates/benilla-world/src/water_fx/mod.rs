@@ -550,6 +550,8 @@ fn push_water_foam(
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
                 clip: None,
+                // fork: fsr (FORK.md) — the foam records stay where they were laid.
+                motion: crate::particles::buffer::EffectMotion::Static,
             },
         );
     }

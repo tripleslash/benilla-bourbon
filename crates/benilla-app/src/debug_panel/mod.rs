@@ -209,6 +209,8 @@ fn spawn_egui_camera(mut commands: Commands) {
         // pass fails validation. egui feathers its own edges anyway.
         bevy::render::view::Msaa::Off,
         RenderLayers::none(),
+        // fork: fsr (FORK.md) — the overlay presents on a held frame of frame generation too.
+        benilla_world::fsr::PresentsHeldFrames,
         Camera {
             order: 2,
             // An overlay composites only its own pixels: egui paints a cleared transparent canvas

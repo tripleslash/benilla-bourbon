@@ -8,7 +8,8 @@ use bevy::prelude::*;
 use crate::view::WorldCamera;
 
 use super::buffer::{
-    EffectDrawSpec, EffectFog, EffectLightOverride, EffectLighting, EffectQuads, EffectVertex,
+    EffectDrawSpec, EffectFog, EffectLightOverride, EffectLighting, EffectMotion, EffectQuads,
+    EffectVertex,
 };
 use super::quads::{expand_quads, CamBasis, DrawFrame};
 use super::{
@@ -426,7 +427,12 @@ pub(super) fn simulate_particles(
         ),
     >,
     // A hosted emitter's sequence: its host's live `AnimationPlayer` slot and clip time.
-    hosts: Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
+    // fork: fsr (FORK.md) — paired with each emitter's placement at the last world frame,
+    // for its motion (one parameter: the system is at Bevy's sixteen).
+    (hosts, mut last_placement): (
+        Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
+        Local<bevy::ecs::entity::EntityHashMap<Transform>>,
+    ),
     mut dumps: super::dumps::Dumps,
 ) {
     let Ok((world_cam, cam_tf, frustum, camera, projection, cam_local)) = cam.single() else {
@@ -991,8 +997,21 @@ pub(super) fn simulate_particles(
                 0.0
             };
         let start = quads.begin();
+        // fork: fsr (FORK.md) — where the emitter stood last world frame (here, if new).
+        let prev_placement = last_placement
+            .insert(entity, *placement)
+            .unwrap_or(*placement);
         if want_quads && !particles.is_empty() {
             expand_quads(def, particles, &frame, placement, &cam, &mut quads.verts);
+            super::quads::push_particle_motion(
+                def,
+                particles,
+                &frame,
+                placement,
+                &prev_placement,
+                dt,
+                &mut quads.motion,
+            );
         }
         // `$WOW_PARTICLE_DEPTHDUMP` over the quads just written; booths draw to their own target.
         if let Some(fidx) = dump_frame {
@@ -1055,6 +1074,7 @@ pub(super) fn simulate_particles(
                 light: light_override.map(|l| l.0.clone()),
                 // A UI model tile's pane cell (`set_clip`); `None` in the world.
                 clip: *clip,
+                motion: EffectMotion::PerVertex,
             },
         );
         // Child pools: their own texture, blend and fog, the parent's anchor and rung.
@@ -1070,6 +1090,15 @@ pub(super) fn simulate_particles(
                 placement,
                 &cam,
                 &mut quads.verts,
+            );
+            super::quads::push_particle_motion(
+                &child.def,
+                &child.particles,
+                &frame,
+                placement,
+                &prev_placement,
+                dt,
+                &mut quads.motion,
             );
             let child_lighting = fold_committed_light(
                 &mut quads.verts[cstart as usize..],
@@ -1095,6 +1124,7 @@ pub(super) fn simulate_particles(
                     light: light_override.map(|l| l.0.clone()),
                     // The parent's cell and clip.
                     clip: *clip,
+                    motion: EffectMotion::PerVertex,
                 },
             );
         }

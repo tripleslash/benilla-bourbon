@@ -392,6 +392,8 @@ fn spawn_ui_camera(mut commands: Commands) {
         crate::ui_gamma::UiGammaLane::default(),
         // The world as this pass's first draw; `source` is `None` until a world camera draws.
         benilla_world::ffx_glow::FfxBackdrop::default(),
+        // fork: fsr (FORK.md) — it presents every frame, a held one of frame generation included.
+        benilla_world::fsr::PresentsHeldFrames,
         // Bevy UI (the glue and loading screens) renders here, in the gamma lane; unmarked, it
         // would take the highest-order camera, the egui overlay.
         bevy::ui::IsDefaultUiCamera,

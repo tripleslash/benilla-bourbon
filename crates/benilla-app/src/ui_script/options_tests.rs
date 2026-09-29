@@ -1313,6 +1313,46 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// fork: fsr (FORK.md) — Use Frame Generation: our own checkbox, staged to Apply, and
+/// Defaults walks it back to the registered "0".
+#[test]
+fn the_frame_generation_row_stages_applies_and_defaults_off() {
+    benilla_formats::wow_data_or_skip!();
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowFrameGeneration";
+    let mut s = audio_harness();
+    s.set_cvar_host("frameGeneration", "0");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>(&format!("return {ROW}Check:GetChecked()"))
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Use Frame Generation"
+    );
+    let _ = s.take_cvar_changes();
+
+    // A click stages; Apply commits.
+    s.run(&format!("{ROW}Check:Click()")).unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("frameGeneration".to_string(), "1".to_string())]
+    );
+
+    // Defaults walks it back to the registered "0".
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>(&format!("return {ROW}Check:GetChecked()"))
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Brightness is an API row over `GetGamma`/`SetGamma`, the reference's slider 6
 /// (`OptionsFrame.lua:30`): a drag writes `gamma`, and a revisit reads it back.
 #[test]
@@ -2507,6 +2547,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_LIGHTING_QUALITY",
                 "GraphicsRowLightingQuality",
             ),
+            // fork: fsr (FORK.md)
+            (
+                "BENILLA_TOOLTIP_FRAME_GENERATION",
+                "GraphicsRowFrameGeneration",
+            ),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
@@ -2538,7 +2583,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 82 rows less the three untipped below, less Display Mode (pulled on this fork), plus the
     // fork's seven Graphics rows (updated models, shadows, the indirect-lighting pair, Water
     // Detail, Lighting, Lighting Quality); a dropdown row is checked on the key it wears at rest.
-    assert_eq!(checked, 85, "every tipped row carries a live key");
+    assert_eq!(checked, 86, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2634,8 +2679,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 85 the key census counts.
-    assert_eq!(raised, 85, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 86 the key census counts.
+    assert_eq!(raised, 86, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
@@ -4749,6 +4794,8 @@ fn turtle_options_carry_every_graphics_row() {
         "worldShadows",
         "hdCharacterModels",
         "renderScale",
+        // fork: fsr (FORK.md)
+        "frameGeneration",
     ] {
         assert!(
             rows.contains(&format!(":{cvar}:1;")),

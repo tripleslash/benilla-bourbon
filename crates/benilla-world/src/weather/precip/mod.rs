@@ -430,6 +430,9 @@ fn push_precip(
         main_entity: Entity::PLACEHOLDER,
         light: None,
         clip: None,
+        // fork: fsr (FORK.md) — rain draws as a modulate, which the velocity pass skips; snow and mist
+        // fall slowly enough for the camera's reprojection.
+        motion: crate::particles::buffer::EffectMotion::Static,
     };
     let start = quads.begin();
     push_streaks(&mut quads.verts, &precip.rain.drops, wind.tilt, cam_pos);

@@ -915,6 +915,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "lightingModel",
     "lightingQuality",
     "renderScale",
+    // fork: fsr (FORK.md)
+    "frameGeneration",
 ];
 
 /// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
@@ -1505,6 +1507,11 @@ mod tests {
             d["lightingQuality"],
             f32::from(LightingQuality::DEFAULT.as_cvar())
         );
+        // fork: fsr (FORK.md) — frame generation boots off, as the engine's knob does.
+        assert_eq!(
+            d["frameGeneration"] != 0.0,
+            benilla_world::fsr::FrameGeneration::default().0
+        );
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).
@@ -1692,6 +1699,11 @@ mod tests {
             res::<LightingSettings>(&app).quality,
             LightingQuality::from_cvar(3.0)
         );
+        // fork: fsr (FORK.md)
+        apply(&mut app, "frameGeneration", "1");
+        assert!(res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        apply(&mut app, "framegeneration", "0");
+        assert!(!res::<benilla_world::fsr::FrameGeneration>(&app).0);
         assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
         apply(&mut app, "fpsJournal", "1");
         assert!(res::<crate::perf::FpsJournalSetting>(&app).0);
@@ -2206,6 +2218,8 @@ mod tests {
             .init_resource::<benilla_world::ffx_glow::FfxSwitches>()
             // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
             .insert_resource(RenderScale(1.0))
+            // fork: fsr (FORK.md)
+            .init_resource::<benilla_world::fsr::FrameGeneration>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
             // WaterDetail::default() $WOW_WATER_DETAIL.

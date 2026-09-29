@@ -435,6 +435,8 @@ fn push_drift(
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
                 clip: None,
+                // fork: fsr (FORK.md) — the motes drift a few centimetres a second: the camera's reprojection covers them.
+                motion: crate::particles::buffer::EffectMotion::Static,
             },
         );
         cloud.submitted = submitted;

@@ -408,8 +408,15 @@
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
-            .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
-            .. "smooths edges at the cost of frame rate. Applies when you click Apply."
+            .. "Below 100% trades sharpness for frame rate, and AMD FSR 3.1 rebuilds the full "
+            .. "resolution from several frames; above 100% is supersampling, which smooths edges "
+            .. "at the cost of frame rate. Applies when you click Apply."
+
+        -- fork: fsr (FORK.md) — 1.12 has no such checkbox.
+        BENILLA_TOOLTIP_FRAME_GENERATION =
+            "Uses AMD FSR 3.1 frame generation to show a generated frame between every two the "
+            .. "game draws, nearly doubling the frames you see for one frame of added latency.\n\n"
+            .. "Render Scale is held at 100% or below while it is on. Applies when you click Apply."
 
         -- 1.12 has no such checkbox.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
@@ -547,6 +554,8 @@
                 "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
                 -- fork: the modern lighting model and its tier (FORK.md).
                 "RowLightingModel", "RowLightingQuality",
+                -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
+                "RowFrameGeneration",
                 "RowRenderScale",
             },
             -- Guild Names is a child of Player Names (UIOptionsFrame.lua:703-709).
@@ -2247,10 +2256,24 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowFrameGeneration" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: fsr (FORK.md) -- `frameGeneration`,
+                                                -- our own row. Deferred: a write moves the
+                                                -- render target's size cap.
+                                                BenillaOptionsRow_OnLoad(this, "frameGeneration", "Use Frame Generation",
+                                                    "BENILLA_TOOLTIP_FRAME_GENERATION")
+                                                this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Deviation: our own row (the reference draws to
@@ -3395,6 +3418,8 @@
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
             BENILLA_WATER_DETAIL = "Water Detail"
             BENILLA_RENDER_SCALE = "Render Scale"
+            -- fork: fsr (FORK.md)
+            BENILLA_FRAME_GENERATION = "Use Frame Generation"
 
             -- A dropdown's `<identifier>Dropdown_Init`, in the shape of Turtle's own
             -- (Options\Functions.lua): each entry picks through OptionsFrameDropdown_OnValueChanged.
@@ -3509,6 +3534,10 @@
                     name = "BENILLA_RENDER_SCALE", desc = BENILLA_TOOLTIP_RENDER_SCALE,
                     type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.05,
                     numberLabels = true } },
+                -- fork: fsr (FORK.md)
+                { category = DISPLAY, row = {
+                    name = "BENILLA_FRAME_GENERATION", desc = BENILLA_TOOLTIP_FRAME_GENERATION,
+                    type = "checkbutton", cvar = "frameGeneration" } },
             }
             -- The first category of a name: DISPLAY is both a VIDEO and an interface category,
             -- and VIDEO's comes first.

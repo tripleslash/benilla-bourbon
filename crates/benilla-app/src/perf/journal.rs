@@ -35,7 +35,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,gpu_modern\n";
+                              gpu_other,gpu_modern,gpu_fsr,gpu_fg,gpu_velocity,rendered,presented\n";
 
 /// The `fpsJournal` change callback: a flag, int-parsed and `!= 0`.
 pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut journal: ResMut<FpsJournalSetting>) {
@@ -109,9 +109,15 @@ enum GpuBucket {
     /// integrate and composite, the light binning. Last, because the columns only ever grow at
     /// the end; before it existed they all landed in [`Self::Other`].
     Modern,
+    // fork: fsr (FORK.md) — the upscaler chain (`fsr_upscale`).
+    Fsr,
+    // fork: fsr (FORK.md) — frame generation: its compose and its chain.
+    Fg,
+    // fork: fsr (FORK.md) — the velocity pass: moving parts and the effect lane.
+    Velocity,
 }
 
-const GPU_BUCKETS: usize = 8;
+const GPU_BUCKETS: usize = 11;
 
 /// Which column a diagnostics path lands in; `None` for anything but a top-level GPU span (a
 /// nested span's parent already carries it).
@@ -126,6 +132,10 @@ fn gpu_bucket(path: &str) -> Option<GpuBucket> {
         "main_transparent_pass_3d" | "main_transmissive_pass_3d" => GpuBucket::Transparent,
         p if p.starts_with("ffx_glow") => GpuBucket::Glow,
         p if p.starts_with("modern_") => GpuBucket::Modern,
+        // fork: fsr (FORK.md)
+        "fsr_upscale" => GpuBucket::Fsr,
+        "fsr_compose" | "fsr_framegen" => GpuBucket::Fg,
+        "fsr_velocity" => GpuBucket::Velocity,
         "tonemapping" | "upscaling" | "msaa_writeback" | "postprocessing" => GpuBucket::Post,
         "main_opaque_pass_2d" | "main_transparent_pass_2d" | "ui" | "ui_gamma_decode" => {
             GpuBucket::Ui
@@ -393,6 +403,11 @@ fn journal_fps(
     journal.main_at_flush = main_now;
     let gpu_cells = journal.gpu.columns();
     line.push_str(&gpu_cells);
+    // fork: fsr (FORK.md) — the row's rendered frames (this window's, one per main-world update)
+    // and presented frames (a held one of frame generation included), apart.
+    let presented =
+        benilla_world::fsr::cadence::PRESENTED.swap(0, std::sync::atomic::Ordering::Relaxed);
+    line.push_str(&format!(",{},{presented}", v.len()));
     line.push('\n');
     use std::io::Write;
     let Some(path) = journal.path.as_ref() else {
@@ -489,9 +504,12 @@ mod tests {
         assert_eq!(acc.frames, 2);
         let cols = acc.columns();
         // gpu_ms = (2 + 3 + 0.8 + 4) / 2; opaque (2 + 4) / 2; static 3 / 2; post 0.8 / 2.
-        assert_eq!(cols, ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00,0.00");
+        assert_eq!(
+            cols,
+            ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00,0.00,0.00,0.00,0.00"
+        );
         // The reset: a second with nothing read writes empty cells, one per column.
-        assert_eq!(acc.columns(), ",,,,,,,,,");
+        assert_eq!(acc.columns(), ",,,,,,,,,,,,");
         // And a later frame is still read after the reset.
         push(
             &mut store,
@@ -502,14 +520,15 @@ mod tests {
         acc.fold(&store);
         assert_eq!(
             acc.columns(),
-            ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00"
+            ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00"
         );
     }
 
     #[test]
     fn the_header_ends_with_the_gpu_cells_in_bucket_order() {
         let cols: Vec<&str> = JOURNAL_HEADER.trim_end().split(',').collect();
-        let gpu: Vec<&str> = cols[cols.len() - (GPU_BUCKETS + 1)..].to_vec();
+        // The frame counts follow the GPU cells.
+        let gpu: Vec<&str> = cols[cols.len() - (GPU_BUCKETS + 3)..cols.len() - 2].to_vec();
         assert_eq!(
             gpu,
             [
@@ -521,7 +540,10 @@ mod tests {
                 "gpu_post",
                 "gpu_ui",
                 "gpu_other",
-                "gpu_modern"
+                "gpu_modern",
+                "gpu_fsr",
+                "gpu_fg",
+                "gpu_velocity"
             ]
         );
         // An empty second writes exactly one cell per GPU column.

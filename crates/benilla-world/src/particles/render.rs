@@ -66,18 +66,27 @@ struct ExtractedDraw {
 }
 
 /// One GPU draw after the merge walk: an index range and the bind-group identity its items share.
-struct MergedDraw {
-    index_range: Range<u32>,
-    texture: AssetId<Image>,
+pub(crate) struct MergedDraw {
+    pub(crate) index_range: Range<u32>,
+    pub(crate) texture: AssetId<Image>,
     light: Option<Buffer>,
     /// This draw's fog and clip row in [`EffectMeta::params`].
     params_offset: u32,
+    // fork: fsr (FORK.md) — the camera whose phase drew it, and what its pipeline keyed on,
+    /// for the velocity pass's redraw.
+    pub(crate) view: MainEntity,
+    pub(crate) blend: EffectBlend,
+    pub(crate) raster_bias: i32,
+    pub(crate) raster_slope: f32,
+    pub(crate) no_depth_test: bool,
 }
 
 /// The lane's per-frame GPU state: vertices, indices, draws, merged draws and params rows.
 #[derive(Resource)]
 pub struct EffectMeta {
     vertices: RawBufferVec<EffectVertex>,
+    // fork: fsr (FORK.md) — each vertex's world displacement ([`super::buffer::EffectMotion`]).
+    motion: RawBufferVec<[f32; 3]>,
     indices: RawBufferVec<u32>,
     draws: Vec<ExtractedDraw>,
     merged: Vec<MergedDraw>,
@@ -100,6 +109,7 @@ impl Default for EffectMeta {
     fn default() -> Self {
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
+            motion: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
             draws: Vec::new(),
             merged: Vec::new(),
@@ -108,6 +118,27 @@ impl Default for EffectMeta {
             params_offsets: [0; 6],
             params_buffer: None,
         }
+    }
+}
+
+impl EffectMeta {
+    // fork: fsr (FORK.md) — the lane's view group, bound again by the velocity pass.
+    pub(crate) fn view_bind_group(&self) -> Option<&BindGroup> {
+        self.view_bind_group.as_ref()
+    }
+
+    // fork: fsr (FORK.md) — the vertex, motion and index buffers the merged draws index.
+    pub(crate) fn velocity_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer)> {
+        Some((
+            self.vertices.buffer()?,
+            self.motion.buffer()?,
+            self.indices.buffer()?,
+        ))
+    }
+
+    // fork: fsr (FORK.md) — this frame's merged draws of one camera's phase.
+    pub(crate) fn merged_for(&self, view: MainEntity) -> impl Iterator<Item = &MergedDraw> {
+        self.merged.iter().filter(move |m| m.view == view)
     }
 }
 
@@ -184,6 +215,13 @@ pub struct EffectPipeline {
     view_layout: BindGroupLayoutDescriptor,
     image_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
+}
+
+impl EffectPipeline {
+    // fork: fsr (FORK.md) — the view group's layout, which the velocity pipeline shares.
+    pub(crate) fn view_layout(&self) -> &BindGroupLayoutDescriptor {
+        &self.view_layout
+    }
 }
 
 pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -378,6 +416,12 @@ fn extract_effects(
     }
     meta.vertices.clear();
     meta.vertices.extend(quads.verts.iter().copied());
+    // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside.
+    meta.motion.clear();
+    meta.motion.extend(quads.motion.iter().copied());
+    for _ in quads.motion.len()..quads.verts.len() {
+        meta.motion.push([0.0; 3]);
+    }
     meta.draws.clear();
     meta.draws.extend(quads.draws.iter().map(|d| ExtractedDraw {
         cam: d.cam,
@@ -535,6 +579,7 @@ fn prepare_effects(
         }
     }
     meta.vertices.write_buffer(&device, &queue);
+    meta.motion.write_buffer(&device, &queue);
 
     // The merge walk, over each live view's sorted items, never the raw phase map (an unswept
     // entry carries a dead frame's indices): a run of items sharing a [`RunKey`] becomes one
@@ -640,6 +685,11 @@ fn prepare_effects(
                         texture: draw.texture,
                         light: draw.light.clone(),
                         params_offset,
+                        view: view.retained_view_entity.main_entity,
+                        blend: draw.blend,
+                        raster_bias: draw.raster_bias,
+                        raster_slope: draw.raster_slope,
+                        no_depth_test: draw.no_depth_test,
                     });
                     open = Some((i, 1, key));
                 }

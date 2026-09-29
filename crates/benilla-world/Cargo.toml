@@ -31,6 +31,8 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-wmo = { path = "../benilla-wmo" }
 bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
+# fork: fsr (FORK.md) — `fsr::caps` claims WebGPU's tier-1 bit on wgpu's own flag type.
+wgpu.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # macOS AppKit calls, at `benilla-app`'s pins so the graph has one objc2.
@@ -55,3 +57,7 @@ objc2 = "0.5"
 # already carries it transitively (`default_platform` bundles it for every target), but named
 # explicitly on the wasm32 target table per the plan's feature-unification note — this crate and
 # `benilla-app` must resolve `bevy` to the SAME feature set or cargo builds two copies.
+
+[dev-dependencies]
+# fork: fsr (FORK.md) — validates every FSR shader permutation.
+naga = { version = "29", features = ["wgsl-in"] }

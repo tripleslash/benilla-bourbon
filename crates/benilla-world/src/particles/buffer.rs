@@ -148,6 +148,20 @@ pub enum EffectLighting {
     Committed,
 }
 
+/// fork: fsr (FORK.md) — how a draw's vertices moved since the last world frame, which FSR's
+/// velocity pass draws as their motion (`fsr/velocity.rs`). A held frame runs no main world, so
+/// "the last world frame" is always the one before this.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum EffectMotion {
+    /// Still in the world: its pixels move with the camera alone.
+    #[default]
+    Static,
+    /// Every vertex moved by this world displacement, current minus previous.
+    Rigid(Vec3),
+    /// Each vertex's own displacement, pushed to [`EffectQuads::motion`] beside it.
+    PerVertex,
+}
+
 /// A per-emitter `WowLight` buffer read in place of the world's; the glue-scene booths set it.
 #[derive(Component, Clone)]
 pub struct EffectLightOverride(pub Buffer);
@@ -186,6 +200,9 @@ pub struct EffectDraw {
 pub struct EffectQuads {
     pub verts: Vec<EffectVertex>,
     pub draws: Vec<EffectDraw>,
+    // fork: fsr (FORK.md) — each vertex's world displacement since the last world frame,
+    /// parallel to [`Self::verts`] once a draw commits ([`EffectMotion`]).
+    pub motion: Vec<[f32; 3]>,
     /// Has [`begin_effect_frame`] run this frame? A commit before it would be erased, so
     /// [`Self::commit`] asserts it in debug builds: every writer needs
     /// `.after(begin_effect_frame)`. [`clear_effect_frame_flag`] resets it in `Last`.
@@ -197,6 +214,7 @@ impl Default for EffectQuads {
         Self {
             verts: Vec::new(),
             draws: Vec::new(),
+            motion: Vec::new(),
             // True, so a fixture with no clear can commit; the app's `Last` reset arms the check.
             cleared_this_frame: true,
         }
@@ -231,11 +249,15 @@ pub struct EffectDrawSpec {
     /// model tiles share one atlas where the reference gives each `<Model>` its own viewport
     /// (`0x59c730`), so the fragment discards outside the pane's cell.
     pub clip: Option<Vec4>,
+    // fork: fsr (FORK.md) — how the vertices moved since the last world frame.
+    pub motion: EffectMotion,
 }
 
 impl EffectQuads {
-    /// Open a draw: remember where its vertices start.
-    pub fn begin(&self) -> u32 {
+    /// Open a draw: remember where its vertices start. fork: fsr (FORK.md) — the motion
+    /// stream catches up with the vertices first, so a `PerVertex` writer's pushes line up.
+    pub fn begin(&mut self) -> u32 {
+        self.motion.resize(self.verts.len(), [0.0; 3]);
         self.verts.len() as u32
     }
 
@@ -263,6 +285,18 @@ impl EffectQuads {
              (see `EffectQuads::cleared_this_frame`)."
         );
         let end = self.verts.len() as u32;
+        // fork: fsr (FORK.md) — the draw's motion, parallel to its vertices.
+        match spec.motion {
+            EffectMotion::PerVertex => self.motion.resize(end as usize, [0.0; 3]),
+            EffectMotion::Static => {
+                self.motion.resize(start as usize, [0.0; 3]);
+                self.motion.resize(end as usize, [0.0; 3]);
+            }
+            EffectMotion::Rigid(d) => {
+                self.motion.resize(start as usize, [0.0; 3]);
+                self.motion.resize(end as usize, d.to_array());
+            }
+        }
         if end > start {
             self.draws.push(EffectDraw {
                 cam: spec.cam,
@@ -290,6 +324,7 @@ impl EffectQuads {
 pub fn begin_effect_frame(mut quads: ResMut<EffectQuads>) {
     quads.verts.clear();
     quads.draws.clear();
+    quads.motion.clear();
     quads.cleared_this_frame = true;
 }
 
@@ -384,6 +419,7 @@ mod tests {
                     main_entity: Entity::PLACEHOLDER,
                     light: None,
                     clip: None,
+                    motion: EffectMotion::Static,
                 },
             );
         }
@@ -472,6 +508,7 @@ impl<'w> WorldEffectDraw<'w> {
                 main_entity: Entity::PLACEHOLDER,
                 light: None,
                 clip: None,
+                motion: EffectMotion::Static,
             },
             quads: &mut self.quads,
         }
@@ -540,6 +577,18 @@ impl EffectBatch<'_> {
     pub fn owner(mut self, entity: Entity) -> Self {
         self.spec.main_entity = entity;
         self
+    }
+
+    /// fork: fsr (FORK.md) — how the batch moved since the last world frame; a
+    /// [`EffectMotion::PerVertex`] batch pushes each vertex's displacement to [`Self::motion_mut`].
+    pub fn moving(mut self, motion: EffectMotion) -> Self {
+        self.spec.motion = motion;
+        self
+    }
+
+    /// fork: fsr (FORK.md) — the per-vertex motion sink, parallel to [`Self::verts_mut`].
+    pub fn motion_mut(&mut self) -> &mut Vec<[f32; 3]> {
+        &mut self.quads.motion
     }
 
     /// Push vertices built elsewhere (the decal lanes project once and cache).

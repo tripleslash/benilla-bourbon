@@ -12,6 +12,8 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use benilla_assets::coords::wow_to_bevy;
 
+// fork: fsr (FORK.md) — `WOW_RENDER_SCALE` / `WOW_FRAME_GENERATION`: FSR without a login.
+mod fsr_view;
 mod wade_probe;
 
 use crate::boot;
@@ -251,6 +253,9 @@ fn plugin(app: &mut App) {
         Update,
         (wade_probe::auto_spawn_probe, wade_probe::drive_probe),
     );
+
+    // fork: fsr (FORK.md) — the FSR mode, when its knobs are set.
+    fsr_view::plugin(app);
 
     // `WOW_WORLDVIEW_SHOT=<png>` (at `WOW_WORLDVIEW_SHOT_AT` seconds, default 20) writes one frame
     // and exits, with no subject gate: the client's live shot needs a player the engine lacks.

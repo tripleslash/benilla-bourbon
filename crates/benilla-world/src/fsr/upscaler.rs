@@ -148,22 +148,23 @@ impl Targets {
         // Each pyramid level is the one above halved, rounded up.
         let m1 = (half + UVec2::ONE) / 2;
         let m2 = (m1 + UVec2::ONE) / 2;
-        let make = |label: &'static str, format: TextureFormat, usage: TextureUsages, size: UVec2| {
-            device.create_texture(&TextureDescriptor {
-                label: Some(label),
-                size: Extent3d {
-                    width: size.x.max(1),
-                    height: size.y.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format,
-                usage,
-                view_formats: &[],
-            })
-        };
+        let make =
+            |label: &'static str, format: TextureFormat, usage: TextureUsages, size: UVec2| {
+                device.create_texture(&TextureDescriptor {
+                    label: Some(label),
+                    size: Extent3d {
+                        width: size.x.max(1),
+                        height: size.y.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
         let view = |t: Texture| t.create_view(&TextureViewDescriptor::default());
         // Written by a compute pass, read by a later one.
         const INTERNAL: TextureUsages =
@@ -248,9 +249,40 @@ pub struct FsrState {
     prev: Option<(Vec3, Quat, Mat4)>,
     epoch: u32,
     modern: bool,
+    /// [`FsrOutput`] holds this rendered frame's upscale: false from `prepare_fsr` until the chain
+    /// lands, and kept through a held frame.
+    output_ready: bool,
+    /// This frame's camera-relative unjittered clip matrices, current and previous
+    /// ([`frame_matrices`]), for the effect lane's motion.
+    rel: [Mat4; 2],
+    /// This frame's clip-from-world matrices: jittered (the raster), unjittered, and last frame's
+    /// unjittered, for the model parts' motion.
+    clip: [Mat4; 3],
 }
 
 impl FsrState {
+    /// The upscaled image, once the chain has written it this rendered frame (or, on a held frame,
+    /// the last one).
+    pub fn output(&self) -> Option<&TextureView> {
+        self.output_ready.then_some(&self.targets.output)
+    }
+
+    /// Rendered frames accumulated since the last reset; 0 on a reset frame.
+    pub fn frame_index(&self) -> u32 {
+        self.frame_index
+    }
+
+    /// `[clip_from_cur_rel, prev_clip_from_cur_rel]`, unjittered and camera-relative.
+    pub fn rel_matrices(&self) -> [Mat4; 2] {
+        self.rel
+    }
+
+    /// `[raster, current, previous]` clip-from-world: the jittered matrix the frame rasterized
+    /// with, and the unjittered current and previous ones.
+    pub fn clip_from_world(&self) -> [Mat4; 3] {
+        self.clip
+    }
+
     /// The dilated motion, dilated depths and reconstructed previous depth, which frame generation
     /// shares rather than derives twice (`ffxFrameInterpolationPrepare`).
     pub fn shared(&self) -> (&TextureView, &TextureView, &Buffer) {
@@ -473,17 +505,18 @@ pub(super) fn init_pipelines(
         return;
     };
     let layouts = Layouts::new(shaders.formats);
-    let queue = |label: &'static str, layout: &BindGroupLayoutDescriptor, shader: &Handle<Shader>| {
-        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some(label.into()),
-            layout: vec![layout.clone()],
-            immediate_size: 0,
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("main".into()),
-            zero_initialize_workgroup_memory: true,
-        })
-    };
+    let queue =
+        |label: &'static str, layout: &BindGroupLayoutDescriptor, shader: &Handle<Shader>| {
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(label.into()),
+                layout: vec![layout.clone()],
+                immediate_size: 0,
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("main".into()),
+                zero_initialize_workgroup_memory: true,
+            })
+        };
     let s = &shaders.upscaler;
     let pipelines = FsrPipelines {
         formats: shaders.formats,
@@ -527,14 +560,14 @@ pub(crate) fn frame_matrices(
     let view_rot = Mat4::from_quat(rot);
     let cur_rel_from_clip = view_rot * jittered.inverse();
     let clip_from_cur_rel = proj * Mat4::from_quat(rot.inverse());
-    let prev_clip_from_cur_rel = prev_proj
-        * Mat4::from_quat(prev_rot.inverse())
-        * Mat4::from_translation(eye - prev_eye);
+    let prev_clip_from_cur_rel =
+        prev_proj * Mat4::from_quat(prev_rot.inverse()) * Mat4::from_translation(eye - prev_eye);
     [cur_rel_from_clip, clip_from_cur_rel, prev_clip_from_cur_rel]
 }
 
 /// `PrepareResources`: allocate or resize each FSR view's targets and advance its history by one
 /// rendered frame — parity, reset, matrices, the parameter block — and publish [`FsrOutput`].
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_fsr(
     mut commands: Commands,
     device: Res<RenderDevice>,
@@ -603,6 +636,9 @@ pub(super) fn prepare_fsr(
                 prev: None,
                 epoch: fsr.epoch,
                 modern,
+                output_ready: false,
+                rel: [Mat4::IDENTITY; 2],
+                clip: [Mat4::IDENTITY; 3],
             }),
         };
 
@@ -629,6 +665,15 @@ pub(super) fn prepare_fsr(
         .jitter_projection(&mut jittered, render.as_vec2());
         let [cur_rel_from_clip, clip_from_cur_rel, prev_clip_from_cur_rel] =
             frame_matrices(eye, rot, proj, jittered, prev);
+        state.output_ready = false;
+        state.rel = [clip_from_cur_rel, prev_clip_from_cur_rel];
+        let view_from_world = view.world_from_view.to_matrix().inverse();
+        let prev_view_from_world = Mat4::from_rotation_translation(prev.1, prev.0).inverse();
+        state.clip = [
+            jittered * view_from_world,
+            proj * view_from_world,
+            prev.2 * prev_view_from_world,
+        ];
 
         let (r, d) = (render.as_vec2(), display.as_vec2());
         let exposure = if modern {
@@ -743,7 +788,11 @@ pub(super) fn fsr_upscale_pass(
         return; // still compiling: the backdrop falls back to the bilinear read this frame
     };
     // The depth is read by two passes, so it must be sampleable.
-    if !depth.texture.usage().contains(TextureUsages::TEXTURE_BINDING) {
+    if !depth
+        .texture
+        .usage()
+        .contains(TextureUsages::TEXTURE_BINDING)
+    {
         return;
     }
 
@@ -924,11 +973,11 @@ pub(super) fn fsr_upscale_pass(
         dispatch(instability, &g_instability, render);
         dispatch(accumulate, &g_accumulate, display);
         dispatch(rcas, &g_rcas, display);
-        drop(dispatch);
         span.end(&mut pass);
     }
 
     state.reset_pending = false;
+    state.output_ready = true;
     // The history this frame wrote is usable from the next one.
     state.frame_index = state.frame_index.saturating_add(1);
 }

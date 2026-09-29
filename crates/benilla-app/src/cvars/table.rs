@@ -791,6 +791,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "the fork's own — the modern model's quality tier",
     ),
     // ── end fork-owned block ──
+    // ── fork-owned block: fsr (FORK.md) ──
+    // fork: fsr (FORK.md)
+    // `frameGeneration` — FSR 3.1.5 frame generation: one generated frame presented between every
+    // two rendered ones, FSR's upscaler at 1:1 at least (`renderScale` is capped at 1 while on).
+    // Off by default; applies to the next frame.
+    ours(
+        "frameGeneration",
+        "0",
+        "benilla's own — 1.12 presents every frame it draws and no frame it did not",
+    ),
+    // ── end fork-owned block ──
     // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
     //
     // The name and the value space are the REFERENCE's, taken from a later client rather than

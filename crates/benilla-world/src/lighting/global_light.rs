@@ -319,7 +319,9 @@ pub fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffer {
     SharedLightBuffer(device.create_buffer(&BufferDescriptor {
         label: Some("wow_shared_light"),
         size: light_blob_bytes(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        // fork: fsr (FORK.md) — `COPY_SRC`: the velocity pass copies it whole as the
+        // next world frame's previous rig pose.
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     }))
 }
