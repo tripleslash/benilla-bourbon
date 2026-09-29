@@ -25,7 +25,7 @@ use bevy::render::render_resource::{
     BufferUsages, Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     TextureViewDimension,
 };
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 
 use benilla_assets::materials::{
     LiquidCataMaterial, LiquidMaterial, TerrainMaterial, WowModelMaterial, MODERN_SHADOW_CASCADES,
@@ -349,7 +349,7 @@ fn fit_shadow_map(
 /// either way, and a missing binding would stall their bind groups.
 fn create_shadow_assets(
     mut images: ResMut<Assets<Image>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     // Classic-sized until the lighting latches (`fit_shadow_map`).
     let image = shadow_map_image(CLASSIC_SHADOW_MAP_SIZE, SHADOW_LAYERS);
@@ -361,7 +361,7 @@ fn create_shadow_assets(
     // at a size no quality tier changes — a re-created buffer would re-prepare every material.
     // P6: the local-light grid sits between them (`lights::BLOCK_LIGHT_BYTES`), which is what puts
     // both writable sub-ranges — the grid's cells and the probe field — on 256-byte offsets.
-    let mut block = ShaderStorageBuffer::with_size(
+    let mut block = ShaderBuffer::with_size(
         CASCADES_BYTES
             + super::volumetrics::BLOCK_TAIL_BYTES
             + super::gi::GI_PARAMS_BYTES

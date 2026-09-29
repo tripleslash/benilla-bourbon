@@ -327,28 +327,22 @@ struct DepthReadbackLabel;
 
 /// Copies the depth texture right after the opaque pass. Read at the end of the main pass instead,
 /// it also holds depth the transparent pass wrote, from something that tracks the camera.
-#[derive(Default)]
-struct DepthReadbackNode;
-
-impl ViewNode for DepthReadbackNode {
-    type ViewQuery = (&'static ViewDepthTexture, &'static DepthProbeView);
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        (depth, _): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
+fn depth_readback_pass(
+    world: &World,
+    view: ViewQuery<(&ViewDepthTexture, &DepthProbeView)>,
+    mut render_context: RenderContext,
+) {
+    let (depth, _) = view.into_inner();
+    {
         let (Some(watch), Some(staging)) = (
             world.get_resource::<DepthWatch>(),
             world.get_resource::<DepthStaging>(),
         ) else {
-            return Ok(());
+            return;
         };
         // `read_depth` counts the frames; stop copying once the burst is done.
         if !watch.armed || world.resource::<DepthFramesRead>().0 >= watch.count {
-            return Ok(());
+            return;
         }
         // Quad mode with nothing live this frame: no copy, and `read_depth` does not count it.
         if watch.pixels.is_empty()
@@ -356,13 +350,13 @@ impl ViewNode for DepthReadbackNode {
                 .get_resource::<QuadProbes>()
                 .is_none_or(|q| q.0.is_empty())
         {
-            return Ok(());
+            return;
         }
         let size = depth.texture.size();
         // `COPY_SRC` lands only on the texture allocated after `arm`, so the first armed frame
         // still has the old one.
         if !depth.texture.usage().contains(TextureUsages::COPY_SRC) {
-            return Ok(());
+            return;
         }
         // Depth-stencil formats reject partial copies (wgpu-core `validate_texture_copy_range`), so
         // the whole texture goes across.
@@ -387,8 +381,7 @@ impl ViewNode for DepthReadbackNode {
                 depth_or_array_layers: 1,
             },
         );
-        Ok(())
-    }
+}
 }
 
 /// How many frames [`read_depth`] has reported; a resource because the graph node reads it.

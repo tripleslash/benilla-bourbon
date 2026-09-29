@@ -325,8 +325,8 @@ pub fn write_gated<M: bevy::asset::Asset>(
     apply: impl FnOnce(&mut M),
 ) {
     if assets.get(handle).is_none_or(differs) {
-        if let Some(m) = assets.get_mut(handle) {
-            apply(m);
+        if let Some(mut m) = assets.get_mut(handle) {
+            apply(&mut m);
         }
     }
 }

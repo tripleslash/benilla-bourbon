@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_render"
-version = "0.18.1"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -25,23 +25,32 @@ readme = "README.md"
 keywords = ["bevy"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bevyengine/bevy"
-resolver = "2"
 
 [package.metadata.docs.rs]
 rustdoc-args = [
     "-Zunstable-options",
     "--generate-link-to-definition",
+    "--generate-macro-expansion",
 ]
 all-features = true
 
 [features]
 ci_limits = []
+debug = [
+    "type_label_buffers",
+    "bevy_utils/debug",
+]
 decoupled_naga = ["bevy_shader/decoupled_naga"]
 detailed_trace = []
 gles = ["wgpu/gles"]
 morph = ["bevy_mesh/morph"]
-multi_threaded = ["bevy_tasks/multi_threaded"]
+multi_threaded = [
+    "bevy_tasks/multi_threaded",
+    "bevy_transform/multi_threaded",
+]
 raw_vulkan_init = ["wgpu/vulkan"]
+reflect_auto_register = ["bevy_app/reflect_auto_register"]
+reflect_functions = ["bevy_app/reflect_functions"]
 serialize = ["bevy_mesh/serialize"]
 shader_format_spirv = [
     "bevy_shader/shader_format_spirv",
@@ -51,6 +60,7 @@ spirv_shader_passthrough = ["wgpu/spirv"]
 statically-linked-dxc = ["wgpu/static-dxc"]
 trace = ["profiling"]
 tracing-tracy = ["dep:tracy-client"]
+type_label_buffers = []
 vulkan-portability = ["wgpu/vulkan-portability"]
 webgl = ["wgpu/webgl"]
 webgpu = ["wgpu/webgpu"]
@@ -63,44 +73,53 @@ path = "src/lib.rs"
 version = "2.3.0"
 
 [dependencies.bevy_app]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_asset]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_camera]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_color]
-version = "0.18.0"
+version = "0.19.1"
 features = [
     "serialize",
     "wgpu-types",
 ]
 
 [dependencies.bevy_derive]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_diagnostic]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_ecs]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_encase_derive]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_image]
-version = "0.18.0"
+version = "0.19.1"
+
+[dependencies.bevy_log]
+version = "0.19.1"
+
+[dependencies.bevy_material]
+version = "0.19.1"
+
+[dependencies.bevy_material_macros]
+version = "0.19.1"
 
 [dependencies.bevy_math]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_mesh]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_platform]
-version = "0.18.0"
+version = "0.19.1"
 features = [
     "std",
     "serialize",
@@ -108,28 +127,28 @@ features = [
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_render_macros]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_shader]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_tasks]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_time]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_transform]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_utils]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_window]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bitflags]
 version = "2"
@@ -154,11 +173,8 @@ default-features = false
 [dependencies.encase]
 version = "0.12"
 
-[dependencies.fixedbitset]
-version = "0.5"
-
 [dependencies.glam]
-version = "0.30.7"
+version = "0.32.0"
 features = [
     "std",
     "encase",
@@ -172,8 +188,11 @@ default-features = false
 [dependencies.indexmap]
 version = "2"
 
+[dependencies.itertools]
+version = "0.14"
+
 [dependencies.naga]
-version = "27"
+version = "29.0.3"
 features = ["wgsl-in"]
 
 [dependencies.nonmax]
@@ -196,11 +215,6 @@ default-features = false
 version = "2"
 default-features = false
 
-[dependencies.tracing]
-version = "0.1"
-features = ["std"]
-default-features = false
-
 [dependencies.tracy-client]
 version = "0.18.3"
 optional = true
@@ -208,8 +222,11 @@ optional = true
 [dependencies.variadics_please]
 version = "1.1"
 
+[dependencies.weak-table]
+version = "0.3"
+
 [dependencies.wgpu]
-version = "27"
+version = "29.0.3"
 features = [
     "wgsl",
     "dx12",
@@ -220,24 +237,36 @@ features = [
 ]
 default-features = false
 
+[dependencies.wgpu-types]
+version = "29.0.3"
+default-features = false
+
 [dev-dependencies.proptest]
 version = "1"
+
+[dev-dependencies.proptest-derive]
+version = "0.2"
+
+[dev-dependencies.wgpu]
+version = "29.0.3"
+features = ["noop"]
+default-features = false
 
 [target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.send_wrapper]
 version = "0.6.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_app]
-version = "0.18.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_platform]
-version = "0.18.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_reflect]
-version = "0.18.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 

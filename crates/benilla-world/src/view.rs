@@ -140,13 +140,12 @@ impl MsaaSetting {
 /// `Rgba16Float` target, `Depth32Float` depth, the swapchain), each a separate wgpu capability;
 /// Bevy passes a count on unchecked, and wgpu fails validation on one the device lacks.
 fn supported_sample_counts(adapter: &bevy::render::renderer::RenderAdapter) -> Vec<u32> {
-    use bevy::image::BevyDefault as _;
     use bevy::render::render_resource::TextureFormat;
 
     let formats = [
         TextureFormat::Rgba16Float,
         TextureFormat::Depth32Float,
-        TextureFormat::bevy_default(),
+        TextureFormat::Rgba8UnormSrgb,
     ];
     MSAA_RANGE
         .clone()
@@ -194,12 +193,11 @@ impl MsaaFormats {
 /// Colour and depth bits for the dropdown's `MULTISAMPLING_FORMAT_STRING`, from the formats we
 /// render into; colour is the swapchain's, the mode the window presents in.
 fn dropdown_bit_depths() -> (u32, u32) {
-    use bevy::image::BevyDefault as _;
     use bevy::render::render_resource::TextureFormat;
 
     let bits = |f: TextureFormat| f.block_copy_size(None).unwrap_or(4) * 8;
     (
-        bits(TextureFormat::bevy_default()),
+        bits(TextureFormat::Rgba8UnormSrgb),
         bits(TextureFormat::Depth32Float),
     )
 }

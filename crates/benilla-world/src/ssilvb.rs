@@ -312,7 +312,7 @@ fn build_variant(
                 shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
-                    format: ViewTarget::TEXTURE_FORMAT_HDR,
+                    format: TextureFormat::Rgba16Float,
                     blend,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -426,7 +426,7 @@ fn prepare_textures(
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: TextureDimension::D2,
-                    format: ViewTarget::TEXTURE_FORMAT_HDR,
+                    format: TextureFormat::Rgba16Float,
                     usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 },
@@ -453,34 +453,24 @@ fn prepare_textures(
     }
 }
 
-#[derive(Default)]
-struct SsilvbNode;
-
-impl ViewNode for SsilvbNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        &'static ViewUniformOffset,
-        &'static SsilvbTextures,
-        &'static Msaa,
+pub(crate) fn ssilvb_pass(
+    world: &World,
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewDepthTexture,
+        &ViewUniformOffset,
+        &SsilvbTextures,
+        &Msaa,
         // The world camera only — a booth bake must never be occluded against its own backdrop.
-        &'static SsilvbView,
-    );
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, depth, view_offset, textures, msaa, _marker): QueryItem<
-            'w,
-            '_,
-            Self::ViewQuery,
-        >,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+        &SsilvbView,
+    )>,
+    mut render_context: RenderContext,
+) {
+    let (view_target, depth, view_offset, textures, msaa, _marker) = view.into_inner();
+    {
         let lighting = *world.resource::<IndirectLighting>();
         if !lighting.enabled() {
-            return Ok(());
+            return;
         }
         // **Multisampling no longer stands this pass down.** A multisampled depth and colour are
         // different binding types, not missing information: `build_variant` compiles a second set
@@ -499,11 +489,11 @@ impl ViewNode for SsilvbNode {
             .usage()
             .contains(TextureUsages::TEXTURE_BINDING)
         {
-            return Ok(());
+            return;
         }
         let pipelines = world.resource::<SsilvbPipelines>();
         let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
-            return Ok(()); // `specialize_pipelines` builds it this frame; gathered next
+            return; // `specialize_pipelines` builds it this frame; gathered next
         };
         let pipeline_cache = world.resource::<PipelineCache>();
         let (Some(gather), Some(blur_h), Some(blur_v), Some(composite)) = (
@@ -512,10 +502,10 @@ impl ViewNode for SsilvbNode {
             pipeline_cache.get_render_pipeline(variant.blur_v),
             pipeline_cache.get_render_pipeline(variant.composite),
         ) else {
-            return Ok(()); // pipelines still compiling — draw the frame un-occluded
+            return; // pipelines still compiling — draw the frame un-occluded
         };
         let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
-            return Ok(());
+            return;
         };
         world.resource::<RenderQueue>().write_buffer(
             &textures.params,
@@ -589,6 +579,7 @@ impl ViewNode for SsilvbNode {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[view_offset.offset]);
@@ -615,12 +606,12 @@ impl ViewNode for SsilvbNode {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         pass.set_pipeline(composite);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
-        Ok(())
-    }
+}
 }
 
 pub struct SsilvbPlugin;

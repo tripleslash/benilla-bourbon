@@ -20,7 +20,7 @@ anyhow = "1.0.102"
 # bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
 # and `vorbis`, and the client mixes through kira. Add a feature by name, never `2d`/`3d`/`ui`; a
 # plugin that takes bevy with its default features brings the audio stack back too.
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
     "default_app",
     "default_platform",
     "2d_bevy_render",
@@ -30,8 +30,9 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "scene",
     "picking",
 ] }
-# For the `WOW_GPU_MS` meter's query set, which bevy 0.18 does not wrap; must match bevy's wgpu.
-wgpu = "27"
+# For the `WOW_GPU_MS` meter's query set, which bevy does not wrap; must match bevy's wgpu, which
+# resolves to the vendored copy (`third_party/wgpu`, below).
+wgpu = "29"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
@@ -44,7 +45,7 @@ mlua-sys = { path = "third_party/mlua-sys" }
 # kira 0.12.1, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
-# bevy_tasks 0.18.1, forked so the browser build can have threads at all. Upstream gates its
+# bevy_tasks 0.19.1, forked so the browser build can have threads at all. Upstream gates its
 # `multi_threaded` alias on `target_arch` rather than `target_feature`, which makes "wasm" and "has
 # no threads" the same statement — they stopped being the same statement when the browser got shared
 # memory. The fork also supplies the threads themselves (`std::thread::spawn` is the `unsupported`
@@ -52,7 +53,7 @@ kira = { path = "third_party/kira" }
 # there rather than erroring. One patch entry covers the graph: every bevy crate depends on this one.
 # `third_party/bevy_tasks/BENILLA.md` has the hunk list and the verifying diff.
 bevy_tasks = { path = "third_party/bevy_tasks" }
-# bevy_ecs 0.18.1, forked for the same reason and in the same shape: 13 threading gates in
+# bevy_ecs 0.19.1, forked for the same reason and in the same shape: 13 threading gates in
 # `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
 # "has no threads". Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
 # purpose — decisions 1366/1437 measured the multi-threaded executor as a LOSS on this app
@@ -66,12 +67,17 @@ bevy_ecs = { path = "third_party/bevy_ecs" }
 # `par_iter_mut`. The fork swaps them for spin equivalents on that target alone.
 # `third_party/async-executor/BENILLA.md` has the argument and the verifying diff.
 async-executor = { path = "third_party/async-executor" }
-# bevy_render 0.18.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
+# bevy_render 0.19.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
 # `SendWrapper` under wasm+atomics and panics if dereferenced off its creating thread; upstream
 # guards `renderer/mod.rs` for exactly that and misses `batching::gpu_preprocessing`, which hands
 # `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
 # scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
 bevy_render = { path = "third_party/bevy_render" }
+# wgpu 29.0.4, forked for two WebGPU feature mappings the browser backend lacks: `"subgroups"` and
+# `"texture-formats-tier1"`, the second so the FSR 3.1.5 upscaler gets FidelityFX's one- and
+# two-channel storage formats in the browser. Two table rows and the two binding names they need;
+# `third_party/wgpu/PATCH.md` has the diff and the removal condition.
+wgpu = { path = "third_party/wgpu" }
 # event-listener 5.4.1, forked for ONE `use` line, and the least obvious of the four. `Event` is
 # what `async-channel` parks on, so its mutex is taken on every send/recv that registers or notifies
 # a listener -- and in the threaded browser build the main thread and a worker per core are on

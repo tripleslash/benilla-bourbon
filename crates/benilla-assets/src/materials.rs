@@ -22,7 +22,7 @@ use bevy::shader::ShaderRef;
 // name them at construction whatever order the assets are created in.
 pub const MODERN_SHADOW_MAP: Handle<Image> =
     bevy::asset::uuid_handle!("6d2f1e4a-3b7c-4e0a-9a51-0c7e8f2d9b31");
-pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderStorageBuffer> =
+pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderBuffer> =
     bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
 // fork: modern lighting (FORK.md, P4) — the integrated froxel fog volume
 // (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
@@ -153,7 +153,7 @@ pub struct WowModelExt {
     #[sampler(122, sampler_type = "comparison", visibility(fragment))]
     pub modern_shadow: Handle<Image>,
     #[storage(123, read_only, visibility(fragment))]
-    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
     // fork: modern lighting (FORK.md, P4) — blended batches fog themselves from the froxel volume.
     #[texture(124, dimension = "3d", visibility(fragment))]
     #[sampler(125, visibility(fragment))]
@@ -237,9 +237,9 @@ impl MaterialExtension for WowModelExt {
             descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
         }
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
-            ds.depth_write_enabled = !key.bind_group_data.no_depth_write;
+            ds.depth_write_enabled = Some(!key.bind_group_data.no_depth_write);
             if key.bind_group_data.no_depth_test {
-                ds.depth_compare = CompareFunction::Always;
+                ds.depth_compare = Some(CompareFunction::Always);
             }
         }
         // A sort bias is not a raster bias: the base `StandardMaterial::specialize` also packs it
@@ -268,7 +268,7 @@ impl MaterialExtension for WowModelExt {
         if key.bind_group_data.fade && !key.bind_group_data.sky_depth {
             // A fading model's near cards occlude its far ones; the sky never writes depth.
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                ds.depth_write_enabled = true;
+                ds.depth_write_enabled = Some(true);
             }
         }
         if key.bind_group_data.clutter {
@@ -320,7 +320,7 @@ impl MaterialExtension for WowModelExt {
                 }
             }
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                ds.depth_write_enabled = true;
+                ds.depth_write_enabled = Some(true);
             }
         }
         // The waterline clip (`benilla_world::straddle`) keys on the blend pass: no new pipelines.
@@ -420,7 +420,7 @@ pub struct LiquidExt {
     // fork: modern lighting (FORK.md, P4) — water draws after the fog composite and fogs
     // itself from the froxel volume (the block carries its parameters).
     #[storage(123, read_only, visibility(fragment))]
-    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
     #[texture(124, dimension = "3d", visibility(fragment))]
     #[sampler(125, visibility(fragment))]
     pub modern_fog: Handle<Image>,
@@ -631,7 +631,7 @@ pub struct LiquidCataExt {
     // sampler of its own: this layout already sits at the 16-sampler stage limit, so the volume is read
     // through `scene_samp` (106, linear clamp).
     #[storage(123, read_only, visibility(fragment))]
-    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
     #[texture(124, dimension = "3d", visibility(fragment))]
     pub modern_fog: Handle<Image>,
     // fork: modern lighting — the sun cascades, so water in shade loses its sun glare and highlight.
@@ -734,7 +734,7 @@ pub struct TerrainExtension {
     #[sampler(122, sampler_type = "comparison", visibility(fragment))]
     pub modern_shadow: Handle<Image>,
     #[storage(123, read_only, visibility(fragment))]
-    pub modern_cascades: Handle<bevy::render::storage::ShaderStorageBuffer>,
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
 }
 
 impl MaterialExtension for TerrainExtension {

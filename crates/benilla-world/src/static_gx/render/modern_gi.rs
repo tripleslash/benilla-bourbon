@@ -158,7 +158,7 @@ fn init_gi_pipelines(
     let clear = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("modern_gi_voxel_clear".into()),
         layout: vec![view_layout.clone(), store_layout.clone()],
-        push_constant_ranges: vec![],
+        immediate_size: 0,
         shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_voxel_clear.wgsl"),
         shader_defs: vec![],
         entry_point: Some("clear_box".into()),
@@ -615,8 +615,8 @@ fn prepare_gi_voxels(
                 // The sweep must see every surface along the axis, so nothing is depth-tested away.
                 depth_stencil: Some(DepthStencilState {
                     format: CORE_3D_DEPTH_FORMAT,
-                    depth_write_enabled: false,
-                    depth_compare: CompareFunction::Always,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(CompareFunction::Always),
                     stencil: StencilState::default(),
                     bias: DepthBiasState::default(),
                 }),
@@ -702,8 +702,8 @@ fn prepare_gi_voxels(
                 },
                 depth_stencil: Some(DepthStencilState {
                     format: TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: CompareFunction::GreaterEqual,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(CompareFunction::GreaterEqual),
                     stencil: StencilState::default(),
                     bias: DepthBiasState::default(),
                 }),
@@ -748,25 +748,19 @@ fn prepare_gi_voxels(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct GxVoxelLabel;
 
-#[derive(Default)]
-struct GiVoxelNode;
-
-impl ViewNode for GiVoxelNode {
-    type ViewQuery = &'static StaticGxView;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        gx_view: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+fn gi_voxel_pass(
+    world: &World,
+    view: ViewQuery<&StaticGxView>,
+    mut render_context: RenderContext,
+) {
+    let gx_view = view.into_inner();
+    {
         if !gx_view.primary {
-            return Ok(());
+            return;
         }
         let state = world.resource::<GiVoxelState>();
         let Some(tier) = state.tier else {
-            return Ok(());
+            return;
         };
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipes = world.resource::<GiVoxelPipelines>();
@@ -776,6 +770,7 @@ impl ViewNode for GiVoxelNode {
         let allocator = world.resource::<MeshAllocator>();
         // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column.
         let diagnostics = render_context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
 
         // The terrain heightfield: redrawn only when the terrain or its window changed.
         if state.height_pending {
@@ -794,6 +789,7 @@ impl ViewNode for GiVoxelNode {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 let timing = diagnostics.pass_span(&mut pass, "modern_gi_heightfield");
                 pass.set_bind_group(0, bind, &[state.height_offset]);
@@ -833,15 +829,15 @@ impl ViewNode for GiVoxelNode {
         }
 
         if state.jobs.is_empty() {
-            return Ok(());
+            return;
         }
         let (Some(view_bind), Some(store_bind), Some(depth)) =
             (&state.view_bind, &state.store_bind, &state.depth)
         else {
-            return Ok(());
+            return;
         };
         let Some(clear) = pipeline_cache.get_compute_pipeline(pipes.clear) else {
-            return Ok(());
+            return;
         };
         let mut casters: Vec<(&GxCellGpu, &GxCellDraw)> = Vec::new();
         for (key, gpu) in &cache.cells {
@@ -895,6 +891,7 @@ impl ViewNode for GiVoxelNode {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
                 pass.set_bind_group(0, view_bind, &[*offset]);
@@ -946,8 +943,7 @@ impl ViewNode for GiVoxelNode {
                 timing.end(&mut pass);
             }
         }
-        Ok(())
-    }
+}
 }
 
 /// Wire the pass between the modern shadow pass and the probe trace (called from `render::build`).

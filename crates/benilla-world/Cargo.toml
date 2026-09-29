@@ -23,7 +23,7 @@ webgl2 = ["bevy/webgl2"]
 webgpu = ["bevy/webgpu"]
 
 [dependencies]
-avian3d = "0.6"
+avian3d = "0.7"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 # No `benilla-protocol`: the engine renders a world and does not speak the protocol.

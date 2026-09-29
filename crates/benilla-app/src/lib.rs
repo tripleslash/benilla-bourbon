@@ -120,7 +120,6 @@ mod shaders;
 mod data_load_guard_tests;
 mod game_tip;
 mod name_persist;
-mod opaque2d;
 /// Where "the client is going down" is observed, in `Last`; every system that persists state on the
 /// way out registers through it.
 mod shutdown;
@@ -461,7 +460,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // dispatch is pure overhead (measured faster, tails flat). `WOW_MT_UPDATE=1` restores it.
     if std::env::var_os("WOW_MT_UPDATE").is_none() {
         app.edit_schedule(Update, |s| {
-            s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
     }
     // PostUpdate too: 208 systems paid about 10 µs each of multi-threaded dispatch, and
@@ -469,7 +468,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // log line names the config a run measured.
     if std::env::var_os("WOW_MT_POSTUPDATE").is_none() {
         app.edit_schedule(PostUpdate, |s| {
-            s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
         println!(
             "executor: PostUpdate -> single-threaded (the default; WOW_MT_POSTUPDATE=1 for MT)"
@@ -643,7 +642,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // for non-Send systems to the main thread, and `create_surfaces` needs it because macOS makes a
     // Metal layer only on the UI thread (the single-threaded executor panics at startup).
     //
-    // **On wasm all of this is already true and none of it is a choice.** `ExecutorKind`'s default
+    // **On wasm all of this is already true and none of it is a choice.** The executor default
     // is `SingleThreaded` on `target_arch = "wasm32"`, and `third_party/bevy_ecs` deliberately does
     // NOT touch that gate (only the `par_iter` ones) — so every schedule the fork does not name,
     // `Render` and `ExtractSchedule` included, is single-threaded there whatever this block does.
@@ -658,7 +657,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     if std::env::var_os("WOW_MT_EXTRACT").is_none() {
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             render_app.edit_schedule(bevy::render::ExtractSchedule, |s| {
-                s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+                s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
             });
             println!(
                 "executor: ExtractSchedule -> single-threaded (the default; WOW_MT_EXTRACT=1 for MT)"

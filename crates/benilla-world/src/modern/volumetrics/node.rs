@@ -19,7 +19,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::storage::GpuShaderStorageBuffer;
+use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
     Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
@@ -113,7 +113,7 @@ fn init_pipelines(
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(label.into()),
             layout: vec![layout.clone()],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader: asset_server.load(path),
             shader_defs: vec![],
             entry_point: Some(entry.into()),
@@ -224,7 +224,7 @@ fn prepare_froxels(
     active: Option<Res<ActiveLighting>>,
     volume: Option<Res<ModernVolume>>,
     images: Res<RenderAssets<GpuImage>>,
-    buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
     light: Option<Res<SharedLightBuffer>>,
     pipes: Option<Res<FroxelPipelines>>,
     pipeline_cache: Res<PipelineCache>,
@@ -462,7 +462,7 @@ fn specialize_composites(
                     shader_defs: shader_defs.clone(),
                     entry_point: Some(entry.to_owned().into()),
                     targets: vec![Some(ColorTargetState {
-                        format: ViewTarget::TEXTURE_FORMAT_HDR,
+                        format: TextureFormat::Rgba16Float,
                         blend: Some(blend),
                         write_mask: ColorWrites::ALL,
                     })],
@@ -483,26 +483,20 @@ fn specialize_composites(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct FroxelLabel;
 
-#[derive(Default)]
-struct FroxelNode;
-
-impl ViewNode for FroxelNode {
-    type ViewQuery = &'static ModernFogView;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        _fog_view: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+fn froxel_pass(
+    world: &World,
+    view: ViewQuery<&ModernFogView>,
+    mut render_context: RenderContext,
+) {
+    let _fog_view = view.into_inner();
+    {
         let targets = world.resource::<FroxelTargets>();
         let (true, Some(scatter_bind), Some(integrate_bind)) = (
             targets.ready,
             &targets.scatter_bind,
             &targets.integrate_bind,
         ) else {
-            return Ok(());
+            return;
         };
         let pipes = world.resource::<FroxelPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -510,11 +504,12 @@ impl ViewNode for FroxelNode {
             pipeline_cache.get_compute_pipeline(pipes.scatter),
             pipeline_cache.get_compute_pipeline(pipes.integrate),
         ) else {
-            return Ok(());
+            return;
         };
         let grid = targets.grid;
         // The journal's `gpu_modern` column, where the device times passes.
         let diagnostics = render_context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
         let encoder = render_context.command_encoder();
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -538,8 +533,7 @@ impl ViewNode for FroxelNode {
             pass.dispatch_workgroups(grid.x.div_ceil(8), grid.y.div_ceil(8), 1);
             span.end(&mut pass);
         }
-        Ok(())
-    }
+}
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -557,39 +551,27 @@ type FogPassQuery = (
     &'static ModernFogView,
 );
 
-#[derive(Default)]
-struct FogCompositeNode;
-
-impl ViewNode for FogCompositeNode {
-    type ViewQuery = FogPassQuery;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        view: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        run_fog_pass(FogPass::Composite, render_context, view, world)
+pub(crate) fn fog_composite_pass(
+    world: &World,
+    view: ViewQuery<FogPassQuery>,
+    mut render_context: RenderContext,
+) {
+    let view = view.into_inner();
+    {
+        run_fog_pass(FogPass::Composite, &mut render_context, view, world)
     }
 }
 
 /// fork: the nearest lamps' halos (`fog_composite.wgsl`'s `fs_halo`), added after the transparent
 /// pass so an alpha-blended tree behind a lamp cannot paint over its glow.
-#[derive(Default)]
-struct LampHaloNode;
-
-impl ViewNode for LampHaloNode {
-    type ViewQuery = FogPassQuery;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        view: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        run_fog_pass(FogPass::Halo, render_context, view, world)
+fn lamp_halo_pass(
+    world: &World,
+    view: ViewQuery<FogPassQuery>,
+    mut render_context: RenderContext,
+) {
+    let view = view.into_inner();
+    {
+        run_fog_pass(FogPass::Halo, &mut render_context, view, world)
     }
 }
 
@@ -599,23 +581,23 @@ enum FogPass {
     Halo,
 }
 
-fn run_fog_pass<'w>(
+fn run_fog_pass(
     which: FogPass,
-    render_context: &mut RenderContext<'w>,
-    (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'w, '_, FogPassQuery>,
-    world: &'w World,
-) -> Result<(), NodeRunError> {
+    render_context: &mut RenderContext,
+    (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'_, '_, FogPassQuery>,
+    world: &World,
+) {
     if !world
         .get_resource::<ActiveLighting>()
         .is_some_and(|a| a.is_modern())
     {
-        return Ok(());
+        return;
     }
     if world
         .get_resource::<ModernVolume>()
         .is_none_or(|v| v.mode == FogMode::Off)
     {
-        return Ok(());
+        return;
     }
     // Armed a frame after the latch (a reallocation); binding it earlier is a validation error.
     if !depth
@@ -623,11 +605,11 @@ fn run_fog_pass<'w>(
         .usage()
         .contains(TextureUsages::TEXTURE_BINDING)
     {
-        return Ok(());
+        return;
     }
     let pipes = world.resource::<FroxelPipelines>();
     let Some((layout, composite, halo)) = pipes.composites.get(&msaa.samples()) else {
-        return Ok(());
+        return;
     };
     let (label, id) = match which {
         FogPass::Composite => ("modern_fog_composite", composite),
@@ -635,25 +617,25 @@ fn run_fog_pass<'w>(
     };
     let pipeline_cache = world.resource::<PipelineCache>();
     let Some(pipeline) = pipeline_cache.get_render_pipeline(*id) else {
-        return Ok(());
+        return;
     };
     let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
-        return Ok(());
+        return;
     };
     let Some(volume) = world
         .resource::<RenderAssets<GpuImage>>()
         .get(MODERN_FOG_VOLUME.id())
     else {
-        return Ok(());
+        return;
     };
     let Some(block) = world
-        .resource::<RenderAssets<GpuShaderStorageBuffer>>()
+        .resource::<RenderAssets<GpuShaderBuffer>>()
         .get(MODERN_SHADOW_CASCADES.id())
     else {
-        return Ok(());
+        return;
     };
     let Some(light) = world.get_resource::<SharedLightBuffer>() else {
-        return Ok(());
+        return;
     };
     let bind = render_context.render_device().create_bind_group(
         label,
@@ -668,6 +650,7 @@ fn run_fog_pass<'w>(
         )),
     );
     let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = render_context
         .command_encoder()
         .begin_render_pass(&RenderPassDescriptor {
@@ -676,13 +659,13 @@ fn run_fog_pass<'w>(
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
     let span = diagnostics.pass_span(&mut pass, label);
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, &bind, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
     span.end(&mut pass);
-    Ok(())
 }
 
 pub(super) fn build(render_app: &mut SubApp) {

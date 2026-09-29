@@ -1648,7 +1648,7 @@ mod tests {
             images.add(Image::new_target_texture(
                 64,
                 64,
-                bevy::render::render_resource::TextureFormat::bevy_default(),
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                 None,
             ))
         };

@@ -172,11 +172,11 @@ if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
   fi
   # The wasm-bindgen Trunk downloaded, whose version MUST match the crate pin (Trunk.toml).
   WBG=""
-  for cand in     "${LOCALAPPDATA:-$HOME/AppData/Local}/trunkrs/trunk/cache/wasm-bindgen-0.2.122/wasm-bindgen.exe"     "$HOME/.cache/trunk/wasm-bindgen-0.2.122/wasm-bindgen"     "$(command -v wasm-bindgen 2>/dev/null || true)"; do
+  for cand in     "${LOCALAPPDATA:-$HOME/AppData/Local}/trunkrs/trunk/cache/wasm-bindgen-0.2.126/wasm-bindgen.exe"     "$HOME/.cache/trunk/wasm-bindgen-0.2.126/wasm-bindgen"     "$(command -v wasm-bindgen 2>/dev/null || true)"; do
     [ -n "${cand}" ] && [ -x "${cand}" ] && WBG="${cand}" && break
   done
   if [ -z "${WBG}" ]; then
-    echo "   no wasm-bindgen 0.2.122 found (Trunk caches one; or cargo install wasm-bindgen-cli)" >&2
+    echo "   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)" >&2
     exit 1
   fi
   "${WBG}" --target web --out-dir web/dist --out-name wenilla --no-demangle "${ARTIFACT}"

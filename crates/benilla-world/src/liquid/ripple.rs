@@ -681,39 +681,32 @@ fn upload_ripple(
     }
 }
 
-#[derive(Default)]
-struct RippleNode;
-
-impl ViewNode for RippleNode {
-    // The world camera only. A booth bake has no wading bodies and no business integrating a wave.
-    type ViewQuery = &'static LiquidScreenView;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        _marker: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+fn ripple_pass(
+    world: &World,
+    view: ViewQuery<&LiquidScreenView>,
+    mut render_context: RenderContext,
+) {
+    let _marker = view.into_inner();
+    {
         let (Some(field), Some(buffer)) = (
             world.get_resource::<RippleField>(),
             world.get_resource::<RippleBuffer>(),
         ) else {
-            return Ok(());
+            return;
         };
         if field.steps == 0 {
-            return Ok(()); // between fixed steps — the water interpolates across the gap
+            return; // between fixed steps — the water interpolates across the gap
         }
         let pipelines = world.resource::<RipplePipeline>();
         let cache = world.resource::<PipelineCache>();
         let Some(propagate) = cache.get_render_pipeline(pipelines.propagate) else {
-            return Ok(());
+            return;
         };
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
         let (Some(map), Some(scratch)) =
             (gpu_images.get(&field.map), gpu_images.get(&field.scratch))
         else {
-            return Ok(());
+            return;
         };
 
         let device = render_context.render_device().clone();
@@ -757,6 +750,7 @@ impl ViewNode for RippleNode {
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
                             occlusion_query_set: None,
+                            multiview_mask: None,
                         });
                 pass.set_pipeline(propagate);
                 // Reproject on the first step only — see `RipplePipeline::settled`.
@@ -779,8 +773,7 @@ impl ViewNode for RippleNode {
                 },
             );
         }
-        Ok(())
-    }
+}
 }
 
 /// Wire the ripple simulation into the app. Called from [`super::LiquidPlugin`].

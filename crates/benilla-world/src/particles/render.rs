@@ -11,7 +11,6 @@ use bevy::asset::{AssetEvent, AssetId};
 use bevy::core_pipeline::core_3d::{Transparent3d, CORE_3D_DEPTH_FORMAT};
 use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::ecs::system::SystemParamItem;
-use bevy::image::BevyDefault as _;
 use bevy::mesh::VertexBufferLayout;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -33,7 +32,7 @@ use bevy::render::render_resource::{
     VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::storage::GpuShaderStorageBuffer; // fork: modern lighting (FORK.md, P4)
+use bevy::render::storage::GpuShaderBuffer; // fork: modern lighting (FORK.md, P4)
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
@@ -327,9 +326,9 @@ impl SpecializedRenderPipeline for EffectPipeline {
                 shader_defs,
                 targets: vec![Some(ColorTargetState {
                     format: if key.hdr {
-                        ViewTarget::TEXTURE_FORMAT_HDR
+                        TextureFormat::Rgba16Float
                     } else {
-                        TextureFormat::bevy_default()
+                        TextureFormat::Rgba8UnormSrgb
                     },
                     blend,
                     write_mask: ColorWrites::ALL,
@@ -342,8 +341,8 @@ impl SpecializedRenderPipeline for EffectPipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: depth_write,
-                depth_compare,
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(depth_compare),
                 stencil: StencilState::default(),
                 bias: DepthBiasState {
                     constant: key.raster_bias,
@@ -445,7 +444,7 @@ fn queue_effects(
                 &effect_pipeline,
                 EffectPipelineKey {
                     samples: msaa.samples(),
-                    hdr: view.hdr,
+                    hdr: view.target_format == TextureFormat::Rgba16Float,
                     blend: draw.blend,
                     raster_bias: draw.raster_bias,
                     raster_slope_bits: draw.raster_slope.to_bits(),
@@ -661,7 +660,7 @@ fn prepare_effect_bind_groups(
     pipeline: Res<EffectPipeline>,
     view_uniforms: Res<ViewUniforms>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    storage: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    storage: Res<RenderAssets<GpuShaderBuffer>>,
     light: Option<Res<SharedLightBuffer>>,
     mut meta: ResMut<EffectMeta>,
     mut bind_groups: ResMut<EffectBindGroups>,

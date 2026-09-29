@@ -83,7 +83,7 @@ impl MaterialExtension for SkyExt {
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
+            depth.depth_write_enabled = Some(false);
         }
         crate::sky_order::sky_pipeline_state(descriptor);
         Ok(())

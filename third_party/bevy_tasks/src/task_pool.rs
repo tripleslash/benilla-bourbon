@@ -592,7 +592,7 @@ impl TaskPool {
     where
         T: Send + 'static,
     {
-        Task::new(self.executor.spawn(future))
+        self.executor.spawn(future)
     }
 
     /// Spawns a static future onto the browser's microtask queue — **not** onto a worker thread.
@@ -616,7 +616,7 @@ impl TaskPool {
     where
         T: 'static,
     {
-        Task::wrap_future(future)
+        web_task::spawn_local(future)
     }
 
     /// Spawns a static future onto the pool's **worker threads**.
@@ -636,10 +636,10 @@ impl TaskPool {
     where
         T: Send + 'static,
     {
-        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-        return Task::new(self.executor.spawn(future));
-        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-        return Task::wrap_pooled_future(&self.executor, future);
+        // One `Task` type on every target since bevy 0.19 (`async_task::Task`), so the worker
+        // executor's own handle is returned on the web too. A dropped one cancels, as upstream's
+        // web tasks now do; callers that mean fire-and-forget `.detach()`.
+        self.executor.spawn(future)
     }
 
     /// Polls the pool's executor once, running at most one ready task on the calling thread.
@@ -671,7 +671,7 @@ impl TaskPool {
     where
         T: 'static,
     {
-        Task::new(TaskPool::LOCAL_EXECUTOR.with(|executor| executor.spawn(future)))
+        TaskPool::LOCAL_EXECUTOR.with(|executor| executor.spawn(future))
     }
 
     /// Spawns a static future on the browser's microtask queue.
@@ -684,7 +684,7 @@ impl TaskPool {
     where
         T: 'static,
     {
-        Task::wrap_future(future)
+        web_task::spawn_local(future)
     }
 
     /// Runs a function with the local executor. Typically used to tick

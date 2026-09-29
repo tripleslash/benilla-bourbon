@@ -204,7 +204,7 @@ fn describe(desc: &PipelineDescriptor) -> String {
                 |ds| {
                     (
                         ds.bias.constant,
-                        ds.depth_write_enabled,
+                        ds.depth_write_enabled.unwrap_or(false),
                         format!("{:?}", ds.depth_compare),
                     )
                 },

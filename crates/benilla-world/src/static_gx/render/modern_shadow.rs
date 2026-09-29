@@ -17,7 +17,7 @@ use bevy::app::SubApp;
 use bevy::pbr::graph::NodePbr;
 use bevy::render::render_resource::binding_types::uniform_buffer;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::storage::GpuShaderStorageBuffer;
+use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::shader::Shader;
 
@@ -303,8 +303,8 @@ fn init_shadow_pipelines(
         },
         depth_stencil: Some(DepthStencilState {
             format: CORE_3D_DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::GreaterEqual,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::GreaterEqual),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),
@@ -364,8 +364,8 @@ fn init_shadow_pipelines(
         },
         depth_stencil: Some(DepthStencilState {
             format: CORE_3D_DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::Always,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),
@@ -406,8 +406,8 @@ fn init_shadow_pipelines(
         },
         depth_stencil: Some(DepthStencilState {
             format: CORE_3D_DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::Always,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),
@@ -438,7 +438,7 @@ fn prepare_modern_shadow(
     cascades: Option<Res<ModernCascades>>,
     lights: Option<Res<ModernLights>>,
     images: Res<RenderAssets<GpuImage>>,
-    buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
     pipes: Option<Res<GxShadowPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     mut uniforms: ResMut<CasterViewBuffer>,
@@ -687,8 +687,8 @@ fn queue_terrain_shadow_pipelines(
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::GreaterEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
@@ -785,8 +785,8 @@ fn prepare_entity_shadows(
                             },
                             depth_stencil: Some(DepthStencilState {
                                 format: CORE_3D_DEPTH_FORMAT,
-                                depth_write_enabled: true,
-                                depth_compare: CompareFunction::GreaterEqual,
+                                depth_write_enabled: Some(true),
+                                depth_compare: Some(CompareFunction::GreaterEqual),
                                 stencil: StencilState::default(),
                                 bias: DepthBiasState::default(),
                             }),
@@ -876,29 +876,24 @@ fn prepare_entity_shadows(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct GxShadowLabel;
 
-#[derive(Default)]
-struct GxShadowNode;
-
-impl ViewNode for GxShadowNode {
-    type ViewQuery = &'static StaticGxView;
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        gx_view: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+fn gx_shadow_pass(
+    world: &World,
+    view: ViewQuery<&StaticGxView>,
+    mut render_context: RenderContext,
+) {
+    let gx_view = view.into_inner();
+    {
         if !gx_view.primary {
-            return Ok(());
+            return;
         }
         let frame = world.resource::<ModernShadowFrame>();
         let Some(view_bind) = frame.bind.as_ref() else {
-            return Ok(());
+            return;
         };
         // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column
         // (`benilla-app` `perf::journal`) where the device times passes.
         let diagnostics = render_context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
         let cascades = world.resource::<ModernCascades>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let ready = world.get_resource::<GxShadowPipelines>().and_then(|pipes| {
@@ -961,7 +956,7 @@ impl ViewNode for GxShadowNode {
         };
         let (Some(working), Some(static_cache)) = (frame.texture.as_ref(), frame.cache.as_ref())
         else {
-            return Ok(());
+            return;
         };
 
         // The local-light atlas is the layer after the sky map and is drawn below, not here: it is
@@ -1047,6 +1042,7 @@ impl ViewNode for GxShadowNode {
                                     ),
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
+                                    multiview_mask: None,
                                 });
                             let span = diagnostics.pass_span(&mut pass, "modern_shadow_restore");
                             pass.set_render_pipeline(restore);
@@ -1079,6 +1075,7 @@ impl ViewNode for GxShadowNode {
                         }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
                     let span = diagnostics.pass_span(&mut pass, "modern_shadow_static");
                     if active {
@@ -1228,6 +1225,7 @@ impl ViewNode for GxShadowNode {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let span = diagnostics.pass_span(&mut pass, "modern_shadow_dynamic");
             pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
@@ -1316,8 +1314,7 @@ impl ViewNode for GxShadowNode {
             meshes,
             allocator,
         );
-        Ok(())
-    }
+}
 }
 
 impl GxShadowNode {
@@ -1664,6 +1661,7 @@ impl GxShadowNode {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         let span = diagnostics.pass_span(&mut pass, "modern_local_shadow");
         for (i, light) in shadowed.iter().enumerate() {
@@ -1794,6 +1792,7 @@ impl GxShadowNode {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_dynamic");
         for (i, light) in shadowed.iter().enumerate() {
@@ -1926,6 +1925,7 @@ fn restore_atlas_slots(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     let span = diagnostics.pass_span(&mut pass, "modern_local_shadow_restore");
     pass.set_render_pipeline(pipeline);

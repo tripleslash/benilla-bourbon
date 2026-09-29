@@ -16,7 +16,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::storage::GpuShaderStorageBuffer;
+use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
@@ -135,7 +135,7 @@ fn init_pipelines(
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(label.into()),
             layout: vec![layout.clone()],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader: asset_server.load(path),
             shader_defs: vec![],
             entry_point: Some(entry.into()),
@@ -195,7 +195,7 @@ fn prepare_gi(
     gi: Option<Res<ModernGi>>,
     scene: Res<ModernGiScene>,
     images: Res<RenderAssets<GpuImage>>,
-    buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
     light: Option<Res<SharedLightBuffer>>,
     pipes: Option<Res<GiPipelines>>,
     pipeline_cache: Res<PipelineCache>,

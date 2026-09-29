@@ -9,22 +9,18 @@
 //! Bevy UI (the glue and loading screens) converts in its own shaders ([`use_gamma_ui_shaders`])
 //! and lands on this camera, which [`crate::ui_pass`] makes `IsDefaultUiCamera`.
 
-use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
-use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::upscaling::upscaling;
+use bevy::core_pipeline::{Core2d, FullscreenShader};
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
-use bevy::ui_render::graph::NodeUi;
+use bevy::ui_render::ui_pass;
 use bevy::ui_render::ui_texture_slice_pipeline::{
     init_ui_texture_slice_pipeline, UiTextureSlicePipeline,
 };
@@ -85,9 +81,6 @@ fn stamp_lane_gamma(gamma: Res<DisplayGamma>, mut lanes: Query<&mut UiGammaLane>
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct UiGammaLabel;
-
 /// The decode's shared parts; the pipeline is specialised per view ([`ViewUiGammaPipeline`]).
 #[derive(Resource)]
 struct UiGammaPipeline {
@@ -138,7 +131,9 @@ fn prepare_view_pipelines(
     views: Query<(Entity, &ExtractedCamera, &ViewTarget), With<UiGammaLane>>,
 ) {
     for (entity, camera, target) in &views {
-        let format = FinalPassTarget::format(&camera.output_mode, target);
+        let Some(format) = FinalPassTarget::format(&camera.output_mode, target) else {
+            continue;
+        };
         let id = pipelines.specialize(&pipeline_cache, &pipeline, format);
         commands.entity(entity).insert(ViewUiGammaPipeline(id));
     }
@@ -185,70 +180,64 @@ fn init_pipeline(
     });
 }
 
-#[derive(Default)]
-struct UiGammaNode;
-
-impl ViewNode for UiGammaNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static UiGammaLane,
-        &'static ExtractedCamera,
-        &'static ViewUiGammaPipeline,
+/// The decode: the view's finished UI target, gamma-decoded once into its output.
+fn ui_gamma_decode(
+    view: ViewQuery<(
+        &ViewTarget,
+        &UiGammaLane,
+        &ExtractedCamera,
+        &ViewUiGammaPipeline,
+    )>,
+    pipelines: Res<UiGammaPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    queue: Res<RenderQueue>,
+    mut ctx: RenderContext,
+) {
+    let (view_target, lane, camera, pipeline) = view.into_inner();
+    let Some(decode) = pipeline_cache.get_render_pipeline(pipeline.0) else {
+        // Still compiling: the UI stays undecoded, over-bright, for a frame or two.
+        return;
+    };
+    // This frame's exponent as `[g, 0, 0, 0]`; the shader reads `.x`.
+    queue.write_buffer(
+        &pipelines.ramp,
+        0,
+        bytemuck::cast_slice(&[lane.gamma, 0.0, 0.0, 0.0]),
     );
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, lane, camera, pipeline): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<UiGammaPipeline>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(decode) = pipeline_cache.get_render_pipeline(pipeline.0) else {
-            // Still compiling: the UI stays undecoded, over-bright, for a frame or two.
-            return Ok(());
-        };
-        // This frame's exponent as `[g, 0, 0, 0]`; the shader reads `.x`.
-        world.resource::<RenderQueue>().write_buffer(
-            &pipelines.ramp,
-            0,
-            bytemuck::cast_slice(&[lane.gamma, 0.0, 0.0, 0.0]),
-        );
-        // The swapchain for the `Skip` player-UI camera, the ping-pong target for a `Write` one.
-        let out = FinalPassTarget::resolve(camera, view_target);
-        let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout);
-        let bind = render_context.render_device().create_bind_group(
-            "ui_gamma_decode",
-            &layout,
-            &BindGroupEntries::sequential((
-                out.source,
-                &pipelines.sampler,
-                pipelines.ramp.as_entire_binding(),
-            )),
-        );
-        // The perf journal buckets this span's name into `gpu_ui`.
-        let diagnostics = render_context.diagnostic_recorder();
-        let scissor = out.scissor_rect();
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("ui_gamma_decode"),
-                color_attachments: &[Some(out.destination)],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        if let Some((x, y, w, h)) = scissor {
-            pass.set_scissor_rect(x, y, w, h);
-        }
-        let span = diagnostics.pass_span(&mut pass, "ui_gamma_decode");
-        pass.set_pipeline(decode);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..3, 0..1);
-        span.end(&mut pass);
-        Ok(())
+    // The swapchain for the `Skip` player-UI camera, the ping-pong target for a `Write` one.
+    let Some(out) = FinalPassTarget::resolve(camera, view_target) else {
+        return; // no output surface this frame (an occluded swapchain)
+    };
+    let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout);
+    let bind = ctx.render_device().create_bind_group(
+        "ui_gamma_decode",
+        &layout,
+        &BindGroupEntries::sequential((
+            out.source,
+            &pipelines.sampler,
+            pipelines.ramp.as_entire_binding(),
+        )),
+    );
+    // The perf journal buckets this span's name into `gpu_ui`.
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let scissor = out.scissor_rect();
+    let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
+        label: Some("ui_gamma_decode"),
+        color_attachments: &[Some(out.destination)],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    if let Some((x, y, w, h)) = scissor {
+        pass.set_scissor_rect(x, y, w, h);
     }
+    let span = diagnostics.pass_span(&mut pass, "ui_gamma_decode");
+    pass.set_pipeline(decode);
+    pass.set_bind_group(0, &bind, &[]);
+    pass.draw(0..3, 0..1);
+    span.end(&mut pass);
 }
 
 /// Puts Bevy UI on the gamma lane: the glue and loading screens are Bevy UI trees, not quads, and
@@ -295,15 +284,14 @@ impl Plugin for UiGammaPlugin {
                     .after(init_ui_pipeline)
                     .after(init_ui_texture_slice_pipeline),
             )
-            .add_render_graph_node::<ViewNodeRunner<UiGammaNode>>(Core2d, UiGammaLabel)
-            // After the quads, before the output blit, which a `Skip` camera skips: the decode is
-            // the output write.
-            .add_render_graph_edges(
+            // After the quads and after Bevy UI, which writes gamma into the same target, and
+            // before the output blit, which a `Skip` camera skips: the decode is the output write.
+            .add_systems(
                 Core2d,
-                (Node2d::EndMainPass, UiGammaLabel, Node2d::Upscaling),
-            )
-            // And after Bevy UI, which writes gamma into the same target: upstream orders `UiPass`
-            // only against `EndMainPass` and `Upscaling`, leaving it unordered against the decode.
-            .add_render_graph_edge(Core2d, NodeUi::UiPass, UiGammaLabel);
+                ui_gamma_decode
+                    .after(benilla_world::ffx_glow::ffx_transparent_pass_2d)
+                    .after(ui_pass)
+                    .before(upscaling),
+            );
     }
 }

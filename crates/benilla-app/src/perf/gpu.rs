@@ -236,6 +236,7 @@ impl Node for GpuStampNode {
                         end_of_pass_write_index: end,
                     }),
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
         }
         Ok(())

@@ -15,7 +15,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderQueue};
-use bevy::render::storage::GpuShaderStorageBuffer;
+use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
 use benilla_assets::materials::MODERN_SHADOW_CASCADES;
@@ -62,7 +62,7 @@ fn init_pipelines(
     let bin = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
-        push_constant_ranges: vec![],
+        immediate_size: 0,
         shader: asset_server.load("embedded://benilla_world/shaders/modern/light_bin.wgsl"),
         shader_defs: vec![],
         entry_point: Some("bin_lights".into()),
@@ -80,7 +80,7 @@ fn prepare_lights(
     device: Res<bevy::render::renderer::RenderDevice>,
     active: Option<Res<ActiveLighting>>,
     lights: Option<Res<ModernLights>>,
-    buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
     light_buffer: Option<Res<SharedLightBuffer>>,
     pipes: Option<Res<LightPipelines>>,
     pipeline_cache: Res<PipelineCache>,

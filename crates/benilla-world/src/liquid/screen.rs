@@ -120,12 +120,12 @@ impl LiquidScreenTargets {
             color: images.add(target_image(
                 "liquid_scene_color",
                 size,
-                ViewTarget::TEXTURE_FORMAT_HDR,
+                TextureFormat::Rgba16Float,
             )),
             blur: images.add(target_image(
                 "liquid_scene_blur",
                 blur_size,
-                ViewTarget::TEXTURE_FORMAT_HDR,
+                TextureFormat::Rgba16Float,
             )),
             depth: images.add(target_image(
                 "liquid_scene_depth",
@@ -135,7 +135,7 @@ impl LiquidScreenTargets {
             reflect: images.add(target_image(
                 "liquid_reflection",
                 reflect_size,
-                ViewTarget::TEXTURE_FORMAT_HDR,
+                TextureFormat::Rgba16Float,
             )),
             size,
         }
@@ -376,12 +376,12 @@ fn build_variant(
         copy: pipeline_cache.queue_render_pipeline(pipeline(
             "liquid_screen_copy",
             "fs_copy",
-            ViewTarget::TEXTURE_FORMAT_HDR,
+            TextureFormat::Rgba16Float,
         )),
         blur: pipeline_cache.queue_render_pipeline(pipeline(
             "liquid_screen_blur",
             "fs_blur",
-            ViewTarget::TEXTURE_FORMAT_HDR,
+            TextureFormat::Rgba16Float,
         )),
         linear_depth: pipeline_cache.queue_render_pipeline(pipeline(
             "liquid_screen_depth",
@@ -392,27 +392,21 @@ fn build_variant(
     }
 }
 
-#[derive(Default)]
-struct LiquidScreenNode;
-
-impl ViewNode for LiquidScreenNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        &'static ViewUniformOffset,
-        &'static Msaa,
-        &'static LiquidScreenView,
-    );
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (view_target, depth, view_offset, msaa, _marker): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
+pub(crate) fn liquid_screen_pass(
+    world: &World,
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewDepthTexture,
+        &ViewUniformOffset,
+        &Msaa,
+        &LiquidScreenView,
+    )>,
+    mut render_context: RenderContext,
+) {
+    let (view_target, depth, view_offset, msaa, _marker) = view.into_inner();
+    {
         let Some(targets) = world.get_resource::<LiquidScreenTargets>() else {
-            return Ok(());
+            return;
         };
         // The depth arming is a main-world write that REALLOCATES the texture, so the frame after
         // an enable still holds a render-attachment-only buffer. Binding it would be a wgpu
@@ -423,13 +417,13 @@ impl ViewNode for LiquidScreenNode {
             .usage()
             .contains(TextureUsages::TEXTURE_BINDING)
         {
-            return Ok(());
+            return;
         }
         // The variant for THIS view's sample count. Multisampling does not stand these passes
         // down; it changes one binding type and nothing else (see `liquid_screen.wgsl`).
         let pipelines = world.resource::<LiquidScreenPipelines>();
         let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
-            return Ok(()); // `specialize_pipelines` builds it this frame; drawn next
+            return; // `specialize_pipelines` builds it this frame; drawn next
         };
         let cache = world.resource::<PipelineCache>();
         let (Some(copy), Some(blur), Some(linear_depth)) = (
@@ -437,10 +431,10 @@ impl ViewNode for LiquidScreenNode {
             cache.get_render_pipeline(variant.blur),
             cache.get_render_pipeline(variant.linear_depth),
         ) else {
-            return Ok(()); // still compiling — the water falls back to its flat lane this frame
+            return; // still compiling — the water falls back to its flat lane this frame
         };
         let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
-            return Ok(());
+            return;
         };
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
         let (Some(color), Some(blurred), Some(depth_out)) = (
@@ -448,7 +442,7 @@ impl ViewNode for LiquidScreenNode {
             gpu_images.get(&targets.blur),
             gpu_images.get(&targets.depth),
         ) else {
-            return Ok(()); // the images have not been prepared yet
+            return; // the images have not been prepared yet
         };
 
         let device = render_context.render_device().clone();
@@ -515,13 +509,13 @@ impl ViewNode for LiquidScreenNode {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, group, &[view_offset.offset]);
             pass.draw(0..3, 0..1);
         }
-        Ok(())
-    }
+}
 }
 
 /// Wire the capture passes into the app. Called from [`super::LiquidPlugin`].

@@ -27,26 +27,27 @@ pub struct FinalPassTarget<'a> {
 }
 
 impl<'a> FinalPassTarget<'a> {
-    /// The format the final pass renders in, which its pipeline is specialised on.
-    pub fn format(output_mode: &CameraOutputMode, target: &ViewTarget) -> TextureFormat {
+    /// The format the final pass renders in, which its pipeline is specialised on; `None` for a
+    /// `Skip` camera whose surface is absent this frame (an occluded swapchain).
+    pub fn format(output_mode: &CameraOutputMode, target: &ViewTarget) -> Option<TextureFormat> {
         match output_mode {
             CameraOutputMode::Skip => target.out_texture_view_format(),
-            CameraOutputMode::Write { .. } => target.main_texture_format(),
+            CameraOutputMode::Write { .. } => Some(target.main_texture_format()),
         }
     }
 
     /// Resolve a view's final pass target. Call once per view per frame: the `Write` arm takes the
-    /// view's post-process write, which flips the main texture.
-    pub fn resolve(camera: &'a ExtractedCamera, target: &'a ViewTarget) -> Self {
+    /// view's post-process write, which flips the main texture. `None` as [`Self::format`].
+    pub fn resolve(camera: &'a ExtractedCamera, target: &'a ViewTarget) -> Option<Self> {
         match camera.output_mode {
-            CameraOutputMode::Skip => Self {
+            CameraOutputMode::Skip => Some(Self {
                 source: target.main_texture_view(),
-                destination: target.out_texture_color_attachment(Some(LinearRgba::NONE)),
+                destination: target.out_texture_color_attachment(Some(LinearRgba::NONE))?,
                 scissor: camera.viewport.as_ref(),
-            },
+            }),
             CameraOutputMode::Write { .. } => {
                 let post = target.post_process_write();
-                Self {
+                Some(Self {
                     source: post.source,
                     destination: RenderPassColorAttachment {
                         view: post.destination,
@@ -55,7 +56,7 @@ impl<'a> FinalPassTarget<'a> {
                         ops: Operations::default(),
                     },
                     scissor: None,
-                }
+                })
             }
         }
     }

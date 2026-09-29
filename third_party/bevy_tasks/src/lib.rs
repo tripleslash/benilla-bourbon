@@ -42,15 +42,6 @@ pub mod cfg {
             conditional_send
         }
 
-        #[cfg(feature = "async-io")] => {
-            /// Indicates `async-io` will be used for the implementation of `block_on`.
-            async_io
-        }
-
-        #[cfg(feature = "futures-lite")] => {
-            /// Indicates `futures-lite` will be used for the implementation of `block_on`.
-            futures_lite
-        }
     }
 }
 
@@ -90,7 +81,6 @@ mod executor;
 pub mod futures;
 mod iter;
 mod slice;
-mod task;
 mod thread_spawner;
 mod usages;
 
@@ -101,9 +91,9 @@ cfg::async_executor! {
 }
 
 // Exports
+pub use async_task::Task;
 pub use iter::ParallelIterator;
 pub use slice::{ParallelSlice, ParallelSliceMut};
-pub use task::Task;
 // **benilla fork.** How a host supplies threads on a platform whose `std` has none. See the
 // module header; on every target with real `std::thread` this is inert.
 pub use thread_spawner::{
@@ -148,26 +138,16 @@ cfg::multi_threaded! {
 // thread has nothing to do until the workers finish, measured in a fraction of a frame. Worker
 // threads never come through here — `task_pool.rs`'s worker loop names `futures_lite`'s parking
 // `block_on` directly, because a worker MAY block and a spinning worker would burn a core.
-cfg::switch! {
-    #[cfg(target_arch = "wasm32")] => {
-        pub use crate::spin_block_on as block_on;
-    }
-    cfg::async_io => {
-        pub use async_io::block_on;
-    }
-    cfg::futures_lite => {
-        pub use futures_lite::future::block_on;
-    }
-    _ => {
-        pub use crate::spin_block_on as block_on;
-    }
-}
+#[cfg(target_arch = "wasm32")]
+pub use crate::spin_block_on as block_on;
+#[cfg(not(target_arch = "wasm32"))]
+pub use bevy_platform::future::block_on;
 
 /// Blocks on the supplied `future` by polling it as fast as the CPU will allow.
 ///
-/// This is upstream's fallback `block_on` — the one used when neither `async-io` nor `futures-lite`
-/// is enabled — lifted out so it can also be named where a *parking* `block_on` is illegal. The
-/// browser's main thread is that place: see the note above this function's re-export.
+/// This is `bevy_platform`'s fallback `block_on` — the one used when neither `async-io` nor
+/// `futures-lite` is enabled — named here so it can also be used where a *parking* `block_on` is
+/// illegal. The browser's main thread is that place: see the note above its re-export.
 ///
 /// It never yields. Only call it where the wait is short and bounded by other threads finishing.
 pub fn spin_block_on<T>(future: impl Future<Output = T>) -> T {
