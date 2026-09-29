@@ -71,7 +71,7 @@ impl ZoneLook {
     /// fork: **Elwynn's look, in every zone.** The Elwynn Forest calibration (treeline shafts at dusk)
     /// is the one look: every zone gets its shaft haze, key-to-fill and grade, so Stranglethorn's
     /// jungle, Durotar, the Barrens and Mulgore carry the same light cones Elwynn does. A zone that
-    /// needs its own tuning takes a row in [`ZONES`] built on this.
+    /// needs its own tuning takes a look built on this ([`ZoneLook::EERIE`]).
     pub const NEUTRAL: Self = Self {
         key: 1.1,
         fill: 0.9,
@@ -148,29 +148,35 @@ impl ZoneLook {
     }
 }
 
-/// `AreaTable.dbc`'s Duskwood.
-const DUSKWOOD: u32 = 10;
-
-/// The look table, by `AreaTable.dbc` zone id; an unlisted zone takes [`ZoneLook::NEUTRAL`].
-const ZONES: &[(u32, ZoneLook)] = &[(
-    DUSKWOOD,
-    // Duskwood is eerie at noon: a weak sun under a dimmed, greyer sky, the fill held so the
-    // key-to-fill ratio stays in band. Exposure is untouched, so its buildings keep their own light.
-    ZoneLook {
+impl ZoneLook {
+    /// fork: **the eerie look.** Duskwood's calibration, for every dark zone: a weak sun under a
+    /// dimmed, greyer sky, the fill held so the key-to-fill ratio stays in band, muted colour and a
+    /// harder grade, and a thicker haze so the daylight comes through the canopy in cones. Exposure
+    /// is untouched, so buildings keep their own light.
+    pub const EERIE: Self = Self {
         key: 0.6,
         fill: 0.8,
         sky_tint: [0.7, 0.72, 0.78],
         saturation: 0.72,
         contrast: 1.18,
-        ..ZoneLook::NEUTRAL
-    },
-)];
+        haze: 0.0034,
+        shafts: 0.4,
+        vignette: 0.38,
+        ..Self::NEUTRAL
+    };
+}
+
+/// `AreaTable.dbc` zone ids that take [`ZoneLook::EERIE`]: Duskwood, Silverpine Forest, Tirisfal
+/// Glades, Deadwind Pass, the Western and Eastern Plaguelands, Swamp of Sorrows and Felwood, and
+/// Turtle WoW's Gilneas and Gilneas City.
+const EERIE_ZONES: &[u32] = &[10, 130, 85, 41, 28, 139, 8, 361, 5179, 5208];
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
-    ZONES
-        .iter()
-        .find(|(id, _)| *id == zone)
-        .map_or(ZoneLook::NEUTRAL, |(_, look)| *look)
+    if EERIE_ZONES.contains(&zone) {
+        ZoneLook::EERIE
+    } else {
+        ZoneLook::NEUTRAL
+    }
 }
 
 /// The look this frame renders with (cross-faded toward the current zone's row).
@@ -430,8 +436,8 @@ mod tests {
     /// Amendment A3's target: 6–10:1 under a canopy, and no row outside that band either.
     #[test]
     fn every_row_keeps_the_key_to_fill_ratio_in_band() {
-        for (zone, look) in ZONES.iter().chain(std::iter::once(&(0, ZoneLook::NEUTRAL))) {
-            let r = key_to_fill(*look);
+        for (zone, look) in [(0, ZoneLook::NEUTRAL), (10, ZoneLook::EERIE)] {
+            let r = key_to_fill(look);
             assert!((6.0..=10.0).contains(&r), "zone {zone}: {r:.2}:1");
         }
     }
@@ -448,10 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn duskwoods_day_is_darker_than_elwynns() {
-        let d = look_for_zone(DUSKWOOD);
-        assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
-        assert_eq!(d.exposure, ZoneLook::NEUTRAL.exposure);
+    fn the_dark_zones_days_are_darker_than_elwynns() {
+        for zone in EERIE_ZONES {
+            let d = look_for_zone(*zone);
+            assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
+            assert_eq!(d.exposure, ZoneLook::NEUTRAL.exposure);
+        }
     }
 
     /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,
