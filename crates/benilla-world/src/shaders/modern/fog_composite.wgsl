@@ -61,6 +61,10 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         let tp = dot(to_light, ray);
         let miss2 = max(dot(to_light, to_light) - tp * tp, 0.0);
         let room = froxelfog::room_weight(f, pos_range.xyz);
+        let share = froxelfog::indoor_air_share(rgb_class.w, room);
+        if (share <= 0.0) {
+            continue;
+        }
         let halo_yd = froxelfog::point_halo_yd(room);
         let reach = min(HALO_REACH * halo_yd, pos_range.w);
         if (miss2 >= reach * reach) {
@@ -96,7 +100,7 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         let excess = froxelfog::point_halo_gain(room) - froxelfog::point_far_share(room);
         let scattered = (ext.x + ext.y + ext.z) * integral.x
             + froxelfog::lamp_air(f, rgb_class.w) * integral.y;
-        sum = sum + rgb_class.rgb * (froxelfog::POINT_GAIN * excess * scattered * through);
+        sum = sum + rgb_class.rgb * (froxelfog::POINT_GAIN * excess * scattered * through * share);
     }
     return sum;
 }

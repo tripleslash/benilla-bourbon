@@ -148,6 +148,17 @@ fn halo_lights(f: FroxelFog, table_count: u32) -> u32 {
     return min(min(u32(f.screen.w), HALO_LIGHTS), table_count);
 }
 
+// fork: **an indoor light lights only the room's air.** The volume has no occlusion for a table
+// light, so a lamp inside a building scattered into the air outside its walls: a glow through the
+// masonry, pulsing with the froxels' slice jitter. An indoor-class light (the table's `w` integer
+// part, `global_light`'s `rooms_are_indoor`) scatters in proportion to how much of the air is the
+// camera's room (`room_weight`), so seen from outside it scatters nothing. A window's light keeps
+// its glow: it stands in front of the glass, outside.
+fn indoor_air_share(class_w: f32, room: f32) -> f32 {
+    let indoor = floor(class_w) >= 1.0 && fract(class_w) <= 0.125;
+    return select(1.0, room, indoor);
+}
+
 // Whether table light `i`, of colour-row `w`, takes its halo per pixel rather than in the froxels.
 fn is_halo_light(i: u32, halo_count: u32, class_w: f32) -> bool {
     return i < halo_count && lamp_air_share(class_w) > 0.5;

@@ -85,12 +85,16 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_cou
     let mu = dot((p - pos_range.xyz) / max(dl, 1e-3), to_eye);
     let far = froxelfog::point_far_share(room);
     let rgb_class = light_table.points[2u * i + 1u];
+    let share = froxelfog::indoor_air_share(rgb_class.w, room);
+    if (share <= 0.0) {
+        return PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
     let excess = select(
         (froxelfog::point_halo_gain(room) - far) * exp(-dl / froxelfog::point_halo_yd(room)),
         0.0,
         froxelfog::is_halo_light(i, halo_count, rgb_class.w),
     );
-    let lit = rgb_class.rgb
+    let lit = rgb_class.rgb * share
         * (froxelfog::point_falloff(dl, pos_range.w) * froxelfog::POINT_GAIN * froxelfog::point_phase(mu));
     let lamp = froxelfog::lamp_air(modern_block.fog, rgb_class.w) * exp(-dl / froxelfog::LAMP_AIR_YD);
     return PointScatter(lit * (far + excess), lit * (excess * lamp));
@@ -250,7 +254,12 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
                     half_texel,
                     vec3<f32>(1.0) - half_texel,
                 );
-                cur = mix(cur, textureSampleLevel(history_tex, repeat_samp, uvw, 0.0), f.medium.w);
+                // fork: fetched at its texel, not filtered: a history re-sampled trilinearly every frame
+                // is blurred again every frame, so a lamp's glow diffused out of its froxels (the mean
+                // drifted with the history weight) and the jitter's beat survived the blend — the
+                // Darkshire town hall pulsed at the Halton period.
+                let texel = min(vec3<u32>(uvw * n), vec3<u32>(f.grid.xyz) - vec3<u32>(1u));
+                cur = mix(cur, textureLoad(history_tex, texel, 0), f.medium.w);
             }
         }
     }
