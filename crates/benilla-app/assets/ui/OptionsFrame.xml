@@ -731,6 +731,55 @@
             return bounds[i]
         end
 
+        -- fork: fsr (FORK.md) -- a slider's marked stops (Render Scale's 0.67, FSR's quality
+        -- ratio, and 1x): a gold tick on the groove over each, its label under it, and a drag that
+        -- ends within BENILLA_SLIDER_MARK_PULL of one lands on it.
+        BENILLA_SLIDER_MARK_PULL = 0.03
+        BENILLA_RENDER_SCALE_MARKS = {
+            { value = 0.67, text = "67%" },
+            { value = 1, text = "100%" },
+        }
+
+        -- Placed once the slider has a width: the thumb travels its width less its own, so a
+        -- mark sits where the thumb's centre stands at that value.
+        function BenillaSlider_PlaceMarks(slider, min, max, marks)
+            if ( not marks or max <= min ) then return end
+            local w = slider:GetWidth()
+            if ( not w or w <= 0 ) then return end
+            local thumb = slider:GetThumbTexture()
+            local tw = 0
+            if ( thumb ) then tw = thumb:GetWidth() or 0 end
+            if ( not slider.benillaMarks ) then slider.benillaMarks = {} end
+            for i, m in ipairs(marks) do
+                local mark = slider.benillaMarks[i]
+                if ( not mark ) then
+                    mark = {}
+                    mark.tick = slider:CreateTexture(nil, "BACKGROUND")
+                    mark.tick:SetTexture(1, 0.82, 0, 0.9)
+                    mark.tick:SetWidth(2)
+                    mark.tick:SetHeight(10)
+                    mark.label = slider:CreateFontString(nil, "BACKGROUND", "GameFontHighlightSmall")
+                    slider.benillaMarks[i] = mark
+                end
+                mark.label:SetText(m.text)
+                local x = tw / 2 + (m.value - min) / (max - min) * (w - tw)
+                mark.tick:ClearAllPoints()
+                mark.tick:SetPoint("CENTER", slider, "LEFT", x, 0)
+                mark.label:ClearAllPoints()
+                mark.label:SetPoint("TOP", mark.tick, "BOTTOM", 0, -4)
+            end
+        end
+
+        -- The mark within the pull of `value`, if any.
+        function BenillaSlider_MarkNear(marks, value)
+            if ( not marks ) then return end
+            for _, m in ipairs(marks) do
+                if ( math.abs(value - m.value) <= BENILLA_SLIDER_MARK_PULL ) then
+                    return m.value
+                end
+            end
+        end
+
         -- SetMinMaxValues re-clamps and fires OnValueChanged, which must not write back.
         function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
@@ -894,6 +943,12 @@
             local control = slider:GetParent()
             local row = control:GetParent()
             if not row.refreshing then
+                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it.
+                local mark = BenillaSlider_MarkNear(row.marks, value)
+                if mark and math.abs(mark - value) > 0.00001 then
+                    slider:SetValue(mark) -- re-enters once with the mark
+                    return
+                end
                 -- Snaps to the grid from the minimum (farclip's is 177+n*60); a refresh sets it
                 -- raw.
                 local step = slider:GetValueStep()
@@ -967,6 +1022,10 @@
                     -- SetValue fires only on a change, so the readout is written here.
                     getglobal(base .. rkey .. "ControlValue"):SetText(
                         BenillaOptionsRow_FormatValue(row, slider:GetValue()))
+                    -- fork: fsr (FORK.md) -- shown, the slider has its width.
+                    if ( row.marks ) then
+                        BenillaSlider_PlaceMarks(slider, row.minv, row.maxv, row.marks)
+                    end
                 end
             end
             BenillaOptionsPage_UpdateDependencies(key)
@@ -2282,7 +2341,10 @@
                                                 -- rebuilds the render target.
                                                 BenillaOptionsRow_OnLoad(this, "renderScale", "Render Scale",
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
-                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.05)
+                                                -- fork: fsr (FORK.md) -- a 0.01 grid, so
+                                                -- FSR's 0.67 is a stop, marked with 1x.
+                                                this.marks = BENILLA_RENDER_SCALE_MARKS
+                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.01)
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -3532,8 +3594,9 @@
                     type = "dropdown", identifier = "BenillaWaterDetail", cvar = "waterDetail" } },
                 { category = DISPLAY, row = {
                     name = "BENILLA_RENDER_SCALE", desc = BENILLA_TOOLTIP_RENDER_SCALE,
-                    type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.05,
-                    numberLabels = true } },
+                    type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.01,
+                    -- fork: fsr (FORK.md) -- FSR's 0.67 and 1x, marked on the groove.
+                    benillaMarks = BENILLA_RENDER_SCALE_MARKS, numberLabels = true } },
                 -- fork: fsr (FORK.md)
                 { category = DISPLAY, row = {
                     name = "BENILLA_FRAME_GENERATION", desc = BENILLA_TOOLTIP_FRAME_GENERATION,
@@ -3699,6 +3762,12 @@
             local sliderChanged = OptionsFrameSlider_OnValueChanged
             function OptionsFrameSlider_OnValueChanged()
                 local option = this:GetParent().option
+                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it.
+                local mark = BenillaSlider_MarkNear(option.benillaMarks, this:GetValue())
+                if ( mark and math.abs(mark - this:GetValue()) > 0.00001 ) then
+                    this:SetValue(mark) -- re-enters once with the mark
+                    return
+                end
                 if ( not option.benillaStaged ) then
                     return sliderChanged()
                 end
@@ -3725,12 +3794,24 @@
                 end
             end
 
+            -- fork: fsr (FORK.md) -- a rendered category's marked sliders get their ticks.
+            local function placeMarks()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.benillaMarks and frame.control ) then
+                        BenillaSlider_PlaceMarks(frame.control, option.minval, option.maxval,
+                            option.benillaMarks)
+                    end
+                end
+            end
+
             local listClick = OptionsListButton_OnClick
             function OptionsListButton_OnClick(category, focusOption)
                 listClick(category, focusOption)
                 if ( next(staged) ) then
                     showStaged()
                 end
+                placeMarks()
             end
 
             -- Defaults writes the category's defaults outright, as Turtle's does, over anything

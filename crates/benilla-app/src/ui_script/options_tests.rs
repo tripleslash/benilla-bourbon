@@ -1788,6 +1788,62 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// fork: fsr (FORK.md) — Render Scale's marked stops: 67% (FSR's quality ratio) and 100%
+/// carry a tick and a label on the groove, the 0.01 grid reaches 0.67, and a drag that ends
+/// within 0.03 of a mark lands on it.
+#[test]
+fn the_render_scale_row_marks_and_pulls_to_67_and_100_percent() {
+    benilla_formats::wow_data_or_skip!();
+    const SLIDER: &str = "BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider";
+    const VALUE: &str = "BenillaOptionsFrameContainerBodyGraphicsRowRenderScaleControlValue";
+    let mut s = audio_harness();
+    s.set_cvar_host("renderScale", "1");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+
+    // Two ticks, labelled as the readout reads, the 100% one right of the 67% one.
+    assert!(s
+        .eval::<bool>(&format!(
+            "local m = {SLIDER}.benillaMarks
+             if m == nil or table.getn(m) ~= 2 then return false end
+             local _, _, _, x1 = m[1].tick:GetPoint(1)
+             local _, _, _, x2 = m[2].tick:GetPoint(1)
+             return m[1].label:GetText() == \"67%\" and m[2].label:GetText() == \"100%\"
+                and x1 < x2"
+        ))
+        .unwrap());
+    assert!(s
+        .eval::<bool>(&format!(
+            "return math.abs({SLIDER}:GetValueStep() - 0.01) < 0.0001"
+        ))
+        .unwrap());
+
+    // Near a mark, the drag lands on it; clear of both, on the grid.
+    for (drag, shown) in [
+        ("0.65", "67%"),
+        ("0.69", "67%"),
+        ("0.98", "100%"),
+        ("0.8", "80%"),
+    ] {
+        s.run(&format!("{SLIDER}:SetValue({drag})")).unwrap();
+        assert_eq!(
+            s.eval::<String>(&format!("return {VALUE}:GetText()"))
+                .unwrap(),
+            shown,
+            "a drag to {drag}"
+        );
+    }
+    s.run(&format!("{SLIDER}:SetValue(0.66)")).unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes().last().cloned(),
+        Some(("renderScale".to_string(), "0.67".to_string()))
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Pending edits are panel-wide, as the era's modified table: a category switch keeps them, and
 /// hiding the window discards them.
 #[test]
