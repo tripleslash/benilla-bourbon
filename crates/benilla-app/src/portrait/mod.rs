@@ -855,8 +855,9 @@ pub(crate) fn booth_view_shape() -> impl Bundle {
         bevy::camera::Hdr,
         Tonemapping::None,
         Msaa::Off,
-        // No Bevy light reaches a booth, so skip the per-view cluster rebuild.
-        bevy::light::cluster::ClusterConfig::None,
+        // No Bevy light reaches a booth, so one cluster: `Single`, not `None`, whose zero grid
+        // sizes Bevy 0.19's GPU-clustering dummy target at 0×0, which WebGPU rejects.
+        bevy::light::cluster::ClusterConfig::Single,
     )
 }
 
