@@ -163,6 +163,16 @@ fn extract_windows(
             // swap chain texture if needed.
             extracted_window.swap_chain_texture_view = None;
         }
+        // **benilla fork (BENILLA.md, "Per-task canvas texture").** A WebGPU canvas texture lives
+        // only until the end of the task that acquired it, so the optimization above hands the
+        // next update a destroyed texture ("Destroyed texture … used in a submit") whenever an
+        // update does not present — frame generation's held frames do exactly that. On the web
+        // an unpresented one is dropped, and `prepare_windows` acquires a fresh one each update.
+        #[cfg(target_arch = "wasm32")]
+        {
+            extracted_window.swap_chain_texture = None;
+            extracted_window.swap_chain_texture_view = None;
+        }
         extracted_window.size_changed = new_width != extracted_window.physical_width
             || new_height != extracted_window.physical_height;
         extracted_window.present_mode_changed =
@@ -254,11 +264,14 @@ pub fn prepare_windows(
         // `handle_uncovered_swap_chains` that triggers a DMA-fence fd leak on
         // Adreno 740 (Quest 3). The exception is windows that still need their
         // initial present (required on Wayland).
+        // benilla: a `Skip` camera counts (`BENILLA.md`, second delta). benilla's player-UI camera
+        // is `Skip` and `ui_gamma` writes the swapchain itself; counting only `Write` cameras
+        // leaves the window without a texture after its initial present, a black client.
         let is_camera_target = sorted_cameras.0.iter().any(|c| {
             matches!(
                 &c.target,
                 Some(bevy_camera::NormalizedRenderTarget::Window(w)) if w.entity() == window.entity
-            ) && matches!(c.output_mode, bevy_camera::CameraOutputMode::Write { .. })
+            )
         });
         if !is_camera_target && !window.needs_initial_present {
             continue;

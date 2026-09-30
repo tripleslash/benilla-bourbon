@@ -41,13 +41,30 @@ swapchain itself) are both `Skip` and clear, so on unpatched 0.19.1 the client a
 `benilla-worldview`'s FSR mode draw nothing (found live, `WOW_FSR_DEBUG=views`: the world view
 `target=false`). The hunk removes the three-line `Skip` early-out, restoring 0.18.1's loop.
 
+Its twin is in `prepare_windows`, which 0.19.1 lets acquire a swap-chain texture only for a window
+a `Write` camera targets (a Quest 3 fence-leak fix). At the glue screens the player-UI camera is
+the window's only camera, so after the initial present the window had no texture and the browser
+client stayed black at 140 fps (found live, `?diag=1`). The hunk drops the `Write` condition: any
+camera targeting the window counts.
+
+## The third delta: per-task canvas texture (web)
+
+`extract_windows` keeps a swap-chain texture that was not presented for the next update, an
+optimization that holds natively. A WebGPU canvas texture lives only until the end of the task
+that acquired it, so on the web the next update submits a destroyed texture ("Destroyed texture
+… used in a submit") and Bevy quits on the validation error. Frame generation's held frames are
+updates that do not present the world view, which is how it was found (`?frame_generation=1`).
+The hunk, `#[cfg(target_arch = "wasm32")]` only, drops the unpresented texture and its view, so
+`prepare_windows` acquires a fresh one every update.
+
 ## The delta, and the command that proves it
 
-**Three lines changed and three removed, one module added.**
+**A few lines changed in four upstream files, one module added.**
 
 | file | change |
 |---|---|
 | `src/view/mod.rs` | `prepare_view_attachments`: the `CameraOutputMode::Skip` early-out goes (above) |
+| `src/view/window/mod.rs` | `prepare_windows`: a `Skip` camera counts as the window's target; `extract_windows`: the wasm32-only per-task canvas texture (above) |
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/lib.rs` | `mod wasm_serial;` |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
@@ -84,7 +101,8 @@ diff -r third_party/bevy_render /tmp/upstream/bevy_render-0.19.1
 ```
 
 That must print exactly a `diff` for `src/batching/gpu_preprocessing.rs` (three lines),
-`src/view/mod.rs` (the `Skip` early-out) and `src/lib.rs` (the `mod`), `Only in third_party/bevy_render/src: wasm_serial.rs`, `Only in
+`src/view/mod.rs` (the `Skip` early-out), `src/view/window/mod.rs` (the two window hunks) and
+`src/lib.rs` (the `mod`), `Only in third_party/bevy_render/src: wasm_serial.rs`, `Only in
 third_party/bevy_render: BENILLA.md`, and `Only in <upstream>: .cargo_vcs_info.json`,
 `Cargo.lock`, `Cargo.toml.orig` — cargo's packaging metadata, dropped the same way the other
 `third_party` forks drop it.
