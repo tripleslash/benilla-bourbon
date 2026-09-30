@@ -250,7 +250,7 @@ pub fn advance_jitter(
     }
 }
 
-/// `WOW_FSR_DEBUG=views`: every two seconds, one line per render view saying which of the parts
+/// `WOW_FSR_DEBUG=views`: every two seconds, after the render graph, one line per render view saying which of the parts
 /// FSR and the backdrop need it has, so a black frame is read from numbers, not guessed at.
 #[allow(clippy::type_complexity)]
 fn debug_views(
@@ -264,8 +264,10 @@ fn debug_views(
         Has<FgState>,
         Has<crate::ffx_glow::FfxBackdrop>,
         Option<&crate::ffx_glow::FfxBackdropView>,
-        Has<bevy::render::view::ViewDepthTexture>,
+        Option<&bevy::render::view::ViewDepthTexture>,
     )>,
+    pipelines: Option<Res<upscaler::FsrPipelines>>,
+    pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
     mut last: Local<Option<std::time::Instant>>,
 ) {
     if last.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0) {
@@ -273,16 +275,39 @@ fn debug_views(
     }
     *last = Some(std::time::Instant::now());
     for (e, main, cam, target, glow, fsr, fg, backdrop, claim, depth) in &views {
+        // After the render graph: `out` says whether this frame's chain landed.
         info!(
-            "FSR_VIEW {e} main={} order={:?} size={:?} target={target} glow={glow} fsr={}              out={} fg={fg} backdrop={backdrop} claim={:?} depth={depth}",
+            "FSR_VIEW {e} main={} order={:?} size={:?} target={target} glow={glow} fsr={} out={} fg={fg} backdrop={backdrop} claim={:?} depth={:?}",
             main.id(),
             cam.map(|c| c.order),
             cam.and_then(|c| c.physical_target_size),
             fsr.is_some(),
             fsr.is_some_and(|f| f.output().is_some()),
             claim.map(|c| c.source_entity()),
+            depth.map(|d| d.texture.usage()),
         );
     }
+    let [ran, compiling, unbindable] = upscaler::UPSCALE_COUNTS
+        .each_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+    let pending: Vec<String> = pipelines
+        .map(|p| {
+            p.ids()
+                .iter()
+                .map(|&id| pipeline_cache.get_compute_pipeline_state(id))
+                .filter(|state| {
+                    !matches!(
+                        state,
+                        bevy::render::render_resource::CachedPipelineState::Ok(_)
+                    )
+                })
+                .map(|state| format!("{state:?}"))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["no FsrPipelines".into()]);
+    info!(
+        "FSR_UPSCALE ran={ran} compiling={compiling} depth_unbindable={unbindable} pending={pending:?}"
+    );
 }
 
 pub struct FsrPlugin;
@@ -339,7 +364,7 @@ impl Plugin for FsrPlugin {
                 Render,
                 debug_views
                     .in_set(RenderSystems::Render)
-                    .before(render_system)
+                    .after(render_system)
                     .run_if(|| {
                         crate::launch_env::var("WOW_FSR_DEBUG").is_some_and(|v| v == "views")
                     }),

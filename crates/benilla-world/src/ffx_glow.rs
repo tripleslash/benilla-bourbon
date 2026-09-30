@@ -569,7 +569,8 @@ pub(crate) struct FfxGlowTextures {
     /// `None` while an [`FfxBackdrop`] claims the view.
     combine: Option<FfxCombinePair>,
     // fork: fsr (FORK.md) — frame generation's compose into `WorldFinal`: the backdrop's
-    /// gamma-lane exit in its own colour-only pass, in the claiming camera's format.
+    /// exit (the gamma lane's byte, or the decode for a `decode` backdrop) in its own colour-only
+    /// pass, in the claiming camera's format.
     compose: Option<FfxCombinePair>,
 }
 
@@ -672,7 +673,7 @@ fn prepare_textures(
         // fork: fsr (FORK.md) — the blur downsamples the upscaled image, so its targets are a
         // quarter of the display size.
         let vp = fsr.map_or(vp, |f| f.display);
-        let compose = fg.map(|fg| specializer.pair_for(fg.format(), true, None));
+        let compose = fg.map(|fg| specializer.pair_for(fg.format(), !fg.decode(), None));
         // Specialised even while claimed: a claim is per frame and drops whenever the UI camera
         // loses its `ViewTarget` (a minimize, a surface reconfigure), when a cold pair would
         // compile synchronously on the render thread. Keeping it warm is a cached lookup.

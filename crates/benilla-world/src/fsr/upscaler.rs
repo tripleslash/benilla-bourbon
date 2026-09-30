@@ -61,6 +61,15 @@ const CUT_DISTANCE: f32 = 50.0;
 /// …or this far round, in radians (60°).
 const CUT_ANGLE: f32 = std::f32::consts::FRAC_PI_3;
 
+/// `WOW_FSR_DEBUG=views`'s counters of [`fsr_upscale_pass`]: `[ran, pipelines compiling, depth not
+/// sampleable]`, so a chain that never lands says why from numbers.
+pub(super) static UPSCALE_COUNTS: [std::sync::atomic::AtomicU32; 3] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; 3];
+
+fn count(slot: usize) {
+    UPSCALE_COUNTS[slot].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Compute workgroup edge; `@workgroup_size(8, 8, 1)` in every pass.
 const WORKGROUP: u32 = 8;
 
@@ -785,6 +794,7 @@ pub(super) fn fsr_upscale_pass(
         get(pipelines.rcas),
     )
     else {
+        count(1);
         return; // still compiling: the backdrop falls back to the bilinear read this frame
     };
     // The depth is read by two passes, so it must be sampleable.
@@ -793,6 +803,7 @@ pub(super) fn fsr_upscale_pass(
         .usage()
         .contains(TextureUsages::TEXTURE_BINDING)
     {
+        count(2);
         return;
     }
 
@@ -976,6 +987,7 @@ pub(super) fn fsr_upscale_pass(
         span.end(&mut pass);
     }
 
+    count(0);
     state.reset_pending = false;
     state.output_ready = true;
     // The history this frame wrote is usable from the next one.

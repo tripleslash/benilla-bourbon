@@ -279,12 +279,20 @@ pub struct FgState {
     composed: Arc<AtomicBool>,
     /// The generated frame of this world frame was written.
     generated: Arc<AtomicBool>,
+    /// The claiming backdrop decodes at its exit ([`FfxBackdrop::decode`]), so the compose must
+    /// too: `WorldFinal` holds what that backdrop's combine would have drawn.
+    decode: bool,
 }
 
 impl FgState {
     /// The format the compose renders `WorldFinal` in: the UI camera's target's.
     pub fn format(&self) -> TextureFormat {
         self.targets.format
+    }
+
+    /// Whether the compose decodes at its exit, as the claiming backdrop's combine does.
+    pub fn decode(&self) -> bool {
+        self.decode
     }
 
     /// This frame's finished image, where the compose writes.
@@ -596,8 +604,8 @@ pub(super) fn prepare_framegen(
         let claim = backdrops
             .iter()
             .find(|(b, _, _)| b.source == Some(main.id()))
-            .map(|(_, target, msaa)| (target.main_texture_format(), msaa.samples()));
-        let (Some(fsr_state), Some((format, samples)), true) =
+            .map(|(b, target, msaa)| (target.main_texture_format(), msaa.samples(), b.decode));
+        let (Some(fsr_state), Some((format, samples, decode)), true) =
             (fsr_state, claim, fsr.frame_generation)
         else {
             if fg.is_some() {
@@ -607,7 +615,10 @@ pub(super) fn prepare_framegen(
         };
         let (render, display) = (fsr_state.render_size(), fsr_state.display_size());
         let keep = fg.as_ref().is_some_and(|s| {
-            s.targets.render == render && s.targets.display == display && s.targets.format == format
+            s.targets.render == render
+                && s.targets.display == display
+                && s.targets.format == format
+                && s.decode == decode
         });
         let mut created = None;
         let state: &mut FgState = match fg {
@@ -624,6 +635,7 @@ pub(super) fn prepare_framegen(
                 frame_index_since_reset: 0,
                 composed: Arc::new(AtomicBool::new(false)),
                 generated: Arc::new(AtomicBool::new(false)),
+                decode,
             }),
         };
 

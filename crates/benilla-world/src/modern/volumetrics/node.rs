@@ -227,7 +227,13 @@ fn prepare_froxels(
     pipeline_cache: Res<PipelineCache>,
     scene: Option<Res<crate::modern::gi::ModernGiScene>>,
     mut targets: ResMut<FroxelTargets>,
+    held: Option<Res<crate::fsr::FsrHeld>>,
 ) {
+    // fork: fsr (FORK.md) — a held frame runs no froxel pass, so it must not flip `front`:
+    // the next world frame would read the never-written slot as its history.
+    if held.is_some_and(|h| h.0) {
+        return;
+    }
     targets.ready = false;
     targets.scatter_bind = None;
     targets.integrate_bind = None;

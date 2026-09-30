@@ -21,6 +21,7 @@ systems run in `Last`.
 | `benilla-world/Cargo.toml` | `wgpu.workspace = true` (the tier-1 flag's type); `naga` dev-dependency (shader validation) |
 | `benilla-world/src/lighting/global_light.rs` | the shared light buffer gains `COPY_SRC`, for the previous rig pose |
 | `benilla-world/src/modern/volumetrics/mod.rs` | re-exports `fog_composite_pass` and `lamp_halo_pass` for FSR's ordering |
+| `benilla-world/src/modern/volumetrics/node.rs` | `prepare_froxels` stands down on `FsrHeld`, so the scatter ping-pong flips only with its pass |
 | `benilla-world/src/ffx_glow.rs` | `FfxBackdrop::decode`; quarter targets sized from `FsrView::display`; the compose pair; `ffx_glow_pass` is `pub(crate)` and reads `FsrState::output`; the backdrop ground reads `FgPresent` then `FsrState::output`; `compose_world_final` |
 | `benilla-world/src/particles/buffer.rs` | `EffectMotion`, `EffectDrawSpec::motion`, `EffectQuads::motion` (kept parallel by `begin`/`commit`), `EffectBatch::moving`/`motion_mut` |
 | `benilla-world/src/particles/render.rs` | the motion vertex stream; `MergedDraw`'s view and pipeline key; `EffectMeta` and `EffectPipeline` accessors for the velocity pass |

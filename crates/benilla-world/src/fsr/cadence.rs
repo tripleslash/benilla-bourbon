@@ -145,6 +145,24 @@ pub(super) fn hold_cameras(
 /// rendered frames itself (one per main-world update).
 pub static PRESENTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// The present cadence since it was last taken ([`take_cadence`]): count, sum and sum of squares
+/// of the intervals between presents (s), and the longest, so evenness is read from numbers.
+static CADENCE: std::sync::Mutex<(u32, f64, f64, f64)> = std::sync::Mutex::new((0, 0.0, 0.0, 0.0));
+
+/// `(mean interval ms, coefficient of variation, max interval ms)` since the last call.
+pub fn take_cadence() -> Option<(f64, f64, f64)> {
+    let (n, sum, sq, max) = std::mem::take(
+        &mut *CADENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    (n > 1).then(|| {
+        let mean = sum / f64::from(n);
+        let var = (sq / f64::from(n) - mean * mean).max(0.0);
+        (mean * 1000.0, var.sqrt() / mean, max * 1000.0)
+    })
+}
+
 /// The world frames' present times, for [`pace_held_frames`].
 #[derive(Resource, Default)]
 pub(super) struct FgPacing {
@@ -158,8 +176,15 @@ pub(super) struct FgPacing {
 /// Native, just before `render_system`: a held frame presents half a world interval after the
 /// world frame before it, so the generated and the real frame split the interval evenly (the SDK's
 /// pacer does the same on its present thread). The web presents on rAF, which paces it.
-pub(super) fn pace_held_frames(held: Res<FsrHeld>, mut pacing: ResMut<FgPacing>) {
+pub(super) fn pace_held_frames(
+    held: Res<FsrHeld>,
+    mut pacing: ResMut<FgPacing>,
+    mut last_present: Local<Option<bevy::platform::time::Instant>>,
+) {
     PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // After this system's own wait: the instant the frame goes to the graph, as near its present
+    // as this thread sees.
+    let _cadence = CadenceMark(&mut last_present);
     #[cfg(not(target_arch = "wasm32"))]
     {
         let now = std::time::Instant::now();
@@ -197,6 +222,25 @@ pub(super) fn install(app: &mut App) {
     app.add_schedule(schedule);
     // `Main` stays the schedule the rest of the app knows; only the entry point moves.
     app.main_mut().update_schedule = Some(FgMain.intern());
+}
+
+/// Records the interval since the last present when dropped, after any pacing wait.
+struct CadenceMark<'a>(&'a mut Option<bevy::platform::time::Instant>);
+
+impl Drop for CadenceMark<'_> {
+    fn drop(&mut self) {
+        let now = bevy::platform::time::Instant::now();
+        if let Some(last) = self.0.replace(now) {
+            let dt = now.duration_since(last).as_secs_f64();
+            let mut c = CADENCE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            c.0 += 1;
+            c.1 += dt;
+            c.2 += dt * dt;
+            c.3 = c.3.max(dt);
+        }
+    }
 }
 
 #[cfg(test)]
