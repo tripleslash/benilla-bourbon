@@ -850,6 +850,8 @@ mod tests {
         let (tx, _rx) = async_channel::unbounded();
         app.init_resource::<Time>()
             .init_resource::<GlueClicks>()
+            // `input::clicks` writes the login intent; the plugin's app has it from `LoginPlugin`.
+            .init_resource::<crate::login::LoginIntent>()
             .insert_resource(crate::net::RealmChoice(tx))
             .add_message::<crate::sound::GlueSound>()
             .insert_resource(Realms {

@@ -659,7 +659,12 @@ pub(crate) mod schedule_tests {
     /// **375 (fork: benilla-bourbon, merge of upstream dd196298)** — upstream's 371 was measured on a
     /// tree without this fork's systems; the merged tree measures four more. Not yet read pair by
     /// pair — a fork-side follow-up, like the `Update` ceiling below.
-    const POST_UPDATE_CEILING: usize = 375;
+    ///
+    /// **462 (fork: the Bevy 0.19 port and FSR, FORK.md)** — measured on the 0.19 tree with
+    /// session 3's runtime fixes and the FSR wiring in; the census passed at 375 on the port before
+    /// them. Not yet attributed pair by pair: `WOW_AMBIGUITY_DUMP=1` now prints PostUpdate's pairs
+    /// too (`post …`), mostly `GlobalTransform` between the camera followers and the effect lanes.
+    const POST_UPDATE_CEILING: usize = 462;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -697,7 +702,12 @@ pub(crate) mod schedule_tests {
     /// This fork's own systems add their pairs on top of upstream's count: the modern lighting
     /// model, the liquid reflection camera and ripple clock, SSILVB, the character shadow map, and
     /// the web build's writer pump and stutter probe. Declaring those orders is fork-side work.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_091;
+    ///
+    /// fork: fsr (FORK.md) — +16 with the FSR wiring: `world_backdrop::sync_fsr_view` takes
+    /// ten (the world camera and window it shares with the video, portrait, minimap, controller and
+    /// net systems `claim_backdrop`, chained before it, already pairs with), and the effect lane's
+    /// motion writers six. Declaring them is fork-side work, with the rest.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_107;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -765,6 +775,31 @@ pub(crate) mod schedule_tests {
                         update.name(y),
                         what.iter()
                             .map(|id| update.component(*id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
+            rows.sort();
+            for r in rows {
+                eprintln!("{r}");
+            }
+            // PostUpdate's pairs, every one (it has no classes), under their own header.
+            let mut rows: Vec<String> = post
+                .conflicts
+                .iter()
+                .map(|(a, b, what)| {
+                    let (x, y) = if post.name(*a) <= post.name(*b) {
+                        (*a, *b)
+                    } else {
+                        (*b, *a)
+                    };
+                    format!(
+                        "  post {}  <->  {}\n      on {}",
+                        post.name(x),
+                        post.name(y),
+                        what.iter()
+                            .map(|id| post.component(*id))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
