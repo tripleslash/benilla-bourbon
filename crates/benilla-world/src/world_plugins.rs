@@ -202,6 +202,8 @@ impl Plugin for WorldFoundation {
             app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
                 mb * 1024 * 1024,
             ));
+            // fork: web — a mesh the budget defers must still be specialized when it lands.
+            crate::late_mesh::plugin(app);
         }
         // Direct draws on every camera: Bevy's indirect lane is a per-draw encode loop on Metal
         // (no MULTI_DRAW_INDIRECT) plus GPU preprocessing; `WOW_INDIRECT=1` restores it. A
