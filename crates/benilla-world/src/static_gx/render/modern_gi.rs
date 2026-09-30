@@ -10,7 +10,8 @@
 //!    the static world's albedo and surface normal. A level is rasterized three times per box — once
 //!    down each axis, so a triangle edge-on to one sweep is caught by another — at several samples
 //!    per voxel. Only *boxes* are ever redone: the slabs the camera scrolled in, and the bounds of
-//!    content that streamed in or out. Nothing else is touched, so a standing camera pays nothing.
+//!    content that streamed in or out, one union box per level a frame. Nothing else is touched,
+//!    so a standing camera pays nothing.
 //! 2. **The terrain heightfield.** The resident terrain cells drawn top-down into a depth map (the
 //!    plan's `gi/heightfield.rs`), which is what terrain hits and every ray past the clipmap use.
 //!    Terrain is not voxelized: it is a height per column by construction, and a 2 yd map holds it
@@ -275,6 +276,22 @@ fn box_voxels(center: Vec3, half: Vec3, voxel: f32, base: IVec3, n: i32) -> Opti
     (lo.cmplt(hi).all()).then_some((lo, hi))
 }
 
+/// Each level's boxes as their one bounding box, levels in first-seen order. Every input box lies
+/// in its level's window, so the union does too.
+fn merge_per_level(boxes: Vec<(usize, IVec3, IVec3)>) -> Vec<(usize, IVec3, IVec3)> {
+    let mut merged: Vec<(usize, IVec3, IVec3)> = Vec::new();
+    for (level, lo, hi) in boxes {
+        match merged.iter_mut().find(|m| m.0 == level) {
+            Some(m) => {
+                m.1 = m.1.min(lo);
+                m.2 = m.2.max(hi);
+            }
+            None => merged.push((level, lo, hi)),
+        }
+    }
+    merged
+}
+
 /// The slabs a level gains when its window moves from `from` to `to` (up to one per axis).
 fn scroll_jobs(from: IVec3, to: IVec3, n: i32, out: &mut Vec<(IVec3, IVec3)>) {
     let delta = to - from;
@@ -532,6 +549,14 @@ fn prepare_gi_voxels(
     }
 
     // --- the jobs' uniforms ---------------------------------------------------------------------
+    // One box per level a frame, the union of its slabs and caster bounds: every box costs three
+    // raster passes over each caster it touches, and a streaming flight queues a dozen small ones
+    // whose casters overlap. Re-voxelizing voxels already right inside the union is GPU work only.
+    let boxes = if std::env::var("WOW_GI_MERGE").is_ok_and(|v| v == "0") {
+        boxes
+    } else {
+        merge_per_level(boxes)
+    };
     views.0.clear();
     for (level, lo, hi) in boxes {
         let voxel = tier.voxel[level];
@@ -815,6 +840,7 @@ pub(crate) fn gi_voxel_pass(
                     pass.set_render_pipeline(pipeline);
                     pass.set_vertex_buffer(0, vslice.buffer.slice(..));
                     pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                    crate::static_gx::count_draw(2);
                     pass.draw_indexed(
                         islice.range.clone(),
                         i32::try_from(vslice.range.start).unwrap_or(0),
@@ -903,39 +929,21 @@ pub(crate) fn gi_voxel_pass(
                     ) {
                         continue;
                     }
-                    let Some(mesh) = meshes.get(draw.mesh.id()) else {
-                        continue;
-                    };
-                    let (Some(vslice), Some(islice)) = (
-                        allocator.mesh_vertex_slice(&draw.mesh.id()),
-                        allocator.mesh_index_slice(&draw.mesh.id()),
-                    ) else {
-                        continue;
-                    };
-                    let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
-                        &mesh.buffer_info
-                    else {
+                    let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
                         continue;
                     };
                     pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                    for run in &gpu.runs {
-                        let Some(pipeline) = pipes
-                            .raster
-                            .get(&(run.cutout, run.two_sided))
-                            .and_then(|id| pipeline_cache.get_render_pipeline(*id))
-                        else {
-                            continue;
-                        };
-                        pass.set_render_pipeline(pipeline);
-                        pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-                        pass.draw_indexed(
-                            (islice.range.start + run.index_range.start)
-                                ..(islice.range.start + run.index_range.end),
-                            i32::try_from(vslice.range.start).unwrap_or(0),
-                            0..1,
-                        );
-                    }
+                    gpu.draw_whole(
+                        &mut pass,
+                        vslice.range.start,
+                        |cut, two| {
+                            pipes
+                                .raster
+                                .get(&(cut, two))
+                                .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+                        },
+                        2,
+                    );
                 }
                 timing.end(&mut pass);
             }
@@ -963,6 +971,24 @@ pub(super) fn build(render_app: &mut SubApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frames_boxes_merge_to_one_union_per_level() {
+        let boxes = vec![
+            (1, IVec3::new(0, 0, 0), IVec3::new(4, 4, 4)),
+            (0, IVec3::new(10, 0, 0), IVec3::new(12, 64, 64)),
+            (1, IVec3::new(8, -2, 1), IVec3::new(9, 3, 2)),
+            (0, IVec3::new(0, 60, 0), IVec3::new(64, 62, 64)),
+        ];
+        assert_eq!(
+            merge_per_level(boxes),
+            vec![
+                (1, IVec3::new(0, -2, 0), IVec3::new(9, 4, 4)),
+                (0, IVec3::new(0, 0, 0), IVec3::new(64, 64, 64)),
+            ]
+        );
+        assert!(merge_per_level(Vec::new()).is_empty());
+    }
 
     #[test]
     fn a_scrolled_window_only_redraws_what_it_gained() {

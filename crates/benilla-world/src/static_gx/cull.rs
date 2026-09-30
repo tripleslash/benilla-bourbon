@@ -546,13 +546,16 @@ pub(super) fn cull_cells(
             .collect();
         println!(
             "GX_PERF ms/frame flush={:.3} cull={:.3} publish={:.3} prepare={:.3} node={:.3} \
-             arrays_mb={}",
+             arrays_mb={} draws/frame gx={} shadow={} gi={}",
             ms[0],
             ms[1],
             ms[2],
             ms[3],
             ms[4],
-            super::GX_VRAM.load(Relaxed) / (1024 * 1024)
+            super::GX_VRAM.load(Relaxed) / (1024 * 1024),
+            super::GX_DRAWS[0].swap(0, Relaxed) / 64,
+            super::GX_DRAWS[1].swap(0, Relaxed) / 64,
+            super::GX_DRAWS[2].swap(0, Relaxed) / 64,
         );
     }
 }

@@ -130,6 +130,22 @@ pub(crate) static GX_PERF: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+/// Draw calls, `WOW_GX_PERF` only: the colour pass and its depth prepass, the shadow cascades,
+/// the GI voxelizer. Each costs its encode in the pass's `CommandEncoder::finish`.
+pub(crate) static GX_DRAWS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Count one draw in [`GX_DRAWS`] slot `i`; a no-op when the meter is off.
+#[inline]
+pub(crate) fn count_draw(i: usize) {
+    if gx_perf_enabled() {
+        GX_DRAWS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Scope guard adding one site's wall time to [`GX_PERF`] slot `i`; a no-op when the meter is off.
 pub(crate) struct GxPerfGuard(Option<(usize, bevy::platform::time::Instant)>);
 impl Drop for GxPerfGuard {

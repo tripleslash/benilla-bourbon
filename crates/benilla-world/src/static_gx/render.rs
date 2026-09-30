@@ -163,6 +163,7 @@ const RECORD_FOG_BIT: u32 = 1 << 14;
 
 /// One coalesced draw run of adjacent live items sharing bind-group slot, pipeline bucket and
 /// selection key; a killed item is never in one.
+#[derive(Clone)]
 struct GxRun {
     /// Index into the region's `bind_groups`, not a pool class.
     slot: usize,
@@ -183,7 +184,18 @@ struct GxCellGpu {
     cell_uniform: Buffer,
     /// Per item, its index into `bind_groups`, kept for kill-driven run rebuilds.
     item_slot: Vec<u16>,
+    /// The region's indices, copied from its mesh at assembly in draw order: items sorted by
+    /// `(cutout, two_sided, slot, group)`, so what binds alike is contiguous and draws as one.
+    /// Every draw a region's runs issue — every pass — reads this buffer, not the mesh's.
+    indices: Buffer,
+    /// Per item, its index range in [`Self::indices`].
+    ranges: Vec<Range<u32>>,
+    /// The items in [`Self::indices`] order.
+    order: Vec<u32>,
+    /// The draw runs, split at every selection key: what the colour pass draws of a region.
     runs: Vec<GxRun>,
+    /// The runs merged across selection keys: what a pass drawing a region whole issues.
+    whole: Vec<GxRun>,
     /// CPU copy of the record table, which the kill and fog syncs rewrite and re-upload.
     records: Vec<[u32; 4]>,
     killed_applied: u32,
@@ -373,6 +385,7 @@ fn prepare_static_gx(
     mesh_pipeline: Res<MeshPipeline>,
     view_keys: Res<ViewKeyCache>,
     images: Res<RenderAssets<GpuImage>>,
+    allocator: Res<MeshAllocator>,
     views: Query<GxViewKey>,
 ) {
     let _t = super::gx_perf_guard(3);
@@ -556,6 +569,10 @@ fn prepare_static_gx(
         .props
         .retain(|e, gpu| gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
 
+    // The assemblies' index copies, submitted below, before any pass draws this frame.
+    let mut copies = render_device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("static_gx_index_copies"),
+    });
     for vis in &gx.visible {
         match vis {
             GxDoodadVis::Cell(cell) => {
@@ -569,7 +586,7 @@ fn prepare_static_gx(
                 let Some(draw) = gx.cells.get(cell) else {
                     continue;
                 };
-                let gpu = assemble_region(
+                if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
                     &pipes,
@@ -577,8 +594,11 @@ fn prepare_static_gx(
                     &render_device,
                     &render_queue,
                     &images,
-                );
-                cache.cells.insert(*cell, gpu);
+                    &allocator,
+                    &mut copies,
+                ) {
+                    cache.cells.insert(*cell, gpu);
+                }
             }
             GxDoodadVis::Prop(entity, _) => {
                 if cache
@@ -591,7 +611,7 @@ fn prepare_static_gx(
                 let Some(draw) = gx.props.get(entity) else {
                     continue;
                 };
-                let gpu = assemble_region(
+                if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
                     &pipes,
@@ -599,8 +619,11 @@ fn prepare_static_gx(
                     &render_device,
                     &render_queue,
                     &images,
-                );
-                cache.props.insert(*entity, gpu);
+                    &allocator,
+                    &mut copies,
+                ) {
+                    cache.props.insert(*entity, gpu);
+                }
             }
         }
     }
@@ -615,7 +638,7 @@ fn prepare_static_gx(
         let Some(draw) = gx.wmos.get(entity) else {
             continue;
         };
-        let gpu = assemble_region(
+        if let Some(gpu) = assemble_region(
             draw,
             &mut pool,
             &pipes,
@@ -623,10 +646,14 @@ fn prepare_static_gx(
             &render_device,
             &render_queue,
             &images,
-        );
-        cache.wmos.insert(*entity, gpu);
+            &allocator,
+            &mut copies,
+        ) {
+            cache.wmos.insert(*entity, gpu);
+        }
     }
     pool.drain_pending(&render_device, &render_queue);
+    render_queue.submit([copies.finish()]);
 
     // The kill-bit sync: on a new bitmap revision, rewrite the kill column, re-upload and rebuild
     // the runs. A cell that changed out of view syncs on re-entry.
@@ -646,7 +673,14 @@ fn prepare_static_gx(
             rec[3] = (rec[3] & !1) | kill_bit(&hidden, i);
         }
         render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
-        gpu.runs = build_runs(&draw.draws, &gpu.item_slot, &hidden);
+        gpu.runs = build_runs(
+            &draw.draws,
+            &gpu.order,
+            &gpu.ranges,
+            &gpu.item_slot,
+            &hidden,
+        );
+        gpu.whole = whole_runs(&gpu.runs);
         gpu.killed_applied = draw.killed_rev;
     }
 
@@ -684,6 +718,9 @@ fn prepare_static_gx(
 /// yet is held back ([`GxCellGpu::unready`]) and the rest draw, as an entity-path part draws the
 /// moment its own material is ready: one slow or missing texture must not blank a whole cell or
 /// building while its colliders and picks stand.
+/// A region's GPU state, or `None` while its mesh has no index slice yet. The index copy is
+/// recorded into `copies`, which the caller submits before any pass draws.
+#[allow(clippy::too_many_arguments)]
 fn assemble_region(
     draw: &GxCellDraw,
     pool: &mut GxTexturePool,
@@ -692,7 +729,10 @@ fn assemble_region(
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
     images: &RenderAssets<GpuImage>,
-) -> GxCellGpu {
+    allocator: &MeshAllocator,
+    copies: &mut CommandEncoder,
+) -> Option<GxCellGpu> {
+    let islice = allocator.mesh_index_slice(&draw.mesh.id())?;
     // Each item's pool slot, deduped by texture id; untextured items take the white class, and so
     // does a held-back item, whose slot is never sampled.
     let mut white: Option<u16> = None;
@@ -773,24 +813,110 @@ fn assemble_region(
         };
         item_slot.push(u16::try_from(slot).expect("gx region under u16 slots"));
     }
-    let runs = build_runs(&draw.draws, &item_slot, &hidden);
-    GxCellGpu {
+    // Draw order: what binds alike together, then by selection key, then bake order. Opaque and
+    // cutout items only, depth-tested, so the order inside a region is free.
+    let mut order: Vec<u32> = (0..draw.draws.len() as u32).collect();
+    order.sort_by_key(|&i| {
+        let item = &draw.draws[i as usize];
+        (
+            item.cutout,
+            item.two_sided,
+            item_slot[i as usize],
+            item.group,
+            i,
+        )
+    });
+    let mut ranges: Vec<Range<u32>> = vec![0..0; draw.draws.len()];
+    let mut at = 0u32;
+    for &i in &order {
+        let len = draw.draws[i as usize].index_range.len() as u32;
+        ranges[i as usize] = at..at + len;
+        at += len;
+    }
+    let indices = render_device.create_buffer(&BufferDescriptor {
+        label: Some("static_gx_indices"),
+        size: u64::from(at.max(1)) * 4,
+        usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    // One copy per stretch of items that stays contiguous in both buffers (`u32` indices, so
+    // every range is copy-aligned).
+    let mut stretch: Option<(u32, u32, u32)> = None; // (source start, destination start, length)
+    let flush = |stretch: Option<(u32, u32, u32)>, copies: &mut CommandEncoder| {
+        if let Some((src, dst, len)) = stretch.filter(|s| s.2 > 0) {
+            copies.copy_buffer_to_buffer(
+                islice.buffer,
+                u64::from(islice.range.start + src) * 4,
+                &indices,
+                u64::from(dst) * 4,
+                u64::from(len) * 4,
+            );
+        }
+    };
+    for &i in &order {
+        let src = draw.draws[i as usize].index_range.clone();
+        let dst = ranges[i as usize].start;
+        stretch = match stretch {
+            Some((s, d, len)) if s + len == src.start && d + len == dst => {
+                Some((s, d, len + src.len() as u32))
+            }
+            other => {
+                flush(other, copies);
+                Some((src.start, dst, src.len() as u32))
+            }
+        };
+    }
+    flush(stretch, copies);
+    let runs = build_runs(&draw.draws, &order, &ranges, &item_slot, &hidden);
+    let whole = whole_runs(&runs);
+    Some(GxCellGpu {
         mesh: draw.mesh.id(),
         bind_groups,
         record_table,
         cell_uniform,
         item_slot,
+        indices,
+        ranges,
+        order,
         runs,
+        whole,
         records,
         killed_applied: draw.killed_rev,
         // Empty, so the first fog sync always writes.
         fog_applied: Vec::new(),
         unready,
         waiting,
-    }
+    })
 }
 
 impl GxCellGpu {
+    /// Every run of this region, merged across selection keys, into `pass`, whose vertex buffer
+    /// is this region's slice starting at `base_vertex`; binds the region's own index buffer.
+    /// `pipeline` picks the pipeline for `(cutout, two_sided)`; a run it has none for is skipped.
+    /// `counter` is the [`super::GX_DRAWS`] slot the draws count in.
+    fn draw_whole<'w>(
+        &'w self,
+        pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
+        base_vertex: u32,
+        pipeline: impl Fn(bool, bool) -> Option<&'w RenderPipeline>,
+        counter: usize,
+    ) {
+        pass.set_index_buffer(self.indices.slice(..), IndexFormat::Uint32);
+        for run in &self.whole {
+            let Some(p) = pipeline(run.cutout, run.two_sided) else {
+                continue;
+            };
+            pass.set_render_pipeline(p);
+            pass.set_bind_group(1, &self.bind_groups[run.slot].1, &[]);
+            crate::static_gx::count_draw(counter);
+            pass.draw_indexed(
+                run.index_range.clone(),
+                i32::try_from(base_vertex).unwrap_or(0),
+                0..1,
+            );
+        }
+    }
+
     /// Whether every texture this region held items back for is resident now, so a re-assembly
     /// can draw them; a complete region never re-assembles.
     fn wants_reassembly(&self, images: &RenderAssets<GpuImage>) -> bool {
@@ -806,14 +932,23 @@ fn hidden_bits(killed: &[u64], unready: &[u64]) -> Vec<u64> {
         .collect()
 }
 
-/// Coalesce adjacent live items sharing (slot, bucket, group) into draw runs; a killed item is
-/// skipped, so a fully gone cell submits nothing.
-fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<GxRun> {
+/// Coalesce live items adjacent in draw `order` and sharing (slot, bucket, group) into draw runs
+/// over their `ranges` in the region's index buffer; a killed item is skipped, so a fully gone
+/// cell submits nothing.
+fn build_runs(
+    draws: &[GxItemDraw],
+    order: &[u32],
+    ranges: &[Range<u32>],
+    item_slot: &[u16],
+    killed: &[u64],
+) -> Vec<GxRun> {
     let mut runs: Vec<GxRun> = Vec::new();
-    for (i, item) in draws.iter().enumerate() {
+    for &i in order {
+        let i = i as usize;
         if kill_bit(killed, i) != 0 {
             continue;
         }
+        let item = &draws[i];
         let slot = usize::from(item_slot[i]);
         match runs.last_mut() {
             Some(r)
@@ -821,20 +956,40 @@ fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<Gx
                     && r.cutout == item.cutout
                     && r.two_sided == item.two_sided
                     && r.group == item.group
-                    && r.index_range.end == item.index_range.start =>
+                    && r.index_range.end == ranges[i].start =>
             {
-                r.index_range.end = item.index_range.end;
+                r.index_range.end = ranges[i].end;
             }
             _ => runs.push(GxRun {
                 slot,
                 cutout: item.cutout,
                 two_sided: item.two_sided,
-                index_range: item.index_range.clone(),
+                index_range: ranges[i].clone(),
                 group: item.group,
             }),
         }
     }
     runs
+}
+
+/// The runs merged across selection keys where they stay contiguous: a region drawn whole.
+fn whole_runs(runs: &[GxRun]) -> Vec<GxRun> {
+    let mut whole: Vec<GxRun> = Vec::new();
+    for run in runs {
+        match whole.last_mut() {
+            Some(w)
+                if (w.slot, w.cutout, w.two_sided) == (run.slot, run.cutout, run.two_sided)
+                    && w.index_range.end == run.index_range.start =>
+            {
+                w.index_range.end = run.index_range.end;
+            }
+            _ => whole.push(GxRun {
+                group: None,
+                ..run.clone()
+            }),
+        }
+    }
+    whole
 }
 
 /// Record-table column 3: item `i`'s exile kill bit from the published bitmap.
@@ -909,7 +1064,6 @@ pub(crate) fn static_gx_pass(
         let Some(light_bind) = world.get_resource::<GxLightBind>() else {
             return;
         };
-        let meshes = world.resource::<RenderAssets<RenderMesh>>();
         let allocator = world.resource::<MeshAllocator>();
         // WMO regions first, then the doodad phase near-first, the 1.12 client's WMO-then-doodad
         // drain order. Cells draw whole; a region draws only its admitted runs.
@@ -976,14 +1130,7 @@ pub(crate) fn static_gx_pass(
             });
             let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
             pass.set_bind_group(0, &view_bind.main, view_offsets);
-            draw_resolved(
-                &mut pass,
-                &resolved,
-                meshes,
-                allocator,
-                &ready_pre,
-                &light_bind.0,
-            );
+            draw_resolved(&mut pass, &resolved, allocator, &ready_pre, &light_bind.0);
             span.end(&mut pass);
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
@@ -998,14 +1145,7 @@ pub(crate) fn static_gx_pass(
         });
         let span = diagnostics.pass_span(&mut pass, "static_gx");
         pass.set_bind_group(0, &view_bind.main, view_offsets);
-        draw_resolved(
-            &mut pass,
-            &resolved,
-            meshes,
-            allocator,
-            &ready,
-            &light_bind.0,
-        );
+        draw_resolved(&mut pass, &resolved, allocator, &ready, &light_bind.0);
         span.end(&mut pass);
     }
 }
@@ -1016,40 +1156,38 @@ pub(crate) fn static_gx_pass(
 fn draw_resolved<'w>(
     pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
     resolved: &[(&'w GxCellGpu, &'w GxCellDraw, Option<&'w GxSel>)],
-    meshes: &'w RenderAssets<RenderMesh>,
     allocator: &'w MeshAllocator,
     pipes: &HashMap<(bool, bool), &'w RenderPipeline>,
     light_bind: &'w BindGroup,
 ) {
+    pass.set_bind_group(2, light_bind, &[]);
     for (gpu, draw, sel) in resolved {
-        let Some(mesh) = meshes.get(draw.mesh.id()) else {
+        let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
             continue;
-        };
-        let (Some(vslice), Some(islice)) = (
-            allocator.mesh_vertex_slice(&draw.mesh.id()),
-            allocator.mesh_index_slice(&draw.mesh.id()),
-        ) else {
-            continue;
-        };
-        let index_format = match &mesh.buffer_info {
-            bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => *index_format,
-            bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
         };
         pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-        pass.set_index_buffer(islice.buffer.slice(..), index_format);
+        // A cell draws whole; a region only its admitted selection keys.
+        let Some(sel) = sel else {
+            gpu.draw_whole(
+                pass,
+                vslice.range.start,
+                |cut, two| pipes.get(&(cut, two)).copied(),
+                0,
+            );
+            continue;
+        };
+        pass.set_index_buffer(gpu.indices.slice(..), IndexFormat::Uint32);
         for run in &gpu.runs {
-            // A region's run draws only if its selection key is admitted; a cell run always.
-            if let (Some(sel), Some(group)) = (sel, run.group) {
+            if let Some(group) = run.group {
                 if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
                     continue;
                 }
             }
             pass.set_render_pipeline(pipes[&(run.cutout, run.two_sided)]);
             pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-            pass.set_bind_group(2, light_bind, &[]);
+            crate::static_gx::count_draw(0);
             pass.draw_indexed(
-                (islice.range.start + run.index_range.start)
-                    ..(islice.range.start + run.index_range.end),
+                run.index_range.clone(),
                 i32::try_from(vslice.range.start).unwrap_or(0),
                 0..1,
             );
@@ -1148,6 +1286,14 @@ mod tests {
         }
     }
 
+    /// Bake order, each item at its own range: the order before any reorder.
+    fn as_baked(draws: &[GxItemDraw]) -> (Vec<u32>, Vec<Range<u32>>) {
+        (
+            (0..draws.len() as u32).collect(),
+            draws.iter().map(|d| d.index_range.clone()).collect(),
+        )
+    }
+
     #[test]
     fn runs_fuse_live_items_and_split_at_kills() {
         let draws = vec![
@@ -1158,19 +1304,20 @@ mod tests {
             item(12..15, true),
         ];
         let slots = vec![0, 0, 0, 0, 1]; // the last item binds another pool class
-        let runs = build_runs(&draws, &slots, &[]);
+        let (order, ranges) = as_baked(&draws);
+        let runs = build_runs(&draws, &order, &ranges, &slots, &[]);
         assert_eq!(runs.len(), 3, "opaque span fused; cutout split by slot");
         assert_eq!(runs[0].index_range, 0..9);
         assert_eq!(runs[1].index_range, 9..12);
         assert!(runs[1].cutout);
         assert_eq!(runs[2].slot, 1);
         // Kill the middle opaque item: the fused run splits around it.
-        let runs = build_runs(&draws, &slots, &[0b010u64]);
+        let runs = build_runs(&draws, &order, &ranges, &slots, &[0b010u64]);
         assert_eq!(runs.len(), 4);
         assert_eq!(runs[0].index_range, 0..3);
         assert_eq!(runs[1].index_range, 6..9);
         // Kill everything: nothing is submitted.
-        assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
+        assert!(build_runs(&draws, &order, &ranges, &slots, &[0b11111u64]).is_empty());
     }
 
     /// A held-back item (texture not resident) hides alone: the fader kills and the unready bits
@@ -1183,11 +1330,40 @@ mod tests {
         let unready = [0b100u64];
         let hidden = hidden_bits(&killed, &unready);
         assert_eq!(hidden, vec![0b101u64]);
-        let runs = build_runs(&draws, &slots, &hidden);
+        let (order, ranges) = as_baked(&draws);
+        let runs = build_runs(&draws, &order, &ranges, &slots, &hidden);
         assert_eq!(runs.len(), 1, "the one ready, live item draws");
         assert_eq!(runs[0].index_range, 3..6);
         // Bitmaps of different lengths: a region with no faders has an empty kill bitmap.
         assert_eq!(hidden_bits(&[], &[0b1u64, 0b10]), vec![0b1u64, 0b10]);
+    }
+
+    /// Items whose pool class alternates in bake order draw as one run per class once reordered,
+    /// and the whole-region runs merge across selection keys.
+    #[test]
+    fn a_reordered_region_draws_one_run_per_class() {
+        let mut draws: Vec<GxItemDraw> = (0..6).map(|i| item(i * 3..i * 3 + 3, false)).collect();
+        for (i, d) in draws.iter_mut().enumerate() {
+            d.group = Some((i / 3) as u16);
+        }
+        let slots = vec![0, 1, 0, 1, 0, 1];
+        let (order, ranges) = as_baked(&draws);
+        assert_eq!(build_runs(&draws, &order, &ranges, &slots, &[]).len(), 6);
+        // The assembly's order: (cutout, two_sided, slot, group, index), items packed in it.
+        let mut order: Vec<u32> = (0..6).collect();
+        order.sort_by_key(|&i| (slots[i as usize], draws[i as usize].group, i));
+        let mut ranges = vec![0..0; 6];
+        let mut at = 0;
+        for &i in &order {
+            ranges[i as usize] = at..at + 3;
+            at += 3;
+        }
+        let runs = build_runs(&draws, &order, &ranges, &slots, &[]);
+        assert_eq!(runs.len(), 4, "one run per (slot, group)");
+        let whole = whole_runs(&runs);
+        assert_eq!(whole.len(), 2, "one run per slot across groups");
+        assert_eq!(whole[0].index_range, 0..9);
+        assert_eq!(whole[1].index_range, 9..18);
     }
 }
 

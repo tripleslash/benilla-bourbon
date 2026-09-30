@@ -1111,6 +1111,7 @@ pub(crate) fn gx_shadow_pass(
                                 pass.set_render_pipeline(pipeline);
                                 pass.set_vertex_buffer(0, vslice.buffer.slice(..));
                                 pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                                crate::static_gx::count_draw(1);
                                 pass.draw_indexed(
                                     islice.range.clone(),
                                     i32::try_from(vslice.range.start).unwrap_or(0),
@@ -1125,42 +1126,19 @@ pub(crate) fn gx_shadow_pass(
                                 if outside_cascade(&clip_from_world, draw) {
                                     continue;
                                 }
-                                let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                                // The region's own index buffer is bound by `draw_whole`; the mesh gives vertices.
+                                let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id())
+                                else {
                                     complete = false;
                                     continue;
-                                };
-                                let (Some(vslice), Some(islice)) = (
-                                    allocator.mesh_vertex_slice(&draw.mesh.id()),
-                                    allocator.mesh_index_slice(&draw.mesh.id()),
-                                ) else {
-                                    complete = false;
-                                    continue;
-                                };
-                                let index_format = match &mesh.buffer_info {
-                                    bevy::render::mesh::RenderMeshBufferInfo::Indexed {
-                                        index_format,
-                                        ..
-                                    } => *index_format,
-                                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                                        continue
-                                    }
                                 };
                                 pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                                pass.set_index_buffer(islice.buffer.slice(..), index_format);
-                                for run in &gpu.runs {
-                                    pass.set_render_pipeline(if run.cutout {
-                                        cutout
-                                    } else {
-                                        opaque
-                                    });
-                                    pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-                                    pass.draw_indexed(
-                                        (islice.range.start + run.index_range.start)
-                                            ..(islice.range.start + run.index_range.end),
-                                        i32::try_from(vslice.range.start).unwrap_or(0),
-                                        0..1,
-                                    );
-                                }
+                                gpu.draw_whole(
+                                    &mut pass,
+                                    vslice.range.start,
+                                    |cut, _| Some(if cut { cutout } else { opaque }),
+                                    1,
+                                );
                             }
                         }
                     }
@@ -1269,6 +1247,7 @@ pub(crate) fn gx_shadow_pass(
                             continue;
                         };
                         pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                        crate::static_gx::count_draw(1);
                         pass.draw_indexed(
                             islice.range.clone(),
                             i32::try_from(vslice.range.start).unwrap_or(0),
@@ -1461,7 +1440,6 @@ fn draw_local_atlas(
                 tile,
                 casters,
                 (opaque, cutout),
-                meshes,
                 allocator,
                 build,
                 fill,
@@ -1632,7 +1610,6 @@ fn draw_atlas_statics(
     tile: (u32, u32),
     casters: &[(&GxCellGpu, &GxCellDraw)],
     pipes: (&RenderPipeline, &RenderPipeline),
-    meshes: &RenderAssets<RenderMesh>,
     allocator: &MeshAllocator,
     redraw: u32,
     fill: &RenderPipeline,
@@ -1706,22 +1683,10 @@ fn draw_atlas_statics(
                 ) {
                     continue;
                 }
-                let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                // The region's own index buffer is bound by `draw_whole`; the mesh gives vertices.
+                let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
                     whole = false;
                     continue;
-                };
-                let (Some(vslice), Some(islice)) = (
-                    allocator.mesh_vertex_slice(&draw.mesh.id()),
-                    allocator.mesh_index_slice(&draw.mesh.id()),
-                ) else {
-                    whole = false;
-                    continue;
-                };
-                let index_format = match &mesh.buffer_info {
-                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                        *index_format
-                    }
-                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
                 };
                 if !set_up {
                     set_atlas_tile(&mut pass, slot, face, tile);
@@ -1729,17 +1694,12 @@ fn draw_atlas_statics(
                     set_up = true;
                 }
                 pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                pass.set_index_buffer(islice.buffer.slice(..), index_format);
-                for run in &gpu.runs {
-                    pass.set_render_pipeline(if run.cutout { cutout } else { opaque });
-                    pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-                    pass.draw_indexed(
-                        (islice.range.start + run.index_range.start)
-                            ..(islice.range.start + run.index_range.end),
-                        i32::try_from(vslice.range.start).unwrap_or(0),
-                        0..1,
-                    );
-                }
+                gpu.draw_whole(
+                    &mut pass,
+                    vslice.range.start,
+                    |cut, _| Some(if cut { cutout } else { opaque }),
+                    1,
+                );
             }
         }
         if whole {
@@ -1841,6 +1801,7 @@ fn draw_atlas_entities(
                             continue;
                         };
                         pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+                        crate::static_gx::count_draw(1);
                         pass.draw_indexed(
                             islice.range.clone(),
                             i32::try_from(vslice.range.start).unwrap_or(0),
