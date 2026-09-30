@@ -74,8 +74,8 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     let cold = previous.depth.w < 0.5;
     let period = max(u32(g.misc.y), 1u);
     // fork: a probe no receiver on screen can read keeps a quarter of the rate. The field is an
-    // ease with a 6.6 s time constant (`gi::SETTLE_SECS`), so one updated every four periods is
-    // under a second behind it when the camera turns onto it, and on its full schedule again from
+    // ease with a 19.8 s time constant (`gi::SETTLE_SECS`), so one updated every four periods is
+    // a few seconds behind it when the camera turns onto it, and on its full schedule again from
     // then; a cut is never throttled. "On screen" is the view cone (`trace.rot_x.w`, its
     // half-diagonal) widened by two probe spacings — the eight probes around any receiver, and the
     // normal bias it samples along, are inside it — and every probe within those two spacings of

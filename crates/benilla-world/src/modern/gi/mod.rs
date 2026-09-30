@@ -81,8 +81,8 @@ pub struct GiTier {
     pub rays: u32,
     /// Frames between a probe's traces. The trace's cost is `rays / period` of the field a frame,
     /// and `probegi::listed_cap` holds a moving camera's frames to the same share. fork: every tier
-    /// runs 3x its P6 period (Medium 12, High 8, Ultra 6, Cinematic 4), a third of the trace for a
-    /// field that settles over 3x as long (`SETTLE_SECS`). Keep it coprime with 7 —
+    /// runs 9x its P6 period (Medium 12, High 8, Ultra 6, Cinematic 4), a ninth of the trace for a
+    /// field that settles over 9x as long (`SETTLE_SECS`). Keep it coprime with 7 —
     /// `gi_classify.wgsl`'s schedule is `(idx * 7 + frame) % period`.
     pub period: u32,
     pub levels: usize,
@@ -152,7 +152,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 3,
             spacing: [4.0, 12.0, 36.0, 0.0, 0.0],
             rays: 24,
-            period: 36,
+            period: 108,
             levels: 3,
             voxel: [1.5, 4.0, 12.0, 0.0],
             voxels: 64,
@@ -167,7 +167,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 3,
             spacing: [3.0, 9.0, 27.0, 0.0, 0.0],
             rays: 32,
-            period: 24,
+            period: 72,
             levels: 4,
             voxel: [1.0, 3.0, 8.0, 16.0],
             voxels: 96,
@@ -182,7 +182,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 4,
             spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
             rays: 48,
-            period: 18,
+            period: 54,
             levels: 4,
             voxel: [0.75, 2.25, 6.0, 12.0],
             voxels: 96,
@@ -201,7 +201,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             cascades: 4,
             spacing: [2.0, 6.0, 18.0, 54.0, 0.0],
             rays: 64,
-            period: 12,
+            period: 36,
             levels: 4,
             voxel: [0.75, 2.25, 6.0, 12.0],
             voxels: 96,
@@ -239,10 +239,11 @@ const BACKFACE_LIMIT: f32 = 0.35;
 /// and a teleport cuts the whole field. What settles slowly is the last few percent of the noise,
 /// which is exactly what was glimmering.
 ///
-/// fork: 3x the 2.2 s the flicker numbers above were measured at, because every tier's period went
-/// 3x with it. What averages the noise away is the number of updates per time constant, so the two
-/// move together: the same residue for a third of the trace.
-const SETTLE_SECS: f32 = 6.6;
+/// fork: 9x the 2.2 s the flicker numbers above were measured at, because every tier's period went
+/// 9x with it (twice 3x, the second for a GI pass a third as costly). What averages the noise away
+/// is the number of updates per time constant, so the two move together: the same residue for a
+/// ninth of the trace.
+const SETTLE_SECS: f32 = 19.8;
 
 /// The steady-frame history weight for a tier updating every `period` frames at `dt`: the ease that
 /// settles in [`SETTLE_SECS`] whatever the tier and the frame rate. Clamped so a stalled frame (a
