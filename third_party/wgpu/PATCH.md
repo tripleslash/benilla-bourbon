@@ -54,6 +54,22 @@ two-channel 16-bit storage targets in the browser. It has to widen them to `Rgba
 that `FeaturesWebGPU` still leaves the bit unnamed, so a wgpu-types bump that assigns it fails the
 build instead of silently requesting the wrong feature.
 
+## Browser WGSL (`src/backend/webgpu.rs`, `browser_wgsl`)
+
+A module Bevy hands over as naga IR is written back to WGSL for the browser by naga 29's writer.
+Two things it writes, the browser's compiler rejects, so `browser_wgsl` post-processes the text:
+
+- `f32::MAX` comes out as `340282350000000000000000000000000000000f`, a decimal above the largest
+  f32 ("value cannot be represented as 'f32'" in Tint); it is rewritten to `3.4028234e38f`, which is
+  in range and rounds to exactly `f32::MAX`. The FSR shaders' `FSR3_FP32_MAX`/`FG_FLT_MAX` hit it.
+- A module that uses subgroup or quad builtins (possible only because the `SUBGROUP` mapping above
+  exposes the feature) needs `enable subgroups;`, which naga does not write; it is prepended when a
+  `@builtin(subgroup_*)` or a `subgroupX(` / `quadX(` call appears.
+  With it goes `diagnostic(off, subgroup_uniformity);`: Tint cannot prove the quad ops in Bevy's
+  depth downsample (`downsample_second`) subgroup-uniform and rejects them; naga validated the module.
+
+Remove it with the rest once naga's writer emits both correctly.
+
 ## Removal
 
 Once a wgpu release that Bevy uses includes both mappings, with a real flag for tier 1:
@@ -68,4 +84,4 @@ wgpu 30 has the bindings, but still lacks the mappings as of 30.0.1.
 diff -ru <crates.io wgpu-29.0.4> third_party/wgpu
 ```
 
-The diff shows only the two hunks above, plus this file and the removed `Cargo.lock`.
+The diff shows only the three hunks above, plus this file and the removed `Cargo.lock`.

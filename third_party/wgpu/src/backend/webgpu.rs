@@ -1907,9 +1907,43 @@ impl dispatch::DeviceInterface for WebDevice {
 
             let writer_flags = naga::back::wgsl::WriterFlags::empty();
             let wgsl_text = back::wgsl::write_string(module, &module_info, writer_flags).unwrap();
+            let wgsl_text = browser_wgsl(wgsl_text);
             Ok(webgpu_sys::GpuShaderModuleDescriptor::new(
                 wgsl_text.as_str(),
             ))
+        }
+        // benilla patch (PATCH.md, "Browser WGSL"): two gaps between naga 29's WGSL writer and
+        // what a browser's compiler accepts.
+        // - naga prints `f32::MAX` as `340282350000000000000000000000000000000f`, a decimal above
+        //   the largest f32, which Tint rejects ("value cannot be represented as 'f32'");
+        //   `3.4028234e38f` is in range and rounds to exactly `f32::MAX`.
+        // - A module using subgroup or quad builtins (reached only on a device with the patched
+        //   `SUBGROUP` feature) needs the `enable subgroups;` directive, which naga does not write.
+        #[cfg(naga)]
+        fn browser_wgsl(text: String) -> String {
+            let text = text.replace("340282350000000000000000000000000000000f", "3.4028234e38f");
+            // A subgroup builtin: `@builtin(subgroup_…)`, a `quad…(` call, or a `subgroupX…(`
+            // call; not an identifier that merely contains the word.
+            let call = |prefix: &str| {
+                text.match_indices(prefix).any(|(at, _)| {
+                    let rest = &text[at + prefix.len()..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    name.starts_with(|c: char| c.is_ascii_uppercase())
+                        && rest[name.len()..].starts_with('(')
+                })
+            };
+            let subgroups =
+                text.contains("@builtin(subgroup_") || call("quad") || call("subgroup");
+            // Tint's uniformity analysis also rejects a quad op it cannot prove subgroup-uniform
+            // (Bevy's depth downsample); naga validated the module, so the rule is turned off.
+            if subgroups && !text.contains("enable subgroups;") {
+                format!("enable subgroups;\ndiagnostic(off, subgroup_uniformity);\n{text}")
+            } else {
+                text
+            }
         }
         let (descriptor, compilation_info) = match shader_module_result {
             Ok(v) => v,
