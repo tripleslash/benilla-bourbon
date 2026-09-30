@@ -236,6 +236,45 @@ fn setup_precip(
 }
 
 /// Per frame: wind, spawn budgets, integrate, land; [`push_precip`] draws in `PostUpdate`.
+/// fork: perf — `WOW_PRECIP_PROFILE=1`: every two seconds, the simulation's mean CPU ms a frame,
+/// the ground rays it cast a frame and the height-cache clears, so a rain frame's cost is read
+/// from numbers.
+#[derive(Default)]
+struct PrecipProfile {
+    on: Option<bool>,
+    since: Option<std::time::Instant>,
+    frames: u32,
+    busy: std::time::Duration,
+}
+
+impl PrecipProfile {
+    fn enabled(&mut self) -> bool {
+        *self.on.get_or_insert_with(|| {
+            crate::launch_env::var("WOW_PRECIP_PROFILE").is_some_and(|v| v == "1")
+        })
+    }
+
+    /// Logs every two seconds, counts this frame, and returns its start.
+    fn frame(&mut self, heights: &mut HeightCache) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        let since = *self.since.get_or_insert(now);
+        if now - since >= std::time::Duration::from_secs(2) && self.frames > 0 {
+            let f = self.frames as f32;
+            info!(
+                "PRECIP_PROFILE sim_ms={:.3} rays_per_frame={:.0} clears={}",
+                self.busy.as_secs_f32() * 1000.0 / f,
+                heights.rays as f32 / f,
+                heights.clears,
+            );
+            (heights.rays, heights.clears, self.frames) = (0, 0, 0);
+            self.busy = std::time::Duration::ZERO;
+            self.since = Some(now);
+        }
+        self.frames += 1;
+        now
+    }
+}
+
 fn simulate_precip(
     time: Res<Time>,
     weather: Res<WeatherState>,
@@ -251,10 +290,12 @@ fn simulate_precip(
     mut last_cut: Local<u32>,
     // Frames since the previous census line.
     mut census_frames: Local<u32>,
+    mut prof: Local<PrecipProfile>,
 ) {
     let Some(precip) = precip.as_deref_mut() else {
         return;
     };
+    let started = prof.enabled().then(|| prof.frame(&mut heights));
     // Indoors this freezes the whole effect, where the reference keeps simulating drops unseen
     // and freezes only the mist.
     if indoors.0 {
@@ -276,6 +317,7 @@ fn simulate_precip(
     wind.update(wind_pos, facing, viewer.planar_speed, dt);
 
     let filter = crate::collision::WorldCollision::body_filter();
+    heights.evict_far(cam_pos);
     let Precip {
         rain,
         snow,
@@ -370,6 +412,9 @@ fn simulate_precip(
             dt,
             cam_pos,
         );
+    }
+    if let Some(t) = started {
+        prof.busy += t.elapsed();
     }
 }
 

@@ -122,18 +122,67 @@ impl Pool {
 
 /// A lazy cache of the weather ground oracle (`0x67c760` → `0x6b7070`), the max of terrain and
 /// the chunk's WMO and doodad hits (`CMapObj::IntersectSegment` `0x6a37b0`, `0x6b7237`), so drops
-/// land on roofs. Here one downward ray per cell from the spawn plane; cleared when that plane
-/// moves a story (the ray start decides which roofs it sees) or the cache outgrows its bound.
+/// land on roofs: the first surface below the spawn plane, or 200 below it on a miss.
+///
+/// fork: perf — cached as each cell's COLUMN of surfaces, cast once from above any spawn plane
+/// the camera is near, so every plane reads its answer from the column. The cache used to hold one
+/// answer per cell for one plane and was dropped whole whenever the plane moved 8 yd: a flying
+/// camera re-cast every cell of the spawn area several times a second, thousands of rays a frame
+/// (`PRECIP_PROFILE`, Duskwood in rain). Its bound covers the band of cells a flight leaves drops
+/// in (packets replay up to [`RETIRE_DIST`] behind the camera), and past it the cells far from the
+/// camera go, once a frame ([`HeightCache::evict_far`]).
 #[derive(Resource, Default)]
 pub(super) struct HeightCache {
-    cells: HashMap<(i32, i32), f32>,
-    cast_y: f32,
+    cells: HashMap<(i32, i32), Column>,
+    /// fork: perf — rays cast and evictions since the profile last read them
+    /// (`WOW_PRECIP_PROFILE`).
+    pub(super) rays: u32,
+    pub(super) clears: u32,
+}
+
+/// One cell's surfaces, highest first, from `top` down to `bottom` (the known span).
+struct Column {
+    top: f32,
+    bottom: f32,
+    hits: [f32; COLUMN_HITS],
+    len: u8,
 }
 
 /// The reference's cell stride (`0x80ff98` = 1.0416666).
 pub(super) const CELL: f32 = 1.041_666_6;
 /// A probe that hits nothing reports ground 200 below the query (`0x67c812`: `refZ − 200`).
 const MISS_DEPTH: f32 = 200.0;
+/// How far below the plane a probe reaches before it counts as a miss.
+const PROBE_REACH: f32 = MISS_DEPTH + 50.0;
+/// A column is cast from this far above the plane that asked for it, so a climbing camera reuses
+/// it until it has risen this far.
+const COLUMN_HEADROOM: f32 = 64.0;
+/// Surfaces kept per column: a roof or a canopy over the ground, a bridge over both.
+const COLUMN_HITS: usize = 4;
+/// The cache's bound (about 8 MB), and the square half-width (yd) kept around the camera past it.
+const CACHE_CELLS: usize = 1 << 17;
+const KEEP_HALF: f32 = 160.0;
+
+impl Column {
+    /// The oracle's answer for a probe from `plane`: the first surface at or below it within
+    /// [`PROBE_REACH`], or the miss depth; `None` when this column does not cover that span.
+    fn ground(&self, plane: f32) -> Option<f32> {
+        if plane > self.top {
+            return None;
+        }
+        let floor = plane - PROBE_REACH;
+        match self.hits[..usize::from(self.len)]
+            .iter()
+            .find(|&&y| y <= plane)
+        {
+            Some(&y) if y >= floor => Some(y),
+            // The first surface under the plane is past the reach: a miss.
+            Some(_) => Some(plane - MISS_DEPTH),
+            None if self.bottom <= floor => Some(plane - MISS_DEPTH),
+            None => None,
+        }
+    }
+}
 
 impl HeightCache {
     pub(super) fn ground_y(
@@ -144,27 +193,72 @@ impl HeightCache {
         spatial: &SpatialQuery,
         filter: &SpatialQueryFilter,
     ) -> f32 {
-        if (self.cast_y - cast_from_y).abs() > 8.0 || self.cells.len() > 20_000 {
-            self.cells.clear();
-            self.cast_y = cast_from_y;
-        }
         let key = Self::key(x, z);
-        if let Some(&y) = self.cells.get(&key) {
+        if let Some(y) = self.cells.get(&key).and_then(|c| c.ground(cast_from_y)) {
             return y;
         }
         let cx = (key.0 as f32 + 0.5) * CELL;
         let cz = (key.1 as f32 + 0.5) * CELL;
-        let y = spatial
-            .cast_ray(
-                Vec3::new(cx, cast_from_y, cz),
-                Dir3::NEG_Y,
-                MISS_DEPTH + 50.0,
-                true,
-                filter,
-            )
-            .map_or(cast_from_y - MISS_DEPTH, |hit| cast_from_y - hit.distance);
-        self.cells.insert(key, y);
+        let column = self.cast_column(cx, cz, cast_from_y, spatial, filter);
+        let y = column
+            .ground(cast_from_y)
+            .unwrap_or(cast_from_y - MISS_DEPTH);
+        self.cells.insert(key, column);
         y
+    }
+
+    /// Past the bound, keep only the cells within [`KEEP_HALF`] of the camera.
+    pub(super) fn evict_far(&mut self, cam: Vec3) {
+        if self.cells.len() < CACHE_CELLS {
+            return;
+        }
+        let (kx, kz) = Self::key(cam.x, cam.z);
+        let keep = (KEEP_HALF / CELL).ceil() as i32;
+        self.cells
+            .retain(|&(cx, cz), _| (cx - kx).abs() <= keep && (cz - kz).abs() <= keep);
+        self.clears += 1;
+    }
+
+    /// Walk down from [`COLUMN_HEADROOM`] above `plane` to [`PROBE_REACH`] below it, one ray per
+    /// surface. Not solid: a ray starting inside a doodad's hull reports where it leaves it, so the
+    /// walk goes on below.
+    fn cast_column(
+        &mut self,
+        x: f32,
+        z: f32,
+        plane: f32,
+        spatial: &SpatialQuery,
+        filter: &SpatialQueryFilter,
+    ) -> Column {
+        let top = plane + COLUMN_HEADROOM;
+        let mut column = Column {
+            top,
+            bottom: plane - PROBE_REACH,
+            hits: [0.0; COLUMN_HITS],
+            len: 0,
+        };
+        let mut from = top;
+        while usize::from(column.len) < COLUMN_HITS {
+            let reach = from - column.bottom;
+            if reach <= 0.0 {
+                break;
+            }
+            self.rays += 1;
+            let Some(hit) =
+                spatial.cast_ray(Vec3::new(x, from, z), Dir3::NEG_Y, reach, false, filter)
+            else {
+                break;
+            };
+            let y = from - hit.distance;
+            column.hits[usize::from(column.len)] = y;
+            column.len += 1;
+            from = y - 0.05;
+        }
+        // Full: the span below the last surface is unknown.
+        if usize::from(column.len) == COLUMN_HITS {
+            column.bottom = column.bottom.max(from);
+        }
+        column
     }
 
     /// The grid cell owning an XZ position.
@@ -380,6 +474,37 @@ pub(super) fn run_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A column answers any plane under its top as one ray from that plane would: the first
+    /// surface at or below it within reach, the miss depth past it, and nothing it did not cover.
+    #[test]
+    fn a_column_answers_every_plane_under_its_top() {
+        // A roof at 30 over ground at 10, cast for a plane at 40.
+        let mut hits = [0.0; COLUMN_HITS];
+        hits[..2].copy_from_slice(&[30.0, 10.0]);
+        let column = Column {
+            top: 40.0 + COLUMN_HEADROOM,
+            bottom: 40.0 - PROBE_REACH,
+            hits,
+            len: 2,
+        };
+        assert_eq!(column.ground(40.0), Some(30.0));
+        assert_eq!(column.ground(100.0), Some(30.0));
+        // Under the roof, the ground.
+        assert_eq!(column.ground(20.0), Some(10.0));
+        // Above the column's top: re-cast.
+        assert_eq!(column.ground(40.0 + COLUMN_HEADROOM + 1.0), None);
+        // A plane whose first surface lies past the reach: a miss.
+        let low = Column {
+            top: 400.0,
+            bottom: 400.0 - COLUMN_HEADROOM - PROBE_REACH,
+            hits,
+            len: 2,
+        };
+        assert_eq!(low.ground(300.0), Some(300.0 - MISS_DEPTH));
+        // Below every surface and past what the column covers: re-cast.
+        assert_eq!(column.ground(5.0), None);
+    }
 
     /// A converged [`WeatherWind`] for a run along Bevy +X at `speed`, through the real window.
     fn wind_at(speed: f32) -> WeatherWind {
