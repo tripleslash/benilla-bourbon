@@ -28,12 +28,12 @@ struct NameVisitor(Option<String>);
 
 impl field::Visit for NameVisitor {
     fn record_str(&mut self, f: &field::Field, value: &str) {
-        if f.name() == "name" {
+        if matches!(f.name(), "name" | "camera" | "system") {
             self.0 = Some(value.to_owned());
         }
     }
     fn record_debug(&mut self, f: &field::Field, value: &dyn std::fmt::Debug) {
-        if f.name() == "name" {
+        if matches!(f.name(), "name" | "camera" | "system") {
             self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
         }
     }
@@ -41,12 +41,21 @@ impl field::Visit for NameVisitor {
 
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SystemProfile {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        if attrs.metadata().name() != "system" {
-            return;
-        }
+        // A system by its name; any other span (`camera_schedule`, `queue_submit`,
+        // `present_frames`, …) as `[span]`, with its camera or system where it has one, so the time a
+        // driver spends outside its systems is attributed too. Nested spans count in both.
         let mut v = NameVisitor(None);
         attrs.record(&mut v);
-        if let (Some(name), Some(span)) = (v.0, ctx.span(id)) {
+        let span_name = attrs.metadata().name();
+        let name = if span_name == "system" {
+            v.0
+        } else {
+            Some(match v.0 {
+                Some(camera) => format!("[span] {span_name} {camera}"),
+                None => format!("[span] {span_name}"),
+            })
+        };
+        if let (Some(name), Some(span)) = (name, ctx.span(id)) {
             span.extensions_mut().insert(Name(name));
         }
     }
@@ -101,8 +110,8 @@ fn report(mut last: Local<Option<Instant>>) {
         totals.into_iter().map(|(n, (d, c))| (n, d, c)).collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     let all: f32 = rows.iter().map(|r| r.1.as_secs_f32()).sum::<f32>() * 1000.0 / secs;
-    info!("SYSTEM_PROFILE total={all:.1}ms/s over {secs:.1}s");
-    for (name, d, c) in rows.iter().take(25) {
+    info!("SYSTEM_PROFILE total={all:.1}ms/s (nested spans double count) over {secs:.1}s");
+    for (name, d, c) in rows.iter().take(45) {
         info!(
             "SYSTEM_PROFILE {:8.2}ms/s {:6.1}/s {name}",
             d.as_secs_f32() * 1000.0 / secs,
