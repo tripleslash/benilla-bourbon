@@ -15,6 +15,7 @@ use bevy::core_pipeline::schedule::RootNonCameraView;
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
+use bevy::render::extract_component::ExtractComponent;
 use bevy::window::PrimaryWindow;
 
 use super::{FsrHeld, FsrView};
@@ -29,7 +30,8 @@ pub struct FgMain;
 pub struct HeldFrame;
 
 /// A camera that still draws on a held frame: the player-UI camera and the dev overlay.
-#[derive(Component, Clone, Copy, Default)]
+/// Extracted, since [`hold_cameras`] reads it in the render world.
+#[derive(Component, Clone, Copy, Default, ExtractComponent)]
 pub struct PresentsHeldFrames;
 
 /// Whether frame generation is wanted: the `frameGeneration` CVar, which the app writes.

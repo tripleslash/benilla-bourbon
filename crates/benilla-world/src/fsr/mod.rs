@@ -262,7 +262,7 @@ fn debug_views(
         Entity,
         &bevy::render::sync_world::MainEntity,
         Option<&bevy::render::camera::ExtractedCamera>,
-        Has<bevy::render::view::ViewTarget>,
+        Option<&bevy::render::view::ViewTarget>,
         Has<crate::ffx_glow::FfxGlowTextures>,
         Option<&FsrState>,
         Has<FgState>,
@@ -272,13 +272,40 @@ fn debug_views(
     )>,
     pipelines: Option<Res<upscaler::FsrPipelines>>,
     pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
+    held: Res<FsrHeld>,
+    ready: Query<&FgPresent>,
+    mut tally: Local<[[u32; 4]; 2]>,
     mut last: Local<Option<bevy::platform::time::Instant>>,
 ) {
+    // Every frame, by world (0) or held (1): frames, frames whose window was written (it presents),
+    // frames with a claiming backdrop, and those whose claim had frame generation's image ready.
+    let row = &mut tally[usize::from(held.0)];
+    row[0] += 1;
+    let written = views.iter().any(|(.., cam, target, _, _, _, _, _, _)| {
+        cam.is_some_and(|c| {
+            matches!(
+                c.target,
+                Some(bevy::camera::NormalizedRenderTarget::Window(_))
+            )
+        }) && target.is_some_and(bevy::render::view::ViewTarget::needs_present)
+    });
+    row[1] += u32::from(written);
+    let source = views
+        .iter()
+        .find_map(|(.., claim, _)| claim.and_then(|c| c.source_entity()));
+    row[2] += u32::from(source.is_some());
+    row[3] += u32::from(source.is_some_and(|s| ready.get(s).is_ok_and(FgPresent::ready)));
     if last.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0) {
         return;
     }
     *last = Some(bevy::platform::time::Instant::now());
+    let [w, h] = std::mem::take(&mut *tally);
+    info!(
+        "FSR_PRESENT world frames={} written={} claimed={} fg_ready={} | held frames={} written={} claimed={} fg_ready={}",
+        w[0], w[1], w[2], w[3], h[0], h[1], h[2], h[3]
+    );
     for (e, main, cam, target, glow, fsr, fg, backdrop, claim, depth) in &views {
+        let target = target.is_some();
         // After the render graph: `out` says whether this frame's chain landed.
         info!(
             "FSR_VIEW {e} main={} order={:?} size={:?} target={target} glow={glow} fsr={} out={} fg={fg} backdrop={backdrop} claim={:?} depth={:?}",
@@ -322,6 +349,7 @@ impl Plugin for FsrPlugin {
             .init_resource::<velocity::FsrMotionParts>()
             .add_plugins((
                 ExtractComponentPlugin::<FsrView>::default(),
+                ExtractComponentPlugin::<PresentsHeldFrames>::default(),
                 ExtractResourcePlugin::<FsrHeld>::default(),
                 ExtractResourcePlugin::<velocity::FsrMotionParts>::default(),
             ))
