@@ -106,7 +106,7 @@ struct Fsr3Params {
     _pad: [f32; 2],
 }
 
-const PARAMS_SIZE: u64 = std::mem::size_of::<Fsr3Params>() as u64;
+pub(super) const PARAMS_SIZE: u64 = std::mem::size_of::<Fsr3Params>() as u64;
 
 /// The chain's display-resolution result: the main texture's colour semantics at the display size.
 /// On the world view while FSR runs; the FFXGlow filter and the UI camera's combine read it.
@@ -764,6 +764,7 @@ pub(super) fn fsr_upscale_pass(
     pipelines: Option<Res<FsrPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     held: Res<FsrHeld>,
+    residual: Option<Res<super::residual::Residual>>,
     mut render_context: RenderContext,
 ) {
     if held.0 {
@@ -985,6 +986,22 @@ pub(super) fn fsr_upscale_pass(
         dispatch(accumulate, &g_accumulate, display);
         dispatch(rcas, &g_rcas, display);
         span.end(&mut pass);
+    }
+    // `WOW_FSR_DEBUG=residual`: this frame's motion vectors against the last frame.
+    if let Some(residual) = residual.as_deref() {
+        residual.record(
+            &device,
+            &pipeline_cache,
+            encoder,
+            super::residual::Inputs {
+                params: state.params.as_entire_binding(),
+                depth: depth.view(),
+                velocity: &t.velocity,
+                color: target.main_texture(),
+                color_view: target.main_texture_view(),
+                render,
+            },
+        );
     }
 
     count(0);

@@ -25,6 +25,7 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 pub mod cadence;
 pub mod caps;
 pub mod framegen;
+mod residual;
 pub mod upscaler;
 pub mod velocity;
 
@@ -127,6 +128,8 @@ pub struct FsrShaders {
     pub velocity: Handle<Shader>,
     /// The effect lane's motion (`effect_velocity.wgsl`).
     pub effect_velocity: Handle<Shader>,
+    /// `WOW_FSR_DEBUG=residual`'s measurement (`residual.wgsl`).
+    pub residual: Handle<Shader>,
 }
 
 const COMMON: &str = include_str!("../shaders/fsr/common.wgsl");
@@ -198,6 +201,7 @@ const FG_PASSES: [(&str, Option<&str>); 10] = [
 ];
 const VELOCITY: &str = include_str!("../shaders/fsr/velocity.wgsl");
 const EFFECT_VELOCITY: &str = include_str!("../shaders/fsr/effect_velocity.wgsl");
+const RESIDUAL: &str = include_str!("../shaders/fsr/residual.wgsl");
 
 /// One upscaler pass's full source: the shared prelude, then the pass with its placeholders
 /// resolved.
@@ -343,6 +347,7 @@ impl Plugin for FsrPlugin {
                     velocity::init_effect_pipeline
                         .after(crate::particles::render::init_effect_pipeline),
                     framegen::init_pipelines,
+                    residual::init,
                 ),
             )
             .add_systems(
@@ -359,6 +364,12 @@ impl Plugin for FsrPlugin {
                         .in_set(RenderSystems::Render)
                         .before(render_system),
                 ),
+            )
+            .add_systems(
+                Render,
+                residual::readback
+                    .in_set(RenderSystems::Render)
+                    .after(render_system),
             )
             .add_systems(
                 Render,
@@ -430,12 +441,17 @@ impl Plugin for FsrPlugin {
             EFFECT_VELOCITY,
             "benilla_fsr/effect_velocity.wgsl",
         ));
+        let residual = shaders.add(Shader::from_wgsl(
+            pass_source(RESIDUAL, formats),
+            "benilla_fsr/residual.wgsl",
+        ));
         let built = FsrShaders {
             formats,
             upscaler,
             framegen,
             velocity,
             effect_velocity,
+            residual,
         };
         app.insert_resource(built.clone());
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -548,6 +564,7 @@ mod tests {
             for (name, _) in FG_PASSES {
                 validate(name, &fg_pass_source(name, formats));
             }
+            validate("residual", &pass_source(RESIDUAL, formats));
         }
     }
 }
