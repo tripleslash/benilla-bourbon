@@ -128,6 +128,9 @@ pub mod launch_env;
 pub mod lighting;
 pub mod liquid;
 pub mod log_ring;
+// fork: perf — per-system CPU time, only in a `trace_systems` build.
+#[cfg(feature = "trace_systems")]
+pub mod system_profile;
 
 /// macOS `Cmd+Q`, re-pointed at the window close so the shutdown systems run.
 pub mod mac_quit;

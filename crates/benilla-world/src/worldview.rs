@@ -13,6 +13,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use benilla_assets::coords::wow_to_bevy;
 
 // fork: fsr (FORK.md) — `WOW_RENDER_SCALE` / `WOW_FRAME_GENERATION`: FSR without a login.
+mod fly_path;
 mod fsr_view;
 mod wade_probe;
 
@@ -256,6 +257,11 @@ fn plugin(app: &mut App) {
 
     // fork: fsr (FORK.md) — the FSR mode, when its knobs are set.
     fsr_view::plugin(app);
+    // fork: perf — a scripted flight (`WOW_WORLDVIEW_FLY`), when its waypoints are set.
+    fly_path::plugin(app);
+    // fork: perf — the per-system CPU profile, in a `trace_systems` build.
+    #[cfg(feature = "trace_systems")]
+    crate::system_profile::plugin(app);
 
     // `WOW_WORLDVIEW_SHOT=<png>` (at `WOW_WORLDVIEW_SHOT_AT` seconds, default 20) writes one frame
     // and exits, with no subject gate: the client's live shot needs a player the engine lacks.

@@ -49,7 +49,18 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         // Quiet wgpu/naga; the ring keeps the last stderr lines for the crash report (`log_ring`).
         .set(bevy::log::LogPlugin {
             filter: "wgpu=error,naga=warn".into(),
-            custom_layer: |_| Some(Box::new(crate::log_ring::LogRing)),
+            custom_layer: |_| {
+                // fork: perf — the per-system CPU profile rides beside the ring when built in.
+                #[cfg(feature = "trace_systems")]
+                {
+                    use bevy::log::tracing_subscriber::Layer;
+                    Some(Box::new(
+                        crate::log_ring::LogRing.and_then(crate::system_profile::SystemProfile),
+                    ))
+                }
+                #[cfg(not(feature = "trace_systems"))]
+                Some(Box::new(crate::log_ring::LogRing))
+            },
             ..default()
         })
         // Asset loads parse synchronously on the IO pool, and Bevy's default 4 threads saturate on
