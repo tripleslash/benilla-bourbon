@@ -272,12 +272,12 @@ fn debug_views(
     )>,
     pipelines: Option<Res<upscaler::FsrPipelines>>,
     pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
-    mut last: Local<Option<std::time::Instant>>,
+    mut last: Local<Option<bevy::platform::time::Instant>>,
 ) {
     if last.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0) {
         return;
     }
-    *last = Some(std::time::Instant::now());
+    *last = Some(bevy::platform::time::Instant::now());
     for (e, main, cam, target, glow, fsr, fg, backdrop, claim, depth) in &views {
         // After the render graph: `out` says whether this frame's chain landed.
         info!(
@@ -377,7 +377,7 @@ impl Plugin for FsrPlugin {
                     .in_set(RenderSystems::Render)
                     .after(render_system)
                     .run_if(|| {
-                        crate::launch_env::var("WOW_FSR_DEBUG").is_some_and(|v| v == "views")
+                        crate::launch_env::live_var("WOW_FSR_DEBUG").is_some_and(|v| v == "views")
                     }),
             )
             .add_systems(

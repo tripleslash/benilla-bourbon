@@ -21,7 +21,7 @@ struct FlyPath {
 
 impl FlyPath {
     fn from_env() -> Option<Self> {
-        let v = crate::launch_env::var("WOW_WORLDVIEW_FLY")?;
+        let v = crate::launch_env::live_var("WOW_WORLDVIEW_FLY")?;
         let points: Vec<Vec3> = v
             .split(';')
             .filter_map(|p| {
@@ -34,7 +34,7 @@ impl FlyPath {
             return None;
         }
         let num = |k: &str, d: f32| {
-            crate::launch_env::var(k)
+            crate::launch_env::live_var(k)
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .unwrap_or(d)
         };

@@ -29,16 +29,16 @@ struct FsrViewConfig {
 impl FsrViewConfig {
     /// `None` when neither knob is set: the viewer's own path.
     fn from_env() -> Option<Self> {
-        let scale = crate::launch_env::var("WOW_RENDER_SCALE")
+        let scale = crate::launch_env::live_var("WOW_RENDER_SCALE")
             .and_then(|v| v.trim().parse::<f32>().ok())
             .filter(|v| v.is_finite());
         let frame_generation =
-            crate::launch_env::var("WOW_FRAME_GENERATION").is_some_and(|v| v.trim() != "0");
+            crate::launch_env::live_var("WOW_FRAME_GENERATION").is_some_and(|v| v.trim() != "0");
         if scale.is_none() && !frame_generation {
             return None;
         }
         let scale = scale.unwrap_or(1.0).clamp(0.25, 1.0);
-        let no_fsr = crate::launch_env::var("WOW_FSR").is_some_and(|v| v.trim() == "0");
+        let no_fsr = crate::launch_env::live_var("WOW_FSR").is_some_and(|v| v.trim() == "0");
         Some(Self {
             // Frame generation caps the scale at 1:1, as the client does.
             scale,

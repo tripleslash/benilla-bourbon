@@ -242,7 +242,7 @@ fn setup_precip(
 #[derive(Default)]
 struct PrecipProfile {
     on: Option<bool>,
-    since: Option<std::time::Instant>,
+    since: Option<bevy::platform::time::Instant>,
     frames: u32,
     busy: std::time::Duration,
 }
@@ -255,8 +255,8 @@ impl PrecipProfile {
     }
 
     /// Logs every two seconds, counts this frame, and returns its start.
-    fn frame(&mut self, heights: &mut HeightCache) -> std::time::Instant {
-        let now = std::time::Instant::now();
+    fn frame(&mut self, heights: &mut HeightCache) -> bevy::platform::time::Instant {
+        let now = bevy::platform::time::Instant::now();
         let since = *self.since.get_or_insert(now);
         if now - since >= std::time::Duration::from_secs(2) && self.frames > 0 {
             let f = self.frames as f32;

@@ -26,7 +26,7 @@ use super::FsrShaders;
 pub(super) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        crate::launch_env::var("WOW_FSR_DEBUG").is_some_and(|v| v.trim() == "residual")
+        crate::launch_env::live_var("WOW_FSR_DEBUG").is_some_and(|v| v.trim() == "residual")
     })
 }
 
