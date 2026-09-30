@@ -42,7 +42,7 @@ pub(crate) use node::froxel_pass;
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 22 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 23 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
 pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
@@ -211,6 +211,8 @@ pub struct FroxelFog {
     pub ground_x: Vec4,
     pub ground_y: Vec4,
     pub ground: Vec4,
+    /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze.
+    pub halo_air: Vec4,
 }
 
 impl FroxelFog {
@@ -245,6 +247,7 @@ impl FroxelFog {
             self.ground_x,
             self.ground_y,
             self.ground,
+            self.halo_air,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -497,6 +500,13 @@ fn update_volume(
             fog_clear: look.0.fog_clear,
         };
     let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
+    // fork: the lamp halos' air — the same zone solved in clear weather, so rain and storms neither
+    // swell nor fade a lamp's glow (`froxelfog::halo_fog`).
+    let halo_air = media::solve(&media::MediaInputs {
+        storm: 0.0,
+        zone_fog_end: l.clear_fog[2],
+        ..shared(l.fog_color, l.clear_fog[0], l.clear_fog[1], 0.0)
+    });
     let room_w = crossfade.map_or(0.0, |c| c.t());
     // The room's sphere (`None` = the camera is not in one): its medium is solved whole, and the
     // weight alone rides the crossfade.
@@ -671,6 +681,7 @@ fn update_volume(
         ground_x: Vec4::ZERO,
         ground_y: Vec4::ZERO,
         ground: Vec4::ZERO,
+        halo_air: Vec4::new(halo_air.density, halo_air.near_clear, halo_air.haze, 0.0),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -797,7 +808,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 544);
+        assert_eq!(FOG_BYTES, 560);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,

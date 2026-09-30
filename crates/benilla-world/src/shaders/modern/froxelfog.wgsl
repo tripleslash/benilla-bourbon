@@ -69,6 +69,21 @@ struct FroxelFog {
     ground_x: vec4<f32>,
     ground_y: vec4<f32>,
     ground: vec4<f32>,
+    // fork: the lamp halos' air — the zone's medium solved in clear weather (`volumetrics::halo_air`):
+    // x = fog extinction (1/yd), y = near-clear range (planar yd), z = haze extinction; w unused.
+    halo_air: vec4<f32>,
+}
+
+// fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its
+// clear-weather solve. Rain and storms thicken the medium (no near-clear range, more haze, a
+// shorter fog end), and a halo scattered by that medium swelled with the weather; scattered by
+// this one it stays the lamp's own, and the storm only dims it through the fog in front of it.
+fn halo_fog(f: FroxelFog) -> FroxelFog {
+    var g = f;
+    g.media.x = f.halo_air.x;
+    g.media.w = f.halo_air.y;
+    g.medium.x = f.halo_air.z;
+    return g;
 }
 
 // Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).

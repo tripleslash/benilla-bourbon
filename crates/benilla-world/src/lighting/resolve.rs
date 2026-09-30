@@ -156,6 +156,7 @@ pub(super) fn setup_lighting(
         cloud_density: atmo.cloud_density,
         cloud_colors: atmo.cloud_colors,
         storm_bcc: 0.0,
+        clear_fog: [fog_start, fog_end, atmo.fog_end],
         cloud_glow_dir: daynight::celestial_sun_direction(720.0), // noon: the sun
         cloud_glow_track: daynight::cloud_glow_track(720.0),
     });
@@ -232,20 +233,33 @@ pub(super) fn update_time_lighting(
     let storm = weather
         .as_ref()
         .map_or(0.0, |w| crate::weather::storm_blend(w.sky_density));
-    let atmo = sampler
+    // fork: modern lighting — the clear atmosphere's fog pair is kept beside the blend.
+    let (atmo, clear_fog_raw) = sampler
         .as_ref()
         .map(|s| {
             let clear =
                 s.0.sample_blended(map, wow_pos, minute * 2, false, submerged, ghost);
-            if storm > 0.0 {
+            let clear_fog = (clear.fog_end, clear.fog_start_frac);
+            let atmo = if storm > 0.0 {
                 let stormy =
                     s.0.sample_blended(map, wow_pos, minute * 2, true, submerged, ghost);
                 clear.lerp(&stormy, storm)
             } else {
                 clear
-            }
+            };
+            (atmo, clear_fog)
         })
-        .unwrap_or(Atmosphere::DEFAULT);
+        .unwrap_or((
+            Atmosphere::DEFAULT,
+            (
+                Atmosphere::DEFAULT.fog_end,
+                Atmosphere::DEFAULT.fog_start_frac,
+            ),
+        ));
+    let clear_fog = {
+        let (start, end) = scene_fog(clear_fog_raw.0, clear_fog_raw.1, view.farclip);
+        [start, end, clear_fog_raw.0]
+    };
     let sun_dir = daynight::sun_direction(minute_f);
     let celestial_dir = daynight::celestial_sun_direction(minute_f);
 
@@ -311,6 +325,7 @@ pub(super) fn update_time_lighting(
         cloud_colors: atmo.cloud_colors,
         // The one `bcc` that also weighted the storm blend above (`0x6d4500`).
         storm_bcc: storm,
+        clear_fog,
         // The sun by day, the white moon by night (`0x6cfb00`).
         cloud_glow_dir: if daynight::cloud_glow_is_sun(minute_f) {
             celestial_dir

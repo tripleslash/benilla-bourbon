@@ -199,6 +199,10 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // fork: the ground banks (outside rooms: a building's air is its own).
     let sigma_bank = ground_banks(f, p) * (1.0 - room);
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank;
+    // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
+    // swell their glow; the storm's own medium still dims it on the way to the eye.
+    let lamp_ext = froxelfog::extinction(froxelfog::halo_fog(f), p, d, room, 1.0, cover);
+    let sigma_lamps = lamp_ext.x + lamp_ext.y + lamp_ext.z + sigma_bank;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -286,7 +290,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var cur = vec4<f32>(
         lum_fog * sigma_fog + lum_haze * sigma_haze + (lum_haze + froxelfog::night_glow(f)) * sigma_night
-            + lum_bank * sigma_bank + points.medium * sigma + points.lamp,
+            + lum_bank * sigma_bank + points.medium * sigma_lamps + points.lamp,
         sigma,
     );
 

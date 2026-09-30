@@ -50,6 +50,10 @@ pub struct WowLighting {
     /// clamp (yd). The modern medium calibrates its long-range height fog on it, so the horizon is
     /// not a wall at the view distance.
     pub(crate) zone_fog_end: f32,
+    /// fork: modern lighting — `[fog_start, fog_end, zone_fog_end]` of the clear atmosphere, before
+    /// the storm blend: the air the lamp halos stand in, so the weather neither swells nor fades a
+    /// lamp's glow (`volumetrics`' `halo_air`).
+    pub(crate) clear_fog: [f32; 3],
     /// The interior fog triple (`DNState+0x80/84/88`): the scene fog lerped toward the claimed
     /// WMO's MFOG by the 4 s [`WmoCrossfade`]. Only content tagged as in a room on the camera's
     /// portal chain reads it: the group's surfaces (`0x6b5190`) and liquid (`0x6b62e0`) and the M2s
