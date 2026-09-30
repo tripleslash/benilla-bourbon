@@ -12,25 +12,19 @@ use benilla_protocol::messages::{
 };
 use benilla_ui::script::{PetActionView, UiScript};
 
-use crate::net::{GuidIndex, ObjectStore};
+use crate::net::ObjectStore;
+use crate::target::UNIT_FLAG_POSSESSED;
 use crate::ui_action::Spells;
 
-use super::drain::UNIT_FLAG_POSSESSED;
-use super::PetBar;
-
-/// `GetPetActionsUsable()` (`0x4bcf70`): false while the state's bit 27 is set or the pet is
-/// stunned, confused or fleeing. Its other four steps test ownership, which a held bar implies.
-pub(super) fn actions_usable(bar: &PetBar, pet_flags: Option<u32>) -> bool {
-    !bar.spells.bar_disabled()
-        && pet_flags.is_none_or(|f| f & benilla_protocol::messages::PET_UNUSABLE_UNIT_FLAGS == 0)
-}
+use super::{PetBar, PetUnit};
 
 /// What the feed last pushed, so `PET_BAR_UPDATE` fires on a change; the key's leading `u32` is
 /// [`PetBar::bar_signals`], so a press that changes nothing still repaints.
 #[derive(Default)]
 pub(super) struct PetBarMemory {
     pushed: Option<(u32, bool, bool, bool, Vec<PetActionView>)>,
-    /// The ten cooldown triples as last pushed: `PET_BAR_UPDATE_COOLDOWN`'s edge.
+    /// The ten cooldown triples as last pushed, so a cooldown alone is pushed with no event: its
+    /// events are [`fire_pet_cooldown_events`]'s.
     cooldowns: Vec<Option<(i64, u32, bool)>>,
 }
 
@@ -174,15 +168,15 @@ pub(super) fn active_aura_press(
     crate::ui_action::toggle::active_action_toggle(spell_id, spell?, pet?).then_some(spell_id)
 }
 
-/// Push the ten slot views on a change: `PET_BAR_UPDATE`, or `PET_BAR_UPDATE_COOLDOWN` when only
-/// cooldowns moved, the reference's fire from the pet's cooldown bank (`0x6e2e8e`).
+/// Push the ten slot views on a change, and `PET_BAR_UPDATE` when the bar itself moved. A change
+/// of the cooldowns alone is pushed without an event: the pet's cooldown events fire off the
+/// list's generation, so a natural expiry fires none, as in the reference.
 pub(super) fn feed_pet_bar(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
     spells: Option<Res<Spells>>,
     clock: Res<crate::ui_script::UiClock>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
+    pet: PetUnit,
     mut memory: Local<crate::ui_script::VmMemo<PetBarMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -192,16 +186,14 @@ pub(super) fn feed_pet_bar(
     let now = Instant::now();
     let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     let has_bar = bar.has_bar();
-    // An unstreamed pet leaves usability to bit 27 alone, and no slot shows active.
-    let pet_store = index
-        .0
-        .get(&bar.spells.pet_guid)
-        .and_then(|&e| stores.get(e).ok());
+    // An unstreamed pet is not usable (`0x4bd034`), and no slot shows active.
+    let pet_store = pet.store(bar.spells.pet_guid);
     let pet_flags = pet_store.map(|s| s.0.unit_flags());
-    let usable = actions_usable(&bar, pet_flags);
-    // `PickupPetAction`'s gate alone (`0x4be1c1`): a possessed unit's bar cannot be rearranged,
-    // but its buttons work, so possession stays out of `usable`.
-    let pickup_allowed = pet_flags.unwrap_or(0) & UNIT_FLAG_POSSESSED == 0;
+    let usable = pet.actions_usable(&bar);
+    // `PickupPetAction`'s gate alone: the pet's object must resolve (`0x4be1f7`) and not be
+    // possessed (`0x4be20a`). A possessed unit's bar cannot be rearranged but its buttons work,
+    // so possession stays out of `usable`; an unstreamed pet has no flags to test and lifts nothing.
+    let pickup_allowed = pet_flags.is_some_and(|flags| flags & UNIT_FLAG_POSSESSED == 0);
     let pet_attacking = bar.attacking;
     // `GetPetTimeRemaining`'s expiry on the VM clock, signed both ways around the anchor sample.
     script.set_pet_expiry(bar.expires.map(|t| match t.checked_duration_since(anchor) {
@@ -238,7 +230,7 @@ pub(super) fn feed_pet_bar(
     };
 
     // `bar_signals` in the key repaints a press that moved nothing (`0x4bc940`/`0x4bc960`); the
-    // cooldown triples are keyed apart, their edge being the bank's.
+    // cooldown triples are keyed apart, since they carry no `PET_BAR_UPDATE`.
     let cooldowns: Vec<Option<(i64, u32, bool)>> = fresh.iter().map(|s| s.cooldown).collect();
     let content: Vec<PetActionView> = fresh
         .iter()
@@ -265,7 +257,35 @@ pub(super) fn feed_pet_bar(
         );
         memory.pushed = Some(key);
         script.fire_event("PET_BAR_UPDATE", vec![]);
-    } else if cooldowns_changed {
-        script.fire_event("PET_BAR_UPDATE_COOLDOWN", vec![]);
     }
+}
+
+/// The flush behind every mutation of the pet's cooldown list: `0x4b31b0` fires
+/// `ACTIONBAR_UPDATE_COOLDOWN` (`0x4e5c60`, event `0xd8`) then `SPELL_UPDATE_COOLDOWN` (`0x106`),
+/// and `0x4bce90` fires `PET_BAR_UPDATE_COOLDOWN` (`0x162`). Its callers are the pet's
+/// `SMSG_SPELL_GO` leg (`0x6e85fc`), `StartGlobalCooldown` for the list (`0x6e2e77`, `0x6e2e8e`),
+/// `SMSG_SPELL_COOLDOWN` for the pet's guid (`0x6e95b0`, `0x6e95b9`), `SMSG_COOLDOWN_EVENT` and
+/// `SMSG_CLEAR_COOLDOWN` (`0x6e3071`, `0x6e3080`) and `SMSG_COOLDOWN_CHEAT` (`0x6e9712`,
+/// `0x6e971c`); each is a change of [`Cooldowns::generation`](crate::spell::Cooldowns), and one
+/// frame's changes fire it once. `SMSG_PET_SPELLS` seeds without it, so the events never fire for
+/// a rebuild. Runs after [`CooldownEvents`](crate::ui_action::CooldownEvents): every feed that
+/// pushes a pet cooldown, the bar's and the book's, has pushed by then, so the handlers read the
+/// new list.
+pub(super) fn fire_pet_cooldown_events(
+    script: Option<NonSendMut<UiScript>>,
+    bar: Res<PetBar>,
+    mut memory: Local<crate::ui_script::VmMemo<crate::ui_script::gate::Watch>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    // A new VM starts from the list as it stands: the reference flushes on a mutation, not at load.
+    let (watch, fresh) = memory.get_reset(&script);
+    let moved = watch.moved(bar.cooldowns.generation);
+    if !moved || fresh {
+        return;
+    }
+    script.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    script.fire_event("SPELL_UPDATE_COOLDOWN", vec![]);
+    script.fire_event("PET_BAR_UPDATE_COOLDOWN", vec![]);
 }

@@ -328,6 +328,18 @@ pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
 #[derive(Component, Clone, Default)]
 pub(crate) struct ObjectStore(pub(crate) ObjectFields);
 
+impl ObjectStore {
+    /// The object manager's unit lookup (`0x468460`, `ecx = 8`): a unit or a player, which share
+    /// the unit block; a game object, corpse or item is not one.
+    pub(crate) fn is_unit(&self) -> bool {
+        use benilla_protocol::messages::ObjectType;
+        matches!(
+            self.0.object_type(),
+            Some(ObjectType::Unit | ObjectType::Player)
+        )
+    }
+}
+
 /// One descriptor dword moved on a streamed object, the reference's `CMirrorHandler` edge: the
 /// values notifier (`0x465330`) diffs live against a shadow copy and passes the old value
 /// (`0x465570`). A first create fires nothing; a re-create of a live guid fires like a delta.
@@ -1066,8 +1078,9 @@ pub(crate) enum ClientCommand {
         toggles: u8,
     },
     /// `CMSG_PET_ACTION`: `packed` is the slot's word as the server sent it, dispatched on its type
-    /// byte; `target_guid` is our selection (`0x4bd212`). The server does not reply, so the
-    /// caller applies the change locally first.
+    /// byte; `target_guid` is our selection (`0x4bd212`), or the player under the pet book's
+    /// `onSelf` (`0x4b4345`). The server does not reply, so the caller applies the change locally
+    /// first.
     PetAction {
         pet_guid: u64,
         packed: u32,

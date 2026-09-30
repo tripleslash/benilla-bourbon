@@ -13,6 +13,7 @@ use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
+use benilla_formats::RangeTargets;
 use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use benilla_ui::script::{ActionState, UiScript};
 
@@ -77,7 +78,8 @@ pub(super) fn feed_action_state(
     mut cooldowns: ResMut<Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     auto_repeat: Res<AutoRepeatActive>,
-    // One tuple for Bevy's 16-param ceiling: cast tracking, macro bindings and spell mods.
+    // One tuple for Bevy's 16-param ceiling: cast tracking, macro bindings, spell mods and the
+    // range units.
     cast_state: (
         Res<crate::spell::PendingCast>,
         Res<crate::spell::QueuedMeleeSpell>,
@@ -85,6 +87,8 @@ pub(super) fn feed_action_state(
         Res<crate::spell::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
         Res<crate::spell::SpellModifiers>,
+        // The caster's and the target's reach and motion, which the range compare reads.
+        crate::spell::RangeUnits,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -117,7 +121,7 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound, spell_mods) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound, spell_mods, range_units) = &cast_state;
     let me = self_q.iter().next();
     // The bags, walked once per frame for every reagent, totem and item count below.
     let carried = me
@@ -129,14 +133,15 @@ pub(super) fn feed_action_state(
         .unwrap_or(0);
     let casting_spell = me.and_then(|(_, _, _, c)| c.map(|c| c.spell_id));
     let current_cast = pending.current(now).or(casting_spell);
-    let self_reach = me.map_or(1.5, |(s, _, _, _)| s.0.unit_combat_reach());
+    let caster = range_units.caster();
     let self_pos = me.map(|(_, t, _, _)| t.translation);
-    // The target's reach and squared distance (the reference tests dx²+dy²+dz², `0x6e47b0`).
-    let target = selection
-        .guid
-        .and_then(|g| objects.entity(g))
-        .and_then(|e| units.get(e).ok());
-    let target_reach = target.map(|(s, _)| s.0.unit_combat_reach());
+    // The target's reach, motion and squared distance (the reference tests dx²+dy²+dz²,
+    // `0x6e47b0`).
+    let target_entity = selection.guid.and_then(|g| objects.entity(g));
+    let target = target_entity.and_then(|e| units.get(e).ok());
+    let target_unit = target_entity
+        .filter(|_| target.is_some())
+        .and_then(|e| range_units.unit(e));
     let dist_sq = match (self_pos, target) {
         (Some(a), Some((_, t))) => Some(a.distance_squared(t.translation)),
         _ => None,
@@ -214,14 +219,26 @@ pub(super) fn feed_action_state(
                 } else {
                     st.usable = true;
                 }
-                // The range verdict against the target (`0x4e56f0`); nil without one.
                 let row = spells.as_ref().and_then(|s| s.ranges.get(d.range_index));
-                let resolved = spell_mods.min_max_range(d, row, self_reach, target_reach);
-                st.has_range = resolved
+                // `ActionHasRange 0x4e5810` asks `GetMinMaxRange` with a null target (`0x4e5852`)
+                // and tests `|min|` and `|max|` against `FLT_EPSILON`. The auto-attack target the
+                // melee arm falls back to cannot move that: its max is at least the 5.0 floor.
+                st.has_range = spell_mods
+                    .min_max_range(d, row, caster, RangeTargets::default())
                     .is_some_and(|(min, max)| min.abs() > f32::EPSILON || max.abs() > f32::EPSILON);
-                st.in_range = match (resolved, dist_sq) {
-                    (Some((min, max)), Some(d2)) if st.has_range => {
-                        Some(d2 >= min * min && d2 <= max * max)
+                // `IsActionInRange 0x4e56f0` runs `CanTargetUnit 0x6e4440`, which binds the selected
+                // target, then `IsTargetInRange 0x6e47b0`, which hands `GetMinMaxRange` that target
+                // (`0x6e47ca`): its reach pads a ranged row, and its motion with the caster's earns
+                // the moving bonus. Nil without a target.
+                st.in_range = match dist_sq {
+                    Some(d2) if st.has_range => {
+                        let targets = RangeTargets {
+                            target: target_unit,
+                            attack_target: None,
+                        };
+                        spell_mods
+                            .min_max_range(d, row, caster, targets)
+                            .map(|(min, max)| d2 >= min * min && d2 <= max * max)
                     }
                     _ => None,
                 };
@@ -476,6 +493,252 @@ mod tests {
                 .unwrap(),
             "grey, not the out-of-power blue: notEnoughMana stays 0 on the spell-less leg"
         );
+    }
+
+    /// `IsActionInRange` (`0x4e56f0`) hands `GetMinMaxRange` the selected unit, so a ranged row
+    /// pads by that unit's reach and the player's alone: a Fireball (0-35) button reads in range
+    /// out to 38 yards from a 1.5-reach target, whoever the player swings at, and `ActionHasRange`
+    /// (`0x4e5810`, a null target) says the button has a range.
+    #[test]
+    fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
+        use benilla_protocol::messages::ActionButton;
+        use benilla_protocol::ObjectFields;
+
+        const FIREBALL: u32 = 133;
+        const SWUNG_AT: u64 = 0xA1;
+        const SELECTED: u64 = 0xB2;
+        /// `UNIT_FIELD_COMBATREACH`.
+        const REACH: u16 = 130;
+
+        let verdict = |distance: f32| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            let mut actions = PlayerActions::default();
+            actions.buttons.insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: FIREBALL,
+                    kind: ACTION_KIND_SPELL,
+                },
+            );
+            let fireball = SpellDisplay {
+                range_index: 4,
+                ..Default::default()
+            };
+            let row = benilla_formats::SpellRange {
+                min: 0.0,
+                max: 35.0,
+                flags: 0,
+            };
+            app.insert_resource(actions)
+                .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+                .insert_resource(Spells {
+                    catalog: benilla_formats::SpellCatalog::from_displays(
+                        [(FIREBALL, fireball)].into_iter().collect(),
+                    ),
+                    forms: Default::default(),
+                    ranges: benilla_formats::SpellRangeCatalog::from_rows(
+                        [(4, row)].into_iter().collect(),
+                    ),
+                    cast_times: Default::default(),
+                    durations: Default::default(),
+                    radii: Default::default(),
+                })
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<crate::ui_script::UiClock>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::spell::PendingCast>()
+                .init_resource::<crate::spell::QueuedMeleeSpell>()
+                .init_resource::<crate::spell::ActiveChannel>()
+                .init_resource::<crate::spell::SpellTargeting>()
+                .init_resource::<crate::spell::HeldForPick>()
+                .init_resource::<crate::net::GuidIndex>()
+                .init_resource::<crate::net::Reputations>()
+                .init_resource::<Items>()
+                .insert_resource(NetCommands(tx));
+            // The player swings at a 4.0-reach unit, close by.
+            let swung_at = app
+                .world_mut()
+                .spawn((
+                    Transform::from_xyz(2.0, 0.0, 0.0),
+                    ObjectStore(ObjectFields::from_pairs(&[
+                        (22, 100),
+                        (REACH, 4.0f32.to_bits()),
+                    ])),
+                ))
+                .id();
+            app.world_mut().spawn((
+                SelfPlayer,
+                Engaged(SWUNG_AT),
+                Transform::default(),
+                ObjectStore(ObjectFields::from_pairs(&[(22, 100), (23, 500)])),
+            ));
+            // The selected unit keeps the descriptor's default 1.5 reach.
+            let selected = app
+                .world_mut()
+                .spawn((
+                    Transform::from_xyz(distance, 0.0, 0.0),
+                    ObjectStore(ObjectFields::from_pairs(&[(22, 100)])),
+                ))
+                .id();
+            let mut index = app.world_mut().resource_mut::<crate::net::GuidIndex>();
+            index.0.insert(SWUNG_AT, swung_at);
+            index.0.insert(SELECTED, selected);
+            app.insert_resource(Selection {
+                target: Some(selected),
+                guid: Some(SELECTED),
+                last: None,
+            });
+            app.insert_non_send(UiScript::new().unwrap());
+            app.add_systems(Update, feed_action_state);
+            app.update();
+            let script = app.world().non_send::<UiScript>();
+            assert!(script
+                .eval::<bool>("return ActionHasRange(1) == 1")
+                .unwrap());
+            script
+                .eval::<i64>("return IsActionInRange(1) or -1")
+                .unwrap()
+        };
+
+        // 35 + the caster's 1.5 + the selected unit's 1.5 = 38.
+        assert_eq!(verdict(37.5), 1, "inside the padded max");
+        assert_eq!(
+            verdict(38.5),
+            0,
+            "past it: the swing's 4.0 reach pads nothing"
+        );
+    }
+
+    /// `IsActionInRange` hands `GetMinMaxRange` the selected unit, so a melee button reads in
+    /// range out to 7.667 yards while the player and the selected mob both run, and to the 5.0
+    /// floor otherwise (`0x6e3648`-`0x6e36a2`).
+    #[test]
+    fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
+        use benilla_protocol::messages::ActionButton;
+        use benilla_protocol::ObjectFields;
+
+        const HAMSTRING: u32 = 1715;
+        const SELECTED: u64 = 0xB2;
+
+        let verdict = |caster_runs: bool, mob_runs: bool, distance: f32| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            let mut actions = PlayerActions::default();
+            actions.buttons.insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: HAMSTRING,
+                    kind: ACTION_KIND_SPELL,
+                },
+            );
+            let melee = benilla_formats::SpellRange {
+                min: 0.0,
+                max: 5.0,
+                flags: 1,
+            };
+            app.insert_resource(actions)
+                .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+                .insert_resource(Spells {
+                    catalog: benilla_formats::SpellCatalog::from_displays(
+                        [(
+                            HAMSTRING,
+                            SpellDisplay {
+                                range_index: 2,
+                                ..Default::default()
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    forms: Default::default(),
+                    ranges: benilla_formats::SpellRangeCatalog::from_rows(
+                        [(2, melee)].into_iter().collect(),
+                    ),
+                    cast_times: Default::default(),
+                    durations: Default::default(),
+                    radii: Default::default(),
+                })
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<crate::ui_script::UiClock>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::spell::PendingCast>()
+                .init_resource::<crate::spell::QueuedMeleeSpell>()
+                .init_resource::<crate::spell::ActiveChannel>()
+                .init_resource::<crate::spell::SpellTargeting>()
+                .init_resource::<crate::spell::HeldForPick>()
+                .init_resource::<crate::net::GuidIndex>()
+                .init_resource::<crate::net::Reputations>()
+                .init_resource::<Items>()
+                .insert_resource(crate::player::Player::with_move_flags(if caster_runs {
+                    crate::creature_anim::move_flags::FORWARD
+                } else {
+                    0
+                }))
+                .insert_resource(NetCommands(tx));
+            let speeds = crate::net::UnitSpeeds(benilla_protocol::MoveSpeeds {
+                walk: 2.5,
+                run: 7.0,
+                run_back: 4.5,
+                swim: 4.7,
+                swim_back: 2.5,
+                turn_rate: 3.1,
+            });
+            app.world_mut().spawn((
+                SelfPlayer,
+                crate::net::Embodied,
+                speeds,
+                Transform::default(),
+                ObjectStore(ObjectFields::from_pairs(&[(22, 100), (23, 500)])),
+            ));
+            // A mob at the descriptor's default 1.5 reach; a live spline at 8 yd/s is its run.
+            let mob = app
+                .world_mut()
+                .spawn((
+                    speeds,
+                    Transform::from_xyz(distance, 0.0, 0.0),
+                    ObjectStore(ObjectFields::from_pairs(&[(22, 100)])),
+                ))
+                .id();
+            if mob_runs {
+                app.world_mut().entity_mut(mob).insert(crate::net::Spline {
+                    points: vec![[distance, 0.0, 0.0], [distance + 16.0, 0.0, 0.0]],
+                    start: Instant::now(),
+                    duration: std::time::Duration::from_secs(2),
+                    id: 1,
+                    grounded: true,
+                    run_mode: true,
+                    deck: None,
+                });
+            }
+            app.world_mut()
+                .resource_mut::<crate::net::GuidIndex>()
+                .0
+                .insert(SELECTED, mob);
+            app.insert_resource(Selection {
+                target: Some(mob),
+                guid: Some(SELECTED),
+                last: None,
+            });
+            app.insert_non_send(UiScript::new().unwrap());
+            app.add_systems(Update, feed_action_state);
+            app.update();
+            let script = app.world().non_send::<UiScript>();
+            script
+                .eval::<i64>("return IsActionInRange(1) or -1")
+                .unwrap()
+        };
+
+        // 1.5 + 1.5 + 1.3333 is under the 5.0 floor; the bonus goes on the floor: 7.667.
+        assert_eq!(verdict(true, true, 7.5), 1, "both running: inside 7.667");
+        assert_eq!(verdict(true, true, 8.0), 0, "past it");
+        assert_eq!(verdict(false, true, 7.5), 0, "the player stands");
+        assert_eq!(verdict(true, false, 7.5), 0, "the mob stands");
+        assert_eq!(verdict(false, false, 4.9), 1, "the floor");
     }
 
     /// An item slot's on-use spell takes the `0x6e3d60` walk (`0x4e5050`), and every shipped

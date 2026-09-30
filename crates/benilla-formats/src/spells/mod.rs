@@ -32,8 +32,9 @@ mod immunity;
 pub use immunity::{cc_exemption, grants_immunity, CcExemption};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
 pub use ranges::{
-    load_spell_ranges, min_max_range, SpellRange, SpellRangeCatalog, COMBAT_REACH_ADD,
-    MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
+    load_spell_ranges, min_max_range, min_max_range_reads_units, RangeTargets, RangeUnit,
+    SpellRange, SpellRangeCatalog, UnitMotion, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
+    MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
 };
 pub use soft_float::modify as soft_modify;
 pub use tokens::{substitute, SpellMods, TokenContext, TokenNumber};
@@ -79,6 +80,9 @@ const COL_SPELL_FAMILY_NAME: usize = 160;
 const COL_SPELL_FAMILY_FLAGS_LOW: usize = 161;
 /// `Targets` (`+0x34`): the seed the cast arm loads into its targeting word (`0x6e525a`).
 const COL_TARGETS: usize = 13;
+/// `TargetCreatureType` (`+0x38`): the creature-type mask `BindTarget` (`0x6e5c26`) and
+/// `SpellCanTargetUnit`'s mirror (`0x6e6544`) test the unit's type against, bit `type - 1`.
+const COL_TARGET_CREATURE_TYPE: usize = 14;
 /// `EffectImplicitTargetA[0]` (`+0x148`), the key of the cast arm's 62-case switch (`0x6e5484`).
 const COL_IMPLICIT_TARGET_A1: usize = 82;
 /// `EffectImplicitTargetB[0]` (`+0x154`), walked beside A by the classifier `0x6ea280`.
@@ -104,6 +108,9 @@ const COL_ATTRIBUTES: usize = 6;
 const COL_ATTRIBUTES_EX: usize = 7;
 const COL_ATTRIBUTES_EX2: usize = 8;
 const COL_ATTRIBUTES_EX3: usize = 9;
+/// `AttributesEx4` (`+0x28`), the dword after `AttributesEx3`: the pet-bar spell arm tests its
+/// `0x20` at `0x4bd355`.
+const COL_ATTRIBUTES_EX4: usize = 10;
 const COL_SPEED: usize = 37;
 const COL_EFFECT_1: usize = 61;
 /// `EffectMiscValue[0]`, `61 + 15 × 3`: the 16th `[3]` array from `Effect`.
@@ -161,6 +168,11 @@ const COL_CASTING_TIME_INDEX: usize = 18;
 const COL_PROC_FLAGS: usize = 24;
 const COL_PROC_CHANCE: usize = 25;
 const COL_PROC_CHARGES: usize = 26;
+const COL_STACK_AMOUNT: usize = 39;
+const COL_MAX_TARGET_LEVEL: usize = 159;
+const COL_MAX_AFFECTED_TARGETS: usize = 163;
+const COL_DAMAGE_MULTIPLIER_1: usize = 167;
+const COL_EFFECT_POINTS_PER_COMBO_POINT_1: usize = 112;
 
 /// The per-effect `[3]` arrays, each constant slot 0; die sides and base points are signed.
 const COL_EFFECT_DIE_SIDES_1: usize = 64;
@@ -176,6 +188,10 @@ const COL_EFFECT_ITEM_TYPE_1: usize = 103;
 
 /// `SPELL_ATTR3_NORMAL_RANGED_ATTACK`: damage floats melee white (`0x6128b0`).
 const ATTR_EX3_NORMAL_RANGED_ATTACK: u32 = 0x8000;
+/// `SPELL_ATTR_EX4_ALLOW_CLIENT_TARGETING` (vmangos `SpellDefines.h:953`): a pet-bar press casts
+/// through the generic entry `0x6e4b60` (`0x4bd355`, `0x4bd378`) instead of sending the pet
+/// action.
+const ATTR_EX4_ALLOW_CLIENT_TARGETING: u32 = 0x20;
 /// `SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT` (vmangos `SpellDefines.h:907`).
 const ATTR_EX3_NO_CASTING_BAR_TEXT: u32 = 0x4;
 /// `AttributesEx3` bit 13: `0x6e7595` tests it as `0x20` in the word's second byte.
@@ -189,6 +205,9 @@ const ATTR_RANGED: u32 = 0x2;
 const ATTR_TARGET_MAIN_HAND_ITEM: u32 = 0x200;
 /// `SPELL_ATTR_EX2_AUTO_REPEAT`: Auto Shot and wand Shoot.
 const ATTR_EX2_AUTO_REPEAT: u32 = 0x20;
+/// `SPELL_ATTR_EX2_ALLOW_DEAD_TARGET` (vmangos `SpellDefines.h:868`): the bind's dead-unit gate
+/// tests it at `0x6e5c85`.
+const ATTR_EX2_ALLOW_DEAD_TARGET: u32 = 0x1;
 const ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS: u32 = 0x20000;
 /// `SPELL_ATTR_PASSIVE`: the spellbook grays the spell (`SpellBookFrame.lua:379-390`).
 const ATTR_PASSIVE: u32 = 0x40;
@@ -348,8 +367,8 @@ impl SpellCatalog {
     }
 }
 
-/// 173 fields, `u32` but for the floats (`Speed`, the two float effect arrays) and the four enUS
-/// string heads; the signed columns stay `u32`, as [`i32_at`] reads the same bits.
+/// 173 fields, `u32` but for `Speed`, the four float effect arrays and the four enUS string heads;
+/// the signed columns stay `u32`, as [`i32_at`] reads the same bits.
 fn spell_schema() -> Schema {
     let mut s = Schema::new("Spell");
     for i in 0..SPELL_FIELDS {
@@ -376,6 +395,21 @@ fn spell_schema() -> Schema {
         } else if (COL_EFFECT_MULTIPLE_VALUE_1..COL_EFFECT_MULTIPLE_VALUE_1 + 3).contains(&i) {
             s.add_field(SchemaField::new(
                 format!("EffectMultipleValue{}", i - COL_EFFECT_MULTIPLE_VALUE_1),
+                FieldType::Float32,
+            ));
+        } else if (COL_EFFECT_POINTS_PER_COMBO_POINT_1..COL_EFFECT_POINTS_PER_COMBO_POINT_1 + 3)
+            .contains(&i)
+        {
+            s.add_field(SchemaField::new(
+                format!(
+                    "EffectPointsPerComboPoint{}",
+                    i - COL_EFFECT_POINTS_PER_COMBO_POINT_1
+                ),
+                FieldType::Float32,
+            ));
+        } else if (COL_DAMAGE_MULTIPLIER_1..COL_DAMAGE_MULTIPLIER_1 + 3).contains(&i) {
+            s.add_field(SchemaField::new(
+                format!("DmgMultiplier{}", i - COL_DAMAGE_MULTIPLIER_1),
                 FieldType::Float32,
             ));
         } else {
@@ -485,6 +519,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 attributes_ex: u32_at(r, COL_ATTRIBUTES_EX).unwrap_or(0),
                 attributes_ex2: u32_at(r, COL_ATTRIBUTES_EX2).unwrap_or(0),
                 attributes_ex3: u32_at(r, COL_ATTRIBUTES_EX3).unwrap_or(0),
+                attributes_ex4: u32_at(r, COL_ATTRIBUTES_EX4).unwrap_or(0),
                 school: u32_at(r, COL_SCHOOL).unwrap_or(0),
                 mechanic: u32_at(r, COL_MECHANIC).unwrap_or(0),
                 effect_mechanic: std::array::from_fn(|i| {
@@ -528,6 +563,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 range_index: u32_at(r, COL_RANGE_INDEX).unwrap_or(0),
                 modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
+                target_creature_type: u32_at(r, COL_TARGET_CREATURE_TYPE).unwrap_or(0),
                 implicit_target_a1: u32_at(r, COL_IMPLICIT_TARGET_A1).unwrap_or(0),
                 effect_implicit_target_a: std::array::from_fn(|i| {
                     u32_at(r, COL_IMPLICIT_TARGET_A1 + i).unwrap_or(0)
@@ -569,6 +605,9 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 proc_flags: u32_at(r, COL_PROC_FLAGS).unwrap_or(0),
                 proc_chance: u32_at(r, COL_PROC_CHANCE).unwrap_or(0),
                 proc_charges: u32_at(r, COL_PROC_CHARGES).unwrap_or(0),
+                stack_amount: u32_at(r, COL_STACK_AMOUNT).unwrap_or(0),
+                max_target_level: u32_at(r, COL_MAX_TARGET_LEVEL).unwrap_or(0),
+                max_affected_targets: u32_at(r, COL_MAX_AFFECTED_TARGETS).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),
@@ -596,6 +635,12 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 }),
                 effect_multiple_value: std::array::from_fn(|i| {
                     f32_at(r, COL_EFFECT_MULTIPLE_VALUE_1 + i).unwrap_or(0.0)
+                }),
+                damage_multiplier: std::array::from_fn(|i| {
+                    f32_at(r, COL_DAMAGE_MULTIPLIER_1 + i).unwrap_or(0.0)
+                }),
+                effect_points_per_combo_point: std::array::from_fn(|i| {
+                    f32_at(r, COL_EFFECT_POINTS_PER_COMBO_POINT_1 + i).unwrap_or(0.0)
                 }),
                 effect_trigger_spell,
                 effect_item_type: std::array::from_fn(|i| {

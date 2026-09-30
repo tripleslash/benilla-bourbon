@@ -11,20 +11,20 @@ use bevy::prelude::*;
 use crate::net::{NetEntity, ObjectStore};
 use crate::portrait::PortraitPart;
 use benilla_assets::materials::WowModelMaterial;
-use benilla_assets::WorldAssets;
 use benilla_world::interior::InteriorLit;
 use benilla_world::model_fade::{
     join_unit_appear_fade, FadeMaterials, PendingAppearFade, RenderFade,
 };
 
 use super::super::equipment::AppliedEquipment;
+use super::super::skin_composite::BodyAtlas;
 use super::super::{
     Characters, Creatures, EntityPart, Equipment, ItemDisplays, SkinComposites, SkinSections,
     VisualAttached,
 };
 use super::char_skin::{
-    build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip,
-    CharSkinMaterials,
+    build_char_skin_materials, equip_geosets, forced_body_atlas, resolve_char_look,
+    resolve_worn_equip, skin_key, CharSkinMaterials,
 };
 use super::dress::{part_materials, spawn_group, DressedPart, PartDress};
 use super::merge::{self, DressedGroup, MergedFormsCache};
@@ -57,7 +57,11 @@ pub(in crate::entities) fn redress_player_looks(
             Option<&benilla_world::interior::BodyBakeCenter>,
             Option<&benilla_world::model_fade::UnitAppearFade>,
         ),
-        With<VisualAttached>,
+        // A torn-down player is freed, not re-dressed (`0x464920`).
+        (
+            With<VisualAttached>,
+            Without<benilla_world::model_fade::DespawnFade>,
+        ),
     >,
     // The standing parts, found again by their batch index.
     mut standing: Query<(
@@ -77,13 +81,13 @@ pub(in crate::entities) fn redress_player_looks(
     // The skin build chain, nested for Bevy's system-param limit.
     skin_build: (
         Option<Res<SkinSections>>,
-        Option<Res<WorldAssets>>,
-        ResMut<Assets<Image>>,
         ResMut<SkinComposites>,
         Res<AssetServer>,
         benilla_world::model_render::M2BatchMaterials,
         ResMut<Assets<Mesh>>,
         ResMut<MergedFormsCache>,
+        // The composite's upload.
+        ResMut<Assets<Image>>,
     ),
     // The own-material lane `spawn_part` takes; no character batch in the shipped data uses it.
     mut own_lane: (
@@ -93,16 +97,8 @@ pub(in crate::entities) fn redress_player_looks(
     ),
     time: Res<Time>,
 ) {
-    let (
-        sections,
-        world_assets,
-        mut images,
-        mut skin_composites,
-        asset_server,
-        mut mats,
-        mut meshes,
-        mut merged,
-    ) = skin_build;
+    let (sections, mut skin_composites, asset_server, mut mats, mut meshes, mut merged, mut images) =
+        skin_build;
     let now = time.elapsed_secs();
     for (entity, net, live, mut applied, children, rig, bones, mut pose, bake_center, unit_fade) in
         &mut players
@@ -112,8 +108,8 @@ pub(in crate::entities) fn redress_player_looks(
             continue;
         }
         // Stamp first: a model-less player has nothing to re-dress and must not retry every frame.
-        // Kept, so the one case that DOES want to come back — a composite whose textures are still
-        // in flight, below — can put it back.
+        // fork: web — kept, so the one case that DOES want to come back, a composite whose blobs
+        // are still in flight (below), can put it back.
         let was_applied = applied.0;
         applied.0 = *live;
         let Some(dm) = net
@@ -128,6 +124,31 @@ pub(in crate::entities) fn redress_player_looks(
 
         let worn = resolve_worn_equip(net, Some(live), Some(dm));
         let look = resolve_char_look(net, Some(dm), entity, &stores);
+        // A re-dress is the reference's incremental composite (`0x47789c`–`0x4778c3`): the new
+        // geosets apply at once and the atlas composites that frame when its sections are
+        // resident, never gated or withheld. So it composites here, in the frame, taking over a
+        // running composite of the same look; only an arriving body waits for its atlas.
+        let atlas = look.as_ref().map(|l| {
+            forced_body_atlas(
+                l,
+                skin_key(l, worn.bodyslots, worn.emblem, worn.tabard_preview),
+                displays.as_deref(),
+                sections.as_deref(),
+                &mut skin_composites,
+                &asset_server,
+                &mut images,
+            )
+        });
+        // fork: web — still coming: undo the stamp so this arm re-enters next frame, and leave the
+        // player in the gear they are wearing rather than re-point every part at an undressed body.
+        let body_tex = match atlas {
+            Some(BodyAtlas::Pending) => {
+                applied.0 = was_applied;
+                continue;
+            }
+            Some(BodyAtlas::Ready(tex)) => tex,
+            None => None,
+        };
         let eg = equip_geosets(
             displays.as_deref(),
             &worn.bodyslots,
@@ -139,36 +160,19 @@ pub(in crate::entities) fn redress_player_looks(
             let cg = characters.as_deref()?;
             Some(cg.0.visible_geosets(l.race, l.sex, l.hair_style, l.facial_hair, &eg))
         });
-        // The re-composite. Cached per (appearance, worn set) in `SkinComposites`, so a swap back
-        // to a set already worn this session costs a lookup. Bracketed like the first build's
-        // (`attach_entity_visuals`): a composite whose textures have not arrived does not blend, and
-        // this player keeps the body it is wearing until they do.
-        let skin_deferrals_before = super::char_skin::skin_deferrals();
         let char_mats: CharSkinMaterials = match look.as_ref() {
             Some(l) => build_char_skin_materials(
                 l,
-                worn.bodyslots,
+                body_tex,
                 worn.cloak,
-                worn.emblem,
-                worn.tabard_preview,
                 displays.as_deref(),
                 sections.as_deref(),
-                world_assets.as_deref(),
                 parts,
-                &mut images,
-                &mut skin_composites,
                 &asset_server,
                 &mut mats,
             ),
             None => (None, None, None, (None, None)),
         };
-        // Still coming: undo the stamp so this arm re-enters next frame, and leave the player in the
-        // gear they are already wearing rather than re-pointing every part at a half-dressed atlas.
-        // The warm the probe started lands within a few frames.
-        if super::char_skin::skin_deferrals() != skin_deferrals_before {
-            applied.0 = was_applied;
-            continue;
-        }
         // No look (a druid form on a beast display) means no geoset filter, as at build.
         let shows = |geoset: u16| visible.as_ref().is_none_or(|v| v.contains(&geoset));
         // A standing group survives only if the new grouping keeps its member set; keyed by the
@@ -500,6 +504,58 @@ mod tests {
             self.app.update();
         }
 
+        /// Composite against the real tables and chain, landing each frame before the re-dress;
+        /// `false` without the install.
+        fn with_skin_data(&mut self) -> bool {
+            let Some(data) = benilla_formats::wow_data() else {
+                benilla_formats::skipped("no WoW install found", &benilla_formats::candidates());
+                return false;
+            };
+            let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+            let tables = benilla_formats::CharSections::load(&mut chain).expect("CharSections");
+            let items = benilla_formats::load_item_display_catalog(&mut chain).expect("items");
+            self.app
+                .insert_resource(SkinSections::new(
+                    tables,
+                    std::sync::Arc::new(std::sync::Mutex::new(chain)),
+                ))
+                .insert_resource(ItemDisplays::icons_for_tests(items))
+                .add_systems(
+                    Update,
+                    super::super::super::skin_composite::land_skin_composites
+                        .before(redress_player_looks),
+                );
+            true
+        }
+
+        /// What the player's visual is dressed with.
+        fn applied(&self) -> Equipment {
+            self.app
+                .world()
+                .get::<AppliedEquipment>(self.player)
+                .unwrap()
+                .0
+        }
+
+        /// Whether the atlas of the fixture's look (race 1, sex 0, every dial 0) in `gear` is
+        /// composited and cached.
+        fn composited(&mut self, gear: Equipment) -> bool {
+            let key = super::super::super::SkinKey {
+                race: 1,
+                sex: 0,
+                skin: 0,
+                face: 0,
+                facial_hair: 0,
+                hair_style: 0,
+                hair_color: 0,
+                equip: gear.bodyslots,
+                emblem: None,
+                tabard_preview: false,
+            };
+            let mut lane = self.app.world_mut().resource_mut::<SkinComposites>();
+            matches!(lane.done.fetch(&key), Some(Some(_))) && lane.running() == 0
+        }
+
         /// The batch indices currently standing under the player.
         fn showing(&mut self) -> Vec<u32> {
             let mut out: Vec<u32> = self
@@ -537,8 +593,7 @@ mod tests {
         );
     }
 
-    /// The re-dress fires once per change: each one starts a body composite, which reads and
-    /// blends BLPs.
+    /// The re-dress fires once per change.
     #[test]
     fn a_gear_change_restamps_what_the_visual_is_dressed_with() {
         let mut s = stand(&[0], &[0], None);
@@ -579,5 +634,49 @@ mod tests {
             s.app.world().get_entity(s.held).is_ok(),
             "and the held item never moved",
         );
+    }
+
+    /// Tier-2 gear, worn by bodyslot − 2.
+    fn tier2(sets: [u32; 8]) -> Equipment {
+        Equipment {
+            bodyslots: sets,
+            settled: true,
+            ..Default::default()
+        }
+    }
+
+    /// A gear change on a standing body is the reference's incremental composite, never gated or
+    /// withheld (`0x47789c`–`0x4778c3`): the new look, atlas included, lands the frame it is seen.
+    #[test]
+    fn a_gear_change_composites_in_the_frame_it_is_seen() {
+        let mut s = stand(&[0, 401], &[0, 1], None);
+        if !s.with_skin_data() {
+            return;
+        }
+        let gear = tier2([10840, 33983, 33990, 33986, 33989, 33982, 33984, 0]);
+        s.wear(gear);
+        assert_eq!(s.applied(), gear, "the change lands this frame");
+        assert!(s.composited(gear), "over its own composited atlas");
+        assert_eq!(s.showing(), vec![0, 1], "the body kept drawing");
+        assert!(
+            s.app.world().get_entity(s.held).is_ok(),
+            "the held item never moved"
+        );
+    }
+
+    /// Gear that changes again: each change lands its own frame, and the latest is the look worn.
+    #[test]
+    fn the_latest_gear_wins() {
+        let mut s = stand(&[0], &[0], None);
+        if !s.with_skin_data() {
+            return;
+        }
+        let first = tier2([0, 33650, 31110, 31115, 31111, 31127, 33651, 0]);
+        let last = tier2([0, 33667, 33665, 33672, 34269, 33666, 33668, 0]);
+        s.wear(first);
+        assert_eq!(s.applied(), first);
+        s.wear(last);
+        assert_eq!(s.applied(), last, "the latest gear is worn");
+        assert!(s.composited(last));
     }
 }

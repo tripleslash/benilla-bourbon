@@ -57,6 +57,16 @@ pub struct GroupMemberEntry {
     pub flags: u8,
 }
 
+impl GroupMemberEntry {
+    /// Whether the row's status byte marks the member online for the record write: a non-zero byte,
+    /// the client's own test for a party slot (`0x5e6c3b`) and a raid row (`0x4ba951`), where bit 0
+    /// alone is not asked. vmangos sends 0 for an absent member and a byte with bit 0 set for a
+    /// present one (`Group/Group.cpp:45-63`), so the two tests agree on its lists.
+    pub fn listed_online(&self) -> bool {
+        self.status != 0
+    }
+}
+
 /// The loot tail `SMSG_GROUP_LIST` carries only when it lists members (`Group.cpp:170-179`);
 /// `threshold` is an item quality, 2 to 4 in practice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,20 +224,43 @@ impl PartyMemberStatsInfo {
         }
     }
 
+    /// The record's online bit (`[rec+8] & 1`), the bit the readers test (`0x4e8227`, `0x4e816b`,
+    /// `0x4e8884`, `0x519741`, `UnitIsConnected`'s `0x517dd3`). A record with no status yet reads
+    /// as the zeroed byte of a fresh one, offline.
+    pub fn is_online(&self) -> bool {
+        self.status.unwrap_or(0) & member_status::ONLINE != 0
+    }
+
+    /// Set or clear the record's online bit (`[rec+8] & 1`), the other bits of its status byte as
+    /// they were: the write `SMSG_GROUP_LIST` makes to a member it lists, from that row's status
+    /// (`0x4e8361`-`0x4e837b`, raid `0x4ba947`-`0x4ba960`). A record with no status yet reads as
+    /// the zeroed byte of a fresh one.
+    pub fn set_online(&mut self, online: bool) {
+        let status = self.status.unwrap_or(0);
+        self.status = Some(if online {
+            status | member_status::ONLINE
+        } else {
+            status & !member_status::ONLINE
+        });
+    }
+
     /// Snapshot a member's live descriptor as the 1.12 client does (`0x5f0880`) when the member's
     /// object leaves view, just before the stats request, so the frame never reads 0/0. Values are
     /// raw; [`Self::shown_power`] divides at the read. AFK and DND are cleared, as in the client.
     /// `pet` is the object of the member's pet guid ([`ObjectFields::unit_pet_guid`]) when held:
     /// its block is copied, and without one the pet block is emptied (`0x5f0a1f`-`0x5f0b72`).
+    /// `pet_name` is that pet's cached name (`0x609210`, copied into `+0x88` at `0x5f0a70`); a
+    /// pet whose name the cache does not hold yet keeps the name the record had.
     ///
     /// Deviation: zone and position are kept, not set to the viewer's zone and the object's
-    /// position, and the pet's name is not copied, because nothing in benilla reads them.
+    /// position, because nothing in benilla reads them.
     ///
     /// [`ObjectFields::unit_pet_guid`]: crate::messages::update_object::ObjectFields::unit_pet_guid
     pub fn snapshot_descriptor(
         &mut self,
         fields: &crate::messages::update_object::ObjectFields,
         pet: Option<&crate::messages::update_object::ObjectFields>,
+        pet_name: Option<&str>,
     ) {
         let mut status = member_status::ONLINE;
         if fields.player_is_ghost() {
@@ -263,6 +296,9 @@ impl PartyMemberStatsInfo {
             Some((guid, pet)) => {
                 let power_type = pet.unit_power_type();
                 self.pet_guid = Some(guid);
+                if let Some(name) = pet_name {
+                    self.pet_name = Some(name.to_string());
+                }
                 self.pet_model_id = Some(pet.unit_displayid().unwrap_or(0) as u16);
                 self.pet_cur_hp = Some(pet.unit_health().unwrap_or(0) as u16);
                 self.pet_max_hp = Some(pet.unit_max_health().unwrap_or(0) as u16);
@@ -305,6 +341,24 @@ impl PartyMemberStatsInfo {
     pub fn shown_max_power(&self) -> u32 {
         u32::from(self.max_power.unwrap_or(0))
             / power_display_scale(u32::from(self.shown_power_type()))
+    }
+
+    /// `UnitPowerType` from the pet block (`+0xd8`, `0x5179d2`'s pet leg), 0 when it has none.
+    pub fn shown_pet_power_type(&self) -> u8 {
+        self.pet_power_type.unwrap_or(0)
+    }
+
+    /// `UnitMana` from the pet block (`+0xe0`): the stored power divided by
+    /// [`power_display_scale`] of the pet's own power type, as for a live unit.
+    pub fn shown_pet_power(&self) -> u32 {
+        u32::from(self.pet_cur_power.unwrap_or(0))
+            / power_display_scale(u32::from(self.shown_pet_power_type()))
+    }
+
+    /// `UnitManaMax` from the pet block (`+0xe2`), the same divide.
+    pub fn shown_pet_max_power(&self) -> u32 {
+        u32::from(self.pet_max_power.unwrap_or(0))
+            / power_display_scale(u32::from(self.shown_pet_power_type()))
     }
 }
 

@@ -7,7 +7,6 @@ use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use benilla_assets::WorldAssets;
 use bevy::animation::transition::AnimationTransitions;
 
 use crate::creature_anim::AnimDriver;
@@ -19,13 +18,17 @@ use benilla_world::model_fade::JoinedFade;
 use benilla_world::model_render::ModelKind;
 use benilla_world::particles;
 
+use super::skin_composite::BodyAtlas;
 use super::{
     Characters, Creatures, CubeAssets, DisplayModel, GameObjects, ModelHandle, SkinComposites,
     SkinSections, VisualAttached,
 };
 
-pub(in crate::entities) mod char_skin;
-use char_skin::{build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip};
+mod char_skin;
+use char_skin::{
+    body_atlas, build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip,
+    skin_key,
+};
 mod dress;
 mod merge;
 use dress::{spawn_group, PartDress};
@@ -33,6 +36,8 @@ pub(super) use merge::MergedFormsCache;
 mod preview;
 pub(crate) use preview::equip_slot;
 pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
+#[cfg(test)]
+mod arrival_tests;
 mod redress;
 
 /// One body's drawn parts as `WOW_DRESS_CENSUS` prints them: index, merge group, blend, material.
@@ -229,8 +234,14 @@ pub(super) fn attach_entity_visuals(
             Option<&super::mount::MountChild>,
             Option<&super::mount::MountBody>,
             Has<crate::transport::TransportAnchor>,
+            Option<&super::Arrival>,
+            Has<super::live_display::ShownRebuild>,
         ),
-        Without<VisualAttached>,
+        // A torn-down unit gets no model: the reference frees it at once (`0x464920`).
+        (
+            Without<VisualAttached>,
+            Without<benilla_world::model_fade::DespawnFade>,
+        ),
     >,
     // A mounted rider waits on its mount child, whose attachment-0 point is the seat.
     mount_children: super::mount::MountChildren,
@@ -250,8 +261,6 @@ pub(super) fn attach_entity_visuals(
     // The character-skin build chain, nested for Bevy's 16-param system limit.
     skin_build: (
         Option<Res<SkinSections>>,
-        Option<Res<WorldAssets>>,
-        ResMut<Assets<Image>>,
         ResMut<SkinComposites>,
         Res<AssetServer>,
         benilla_world::model_render::M2BatchMaterials,
@@ -260,6 +269,8 @@ pub(super) fn attach_entity_visuals(
         ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
         ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
         ResMut<benilla_world::mat_anim_table::MatAnimTable>,
+        // A forced composite's upload.
+        ResMut<Assets<Image>>,
     ),
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
@@ -267,8 +278,6 @@ pub(super) fn attach_entity_visuals(
 ) {
     let (
         sections,
-        world_assets,
-        mut images,
         mut skin_composites,
         asset_server,
         mut mats,
@@ -277,9 +286,23 @@ pub(super) fn attach_entity_visuals(
         mut uv_reg,
         mut tint_reg,
         mut anim_table,
+        mut images,
     ) = skin_build;
     let now = time.elapsed_secs();
-    for (entity, net, equipment, reattached, mount_child, mount_body, anchored) in &pending {
+    for (
+        entity,
+        net,
+        equipment,
+        reattached,
+        mount_child,
+        mount_body,
+        anchored,
+        arrival,
+        shown_rebuild,
+    ) in &pending
+    {
+        // The appear ramp's origin: the unit's arrival, however long its visual waited to build.
+        let arrived = arrival.map_or(now, |a| a.0);
         // A player attaches once its equipment settles, so it never flashes naked.
         if net.kind == EntityKind::Player && !equipment.is_some_and(|e| e.settled) {
             continue;
@@ -324,6 +347,46 @@ pub(super) fn attach_entity_visuals(
             None => None,
         };
 
+        // A character model carries every hair, facial and body geoset, and is shared by its
+        // display, so the entity's own look picks which show.
+        let look = model.and_then(|_| resolve_char_look(net, dm, entity, &stores));
+        // A body whose composite is still running is not built: nothing of it draws, its mount
+        // included, until it can draw dressed, as the reference's ShouldRender answers the
+        // composite driver's 0 (`0x607e7c` → `0x481749`). Retried each frame, with the look of
+        // that frame. A display swap waits the same way, a fresh component in the reference
+        // (`0x607da0` → `0x5fb200`); a body benilla rebuilds while it was drawn does not.
+        let body_tex = match look.as_ref() {
+            Some(l) => {
+                let key = skin_key(l, equip, worn.emblem, worn.tabard_preview);
+                // fork: web — a forced composite is Pending while its blobs arrive; native never.
+                let atlas = if shown_rebuild {
+                    char_skin::forced_body_atlas(
+                        l,
+                        key,
+                        displays.as_deref(),
+                        sections.as_deref(),
+                        &mut skin_composites,
+                        &asset_server,
+                        &mut images,
+                    )
+                } else {
+                    body_atlas(
+                        l,
+                        key,
+                        displays.as_deref(),
+                        sections.as_deref(),
+                        &mut skin_composites,
+                        &asset_server,
+                    )
+                };
+                match atlas {
+                    BodyAtlas::Ready(tex) => tex,
+                    BodyAtlas::Pending => continue,
+                }
+            }
+            None => None,
+        };
+
         // Invisible GameObjects and trigger creatures hide by transparent or empty M2s, never by a
         // flag: the reference draws any loaded model and culls zero-alpha batches (`0x707b3a`),
         // so their `parts` are empty and `named_a_model` keeps the cube off them.
@@ -349,6 +412,7 @@ pub(super) fn attach_entity_visuals(
                     mount_child.map(|&super::mount::MountChild(c)| c),
                     mount_display,
                     reattached,
+                    arrival.copied(),
                 ) {
                     super::mount::Seat::Wait => continue,
                     super::mount::Seat::Frame(anchor) => rider_root = anchor,
@@ -525,9 +589,6 @@ pub(super) fn attach_entity_visuals(
                         .insert(crate::creature_anim::BodyTwist::new(spine, head));
                 }
             }
-            // A character model carries every hair, facial and body geoset, and is shared by its
-            // display, so the entity's own look picks which show.
-            let look = resolve_char_look(net, dm, entity, &stores);
             // The worn geoset selectors, the helm's hide-mask rows included (`0x4799a0`).
             let equip_geosets = equip_geosets(
                 displays.as_deref(),
@@ -546,37 +607,19 @@ pub(super) fn attach_entity_visuals(
                     &equip_geosets,
                 ))
             });
-            // Brackets the skin build: a body composite whose textures have not arrived yet counts
-            // itself here rather than blending an atlas that is missing a layer and caching it for
-            // the session (`char_skin::skin_deferrals`). Zero on native.
-            let skin_deferrals_before = char_skin::skin_deferrals();
             let char_mats = match look.as_ref() {
                 Some(l) => build_char_skin_materials(
                     l,
-                    equip,
+                    body_tex,
                     worn.cloak,
-                    worn.emblem,
-                    worn.tabard_preview,
                     displays.as_deref(),
                     sections.as_deref(),
-                    world_assets.as_deref(),
                     parts,
-                    &mut images,
-                    &mut skin_composites,
                     &asset_server,
                     &mut mats,
                 ),
                 None => (None, None, None, (None, None)),
             };
-            // The composite deferred, so this unit is not finished. Leave it WITHOUT
-            // `VisualAttached` — the query above is `Without<VisualAttached>`, so the next frame
-            // picks it up again — and skip the spawning below rather than build a body around a
-            // half-dressed atlas. The reads it asked for are warming meanwhile, so this converges in
-            // the handful of frames a fetch takes. Nothing has been spawned at this point; the one
-            // component written above (`BoneAttach`) is an overwrite on the retry, not a duplicate.
-            if char_skin::skin_deferrals() != skin_deferrals_before {
-                continue;
-            }
             // Whether a part armed an appear-fade, mirrored onto the root so a held item that
             // spawns later joins the ramp.
             let mut unit_will_fade = false;
@@ -638,7 +681,10 @@ pub(super) fn attach_entity_visuals(
                 fade: if reattached {
                     JoinedFade::Steady
                 } else {
-                    JoinedFade::Pending { since: now }
+                    JoinedFade::Pending {
+                        since: now,
+                        arrived,
+                    }
                 },
             };
             // The shown batches spawn as material groups (`merge`).
@@ -666,9 +712,12 @@ pub(super) fn attach_entity_visuals(
             }
             // A `Reattached` rebuild drops any in-flight fade, as its parts spawned steady.
             if unit_will_fade {
-                commands
-                    .entity(entity)
-                    .insert(benilla_world::model_fade::UnitAppearFade::Pending { since: now });
+                commands.entity(entity).insert(
+                    benilla_world::model_fade::UnitAppearFade::Pending {
+                        since: now,
+                        arrived,
+                    },
+                );
             } else if reattached {
                 commands
                     .entity(entity)
@@ -972,7 +1021,10 @@ pub(super) fn attach_entity_visuals(
             .insert(VisualAttached)
             // The display the visual was built with, for `refresh_live_display` to diff.
             .insert(super::live_display::AppliedDisplay(net.display_id))
-            .remove::<super::equipment::Reattached>();
+            .remove::<(
+                super::equipment::Reattached,
+                super::live_display::ShownRebuild,
+            )>();
     }
 }
 
@@ -1077,5 +1129,68 @@ mod tests {
             );
             *app.world_mut() = world;
         }
+    }
+    /// A unit torn down before its visual built gets none: `0x464920` frees it at once, so the
+    /// build would run commands on an entity `apply_despawn_fade` has despawned by the time they
+    /// apply.
+    #[test]
+    fn a_torn_down_unit_is_not_built() {
+        use benilla_world::model_fade::DespawnFade;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_asset::<Mesh>()
+            .init_asset::<benilla_assets::materials::WowModelMaterial>()
+            .init_resource::<benilla_world::model_render::ModelMaterials>()
+            .init_resource::<super::super::corpse::BonesModels>()
+            .init_resource::<SkinComposites>()
+            .init_resource::<merge::MergedFormsCache>()
+            .init_resource::<benilla_world::doodad_anim::UvAnimMaterials>()
+            .init_resource::<benilla_world::doodad_anim::TintAnimMaterials>()
+            .init_resource::<benilla_world::mat_anim_table::MatAnimTable>()
+            .init_resource::<benilla_world::rig_palette::RigPalettes>()
+            .init_resource::<benilla_world::collision::ColliderEpoch>()
+            .insert_resource(CubeAssets {
+                mesh: Handle::default(),
+                player_mesh: Handle::default(),
+                player_mat: Handle::default(),
+                npc_mat: Handle::default(),
+            });
+        let mut spawn = |torn_down: bool| {
+            let mut unit = app.world_mut().spawn(NetEntity {
+                kind: EntityKind::Unit,
+                display_id: None,
+                scale: 1.0,
+            });
+            if torn_down {
+                unit.insert(DespawnFade::default());
+            }
+            unit.id()
+        };
+        let (gone, kept, live) = (spawn(true), spawn(true), spawn(false));
+
+        // The build's commands are queued, the fade's despawn of the unit with nothing fadeable
+        // lands, then the queue applies: the order two unordered chains can interleave in.
+        let world = app.world_mut();
+        let mut build = IntoSystem::into_system(attach_entity_visuals);
+        build.initialize(world);
+        build
+            .run_without_applying_deferred((), world)
+            .expect("the build system runs");
+        world.despawn(gone);
+        build.apply_deferred(world);
+
+        let kept = world.entity(kept);
+        assert!(
+            !kept.contains::<VisualAttached>(),
+            "a torn-down unit has no visual"
+        );
+        assert!(!kept.contains::<benilla_world::interior::BodyBakeCenter>());
+
+        assert!(
+            world.entity(live).contains::<VisualAttached>(),
+            "a live unit still builds"
+        );
     }
 }

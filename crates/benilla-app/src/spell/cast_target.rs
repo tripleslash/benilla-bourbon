@@ -6,8 +6,9 @@
 //!   target from the spell's implicit targeting.
 //! - `Attributes & 0x200`: the candidate is the equipped main hand (`0x6e5361`), bound as an item
 //!   with no cursor; an empty hand refuses with "Your weapon hand is empty" (`0x6e504b`).
-//! - otherwise each bit is cleared against the selection by its relation check, then against the
-//!   player behind `autoSelfCast` (`0x6e53d7`); only a fully cleared word commits, as a unit guid.
+//! - otherwise the selection meets `BindTarget`'s gates ([`bind_gates`]), then each bit is cleared
+//!   by its relation check; then the player behind `autoSelfCast` (`0x6e53d7`) does the same. Only a
+//!   fully cleared word commits, as a unit guid.
 //! - a word with item, lock, GameObject or location bits enters the targeting cursor carrying
 //!   the whole word: its location (`0x6e6320`, `& 0x60`), item (`0x6e6330`, `& 0x4010`),
 //!   GameObject (`0x6e62d0`, `& 0x4800`) and unit (`0x6e6460`) predicates can hold at once, and
@@ -21,8 +22,13 @@ use benilla_formats::SpellDisplay;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::bind_gates::{bind_gates, unit_alive};
+use super::group_relation::{GroupInputs, GroupRoster};
+use crate::creature_type::CreatureTypeSources;
+use crate::names::NameCache;
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid, SelfPlayer};
 use crate::target::{can_assist, can_attack, Factions, Selection};
+use benilla_protocol::messages::OwnerFallback;
 
 /// `TARGET_FLAG_*` bits of the client's targeting flag word (`0xcecac0`).
 const TF_UNIT: u16 = 0x0002;
@@ -31,8 +37,11 @@ const TF_UNIT_PARTY: u16 = 0x0008;
 const TF_UNIT_ENEMY: u16 = 0x0080;
 const TF_UNIT_ASSIST: u16 = 0x0100;
 const TF_CORPSE_ENEMY: u16 = 0x0200;
-const TF_EXPLICIT_GATE: u16 = 0x0400;
+pub(super) const TF_EXPLICIT_GATE: u16 = 0x0400;
 const TF_CORPSE_ALLY: u16 = 0x8000;
+/// The corpse words, `0x8600`: `BindTarget`'s dead-unit gate lets a dead unit through for any of
+/// them (`6e5c7a`).
+pub(super) const CORPSE_WORD_BITS: u16 = TF_CORPSE_ENEMY | TF_EXPLICIT_GATE | TF_CORPSE_ALLY;
 /// The unit-shaped bits a selected unit (alive or dead) can satisfy.
 const UNIT_BITS: u16 = TF_UNIT
     | TF_UNIT_RAID
@@ -104,7 +113,7 @@ pub(crate) struct CastCandidates {
     pub(crate) main_hand_item: Option<u64>,
 }
 
-/// What the binder's relation checks read: the selected unit's store and the player's.
+/// What the binder's gates and relation checks read: the selected unit's store and the player's.
 #[derive(Clone, Copy)]
 pub(crate) struct TargetRelations<'a> {
     pub(crate) target_store: Option<&'a ObjectStore>,
@@ -113,6 +122,48 @@ pub(crate) struct TargetRelations<'a> {
     pub(crate) self_store: Option<&'a ObjectStore>,
     pub(crate) factions: Option<&'a Factions>,
     pub(crate) reputations: &'a Reputations,
+    /// The creature-type gate's inputs, for the candidate and for the player alike.
+    pub(crate) types: CreatureTypeSources<'a>,
+    /// The party and raid predicates' inputs (`0x606c20`, `0x606d20`).
+    pub(crate) group: GroupInputs<'a>,
+}
+
+/// A unit's owner as `CanAssist`'s `IsPvP` chase (`0x5ee5a0`) and `0x606170` read it, its charmer
+/// else its creator: that object's descriptor, if it has streamed (`0x468460`).
+pub(super) fn owner_store<'a>(
+    store: Option<&ObjectStore>,
+    index: Option<&GuidIndex>,
+    stores: &'a Query<&ObjectStore>,
+) -> Option<&'a ObjectStore> {
+    let owner = store?.0.unit_owner(OwnerFallback::CreatedBy)?;
+    stores.get(*index?.0.get(&owner)?).ok()
+}
+
+impl TargetRelations<'_> {
+    /// `CanAssist 0x6066f0` toward the candidate, which the caster always is for himself. The
+    /// binder's assist arm and the world pick's relation leg both ask it.
+    pub(super) fn assistable(&self, is_self: bool) -> bool {
+        is_self
+            || can_assist(
+                self.target_store,
+                self.factions,
+                self.reputations,
+                self.self_store,
+                |_| self.target_owner_store.cloned(),
+            )
+    }
+
+    /// `CanAttack 0x606980` toward the candidate, never the caster. The binder's enemy arm and the
+    /// world pick's relation leg both ask it.
+    pub(super) fn attackable(&self, is_self: bool) -> bool {
+        !is_self
+            && can_attack(
+                self.target_store,
+                self.factions,
+                self.reputations,
+                self.self_store,
+            )
+    }
 }
 
 /// The targeting inputs [`super::send_spell_cast`] resolves with, built by both cast callers.
@@ -131,15 +182,32 @@ pub(crate) struct CastContext<'a> {
     pub(crate) self_move_flags: u32,
 }
 
-/// Positions and combat reaches for the pre-send range refusal: the client's cast runs
+impl CastContext<'_> {
+    /// Applies the self-cast modifier, `onSelf`: the caster replaces the selection as the bind
+    /// candidate, guid and store both, the pair the autoSelfCast fallback swaps (`0x6e53d7`). It
+    /// is the explicit guid `CastSpell` and `CastSpellByName` hand `ArmCast 0x6e5250` (`0x4b4345`,
+    /// `0x4b4afa`, bound at `0x6e5393`); where `UseAction 0x4e5ee0` applies its own is untraced.
+    pub(crate) fn self_bound(mut self, on_self: bool) -> Self {
+        if on_self {
+            self.selection_guid = self.self_guid;
+            self.rel.target_store = self.rel.self_store;
+            self.rel.group.target_guid = self.self_guid;
+        }
+        self
+    }
+}
+
+/// Positions and the two units for the pre-send range refusal: the client's cast runs
 /// `CanTargetUnit 0x6e4440` and `IsTargetInRange 0x6e47b0` before the commit, so an out-of-range
 /// press refuses locally and none of the commit tail runs.
 #[derive(Clone, Copy)]
 pub(crate) struct RangeInputs {
     pub(crate) self_pos: Option<Vec3>,
     pub(crate) target_pos: Option<Vec3>,
-    pub(crate) self_reach: f32,
-    pub(crate) target_reach: Option<f32>,
+    /// The caster's combat reach and motion.
+    pub(crate) caster: benilla_formats::RangeUnit,
+    /// The bound unit, which `GetMinMaxRange` reads for the ranged pad and the moving bonus.
+    pub(crate) target: Option<benilla_formats::RangeUnit>,
 }
 
 impl RangeInputs {
@@ -157,14 +225,7 @@ impl RangeInputs {
             .self_pos
             .zip(self.target_pos)
             .map(|(a, b)| a.distance_squared(b));
-        super::validator::cast_range_refusal(
-            def,
-            row,
-            self.self_reach,
-            self.target_reach,
-            dist_sq,
-            mods,
-        )
+        super::validator::cast_range_refusal(def, row, self.caster, self.target, dist_sq, mods)
     }
 }
 
@@ -173,9 +234,8 @@ impl Default for RangeInputs {
         Self {
             self_pos: None,
             target_pos: None,
-            // The descriptor's default combat reach.
-            self_reach: 1.5,
-            target_reach: None,
+            caster: benilla_formats::RangeUnit::still(super::DEFAULT_REACH),
+            target: None,
         }
     }
 }
@@ -191,35 +251,47 @@ pub(crate) struct CastTargeting<'w, 's> {
     auto_self_cast: Res<'w, AutoSelfCast>,
     factions: Option<Res<'w, Factions>>,
     reputations: Res<'w, Reputations>,
+    /// The party slots and raid roster as the frame began; a harness without them has no group.
+    roster: Option<Res<'w, GroupRoster>>,
+    /// The creature-type gate's template cache and form table; a harness without them resolves
+    /// no type.
+    names: Option<Res<'w, NameCache>>,
+    spells: Option<Res<'w, crate::ui_action::Spells>>,
     self_transform: Query<'w, 's, &'static Transform, With<SelfPlayer>>,
     transforms: Query<'w, 's, &'static Transform>,
     /// `Option`: the body exists only in world, and the cast-result handler must fetch this param
     /// anywhere. With no body the moving gate passes and the server decides.
     player: Option<Res<'w, crate::player::Player>>,
+    /// The caster's and the selection's reach and motion, for the range gate.
+    range_units: super::RangeUnits<'w, 's>,
 }
 
 impl CastTargeting<'_, '_> {
     /// This frame's [`CastContext`].
     pub(crate) fn context(&self) -> CastContext<'_> {
         let target_store = self.selection.target.and_then(|e| self.stores.get(e).ok());
-        let target_owner_store = target_store
-            .and_then(|store| {
-                store
-                    .0
-                    .unit_owner(benilla_protocol::messages::OwnerFallback::CreatedBy)
-            })
-            .and_then(|guid| self.index.as_ref()?.0.get(&guid).copied())
-            .and_then(|entity| self.stores.get(entity).ok());
+        let owner_store = |store| owner_store(store, self.index.as_deref(), &self.stores);
+        let self_store = self.self_store.iter().next();
         CastContext {
             selection_guid: self.selection.guid,
             self_guid: self.self_guid.0,
             auto_self_cast: self.auto_self_cast.0,
             rel: TargetRelations {
                 target_store,
-                target_owner_store,
-                self_store: self.self_store.iter().next(),
+                target_owner_store: owner_store(target_store),
+                self_store,
                 factions: self.factions.as_deref(),
                 reputations: &self.reputations,
+                types: CreatureTypeSources {
+                    names: self.names.as_deref(),
+                    forms: self.spells.as_deref().map(|s| &s.forms),
+                },
+                group: GroupInputs {
+                    self_guid: self.self_guid.0,
+                    target_guid: self.selection.guid,
+                    self_owner_store: owner_store(self_store),
+                    roster: self.roster.as_deref(),
+                },
             },
             range: RangeInputs {
                 self_pos: self.self_transform.iter().next().map(|t| t.translation),
@@ -228,12 +300,8 @@ impl CastTargeting<'_, '_> {
                     .target
                     .and_then(|e| self.transforms.get(e).ok())
                     .map(|t| t.translation),
-                self_reach: self
-                    .self_store
-                    .iter()
-                    .next()
-                    .map_or(1.5, |s| s.0.unit_combat_reach()),
-                target_reach: target_store.map(|s| s.0.unit_combat_reach()),
+                caster: self.range_units.caster(),
+                target: self.selection.target.and_then(|e| self.range_units.unit(e)),
             },
             main_hand_item: self
                 .self_store
@@ -281,50 +349,38 @@ pub(crate) fn cast_target_mask(def: &SpellDisplay) -> u16 {
     word
 }
 
-/// `BindTarget 0x6e5b40`'s unit branch: clear every flag-word bit the candidate satisfies.
+/// `BindTarget 0x6e5b40`'s unit branch past the gates: clear every flag-word bit the candidate
+/// satisfies.
 ///
 /// The assist bit asks `CanAssist 0x6066f0`: selectable, friendly or better, and an NPC's owner
 /// (or the NPC itself) PvP-enabled. This keeps friendly ambient NPCs and critters unbindable.
-/// The enemy bit asks `CanAttack` (`0x606980`). Party and raid (`0x606c20`, `0x606d20`) accept
-/// only the player; the corpse check (`0x6067d0`) is assistable with health 0 here.
+/// The enemy bit asks `CanAttack` (`0x606980`). The party bit needs `0x606c20` and then `CanAssist`
+/// (`6e5cad`-`6e5cec`): the player, a member of his party, or a unit that answers to one. The raid
+/// bit needs `0x606d20` and `CanAssist` (`6e5cf1`-`6e5d2f`): the same, with the raid roster
+/// counting as well as the party slots. The corpse check (`0x6067d0`) is assistable with health 0
+/// here.
 fn clear_satisfied_bits(word: u16, is_self: bool, rel: &TargetRelations) -> u16 {
     let mut word = word;
-    let assist = is_self
-        || can_assist(
-            rel.target_store,
-            rel.factions,
-            rel.reputations,
-            rel.self_store,
-            |_| rel.target_owner_store.cloned(),
-        );
-    let dead = rel
-        .target_store
-        .is_some_and(|s| s.0.unit_health() == Some(0));
-    if word & TF_UNIT_PARTY != 0 && is_self {
+    let assist = rel.assistable(is_self);
+    let dead = rel.target_store.is_some_and(|s| !unit_alive(&s.0));
+    if word & TF_UNIT_PARTY != 0 && assist && rel.in_party(is_self) {
         word &= !TF_UNIT_PARTY;
     }
-    if word & TF_UNIT_RAID != 0 && is_self {
+    if word & TF_UNIT_RAID != 0 && assist && rel.in_group(is_self) {
         word &= !TF_UNIT_RAID;
     }
     if word & TF_UNIT_ASSIST != 0 && assist {
         word &= !TF_UNIT_ASSIST;
     }
-    if word & TF_UNIT_ENEMY != 0
-        && !is_self
-        && can_attack(
-            rel.target_store,
-            rel.factions,
-            rel.reputations,
-            rel.self_store,
-        )
-    {
+    if word & TF_UNIT_ENEMY != 0 && rel.attackable(is_self) {
         word &= !TF_UNIT_ENEMY;
     }
-    // Bit 1 has no relation check: any unit binds. Bit 10 is cleared by any candidate but self.
+    // Bit 1 has no relation check: any unit binds. A dead unit's bind clears bit 10 (`6e5d89`,
+    // `6e5ddb`); the gate refuses a living unit under that word before it gets here.
     if word & TF_UNIT != 0 {
         word &= !TF_UNIT;
     }
-    if word & TF_EXPLICIT_GATE != 0 && !is_self {
+    if word & TF_EXPLICIT_GATE != 0 && dead {
         word &= !TF_EXPLICIT_GATE;
     }
     if word & TF_CORPSE_ALLY != 0 && assist && dead {
@@ -336,10 +392,22 @@ fn clear_satisfied_bits(word: u16, is_self: bool, rel: &TargetRelations) -> u16 
     word
 }
 
-/// Whether `BindTarget 0x6e5b40`'s unit arm clears the whole standing word for this unit.
-/// The initial selection, a world click and `SpellTargetUnit` all use this one predicate.
-pub(super) fn unit_word_binds(word: u16, is_self: bool, rel: &TargetRelations) -> bool {
+/// Whether the unit arm's relation checks clear the whole standing word for this unit.
+fn unit_word_binds(word: u16, is_self: bool, rel: &TargetRelations) -> bool {
     word & UNIT_BITS != 0 && clear_satisfied_bits(word, is_self, rel) == 0
+}
+
+/// Whether `BindTarget 0x6e5b40`'s unit branch binds this unit under the standing word: the gates
+/// ([`bind_gates`]), then the relation checks. The initial selection, the `autoSelfCast` fallback,
+/// a world click, `SpellTargetUnit` and the hover verdict all ask this one predicate. An unknown
+/// spell has no row to gate on and leaves the relation checks alone.
+pub(super) fn unit_binds(
+    def: Option<&SpellDisplay>,
+    word: u16,
+    is_self: bool,
+    rel: &TargetRelations,
+) -> bool {
+    def.is_none_or(|def| bind_gates(def, word, is_self, rel)) && unit_word_binds(word, is_self, rel)
 }
 
 /// The wire target for casting `def`. An unknown spell sends the selection as is, or no target
@@ -396,22 +464,27 @@ pub(crate) fn resolve_cast_target(
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
-    // The selection (`0xb4e2d8`, `0x6e539f`).
+    // The selection (`0xb4e2d8`, `0x6e539f`). A unit the gates or the relation checks refuse binds
+    // nothing, so the fallback below gets its turn.
     if let Some(guid) = cand.selection {
         let is_self = cand.caster == Some(guid);
-        if unit_word_binds(word, is_self, rel) {
+        if unit_binds(Some(def), word, is_self, rel) {
             return CastWireTarget::Unit(guid);
         }
     }
-    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast.
+    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast, through the same gates.
     if auto_self_cast {
         if let Some(guid) = cand.caster {
             let self_rel = TargetRelations {
                 target_store: rel.self_store,
                 target_owner_store: None,
+                group: GroupInputs {
+                    target_guid: Some(guid),
+                    ..rel.group
+                },
                 ..*rel
             };
-            if unit_word_binds(word, true, &self_rel) {
+            if unit_binds(Some(def), word, true, &self_rel) {
                 return CastWireTarget::Unit(guid);
             }
         }
@@ -489,15 +562,18 @@ mod tests {
     fn resolution_wire_shapes() {
         use benilla_protocol::ObjectFields;
         // `UNIT_FIELD_FLAGS` bit 3 (player-controlled) on us alone selects `CanAttack`'s mixed
-        // arm; with no catalog the reaction resolves neutral, so the enemy bit clears.
-        let me = crate::net::ObjectStore(ObjectFields::from_pairs(&[(46, 1 << 3)]));
-        let it = crate::net::ObjectStore(ObjectFields::from_pairs(&[(35, 0)]));
+        // arm; with no catalog the reaction resolves neutral, so the enemy bit clears. Both carry
+        // `UNIT_FIELD_HEALTH` (22): a store with none reads dead to the gates.
+        let me = crate::net::ObjectStore(ObjectFields::from_pairs(&[(22, 100), (46, 1 << 3)]));
+        let it = crate::net::ObjectStore(ObjectFields::from_pairs(&[(22, 100), (35, 0)]));
         let rel = TargetRelations {
             target_store: Some(&it),
             target_owner_store: None,
             self_store: Some(&me),
             factions: None,
             reputations: &Reputations(Vec::new()),
+            types: Default::default(),
+            group: Default::default(),
         };
         let ice_armor = spell(0, 1);
         assert_eq!(
@@ -568,6 +644,8 @@ mod tests {
             self_store: Some(&me),
             factions: Some(&factions),
             reputations: &reputations,
+            types: Default::default(),
+            group: Default::default(),
         };
 
         assert!(
@@ -746,6 +824,30 @@ mod tests {
         );
     }
 
+    /// A dead unit's bind clears the `0x400` bit whoever it is (`6e5d89`, `6e5ddb`); a living
+    /// unit's never does, and the gate refuses it before the relation checks are asked.
+    #[test]
+    fn a_dead_units_bind_clears_the_0x400_bit() {
+        use benilla_protocol::ObjectFields;
+
+        let health = |hp| ObjectStore(ObjectFields::from_pairs(&[(22, hp)]));
+        let (corpse, live) = (health(0), health(100));
+        let rel = |target| TargetRelations {
+            target_store: Some(target),
+            ..rel_none()
+        };
+        for is_self in [false, true] {
+            assert!(
+                unit_word_binds(0x402, is_self, &rel(&corpse)),
+                "a corpse, self {is_self}"
+            );
+            assert!(
+                !unit_word_binds(0x402, is_self, &rel(&live)),
+                "a living unit keeps the bit, self {is_self}"
+            );
+        }
+    }
+
     fn rel_none() -> TargetRelations<'static> {
         static EMPTY: Reputations = Reputations(Vec::new());
         TargetRelations {
@@ -754,6 +856,8 @@ mod tests {
             self_store: None,
             factions: None,
             reputations: &EMPTY,
+            types: Default::default(),
+            group: Default::default(),
         }
     }
 }

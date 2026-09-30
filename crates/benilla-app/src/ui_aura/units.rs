@@ -9,47 +9,29 @@
 use std::collections::hash_map::{Entry, HashMap};
 
 use benilla_formats::SpellCatalog;
-use benilla_protocol::messages::ObjectType;
 use benilla_ui::script::{AuraState, UiScript, UnitGuids};
 
 use super::{aura_list, other_unit_inputs, record_inputs, AuraInput};
 use crate::net::ObjectStore;
-use crate::ui_party::{raid_row_guids, GroupState, RAID_TOKENS};
-
-/// `partyN` then `partypetN`.
-const PARTY_AURA_TOKENS: [&str; 8] = [
-    "party1",
-    "party2",
-    "party3",
-    "party4",
-    "partypet1",
-    "partypet2",
-    "partypet3",
-    "partypet4",
-];
-
-/// `raidpet1..raidpet40`, one per raid row.
-#[rustfmt::skip]
-const RAID_PET_TOKENS: [&str; 40] = [
-    "raidpet1", "raidpet2", "raidpet3", "raidpet4", "raidpet5", "raidpet6", "raidpet7",
-    "raidpet8", "raidpet9", "raidpet10", "raidpet11", "raidpet12", "raidpet13", "raidpet14",
-    "raidpet15", "raidpet16", "raidpet17", "raidpet18", "raidpet19", "raidpet20", "raidpet21",
-    "raidpet22", "raidpet23", "raidpet24", "raidpet25", "raidpet26", "raidpet27", "raidpet28",
-    "raidpet29", "raidpet30", "raidpet31", "raidpet32", "raidpet33", "raidpet34", "raidpet35",
-    "raidpet36", "raidpet37", "raidpet38", "raidpet39", "raidpet40",
-];
+use crate::ui_party::{
+    raid_row_guids, GroupState, PARTY_PET_TOKENS, PARTY_TOKENS, RAID_PET_TOKENS, RAID_TOKENS,
+};
 
 /// The tokens `UNIT_AURA` fires for besides `"player"`, in firing order: [`EVENT_UNITS`], then the
 /// group's, each resolved by [`event_guid`].
 const EVENT_UNITS: [&str; 3] = ["pet", "target", "targettarget"];
 
-const EVENT_TOKEN_COUNT: usize =
-    EVENT_UNITS.len() + PARTY_AURA_TOKENS.len() + RAID_TOKENS.len() + RAID_PET_TOKENS.len();
+const EVENT_TOKEN_COUNT: usize = EVENT_UNITS.len()
+    + PARTY_TOKENS.len()
+    + PARTY_PET_TOKENS.len()
+    + RAID_TOKENS.len()
+    + RAID_PET_TOKENS.len();
 
 fn event_tokens() -> impl Iterator<Item = &'static str> {
     EVENT_UNITS
         .into_iter()
-        .chain(PARTY_AURA_TOKENS)
+        .chain(PARTY_TOKENS)
+        .chain(PARTY_PET_TOKENS)
         .chain(RAID_TOKENS)
         .chain(RAID_PET_TOKENS)
 }
@@ -96,14 +78,6 @@ fn fill_group<'a>(
             .iter()
             .map(|&m| group.raid_pet_guid(m, live(m)).unwrap_or(0)),
     );
-}
-
-/// The object manager's unit lookup (`0x468460`, `ecx = 8`): a held unit or player.
-fn is_unit(store: &ObjectStore) -> bool {
-    matches!(
-        store.0.object_type(),
-        Some(ObjectType::Unit | ObjectType::Player)
-    )
 }
 
 /// What [`UnitAuras::feed`] reads this frame.
@@ -211,7 +185,7 @@ impl UnitAuras {
                 continue;
             }
             let store = held(guid);
-            if let Some(unit) = store.filter(|s| is_unit(s)) {
+            if let Some(unit) = store.filter(|s| s.is_unit()) {
                 let next = unit.0.unit_target().unwrap_or(0);
                 g.held.insert(guid, next);
                 walk.push((next, false));
@@ -532,6 +506,60 @@ mod tests {
         assert!(listed(&mut app, "party1", true).is_empty());
     }
 
+    /// The list writes the record's online bit too (`0x4e8361`-`0x4e837b`), so a status-only
+    /// `SMSG_GROUP_LIST` for a member out of view takes their last auras: `UnitBuff` and
+    /// `UnitDebuff` answer nil behind a clear bit (`0x519741`, `0x519b31`), and an online list brings them back.
+    #[test]
+    fn a_status_only_list_takes_an_out_of_view_members_auras_and_an_online_one_returns_them() {
+        let mut app = party_app();
+        stats(
+            &mut app,
+            true,
+            PartyMemberStatsInfo {
+                status: Some(member_status::ONLINE),
+                auras: Some(vec![(0, 1126)]),
+                auras_negative: Some(vec![(33, 589)]),
+                ..Default::default()
+            },
+        );
+        app.update();
+        assert_eq!(listed(&mut app, "party1", false), [1126]);
+        assert_eq!(listed(&mut app, "party1", true), [589]);
+
+        let relist = |app: &mut App, status: u8| {
+            let member = GroupMemberEntry {
+                name: "Brisca".into(),
+                guid: MEMBER,
+                status,
+                flags: 0,
+            };
+            app.world_mut().resource_mut::<GroupState>().apply_list(
+                0,
+                0,
+                vec![member],
+                ME,
+                None,
+                Some(ME),
+            );
+            app.update();
+        };
+        relist(&mut app, member_status::OFFLINE);
+        let nil = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval::<bool>(
+                r#"return UnitBuff("party1", 1) == nil and UnitDebuff("party1", 1) == nil"#,
+            )
+            .unwrap();
+        assert!(nil, "the record kept the auras, the clear bit hides them");
+        assert!(listed(&mut app, "party1", false).is_empty());
+        assert!(listed(&mut app, "party1", true).is_empty());
+
+        relist(&mut app, member_status::ONLINE);
+        assert_eq!(listed(&mut app, "party1", false), [1126]);
+        assert_eq!(listed(&mut app, "party1", true), [589]);
+    }
+
     /// The record is slot-indexed: deltas patch named slots, the halves split at slot 32, and each
     /// walk is ascending slot whatever order the slots filled in.
     #[test]
@@ -664,28 +692,34 @@ mod tests {
     /// in subgroup 3, in wire order, none streamed and none with a record.
     fn raid_app() -> App {
         let mut app = party_app();
-        let member = |name: &str, guid, subgroup| GroupMemberEntry {
+        relist_raid(&mut app, member_status::ONLINE);
+        app.update();
+        let _ = seen(&mut app);
+        app
+    }
+
+    /// The raid's list as `raid_app` sends it, with `MATE`'s status byte as given.
+    fn relist_raid(app: &mut App, mate: u8) {
+        let member = |name: &str, guid, status, subgroup| GroupMemberEntry {
             name: name.into(),
             guid,
-            status: member_status::ONLINE,
+            status,
             flags: subgroup,
         };
+        let online = member_status::ONLINE;
         app.world_mut().resource_mut::<GroupState>().apply_list(
             crate::ui_party::GROUPTYPE_RAID,
             0,
             vec![
-                member("Mate", MATE, 0),
-                member("Two", 0x2002, 1),
-                member("Three", 0x2003, 1),
-                member("Far", FAR, 2),
+                member("Mate", MATE, mate, 0),
+                member("Two", 0x2002, online, 1),
+                member("Three", 0x2003, online, 1),
+                member("Far", FAR, online, 2),
             ],
             ME,
             None,
             Some(ME),
         );
-        app.update();
-        let _ = seen(&mut app);
-        app
     }
 
     fn online(auras_negative: Vec<(u8, u16)>) -> PartyMemberStatsInfo {
@@ -785,6 +819,28 @@ mod tests {
         );
         app.update();
         assert!(seen(&mut app).is_empty());
+    }
+
+    /// The raid roster's twin of the list write (`0x4ba947`-`0x4ba960`): a status-only raid list
+    /// hides an out-of-view row's auras under `raidN` and its party slot alike, and an online list
+    /// returns them.
+    #[test]
+    fn a_status_only_raid_list_takes_an_out_of_view_rows_auras_and_an_online_one_returns_them() {
+        let mut app = raid_app();
+        stats_of(&mut app, MATE, true, online(vec![(32, 589)]));
+        app.update();
+        assert_eq!(listed(&mut app, "raid2", true), [589]);
+        assert_eq!(listed(&mut app, "party1", true), [589]);
+
+        relist_raid(&mut app, member_status::OFFLINE);
+        app.update();
+        assert!(listed(&mut app, "raid2", true).is_empty());
+        assert!(listed(&mut app, "party1", true).is_empty());
+
+        relist_raid(&mut app, member_status::ONLINE);
+        app.update();
+        assert_eq!(listed(&mut app, "raid2", true), [589]);
+        assert_eq!(listed(&mut app, "party1", true), [589]);
     }
 
     /// A raid token past the roster, a raid token outside a raid, and an offline member's pet

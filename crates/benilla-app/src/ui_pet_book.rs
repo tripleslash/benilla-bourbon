@@ -24,7 +24,7 @@ use benilla_ui::script::{PetBookState, SpellSlotView, UiScript};
 
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::Spells;
-use crate::ui_pet::PetBar;
+use crate::ui_pet::{PetBar, PetUnit};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -51,11 +51,11 @@ impl Plugin for UiPetBookPlugin {
 
 /// What the feed last pushed, so `SPELLS_CHANGED` fires only on a real change.
 #[derive(Default)]
-struct FeedMemory {
+pub(crate) struct FeedMemory {
     pushed: PetBookState,
 }
 
-fn feed_pet_book(
+pub(crate) fn feed_pet_book(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
     spells: Option<Res<Spells>>,
@@ -118,16 +118,18 @@ fn feed_pet_book(
         script.set_pet_book(fresh.clone());
         memory.pushed = fresh;
         // One `SPELLS_CHANGED` for both books off the shared re-sort (`0x4b2fd0` tail-jumps
-        // `SignalEvent(0x104)`). Cooldown and autocast repaint the pet page through
-        // `PET_BAR_UPDATE` (`SpellBookFrame.lua:214`, `227-231`), which `ui_pet`'s feed fires.
+        // `SignalEvent(0x104)`). A cooldown repaints the pet page through the flush's
+        // `SPELL_UPDATE_COOLDOWN` (`SpellBookFrame.lua:209`, `221`), which `ui_pet`'s
+        // `fire_pet_cooldown_events` fires after this feed's push; autocast, through
+        // `PET_BAR_UPDATE` (`227-231`), which `ui_pet`'s feed fires.
         if changed {
             script.fire_event("SPELLS_CHANGED", vec![]);
         }
     }
 }
 
-/// Whether the book itself changed; a slot's cooldown, autocast or ring reaches the buttons
-/// through `PET_BAR_UPDATE` instead.
+/// Whether the book itself changed; a slot's cooldown reaches the buttons through the flush's
+/// `SPELL_UPDATE_COOLDOWN`, its autocast and ring through `PET_BAR_UPDATE`, instead.
 fn book_changed(fresh: &PetBookState, old: &PetBookState) -> bool {
     fresh.token != old.token
         || fresh.slots.len() != old.slots.len()
@@ -169,16 +171,18 @@ fn slot_view(
     }
 }
 
-/// `CastSpell(id, "pet")`: cancel first, as on the bar (`0x4b33af`-`0x4b3461`), a spell whose
-/// aura is on the pet sending `CMSG_PET_CANCEL_AURA` (0x26B) instead of the order; else
-/// `CMSG_PET_ACTION` at the selection as the calls before it left it.
-pub(crate) fn cast_pet_spell(p: &mut crate::ui_pet::PetPress, spell_id: u32) {
+/// `CastSpell(id, "pet", onSelf)`: cancel first, as on the bar (`0x4b33af`-`0x4b3461`), a spell
+/// whose aura is on the pet sending `CMSG_PET_CANCEL_AURA` (0x26B) instead of the order; else
+/// `CMSG_PET_ACTION` at the selection as the calls before it left it, or with `onSelf` at the
+/// player. Unlike the bar's press it asks no usability predicate: no call site of `0x4bcf70` is
+/// in this path.
+pub(crate) fn cast_pet_spell(p: &mut crate::ui_pet::PetPress, spell_id: u32, on_self: bool) {
     let pet_guid = p.bar.spells.pet_guid;
     if pet_guid == 0 {
         debug!("ui_pet_book: dropping a queued pet book cast — the bar is gone");
         return;
     }
-    let target_guid = p.selection.guid.unwrap_or(0);
+    let target_guid = p.spell_target(on_self);
     let display = p.spells.as_ref().and_then(|s| s.catalog.get(spell_id));
     if let (Some(d), Some(store)) = (display, p.pet.store(pet_guid)) {
         if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
@@ -201,11 +205,14 @@ pub(crate) fn cast_pet_spell(p: &mut crate::ui_pet::PetPress, spell_id: u32) {
     });
 }
 
-/// Drains the pet book's `ToggleSpellAutocast` intents.
-fn drain_pet_book(
+/// Drains the pet book's `ToggleSpellAutocast` intents. Each asks the usability predicate before
+/// it looks anything up (`0x4bccce`), so an unusable pet's toggle flips, repaints and sends
+/// nothing.
+pub(crate) fn drain_pet_book(
     script: Option<NonSendMut<UiScript>>,
     mut bar: ResMut<PetBar>,
     commands: Res<NetCommands>,
+    pet: PetUnit,
 ) {
     let Some(mut script) = script else {
         return;
@@ -220,6 +227,10 @@ fn drain_pet_book(
         return;
     }
     for spell_id in autocasts {
+        if !pet.actions_usable(&bar) {
+            debug!("ui_pet_book: autocast {spell_id} refused, the pet's actions are not usable");
+            continue;
+        }
         let Some(on) = flip_autocast(&mut bar.spells, spell_id) else {
             continue;
         };

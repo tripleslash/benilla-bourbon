@@ -135,20 +135,24 @@ impl SeatWriters<'_, '_> {
 #[allow(clippy::type_complexity)]
 pub(in crate::entities) fn attach_held_items(
     mut commands: Commands,
-    mut units: Query<(
-        &HeldItems,
-        &BoneAttach,
-        Option<&mut HeldAttached>,
-        Entity,
-        Option<&UnitAppearFade>,
-        Option<&benilla_world::interior::BodyBakeCenter>,
-        Option<&Transform>,
-        // The wearer's slot, which a slotless item's parts carry so the body tint reaches them;
-        // an attached model inherits its parent's computed colours (`0x714000`).
-        Option<&benilla_world::rig_palette::RigSkin>,
-        // The attach joint spawns on demand from the live pose, never the rest pose.
-        Option<&mut benilla_world::rig_anim::RigPose>,
-    )>,
+    mut units: Query<
+        (
+            &HeldItems,
+            &BoneAttach,
+            Option<&mut HeldAttached>,
+            Entity,
+            Option<&UnitAppearFade>,
+            Option<&benilla_world::interior::BodyBakeCenter>,
+            Option<&Transform>,
+            // The wearer's slot, which a slotless item's parts carry so the body tint reaches them;
+            // an attached model inherits its parent's computed colours (`0x714000`).
+            Option<&benilla_world::rig_palette::RigSkin>,
+            // The attach joint spawns on demand from the live pose, never the rest pose.
+            Option<&mut benilla_world::rig_anim::RigPose>,
+        ),
+        // A torn-down wearer gets no new item model: the reference frees it at once (`0x464920`).
+        Without<benilla_world::model_fade::DespawnFade>,
+    >,
     held: Option<Res<ItemDisplays>>,
     time: Res<Time>,
     mut seats: SeatWriters,
@@ -1399,7 +1403,10 @@ mod tests {
                 items,
                 bones,
                 Transform::default(),
-                UnitAppearFade::Pending { since: SINCE },
+                UnitAppearFade::Pending {
+                    since: SINCE,
+                    arrived: SINCE,
+                },
             ))
             .id();
         let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
@@ -1487,7 +1494,10 @@ mod tests {
                 items,
                 bones,
                 Transform::default(),
-                UnitAppearFade::Pending { since: SINCE },
+                UnitAppearFade::Pending {
+                    since: SINCE,
+                    arrived: SINCE,
+                },
             ))
             .id();
         let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);

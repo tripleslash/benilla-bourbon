@@ -13,6 +13,7 @@ use benilla_protocol::messages::PetSpells;
 
 use crate::net::{GuidIndex, ObjectStore};
 use crate::spell::Cooldowns;
+use crate::ui_action::CooldownEvents;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -21,8 +22,9 @@ mod drain;
 mod menu;
 mod net;
 mod unit;
+mod usable;
 
-use bar::feed_pet_bar;
+use bar::{feed_pet_bar, fire_pet_cooldown_events};
 use drain::drain_pet_actions;
 // A pet bar press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::pet_stop_on_old_target_clear;
@@ -31,7 +33,13 @@ use menu::{drain_pet_menu, feed_pet_menu};
 use unit::feed_pet_unit;
 
 #[cfg(test)]
+mod flush_tests;
+#[cfg(test)]
+mod press_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod usable_tests;
 
 /// The pet action bar's state. A zero `spells.pet_guid` means no bar: the teardown packet carries
 /// only that guid.
@@ -39,8 +47,10 @@ mod tests;
 pub(crate) struct PetBar {
     /// The last `SMSG_PET_SPELLS`, with `SMSG_PET_MODE` and local presses folded in.
     pub(crate) spells: PetSpells,
-    /// The pet's own cooldowns: the reference keeps a `SPELLHISTORY` per unit. Seeded from
-    /// `SMSG_PET_SPELLS`, topped up by `SMSG_SPELL_COOLDOWN` for the pet's guid.
+    /// The pet's own cooldowns, the list at `0xcecb04`. Seeded from `SMSG_PET_SPELLS`, topped up
+    /// by `SMSG_SPELL_COOLDOWN` for the pet's guid, by the pet's own `SMSG_SPELL_GO` and by a
+    /// press's GCD. Each mutation but the seed fires the flush, off [`Cooldowns::generation`]
+    /// (`bar::fire_pet_cooldown_events`).
     pub(crate) cooldowns: Cooldowns,
     /// The client's `[0xb714b0]`, a local latch: all of `IsPetAttackActive`, and the only thing
     /// that lights Attack (`0x4bdf16`-`0x4bdf22`). Raised only for a possessed unit (`0x4bd420`),
@@ -61,6 +71,17 @@ impl PetBar {
     pub(crate) fn has_bar(&self) -> bool {
         self.spells.pet_guid != 0
     }
+
+    /// No pet: every field back to its default, the cooldown list emptied with its counters kept
+    /// ([`Cooldowns::clear_silent`]), for the teardown packet and the session end.
+    pub(crate) fn clear(&mut self) {
+        let mut cooldowns = std::mem::take(&mut self.cooldowns);
+        cooldowns.clear_silent();
+        *self = Self {
+            cooldowns,
+            ..Default::default()
+        };
+    }
 }
 
 pub(crate) struct UiPetPlugin;
@@ -79,10 +100,16 @@ impl Plugin for UiPetPlugin {
                     .in_set(UnitFeed)
                     .before(feed_pet_bar),
                 // After the pet snapshot: these feeds' events reach Lua at once, and their
-                // handlers read `HasPetUI()`, which `crate::ui_pet_stats` pushes.
+                // handlers read `HasPetUI()`, which `crate::ui_pet_stats` pushes. The bar pushes
+                // its cooldown triples before the cooldown events and the pet's flush fires after
+                // them, so the buttons it wakes read the new list.
                 feed_pet_bar
                     .in_set(UnitFeed)
-                    .after(crate::ui_pet_stats::PetSnapshot),
+                    .after(crate::ui_pet_stats::PetSnapshot)
+                    .before(CooldownEvents),
+                fire_pet_cooldown_events
+                    .in_set(UnitFeed)
+                    .after(CooldownEvents),
                 feed_pet_unit
                     .in_set(UnitFeed)
                     .after(crate::ui_pet_stats::PetSnapshot),
@@ -99,14 +126,13 @@ impl Plugin for UiPetPlugin {
 }
 
 /// The unit behind [`PetBar`]'s cached guid, plus our own guid for the ownership tests the
-/// reference makes before trusting the pet's fields (`0x5ff780`, `0x612e33`).
+/// reference makes before trusting the pet's fields (`0x5ff780`, `0x612e33`), and the usability
+/// predicate every pet-bar verb the reference guards asks of them ([`PetUnit::usable_pet`]).
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct PetUnit<'w, 's> {
     index: Res<'w, GuidIndex>,
     stores: Query<'w, 's, &'static ObjectStore>,
     self_guid: Res<'w, crate::net::SelfGuid>,
-    /// The per-field edges, for `fire_transitions`' watch-bridge arms.
-    pub(super) edges: MessageReader<'w, 's, crate::net::FieldChanged>,
 }
 
 impl PetUnit<'_, '_> {
@@ -114,6 +140,12 @@ impl PetUnit<'_, '_> {
     pub(crate) fn store(&self, pet_guid: u64) -> Option<&ObjectStore> {
         let e = *self.index.0.get(&pet_guid)?;
         self.stores.get(e).ok()
+    }
+
+    /// The active player's descriptor, `None` while its object is not streamed: the lookup the
+    /// usability predicate makes on the client's player guid (`0x4bcf89`, typemask `0x10`).
+    pub(crate) fn player_store(&self) -> Option<&ObjectStore> {
+        self.store(self.self_guid.0?)
     }
 
     /// The pet's entity under [`Self::store`]'s contract, for the pet paper doll's model.

@@ -1,26 +1,38 @@
 //! The spell-view cell tests, against the real 5875 data, and the feed's place in the schedule.
 
+use super::spell_feed::{build_view, feed_spell_tooltips, ViewCaster, ViewCtx};
 use super::*;
-use crate::ui_action::Spells;
+use crate::items::Items;
+use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::ui_action::{PlayerActions, Spells};
+
+/// The view alone, for the cell tests; the feed keeps what it read beside it.
+fn spell_tooltip_view(
+    spell_id: u32,
+    spells: &Spells,
+    vctx: &mut ViewCtx,
+) -> Option<benilla_ui::script::SpellTooltipView> {
+    build_view(spell_id, spells, vctx).map(|(view, _)| view)
+}
 
 /// A view context with no player state, the DBC-only half of the builder.
-struct TestCtx {
-    items: Items,
-    commands: NetCommands,
+pub(super) struct TestCtx {
+    pub(super) items: Items,
+    pub(super) commands: NetCommands,
     _rx: crossbeam_channel::Receiver<crate::net::ClientCommand>,
     /// The builder's lookup over the shipped `GlobalStrings.lua`: a stub would pass on wording
     /// the client never shows.
     get: Box<Getter>,
     /// Empty by default; modifier tests populate it explicitly.
-    spell_mods: crate::spell::SpellModifiers,
+    pub(super) spell_mods: crate::spell::SpellModifiers,
     /// Absent by default: every spell's skill level reads 0.
-    skill_lines: Option<benilla_formats::SkillLineCatalog>,
+    pub(super) skill_lines: Option<benilla_formats::SkillLineCatalog>,
 }
 
 type Getter = dyn Fn(&str) -> Option<String>;
 
 impl TestCtx {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let vm = benilla_ui::script::UiScript::new().expect("VM");
         crate::ui_script::load_ui_for_test(&vm, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -50,11 +62,11 @@ impl TestCtx {
         target_reach: f32,
     ) -> ViewCtx<'a, 'w, 's> {
         let mut ctx = self.ctx_for(objects, 0, None, store);
-        ctx.attack_target_reach = Some(target_reach);
+        ctx.attack_target = Some(benilla_formats::RangeUnit::still(target_reach));
         ctx
     }
 
-    fn ctx_for<'a, 'w, 's>(
+    pub(super) fn ctx_for<'a, 'w, 's>(
         &'a mut self,
         objects: &'a Objects<'w, 's>,
         form: u8,
@@ -66,8 +78,10 @@ impl TestCtx {
             form,
             store,
             caster: ViewCaster::Player,
-            combat_reach: store.map_or(1.5, |s| s.0.unit_combat_reach()),
-            attack_target_reach: None,
+            range_caster: benilla_formats::RangeUnit::still(
+                store.map_or(1.5, |s| s.0.unit_combat_reach()),
+            ),
+            attack_target: None,
             objects,
             items: &mut self.items,
             commands: &self.commands,
@@ -92,7 +106,7 @@ impl TestCtx {
 }
 
 /// The 5875 spell data the view builder reads; `None` skips where the install is absent.
-fn real_spells() -> Option<Spells> {
+pub(super) fn real_spells() -> Option<Spells> {
     let data = benilla_formats::wow_data_or_skip!(None);
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     Some(Spells {
@@ -455,24 +469,24 @@ fn cost_and_cast_cells_on_real_data() {
     let mut t = TestCtx::new();
     let mut objs = no_objects();
     let objects = objs.get();
-    // A level-60 store: max health 4000, base mana 1000 (fields: health 22, max health 28,
-    // level 34, base mana 162).
+    // A level-60 store: max health 4000, base mana 1000 and base health 1689 (fields: health 22,
+    // max health 28, level 34, base mana 162, base health 163).
     let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
         (22u16, 3500u32),
         (28, 4000),
         (34, 60),
         (162, 1000),
+        (163, 1689),
     ]));
 
-    // Bloodrage (2687): 20% of max health, a flat number through the health fallback; bare
-    // "Instant" on a non-mana type.
+    // Bloodrage (2687): 20% of base health; bare "Instant" on a non-mana type.
     let v = spell_tooltip_view(
         2687,
         &spells,
         &mut t.ctx_for(&objects, 0, None, Some(&store)),
     )
     .expect("Bloodrage view");
-    assert_eq!(v.cost.as_deref(), Some("800 Health"), "20% of 4000");
+    assert_eq!(v.cost.as_deref(), Some("337 Health"), "20% of 1689");
     assert_eq!(v.cast_time.as_deref(), Some("Instant"));
 
     // Life Tap (1454): the 5875 data has no cost columns for any rank, so the cell is empty.
@@ -600,6 +614,33 @@ fn range_cell_on_real_data() {
     .expect("Sinister Strike view");
     assert_eq!(v.range.as_deref(), Some("7 yd range"));
 
+    // Both units running: the moving bonus goes on the floor, 5.0 + 2.6667 = 7.667, rounded to 8.
+    let running = benilla_formats::UnitMotion {
+        flags: 1,
+        speed: 7.0,
+        walk_speed: 2.5,
+    };
+    let runner = benilla_formats::RangeUnit {
+        motion: running,
+        ..benilla_formats::RangeUnit::still(1.5)
+    };
+    let mut ctx = t.ctx_for(&objects, 0, None, Some(&store));
+    ctx.range_caster = runner;
+    ctx.attack_target = Some(runner);
+    let v = spell_tooltip_view(1752, &spells, &mut ctx).expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("8 yd range"));
+    // One of them standing, or no auto-attack target to read: the floor.
+    ctx.attack_target = Some(benilla_formats::RangeUnit::still(1.5));
+    let v = spell_tooltip_view(1752, &spells, &mut ctx).expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("5 yd range"));
+    ctx.attack_target = None;
+    let v = spell_tooltip_view(1752, &spells, &mut ctx).expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("5 yd range"));
+    // The ranged arm passes no target, so the bonus never reaches an authored row: Fireball's 35.
+    ctx.attack_target = Some(runner);
+    let v = spell_tooltip_view(133, &spells, &mut ctx).expect("Fireball view");
+    assert_eq!(v.range.as_deref(), Some("35 yd range"));
+
     // An authored row: Fireball's 0-35.
     let v = spell_tooltip_view(
         133,
@@ -608,6 +649,23 @@ fn range_cell_on_real_data() {
     )
     .expect("Fireball view");
     assert_eq!(v.range.as_deref(), Some("35 yd range"));
+
+    // The tooltip passes a null target (`0x52e9c2`), so the auto-attack target pads no ranged row:
+    // Fireball still reads its 35 while you swing at a 1.5-reach unit, and Charge its 8-25.
+    let v = spell_tooltip_view(
+        133,
+        &spells,
+        &mut t.ctx_engaged(&objects, Some(&store), 1.5),
+    )
+    .expect("Fireball view");
+    assert_eq!(v.range.as_deref(), Some("35 yd range"));
+    let v = spell_tooltip_view(
+        100,
+        &spells,
+        &mut t.ctx_engaged(&objects, Some(&store), 1.5),
+    )
+    .expect("Charge view");
+    assert_eq!(v.range.as_deref(), Some("8-25 yd range"));
 
     // An authored pair, `"%d-%d"`: Charge's 8-25, which the reach does not change.
     let v = spell_tooltip_view(100, &spells, &mut t.ctx_for(&objects, 0, None, Some(&big)))
@@ -880,6 +938,56 @@ fn the_mouseover_token_carries_the_hovered_guid() {
         Some(1),
         "the token is itself"
     );
+}
+
+/// `UnitCreatureType("mouseover")` goes through the resolver `0x605570` for a hovered player as
+/// for a creature: a druid in Cat Form is a Beast, and out of form a Humanoid by race. The plate
+/// itself is built for a player from its race and class, whatever type the snapshot carries.
+#[test]
+fn the_mouseover_token_names_the_hovered_units_creature_type() {
+    use benilla_protocol::ObjectFields;
+
+    /// `UNIT_FIELD_BYTES_0` and `UNIT_FIELD_BYTES_1`, absolute descriptor indices.
+    const BYTES_0: u16 = 36;
+    const BYTES_1: u16 = 138;
+    const NIGHT_ELF: u32 = 4;
+    const CAT_FORM: u32 = 1;
+    const DRUID: u64 = 0x99;
+
+    let (mut app, _, _) = mouseover_app();
+    let mut spells = crate::ui_action::Spells::empty_for_tests();
+    spells.forms.insert(
+        CAT_FORM,
+        benilla_formats::ShapeshiftForm {
+            creature_type: 1,
+            ..Default::default()
+        },
+    );
+    app.insert_resource(spells);
+    let druid = app
+        .world_mut()
+        .spawn(ObjectStore(ObjectFields::from_pairs(&[
+            (BYTES_0, NIGHT_ELF),
+            (BYTES_1, CAT_FORM << 16),
+        ])))
+        .id();
+    let creature_type = |app: &mut App| {
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .eval::<Option<String>>(r#"return UnitCreatureType("mouseover")"#)
+            .unwrap()
+    };
+
+    hover_unit(&mut app, druid, DRUID);
+    assert_eq!(creature_type(&mut app).as_deref(), Some("Beast"));
+    app.world_mut()
+        .entity_mut(druid)
+        .get_mut::<ObjectStore>()
+        .unwrap()
+        .0
+        .merge(ObjectFields::from_pairs(&[(BYTES_1, 0)]));
+    hover_unit(&mut app, druid, DRUID);
+    assert_eq!(creature_type(&mut app).as_deref(), Some("Humanoid"));
 }
 
 /// Once no unit wins the pick, `"mouseover"` names nobody: the publisher `0x492890` zeroes the pair

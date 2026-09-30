@@ -145,7 +145,11 @@ pub(super) fn refresh_live_display(
             Option<&CollisionHeight>,
             &Transform,
         ),
-        With<VisualAttached>,
+        // A torn-down unit is freed, not rebuilt (`0x464920`).
+        (
+            With<VisualAttached>,
+            Without<benilla_world::model_fade::DespawnFade>,
+        ),
     >,
     mut swapped: MessageWriter<DisplaySwapped>,
 ) {
@@ -228,6 +232,11 @@ pub(super) fn tick_scale_ease(
     }
 }
 
+/// A rebuild of a body that was drawn, benilla's own palette heal: its composite is forced, so the
+/// body never drops out for frames as an arriving one waits, and rebuilds at once as it always has.
+#[derive(Component)]
+pub(super) struct ShownRebuild;
+
 /// Palette headroom the healer waits for, under the doodad reaper's low-water (256) so the reaper
 /// makes room first; rebuilding into a tight table would starve again.
 const HEAL_MIN_HEADROOM: usize = 128;
@@ -246,6 +255,7 @@ pub(super) fn heal_rig_starved(
         (
             With<benilla_world::rig_palette::RigStarved>,
             With<VisualAttached>,
+            Without<benilla_world::model_fade::DespawnFade>,
         ),
     >,
 ) {
@@ -260,7 +270,8 @@ pub(super) fn heal_rig_starved(
         tear_down_visual(
             commands
                 .entity(entity)
-                .remove::<benilla_world::rig_palette::RigStarved>(),
+                .remove::<benilla_world::rig_palette::RigStarved>()
+                .insert(ShownRebuild),
         );
     }
 }
@@ -385,6 +396,29 @@ mod tests {
             app.world().get_entity(child).is_err(),
             "the old visual's children despawned"
         );
+    }
+
+    #[test]
+    fn a_torn_down_starved_unit_is_not_rebuilt() {
+        let mut app = App::new();
+        app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+        app.add_systems(Update, heal_rig_starved);
+        let unit = app
+            .world_mut()
+            .spawn((
+                benilla_world::rig_palette::RigStarved,
+                VisualAttached,
+                benilla_world::model_fade::DespawnFade::default(),
+                crate::net::Guid(0xB0B),
+            ))
+            .id();
+        app.update();
+        let e = app.world().entity(unit);
+        assert!(
+            e.contains::<VisualAttached>(),
+            "a fading unit keeps its visual"
+        );
+        assert!(!e.contains::<super::super::equipment::Reattached>());
     }
 
     #[test]

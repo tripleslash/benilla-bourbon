@@ -5,7 +5,7 @@ use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::dbc::{parse, str_at, u32_at};
 use crate::items::ItemDisplay;
-use crate::{BlpMipChain, Chain};
+use crate::{read_texture_mip_chain, BlpMipChain, Chain};
 
 const CHAR_SECTIONS: &str = "DBFilesClient\\CharSections.dbc";
 
@@ -171,11 +171,12 @@ pub struct CharSections {
 }
 
 /// The read plan of one body composite — [`CharSections::composite_plan`]'s answer, and the input to
-/// [`CharSections::composite_from_plan`].
+/// [`CharSections::composite_from_plan`] or [`CompositePlan::run`].
 ///
 /// Deliberately opaque past [`CompositePlan::paths`]: the only thing a caller outside this module
 /// wants from it is "what does this need in memory?", and exposing the tile rects would invite a
 /// second place to reason about them.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompositePlan {
     /// The base skin — the canvas. Required.
     base: String,
@@ -194,6 +195,22 @@ impl CompositePlan {
                 .iter()
                 .flat_map(|(c, _)| c.iter().map(String::as_str)),
         )
+    }
+
+    /// Read, decode and blit: each overlay at its tile per authored mip level (`0x475c50`,
+    /// `0x4770f0`). An overlay that reads nowhere is skipped; a base skin that does not read fails.
+    ///
+    /// Deviation: blends in 8-bit RGBA, not the client's RGB565 with 2-bit coverage, because that
+    /// format only saves texture memory and loses precision.
+    pub fn run(&self, mut read: impl FnMut(&str) -> Result<BlpMipChain>) -> Result<BlpMipChain> {
+        let mut atlas =
+            read(&self.base).with_context(|| format!("reading base skin '{}'", self.base))?;
+        for (candidates, tile) in &self.layers {
+            if let Some(overlay) = candidates.iter().find_map(|path| read(path).ok()) {
+                blit_over(&mut atlas, &overlay, *tile);
+            }
+        }
+        Ok(atlas)
     }
 
     /// Read every blob this plan needs and hand the bytes back — **the half that must touch the
@@ -309,12 +326,8 @@ impl CharSections {
             .filter(|s| !s.is_empty())
     }
 
-    /// The body-skin atlas as one mip pyramid: the 256² base skin, the head overlays, the
-    /// underwear, the equipment by bodyslot − 2 and the guild emblem ([`equip_blits`]), each at its
-    /// tile per authored mip level (`0x475c50`, `0x4770f0`); `Ok(None)` without a base skin row.
-    ///
-    /// Deviation: blends in 8-bit RGBA, not the client's RGB565 with 2-bit coverage, because that
-    /// format only saves texture memory and loses precision.
+    /// The body-skin atlas as one mip pyramid, read off `chain` on this thread:
+    /// [`Self::composite_plan`] run by [`CompositePlan::run`]; `Ok(None)` without a base skin row.
     pub fn composite_body(
         &self,
         chain: &mut Chain,
@@ -343,19 +356,22 @@ impl CharSections {
         ) else {
             return Ok(None);
         };
-        self.composite_from_plan(chain, &plan).map(Some)
+        plan.run(|path| read_texture_mip_chain(chain, path))
+            .map(Some)
     }
 
     /// **What a [`Self::composite_body`] with these arguments would read**, and where each layer
-    /// lands — the whole derivation, with no reading in it.
+    /// lands — the whole derivation, with no reading in it: the 256² base skin, the head overlays,
+    /// the underwear, the equipment by bodyslot − 2 and the guild emblem ([`equip_blits`]), in blit
+    /// order. It owns its paths, so [`CompositePlan::run`] can read and blit on any thread.
     ///
-    /// It is split out because the browser needs to ask *before* it starts. The composite blends a
-    /// base skin with up to fifteen overlays into one atlas that is then cached per appearance for
-    /// the session, so a read that is not ready yet cannot simply be skipped and retried: the atlas
-    /// would be cached without that layer, and a tabard would be missing for as long as the player
-    /// wore it. With the plan in hand a caller can warm every path ([`crate::Chain::ready`]) and do
-    /// nothing until they are all in memory — without a second transcription of which section fans
-    /// out to which tile, which is the part that must never drift.
+    /// The browser needs to ask *before* it starts. The composite blends a base skin with up to
+    /// fifteen overlays into one atlas that is then cached per appearance for the session, so a
+    /// read that is not ready yet cannot simply be skipped and retried: the atlas would be cached
+    /// without that layer, and a tabard would be missing for as long as the player wore it. With
+    /// the plan in hand a caller can warm every path ([`crate::Chain::ready`]) and do nothing until
+    /// they are all in memory — without a second transcription of which section fans out to which
+    /// tile, which is the part that must never drift.
     ///
     /// `None` when the race/sex/skin triple names no base skin, which is [`Self::composite_body`]'s
     /// `Ok(None)`: there is nothing to composite onto.
@@ -373,8 +389,8 @@ impl CharSections {
         emblem: Option<GuildEmblem>,
         tabard_preview: bool,
     ) -> Option<CompositePlan> {
-        let base = self.skin_texture(race, sex, skin)?.to_string();
-        let mut layers: Vec<(Vec<String>, Tile)> = Vec::new();
+        let base = self.skin_texture(race, sex, skin)?.to_owned();
+        let mut layers = Vec::new();
         // The head overlays `(sectionType, variation, color, column, tile)` of `0x4782e0`, in order
         // face, facial hair, hair; face and facial hair use columns 0/1, hair 1/2.
         let overlays: [(u8, u8, u8, usize, Tile); 6] = [
@@ -387,7 +403,7 @@ impl CharSections {
         ];
         for (ty, var, color, col, tile) in overlays {
             if let Some(path) = self.tex(race, sex, ty, var, color, col) {
-                layers.push((vec![path.to_string()], tile));
+                layers.push((vec![path.to_owned()], tile));
             }
         }
         // One plan gates the underwear and drives the equipment blits.
@@ -399,7 +415,7 @@ impl CharSections {
                 continue;
             }
             if let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) {
-                layers.push((vec![path.to_string()], EQUIP_TILES[layer]));
+                layers.push((vec![path.to_owned()], EQUIP_TILES[layer]));
             }
         }
         // The equipment and emblem layers in plan order, each from its first decodable candidate.
@@ -410,13 +426,12 @@ impl CharSections {
     }
 
     /// Read and blend what [`Self::composite_plan`] worked out — [`CompositePlan::read`] then
-    /// [`CompositeBlobs::blend`], which is the whole of this function and the reason it stayed.
-    /// The base skin is required (without the canvas there is no atlas) and every layer is
-    /// best-effort, exactly as before the plan was split out of it.
+    /// [`CompositeBlobs::blend`]. The base skin is required (without the canvas there is no atlas)
+    /// and every layer is best-effort.
     ///
     /// Callers that must not spend the decode on the thread they are on take the two halves
-    /// separately; this is for the ones with nothing to gain from that (native, the instrument,
-    /// the tests).
+    /// separately (the browser: the read on the page's thread, the blend on a worker); native
+    /// callers run [`CompositePlan::run`] off the frame thread instead.
     pub fn composite_from_plan(
         &self,
         chain: &mut Chain,

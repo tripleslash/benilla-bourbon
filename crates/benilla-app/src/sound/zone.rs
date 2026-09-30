@@ -7,7 +7,9 @@
 //! interval (`0x4601f0`). A zone-music change (`0x4602e0`) or world entry (`0x45ffc0`, at
 //! `0x45ffdb`) arms the next start to −1 at `0x836400`, so the incoming track opens that tick
 //! (`0x460240`) at full volume: no fade-in primitive (`0x7a57b0`, `0x7a5730`) is called on a
-//! music slot.
+//! music slot. A start that plays nothing (no kit, a file missing from the archive, a failed
+//! open) leaves that deadline armed, so every tick retries with a fresh weighted pick
+//! (`0x460240` writes `[0x836400]` on no failure path): a missing file costs a tick, not the zone.
 //!
 //! Server-pushed music (`SMSG_PLAY_MUSIC`) takes the same slot. The server re-pushes an event
 //! track to loop it (the Darkmoon Faire every 5 s, vmangos `go_scripts.cpp:318`), so a push for
@@ -17,9 +19,22 @@
 //! Ambience (`0x460b00`): an area, interior, day/night or ghost change crossfades over 5.0 s;
 //! submerge/emerge is instant (`0x458650` → `0x460af0`). Day is 05:30 ≤ t < 21:00 on the
 //! server-synced clock, a hard step with no fade (`0x4578c0`, via the `0x642710` range check).
+//! The bed is a looping stream read from the archive as it plays (`0x7a54d0`), opened on the IO
+//! pool so the frame that changes it reads and decodes nothing.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+
+use anyhow::Context;
 use bevy::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::tasks::futures_lite::future;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::tasks::{block_on, IoTaskPool, Task};
+use kira::sound::FromFileError;
 
+#[cfg(not(target_arch = "wasm32"))]
+use benilla_formats::Chain;
 use benilla_formats::{AreaSoundCatalog, TryRead};
 
 use crate::net::{ServerSoundKind, ServerSoundMessage};
@@ -29,7 +44,7 @@ use benilla_world::lighting::GameClock;
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit_ext, KitRef, Latch, PlayExtras, SoundCategory, SoundKits};
-use super::mixer::{self, StreamingSoundHandle};
+use super::mixer::{self, StreamingSoundData, StreamingSoundHandle};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The zone-to-audio catalog; absent when the client data did not load.
@@ -53,8 +68,19 @@ fn phase(clock: &GameClock) -> usize {
     }
 }
 
-/// SoundEntries 4123 `UnderWaterLoop`, the submerged ambience bed.
-const UNDERWATER_LOOP_KIT: u32 = 4123;
+/// The selector's two forced beds (`0x460bd0`), ahead of the weather and zone beds: a ghost's
+/// `[0xb06d48]`, else a submerged listener's `[0xb06d4c]`. The kit is 0 when the row was not
+/// found, and the selector then returns silence rather than falling through, as `0x460bd9` and
+/// `0x460be8` return the global unchecked.
+fn forced_bed(kits: &SoundKits, ghost: bool, submerged: bool) -> Option<u32> {
+    if ghost {
+        Some(kits.ghost_bed().unwrap_or(0))
+    } else if submerged {
+        Some(kits.underwater_bed().unwrap_or(0))
+    } else {
+        None
+    }
+}
 
 /// The outgoing music fade, the only fade on the music slot: `0x4602e0` →
 /// `0x7a5a10(0x40800000 = 4.0f)`.
@@ -127,8 +153,8 @@ pub(super) struct ZoneAudio {
     /// The Lua `PlayMusic` slot, the reference's `[0xb06ccc]`: a second music stream beside the
     /// zone track's `[0xb06cc4]`, driven only by `PlayMusic`/`StopMusic`.
     lua_music: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
-    /// The file on that slot, kept to restart it: `0x7a5620` opens it with `SetLoopCount(-1)`
-    /// (`0x7a5592`), and kira cannot loop a decode-stream.
+    /// The file on that slot, kept to reopen it at its natural end: `0x7a5620` opens it with
+    /// `SetLoopCount(-1)` (`0x7a5592`), where this slot restarts it.
     lua_music_path: Option<String>,
     lua_music_watch: mixer::StreamWatch,
     /// [`Self::music_pending`] for the **override slot**: the path a `PlayMusic` asked for while
@@ -147,13 +173,17 @@ pub(super) struct ZoneAudio {
     #[cfg(target_arch = "wasm32")]
     lua_music_decode: Option<(String, super::web_decode::Pending)>,
     /// When the next zone track starts (`Time::elapsed_secs_f64`); `None` while one plays or the
-    /// zone has no music.
+    /// zone has no music. A due start that plays nothing leaves it set, so the next frame retries
+    /// (`0x460240` never writes `[0x836400]` on a failure).
     next_track_at: Option<f64>,
+    /// Music paths already warned about, so a retry every frame reports a bad file once.
+    unplayable: std::collections::HashSet<String>,
     /// Last frame's [`SoundConfig::music_suppressed`], for its edges.
     music_suppressed: bool,
-    /// The looping ambience kit currently up (0 = none), its handle and base volume.
+    /// The looping ambience kit last asked for (0 = none): the bed playing, or the one opening.
     ambience_kit: u32,
-    ambience: Option<mixer::StaticSoundHandle>,
+    /// The bed playing and its base volume.
+    ambience: Option<StreamingSoundHandle<FromFileError>>,
     ambience_kit_vol: f32,
     /// The incoming leg of an ambience crossfade, while the new bed ramps up.
     ambience_fade_in: Option<FadeIn>,
@@ -173,9 +203,11 @@ pub(super) struct ZoneAudio {
     /// `pick_stream` depletes: re-rolling the kit on every frame of the wait would scatter the warm
     /// across variations and never finish one. See [`open_music_stream`].
     music_pending: Option<(u32, String, f32)>,
-    /// [`Self::music_pending`] for the ambience bed: the pick (kit, file, kit volume) and the fade
-    /// it was asked to arrive with. `ambience_kit` is already committed when this is set, so the
-    /// retry re-enters the bed player directly rather than going back through the swap's edge check.
+    /// fork: web — [`Self::music_pending`] for the ambience bed: the pick (kit, file, kit volume)
+    /// and the fade it was asked to arrive with, retried by [`land_ambience`]. `ambience_kit` is
+    /// already committed when this is set. Native beds open on the IO pool instead
+    /// ([`Self::ambience_opening`]).
+    #[cfg(target_arch = "wasm32")]
     ambience_pending: Option<(u32, String, f32, u64)>,
     /// **The browser's decode in flight for the music slot** — the second half of the same wait
     /// [`Self::music_pending`] is the first half of.
@@ -195,6 +227,11 @@ pub(super) struct ZoneAudio {
     /// per-frame envelope that simply starts later.
     #[cfg(target_arch = "wasm32")]
     ambience_decode: Option<(u32, String, f32, u64, super::web_decode::Pending)>,
+    /// The next bed, opening off the main thread; the playing one holds until it lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    ambience_opening: Option<OpeningBed>,
+    /// The playing bed's starvation meter: it reads from the archive as it plays.
+    ambience_watch: mixer::StreamWatch,
     /// Intro row id to last-played time (secs), against `MinDelayMinutes`.
     intro_last: std::collections::HashMap<u32, f64>,
     area: Option<u32>,
@@ -220,17 +257,22 @@ impl Default for ZoneAudio {
             #[cfg(target_arch = "wasm32")]
             lua_music_decode: None,
             next_track_at: None,
+            unplayable: std::collections::HashSet::new(),
             music_suppressed: false,
             ambience_kit: 0,
             ambience: None,
             ambience_kit_vol: 1.0,
             ambience_fade_in: None,
             music_pending: None,
+            #[cfg(target_arch = "wasm32")]
             ambience_pending: None,
             #[cfg(target_arch = "wasm32")]
             music_decode: None,
             #[cfg(target_arch = "wasm32")]
             ambience_decode: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            ambience_opening: None,
+            ambience_watch: mixer::StreamWatch::new("ambience"),
             intro_last: std::collections::HashMap::new(),
             area: None,
             interior: None,
@@ -358,51 +400,21 @@ fn zone_audio(
             if let Some(mut h) = zone.music.take() {
                 h.stop(mixer::fade(MUSIC_FADE_OUT_MS));
             }
-            zone.next_track_at = None;
-            // The intro preempts the zone track, at full, if off cooldown.
-            let mut slot_taken = false;
-            if let Some(intro) = intro {
-                let ok_at = zone
-                    .intro_last
-                    .get(&intro.id)
-                    .map(|t| t + intro.min_delay_minutes as f64 * 60.0);
-                if ok_at.is_none_or(|t| now >= t)
-                    && intro.sound_id != 0
-                    && start_music_stream(
-                        zone,
-                        &mut out,
-                        &mut kits,
-                        &assets,
-                        &config,
-                        intro.sound_id,
-                    )
-                {
-                    zone.intro_last.insert(intro.id, now);
-                    slot_taken = true;
-                }
-            }
-            // Otherwise the zone track starts now, on a change and on world entry alike (the −1
-            // that `0x4602e0` and `0x45ffc0` arm); the silence interval is same-zone spacing only.
-            if !slot_taken {
-                if let Some(kit) = zone_music_row(&areas.0, music_row).map(|m| m.sounds[phase]) {
-                    if kit != 0 {
-                        start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit);
-                    }
-                }
-            }
+            let kit = zone_music_row(&areas.0, music_row).map(|m| m.sounds[phase]);
+            begin_zone_music(zone, intro, kit, now, |zone, kit| {
+                start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit)
+            });
         }
     }
 
     // ---- ambience: the reference's selector (`0x460bd0`) ranks ghost > submerged > weather >
-    // interior/zone day/night; the ghost bed is the kit named "Ghost", its swap the 5.0 s
-    // crossfade (`0x458680` → `0x460c20`) ----
+    // interior/zone day/night; a ghost's swap is the 5.0 s crossfade (`0x458680` → `0x460c20`) ----
+    reap_stopped_bed(zone);
     let ghost = self_store
         .single()
         .is_ok_and(|store| store.0.player_is_ghost());
-    let desired = if ghost {
-        kits.id_by_name("Ghost").unwrap_or(0)
-    } else if world.submersion().is_water() {
-        UNDERWATER_LOOP_KIT
+    let desired = if let Some(bed) = forced_bed(&kits, ghost, world.submersion().is_water()) {
+        bed
     } else if weather.0 != 0 && world.area_interior().is_none() {
         // `0x460bf7`–`0x460c17`: with the zonetext indoor bit `[0xb06d44]` clear, the weather's
         // SoundEntries is the bed; indoors the selector ignores it, and the swap crossfades.
@@ -428,17 +440,16 @@ fn zone_audio(
         } else {
             AMBIENCE_TRANSITION_FADE_MS
         };
-        swap_ambience(
-            zone, &mut out, &mut kits, &assets, &config, desired, fade_ms, now,
-        );
+        swap_ambience(zone, &out, &mut kits, &assets, desired, fade_ms);
     }
     zone.was_underwater = world.submersion().is_water();
+    land_ambience(zone, &mut out, &assets, &config, now);
 
     // ---- deferred opens (web target) ----
     // A slot that refused to block on a cold pack left its intent latched; the packs it asked for
     // have been warming since. Retried before the transport below so a track that lands this frame
     // is playing before anything looks at whether one is.
-    retry_deferred(zone, &mut out, &assets, &config, now);
+    retry_deferred(zone, &mut out, &assets, &config);
 
     // ---- music transport ----
     // Reap a finished track and schedule the next after a silence interval (`0x4600b6`).
@@ -451,16 +462,13 @@ fn zone_audio(
         }
     }
     // The deadline passed: start the next track. Under a live Lua slot the reference's pump bails
-    // before reading the deadline (`0x460057`) while this consumes it and is refused at the slot;
-    // the same outcome, since only the verb ends the override and it always rewrites the deadline.
+    // before reading the deadline (`0x460057`); here the start is refused at the slot and the
+    // deadline stays armed until the verb rewrites it, the same outcome.
     if zone.next_track_at.is_some_and(|t| now >= t) && zone.music.is_none() {
-        zone.next_track_at = None;
-        if let Some(m) = zone_music_row(&areas.0, zone.zone_music) {
-            let kit = m.sounds[phase];
-            if kit != 0 {
-                start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit);
-            }
-        }
+        let kit = zone_music_row(&areas.0, zone.zone_music).map(|m| m.sounds[phase]);
+        pump_zone_music(zone, kit, |zone, kit| {
+            start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit)
+        });
     }
 
     // ---- per-frame volumes (sliders are live) ----
@@ -485,6 +493,9 @@ fn zone_audio(
             ),
             mixer::glide(),
         );
+    }
+    if let Some(h) = &zone.ambience {
+        zone.ambience_watch.feed(h, f64::from(real.delta_secs()));
     }
 }
 
@@ -559,6 +570,62 @@ fn next_track_time(
 /// (`cmp [0xb06cbc],eax; je`). A `Stopped` handle not yet reaped does not hold the slot.
 fn slot_holds(music_kit: u32, kit_id: u32, slot: Option<kira::sound::PlaybackState>) -> bool {
     music_kit == kit_id && slot.is_some_and(|s| s != kira::sound::PlaybackState::Stopped)
+}
+
+/// A zone-music change's start: the intro if off cooldown, else the zone track now, on a change
+/// and on world entry alike (the −1 that `0x4602e0` and `0x45ffc0` arm); the silence interval is
+/// same-zone spacing only. `kit` is the row's kit for the phase, `None` with no row. A start that
+/// plays nothing leaves the pump armed for the next frame (`0x460240` returns without writing
+/// `[0x836400]`), which is also how a phase with no kit waits for the other one.
+fn begin_zone_music(
+    zone: &mut ZoneAudio,
+    intro: Option<&benilla_formats::ZoneIntroEntry>,
+    kit: Option<u32>,
+    now: f64,
+    mut start: impl FnMut(&mut ZoneAudio, u32) -> bool,
+) {
+    zone.next_track_at = None;
+    if let Some(intro) = intro {
+        let ok_at = zone
+            .intro_last
+            .get(&intro.id)
+            .map(|t| t + intro.min_delay_minutes as f64 * 60.0);
+        if ok_at.is_none_or(|t| now >= t) && intro.sound_id != 0 && start(zone, intro.sound_id) {
+            zone.intro_last.insert(intro.id, now);
+            return;
+        }
+    }
+    let Some(kit) = kit else {
+        return;
+    };
+    if kit == 0 || !start(zone, kit) {
+        zone.next_track_at = Some(now);
+    }
+}
+
+/// The due start: the row's kit for the phase (`None` with no row) with a fresh weighted pick
+/// (`0x45bb70`) per attempt. The deadline is spent only by a stream that opened; a missing file,
+/// no kit or a refused slot leaves it armed (`0x46024b`–`0x4602a4` return before any write).
+fn pump_zone_music(
+    zone: &mut ZoneAudio,
+    kit: Option<u32>,
+    mut start: impl FnMut(&mut ZoneAudio, u32) -> bool,
+) {
+    match kit {
+        None => zone.next_track_at = None,
+        Some(0) => {}
+        Some(kit) => {
+            if start(zone, kit) {
+                zone.next_track_at = None;
+            }
+        }
+    }
+}
+
+/// Whether `path` is newly unplayable: the reference retries a bad pick silently every tick, so
+/// the log hears of each path once.
+fn first_unplayable(zone: &mut ZoneAudio, path: &str) -> bool {
+    zone.unplayable.insert(path.to_owned())
 }
 
 /// Open a music kit on the music slot at full volume (`0x460240` → `0x7a5dc0`), replacing what
@@ -652,7 +719,9 @@ fn open_music_stream(
             return true;
         }
         TryRead::Missing => {
-            warn!("zone music: {path} — not readable from the patch chain");
+            if first_unplayable(zone, &path) {
+                warn!("zone music: {path} — not readable from the patch chain");
+            }
             zone.music_pending = None;
             return false;
         }
@@ -716,7 +785,9 @@ fn play_music_data(
             true
         }
         Err(e) => {
-            warn!("zone music: {path} — {e:#}");
+            if first_unplayable(zone, &path) {
+                warn!("zone music: {path} — {e:#}");
+            }
             false
         }
     }
@@ -917,156 +988,245 @@ fn drop_lua_music(zone: &mut ZoneAudio) {
     }
 }
 
-/// Crossfade the looping ambience bed to a new kit (0 = stop) over `fade_ms`: the old bed fades
-/// out on the backend while the new one starts silent under the per-frame envelope.
+/// Crossfade the looping ambience bed to a new kit (0 = stop) over `fade_ms`. The new bed opens
+/// on the IO pool ([`open_bed`]) and both legs start the frame it lands ([`land_ambience`]), a
+/// frame or more after the swap, where the reference fades out and opens in the one call
+/// (`0x460b31`, `0x460b54`): a cold open can take far longer than a frame. A newer swap drops an
+/// open still in flight, so the latest kit wins.
 fn swap_ambience(
     zone: &mut ZoneAudio,
-    out: &mut SoundOutput,
+    out: &SoundOutput,
     kits: &mut SoundKits,
     assets: &WorldAssets,
-    config: &SoundConfig,
     kit_id: u32,
     fade_ms: u64,
-    now: f64,
 ) {
     if kit_id == zone.ambience_kit {
         return;
     }
-    if let Some(mut h) = zone.ambience.take() {
-        h.stop(mixer::fade(fade_ms));
-    }
     zone.ambience_kit = kit_id;
-    zone.ambience_fade_in = None;
-    zone.ambience_pending = None;
-    // A decode still running for the bed we just swapped away from is abandoned here rather than
-    // left to be refused when it lands: the same drop the read latch above gets, one wait later.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zone.ambience_opening = None;
+    }
+    // A read or a decode still running for the bed swapped away from is abandoned here.
     #[cfg(target_arch = "wasm32")]
     {
+        zone.ambience_pending = None;
         zone.ambience_decode = None;
     }
-    if kit_id == 0 {
-        return;
-    }
-    open_ambience_bed(zone, out, kits, assets, config, kit_id, fade_ms, now);
-}
-
-/// Open the bed [`swap_ambience`] decided on — the half that touches bytes, split out so the web
-/// target's retry ([`retry_deferred`]) can re-enter it without going back through the edge check
-/// above, which has already committed `ambience_kit`.
-#[allow(clippy::too_many_arguments)]
-fn open_ambience_bed(
-    zone: &mut ZoneAudio,
-    out: &mut SoundOutput,
-    kits: &mut SoundKits,
-    assets: &WorldAssets,
-    config: &SoundConfig,
-    kit_id: u32,
-    fade_ms: u64,
-    now: f64,
-) {
-    if out.mixer.is_none() {
-        return;
-    }
-    let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
+    let pick = if kit_id != 0 && out.mixer.is_some() {
+        kits.pick_stream(kit_id)
+    } else {
+        None
+    };
+    let Some((path, kit_vol)) = pick else {
+        // Nothing opens, so the old bed goes now: the reference's fade-out precedes its open
+        // (`0x460b31`, then `0x460b54`).
+        fade_out_ambience(zone, fade_ms);
         return;
     };
-    play_ambience_bed(
-        zone, out, assets, config, kit_id, path, kit_vol, fade_ms, now,
-    );
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let chain = assets.chain.clone();
+        let open_path = path.clone();
+        begin_bed_open(zone, path, kit_vol, fade_ms, move || {
+            open_bed(&chain, &open_path)
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    read_web_bed(zone, assets, kit_id, path, kit_vol, fade_ms);
 }
 
-/// Play an ambience bed that has **already been picked** — [`open_ambience_bed`] past the variation
-/// roll, split for the same reason [`open_music_stream`] is: `pick_stream` depletes, and the web
-/// target's retry must re-open the file it chose rather than roll the kit again on every frame the
-/// pack is still coming down.
-#[allow(clippy::too_many_arguments)]
-fn play_ambience_bed(
+/// fork: web — read a picked bed off the page's chain and hand it to the browser to decode
+/// ([`super::web_decode`], `true` the whole-file loop a bed needs). A pack still on the wire
+/// latches the pick for [`land_ambience`] to retry, rather than block the frame on a fetch. A bed
+/// that does not read leaves silence behind the old one's fade, as a failed open does.
+#[cfg(target_arch = "wasm32")]
+fn read_web_bed(
     zone: &mut ZoneAudio,
-    out: &mut SoundOutput,
     assets: &WorldAssets,
-    config: &SoundConfig,
     kit_id: u32,
     path: String,
     kit_vol: f32,
     fade_ms: u64,
-    now: f64,
 ) {
-    // Checked, not borrowed — the mixer is the tail's ([`play_ambience_data`]), and so are the
-    // config and the clock: on the page they are read frames later, when the bed actually opens.
-    if out.mixer.is_none() {
-        return;
-    }
-    #[cfg(target_arch = "wasm32")]
-    let (_, _) = (config, now);
     let bytes = match assets.chain.lock_recover().try_read(&path) {
         TryRead::Ready(bytes) => bytes,
-        // Not in memory yet (web only) — latch the pick and the fade it asked for, and let the
-        // per-frame retry open the bed once the pack lands. Blocking here would freeze the frame on
-        // a fetch for a sound the player has not noticed is missing yet.
         TryRead::Pending => {
             zone.ambience_pending = Some((kit_id, path, kit_vol, fade_ms));
             return;
         }
         TryRead::Missing => {
             warn!("ambience: {path} — not readable from the patch chain");
-            zone.ambience_pending = None;
+            fade_out_ambience(zone, fade_ms);
             return;
         }
     };
-    zone.ambience_pending = None;
-    // The decode goes to the browser and the bed opens on the frame the PCM lands — `true` is the
-    // whole-file loop `loop_from_bytes` applies on the synchronous path. The crossfade absorbs the
-    // extra frames: its incoming leg is a per-frame envelope that simply starts later.
-    #[cfg(target_arch = "wasm32")]
-    {
-        zone.ambience_decode = Some((
-            kit_id,
-            path,
-            kit_vol,
-            fade_ms,
-            super::web_decode::begin(bytes, true),
-        ));
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        // A static loop, NOT a stream: streaming loop beds die at EOF (mixer::loop_from_bytes docs).
-        let data = match mixer::loop_from_bytes(bytes) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("ambience: {path} — {e:#}");
-                return;
-            }
-        };
-        play_ambience_data(
-            zone, out, config, kit_id, &path, kit_vol, fade_ms, now, data,
-        );
-    }
+    zone.ambience_decode = Some((
+        kit_id,
+        path,
+        kit_vol,
+        fade_ms,
+        super::web_decode::begin(bytes, true),
+    ));
 }
 
-/// The tail of [`play_ambience_bed`]: a **decoded** bed into the slot. Split for the same reason
-/// [`play_music_data`] is — on the web target the decode happens between the halves, off the frame.
-#[allow(clippy::too_many_arguments)]
-fn play_ambience_data(
-    zone: &mut ZoneAudio,
-    out: &mut SoundOutput,
-    config: &SoundConfig,
-    kit_id: u32,
-    path: &str,
+/// An ambience bed opening off the main thread, and how it goes in once open.
+#[cfg(not(target_arch = "wasm32"))]
+struct OpeningBed {
+    path: String,
     kit_vol: f32,
     fade_ms: u64,
-    now: f64,
-    data: mixer::StaticSoundData,
+    task: Task<anyhow::Result<StreamingSoundData<FromFileError>>>,
+}
+
+/// A bed whose open finished, ready to land.
+struct OpenedBed {
+    path: String,
+    kit_vol: f32,
+    fade_ms: u64,
+    stream: anyhow::Result<StreamingSoundData<FromFileError>>,
+}
+
+/// Run `open` on the IO pool as the next bed, replacing any open in flight.
+#[cfg(not(target_arch = "wasm32"))]
+fn begin_bed_open(
+    zone: &mut ZoneAudio,
+    path: String,
+    kit_vol: f32,
+    fade_ms: u64,
+    open: impl FnOnce() -> anyhow::Result<StreamingSoundData<FromFileError>> + Send + 'static,
 ) {
-    let Some(mixer_ref) = out.mixer.as_mut() else {
+    let task = IoTaskPool::get().spawn(async move { open() });
+    zone.ambience_opening = Some(OpeningBed {
+        path,
+        kit_vol,
+        fade_ms,
+        task,
+    });
+}
+
+/// The open in flight, once it has finished.
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_bed_open(zone: &mut ZoneAudio) -> Option<OpenedBed> {
+    let stream = block_on(future::poll_once(&mut zone.ambience_opening.as_mut()?.task))?;
+    let OpeningBed {
+        path,
+        kit_vol,
+        fade_ms,
+        ..
+    } = zone.ambience_opening.take()?;
+    Some(OpenedBed {
+        path,
+        kit_vol,
+        fade_ms,
+        stream,
+    })
+}
+
+/// fork: web — the bed whose read and decode finished: a latched read is retried first (its pack
+/// has been warming), then the browser's decode is polled. A result for a kit swapped away from
+/// is dropped.
+#[cfg(target_arch = "wasm32")]
+fn poll_bed_open(zone: &mut ZoneAudio, assets: &WorldAssets) -> Option<OpenedBed> {
+    if let Some((kit, path, kit_vol, fade_ms)) = zone.ambience_pending.take() {
+        if kit == zone.ambience_kit {
+            read_web_bed(zone, assets, kit, path, kit_vol, fade_ms);
+        }
+    }
+    let (kit, path, kit_vol, fade_ms, mut pending) = zone.ambience_decode.take()?;
+    let Some(decoded) = pending.take() else {
+        zone.ambience_decode = Some((kit, path, kit_vol, fade_ms, pending));
+        return None;
+    };
+    if kit != zone.ambience_kit {
+        return None;
+    }
+    Some(OpenedBed {
+        path,
+        kit_vol,
+        fade_ms,
+        stream: decoded
+            .map(mixer::stream_from_decoded)
+            .map_err(|e| anyhow::anyhow!(e)),
+    })
+}
+
+/// Whether a bed is on its way in: the open in flight (native), or its read or decode (web).
+fn bed_opening(zone: &ZoneAudio) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return zone.ambience_opening.is_some();
+    #[cfg(target_arch = "wasm32")]
+    return zone.ambience_pending.is_some() || zone.ambience_decode.is_some();
+}
+
+/// Open `path` as a looping ambience stream, read from its archive a sector at a time as it
+/// plays: the reference opens a bed with `FSOUND_Stream_Open` in mode `0x82002`, its `0x2` the
+/// loop bit, and loop count −1 (`0x458900` → `0x7a5620` → `0x7a54d0`, `0x7a5592`), reading
+/// through its MPQ file callbacks. The chain's lock covers the archive lookup alone.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundData<FromFileError>> {
+    let archive = chain.lock_recover().archive_for(path)?;
+    let file = archive
+        .open_file(path)
+        .with_context(|| format!("opening {path} in {}", archive.path().display()))?;
+    let len = file.size();
+    Ok(mixer::stream_from_source(file, len)?.loop_region(..))
+}
+
+/// The frame the next bed's open lands: the old bed fades out over the swap's `fade_ms` and the
+/// new one starts under the per-frame fade-in envelope (`0x460b31`, `0x460b76`–`0x460b8c`), or at
+/// full with the old one cut when the swap is instant. A bed that failed to open leaves silence,
+/// as the reference's failed open leaves `[0xb06d3c]` empty behind the fade.
+fn land_ambience(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    now: f64,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = assets;
+    #[cfg(not(target_arch = "wasm32"))]
+    let opened = poll_bed_open(zone);
+    #[cfg(target_arch = "wasm32")]
+    let opened = poll_bed_open(zone, assets);
+    let Some(opened) = opened else {
         return;
     };
-    let _ = kit_id;
+    let ambience_amp = config.category_amp(SoundCategory::Ambience);
+    start_bed(zone, opened, ambience_amp, now, |data| {
+        out.mixer
+            .as_mut()
+            .context("the audio device closed")?
+            .play_stream(data)
+    });
+}
+
+/// [`land_ambience`] once the bed is open: `play` starts it on the device.
+fn start_bed(
+    zone: &mut ZoneAudio,
+    opened: OpenedBed,
+    ambience_amp: f32,
+    now: f64,
+    play: impl FnOnce(
+        StreamingSoundData<FromFileError>,
+    ) -> anyhow::Result<StreamingSoundHandle<FromFileError>>,
+) {
+    let OpenedBed {
+        path,
+        kit_vol,
+        fade_ms,
+        stream,
+    } = opened;
+    fade_out_ambience(zone, fade_ms);
     let start_amp = if fade_ms > 0 {
         0.0
     } else {
-        config.category_amp(SoundCategory::Ambience) * kit_vol
+        ambience_amp * kit_vol
     };
-    match mixer_ref.play_2d(data.volume(mixer::amp_to_db(start_amp))) {
+    match stream.and_then(|data| play(data.volume(mixer::amp_to_db(start_amp)))) {
         Ok(h) => {
             info!("ambience: {path}");
             zone.ambience = Some(h);
@@ -1079,14 +1239,14 @@ fn play_ambience_data(
     }
 }
 
-/// Re-attempt the opens the **web target** deferred: a music track or an ambience bed whose bytes
-/// were not in memory when the scheduler asked for them.
+/// Re-attempt the music opens the **web target** deferred: a track whose bytes were not in memory
+/// when the scheduler asked for them. The ambience bed's retry is [`land_ambience`]'s.
 ///
 /// It is a per-frame poll and not a callback because that is all it needs to be — the read that
 /// deferred also started the pack warming, so this converges in the handful of frames a fetch takes,
-/// and the poll itself is a `Map` lookup through the resident bridge. **On native both latches are
-/// permanently `None`** (`Chain::try_read` never answers `Pending` there), so this is two `Option`
-/// tests and a return.
+/// and the poll itself is a `Map` lookup through the resident bridge. **On native the latch is
+/// permanently `None`** (`Chain::try_read` never answers `Pending` there), so this is an `Option`
+/// test and a return.
 ///
 /// Nothing here re-decides anything: the scheduling was settled when the intent was latched, and
 /// this only carries it out. A latch is dropped the moment its open succeeds or the file turns out
@@ -1096,7 +1256,6 @@ fn retry_deferred(
     out: &mut SoundOutput,
     assets: &WorldAssets,
     config: &SoundConfig,
-    now: f64,
 ) {
     // `take`, not `clone`: the openers re-latch on a second `Pending`, so taking it here avoids
     // cloning the path on every frame of the wait and leaves exactly one owner of the intent.
@@ -1105,13 +1264,6 @@ fn retry_deferred(
         // that owns the slot's gate — a latch that outlives the reason it was made must not route
         // around it.
         open_music_stream(zone, out, assets, config, kit, path, kit_vol);
-    }
-    if let Some((kit, path, kit_vol, fade_ms)) = zone.ambience_pending.take() {
-        // Only while the bed is still the one wanted — a second swap during the wait re-latched,
-        // and a swap to silence cleared it. Either way `take` above is the drop.
-        if kit == zone.ambience_kit {
-            play_ambience_bed(zone, out, assets, config, kit, path, kit_vol, fade_ms, now);
-        }
     }
     // The decode half of the same wait (`super::web_decode`). Polled here rather than woken by a
     // callback for the reason the read half is: this system already runs every frame, and a poll
@@ -1139,20 +1291,42 @@ fn retry_deferred(
                 Some(Err(e)) => warn!("zone music: {path} — {e}"),
             }
         }
-        if let Some((kit, path, kit_vol, fade_ms, mut pending)) = zone.ambience_decode.take() {
-            match pending.take() {
-                None => zone.ambience_decode = Some((kit, path, kit_vol, fade_ms, pending)),
-                Some(Ok(data)) => {
-                    if kit == zone.ambience_kit {
-                        play_ambience_data(
-                            zone, out, config, kit, &path, kit_vol, fade_ms, now, data,
-                        );
-                    }
-                }
-                Some(Err(e)) => warn!("ambience: {path} — {e}"),
-            }
-        }
     }
+}
+
+/// Drop a bed that stopped by itself, which a looping stream does only on a read or decode
+/// error, and clear its kit so the selection reopens it next; whether one was reaped. An open in
+/// flight replaces it anyway, so its kit is kept.
+fn reap_stopped_bed(zone: &mut ZoneAudio) -> bool {
+    let Some(h) = zone.ambience.as_mut() else {
+        return false;
+    };
+    if h.state() != kira::sound::PlaybackState::Stopped {
+        return false;
+    }
+    let error = h
+        .pop_error()
+        .map_or_else(|| "no error reported".to_owned(), |e| e.to_string());
+    warn!(
+        "ambience: kit {} stopped mid-play — {error}",
+        zone.ambience_kit
+    );
+    zone.ambience = None;
+    zone.ambience_fade_in = None;
+    zone.ambience_watch.reset();
+    if !bed_opening(zone) {
+        zone.ambience_kit = 0;
+    }
+    true
+}
+
+/// Release the playing bed to fade out over `fade_ms` on the backend; `0` cuts it.
+fn fade_out_ambience(zone: &mut ZoneAudio, fade_ms: u64) {
+    if let Some(mut h) = zone.ambience.take() {
+        h.stop(mixer::fade(fade_ms));
+    }
+    zone.ambience_fade_in = None;
+    zone.ambience_watch.reset();
 }
 
 /// The Lua music slot: this frame's queued verbs, the loop, the slider and the watch.
@@ -1361,6 +1535,17 @@ fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
     if let Some(mut h) = zone.ambience.take() {
         h.stop(mixer::fade(WORLD_TEARDOWN_FADE_MS));
     }
+    // An open still in flight lands nowhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zone.ambience_opening = None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.ambience_pending = None;
+        zone.ambience_decode = None;
+    }
+    zone.ambience_watch.reset();
     zone.zone_music = 0;
     zone.music_kit = 0;
     zone.music_kit_vol = 1.0;
@@ -1419,10 +1604,184 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_music_suppression, slot_holds, take_lua_music_slot, ZoneAudio,
+        apply_music_suppression, begin_bed_open, begin_zone_music, first_unplayable, forced_bed,
+        open_bed, poll_bed_open, pump_zone_music, reap_stopped_bed, slot_holds, start_bed,
+        stop_world_soundscape, take_lua_music_slot, OpenedBed, ZoneAudio,
         CINEMATIC_MUSIC_RESUME_SECS, LUA_MUSIC_SCHEDULE_SECS,
     };
-    use kira::sound::PlaybackState;
+    use crate::sound::kit::SoundKits;
+    use crate::sound::mixer;
+    use benilla_formats::SoundKitCatalog;
+    use kira::sound::streaming::StreamingSoundData;
+    use kira::sound::{FromFileError, PlaybackState};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// A kit of `files`, of which only the `present` ones open, picked uniformly per attempt as
+    /// the reference's weighted pick does: every attempt is logged in `tried`.
+    struct Kit {
+        files: usize,
+        present: Vec<usize>,
+        tried: Vec<usize>,
+        /// Picks to make first, then the RNG's.
+        script: Vec<usize>,
+    }
+
+    impl Kit {
+        fn start(&mut self, zone: &mut ZoneAudio, _kit: u32) -> bool {
+            let pick = if self.script.is_empty() {
+                zone.rand() as usize % self.files
+            } else {
+                self.script.remove(0)
+            };
+            self.tried.push(pick);
+            self.present.contains(&pick)
+        }
+    }
+
+    /// The pump's frame loop, as `zone_audio` runs it: a track starts once the deadline passed.
+    fn frames(zone: &mut ZoneAudio, kit: &mut Kit, n: usize, mut playing: impl FnMut() -> bool) {
+        for f in 0..n {
+            let now = f as f64 / 60.0;
+            if zone.next_track_at.is_some_and(|t| now >= t) && !playing() {
+                pump_zone_music(zone, Some(7), |z, k| kit.start(z, k));
+            }
+        }
+    }
+
+    /// The Crossroads' shape: four tracks, one in the install.
+    #[test]
+    fn a_pick_that_lands_on_a_missing_file_is_retried_until_one_plays() {
+        let mut zone = ZoneAudio {
+            next_track_at: Some(0.0),
+            ..ZoneAudio::default()
+        };
+        let mut kit = Kit {
+            files: 4,
+            present: vec![2],
+            tried: vec![],
+            script: vec![0, 1],
+        };
+        frames(&mut zone, &mut kit, 600, || false);
+        assert_eq!(kit.tried.last(), Some(&2), "a later frame found the track");
+        assert!(kit.tried.len() > 1, "the seed's first pick is a miss");
+        assert_eq!(
+            zone.next_track_at, None,
+            "the deadline is spent by the start"
+        );
+        let n = kit.tried.len();
+        frames(&mut zone, &mut kit, 60, || false);
+        assert_eq!(kit.tried.len(), n, "nothing retries once a stream opened");
+    }
+
+    #[test]
+    fn a_zone_change_whose_start_fails_keeps_the_pump_armed() {
+        let mut zone = ZoneAudio::default();
+        let mut kit = Kit {
+            files: 4,
+            present: vec![],
+            tried: vec![],
+            script: vec![0],
+        };
+        begin_zone_music(&mut zone, None, Some(7), 5.0, |z, k| kit.start(z, k));
+        assert_eq!(kit.tried.len(), 1, "the change starts inline");
+        assert_eq!(zone.next_track_at, Some(5.0), "and arms the retry at once");
+
+        kit.present = vec![0, 1, 2, 3];
+        let mut now = 5.0;
+        while zone.next_track_at.is_some() {
+            pump_zone_music(&mut zone, Some(7), |z, k| kit.start(z, k));
+            now += 1.0 / 60.0;
+            assert!(now < 10.0);
+        }
+        assert_eq!(kit.tried.len(), 2, "the next frame's pick played");
+    }
+
+    #[test]
+    fn a_zone_change_that_starts_leaves_nothing_armed() {
+        let mut zone = ZoneAudio {
+            next_track_at: Some(1.0),
+            ..ZoneAudio::default()
+        };
+        let mut kit = Kit {
+            files: 1,
+            present: vec![0],
+            tried: vec![],
+            script: vec![],
+        };
+        begin_zone_music(&mut zone, None, Some(7), 5.0, |z, k| kit.start(z, k));
+        assert_eq!(zone.next_track_at, None);
+        // No row: no music, nothing to retry.
+        begin_zone_music(&mut zone, None, None, 5.0, |_, _| {
+            panic!("no row starts nothing")
+        });
+        assert_eq!(zone.next_track_at, None);
+    }
+
+    /// Everlook: a kit for one phase only. The pump waits for the phase that has one.
+    #[test]
+    fn a_phase_with_no_kit_stays_armed_until_the_other_phase_has_one() {
+        let mut zone = ZoneAudio::default();
+        begin_zone_music(&mut zone, None, Some(0), 3.0, |_, _| {
+            panic!("kit 0 opens nothing")
+        });
+        assert_eq!(zone.next_track_at, Some(3.0));
+        for _ in 0..100 {
+            pump_zone_music(&mut zone, Some(0), |_, _| panic!("kit 0 opens nothing"));
+        }
+        assert_eq!(zone.next_track_at, Some(3.0));
+
+        let mut started = vec![];
+        pump_zone_music(&mut zone, Some(9), |_, k| {
+            started.push(k);
+            true
+        });
+        assert_eq!(started, [9]);
+        assert_eq!(zone.next_track_at, None);
+    }
+
+    #[test]
+    fn a_zone_with_no_music_row_drops_the_deadline() {
+        let mut zone = ZoneAudio {
+            next_track_at: Some(0.0),
+            ..ZoneAudio::default()
+        };
+        pump_zone_music(&mut zone, None, |_, _| panic!("no row starts nothing"));
+        assert_eq!(zone.next_track_at, None);
+    }
+
+    /// The intro wins when it plays; one that fails falls through to the zone track.
+    #[test]
+    fn an_intro_that_fails_falls_through_to_the_zone_track() {
+        let intro = benilla_formats::ZoneIntroEntry {
+            id: 1,
+            sound_id: 11,
+            priority: 0,
+            min_delay_minutes: 10,
+        };
+        let mut zone = ZoneAudio::default();
+        let mut asked = vec![];
+        begin_zone_music(&mut zone, Some(&intro), Some(7), 0.0, |_, k| {
+            asked.push(k);
+            k == 7
+        });
+        assert_eq!(asked, [11, 7]);
+        assert_eq!(zone.next_track_at, None);
+        assert!(
+            !zone.intro_last.contains_key(&1),
+            "a failed intro is not stamped"
+        );
+    }
+
+    #[test]
+    fn a_missing_path_is_reported_once_across_retries() {
+        let mut zone = ZoneAudio::default();
+        let hits = (0..500)
+            .filter(|_| first_unplayable(&mut zone, "Sound\\Music\\a.mp3"))
+            .count();
+        assert_eq!(hits, 1);
+        assert!(first_unplayable(&mut zone, "Sound\\Music\\b.mp3"));
+    }
 
     #[test]
     fn a_cinematic_cuts_the_music_and_brings_it_back_three_seconds_later() {
@@ -1531,5 +1890,351 @@ mod tests {
         assert!(!slot_holds(8440, 8440, Some(PlaybackState::Stopped)));
         assert!(!slot_holds(8440, 8440, None));
         assert!(!slot_holds(8440, 4123, Some(PlaybackState::Playing)));
+    }
+
+    /// A ghost hears its own bed whatever the water does, a swimmer the underwater one, and a
+    /// living dry listener neither. A row named plain `Ghost` or `UnderWaterLoop`, which the
+    /// selector does not look for, is never the bed.
+    #[test]
+    fn a_ghost_selects_the_ghost_bed_ahead_of_the_water_bed() {
+        let kits = SoundKits::new(SoundKitCatalog::named_for_tests(&[
+            (7, "Ghost"),
+            (4123, "UnderWaterLoop"),
+            (4160, "Ghost (DONOTRENAME)"),
+            (4209, "Underwater (DONOTRENAME)"),
+        ]));
+        assert_eq!(forced_bed(&kits, true, false), Some(4160));
+        assert_eq!(
+            forced_bed(&kits, true, true),
+            Some(4160),
+            "ghost outranks water"
+        );
+        assert_eq!(forced_bed(&kits, false, true), Some(4209));
+        assert_eq!(
+            forced_bed(&kits, false, false),
+            None,
+            "the weather and zone beds follow"
+        );
+    }
+
+    /// `0x460bd9` and `0x460be8` return the global unchecked, so an unresolved row is silence
+    /// (kit 0), not the next bed in the ranking.
+    #[test]
+    fn an_unresolved_forced_bed_is_silence() {
+        let kits = SoundKits::new(SoundKitCatalog::named_for_tests(&[(
+            4123,
+            "UnderWaterLoop",
+        )]));
+        assert_eq!(forced_bed(&kits, true, false), Some(0));
+        assert_eq!(forced_bed(&kits, false, true), Some(0));
+        assert_eq!(forced_bed(&kits, false, false), None);
+    }
+
+    /// With the install: the ghost bed is `GhostState.wav` and the water bed the underwater loop
+    /// at its own row's volume, each a file the chain opens.
+    #[test]
+    fn the_install_s_ghost_and_water_beds_are_the_donotrename_rows() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("chain");
+        let catalog = benilla_formats::load_sound_kit_catalog(&mut chain).expect("SoundEntries");
+        let mut kits = SoundKits::new(catalog);
+        assert_eq!(forced_bed(&kits, true, false), Some(4160));
+        assert_eq!(forced_bed(&kits, false, true), Some(4209));
+        for (kit, file) in [(4160, "GhostState.wav"), (4209, "UndwaterLoop.wav")] {
+            let (path, _) = kits.pick_stream(kit).expect("the kit has a bed");
+            assert!(path.ends_with(file), "kit {kit} plays {path}");
+            assert!(chain.contains(&path), "{path} is in the archives");
+        }
+    }
+
+    fn io_pool() {
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+    }
+
+    /// A short synthetic bed, stereo with the install's mono `nBlockAlign`.
+    fn bed() -> anyhow::Result<StreamingSoundData<FromFileError>> {
+        let wav = mixer::tests::pcm16_wav(22_050, 2, 2, 100, |i| i as i16);
+        Ok(mixer::stream_from_bytes(wav)?.loop_region(..))
+    }
+
+    /// An opener held until `gate` fires; run on the caller's thread it gives up after 2 s.
+    fn held(
+        gate: mpsc::Receiver<()>,
+        ran_on: Arc<Mutex<Option<std::thread::ThreadId>>>,
+    ) -> impl FnOnce() -> anyhow::Result<StreamingSoundData<FromFileError>> + Send + 'static {
+        move || {
+            *ran_on.lock().unwrap() = Some(std::thread::current().id());
+            let _ = gate.recv_timeout(Duration::from_secs(2));
+            bed()
+        }
+    }
+
+    fn wait_landed(zone: &mut ZoneAudio) -> Option<OpenedBed> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(bed) = poll_bed_open(zone) {
+                return Some(bed);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        None
+    }
+
+    /// The swap's frame reads and decodes nothing: the open runs on the IO pool, and the caller
+    /// is back while it is still held.
+    #[test]
+    fn a_bed_opens_off_the_calling_thread() {
+        io_pool();
+        let mut zone = ZoneAudio::default();
+        let (release, gate) = mpsc::channel();
+        let ran_on = Arc::new(Mutex::new(None));
+        begin_bed_open(
+            &mut zone,
+            "a.wav".into(),
+            1.0,
+            5000,
+            held(gate, ran_on.clone()),
+        );
+        assert!(
+            poll_bed_open(&mut zone).is_none(),
+            "nothing lands while the open is held"
+        );
+        let _ = release.send(());
+        let landed = wait_landed(&mut zone).expect("the open lands");
+        assert_eq!(landed.path, "a.wav");
+        assert!(landed.stream.is_ok());
+        let ran_on = ran_on.lock().unwrap().expect("the open ran");
+        assert_ne!(ran_on, std::thread::current().id(), "opened off the caller");
+    }
+
+    /// Latest wins: a swap made while an open is in flight drops it.
+    #[test]
+    fn a_newer_swap_drops_the_open_in_flight() {
+        io_pool();
+        let mut zone = ZoneAudio::default();
+        let (release, gate) = mpsc::channel();
+        begin_bed_open(
+            &mut zone,
+            "old.wav".into(),
+            1.0,
+            5000,
+            held(gate, Arc::default()),
+        );
+        begin_bed_open(&mut zone, "new.wav".into(), 0.5, 5000, bed);
+        let _ = release.send(());
+        let landed = wait_landed(&mut zone).expect("the open lands");
+        assert_eq!(landed.path, "new.wav");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            poll_bed_open(&mut zone).is_none(),
+            "the dropped open never lands"
+        );
+    }
+
+    /// Leaving the world (or the loading cover) takes an open in flight with it.
+    #[test]
+    fn leaving_the_world_drops_an_open_in_flight() {
+        io_pool();
+        let mut zone = ZoneAudio {
+            ambience_kit: 7,
+            ..Default::default()
+        };
+        let (release, gate) = mpsc::channel();
+        begin_bed_open(
+            &mut zone,
+            "a.wav".into(),
+            1.0,
+            5000,
+            held(gate, Arc::default()),
+        );
+        stop_world_soundscape(&mut zone, "test");
+        let _ = release.send(());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(poll_bed_open(&mut zone).is_none());
+        assert_eq!(zone.ambience_kit, 0);
+    }
+
+    /// A landed bed: 5 s in under the envelope, or cut in at full; a failed open leaves silence.
+    #[test]
+    fn a_landed_bed_fades_in_or_cuts_in() {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+        use kira::{AudioManager, AudioManagerSettings};
+        let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
+            backend_settings: MockBackendSettings {
+                sample_rate: 22_050,
+            },
+            ..Default::default()
+        })
+        .expect("mock backend");
+        let mut play = |d| manager.play(d).map_err(|e| anyhow::anyhow!("{e}"));
+        let opened = |fade_ms, stream| OpenedBed {
+            path: "a.wav".into(),
+            kit_vol: 0.5,
+            fade_ms,
+            stream,
+        };
+        let mut zone = ZoneAudio::default();
+
+        start_bed(&mut zone, opened(5000, bed()), 1.0, 10.0, &mut play);
+        assert!(zone.ambience.is_some());
+        assert_eq!(zone.ambience_kit_vol, 0.5);
+        let fade = zone.ambience_fade_in.expect("the in-leg ramps");
+        assert_eq!(fade.gain(10.0), 0.0);
+        assert!((fade.gain(12.5) - 0.5).abs() < 1e-6);
+
+        start_bed(&mut zone, opened(0, bed()), 1.0, 20.0, &mut play);
+        assert!(zone.ambience.is_some());
+        assert!(zone.ambience_fade_in.is_none(), "an instant swap cuts in");
+
+        let failed = opened(5000, Err(anyhow::anyhow!("missing")));
+        start_bed(&mut zone, failed, 1.0, 30.0, &mut play);
+        assert!(
+            zone.ambience.is_none(),
+            "the old bed went, nothing replaced it"
+        );
+    }
+
+    /// The main thread's cost of an ambience change, before (read and decode the bed whole) and
+    /// after (queue the open; start the opened stream), over every bed in the install.
+    #[test]
+    #[ignore = "instrument: run by hand — cargo test -p benilla-app --lib sound::zone::tests::bed_swap_cost -- --ignored --nocapture"]
+    fn bed_swap_cost() {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+        use kira::{AudioManager, AudioManagerSettings};
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Arc::new(Mutex::new(
+            benilla_formats::open_chain(&data).expect("chain"),
+        ));
+        io_pool();
+        let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
+            backend_settings: MockBackendSettings {
+                sample_rate: 44_100,
+            },
+            ..Default::default()
+        })
+        .expect("mock backend");
+        let beds: Vec<String> = chain
+            .lock()
+            .unwrap()
+            .list()
+            .expect("listing")
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                n.starts_with("sound\\ambience\\") && n.ends_with(".wav")
+            })
+            .collect();
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+        // Warm, as a running client's IO pool and kira are by its first swap.
+        let mut zone = ZoneAudio::default();
+        let (c, p) = (chain.clone(), beds[0].clone());
+        begin_bed_open(&mut zone, p.clone(), 1.0, 0, move || open_bed(&c, &p));
+        let landed = wait_landed(&mut zone).expect("lands");
+        start_bed(&mut zone, landed, 1.0, 0.0, |d| {
+            manager.play(d).map_err(|e| anyhow::anyhow!("{e}"))
+        });
+        let (mut before, mut after, mut worker) = (Vec::new(), Vec::new(), Vec::new());
+        for path in &beds {
+            // After: the swap's frame queues the open; the landing frame starts the stream.
+            let mut zone = ZoneAudio::default();
+            let (c, p) = (chain.clone(), path.clone());
+            let worker_ms = Arc::new(Mutex::new(0.0));
+            let w = worker_ms.clone();
+            let t = Instant::now();
+            begin_bed_open(&mut zone, path.clone(), 1.0, 5000, move || {
+                let t = Instant::now();
+                let bed = open_bed(&c, &p);
+                *w.lock().unwrap() = ms(t);
+                bed
+            });
+            let queue = ms(t);
+            let landed = wait_landed(&mut zone).expect("lands");
+            let t = Instant::now();
+            start_bed(&mut zone, landed, 1.0, 0.0, |d| {
+                manager.play(d).map_err(|e| anyhow::anyhow!("{e}"))
+            });
+            let start = ms(t);
+            assert!(zone.ambience.is_some(), "{path} plays");
+            stop_world_soundscape(&mut zone, "next");
+
+            // Before: the whole bed read and decoded on the caller.
+            let t = Instant::now();
+            let bytes = chain.lock().unwrap().read(path).expect("reads");
+            let read = ms(t);
+            let t = Instant::now();
+            let _bed = mixer::sfx_from_bytes(bytes)
+                .expect("decodes")
+                .loop_region(..);
+            let decode = ms(t);
+
+            eprintln!(
+                "{path}: before read {read:.1} + decode {decode:.1} ms | after queue {queue:.3} \
+                 + start {start:.3} ms on the caller, open {:.2} ms on the IO pool",
+                worker_ms.lock().unwrap()
+            );
+            before.push(read + decode);
+            after.push(queue + start);
+            worker.push(*worker_ms.lock().unwrap());
+        }
+        let summary = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            format!("{:.3} / {:.3} / {:.3}", at(0.5), at(0.9), at(1.0))
+        };
+        eprintln!(
+            "{} beds, median / p90 / max ms: before, on the caller {}; after, on the caller {}, \
+             on the IO pool {}",
+            beds.len(),
+            summary(&mut before),
+            summary(&mut after),
+            summary(&mut worker),
+        );
+    }
+
+    /// A source whose reads fail past `limit` bytes, as a bad archive sector would mid-play.
+    struct FailsAfter(std::io::Cursor<Vec<u8>>, u64);
+
+    impl std::io::Read for FailsAfter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let left = self.1.saturating_sub(self.0.position());
+            if left == 0 {
+                return Err(std::io::Error::other("unreadable sector"));
+            }
+            let n = buf.len().min(left as usize);
+            self.0.read(&mut buf[..n])
+        }
+    }
+
+    impl std::io::Seek for FailsAfter {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(to)
+        }
+    }
+
+    /// A bed that a read error stops mid-play is reaped and its kit cleared, so the selection
+    /// reopens it the next frame instead of leaving silence until the kit changes.
+    #[test]
+    fn a_bed_that_stops_mid_play_is_reaped() {
+        let wav = mixer::tests::pcm16_wav(22_050, 2, 4, 20_000, |i| i as i16);
+        let len = wav.len() as u64;
+        let bed = mixer::stream_from_source(FailsAfter(std::io::Cursor::new(wav), 60_000), len)
+            .expect("the header reads")
+            .loop_region(..);
+        let mut manager = mixer::tests::mock_manager();
+        let h = manager.play(bed).expect("play");
+        let mut zone = ZoneAudio {
+            ambience_kit: 7,
+            ..Default::default()
+        };
+        zone.ambience = Some(h);
+        assert!(!reap_stopped_bed(&mut zone), "a playing bed stays");
+        assert!(
+            mixer::tests::plays_out(&mut manager, zone.ambience.as_ref().unwrap()),
+            "the read error stops the bed"
+        );
+        assert!(reap_stopped_bed(&mut zone));
+        assert!(zone.ambience.is_none());
+        assert_eq!(zone.ambience_kit, 0, "the selection reopens it");
     }
 }

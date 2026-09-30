@@ -29,6 +29,10 @@ use display::{
 mod attach;
 use attach::{attach_entity_visuals, build_dressup_preview, build_glue_pet, build_glue_preview};
 
+/// Composited body skins by look, built off the main thread.
+mod skin_composite;
+use skin_composite::{land_skin_composites, SkinComposites, SkinKey, SkinSections};
+
 /// The dynamic point lights an entity's own model carries, such as a held torch.
 mod carried_light;
 use carried_light::spawn_carried_lights;
@@ -384,50 +388,28 @@ struct GameObjects {
 #[derive(Resource)]
 struct Characters(CharacterGeosets);
 
-/// The `CharSections` skin lookup; without it a player's body skin stays untextured.
-#[derive(Resource)]
-struct SkinSections(CharSections);
-
 /// Character-creation data (body displays, race and class combos, appearance ranges).
 #[derive(Resource)]
 pub(crate) struct CharCreate(pub(crate) CharCreateCatalog);
 
-/// Composited body skins by look, so every player wearing a look shares one 256² atlas.
-///
-/// Two maps, because on the web a look is not composited in the frame it is asked for. The blend is
-/// a base skin plus up to fifteen overlays of BLP decode and per-texel source-over, and the
-/// browser's frame thread is the thread that draws — so [`attach::char_skin`] reads the plan's
-/// blobs off the chain (the half that must be on this thread) and hands the CPU half to a worker.
-/// `blending` holds those in flight, keyed by the look they will answer, so a second body wearing
-/// the same look joins the one job instead of starting a second — which matters most exactly where
-/// it is worst: the char-select booth, and a raid of strangers arriving together. **Native never
-/// populates it**; there the blend runs inline as it always has.
-#[derive(Resource, Default)]
-struct SkinComposites {
-    /// Looks whose atlas is uploaded and ready. The distance sweep ([`scope_entity_art`]) and the
-    /// map-change teardown both act on this half.
-    ready: benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
-    /// Looks whose blend is on a worker thread. Drained into `ready` by
-    /// [`attach::char_skin::drain_skin_composites`], or picked up in place by the next asker.
-    blending: HashMap<SkinKey, bevy::tasks::Task<Option<benilla_formats::BlpMipChain>>>,
-}
+/// When a net entity arrived, on the appear fade's clock: the reference stamps a unit's fade as its
+/// create block is processed (`0x465c50` → `0x5fb880`, a player's through `0x5debe0` →
+/// `0x613af0` at `0x5fb956` → `0x614f80`), before its model or composite is ready, so the ramp runs
+/// from here however long the visual waits. A mount child carries its rider's, as the reference
+/// writes the unit's one fade onto the mount model (`0x614ae6`–`0x614af4`, `0x614b9e`–`0x614bba`).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Arrival(pub(crate) f32);
 
-/// What decides a composited body skin: race and sex pick the `CharSections` rows, the dials pick
-/// the variations, and `equip` holds the worn armour display ids by body slot − 2.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct SkinKey {
-    pub(super) race: u8,
-    pub(super) sex: u8,
-    pub(super) skin: u8,
-    pub(super) face: u8,
-    pub(super) facial_hair: u8,
-    pub(super) hair_style: u8,
-    pub(super) hair_color: u8,
-    pub(super) equip: [u32; 8],
-    /// The guild emblem: two guilds' members wear one tabard display but must not share an atlas.
-    pub(super) emblem: Option<benilla_formats::GuildEmblem>,
-    /// The tabard designer's preview: the emblem paints over an empty tabard slot.
-    pub(super) tabard_preview: bool,
+/// Stamp each net entity's [`Arrival`] the frame it streams in.
+fn stamp_arrivals(
+    mut commands: Commands,
+    time: Res<Time>,
+    arrived: Query<Entity, (Added<NetEntity>, Without<Arrival>)>,
+) {
+    let now = time.elapsed_secs();
+    for entity in &arrived {
+        commands.entity(entity).insert(Arrival(now));
+    }
 }
 
 /// Marks a net entity whose visual is attached; the `waterfx` rig pre-marks its dummy unit.
@@ -494,12 +476,9 @@ impl DisplayCaches<'_> {
         items.as_ref().map_or(0, |i| i.models.len()),
         fx.models.len(),
         glows.as_ref().map_or(0, |g| g.models.len()),
-        composites.ready.len(),
+        composites.done.len(),
     );
-        composites.ready.clear();
-        // The in-flight blends go too: their look belongs to the art being left, and a `Task`
-        // dropped here is cancelled rather than left to finish for a cache that no longer wants it.
-        composites.blending.clear();
+        composites.clear();
         fx.models.clear();
         if let Some(mut c) = creatures {
             c.models.clear();
@@ -525,7 +504,7 @@ fn scope_entity_art(
     mut composites: ResMut<SkinComposites>,
 ) {
     scope.apply(
-        &mut composites.ready,
+        &mut composites.done,
         benilla_world::art_scope::ArtSlot::Skins,
     );
 }
@@ -657,15 +636,20 @@ impl Plugin for EntitiesPlugin {
         .add_data_loaders(setup_entities)
         .add_systems(Update, (evict_display_caches, scope_entity_art))
         .add_observer(forget_display_caches)
-        // Land every body composite a worker finished (web only — native blends inline and never
-        // queues one). **Before `DisplayBuildSet`**, which heads the chain the three composite
-        // callers sit in, so a look that finished between frames is in the cache before the same
-        // frame's attach asks for it rather than a frame later. Correctness does not depend on
-        // that — each caller also polls its own key in place, and an unclaimed job is what this
-        // pass exists to reap — but the ordering is free and one frame of a naked body is not.
+        // An arrival is stamped the frame it streams in, before its visual is asked for.
         .add_systems(
             Update,
-            attach::char_skin::drain_skin_composites.before(DisplayBuildSet),
+            stamp_arrivals
+                .after(WorldStage::Net)
+                .before(EntityVisualsSet),
+        )
+        // Finished body composites land before the frame's bodies ask for their atlas.
+        .add_systems(
+            Update,
+            land_skin_composites
+                .after(evict_display_caches)
+                .before(EntityVisualsSet)
+                .after(WorldStage::Net),
         )
         // After the net stage, whose Commands create the entity; until then its readers take the
         // constructor default.
@@ -914,7 +898,9 @@ fn setup_entities(
         Err(e) => warn!("character geosets unavailable, players show every geoset: {e:#}"),
     }
     match CharSections::load(&mut chain) {
-        Ok(sections) => commands.insert_resource(SkinSections(sections)),
+        Ok(sections) => {
+            commands.insert_resource(SkinSections::new(sections, world_assets.chain.clone()))
+        }
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
     // Turtle WoW's races and race/class table are its own; the 1.12.1 load refuses them.

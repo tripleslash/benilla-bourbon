@@ -1,6 +1,7 @@
 //! The spell, the reference's `Spell_C`: the cast ladder and commit ([`cast_send`], `TryCast
 //! 0x6e4b60` and `SendCast 0x6e54f0`), the target bind ([`cast_target`], `ArmCast 0x6e5250` and
-//! `BindTarget 0x6e5b40`), the requirement validator ([`validator`], `0x6094f0`), the usable walk
+//! `BindTarget 0x6e5b40`), the party and raid relations its arms ask ([`group_relation`],
+//! `0x606c20`, `0x606d20`), the requirement validator ([`validator`], `0x6094f0`), the usable walk
 //! ([`usable`], `IsSpellUsableNow 0x6e3d60`), the targeting cursor ([`targeting`], `0xcecac0`),
 //! the in-flight slot, the cooldowns, the talent modifiers and their packet handlers ([`net`]).
 
@@ -11,12 +12,15 @@ use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
 
+mod bind_gates;
 mod cast_send;
 pub(crate) mod cast_target;
 pub(crate) mod cooldowns;
+mod group_relation;
 mod inflight;
 mod mods;
 pub(crate) mod net;
+mod range_units;
 pub(crate) mod targeting;
 pub(crate) mod usable;
 pub(crate) mod validator;
@@ -30,9 +34,10 @@ pub(crate) use inflight::{
     inflight, ActiveChannel, AutoRepeatActive, LocalMoveStart, PendingCast, QueuedMeleeSpell,
     SelfCancel, SPELL_INTERRUPT_MOVEMENT,
 };
+pub(crate) use mods::{ModsDiff, SpellModifiers, OP_CAST_TIME, OP_COST, OP_GCD, OP_RADIUS};
 #[cfg(test)]
-pub(crate) use mods::OP_COOLDOWN;
-pub(crate) use mods::{SpellModifiers, OP_CAST_TIME, OP_COST, OP_GCD, OP_RADIUS};
+pub(crate) use mods::{OP_COOLDOWN, OP_RANGE};
+pub(crate) use range_units::{RangeUnits, DEFAULT_REACH};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
 pub(crate) use targeting::{
     ground_cast_radius, CorpsePick, PicksSelf, ScriptCursor, SpellTargeting, TargetingWants,
@@ -68,6 +73,8 @@ impl Plugin for SpellPlugin {
             .init_resource::<targeting::EnchantConfirmItem>()
             .init_resource::<targeting::PicksSelf>()
             .init_resource::<targeting::CorpsePick>()
+            .init_resource::<targeting::UnitPick>()
+            .init_resource::<group_relation::GroupRoster>()
             .add_observer(cast_target::on_cvar)
             .add_systems(
                 Update,
@@ -81,15 +88,23 @@ impl Plugin for SpellPlugin {
                     // The state push runs before the input pass's `ToggleGameMenu`, whose
                     // `SpellStopTargeting` lands with the script calls after it. After the
                     // old-target clear, the pet bar's writer in the feed: `"pet"` resolves off
-                    // the bar.
+                    // the bar. After the aura feed, whose resolver inputs list the units the
+                    // hover verdict is asked for.
                     targeting::feed_targeting_to_vm
                         .in_set(UnitFeed)
-                        .after(crate::ui_pet::pet_stop_on_old_target_clear),
+                        .after(crate::ui_pet::pet_stop_on_old_target_clear)
+                        .after(crate::ui_aura::AuraEvents),
                     (
                         targeting::publish_picks_self,
                         targeting::publish_corpse_pick,
+                        targeting::publish_unit_pick,
                     )
                         .in_set(UiFeed),
+                    // The party slots and raid roster the party and raid words read, before
+                    // the feed's targeting push asks them.
+                    group_relation::publish_group_roster
+                        .in_set(UiFeed)
+                        .before(UnitFeed),
                     // The item-target commit (`0x495d60`): after the input pass so a bag click
                     // binds the same frame; outside the target chain, as its clicks never reach
                     // the world.
@@ -112,6 +127,12 @@ pub(crate) fn spell_skill_value(
     let Some(line) = skill_lines.and_then(|c| c.spell_to_line(spell_id)) else {
         return 0;
     };
+    skill_line_value(me, line)
+}
+
+/// The player's skill in `line`, [`spell_skill_value`]'s second half: 0 without a player or a
+/// slot for it.
+pub(crate) fn skill_line_value(me: Option<&crate::net::ObjectStore>, line: u32) -> u32 {
     let Some(store) = me else { return 0 };
     line_skill_value(
         (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
@@ -157,8 +178,31 @@ pub(crate) fn skill_snapshot(me: Option<&crate::net::ObjectStore>) -> SkillSnaps
     })
 }
 
+/// The skill lines whose value differs between two snapshots: a line with no slot reads 0
+/// ([`skill_line_value`]), and the first slot of a line is the one read.
+pub(crate) fn changed_skill_lines(prev: &SkillSnapshot, now: &SkillSnapshot) -> Vec<u32> {
+    let by_line = |snapshot: &SkillSnapshot| {
+        let mut lines = std::collections::HashMap::new();
+        for &(line, value) in snapshot.iter().filter(|(line, _)| *line != 0) {
+            lines.entry(u32::from(line)).or_insert(value);
+        }
+        lines
+    };
+    let (prev, now) = (by_line(prev), by_line(now));
+    let value =
+        |lines: &std::collections::HashMap<u32, u32>, line| lines.get(&line).copied().unwrap_or(0);
+    prev.keys()
+        .chain(now.keys())
+        .copied()
+        .filter(|&line| value(&prev, line) != value(&now, line))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use benilla_protocol::messages::PlayerSkillSlot;
 
     fn slot(value: u16, temp_bonus: i16, perm_bonus: i16) -> PlayerSkillSlot {
@@ -170,6 +214,37 @@ mod tests {
             temp_bonus,
             perm_bonus,
         }
+    }
+
+    /// A line's change is its value's, wherever its slot sits: a moved slot is no change, a line
+    /// gained or lost is one, and a slot at 0 is a line at 0.
+    #[test]
+    fn the_changed_lines_are_those_whose_value_moved() {
+        let snapshot = |slots: &[(u16, u32)]| -> SkillSnapshot {
+            let mut s = [(0, 0); benilla_protocol::messages::PLAYER_SKILL_SLOTS as usize];
+            s[..slots.len()].copy_from_slice(slots);
+            s
+        };
+        let base = snapshot(&[(43, 100), (44, 50), (54, 0)]);
+        assert!(changed_skill_lines(&base, &base).is_empty());
+        assert!(
+            changed_skill_lines(&base, &snapshot(&[(54, 0), (44, 50), (43, 100)])).is_empty(),
+            "a reordered slot table changes no line"
+        );
+        assert_eq!(
+            changed_skill_lines(&base, &snapshot(&[(43, 101), (44, 50)])),
+            [43]
+        );
+        assert_eq!(
+            changed_skill_lines(&base, &snapshot(&[(43, 100), (44, 50), (95, 1)])),
+            [95],
+            "a gained line, and the slot at 0 that went away is no change"
+        );
+        assert_eq!(
+            changed_skill_lines(&base, &snapshot(&[(43, 100)])),
+            [44],
+            "a lost line reads 0"
+        );
     }
 
     /// The high bonus half counts only over a positive value, and unsigned; the low half is

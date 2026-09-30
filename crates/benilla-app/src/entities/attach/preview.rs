@@ -17,7 +17,6 @@ use crate::portrait::{
     PreviewRider,
 };
 use benilla_assets::materials::WowModelMaterial;
-use benilla_assets::WorldAssets;
 
 use super::super::equipment::{attach_id, ensure_item_model, placement, ItemModelKind};
 use super::super::item_glow::{self, ItemGlows};
@@ -102,7 +101,6 @@ pub(in crate::entities) struct PreviewCtx<'a, 'w> {
     /// nobody wears.
     pub(in crate::entities) glows: Option<&'a mut ItemGlows>,
     pub(in crate::entities) sections: Option<&'a SkinSections>,
-    pub(in crate::entities) world_assets: Option<&'a WorldAssets>,
     pub(in crate::entities) images: &'a mut Assets<Image>,
     pub(in crate::entities) skin_composites: &'a mut SkinComposites,
     pub(in crate::entities) asset_server: &'a AssetServer,
@@ -120,7 +118,6 @@ pub(in crate::entities) fn build_glue_preview(
     mut displays: Option<ResMut<ItemDisplays>>,
     mut glows: Option<ResMut<ItemGlows>>,
     sections: Option<Res<SkinSections>>,
-    world_assets: Option<Res<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
     mut skin_composites: ResMut<SkinComposites>,
     asset_server: Res<AssetServer>,
@@ -208,7 +205,6 @@ pub(in crate::entities) fn build_glue_preview(
             displays: displays.as_deref_mut(),
             glows: glows.as_deref_mut(),
             sections: sections.as_deref(),
-            world_assets: world_assets.as_deref(),
             images: &mut images,
             skin_composites: &mut skin_composites,
             asset_server: &asset_server,
@@ -286,7 +282,6 @@ pub(in crate::entities) fn build_dressup_preview(
     mut displays: Option<ResMut<ItemDisplays>>,
     mut glows: Option<ResMut<ItemGlows>>,
     sections: Option<Res<SkinSections>>,
-    world_assets: Option<Res<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
     mut skin_composites: ResMut<SkinComposites>,
     asset_server: Res<AssetServer>,
@@ -342,7 +337,6 @@ pub(in crate::entities) fn build_dressup_preview(
             displays: displays.as_deref_mut(),
             glows: glows.as_deref_mut(),
             sections: sections.as_deref(),
-            world_assets: world_assets.as_deref(),
             images: &mut images,
             skin_composites: &mut skin_composites,
             asset_server: &asset_server,
@@ -574,28 +568,31 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
     let visible = ctx.characters.map(|c| {
         c.0.visible_geosets(race, sex, char_look.hair_style, char_look.facial_hair, &eg)
     });
-    // Bracketed like the world path's: a body composite whose textures have not arrived does not
-    // blend, and the booth waits — the same "retry next frame" this function already does for a
-    // held-item model that is still loading.
-    let skin_deferrals_before = super::char_skin::skin_deferrals();
+    // fork: web — a forced composite whose blobs have not arrived is Pending, and the booth waits:
+    // the same "retry next frame" this function already does for a held-item model still loading.
+    let super::super::skin_composite::BodyAtlas::Ready(body_tex) =
+        super::char_skin::forced_body_atlas(
+            &char_look,
+            super::char_skin::skin_key(&char_look, bodyslots, spec.emblem, false),
+            ctx.displays.as_deref(),
+            ctx.sections,
+            ctx.skin_composites,
+            ctx.asset_server,
+            ctx.images,
+        )
+    else {
+        return None;
+    };
     let char_mats = super::char_skin::build_char_skin_materials(
         &char_look,
-        bodyslots,
+        body_tex,
         cloak,
-        spec.emblem,
-        false,
         ctx.displays.as_deref(),
         ctx.sections,
-        ctx.world_assets,
         parts,
-        ctx.images,
-        ctx.skin_composites,
         ctx.asset_server,
         ctx.mats,
     );
-    if super::char_skin::skin_deferrals() != skin_deferrals_before {
-        return None; // the body composite's textures are still coming — retry next frame
-    }
 
     let shows = |p: &EntityPart| {
         visible

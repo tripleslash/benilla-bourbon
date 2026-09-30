@@ -11,8 +11,9 @@ use super::scan;
 /// Everything the selection calls read and write.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ScriptSelect<'w, 's> {
-    /// The one unit-token resolver, shared with the reach feed so `TargetUnit("target")` and
-    /// `CheckInteractDistance("target", …)` name the same unit.
+    /// The app's unit-token resolver. The VM's own reads the same grammar
+    /// ([`benilla_ui::script::parse_unit_token`]), so `TargetUnit("party1target")` and
+    /// `CheckInteractDistance("party1target", …)` name the same unit.
     tokens: crate::ui_unit::UnitTokens<'w, 's>,
     /// `TargetLastEnemy`'s memory (`[0xb4e2e8]`), stamped by `scan::remember_last_enemy`.
     last_enemy: Res<'w, scan::LastEnemy>,
@@ -113,22 +114,10 @@ impl ScriptSelect<'_, '_> {
 mod tests {
     use super::*;
 
-    /// The selection calls from Lua, through the binding bodies of ASSISTTARGET (`AssistUnit`) and
-    /// TARGETLASTHOSTILE (`TargetLastEnemy`): an empty basis, a garbage token and a stale memory
-    /// are each a no-op (`0x489a40`'s bare `ret`), never a deselect or a panic.
-    #[test]
-    fn the_selection_calls_run_assist_and_last_enemy_without_ever_deselecting() {
-        use crate::net::{Guid, NetCommands, ObjectStore, SelfPlayer};
+    /// A world holding what [`ScriptSelect`] reads, with a bare VM and no units.
+    fn script_world() -> World {
+        use crate::net::NetCommands;
         use benilla_ui::script::UiScript;
-        use bevy::ecs::system::RunSystemOnce;
-
-        const ME: u64 = 1;
-        const BASIS: u64 = 0xB0A2;
-        const VICTIM: u64 = 0xC0DE;
-        const GONE: u64 = 0x6017;
-        // `UNIT_FIELD_TARGET` is a 2-field guid at index 16; HEALTH/MAXHEALTH keep the units live.
-        let store =
-            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
 
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut world = World::new();
@@ -148,6 +137,27 @@ mod tests {
         world.init_resource::<scan::TabHistory>();
         world.init_resource::<Time>();
         world.insert_non_send(UiScript::new().expect("a bare VM"));
+        world
+    }
+
+    /// The selection calls from Lua, through the binding bodies of ASSISTTARGET (`AssistUnit`) and
+    /// TARGETLASTHOSTILE (`TargetLastEnemy`): an empty basis, a garbage token and a stale memory
+    /// are each a no-op (`0x489a40`'s bare `ret`), never a deselect or a panic.
+    #[test]
+    fn the_selection_calls_run_assist_and_last_enemy_without_ever_deselecting() {
+        use crate::net::{Guid, ObjectStore, SelfPlayer};
+        use benilla_ui::script::UiScript;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ME: u64 = 1;
+        const BASIS: u64 = 0xB0A2;
+        const VICTIM: u64 = 0xC0DE;
+        const GONE: u64 = 0x6017;
+        // `UNIT_FIELD_TARGET` is a 2-field guid at index 16; HEALTH/MAXHEALTH keep the units live.
+        let store =
+            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+
+        let mut world = script_world();
 
         world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));
         // The basis is pointing at the victim; the victim points at nobody.
@@ -208,5 +218,229 @@ mod tests {
         assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
         set(&mut world, None);
         assert_eq!(run(&mut world, "TargetLastEnemy()"), None);
+    }
+
+    /// `TargetUnit("partypet1")`, the TARGETPARTYPET1 binding and the pet half of
+    /// TARGETPARTYMEMBER1, commits the pet the member's descriptor names (`0x515970` to `0x4e81d0`);
+    /// a slot with no member, or one whose pet is not held, is a no-op, never a deselect.
+    #[test]
+    fn target_unit_selects_a_party_pet() {
+        use crate::net::{Guid, ObjectStore, SelfPlayer};
+        use benilla_protocol::messages::{member_status, GroupMemberEntry};
+        use benilla_ui::script::UiScript;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ME: u64 = 1;
+        const MEMBER: u64 = 0x1234;
+        const PET: u64 = 0xF140_0000_0000_0077;
+        // HEALTH/MAXHEALTH keep the units live; `UNIT_FIELD_SUMMON` is the 2-field guid at 8.
+        let store =
+            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+
+        let mut world = script_world();
+        world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));
+        let pet = world
+            .spawn((Guid(PET), store(&[(22, 100), (28, 100)])))
+            .id();
+        let member = world
+            .spawn((
+                Guid(MEMBER),
+                store(&[
+                    (22, 100),
+                    (28, 100),
+                    (8, PET as u32),
+                    (9, (PET >> 32) as u32),
+                ]),
+            ))
+            .id();
+        let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
+        index.insert(PET, pet);
+        index.insert(MEMBER, member);
+        world
+            .resource_mut::<crate::ui_party::GroupState>()
+            .apply_list(
+                0,
+                0,
+                vec![GroupMemberEntry {
+                    name: "Brisca".into(),
+                    guid: MEMBER,
+                    status: member_status::ONLINE,
+                    flags: 0,
+                }],
+                ME,
+                None,
+                Some(ME),
+            );
+
+        let run = |world: &mut World, lua: &str| {
+            world
+                .non_send_mut::<UiScript>()
+                .eval::<()>(lua)
+                .expect("the binding runs");
+            world
+                .run_system_once(
+                    |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
+                        for request in script.take_selection_requests() {
+                            select.select(request);
+                        }
+                    },
+                )
+                .expect("the applier runs as a one-shot system");
+            world.resource::<super::super::Selection>().guid
+        };
+
+        assert_eq!(run(&mut world, r#"TargetUnit("party1")"#), Some(MEMBER));
+        assert_eq!(run(&mut world, r#"TargetUnit("partypet1")"#), Some(PET));
+        assert_eq!(run(&mut world, r#"TargetUnit("PartyPet1")"#), Some(PET));
+        // No second member, and slot 0 and 5 are no slot: each leaves the selection alone.
+        for token in ["partypet2", "partypet0", "partypet5"] {
+            assert_eq!(
+                run(&mut world, &format!(r#"TargetUnit("{token}")"#)),
+                Some(PET),
+                "{token}"
+            );
+        }
+        // Out of view, the pet is named but not held: nothing to select, no deselect.
+        world.resource_mut::<crate::net::GuidIndex>().0.remove(&PET);
+        assert_eq!(run(&mut world, r#"TargetUnit("party1")"#), Some(MEMBER));
+        assert_eq!(run(&mut world, r#"TargetUnit("partypet1")"#), Some(MEMBER));
+    }
+
+    /// `TargetUnit` and `AssistUnit` take the tokens the reference's resolver takes (`0x515970`,
+    /// from `0x489a08` and `0x489ba9`): a base then a hop off each held unit's target, so
+    /// `party1target` names the unit party1 targets and `AssistUnit("party1target")` its target's.
+    /// A chain that breaks, and text that is not a hop, is a no-op, never a deselect.
+    #[test]
+    fn target_and_assist_unit_follow_a_target_chain() {
+        use crate::net::{Guid, ObjectStore, SelfPlayer};
+        use benilla_protocol::messages::{member_status, GroupMemberEntry};
+        use benilla_ui::script::UiScript;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ME: u64 = 1;
+        const MEMBER: u64 = 0x1234;
+        const PET: u64 = 0xF140_0000_0000_0077;
+        const VICTIM: u64 = 0xC0DE;
+        const THIRD: u64 = 0xF130_0000_0000_0003;
+        // `OBJECT_FIELD_TYPE` 2 (a hop is off a unit, typemask 8), `UNIT_FIELD_SUMMON` 8 and
+        // `UNIT_FIELD_TARGET` 16, the latter two each a 2-field guid.
+        let unit = |kind: u32, summon: u64, target: u64| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, kind),
+                (8, summon as u32),
+                (9, (summon >> 32) as u32),
+                (16, target as u32),
+                (17, (target >> 32) as u32),
+            ]))
+        };
+        const PLAYER: u32 = 0x19;
+        const CREATURE: u32 = 0x09;
+
+        let mut world = script_world();
+        // We target the victim, party1 targets the victim, the victim targets `THIRD`, our pet
+        // targets `THIRD`; `THIRD` targets nobody.
+        world.spawn((SelfPlayer, Guid(ME), unit(PLAYER, PET, VICTIM)));
+        let member = world.spawn((Guid(MEMBER), unit(PLAYER, 0, VICTIM))).id();
+        let victim = world.spawn((Guid(VICTIM), unit(CREATURE, 0, THIRD))).id();
+        let third = world.spawn((Guid(THIRD), unit(CREATURE, 0, 0))).id();
+        let pet = world.spawn((Guid(PET), unit(CREATURE, 0, THIRD))).id();
+        let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
+        index.insert(MEMBER, member);
+        index.insert(VICTIM, victim);
+        index.insert(THIRD, third);
+        index.insert(PET, pet);
+        world
+            .resource_mut::<crate::ui_party::GroupState>()
+            .apply_list(
+                0,
+                0,
+                vec![GroupMemberEntry {
+                    name: "Brisca".into(),
+                    guid: MEMBER,
+                    status: member_status::ONLINE,
+                    flags: 0,
+                }],
+                ME,
+                None,
+                Some(ME),
+            );
+        let mut bar = crate::ui_pet::PetBar::default();
+        bar.spells.pet_guid = PET;
+        world.insert_resource(bar);
+
+        let run = |world: &mut World, lua: &str| {
+            world
+                .non_send_mut::<UiScript>()
+                .eval::<()>(lua)
+                .expect("the binding runs");
+            world
+                .run_system_once(
+                    |mut script: NonSendMut<UiScript>, mut select: ScriptSelect| {
+                        for request in script.take_selection_requests() {
+                            select.select(request);
+                        }
+                    },
+                )
+                .expect("the applier runs as a one-shot system");
+            world.resource::<super::super::Selection>().guid
+        };
+        let reset = |world: &mut World| {
+            let mut sel = world.resource_mut::<super::super::Selection>();
+            sel.target = None;
+            sel.guid = None;
+        };
+
+        assert_eq!(run(&mut world, r#"TargetUnit("party1")"#), Some(MEMBER));
+        assert_eq!(
+            run(&mut world, r#"TargetUnit("party1target")"#),
+            Some(VICTIM)
+        );
+        assert_eq!(
+            run(&mut world, r#"TargetUnit("party1targettarget")"#),
+            Some(THIRD)
+        );
+        // `THIRD` targets nobody: the chain ends there, and the selection stays.
+        for token in [
+            "party1targettargettarget",
+            "party1targetfoo",
+            "party1foo",
+            "party2target",
+            "npctarget",
+        ] {
+            assert_eq!(
+                run(&mut world, &format!(r#"TargetUnit("{token}")"#)),
+                Some(THIRD),
+                "{token}"
+            );
+        }
+
+        reset(&mut world);
+        assert_eq!(
+            run(&mut world, r#"TargetUnit("PARTY1TARGET")"#),
+            Some(VICTIM)
+        );
+        reset(&mut world);
+        assert_eq!(
+            run(&mut world, r#"TargetUnit("playertarget")"#),
+            Some(VICTIM)
+        );
+        reset(&mut world);
+        assert_eq!(run(&mut world, r#"TargetUnit("pettarget")"#), Some(THIRD));
+        reset(&mut world);
+        assert_eq!(run(&mut world, r#"TargetUnit("partypet1target")"#), None);
+
+        // Assisting a unit selects its target; its target is a chain's end, so one hop further.
+        reset(&mut world);
+        assert_eq!(run(&mut world, r#"AssistUnit("party1")"#), Some(VICTIM));
+        reset(&mut world);
+        assert_eq!(
+            run(&mut world, r#"AssistUnit("party1target")"#),
+            Some(THIRD)
+        );
+        assert_eq!(
+            run(&mut world, r#"AssistUnit("party1targettarget")"#),
+            Some(THIRD),
+            "THIRD targets nobody: silent, nothing deselected"
+        );
     }
 }

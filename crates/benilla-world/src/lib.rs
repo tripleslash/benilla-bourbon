@@ -125,6 +125,7 @@ pub mod instance_tint;
 pub mod interact;
 pub mod interior;
 pub mod launch_env;
+pub mod layout_keys;
 pub mod lighting;
 // fork: web — the upload budget's deferred meshes, re-specialized when they land.
 mod late_mesh;

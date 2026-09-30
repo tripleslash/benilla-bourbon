@@ -9,6 +9,7 @@ use benilla_protocol::messages::{
 use benilla_ui::script::PetActionView;
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore};
+use crate::target::UNIT_FLAG_POSSESSED;
 
 use super::bar::*;
 use super::drain::*;
@@ -158,28 +159,6 @@ fn a_disabled_bar_reads_passive_and_lights_no_command() {
         .active,
         "the command it IS on goes dark too"
     );
-}
-
-#[test]
-fn usability_is_the_disabled_bit_and_the_pets_crowd_control() {
-    let mut bar = PetBar {
-        spells: state(PET_COMMAND_FOLLOW, PET_REACT_DEFENSIVE),
-        ..Default::default()
-    };
-    assert!(actions_usable(&bar, Some(0)));
-    assert!(
-        actions_usable(&bar, None),
-        "a missing descriptor is not a no"
-    );
-
-    for flag in [0x0004_0000, 0x0040_0000, 0x0080_0000] {
-        assert!(!actions_usable(&bar, Some(flag)), "flag {flag:#x} disables");
-    }
-    // Those three are stunned, confused, fleeing; POSSESSED is not among them.
-    assert!(actions_usable(&bar, Some(0x0100_0000)));
-
-    bar.spells.state |= PET_STATE_BAR_DISABLED;
-    assert!(!actions_usable(&bar, Some(0)));
 }
 
 #[test]
@@ -761,9 +740,10 @@ fn the_dismiss_word_is_the_carved_literal() {
     assert!(!entry.is_spell(), "dismiss is a command, never a cast");
 }
 
-/// The reference fires `PET_BAR_UPDATE_COOLDOWN` from the pet's cooldown bank (`0x6e2e8e`).
+/// A cooldown moves no bar: the feed pushes the new triple and fires nothing, for its events are
+/// the list's flush (`0x4b31b0`, `0x4bce90`), which `flush_tests` covers.
 #[test]
-fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
+fn a_cooldown_alone_is_pushed_with_no_event_from_the_bar_feed() {
     use bevy::prelude::*;
     use std::collections::HashMap;
     const CLAW: u32 = 3010;
@@ -779,6 +759,7 @@ fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
     let mut app = App::new();
     app.init_resource::<crate::ui_script::UiClock>()
         .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::net::SelfGuid>()
         .insert_resource(crate::ui_action::Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([(CLAW, claw())])),
             ..crate::ui_action::Spells::empty_for_tests()
@@ -821,8 +802,8 @@ fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
         .start_spell(CLAW, &claw(), 0, std::time::Instant::now(), None);
     assert_eq!(
         seen(&mut app),
-        vec!["PET_BAR_UPDATE_COOLDOWN".to_string()],
-        "a cooldown alone is the bank's edge, not the bar's"
+        Vec::<String>::new(),
+        "a cooldown alone is neither the bar's event nor this feed's"
     );
     let (start, duration, enable): (f64, f64, i32) = app
         .world_mut()
@@ -901,4 +882,156 @@ fn the_session_end_tears_the_pet_bar_down() {
         "no pet bar carried into the next session"
     );
     assert!(bar.spells.bar[3].is_empty());
+}
+
+/// `UnitIsConnected` answers 1 for any unit the object manager holds (`0x517daf`), so the real
+/// `"pet"` feed's snapshot reads connected, and the stock pet frame's `UnitFrameManaBar_Update`
+/// takes its live leg: the pet's own power in its type's colour, not the disconnected leg's
+/// maximum in grey (UnitFrame.lua:214-216).
+#[test]
+fn a_held_pet_reads_connected_and_its_stock_power_bar_shows_its_power() {
+    use bevy::prelude::*;
+    benilla_formats::wow_data_or_skip!();
+    const PET: u64 = 0xF140_0000_0000_002A;
+    // `UNIT_FIELD_` HEALTH, MAXHEALTH, LEVEL, BYTES_0 (power type in byte 3), and focus, the power
+    // type a hunter's pet runs on, at POWER1 + 2 and MAXPOWER1 + 2.
+    const FOCUS: u32 = 2;
+    let fields = [
+        (22, 72),
+        (28, 100),
+        (34, 60),
+        (36, FOCUS << 24),
+        (25, 45),
+        (31, 80),
+    ];
+
+    let mut script = benilla_ui::script::UiScript::new().unwrap();
+    script.set_screen_size(1024.0, 768.0);
+    let failures = crate::ui_script::load_default_ui(&script);
+    assert!(failures.is_empty(), "load failures: {failures:?}");
+
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::net::SelfGuid>()
+        .init_resource::<crate::names::NameCache>()
+        .insert_resource(PetBar {
+            spells: PetSpells {
+                pet_guid: PET,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .add_systems(Update, feed_pet_unit);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    // Kept alive for the run: a dropped receiver would fail the name query.
+    std::mem::forget(rx);
+    app.insert_resource(NetCommands(tx));
+    let pet = app
+        .world_mut()
+        .spawn((
+            crate::net::Guid(PET),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&fields)),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(PET, pet);
+    app.insert_non_send(script);
+
+    app.update();
+    let mut script = app
+        .world_mut()
+        .non_send_mut::<benilla_ui::script::UiScript>();
+    script.resolve();
+    let (connected, shown, value, max, r, g, b) = script
+        .eval::<(Option<f64>, Option<f64>, f64, f64, f64, f64, f64)>(
+            "local _, max = PetFrameManaBar:GetMinMaxValues() \
+             local r, g, b = PetFrameManaBar:GetStatusBarColor() \
+             return UnitIsConnected('pet'), PetFrame:IsShown(), PetFrameManaBar:GetValue(), \
+                    max, r, g, b",
+        )
+        .unwrap();
+    assert_eq!(connected, Some(1.0), "a held pet is connected");
+    assert_eq!(shown, Some(1.0), "the feed's UNIT_PET showed the frame");
+    assert_eq!(
+        (value, max),
+        (45.0, 80.0),
+        "the pet's power, not its maximum"
+    );
+    assert_eq!(
+        (r, g, b),
+        (1.0, 0.5, 0.25),
+        "FOCUS, not the disconnected grey"
+    );
+    let errors = script.errors();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
+/// `UnitCreatureType("pet")` (`0x51a280`) names the pet's template through the resolver
+/// `0x605570`, keyed by the descriptor's `OBJECT_FIELD_ENTRY`: a held Imp is a Demon.
+#[test]
+fn a_held_pet_names_its_templates_creature_type() {
+    use bevy::prelude::*;
+    const PET: u64 = 0xF140_0000_0000_002A;
+    /// `OBJECT_FIELD_ENTRY`, and the Imp's template entry.
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    const IMP: u32 = 416;
+
+    let mut names = crate::names::NameCache::default();
+    names.insert_creature(
+        IMP,
+        Some(crate::names::CreatureRecord {
+            name: "Imp".into(),
+            subname: None,
+            creature_type: 3,
+            pet_family: 0,
+            rank: 0,
+            type_flags: 0,
+            civilian: false,
+            racial_leader: false,
+            display_id: 0,
+        }),
+    );
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::net::SelfGuid>()
+        .insert_resource(names)
+        .insert_resource(PetBar {
+            spells: PetSpells {
+                pet_guid: PET,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .add_systems(Update, feed_pet_unit);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    // Kept alive for the run: a dropped receiver would fail the name query.
+    std::mem::forget(rx);
+    app.insert_resource(NetCommands(tx));
+    let pet = app
+        .world_mut()
+        .spawn((
+            crate::net::Guid(PET),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                OBJECT_FIELD_ENTRY,
+                IMP,
+            )])),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(PET, pet);
+    app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
+
+    app.update();
+    let answer = app
+        .world_mut()
+        .non_send_mut::<benilla_ui::script::UiScript>()
+        .eval::<Option<String>>("return UnitCreatureType('pet')")
+        .unwrap();
+    assert_eq!(answer.as_deref(), Some("Demon"));
 }
