@@ -785,7 +785,7 @@ fn play_music_data(
             true
         }
         Err(e) => {
-            if first_unplayable(zone, &path) {
+            if first_unplayable(zone, path) {
                 warn!("zone music: {path} — {e:#}");
             }
             false

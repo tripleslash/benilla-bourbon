@@ -101,14 +101,11 @@ fn fg_main(world: &mut World, lookups: &mut SystemState<FgLookups>) {
     let wanted = world.resource::<FrameGeneration>().0;
     let held = if wanted {
         let (window, in_world, epoch) = {
-            let (windows, views) = lookups.get(world);
+            let (windows, views) = lookups.get(world).expect("two queries validate");
             let window = windows.iter().next().map_or(UVec2::ZERO, |w| {
                 UVec2::new(w.physical_width(), w.physical_height())
             });
-            let (in_world, epoch) = views
-                .iter()
-                .next()
-                .map_or((false, 0), |f| (true, f.epoch));
+            let (in_world, epoch) = views.iter().next().map_or((false, 0), |f| (true, f.epoch));
             (window, in_world, epoch)
         };
         let inputs = FgInputs {
