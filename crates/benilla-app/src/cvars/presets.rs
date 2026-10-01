@@ -174,7 +174,9 @@ mod tests {
     fn every_governed_row_is_a_registered_graphics_row() {
         let cvars = Cvars::default();
         for (k, values) in GRAPHICS_PRESETS {
-            let row = cvars.row(k).unwrap_or_else(|| panic!("{k}: not registered"));
+            let row = cvars
+                .row(k)
+                .unwrap_or_else(|| panic!("{k}: not registered"));
             assert!(!row.latched, "{k}: a latched row cannot follow a rung");
             for v in values {
                 assert!(
@@ -241,7 +243,10 @@ mod tests {
                 assert_eq!(cvars.get(GRAPHICS_QUALITY), Some(name));
                 let col = column(name);
                 for (k, values) in GRAPHICS_PRESETS {
-                    assert!(same_value(cvars.get(k).unwrap(), values[col]), "{name}: {k}");
+                    assert!(
+                        same_value(cvars.get(k).unwrap(), values[col]),
+                        "{name}: {k}"
+                    );
                 }
             }
         }

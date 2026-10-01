@@ -416,7 +416,10 @@ mod tests {
         world.resource_mut::<WeatherState>().sky_density = 1.0;
         world.run_system_once(update_wind).unwrap();
         let sway = world.resource::<EnvFrame>().sway_strength;
-        assert!((sway - 2.0 * (1.0 + STORM_SWAY_GAIN)).abs() < 1.0e-6, "{sway}");
+        assert!(
+            (sway - 2.0 * (1.0 + STORM_SWAY_GAIN)).abs() < 1.0e-6,
+            "{sway}"
+        );
         world.insert_resource(FoliageWind(0));
         world.run_system_once(update_wind).unwrap();
         let rows = world.resource::<EnvFrame>().pack();
@@ -437,7 +440,10 @@ mod tests {
         let p = WindProfile::default();
         for t0 in [10.0, 600.0, 36_000.0] {
             let d = integrate_travel(p, 0.0, t0, t0 + 1.0);
-            assert!(d > 0.0 && d < 2.2 * f64::from(p.base_speed), "t0={t0} d={d}");
+            assert!(
+                d > 0.0 && d < 2.2 * f64::from(p.base_speed),
+                "t0={t0} d={d}"
+            );
         }
     }
 }

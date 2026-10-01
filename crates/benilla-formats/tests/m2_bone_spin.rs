@@ -150,12 +150,12 @@ fn the_ghost_sky_spins_its_bone_on_the_global_sequence() {
         let dot: f32 = (0..4).map(|i| a[i] * b[i]).sum();
         2.0 * dot.abs().clamp(0.0, 1.0).acos().to_degrees()
     };
-    let (early, later) = (
-        from_start(s.duration * 0.05),
-        from_start(s.duration * 0.25),
-    );
+    let (early, later) = (from_start(s.duration * 0.05), from_start(s.duration * 0.25));
     assert!(early > 1.0, "already turning 5% in: {early}°");
-    assert!(later > early, "and further on at 25%: {early}° then {later}°");
+    assert!(
+        later > early,
+        "and further on at 25%: {early}° then {later}°"
+    );
 }
 
 /// `StratholmeSkybox` is three static opaque batches: nothing spins.

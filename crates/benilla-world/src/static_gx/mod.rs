@@ -474,9 +474,6 @@ impl StaticGx {
             }
         };
         let foliage_wind = foliage_wind_batch(&b.object.label, b.blend, b.wmo.is_some());
-        if foliage_wind {
-            log_foliage_classification(&b.object.label);
-        }
         let wmo_key = b.wmo.as_ref().map(|w| w.instance);
         let wmo = b.wmo.map(|w| GxItemWmo {
             group: w.group,
@@ -708,20 +705,6 @@ pub(crate) fn foliage_wind_batch(path: &str, blend: ModelBlend, wmo_geometry: bo
     ]
     .iter()
     .any(|term| p.contains(term))
-}
-
-/// Logs each classified model once, so a false positive can be audited from an ordinary load.
-fn log_foliage_classification(path: &str) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let mut seen = SEEN
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if seen.insert(path.to_string()) {
-        debug!("wind: classified foliage leaf batches for {path}");
-    }
 }
 
 pub struct StaticGxPlugin;

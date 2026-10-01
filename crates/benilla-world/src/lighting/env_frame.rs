@@ -176,7 +176,9 @@ mod tests {
             ),
         ] {
             let points = src.find("points: array<vec4<f32>, 512>").expect(name);
-            let probes = src.find("prop_probes: array<vec4<f32>, 57344>").expect(name);
+            let probes = src
+                .find("prop_probes: array<vec4<f32>, 57344>")
+                .expect(name);
             let between = &src[points..probes];
             assert!(
                 between.contains("env: env_frame::EnvFrame")

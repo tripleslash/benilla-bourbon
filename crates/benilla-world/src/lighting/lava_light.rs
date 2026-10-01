@@ -339,7 +339,15 @@ mod tests {
 
     fn points(list: Vec<(Entity, Vec<Vec3>)>) -> HashMap<Entity, Candidates> {
         list.into_iter()
-            .map(|(e, points)| (e, Candidates { points, rooms: None }))
+            .map(|(e, points)| {
+                (
+                    e,
+                    Candidates {
+                        points,
+                        rooms: None,
+                    },
+                )
+            })
             .collect()
     }
 
