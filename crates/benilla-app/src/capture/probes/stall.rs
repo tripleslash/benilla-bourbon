@@ -2,9 +2,9 @@
 //! of `<frames>` consecutive frames, every `<every_s>` seconds from `<after_s>`, reproducing a
 //! backgrounded window, which a kept-visible probe window ([`super::ProbeFocusPlugin`]) never is.
 //!
-//! Losing focus alone costs nothing (bevy's default `WinitSettings::game()` keeps an unfocused
-//! window at 60 Hz); a fully covered macOS window blocks ~1 s in `CAMetalLayer.nextDrawable` every
-//! frame. A ten-second tab-away is therefore `WOW_STALL="1000,20,60,10"`, and `WOW_STALL="0"` is
+//! Losing focus alone caps the loop at 60 Hz (bevy's default `WinitSettings::game()` drives an
+//! unfocused window at reactive 1/60 s; the FPS probe and journal runs lift that in `run()`); a
+//! fully covered macOS window blocks ~1 s in `CAMetalLayer.nextDrawable` every frame. A ten-second tab-away is therefore `WOW_STALL="1000,20,60,10"`, and `WOW_STALL="0"` is
 //! the monitor alone. Distinct from `WOW_STALL_INJECT` (`crate::perf::stall`), one watchdog sleep.
 //!
 //! `STALL_HIT` prints three clocks: `wall_dt`, [`Instant`] across the main-schedule pass (the

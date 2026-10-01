@@ -633,6 +633,18 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         start: run_mode::start_state(),
     });
 
+    // A background run opens unfocused, and `WinitSettings::game()` drives an unfocused window at
+    // reactive 1/60 s, so a frame-time instrument would read ~16.7 ms whatever the scene costs.
+    if background
+        && (std::env::var_os("WOW_FPS_PROBE").is_some()
+            || std::env::var_os("WOW_FPS_JOURNAL").is_some())
+    {
+        app.insert_resource(bevy::winit::WinitSettings {
+            focused_mode: bevy::winit::UpdateMode::Continuous,
+            unfocused_mode: bevy::winit::UpdateMode::Continuous,
+        });
+    }
+
     // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
     benilla_assets::register_asset_loaders(&mut app);
 
