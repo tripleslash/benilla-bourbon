@@ -87,11 +87,16 @@ mod chain_beam;
 pub(crate) use chain_beam::ChainHops;
 use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // `equip_slot` is the one InventoryType → slot table; the dressing room places items by it.
-pub(crate) use attach::{equip_slot, BodyPartsDesc};
+pub(crate) use attach::equip_slot;
+// For the `WOW_DRESS_CENSUS` instrument (a `dev` build's).
+#[cfg(feature = "dev")]
+pub(crate) use attach::BodyPartsDesc;
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 // For the `WOW_DRESS_CENSUS` instrument: what a body wears against what it resolved.
-pub(crate) use equipment::{attach_id, DressKey, HeldAttached, ATTACH_SLOT_NAMES};
+#[cfg(any(feature = "dev", test))]
+pub(crate) use equipment::ATTACH_SLOT_NAMES;
+pub(crate) use equipment::{attach_id, DressKey, HeldAttached};
 // Only the tests that build a `DressKey` name this type.
 #[cfg(test)]
 pub(crate) use equipment::ItemModelKind;
