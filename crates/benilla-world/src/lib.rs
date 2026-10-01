@@ -172,6 +172,7 @@ pub mod view;
 pub mod vis_chain;
 pub mod water_fx;
 pub mod wdl;
+pub mod wind;
 pub mod weather;
 pub mod wmo_portal;
 pub mod world_census;

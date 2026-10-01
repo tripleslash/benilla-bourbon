@@ -16,6 +16,9 @@
 #import benilla_modern::probegi
 #import benilla_modern::locallight
 #import benilla::env_frame
+// Ported from WarcraftXL (https://github.com/WarcraftXL) by iThorgrim — module
+// wxl-experimental-wind, grass/GrassWind.cpp (grass vertex displacement seam).
+#import benilla::wind_hook
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -589,8 +592,26 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     // Precision: camera-relative to clip space; `clip_from_world × p_world` cancels
     // catastrophically with camera and geometry near 9 k yd. `world_position` is absolute again:
     // lighting and fog need no such precision.
-    let p_cam = (frame_from_local * vec4<f32>(vertex.position, 1.0)).xyz
+    var p_cam = (frame_from_local * vec4<f32>(vertex.position, 1.0)).xyz
         + (frame_origin - view.world_position);
+    // fork: foliage wind. Clutter UV_B is `(height from base, per-tuft phase)`, authored by
+    // `clutter.rs`; UV_0 and the vertex colour keep their texture and tint meanings. The
+    // depth-prime twin runs this same stage, so both passes displace alike.
+#ifdef VERTEX_UVS_B
+    if (m.clutter_fade.w > 0.5) {
+        p_cam += wind_hook::grass_offset(
+            p_cam + view.world_position, vertex.uv_b.x, vertex.uv_b.y, view.world_position,
+            wow_light.env
+        );
+    }
+#endif
+    // fork: a retained tree inside its fade band draws here with the same anchor and field maths,
+    // so it does not pop. The leaf marker is material bit 14 (`model_render::FOLIAGE_WIND_MARKER`).
+    if ((u32(m.clutter_fade.z) & 16384u) != 0u && m.clutter_fade.w <= 0.5) {
+        p_cam += wind_hook::tree_offset(
+            p_cam + view.world_position, frame_origin, view.world_position, wow_light.env
+        );
+    }
     out.world_position = vec4<f32>(p_cam + view.world_position, 1.0);
     let view_rot = mat3x3<f32>(
         view.view_from_world[0].xyz,

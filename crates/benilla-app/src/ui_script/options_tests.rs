@@ -2610,6 +2610,12 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_FRAME_GENERATION",
                 "GraphicsRowFrameGeneration",
             ),
+            // fork: the Everwood port (FORK.md)
+            ("BENILLA_TOOLTIP_FOLIAGE_WIND", "GraphicsRowFoliageWind"),
+            (
+                "BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH",
+                "GraphicsRowFoliageWindStrength",
+            ),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
@@ -4854,6 +4860,9 @@ fn turtle_options_carry_every_graphics_row() {
         "renderScale",
         // fork: fsr (FORK.md)
         "frameGeneration",
+        // fork: the Everwood port (FORK.md)
+        "foliageWind",
+        "foliageWindStrength",
     ] {
         assert!(
             rows.contains(&format!(":{cvar}:1;")),

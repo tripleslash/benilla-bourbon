@@ -12,8 +12,9 @@ use super::{
     MAX_DIRTY_FRAMES, REBAKE_FRAMES,
 };
 use super::{
-    WORD_CLASS_INT, WORD_CLASS_TRANS, WORD_FOG_OFF, WORD_HAS_VC, WORD_INTERIOR, WORD_MATTE,
-    WORD_SHADE_LIT, WORD_TEXTURED, WORD_UNLIT, WORD_WINDOW, WORD_WMO, WORD_WRAP_X, WORD_WRAP_Y,
+    WORD_CLASS_INT, WORD_CLASS_TRANS, WORD_FOG_OFF, WORD_FOLIAGE_WIND, WORD_HAS_VC, WORD_INTERIOR,
+    WORD_MATTE, WORD_SHADE_LIT, WORD_TEXTURED, WORD_UNLIT, WORD_WINDOW, WORD_WMO, WORD_WRAP_X,
+    WORD_WRAP_Y,
 };
 
 /// Print the declined-batch census, beside the accepted count, once the counts have sat still for
@@ -362,6 +363,8 @@ fn bake_cell(items: &[GxItem]) -> BakedCell {
             | (u32::from(item.matte) * WORD_MATTE)
             | (u32::from(item.texture.is_some()) * WORD_TEXTURED)
             | (u32::from(has_vc) * WORD_HAS_VC)
+            // fork: only classified alpha-tested tree and bush leaf cards carry this bit.
+            | (u32::from(item.foliage_wind) * WORD_FOLIAGE_WIND)
             // An interior prop is WORD_INTERIOR without WORD_WMO; a slot-less prop keeps the
             // exterior law, as on the entity path.
             | item.prop.as_ref().map_or(0, |p| {

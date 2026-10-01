@@ -220,6 +220,7 @@ pub(super) fn spawn_menagerie(
     // The ground-clutter lane, both sidednesses and all three alpha modes its builder maps to
     // (Opaque, Mask, Blend). The pipeline sees only key bits, so `clutter_fade` is armed on a
     // copy of the plain material, leaving the dedup cache's entry untouched.
+    let mut clutter_mats: Vec<Handle<WowModelMaterial>> = Vec::new();
     for two_sided in [false, true] {
         for blend in [ModelBlend::Opaque, ModelBlend::AlphaTest, ModelBlend::Blend] {
             let plain = model_material(
@@ -255,6 +256,8 @@ pub(super) fn spawn_menagerie(
                 let mut m = m.clone();
                 m.extension.clutter_fade = Vec4::new(52.5, 70.0, 0.0, 1.0);
                 let clutter = materials.add(m);
+                // fork: also on the clutter mesh's own layout (UV_1, the wind height and phase).
+                clutter_mats.push(clutter.clone());
                 mats.push(clutter);
             }
         }
@@ -403,6 +406,19 @@ pub(super) fn spawn_menagerie(
     let posuv2 = meshes.add(warm_pos_uv_mesh(true));
     let liquid_mesh = meshes.add(warm_liquid_mesh(false));
     let liquid_mesh_colored = meshes.add(warm_liquid_mesh(true));
+    // fork: clutter meshes carry POS + NORMAL + UV_0 + UV_1 (wind) + COLOR, a layout (and
+    // `VERTEX_UVS_B`) the model quads lack; the liquid colour quad has exactly that set.
+    for mat in &clutter_mats {
+        spawn_lane_rig(
+            commands,
+            cam,
+            None,
+            &liquid_mesh_colored,
+            None,
+            mat.clone(),
+            &mut count,
+        );
+    }
     // Celestial discs and glares (`sun::setup` quads: position, normal, UV).
     for mat in lane_handles(&mut lanes.celestial) {
         spawn_lane_rig(

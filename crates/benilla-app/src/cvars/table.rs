@@ -802,6 +802,21 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 presents every frame it draws and no frame it did not",
     ),
     // ── end fork-owned block ──
+    // ── fork-owned block: the Everwood port (FORK.md) ──
+    // `foliageWind` — 0 off (no vertex displacement, the reference's still image), 1 grass, 2
+    // grass and classified tree and bush foliage (the default). `foliageWindStrength` — the sway
+    // gain, 0.25..3, 1 the shipped tuning. Both apply to the next frame.
+    ours(
+        "foliageWind",
+        "2",
+        "the fork's own — 1.12 draws ground clutter and tree foliage still",
+    ),
+    ours(
+        "foliageWindStrength",
+        "1",
+        "the fork's own — the gain on `foliageWind`'s sway",
+    ),
+    // ── end fork-owned block ──
     // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
     //
     // The name and the value space are the REFERENCE's, taken from a later client rather than

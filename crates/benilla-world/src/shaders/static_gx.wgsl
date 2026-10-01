@@ -10,6 +10,9 @@
 #import benilla_modern::probegi
 #import benilla_modern::locallight
 #import benilla::env_frame
+// Ported from WarcraftXL (https://github.com/WarcraftXL) by iThorgrim — module
+// wxl-experimental-wind (the shared foliage vertex displacement, `wind_hook.wgsl`).
+#import benilla::wind_hook
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -267,6 +270,8 @@ const WORD_HAS_VC: u32 = 134217728u;   // 1 << 27: the batch authors vertex colo
 // INTERIOR without WMO is an interior M2 prop, the entity shader's `interior_prop =
 // flags.z && !flags.x`: probe lighting, interior fog, no point lights.
 const WORD_MATTE: u32 = 268435456u;    // 1 << 28: ShadeSel::Matte, fixed intensity 1.0
+// fork: an alpha-tested leaf batch of a classified static tree or bush model (foliage wind).
+const WORD_FOLIAGE_WIND: u32 = 536870912u; // 1 << 29
 
 // The alpha-test cutout reference 224/255, as wow_model.wgsl's VANILLA_ALPHA_KEY.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
@@ -404,9 +409,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.color = vec4<f32>(1.0);
         return out;
     }
-    let world = v.position + cell.origin.xyz;
+    let world = v.position + cell.origin.xyz + gx_wind_offset(v.position, v.word, v.anchor);
     out.world_position = vec4<f32>(world, 1.0);
-    out.position = gx_clip_position(v.position, v.word);
+    out.position = gx_clip_position(v.position, v.word, v.anchor);
     out.world_normal = v.normal;
     out.uv = v.uv;
     out.word = v.word;
@@ -446,8 +451,14 @@ fn vertex(v: GxVertex) -> GxVsOut {
 // folded into depth so a later coplanar batch wins reverse-Z in any draw order, because the draw
 // sort does not keep authored order. One function, so the prepass and the colour pass compute it
 // with the same operations in the same order.
-fn gx_clip_position(position: vec3<f32>, word: u32) -> vec4<f32> {
-    let p_cam = position + (cell.origin.xyz - view.world_position);
+//
+// fork: the foliage sway is added in here, so the prepass and the `Equal`-tested colour pass
+// displace a leaf identically. The shadow casters and the GI voxels stay static (the cascade and
+// atlas caches stay valid), and FSR has no motion vector for the sway: it relies on its
+// shading-change detector, at most a slight smear on leaves.
+fn gx_clip_position(position: vec3<f32>, word: u32, anchor: vec3<f32>) -> vec4<f32> {
+    let p_cam = position + (cell.origin.xyz - view.world_position)
+        + gx_wind_offset(position, word, anchor);
     let view_rot = mat3x3<f32>(
         view.view_from_world[0].xyz,
         view.view_from_world[1].xyz,
@@ -456,6 +467,17 @@ fn gx_clip_position(position: vec3<f32>, word: u32) -> vec4<f32> {
     var clip = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
     clip.z *= 1.0 + f32(recs[word & 0xffffu].y) * 1.1920929e-7;
     return clip;
+}
+
+// fork: a classified leaf batch's wind displacement from its placement anchor (zero for every
+// other batch): only leaf cards carry the bit, and animated doodads never reach this lane.
+fn gx_wind_offset(position: vec3<f32>, word: u32, anchor: vec3<f32>) -> vec3<f32> {
+    if ((word & WORD_FOLIAGE_WIND) == 0u) {
+        return vec3<f32>(0.0);
+    }
+    return wind_hook::tree_offset(
+        position + cell.origin.xyz, anchor, view.world_position, wow_light.env
+    );
 }
 
 // The item's texel through the sampler matching its wrap flags. Both-repeat and both-clamp ride
@@ -497,6 +519,8 @@ struct GxPrepassVertex {
     @location(0) position: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) word: u32,
+    // fork: the placement anchor, for the foliage sway the colour pass applies.
+    @location(4) anchor: vec3<f32>,
 }
 
 struct GxPrepassOut {
@@ -518,9 +542,9 @@ fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
         out.eye_z = 0.0;
         return out;
     }
-    let world = v.position + cell.origin.xyz;
+    let world = v.position + cell.origin.xyz + gx_wind_offset(v.position, v.word, v.anchor);
     out.eye_z = -(view.view_from_world * vec4<f32>(world, 1.0)).z;
-    out.position = gx_clip_position(v.position, v.word);
+    out.position = gx_clip_position(v.position, v.word, v.anchor);
     return out;
 }
 

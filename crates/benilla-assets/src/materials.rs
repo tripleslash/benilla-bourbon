@@ -47,6 +47,8 @@ pub fn register_shaders(app: &mut App) {
         // `benilla::env_frame`, the block the world `WowLight` mirrors declare after the point
         // table (`benilla-world`'s `lighting/env_frame.rs`).
         bevy::shader::load_shader_library!(app, "shaders/env_frame.wgsl");
+        // `benilla::wind_hook`, the shared vertex displacement for grass and foliage.
+        bevy::shader::load_shader_library!(app, "shaders/wind_hook.wgsl");
     }
 }
 

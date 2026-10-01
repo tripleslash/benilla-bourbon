@@ -166,6 +166,12 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/lighting/{global_light,prop_probes,mod}.rs` | `LightStd430.env` (12 rows after the point table, packed in `build_light_data` from `EnvFrame`); the rain-shelter region (65,568 B) between the per-frame blob and the prop probes, so `prop_probe_region_offset` and every region behind it move | Everwood port |
 | `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl`, `fsr/velocity.wgsl`, `modern/entity_shadow.wgsl` | the light mirrors declare `env` and `shelter_hdr` / `shelter_cfg` / `shelter` after `points` (the last two as unread padding) | Everwood port |
 | `benilla-assets/src/materials.rs` | `register_shaders` loads the `benilla::env_frame` / `wind_hook` / `wet_hook` libraries | Everwood port |
+| `benilla-world/src/clutter.rs` | `build_chunk_clutter` writes `ATTRIBUTE_UV_1` = (height over the model's span, per-tuft phase) | Everwood port: wind |
+| `wow_model.wgsl` | `vertex`: `p_cam` is `var` and takes `wind_hook::grass_offset` (clutter, under `VERTEX_UVS_B`) and `tree_offset` (material marker bit 14) | Everwood port: wind |
+| `static_gx.wgsl`, `static_gx/{mod,bake}.rs` | `WORD_FOLIAGE_WIND` (bit 29) from `foliage_wind_batch`; `gx_clip_position` takes the anchor and adds `gx_wind_offset`; `GxPrepassVertex` gains `anchor` | Everwood port: wind |
+| `benilla-world/src/model_render.rs`, `terrain_stream/spawn/assemble.rs` | `FOLIAGE_WIND_MARKER` (bit 14), `foliage_model_material`; a leaf batch's fade seed carries the marked pair | Everwood port: wind |
+| `benilla-world/src/world_plugins.rs`, `lib.rs` | `pub mod wind;`, `.add(crate::wind::WindPlugin)` after `WeatherPlugin` | Everwood port: wind |
+| `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `pipe_warm/menagerie.rs`, `assets/ui/OptionsFrame.xml` | the `foliageWind` / `foliageWindStrength` rows, their `on_cvar` arms, `GRAPHICS_CVARS`, the option rows in both windows; the clutter pipelines warmed on the UV_1 layout | Everwood port: wind |
 
 ## Planned hooks (not yet landed)
 

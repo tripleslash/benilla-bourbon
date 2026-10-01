@@ -200,6 +200,9 @@ pub(crate) fn on_cvar(
         Option<ResMut<benilla_world::ssilvb::IndirectLighting>>,
         Option<ResMut<benilla_world::modern::LightingSettings>>,
         Option<ResMut<benilla_world::liquid::WaterDetail>>,
+        // fork: the Everwood port (FORK.md) — the foliage wind tier and gain.
+        Option<ResMut<benilla_world::wind::FoliageWind>>,
+        Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
     ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -316,6 +319,22 @@ pub(crate) fn on_cvar(
         "waterdetail" => {
             if let Some(water) = fork.2.as_deref_mut() {
                 *water = benilla_world::liquid::WaterDetail::from_cvar(v);
+            }
+        }
+        // fork: the foliage wind (FORK.md): 0 off, 1 grass, 2 grass and trees. A
+        // dev build's capture pin (`$WOW_FOLIAGE_WIND` under `$WOW_CAPTURE`) holds its tier.
+        "foliagewind" => {
+            if let Some(wind) = fork.3.as_deref_mut() {
+                let pinned = cfg!(feature = "dev")
+                    && benilla_world::wind::FoliageWind::capture_override().is_some();
+                if !pinned {
+                    wind.0 = v.clamp(0.0, 2.0) as u8;
+                }
+            }
+        }
+        "foliagewindstrength" => {
+            if let Some(strength) = fork.4.as_deref_mut() {
+                *strength = benilla_world::wind::FoliageWindStrength::from_cvar(v);
             }
         }
         // Spell Detail (`0x689510`): `SStrToInt`, clamped to [0, 2] in the handler's own copy,

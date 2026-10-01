@@ -916,6 +916,9 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "renderScale",
     // fork: fsr (FORK.md)
     "frameGeneration",
+    // fork: the Everwood port (FORK.md)
+    "foliageWind",
+    "foliageWindStrength",
 ];
 
 /// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
@@ -1516,6 +1519,15 @@ mod tests {
         assert_eq!(
             d["frameGeneration"] != 0.0,
             benilla_world::fsr::FrameGeneration::default().0
+        );
+        // fork: the Everwood port — the foliage wind boots at the engine's registered tier and gain.
+        assert_eq!(
+            d["foliageWind"],
+            f32::from(benilla_world::wind::FoliageWind::REGISTERED)
+        );
+        assert_eq!(
+            d["foliageWindStrength"],
+            benilla_world::wind::FoliageWindStrength::REGISTERED
         );
     }
 

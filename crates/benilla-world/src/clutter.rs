@@ -335,10 +335,21 @@ fn build_chunk_clutter(
         if subs.is_empty() {
             continue;
         }
+        // fork: foliage wind. Source M2 Z is up. The bend weight is the tuft's own height,
+        // normalised over ALL of the model's submeshes (so a stem and its head bend as one body),
+        // never texture V. UV_1 is free on clutter and carries height + per-tuft phase.
+        let (min_z, max_z) = subs
+            .iter()
+            .flat_map(|sub| sub.positions.iter())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p[2]), hi.max(p[2]))
+            });
+        let height_span = (max_z - min_z).max(1.0e-4);
         for sub in subs.iter() {
             let vcount = sub.positions.len() * placements.len();
             let mut positions = Vec::with_capacity(vcount);
             let mut uvs = Vec::with_capacity(vcount);
+            let mut wind = Vec::with_capacity(vcount);
             // The ground normal under each tuft, never the blade's own M2 normal.
             let mut normals = Vec::with_capacity(vcount);
             let mut colors = Vec::with_capacity(vcount);
@@ -350,6 +361,7 @@ fn build_chunk_clutter(
                 let rot = Quat::from_rotation_y(d.yaw);
                 // The reference's random per-tuft scale, in [0.9, 1.1].
                 let inst_scale = d.scale;
+                let phase = tuft_phase(origin);
                 // One tint per tuft. The reference makes the grey the lit material (colour material
                 // on ambient and diffuse, `0x59cfec`), `clamp(grey × light) × texture`; the shader
                 // multiplies it outside the clamp, `texture × grey × clamp(light)`, so under light
@@ -358,6 +370,7 @@ fn build_chunk_clutter(
                 for (i, p) in sub.positions.iter().enumerate() {
                     positions.push((rot * (wow_to_bevy(*p) * inst_scale) + origin).to_array());
                     uvs.push(sub.uvs[i]);
+                    wind.push([((p[2] - min_z) / height_span).clamp(0.0, 1.0), phase]);
                     normals.push(sp.ground_normal);
                     colors.push(tint);
                 }
@@ -369,6 +382,8 @@ fn build_chunk_clutter(
             );
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            // fork: the wind attributes; a second UV set turns `VERTEX_UVS_B` on for clutter only.
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, wind);
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
             // The MCSH tint, under the `VERTEX_COLORS` def the shader's clutter path reads.
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -416,6 +431,13 @@ fn build_chunk_clutter(
         );
     }
     out
+}
+
+/// fork: a tuft's wind phase from its world-space origin: an identity hash, so rebuild order and
+/// frame timing cannot change a blade's motion.
+fn tuft_phase(origin: Vec3) -> f32 {
+    let h = (origin.x * 0.737 + origin.z * 1.311).sin() * 43_758.547;
+    h.fract().abs() * std::f32::consts::TAU
 }
 
 /// Squared distance from a point to an axis-aligned box, zero inside.

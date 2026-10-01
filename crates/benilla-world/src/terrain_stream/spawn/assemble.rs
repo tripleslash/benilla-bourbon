@@ -229,6 +229,43 @@ pub fn spawn_model_entities(
                 seq_owner,
             )
         };
+        // fork: a classified exterior tree or bush leaf batch gets marked copies of both materials
+        // for its fade-band exile (`FOLIAGE_WIND_MARKER`), so only those entity draws sway; the
+        // plain pair stays on every other path.
+        let wind_seed = (!interior
+            && !steady_interior_prop
+            && crate::static_gx::foliage_wind_batch(&object.label, sub.blend, is_wmo))
+        .then(|| {
+            let mut wind_mat = |fade: bool| {
+                crate::model_render::foliage_model_material(
+                    mat_cache,
+                    materials,
+                    sub.texture.clone(),
+                    sub.blend,
+                    two_sided,
+                    is_wmo,
+                    interior,
+                    sub.emissive,
+                    sub.additive,
+                    fade,
+                    sub.no_depth_write,
+                    sub.no_depth_test,
+                    sub.fog_policy,
+                    sub.env_map,
+                    shade,
+                    batch_order,
+                    sub.uv_anim.as_ref(),
+                    sub.rgb_anim.as_ref(),
+                    sub.wmo_batch,
+                    sub.sidn,
+                    sub.window,
+                    false,
+                    light,
+                    seq_owner,
+                )
+            };
+            (wind_mat(false), wind_mat(true))
+        });
         // One classification for the census tally and the diverts, so the two cannot drift.
         let class = crate::static_merge::BatchClass {
             excluded: animated
@@ -307,8 +344,13 @@ pub fn spawn_model_entities(
                             local_center,
                             stat_mesh: stat_mesh.clone(),
                             aabb: *stat_aabb,
-                            cutout: cutout.clone(),
-                            blend: blend.clone(),
+                            // fork: the marked pair for a leaf batch.
+                            cutout: wind_seed
+                                .as_ref()
+                                .map_or_else(|| cutout.clone(), |w| w.0.clone()),
+                            blend: wind_seed
+                                .as_ref()
+                                .map_or_else(|| blend.clone(), |w| w.1.clone()),
                         });
                         // A never-fader enters bare, a fader only with its seed.
                         (class.never_fade || fade_seed.is_some())

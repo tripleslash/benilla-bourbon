@@ -75,6 +75,9 @@ pub struct MatKey {
     window: bool,
     /// A depth-prime twin ([`zfill_material`], the reference's `M2UseZFill` clone at `0x707f7d`).
     zfill: bool,
+    /// fork: a classified tree or bush leaf batch's exile copy, marker bit 14
+    /// ([`FOLIAGE_WIND_MARKER`]); `wow_model.wgsl` sways only these.
+    foliage_wind: bool,
     /// A WMO skybox batch ([`crate::skybox`]), with its own pipeline and sort rung.
     sky_depth: bool,
     /// The placement owning this material when its animated loop follows the instance's sequence
@@ -148,6 +151,121 @@ pub fn model_material(
     light: &Buffer,
     instance: Option<Entity>,
 ) -> Handle<WowModelMaterial> {
+    model_material_impl(
+        cache,
+        materials,
+        texture,
+        blend,
+        two_sided,
+        is_wmo,
+        is_interior,
+        is_emissive,
+        is_additive,
+        fade_variant,
+        no_depth_write,
+        no_depth_test,
+        fog_policy,
+        env_map,
+        shade,
+        batch_order,
+        uv_anim,
+        rgb_anim,
+        wmo_class,
+        sidn,
+        window,
+        sky_depth,
+        light,
+        instance,
+        false,
+    )
+}
+
+/// fork: [`model_material`] for a classified tree or bush leaf batch's exile copy: the same
+/// material plus [`FOLIAGE_WIND_MARKER`], so the entity draw sways like the retained batch.
+#[allow(clippy::too_many_arguments)]
+pub fn foliage_model_material(
+    cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    texture: Option<Handle<Image>>,
+    blend: ModelBlend,
+    two_sided: bool,
+    is_wmo: bool,
+    is_interior: bool,
+    is_emissive: bool,
+    is_additive: bool,
+    fade_variant: bool,
+    no_depth_write: bool,
+    no_depth_test: bool,
+    fog_policy: benilla_formats::FogPolicy,
+    env_map: bool,
+    shade: ShadeSel,
+    batch_order: u16,
+    uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
+    rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
+    wmo_class: Option<WmoBatchClass>,
+    sidn: Option<[u8; 3]>,
+    window: bool,
+    sky_depth: bool,
+    light: &Buffer,
+    instance: Option<Entity>,
+) -> Handle<WowModelMaterial> {
+    model_material_impl(
+        cache,
+        materials,
+        texture,
+        blend,
+        two_sided,
+        is_wmo,
+        is_interior,
+        is_emissive,
+        is_additive,
+        fade_variant,
+        no_depth_write,
+        no_depth_test,
+        fog_policy,
+        env_map,
+        shade,
+        batch_order,
+        uv_anim,
+        rgb_anim,
+        wmo_class,
+        sidn,
+        window,
+        sky_depth,
+        light,
+        instance,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_material_impl(
+    cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    texture: Option<Handle<Image>>,
+    blend: ModelBlend,
+    two_sided: bool,
+    is_wmo: bool,
+    is_interior: bool,
+    is_emissive: bool,
+    is_additive: bool,
+    fade_variant: bool,
+    no_depth_write: bool,
+    no_depth_test: bool,
+    fog_policy: benilla_formats::FogPolicy,
+    env_map: bool,
+    shade: ShadeSel,
+    batch_order: u16,
+    uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
+    rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
+    wmo_class: Option<WmoBatchClass>,
+    sidn: Option<[u8; 3]>,
+    window: bool,
+    sky_depth: bool,
+    light: &Buffer,
+    instance: Option<Entity>,
+    foliage_wind: bool,
+) -> Handle<WowModelMaterial> {
     let key = MatKey {
         light: light.id(),
         texture: texture.as_ref().map(Handle::id),
@@ -170,6 +288,7 @@ pub fn model_material(
         sidn,
         window,
         zfill: false,
+        foliage_wind,
         sky_depth,
         instance,
     };
@@ -244,7 +363,7 @@ pub fn model_material(
                     // (`0x70baf0`), 7 Mod (DST_COLOR, ZERO) and 8 Mod2x (DST_COLOR, SRC_COLOR),
                     // exact because the framebuffer holds gamma as in the reference, 10 twin
                     // cutout (the source alpha-tests: 224/255 on the unfaded alpha; an Opaque
-                    // source has no test, `0x70c237`), 12 env map, 13 sky depth.
+                    // source has no test, `0x70c237`), 12 env map, 13 sky depth, 14 foliage wind.
                     f32::from(
                         u16::from(no_depth_write)
                             | (u16::from(no_depth_test) << 1)
@@ -259,7 +378,8 @@ pub fn model_material(
                             | (u16::from(blend == ModelBlend::Mod2x) << 8)
                             | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
                             | (u16::from(env_map) * ENV_MAP_MARKER)
-                            | (u16::from(sky_depth) * SKY_DEPTH_MARKER),
+                            | (u16::from(sky_depth) * SKY_DEPTH_MARKER)
+                            | (u16::from(foliage_wind) * FOLIAGE_WIND_MARKER),
                     ),
                     0.0,
                 ),
@@ -342,6 +462,11 @@ pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 /// vertex with no raster bias; a `WowModelKey` axis, so every other draw keeps its real depth.
 pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
 
+/// fork: `clutter_fade.z` marker bit 14: a classified tree or bush leaf batch's exile copy, the
+/// only entity draw `wow_model.wgsl` applies `tree_offset` to. Vertex-only uniform data, not a
+/// `WowModelKey` axis; a `MeshTag` bit would alias the lane weight and the interior probe slot.
+pub(crate) const FOLIAGE_WIND_MARKER: u16 = 1 << 14;
+
 /// [`BATCH_ORDER_SORT_EPS`] for the WMO skybox lane: at the −6e4 rung the f32 ulp is 0.0039, so
 /// 1e-3 would round away; this step is 4 ulps. Every skybox batch pair ties, being eye-anchored.
 pub(crate) const SKYBOX_ORDER_EPS: f32 = 0.015625;
@@ -404,6 +529,7 @@ pub fn zfill_material(
         sidn: None,
         window: false,
         zfill: true,
+        foliage_wind: false,
         // No skybox batch has a twin: the sky writes no depth.
         sky_depth: false,
         instance: None,
