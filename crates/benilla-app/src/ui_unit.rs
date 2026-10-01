@@ -153,9 +153,9 @@ impl Plugin for UiUnitPlugin {
                 // raises for the same port.
                 fire_leaving_world_on_worldport,
                 // Before `feed_units`, whose `PLAYER_TARGET_CHANGED` runs `InspectUnit("target")`:
-                // `CanInspect` must answer for the new target, not last frame's. It therefore reads
-                // the aura feed's resolver inputs (a form's creature type) as of last frame.
-                feed_unit_reach,
+                // `CanInspect` must answer for the new target, not last frame's. After the aura
+                // feed, which publishes the held guids it measures, the new target's among them.
+                feed_unit_reach.after(crate::ui_aura::AuraEvents),
                 feed_units,
                 // After the aura feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
@@ -3160,6 +3160,15 @@ mod tests {
                 guid: Some(guid),
                 ..Default::default()
             });
+            // The aura feed's step: it publishes the guids the tokens name, the new target's too.
+            app.world_mut().non_send_mut::<UiScript>().set_unit_guids(
+                &benilla_ui::script::UnitGuids {
+                    player: ME,
+                    target: guid,
+                    held: HashMap::from([(ME, 0), (guid, 0)]),
+                    ..Default::default()
+                },
+            );
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut().run_system_once(feed_units).unwrap();
             let mut s = app.world_mut().non_send_mut::<UiScript>();
