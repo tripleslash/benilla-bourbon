@@ -92,31 +92,42 @@ fn apply_global_sequences(
         }
         let mut rig = rigs.get_mut(host).ok();
         for (target, bone) in &drive.bones {
-            let tf: &mut Transform = match target {
+            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
+            // Seeded from the current value, so a channel the bone does not carry keeps it.
+            let sample = |cur: &Transform| {
+                let mut out = *cur;
+                if let Some(c) = &bone.translation {
+                    out.translation = c.sample(at(c.period));
+                }
+                if let Some(c) = &bone.rotation {
+                    out.rotation = c.sample(at(c.period));
+                }
+                if let Some(c) = &bone.scale {
+                    out.scale = c.sample(at(c.period));
+                }
+                out
+            };
+            // Both targets store only a moved value: a joint's `Changed` costs a propagation
+            // walk, and a rig's `pose_dirty` a re-fold and anchor re-seat, every frame it held.
+            match target {
                 SeqTarget::Joint(joint) => {
-                    let Ok(tf) = joints.get_mut(*joint) else {
+                    let Ok(mut tf) = joints.get_mut(*joint) else {
                         continue;
                     };
-                    tf.into_inner()
+                    let posed = sample(&tf);
+                    tf.set_if_neq(posed);
                 }
                 SeqTarget::Bone(b) => {
                     let Some(rig) = rig.as_mut() else { continue };
-                    rig.pose_dirty = true;
-                    let Some(tf) = rig.locals.get_mut(*b as usize) else {
+                    let Some(cur) = rig.locals.get(*b as usize).copied() else {
                         continue;
                     };
-                    tf
+                    let posed = sample(&cur);
+                    if cur != posed {
+                        rig.locals[*b as usize] = posed;
+                        rig.pose_dirty = true;
+                    }
                 }
-            };
-            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
-            if let Some(c) = &bone.translation {
-                tf.translation = c.sample(at(c.period));
-            }
-            if let Some(c) = &bone.rotation {
-                tf.rotation = c.sample(at(c.period));
-            }
-            if let Some(c) = &bone.scale {
-                tf.scale = c.sample(at(c.period));
             }
         }
     }

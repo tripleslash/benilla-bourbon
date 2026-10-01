@@ -55,11 +55,13 @@ fn compose_rig_models(
                 continue;
             };
             let (scale, rotation, translation) = m.to_scale_rotation_translation();
-            *t = Transform {
+            // Compared first: `DerefMut` marks the anchor `Changed` (a propagation subtree walk)
+            // whether or not the value moved, and a still scenery rig poses to the same place.
+            t.set_if_neq(Transform {
                 translation,
                 rotation,
                 scale,
-            };
+            });
         }
     }
 }
