@@ -342,13 +342,19 @@ fn follow_camera(
     let Some(cam_gt) = cam.iter().next() else {
         return;
     };
-    let now = time.elapsed_secs();
+    let now = time.elapsed_secs_f64();
     for (mut tf, mut gt, spin) in &mut parts {
         let (rot, pivot) = match spin {
-            Some(s) => (
-                benilla_assets::coords::wow_rotation_to_bevy(s.spin.sample(now)),
-                s.pivot,
-            ),
+            Some(s) => {
+                // Wrapped by the spin's own period in f64: an f32 clock steps the angle visibly
+                // after a day's uptime.
+                let d = f64::from(s.spin.duration);
+                let t = if d > 0.0 { now.rem_euclid(d) } else { 0.0 } as f32;
+                (
+                    benilla_assets::coords::wow_rotation_to_bevy(s.spin.sample(t)),
+                    s.pivot,
+                )
+            }
             None => (Quat::IDENTITY, Vec3::ZERO),
         };
         tf.translation = cam_gt.translation() + pivot - rot * pivot;
