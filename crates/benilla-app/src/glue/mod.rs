@@ -34,6 +34,7 @@ impl Plugin for GluePlugin {
         >::default())
             .init_resource::<GlueArt>()
             .add_observer(art::forget_glue_art)
+            .add_observer(widgets::image_fills_node)
             .add_data_loaders(crate::glue_strings::load_glue_strings)
             .init_resource::<GlueClicks>()
             .init_resource::<dialog::GlueDialog>()

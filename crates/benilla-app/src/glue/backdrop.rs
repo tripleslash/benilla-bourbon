@@ -201,10 +201,10 @@ pub(crate) fn fit_backdrop_borders(
                 continue;
             };
             let (x, y, w, h, mode) = match kind {
-                BackdropPiece::Tl => (0.0, 0.0, edge, edge, NodeImageMode::Auto),
-                BackdropPiece::Tr => (bw - edge, 0.0, edge, edge, NodeImageMode::Auto),
-                BackdropPiece::Bl => (0.0, bh - edge, edge, edge, NodeImageMode::Auto),
-                BackdropPiece::Br => (bw - edge, bh - edge, edge, edge, NodeImageMode::Auto),
+                BackdropPiece::Tl => (0.0, 0.0, edge, edge, NodeImageMode::Stretch),
+                BackdropPiece::Tr => (bw - edge, 0.0, edge, edge, NodeImageMode::Stretch),
+                BackdropPiece::Bl => (0.0, bh - edge, edge, edge, NodeImageMode::Stretch),
+                BackdropPiece::Br => (bw - edge, bh - edge, edge, edge, NodeImageMode::Stretch),
                 BackdropPiece::Left => (0.0, edge, edge, run_h, run(false)),
                 BackdropPiece::Right => (bw - edge, edge, edge, run_h, run(false)),
                 BackdropPiece::Top => (edge, 0.0, run_w, edge, run(true)),

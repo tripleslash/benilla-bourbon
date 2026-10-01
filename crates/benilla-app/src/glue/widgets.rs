@@ -6,6 +6,7 @@ use benilla_ui::markup::{tokens, TokenKind};
 use benilla_ui::widget::EditBoxState;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
+use bevy::ui::VisualBox;
 use bevy::ui_render::ui_material::MaterialNode;
 
 use super::art::{tc_rect, ArrowArt, GlueArt, BTN_BG, BUTTON_TC, FALLBACK_ALPHA, GOLD, NAME_EDGE};
@@ -58,6 +59,32 @@ pub(crate) struct OutlineCopy {
 }
 
 // ── Layout helpers ───────────────────────────────────────────────────────────────────────────────
+
+/// A texture fills the rectangle its frame gives it, stretched, as a 1.12 `Texture` does: an
+/// [`ImageNode`] whose node sets both its sizes (explicitly, or by opposing absolute insets)
+/// draws [`NodeImageMode::Stretch`] across its border box. bevy 0.19's `Auto` letterboxes the
+/// image to its source aspect inside the content box, which shrank every cropped or stretched
+/// glue texture; an image whose node takes its size from the texture keeps `Auto`.
+pub(crate) fn image_fills_node(
+    add: On<Add, ImageNode>,
+    mut images: Query<(&Node, &mut ImageNode)>,
+) {
+    let Ok((node, mut image)) = images.get_mut(add.entity) else {
+        return;
+    };
+    let absolute = node.position_type == PositionType::Absolute;
+    let spans = |size: Val, a: Val, b: Val| {
+        size != Val::Auto || (absolute && a != Val::Auto && b != Val::Auto)
+    };
+    let sized =
+        spans(node.width, node.left, node.right) && spans(node.height, node.top, node.bottom);
+    if sized && matches!(image.image_mode, NodeImageMode::Auto) {
+        image.image_mode = NodeImageMode::Stretch;
+    }
+    if !matches!(image.image_mode, NodeImageMode::Auto) {
+        image.visual_box = VisualBox::BorderBox;
+    }
+}
 
 /// An absolutely-positioned node at the authored `(left, top, w, h)`, scaled by `s`.
 pub(crate) fn abs(s: f32, left: f32, top: f32, w: f32, h: f32) -> Node {
