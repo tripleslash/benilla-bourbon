@@ -429,6 +429,13 @@
             .. "calmer, higher is a blustery day. Storms swing everything harder on top.\n\n"
             .. "Grass still parts around characters the same way. Needs Foliage Wind on."
 
+        BENILLA_TOOLTIP_GRAPHICS_PRESET =
+            "Sets every graphics setting below at once, from the original client's look to the "
+            .. "most detailed one: lighting, view distance, ground detail, weather, shadows, "
+            .. "ambient occlusion, water, the updated and reforged models, render scale, frame "
+            .. "generation, foliage wind, wet surfaces and lava light.\n\n"
+            .. "Classic is the original client. Changing a setting a preset names shows Custom. "
+            .. "Applies when you click Apply; the reforged models change on the next load."
         BENILLA_TOOLTIP_RAIN_SURFACES =
             "Rain slowly soaks the ground, stone and wood under the open sky: they darken, puddles "
             .. "gather on flat ground and wet tops catch the light. Everything dries over a few "
@@ -548,6 +555,8 @@
                 "RowBackgroundSound",
             },
             Graphics = {
+                -- fork: the Graphics Preset heads the page it names (FORK.md).
+                "RowGraphicsPreset",
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
                 "RowWeatherDensity",
                 -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
@@ -1168,6 +1177,31 @@
                 BenillaOptionsRow_Set(row, BenillaOptionsRow_Default(row))
             end
             BenillaOptionsPage_Refresh(key)
+            if key == "Graphics" then BenillaOptionsPreset_Settle() end
+        end
+
+        -- fork: the Graphics Preset (FORK.md). The host writes a rung's rows a
+        -- frame after its name is stored, and re-derives the name whenever a row it names moves,
+        -- so the row repaints the page once those writes have landed and follows its own label.
+        function BenillaOptionsPreset_Settle()
+            BenillaOptionsFrameContainerBodyGraphicsRowGraphicsPreset.settle = 3
+        end
+
+        function BenillaOptionsPresetRow_OnUpdate(row)
+            if row.settle then
+                row.settle = row.settle - 1
+                if row.settle <= 0 then
+                    row.settle = nil
+                    row.seen = GetCVar(row.cvar)
+                    BenillaOptionsPage_Refresh("Graphics")
+                end
+                return
+            end
+            local live = GetCVar(row.cvar)
+            if live ~= row.seen then
+                row.seen = live
+                BenillaOptionsDropdown_ShowValue(row)
+            end
         end
 
         -- ── The Apply flow ──
@@ -1202,6 +1236,8 @@
                 end
             end
             BenillaOptionsApply_Update()
+            -- fork: a Graphics write may move the preset's rows or its label.
+            BenillaOptionsPreset_Settle()
         end
 
         function BenillaOptionsPage_DiscardPending()
@@ -2070,10 +2106,35 @@
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowUiScale" inherits="BenillaOptionsSliderRowTemplate">
+                                        <!-- fork: the Graphics Preset (FORK.md).
+                                             One CVar: the host's `cvars::presets` writes the rows
+                                             a rung names and re-derives this one every frame. -->
+                                        <Frame name="$parentRowGraphicsPreset" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts>
+                                                <OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "graphicsQuality", "Graphics Preset",
+                                                    "BENILLA_TOOLTIP_GRAPHICS_PRESET")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Classic", value = "Classic" },
+                                                    { text = "Low", value = "Low" },
+                                                    { text = "Medium", value = "Medium" },
+                                                    { text = "High", value = "High" },
+                                                    { text = "Ultra", value = "Ultra" },
+                                                    { text = "Cinematic", value = "Cinematic" },
+                                                    { text = "Custom", value = "Custom" },
+                                                })
+                                                </OnLoad>
+                                                <OnUpdate>BenillaOptionsPresetRow_OnUpdate(this)</OnUpdate>
+                                            </Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowUiScale" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "uiScale", "UI Scale",
@@ -3547,6 +3608,7 @@
             BENILLA_FOLIAGE_WIND = "Foliage Wind"
             BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
             BENILLA_RAIN_SURFACES = "Wet Surfaces in Rain"
+            BENILLA_GRAPHICS_PRESET = "Graphics Preset"
 
             -- A dropdown's `<identifier>Dropdown_Init`, in the shape of Turtle's own
             -- (Options\Functions.lua): each entry picks through OptionsFrameDropdown_OnValueChanged.
@@ -3574,6 +3636,15 @@
                 { text = "High", value = "2" },
                 { text = "Ultra", value = "3" },
                 { text = "Cinematic", value = "4" },
+            })
+            BenillaGraphicsPresetDropdown_Init = dropdown("graphicsQuality", {
+                { text = "Classic", value = "Classic" },
+                { text = "Low", value = "Low" },
+                { text = "Medium", value = "Medium" },
+                { text = "High", value = "High" },
+                { text = "Ultra", value = "Ultra" },
+                { text = "Cinematic", value = "Cinematic" },
+                { text = "Custom", value = "Custom" },
             })
             BenillaFoliageWindDropdown_Init = dropdown("foliageWind", {
                 { text = "Off", value = "0" },
@@ -3634,6 +3705,13 @@
             -- The rows, by the category they join; the bounds are our rows'. The tooltips are
             -- ours, whose "Applies when you click Apply" holds here too (below).
             local rows = {
+                -- fork: the Graphics Preset heads the first video category
+                -- (FORK.md). `benillaPreset`: committed before every other row,
+                -- and the window follows the rows the host then writes.
+                { category = DISPLAY, first = 1, row = {
+                    name = "BENILLA_GRAPHICS_PRESET", desc = BENILLA_TOOLTIP_GRAPHICS_PRESET,
+                    type = "dropdown", identifier = "BenillaGraphicsPreset",
+                    cvar = "graphicsQuality", benillaPreset = 1 } },
                 { category = WORLD_APPEARANCE, row = {
                     name = "BENILLA_WORLD_SHADOWS", desc = BENILLA_TOOLTIP_WORLD_SHADOWS,
                     type = "checkbutton", cvar = "worldShadows" } },
@@ -3690,7 +3768,11 @@
                 local placed
                 for _, category in ipairs(GameOptions) do
                     if ( category.options and category.name == entry.category ) then
-                        tinsert(category.options, entry.row)
+                        if ( entry.first ) then
+                            tinsert(category.options, 1, entry.row)
+                        else
+                            tinsert(category.options, entry.row)
+                        end
                         placed = 1
                         break
                     end
@@ -3777,8 +3859,20 @@
                     return
                 end
                 local restart, reload
+                -- fork: the Graphics Preset first, so a row staged beside it wins over its rung;
+                -- the watch below follows what the host then writes.
                 for option, value in pairs(staged) do
-                    if ( option.cvar ) then
+                    if ( option.benillaPreset ) then
+                        BenillaPresetWatch.reforged = GetCVar("reforgedModels")
+                        BenillaPresetWatch.frames = 6
+                        BenillaPresetWatch:Show()
+                        SetCVar(option.cvar, value, option.name)
+                    end
+                end
+                for option, value in pairs(staged) do
+                    if ( option.benillaPreset ) then
+                        -- Written above.
+                    elseif ( option.cvar ) then
                         SetCVar(option.cvar, value, option.name)
                     elseif ( option.uvar ) then
                         setglobal(option.uvar, value)
@@ -3809,6 +3903,25 @@
             apply:SetScript("OnClick", function()
                 PlaySound("igMainMenuOption")
                 commit(1)
+            end)
+
+            -- fork: the Graphics Preset's rows are written by the host a frame after its name
+            -- is. A few frames on, the window re-renders from them, and a rung that moved the
+            -- reforged models says the reload it waits for, as that row's own Apply does.
+            local watch = CreateFrame("Frame", "BenillaPresetWatch", UIParent)
+            watch:Hide()
+            watch:SetScript("OnUpdate", function()
+                this.frames = this.frames - 1
+                if ( this.frames > 0 ) then
+                    return
+                end
+                this:Hide()
+                if ( GetCVar("reforgedModels") ~= this.reforged ) then
+                    StaticPopup_Show("BENILLA_RELOAD_REQUIRED")
+                end
+                if ( OptionsFrame:IsVisible() ) then
+                    OptionsFrame_OnShow()
+                end
             end)
             local okay = OptionsFrameOkay:GetScript("OnClick")
             OptionsFrameOkay:SetScript("OnClick", function()

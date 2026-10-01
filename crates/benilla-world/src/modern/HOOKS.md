@@ -171,6 +171,8 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `static_gx.wgsl`, `static_gx/{mod,bake}.rs` | `WORD_FOLIAGE_WIND` (bit 29) from `foliage_wind_batch`; `gx_clip_position` takes the anchor and adds `gx_wind_offset`; `GxPrepassVertex` gains `anchor` | Everwood port: wind |
 | `benilla-world/src/model_render.rs`, `terrain_stream/spawn/assemble.rs` | `FOLIAGE_WIND_MARKER` (bit 14), `foliage_model_material`; a leaf batch's fade seed carries the marked pair | Everwood port: wind |
 | `benilla-world/src/world_plugins.rs`, `lib.rs` | `pub mod wind;`, `.add(crate::wind::WindPlugin)` after `WeatherPlugin` | Everwood port: wind |
+| `benilla-app/src/cvars/{mod,table,presets}.rs` | the `graphicsQuality` row; `set` / `set_from_vm` apply a rung's column; `sync_cvars` mirrors the derived label; `load_config` re-applies a saved rung to rows the file lacks; `GRAPHICS_CVARS` gains the row and `reforgedModels` / `lavaLight` | Everwood port: presets |
+| `benilla-app/assets/ui/OptionsFrame.xml` | `RowGraphicsPreset` heads the Graphics page (`BenillaOptionsPresetRow_OnUpdate`, `BenillaOptionsPreset_Settle`); a `benillaPreset` row heads Turtle's first video category, committed first and followed by `BenillaPresetWatch` | Everwood port: presets |
 | `sky.wgsl` | a modern frame replaces the piecewise-linear ring mix with a monotone cubic (`smooth_gradient`) through the same six stops; classic keeps the linear rings | Everwood port: sky |
 | `benilla-world/src/lighting/mod.rs`, `modern/lights/mod.rs` | `mod lava_light;` and its `register`; `update_lights` refuses a `LavaLight` a cube shadow, beside `SpellFxLight` | Everwood port: lava |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs` | the `lavaLight` row and its `on_cvar` arm | Everwood port: lava |

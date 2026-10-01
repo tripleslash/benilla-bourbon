@@ -30,6 +30,8 @@ use benilla_ui::script::{SeededCvar, UiScript};
 use benilla_world::liquid::WaterDetail;
 use benilla_world::modern::LightingSettings;
 
+// fork: the Graphics Preset ladder (FORK.md).
+mod presets;
 mod table;
 #[cfg(test)]
 use table::Reference;
@@ -307,7 +309,12 @@ impl Cvars {
     /// A host-side write (minimap zoom, camera views, the remembered character, the tip cursor):
     /// mirrored into the VM, persisted and observed.
     pub(crate) fn set(&mut self, name: &str, value: &str) -> SetOutcome {
-        self.write(name, value, false)
+        let outcome = self.write(name, value, false);
+        // fork: a rung's name writes the rung's rows ([`presets`]).
+        if name.eq_ignore_ascii_case(presets::GRAPHICS_QUALITY) {
+            presets::apply_graphics_preset(self, value);
+        }
+        outcome
     }
 
     /// A write the VM's mirror already made, drained from its change queue.
@@ -315,6 +322,14 @@ impl Cvars {
         let outcome = self.write(name, value, true);
         if matches!(outcome, SetOutcome::Changed | SetOutcome::Staged)
             && GRAPHICS_CVARS.iter().any(|c| c.eq_ignore_ascii_case(name))
+        {
+            self.graphics_applied = true;
+        }
+        // fork: a rung's name writes the rung's rows, at the write's own place in the queue, so a
+        // member edit queued behind it wins; a rung that moved a row is a Graphics Apply even
+        // when its name was already showing ([`presets`]).
+        if name.eq_ignore_ascii_case(presets::GRAPHICS_QUALITY)
+            && presets::apply_graphics_preset(self, value).is_some_and(|moved| moved > 0)
         {
             self.graphics_applied = true;
         }
@@ -814,7 +829,11 @@ fn load_config(world: &mut World) {
                 // change.
                 warn!("{msg}");
             }
-            StoredConfig::Table(table) => cvars.load_file(table),
+            StoredConfig::Table(table) => {
+                cvars.load_file(table);
+                // fork: governed rows registered after the save follow the saved Graphics Preset.
+                cvars.reapply_saved_presets();
+            }
         }
         apply_query_overrides(&mut cvars);
         apply_gpu_tier(&mut cvars);
@@ -920,6 +939,10 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "foliageWind",
     "foliageWindStrength",
     "rainSurfaces",
+    // The Graphics Preset and the two rows it governs that the page does not show.
+    "graphicsQuality",
+    "reforgedModels",
+    "lavaLight",
 ];
 
 /// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
@@ -1058,6 +1081,10 @@ pub(crate) fn sync_cvars(
         release_gpu_tier(&mut cvars);
     }
     let Some(mut script) = script else {
+        // fork: the Graphics Preset's label follows the rows it names.
+        if cvars.stale_graphics_quality().is_some() {
+            cvars.mirror_graphics_quality();
+        }
         // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
         if cvars.has_outbox() {
             cvars.take_outbox();
@@ -1081,6 +1108,11 @@ pub(crate) fn sync_cvars(
         for (name, value) in changes {
             cvars.set_from_vm(&name, &value);
         }
+    }
+    // fork: after every ordered write and before the mirror flush, the Graphics Preset's label
+    // is re-derived from the rows it names.
+    if cvars.stale_graphics_quality().is_some() {
+        cvars.mirror_graphics_quality();
     }
     if seeded.claim(&script) {
         // The file's unclaimed entries first, so an addon's `RegisterCVar` starts at the saved
@@ -2562,7 +2594,8 @@ mod tests {
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
     /// (the reference's registered `""`, `0x882748`) and `gxApi` are empty until the session writes
     /// them; `gxResolution` and `realmList` pass their observers' parsers
-    /// ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]).
+    /// ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]); fork:
+    /// `graphicsQuality` is a rung's name, checked by [`presets`]' own tests.
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
         let mut strings: Vec<&str> = REGISTERED
@@ -2573,7 +2606,13 @@ mod tests {
         strings.sort_unstable(); // the list is the claim, not where the rows sit in the table
         assert_eq!(
             strings,
-            vec!["gxApi", "gxResolution", "realmList", "realmName"]
+            vec![
+                "graphicsQuality",
+                "gxApi",
+                "gxResolution",
+                "realmList",
+                "realmName"
+            ]
         );
         let default_of = |name: &str| {
             REGISTERED
@@ -2994,6 +3033,11 @@ mod tests {
                 "GameTooltip's binding-line gate, stock and pfUI",
             ),
             ("gxApi", "pfUI's system tooltip names the backend"),
+            (
+                "graphicsQuality",
+                "the Graphics Preset row of our OptionsFrame.xml, in both options windows; the \
+                 host side is `cvars::presets`, which this walk skips with the rest of `cvars/`",
+            ),
             (
                 "hdCharacterModels",
                 "not Lua: read before the App exists by `apply_boot_layers` in this file, which the \

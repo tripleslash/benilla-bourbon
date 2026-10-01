@@ -823,6 +823,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — 1.12's rain leaves every surface as it was",
     ),
+    // `graphicsQuality` — the Graphics Preset: a NAME for a combination of the graphics rows
+    // ([`super::presets`]), re-derived every frame. A string row, so `config.toml` and
+    // `/console set graphicsQuality Medium` read as what they mean. Cinematic is the registered
+    // defaults of the rows it names.
+    ours(
+        "graphicsQuality",
+        "Cinematic",
+        "the fork's own — a preset ladder over the graphics rows (Classic / Low / Medium / High / \
+         Ultra / Cinematic, or Custom); the reference's options have no such preset",
+    ),
     // `lavaLight` — magma surfaces light the rock and ground around them; 0 is the reference,
     // where lava glows and lights nothing. No options row: the Graphics Preset governs it.
     ours(

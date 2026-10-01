@@ -2042,6 +2042,9 @@ fn the_gpu_tier_graphics_list_is_the_graphics_page() {
         )
         .unwrap();
     let mut page: Vec<&str> = written.split(',').collect();
+    // fork: the Graphics Preset also governs two rows the page does not show, and a rung that
+    // moves them is a Graphics Apply too (`cvars::presets`).
+    page.extend(["reforgedModels", "lavaLight"]);
     page.sort_unstable();
     let mut listed = crate::cvars::GRAPHICS_CVARS.to_vec();
     listed.sort_unstable();
@@ -2618,6 +2621,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ),
             ("BENILLA_TOOLTIP_RAIN_SURFACES", "GraphicsRowRainSurfaces"),
             (
+                "BENILLA_TOOLTIP_GRAPHICS_PRESET",
+                "GraphicsRowGraphicsPreset",
+            ),
+            (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
             ),
@@ -2647,8 +2654,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     }
     // 82 rows less the three untipped below, less Display Mode (pulled on this fork), plus the
     // fork's seven Graphics rows (updated models, shadows, the indirect-lighting pair, Water
-    // Detail, Lighting, Lighting Quality); a dropdown row is checked on the key it wears at rest.
-    assert_eq!(checked, 86, "every tipped row carries a live key");
+    // Detail, Lighting, Lighting Quality) and the Everwood port's four (Graphics Preset, Foliage
+    // Wind and its strength, Wet Surfaces in Rain); a dropdown row is checked on the key it wears
+    // at rest.
+    assert_eq!(checked, 90, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2744,8 +2753,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 86 the key census counts.
-    assert_eq!(raised, 86, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 90 the key census counts.
+    assert_eq!(raised, 90, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
@@ -4865,6 +4874,7 @@ fn turtle_options_carry_every_graphics_row() {
         "foliageWind",
         "foliageWindStrength",
         "rainSurfaces",
+        "graphicsQuality",
     ] {
         assert!(
             rows.contains(&format!(":{cvar}:1;")),
