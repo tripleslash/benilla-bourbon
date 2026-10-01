@@ -276,6 +276,7 @@ pub(super) fn attach_entity_visuals(
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
+    let frame_start = bevy::platform::time::Instant::now();
     let (
         sections,
         mut skin_composites,
@@ -1025,8 +1026,19 @@ pub(super) fn attach_entity_visuals(
                 super::equipment::Reattached,
                 super::live_display::ShownRebuild,
             )>();
+        // Checked only after a build, so a unit still waiting (unsettled equipment, a loading
+        // model) spends none of it; the rest keep `Without<VisualAttached>` and build next frame,
+        // their appear fade still timed from `Arrival`.
+        if frame_start.elapsed() >= ATTACH_VISUAL_BUDGET {
+            break;
+        }
     }
 }
+
+/// How long [`attach_entity_visuals`] may spend building arrivals before leaving the rest to the
+/// next frame, so a crowd arriving together is not one long frame; the terrain streamer's own
+/// `SPAWN_BUDGET`.
+const ATTACH_VISUAL_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// The union of a model's part boxes, its bind-pose extent: the election bound when the idle
 /// authors no CAaBox. Over-large only admits, never hides.
