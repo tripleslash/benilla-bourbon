@@ -125,10 +125,11 @@ const POINT_FORWARD: f32 = 0.3;
 // halo while a street of lit windows (each a light, 48 yd of range) no longer fills the air around
 // the camera with a grey glow. At the flame it scatters `POINT_HALO_GAIN` times its far-field share,
 // so a torch or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps). At
-// 4.0 the halo read far brighter than the lamp it stands around; 2.5 keeps 0.6 of it.
+// 4.0 the halo read far brighter than the lamp it stands around, 2.5 vanished in clear air; 3.0
+// keeps 0.75 of it.
 const POINT_HALO_YD: f32 = 4.0;
 const POINT_FAR_SHARE: f32 = 0.35;
-const POINT_HALO_GAIN: f32 = 2.5;
+const POINT_HALO_GAIN: f32 = 3.0;
 // fork: inside a building a light keeps `ROOM_POINT_FAR_SHARE` past its halo and its halo shrinks
 // to `ROOM_POINT_HALO_YD` at `ROOM_POINT_HALO_GAIN`: an inn's dozen candles each filling their
 // range put a grey veil on the whole common room.
@@ -141,8 +142,8 @@ const ROOM_POINT_HALO_GAIN: f32 = 1.5;
 // the SIDN night) at the light, falling off over `LAMP_AIR_YD`. The zone's own air is a few
 // thousandths per yard, and a flame's halo lit in it alone came out at a few hundredths of the
 // night scene's radiance — no halo at all; the pocket gives a flame a core glow about two yards
-// across instead of a lit fog filling its whole range. 12, not 20: 0.6 of the core, with the halo.
-const LAMP_AIR: f32 = 12.0;
+// across instead of a lit fog filling its whole range. 15, not 20: 0.75 of the core, with the halo.
+const LAMP_AIR: f32 = 15.0;
 const LAMP_AIR_YD: f32 = 1.0;
 
 // How much lamp air a table light stands in, from its colour row's `w` (0/1 the indoor class, plus
