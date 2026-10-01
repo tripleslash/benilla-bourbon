@@ -112,14 +112,14 @@ fur where patch-A has 512) keep patch-A's. Its 687 names patch-A lacks are taken
 
 **Why the upscale.** `characters::sections` composites a body from a base skin plus up to fifteen
 overlays, and its tile table is authored at `UPSCALE_FACTOR = 2` — a 512-square atlas over the
-reference's 256-square partition. The compositor copies a source texel to a destination texel and
-clamps, so every input has to already be at its tile's size. The vanilla corpus satisfies that
-because `patch-U`/`patch-V` resample the character tree to 2x; `patch-A` does not (256-square skins,
-128x32 and 128x64 overlays — exactly 1x), so an unscaled layer renders a character with no
-armour, no underwear and an unpainted head strip. patch-T's textures are already 2x, and step 2
-brings the rest of the composite inputs (patch-A's own 1x skins and strips, `CharSections.dbc`'s
-names) up to the same 2x everything else already speaks, which is why the compositor needs no
-changes at all. Model-bound art keeps its own size: resampling it would make it larger and no
+reference's 256-square partition. The compositor scales the tiles to the base skin it is given and
+copies texel for texel where an overlay is its tile's size, nearest-sampling one that is not, so a
+1x skin composites at 1x and mixed art still lands in place. The vanilla corpus is 2x throughout
+because `patch-U`/`patch-V` resample the character tree; `patch-A` does not (256-square skins,
+128x32 and 128x64 overlays — exactly 1x), and a 1x overlay on a 2x skin would be sampled up
+blocky. patch-T's textures are already 2x, and step 2 brings the rest of the composite inputs
+(patch-A's own 1x skins and strips, `CharSections.dbc`'s names) up to the same 2x everything else
+already speaks, so every blit stays a straight copy. Model-bound art keeps its own size: resampling it would make it larger and no
 sharper. The resample is Lanczos — `upscale_rgba` in the script is the one seam a neural upscaler
 drops into, if the weights and a runtime ever land in the tree.
 

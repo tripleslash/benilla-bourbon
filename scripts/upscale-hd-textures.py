@@ -5,10 +5,9 @@ WHY THIS EXISTS
 ---------------
 `benilla_formats::characters::sections` composites a character's body from a base skin plus up to
 fifteen overlays, and its tile table is authored at `UPSCALE_FACTOR = 2` — a 512-square atlas over
-the reference's 256-square partition. That constant is not negotiable from the art's side: the
-compositor copies a source texel to a destination texel and clamps, so an overlay that is not
-already at the tile's size lands in a corner of it and the character comes out with no armour, no
-underwear and an unpainted head strip.
+the reference's 256-square partition. The compositor scales its tiles to the base skin and
+nearest-samples an overlay that is not its tile's size, so mixed art composites in place; but a
+1x overlay on a 2x skin is then sampled up blocky, which a Lanczos resample here avoids.
 
 The vanilla corpus satisfies it because `patch-U`/`patch-V` resample the whole character tree to 2x.
 `patch-A.MPQ` — the updated character models — does not: its skins are 256-square and its overlays

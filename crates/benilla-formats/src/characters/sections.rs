@@ -22,6 +22,8 @@ const HAIR_SUBSTITUTE_VARIATION: u8 = 1;
 /// An atlas rect `(x, y, w, h)` in pixels.
 type Tile = (u32, u32, u32, u32);
 
+/// The scale the tile table is authored at: a 512² atlas over the reference's 256² partition. A
+/// skin of another size scales the tiles with it ([`atlas_tile`]).
 const UPSCALE_FACTOR: u32 = 2;
 
 /// The head strip of the 256² partition `0x475c50` writes, scaled by [`UPSCALE_FACTOR`]: g8 the
@@ -112,8 +114,9 @@ const EQUIP_TEX_DIRS: [&str; 8] = [
 ];
 
 /// Whether `name` is art the body composite reads that is still at the reference's own 1× scale,
-/// and so must be resampled by [`UPSCALE_FACTOR`] before this atlas can take it: the compositor
-/// copies texel for texel into tiles authored at 2×. `width` is the texture's level-0 width.
+/// which the packer resamples by [`UPSCALE_FACTOR`] so a 2× atlas keeps its detail; the compositor
+/// itself scales its tiles to the skin and samples a mismatched overlay over its tile. `width` is
+/// the texture's level-0 width.
 ///
 /// A `Character\` skin or overlay is 1× up to the 256² partition's width; an `Item\TextureComponents`
 /// region or a guild emblem half up to the 128-wide tile. `Character\` also holds model-bound art
@@ -715,15 +718,36 @@ pub fn equip_region_candidates(layer: usize, name: &str, sex: u8) -> [String; 2]
     ['U', letter].map(|c| format!("Item\\TextureComponents\\{dir}\\{name}_{c}.blp"))
 }
 
+/// A tile of the [`UPSCALE_FACTOR`]-scaled table at an atlas of `width`×`height`: identity on the
+/// 2x atlas the table is authored for, and scaled to a 1x or HD skin, whose UV layout is the same.
+fn atlas_tile((x, y, w, h): Tile, width: u32, height: u32) -> Tile {
+    let authored = 256 * UPSCALE_FACTOR;
+    if (width, height) == (authored, authored) {
+        return (x, y, w, h);
+    }
+    let scale = |v: u32, size: u32| (u64::from(v) * u64::from(size) / u64::from(authored)) as u32;
+    (
+        scale(x, width),
+        scale(y, height),
+        scale(w, width),
+        scale(h, height),
+    )
+}
+
 /// Source-over blit of an overlay's mip pyramid at `tile`, level by level, from the overlay's own
 /// origin (`0x4770f0`: src `(0,0)`, extent the tile); an opaque texel copies, the client's REPLACE.
+/// An overlay that is not its tile's size at this atlas is nearest-sampled over the whole tile.
 fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
     // Both chains must be decoded RGBA: DXT blocks would blend into garbage without failing.
     debug_assert!(
         dst.is_rgba8() && src.is_rgba8(),
         "character-skin compositing needs decoded chains on both sides"
     );
-    let (tx, ty, tw, th) = tile;
+    let (tx, ty, tw, th) = atlas_tile(tile, dst.width, dst.height);
+    if (src.width, src.height) != (tw, th) {
+        blit_over_resampled(dst, src, (tx, ty, tw, th));
+        return;
+    }
     let levels = dst.mips.len().min(src.mips.len());
     for i in 0..levels {
         let dw = (dst.width >> i).max(1) as usize;
@@ -745,22 +769,67 @@ fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
                 if si + 4 > s.len() || di + 4 > d.len() {
                     continue;
                 }
-                let a = s[si + 3] as u32;
-                if a == 0 {
-                    continue;
-                }
-                if a == 255 {
-                    d[di..di + 4].copy_from_slice(&s[si..si + 4]);
-                    continue;
-                }
-                let ia = 255 - a;
-                for c in 0..3 {
-                    d[di + c] = ((s[si + c] as u32 * a + d[di + c] as u32 * ia + 127) / 255) as u8;
-                }
-                d[di + 3] = (a + (d[di + 3] as u32 * ia + 127) / 255).min(255) as u8;
+                blend_texel(&mut d[di..di + 4], &s[si..si + 4]);
             }
         }
     }
+}
+
+/// [`blit_over`] for an overlay whose size is not its tile's: per atlas level, the smallest
+/// authored source level still covering the tile (the last one past a short pyramid), sampled at
+/// texel centres.
+fn blit_over_resampled(dst: &mut BlpMipChain, src: &BlpMipChain, (tx, ty, tw, th): Tile) {
+    if src.mips.is_empty() {
+        return;
+    }
+    for i in 0..dst.mips.len() {
+        let dw = (dst.width >> i).max(1) as usize;
+        let dh = (dst.height >> i).max(1) as usize;
+        let (ox, oy) = ((tx >> i) as usize, (ty >> i) as usize);
+        let (w, h) = ((tw >> i).max(1) as usize, (th >> i).max(1) as usize);
+        let level = (0..src.mips.len())
+            .take_while(|&l| {
+                let (sw, sh) = src.mip_size(l as u32);
+                sw as usize >= w && sh as usize >= h
+            })
+            .last()
+            .unwrap_or(0);
+        let (sw, sh) = src.mip_size(level as u32);
+        let (sw, sh) = (sw as usize, sh as usize);
+        let cw = w.min(dw.saturating_sub(ox));
+        let ch = h.min(dh.saturating_sub(oy));
+        let (d, s) = (&mut dst.mips[i], &src.mips[level]);
+        for row in 0..ch {
+            let sy = ((2 * row + 1) * sh / (2 * h)).min(sh - 1);
+            for col in 0..cw {
+                let sx = ((2 * col + 1) * sw / (2 * w)).min(sw - 1);
+                let si = (sy * sw + sx) * 4;
+                let di = ((oy + row) * dw + (ox + col)) * 4;
+                if si + 4 > s.len() || di + 4 > d.len() {
+                    continue;
+                }
+                blend_texel(&mut d[di..di + 4], &s[si..si + 4]);
+            }
+        }
+    }
+}
+
+/// Straight 8-bit source-over of one texel: transparent is a no-op, opaque a copy.
+#[inline(always)]
+fn blend_texel(d: &mut [u8], s: &[u8]) {
+    let a = s[3] as u32;
+    if a == 0 {
+        return;
+    }
+    if a == 255 {
+        d.copy_from_slice(s);
+        return;
+    }
+    let ia = 255 - a;
+    for c in 0..3 {
+        d[c] = ((s[c] as u32 * a + d[c] as u32 * ia + 127) / 255) as u8;
+    }
+    d[3] = (a + (d[3] as u32 * ia + 127) / 255).min(255) as u8;
 }
 
 /// CharSections.dbc: 10 fields, three of them texture names.
@@ -1420,9 +1489,14 @@ mod tests {
 
     #[test]
     fn blit_over_replaces_blends_and_clamps() {
+        // Tiles are the 512² table's; this 2×2 atlas scales them to one texel each.
         let mut dst = chain(2, 2, [128, 128, 128, 255].repeat(4));
 
-        blit_over(&mut dst, &chain(1, 1, vec![255, 0, 0, 255]), (0, 0, 1, 1));
+        blit_over(
+            &mut dst,
+            &chain(1, 1, vec![255, 0, 0, 255]),
+            (0, 0, 256, 256),
+        );
         assert_eq!(
             &dst.mips[0][0..4],
             &[255, 0, 0, 255],
@@ -1435,7 +1509,11 @@ mod tests {
         );
 
         // Half-alpha blue over grey: R≈64, B≈191.
-        blit_over(&mut dst, &chain(1, 1, vec![0, 0, 255, 128]), (1, 1, 1, 1));
+        blit_over(
+            &mut dst,
+            &chain(1, 1, vec![0, 0, 255, 128]),
+            (256, 256, 256, 256),
+        );
         let px = &dst.mips[0][12..16];
         assert!((px[0] as i32 - 64).abs() <= 1, "blended R ≈ 128·(1−a)");
         assert!(
@@ -1445,8 +1523,76 @@ mod tests {
         assert_eq!(px[3], 255, "over an opaque base the result stays opaque");
 
         let before = dst.mips[0].clone();
-        blit_over(&mut dst, &chain(1, 1, vec![1, 2, 3, 0]), (0, 0, 1, 1));
+        blit_over(&mut dst, &chain(1, 1, vec![1, 2, 3, 0]), (0, 0, 256, 256));
         assert_eq!(dst.mips[0], before, "transparent texel is a no-op");
+    }
+
+    /// A pyramid whose level `i` is one colour, `100 + i`, so the level a blit read is visible.
+    fn levelled(width: u32, height: u32, levels: usize) -> BlpMipChain {
+        BlpMipChain {
+            width,
+            height,
+            texels: crate::BlpTexels::Rgba8Unorm,
+            mips: (0..levels)
+                .map(|i| {
+                    [100 + i as u8, 20, 30, 255]
+                        .repeat(((width >> i).max(1) * (height >> i).max(1)) as usize)
+                })
+                .collect(),
+        }
+    }
+
+    /// The table is authored for the 512² atlas, where a tile is used as is; a 1x skin (256²) and
+    /// an HD one (1024²) keep the same UV layout, so the tile scales with the atlas.
+    #[test]
+    fn a_tile_scales_with_the_atlas_and_is_exact_at_2x() {
+        assert_eq!(atlas_tile(EQUIP_TILES[3], 512, 512), EQUIP_TILES[3]);
+        assert_eq!(atlas_tile(EQUIP_TILES[3], 256, 256), (128, 0, 128, 64));
+        assert_eq!(atlas_tile(EQUIP_TILES[3], 1024, 1024), (512, 0, 512, 256));
+    }
+
+    /// A 1x skin with 1x overlays composites into the 1x partition, texel for texel, at every
+    /// level the overlay authors.
+    #[test]
+    fn a_1x_atlas_takes_1x_overlays_at_the_reference_partition() {
+        let mut dst = levelled(256, 256, 8);
+        dst.mips.iter_mut().for_each(|m| m.fill(0));
+        let src = levelled(128, 64, 7);
+        blit_over(&mut dst, &src, EQUIP_TILES[3]);
+        for i in 0..7 {
+            let width = 256 >> i;
+            let (left, right, bottom) = (128 >> i, (128 >> i) + (128 >> i), (64usize >> i).max(1));
+            let at =
+                |x: usize, y: usize| &dst.mips[i][(y * width + x) * 4..(y * width + x) * 4 + 4];
+            assert_eq!(
+                at(left, 0),
+                &[100 + i as u8, 20, 30, 255],
+                "level {i} inside"
+            );
+            assert_eq!(at(right - 1, bottom - 1), &[100 + i as u8, 20, 30, 255]);
+            assert_eq!(at(left - 1, 0), &[0; 4], "level {i} left of the tile");
+        }
+        assert!(
+            dst.mips[7].iter().all(|&b| b == 0),
+            "past the overlay's own pyramid"
+        );
+    }
+
+    /// An overlay not its tile's size (a 1x region on an HD skin) is sampled over the whole tile
+    /// from the smallest source level still covering it.
+    #[test]
+    fn a_mismatched_overlay_covers_its_whole_tile() {
+        let mut dst = levelled(1024, 1024, 10);
+        dst.mips.iter_mut().for_each(|m| m.fill(0));
+        let src = levelled(128, 64, 8);
+        blit_over(&mut dst, &src, EQUIP_TILES[3]);
+        // Level 0's tile is 512×256: the source's level 0 is the largest, stretched over it.
+        let far = (255 * 1024 + 1023) * 4;
+        assert_eq!(&dst.mips[0][far..far + 4], &[100, 20, 30, 255]);
+        assert_eq!(&dst.mips[0][(256 * 1024 + 512) * 4..][..4], &[0; 4]);
+        // Level 3's tile is 64×32, which the source's level 1 matches.
+        let at = (31 * 128 + 127) * 4;
+        assert_eq!(&dst.mips[3][at..at + 4], &[101, 20, 30, 255]);
     }
 
     /// On the shipped files a Human male's head and pelvis tiles change, and the torso does not.
@@ -1463,20 +1609,26 @@ mod tests {
             .expect("composite ok")
             .expect("base skin row present");
 
-        assert_eq!((comp.width, comp.height), (256, 256), "atlas is 256²");
+        assert_eq!(
+            (comp.width, comp.height),
+            (base.width, base.height),
+            "the atlas is the base skin's size"
+        );
         assert_eq!(comp.mips.len(), base.mips.len(), "keeps the base mip count");
 
-        // Count mip-0 pixels in a tile that differ from the base atlas.
+        // Count mip-0 pixels in a tile that differ from the base atlas, as a share of the tile
+        // so the floors hold at the 1x and the 2x skin alike.
         let changed = |t: Tile| {
-            let (x, y, w, h) = t;
+            let (x, y, w, h) = atlas_tile(t, comp.width, comp.height);
             let (b, c) = (&base.mips[0], &comp.mips[0]);
-            (y..y + h)
+            let n = (y..y + h)
                 .flat_map(|row| (x..x + w).map(move |col| (row, col)))
                 .filter(|&(row, col)| {
-                    let i = ((row * 256 + col) * 4) as usize;
+                    let i = ((row * comp.width + col) * 4) as usize;
                     b[i..i + 4] != c[i..i + 4]
                 })
-                .count()
+                .count();
+            n * 256 * 256 / (comp.width * comp.height) as usize
         };
         assert!(changed(TILE_G9) > 4000, "face lower overlaid into g9");
         assert!(changed(TILE_G8) > 2000, "face upper overlaid into g8");
@@ -1589,21 +1741,20 @@ mod tests {
             "Character\\NightElf\\Female\\NightElfFemaleNakedTorsoSkin00_00.blp",
         )
         .expect("read naked torso");
-        assert_eq!(
-            (torso.width, torso.height),
-            (128, 64),
-            "the sheet is authored exactly tile-sized"
-        );
         let comp = cs
             .composite_body(
                 &mut chain, race, sex, skin, 0, 0, 0, 0, [None; 8], None, false,
             )
             .expect("composite ok")
             .expect("base skin row present");
-
-        let (tx, ty, tw, th) = TILE_G3;
+        let (tx, ty, tw, th) = atlas_tile(TILE_G3, comp.width, comp.height);
+        assert_eq!(
+            (torso.width, torso.height),
+            (tw, th),
+            "the sheet is authored exactly tile-sized"
+        );
         for row in 0..th {
-            let d = ((ty + row) * 256 + tx) as usize * 4;
+            let d = ((ty + row) * comp.width + tx) as usize * 4;
             let s = (row * tw) as usize * 4;
             assert_eq!(
                 &comp.mips[0][d..d + tw as usize * 4],
@@ -1640,9 +1791,11 @@ mod tests {
                 })
                 .collect()
         };
-        let sheet = |img: &BlpMipChain| rect(img, (0, 0, 128, 64), 128);
+        let sheet = |img: &BlpMipChain| rect(img, (0, 0, img.width, img.height), img.width);
         let (torso_sheet, pelvis_sheet) = (sheet(&torso), sheet(&pelvis));
-        let (base_g3, base_g5) = (rect(&base, TILE_G3, 256), rect(&base, TILE_G5, 256));
+        let in_atlas =
+            |img: &BlpMipChain, t: Tile| rect(img, atlas_tile(t, img.width, img.height), img.width);
+        let (base_g3, base_g5) = (in_atlas(&base, TILE_G3), in_atlas(&base, TILE_G5));
 
         // A display that takes the cell without painting it.
         let occupies = |layers: &[usize]| {
@@ -1735,7 +1888,7 @@ mod tests {
                 (TILE_G3, "torso", g3_want, g3),
                 (TILE_G5, "pelvis", g5_want, g5),
             ] {
-                let n = differing(&rect(&comp, tile, 256), want);
+                let n = differing(&in_atlas(&comp, tile), want);
                 assert_eq!(
                     n, 0,
                     "{label}: the {name} tile is not {want_name} ({n}/8192 texels)"
@@ -1775,6 +1928,7 @@ mod tests {
         let equipment: [Option<&ItemDisplay>; 8] =
             [None, None, None, None, None, None, None, Some(tabard)];
 
+        let mut authored = Vec::new();
         for step in equip_blits(&equipment, Some(emblem), false) {
             let path = step
                 .candidates(0)
@@ -1782,12 +1936,7 @@ mod tests {
                 .find(|p| read_texture_mip_chain(&mut chain, p).is_ok())
                 .unwrap_or_else(|| panic!("{:?} resolves no file", step.source));
             let mips = read_texture_mip_chain(&mut chain, &path).expect("re-read");
-            let (_, _, tw, th) = EQUIP_TILES[step.layer];
-            assert_eq!(
-                (mips.width, mips.height),
-                (tw, th),
-                "{path} is authored tile-sized"
-            );
+            authored.push((path, step.layer, mips.width, mips.height));
         }
 
         let mut compose = |em: Option<GuildEmblem>| {
@@ -1797,9 +1946,15 @@ mod tests {
         };
         let plain = compose(None);
         let crested = compose(Some(emblem));
+        let atlas = |t: Tile| atlas_tile(t, plain.width, plain.height);
+        for (path, layer, w, h) in authored {
+            let (_, _, tw, th) = atlas(EQUIP_TILES[layer]);
+            assert_eq!((w, h), (tw, th), "{path} is authored tile-sized");
+        }
+        let stride = plain.width as usize;
         let in_torso = |i: usize| {
-            let (x, y) = ((i % 256) as u32, (i / 256) as u32);
-            [EQUIP_TILES[3], EQUIP_TILES[4]]
+            let (x, y) = ((i % stride) as u32, (i / stride) as u32);
+            [atlas(EQUIP_TILES[3]), atlas(EQUIP_TILES[4])]
                 .iter()
                 .any(|(tx, ty, tw, th)| x >= *tx && x < tx + tw && y >= *ty && y < ty + th)
         };
@@ -1821,7 +1976,7 @@ mod tests {
             strays.is_empty(),
             "the emblem repainted {} texel(s) outside the torso tiles, first at {:?}",
             strays.len(),
-            strays.first().map(|i| (i % 256, i / 256))
+            strays.first().map(|i| (i % stride, i / stride))
         );
 
         let other = compose(Some(GuildEmblem {
@@ -1874,15 +2029,17 @@ mod tests {
         equipment[4] = Some(boots);
         let dressed = compose(equipment);
 
+        // Changed texels in a tile, as a share of a 1x tile's so the floors hold at any scale.
         let changed = |a: &BlpMipChain, b: &BlpMipChain, t: Tile| {
-            let (x, y, w, h) = t;
-            (y..y + h)
+            let (x, y, w, h) = atlas_tile(t, a.width, a.height);
+            let n = (y..y + h)
                 .flat_map(|row| (x..x + w).map(move |col| (row, col)))
                 .filter(|&(row, col)| {
-                    let i = ((row * 256 + col) * 4) as usize;
+                    let i = ((row * a.width + col) * 4) as usize;
                     a.mips[0][i..i + 4] != b.mips[0][i..i + 4]
                 })
-                .count()
+                .count();
+            n * 256 * 256 / (a.width * a.height) as usize
         };
         assert!(
             changed(&naked, &dressed, EQUIP_TILES[3]) > 2000,

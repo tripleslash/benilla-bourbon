@@ -62,8 +62,9 @@ enum Cmd {
     /// Write an archive's blobs out as loose files, for a tool that is not this one to rewrite.
     ///
     /// Exists for exactly one pipeline: the HD layer's art is authored 1x and the character
-    /// compositor is built at `UPSCALE_FACTOR = 2`, so `scripts/upscale-hd-textures.py` has to see
-    /// the BLPs. Extract, upscale in place, then `build --replace-from` the same directory.
+    /// atlas of a 2x corpus is 512², so `scripts/upscale-hd-textures.py` has to see the BLPs to
+    /// keep a 1x overlay from being sampled up blocky. Extract, upscale in place, then
+    /// `build --replace-from` the same directory.
     Extract(ExtractArgs),
     /// Work out the updated-character-model layer: an HD archive with a later archive's files laid
     /// over it where they improve on it, as the key list and archive pins `build` packs. See
