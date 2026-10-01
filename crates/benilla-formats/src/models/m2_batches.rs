@@ -27,7 +27,7 @@ fn parent_dir(path: &str) -> &str {
     }
 }
 
-/// A batch's `.blp`: `Monster1/2/3` come from the creature's skin variations
+/// A batch's `.blp`: `Monster1/2/3` come from the creature's skin variations alone
 /// (`<model-dir>\<name>.blp`), else the embedded filename.
 fn resolve_texture(
     tex: &benilla_m2::M2Texture,
@@ -55,11 +55,14 @@ fn resolve_texture(
         M2TextureType::Other(8) => Some(CharSkinSlot::SkinExtra),
         _ => None,
     };
-    // The skin slot is reported so a skin-less load can fill it at spawn.
+    // The skin slot is reported so a skin-less load can fill it at spawn. A creature-skin record's
+    // own name is never a file: the stock models leave it empty, and Turtle WoW's `Stag.m2` carries
+    // one junk byte there, which read as a path left the slot looking filled, so the display's
+    // skin never went on and the stag drew nothing.
     match tex.texture_type {
-        M2TextureType::Monster1 => (variation(0).or(embedded), Some(0), None, false),
-        M2TextureType::Monster2 => (variation(1).or(embedded), Some(1), None, false),
-        M2TextureType::Monster3 => (variation(2).or(embedded), Some(2), None, false),
+        M2TextureType::Monster1 => (variation(0), Some(0), None, false),
+        M2TextureType::Monster2 => (variation(1), Some(1), None, false),
+        M2TextureType::Monster3 => (variation(2), Some(2), None, false),
         _ => (embedded, None, char_slot, icon_slot),
     }
 }
