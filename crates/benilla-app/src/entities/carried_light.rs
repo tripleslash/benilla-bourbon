@@ -13,11 +13,13 @@ use benilla_world::terrain_stream::point_light;
 /// Spawn a point light child for each casting M2 light of an entity's model. A light whose bone
 /// `joint` resolves rides that joint at `position − bone_pivot`; one without (a held item has no
 /// skeleton, a `-1` bone) hangs off `frame` in model space. As children, the lights leave with a
-/// gear change, a despawn or a mount transition.
+/// gear change, a despawn or a mount transition. `glowless`: the model draws nothing at rest, so
+/// its lights light surfaces and stand in no halo ([`benilla_world::lighting::Glowless`]).
 pub(super) fn spawn_carried_lights(
     commands: &mut Commands,
     lights: &[ModelLight],
     frame: Entity,
+    glowless: bool,
     joint: impl Fn(i16) -> Option<Entity>,
 ) {
     for l in lights {
@@ -63,6 +65,11 @@ pub(super) fn spawn_carried_lights(
         ) {
             commands.entity(glow).insert(flicker);
         }
+        if glowless {
+            commands
+                .entity(glow)
+                .insert(benilla_world::lighting::Glowless);
+        }
         commands.entity(parent).add_child(glow);
     }
 }
@@ -106,7 +113,7 @@ mod tests {
         ];
         app.world_mut().commands().queue(move |world: &mut World| {
             let mut q = world.commands();
-            spawn_carried_lights(&mut q, &lights, frame, move |bone| {
+            spawn_carried_lights(&mut q, &lights, frame, false, move |bone| {
                 (bone == 3).then_some(joint)
             });
         });
@@ -147,5 +154,33 @@ mod tests {
             (pl.color[0] * recovered - 1.4).abs() < 1e-3,
             "colour × intensity survives the packing"
         );
+        assert!(
+            !app.world()
+                .entity(spawned[0].0)
+                .contains::<benilla_world::lighting::Glowless>(),
+            "a drawn model's light stands in its halo"
+        );
+    }
+
+    /// A model that draws nothing at rest keeps its light, tagged so the fog gives it no halo.
+    #[test]
+    fn an_undrawn_models_light_is_glowless() {
+        let mut app = App::new();
+        let frame = app.world_mut().spawn(Transform::IDENTITY).id();
+        let lights = [light(1, -1, [0.0, 0.0, 4.0], false)];
+        app.world_mut().commands().queue(move |world: &mut World| {
+            let mut q = world.commands();
+            spawn_carried_lights(&mut q, &lights, frame, true, |_| None);
+        });
+        app.world_mut().flush();
+        let tagged = app
+            .world_mut()
+            .query::<(
+                &benilla_world::lighting::WorldPointLight,
+                &benilla_world::lighting::Glowless,
+            )>()
+            .iter(app.world())
+            .count();
+        assert_eq!(tagged, 1);
     }
 }

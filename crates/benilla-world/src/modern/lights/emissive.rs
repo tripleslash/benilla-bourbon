@@ -446,6 +446,16 @@ pub fn is_light_fixture(path: &str) -> bool {
     FIXTURES.iter().any(|k| file.contains(k))
 }
 
+/// fork: **a swarm is not a lamp.** A critter placed as a doodad (`World\Critter\…`, Darkshire's
+/// `Fireflies01.m2` and its kin) or a firefly cloud draws its insects as additive particles, which
+/// [`for_model`] reads exactly as it reads a brazier's flame: each swarm became a light at its
+/// centroid, standing in a halo in the open air with nothing there to burn.
+pub fn is_living_swarm(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase().replace('/', "\\");
+    let file = lower.rsplit('\\').next().unwrap_or(&lower);
+    lower.contains("\\critter\\") || file.contains("firefl")
+}
+
 /// One batch read as a fixture's lit glass: UNLIT, and neither additive (a card, read by
 /// [`glow_of_geometry`]) nor env-mapped (a reflection).
 pub fn glass_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
@@ -854,6 +864,24 @@ mod tests {
         assert!(!is_light_fixture(
             "World\\ENVIRONMENT\\DOODAD\\ANQUIRAJ\\Fireflies\\Hive_Fireflies_01.m2"
         ));
+    }
+
+    /// Darkshire's firefly swarms floated a lamp's halo in the air; a lamp is still a lamp.
+    #[test]
+    fn a_swarm_derives_no_light() {
+        for swarm in [
+            "world/critter/fireflies/fireflies01.m2",
+            "World\\Critter\\Butterfly\\Butterfly01.m2",
+            "World\\ENVIRONMENT\\DOODAD\\ANQUIRAJ\\Fireflies\\Hive_Fireflies_01.m2",
+        ] {
+            assert!(is_living_swarm(swarm), "{swarm}");
+        }
+        for fixture in [
+            "world/generic/passivedoodads/lights/generaltorch01.m2",
+            "World\\Generic\\Human\\Passive Doodads\\Lamps\\StormwindStreetlamp01.m2",
+        ] {
+            assert!(!is_living_swarm(fixture), "{fixture}");
+        }
     }
 
     /// GOLDEN — **Stormwind's street lamps are the city's own glass.** Two lanterns in one

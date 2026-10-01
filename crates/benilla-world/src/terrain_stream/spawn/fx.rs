@@ -123,6 +123,9 @@ pub(super) fn spawn_emissive_light_for(
     // it. Gating the spawn instead made a lamp's fate depend on whether it streamed in before or
     // after the lighting latch — see that type's note.
     use crate::modern::lights::emissive;
+    if emissive::is_living_swarm(path) {
+        return;
+    }
     // The centroid and fixture radius are `emissive`'s own law, shared with the entity lane —
     // a GameObject brazier is this same derivation over `EntityPart`s instead of `ModelSubmesh`es.
     let recipe = emissive::for_model(lights, emitters, submeshes, idle).and_then(|emissive| {
@@ -257,6 +260,7 @@ pub(super) fn spawn_wmo_lights_for(
             .map(|(g, _)| g as u16)
             .collect();
         let world = transform.transform_point(wow_to_bevy(l.position));
+        let before = out.len();
         spawn_point_light(
             commands,
             world,
@@ -268,6 +272,10 @@ pub(super) fn spawn_wmo_lights_for(
             crate::lighting::flame_flicker(None, false, l.color, l.intensity, world),
             out,
         );
+        // fork: no flame or glass is drawn for a MOLT light, so the fog gives it no halo.
+        for e in &out[before..] {
+            commands.entity(*e).insert(crate::lighting::Glowless);
+        }
     }
 }
 

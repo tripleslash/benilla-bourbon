@@ -152,6 +152,19 @@ fn lamp_air_share(class_w: f32) -> f32 {
     return select(1.0, 0.0, fract(class_w) > 0.125);
 }
 
+// A window's light (`global_light::WINDOW_TAG` 0.25 over the indoor class).
+fn is_window(class_w: f32) -> bool {
+    return abs(fract(class_w) - 0.25) < 0.0625;
+}
+
+// fork: **only a flame stands in a halo.** A window's light (a pane is not a flame) and a light
+// nothing on screen draws (`global_light::GLOWLESS_TAG` 0.375, a WMO's MOLT light) scatter their
+// far share like any light and no halo: theirs floated a glow in the air a yard off the facade,
+// under the window, where no lamp hangs.
+fn has_halo(class_w: f32) -> bool {
+    return fract(class_w) <= 0.125;
+}
+
 // The lamp air's extinction at its peak (1/yd) for a light of colour-row `w`: scale it by
 // `exp(-dl / LAMP_AIR_YD)` at distance `dl` from the light.
 fn lamp_air(f: FroxelFog, class_w: f32) -> f32 {
@@ -162,8 +175,8 @@ fn lamp_air(f: FroxelFog, class_w: f32) -> f32 {
 // is packed nearest-to-camera first) scatters only its far share into the froxels, and the halo pass
 // adds its halo along each pixel's own ray: a 4 yd halo is two or three froxel slices deep at street
 // range, and its lamp air a yard, so in the volume it smeared into a faint blob or vanished. Window
-// lights stay in the froxels whole (`is_halo_light`): they take no lamp air, and a city's panes would
-// otherwise take the slots of the lamps past them.
+// lights stay in the froxels (`is_halo_light`) with no halo at all (`has_halo`): they take no lamp
+// air, and a city's panes would otherwise take the slots of the lamps past them.
 const HALO_LIGHTS: u32 = 32u;
 
 // How many of the table's first lights are scanned for per-pixel halos: the tier's point-light count
@@ -179,7 +192,7 @@ fn halo_lights(f: FroxelFog, table_count: u32) -> u32 {
 // camera's room (`room_weight`), so seen from outside it scatters nothing. A window's light keeps
 // its glow: it stands in front of the glass, outside.
 fn indoor_air_share(class_w: f32, room: f32) -> f32 {
-    let indoor = floor(class_w) >= 1.0 && fract(class_w) <= 0.125;
+    let indoor = floor(class_w) >= 1.0 && !is_window(class_w);
     return select(1.0, room, indoor);
 }
 
