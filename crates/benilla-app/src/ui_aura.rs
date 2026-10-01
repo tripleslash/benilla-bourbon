@@ -77,7 +77,16 @@ struct CachedAura {
 #[derive(Resource, Default)]
 pub(crate) struct PlayerAuraCache {
     auras: Vec<CachedAura>,
+    /// The session's first feed with an avatar has run: the login snapshot is in.
+    seeded: bool,
 }
+
+/// The `appeared_at` of an aura in the login snapshot: the avatar's first descriptor carries the
+/// auras the character logged in with, and their remaining times (`Map::ExistingPlayerLogin`) can
+/// land while the world is still loading, seconds before that first feed. Every stamp of the
+/// session joins them; a slot filled later keeps [`DURATION_SLACK`]. The reference reader has no
+/// freshness test at all (`0x4e4450`), so this only narrows our own gate to where it is needed.
+const LOGIN_SNAPSHOT: f64 = f64::NEG_INFINITY;
 
 /// [`feed_auras`] fires `PLAYER_AURAS_CHANGED` and `UNIT_AURA` inline, so a feed whose state their
 /// handlers re-read (the stance feed) runs `.before(AuraEvents)` or they read last frame's.
@@ -427,7 +436,13 @@ fn feed_auras(
         .filter(|a| shown_in_aura_ui(catalog, a.spell_id))
         .copied()
         .collect();
-    reconcile(&mut cache.auras, &live, bevy_now);
+    let appeared_at = if cache.seeded {
+        bevy_now
+    } else {
+        LOGIN_SNAPSHOT
+    };
+    cache.seeded = true;
+    reconcile(&mut cache.auras, &live, appeared_at);
 
     // No stamp is pruned for an empty slot: the packet arrives before its slot fills.
 
@@ -625,6 +640,7 @@ fn end_session_aura_state(
         script.set_tracking(None);
     }
     cache.auras.clear();
+    cache.seeded = false;
     durations.by_slot.clear();
     // No `AuraFeedMemory` reset: its edge keys die with the VM.
 }
@@ -716,6 +732,10 @@ mod tests {
             .set(ClientState::CharSelect);
         app.update();
         assert!(app.world().resource::<PlayerAuraCache>().auras.is_empty());
+        assert!(
+            !app.world().resource::<PlayerAuraCache>().seeded,
+            "the next login's snapshot is a snapshot again"
+        );
         assert!(app.world().resource::<AuraDurations>().by_slot.is_empty());
     }
 
@@ -868,6 +888,33 @@ mod tests {
         );
         // No stamp: a permanent aura, which gets no packet.
         assert_eq!(join_duration(None, 200.0, 200.0, 5000.0), (0.0, 0.0));
+    }
+
+    /// A login's remaining times land while the world loads, seconds before the avatar's first
+    /// feed: the snapshot's auras join them, and a slot filled later keeps the freshness gate.
+    #[test]
+    fn the_login_snapshot_joins_durations_that_landed_while_loading() {
+        let mut durations = AuraDurations::default();
+        // t = 3: the server sends the logged-in buffs' remainders during the loading screen.
+        durations.set(0, 1_200_000, 3.0);
+        durations.set(1, 600_000, 3.0);
+        // t = 11: the avatar's first feed reconciles the snapshot.
+        let mut cache = Vec::new();
+        reconcile(&mut cache, &[slot(0, 1126), slot(1, 21564)], LOGIN_SNAPSHOT);
+        for c in &cache {
+            let (total, expiry) =
+                join_duration(durations.by_slot.get(&c.slot), c.appeared_at, 11.0, 500.0);
+            assert!(total > 0.0, "slot {} shows its timer, not `0 s`", c.slot);
+            assert!(expiry > 500.0, "slot {} has time left", c.slot);
+        }
+        // Mid-session, slot 0 is recycled by a new aura with no fresh packet: no stale timer.
+        reconcile(&mut cache, &[slot(1, 21564)], 20.0);
+        reconcile(&mut cache, &[slot(0, 99), slot(1, 21564)], 20.0);
+        let recycled = cache.iter().find(|c| c.slot == 0).unwrap();
+        assert_eq!(
+            join_duration(durations.by_slot.get(&0), recycled.appeared_at, 20.0, 500.0),
+            (0.0, 0.0)
+        );
     }
 
     /// The duration packet arrives about a frame before the delta that fills its slot.
