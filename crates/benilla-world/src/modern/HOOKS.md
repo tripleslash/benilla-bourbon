@@ -163,6 +163,9 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-app/src/lib.rs` | `SEEDED` gains `WOW_FIRE_FLICKER` (`?fire_flicker=`) and `WOW_SPELL_LIGHT` (`?spell_light=0`) | pkuzic port |
 | `benilla-world/src/wmo_portal/fog.rs` | `CameraRoomExtent` (the room the camera stands in, as a world sphere), re-exported from `wmo_portal/mod.rs` | P4 fix |
 | `benilla-world/src/wmo_portal/mod.rs` | `compute_wmo_pvs` writes `CameraRoomExtent` beside `CameraWmoFog`: the sphere of `fog_room` (the true interior whose MFOG engaged), `None` wherever the fog target is — never an exterior-lit courtyard's | P4 fix |
+| `benilla-world/src/lighting/{global_light,prop_probes,mod}.rs` | `LightStd430.env` (12 rows after the point table, packed in `build_light_data` from `EnvFrame`); the rain-shelter region (65,568 B) between the per-frame blob and the prop probes, so `prop_probe_region_offset` and every region behind it move | Everwood port |
+| `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl`, `fsr/velocity.wgsl`, `modern/entity_shadow.wgsl` | the light mirrors declare `env` and `shelter_hdr` / `shelter_cfg` / `shelter` after `points` (the last two as unread padding) | Everwood port |
+| `benilla-assets/src/materials.rs` | `register_shaders` loads the `benilla::env_frame` / `wind_hook` / `wet_hook` libraries | Everwood port |
 
 ## Planned hooks (not yet landed)
 

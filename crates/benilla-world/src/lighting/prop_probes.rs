@@ -195,9 +195,10 @@ pub(super) fn publish_prop_probes(
     }
 }
 
-/// Byte offset of the probe region in the shared light buffer, right after the per-frame blob.
+/// Byte offset of the probe region in the shared light buffer: after the per-frame blob and the
+/// rain-shelter region behind it.
 pub fn prop_probe_region_offset() -> u64 {
-    super::global_light::per_frame_blob_bytes()
+    super::global_light::per_frame_blob_bytes() + super::env_frame::SHELTER_REGION_BYTES
 }
 
 /// Render world, in `PrepareResources`: writes the probe region when the table changed; the

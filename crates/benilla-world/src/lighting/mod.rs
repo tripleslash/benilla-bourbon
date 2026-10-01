@@ -8,12 +8,17 @@ use benilla_formats::{LightCatalog, LiquidKind};
 
 mod blob; // off-world light blobs (portrait booths, body panes, glue scene)
 mod daynight; // the sun, moon and day/night curves
+mod env_frame; // fork: the environment block (wind, wetness, benders) behind the point table
 mod flicker; // fork: the flame flicker folded into the packed point table (ported from pkuzic)
 mod global_light; // the shared global-light storage buffer
 mod prop_probes; // the interior-prop SH probe table
 mod resolve; // the per-frame time-of-day resolve and the interior-fog crossfade
 mod sh; // the model SH probe fold
 pub use blob::LightBlob;
+pub use env_frame::{
+    shelter_region_offset, EnvFrame, ENV_FRAME_ROWS, MAX_BENDERS, SHELTER_GRID,
+    SHELTER_HEADER_ROWS, SHELTER_REGION_BYTES,
+};
 pub(crate) use flicker::is_warm;
 pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
 pub use global_light::{

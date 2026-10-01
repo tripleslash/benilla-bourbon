@@ -29,7 +29,8 @@ use crate::view::WorldCamera;
 ///      interior-tagged content in place of 4-5 ·
 ///   20 point_count (x = live entries) · 21+ the point-light table, two rows per light,
 ///      `[pos.xyz, range]` and `[rgb, 0]`, here because Bevy's clusterable buffer is
-///      fragment-only in the view layout and the point term is per vertex.
+///      fragment-only in the view layout and the point term is per vertex ·
+///   533+ fork: the environment block ([`super::env_frame`]): wind, wetness, benders.
 ///
 /// The GPU buffer is larger: the interior-prop probes and the skin-palette regions follow this
 /// prefix. They stay out of this struct because the extract clones it by value every frame, and
@@ -39,6 +40,8 @@ use crate::view::WorldCamera;
 struct LightStd430 {
     rows: [[f32; 4]; LIGHT_HEADER_ROWS],
     points: [[f32; 4]; 2 * MAX_POINT_LIGHTS],
+    // fork: after the point table, so no earlier offset moves.
+    env: [[f32; 4]; super::env_frame::ENV_FRAME_ROWS],
 }
 
 /// Header row count of the layout above (rows 0..=20), which every light blob sizes against.
@@ -280,6 +283,7 @@ impl Default for WowLightData {
         Self(LightStd430 {
             rows: [[0.0; 4]; 21],
             points: [[0.0; 4]; 2 * MAX_POINT_LIGHTS],
+            env: [[0.0; 4]; super::env_frame::ENV_FRAME_ROWS],
         })
     }
 }
@@ -292,6 +296,7 @@ pub struct SharedLightBuffer(pub Buffer);
 /// Registers the light pack, the probe publish, their extracts and the render-world uploads.
 pub(super) fn register(app: &mut App) {
     app.init_resource::<WowLightData>()
+        .init_resource::<super::EnvFrame>()
         .init_resource::<super::prop_probes::PropProbeExtract>()
         .add_plugins(ExtractResourcePlugin::<WowLightData>::default())
         .add_plugins(ExtractResourcePlugin::<SharedLightBuffer>::default())
@@ -344,11 +349,12 @@ pub fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffer {
 /// whole layout at each draw.
 pub fn light_blob_bytes() -> u64 {
     per_frame_blob_bytes()
+        + super::env_frame::SHELTER_REGION_BYTES
         + (7 * MAX_PROP_PROBES * 16) as u64
         + crate::rig_palette::palette_regions_bytes()
 }
 
-/// The per-frame prefix's size, which is also the probe region's offset.
+/// The per-frame prefix's size, which is also the shelter region's offset; the probes follow it.
 pub(super) fn per_frame_blob_bytes() -> u64 {
     std::mem::size_of::<LightStd430>() as u64
 }
@@ -394,6 +400,8 @@ fn build_light_data(
     time: Res<Time>,
     // fork: modern lighting — row 20 `.y` tells every world shader the frame is linear.
     active: Option<Res<crate::modern::ActiveLighting>>,
+    // fork: the environment block, packed behind the point table.
+    env: Option<Res<super::EnvFrame>>,
     mut last_dump: Local<f64>,
     mut last_rows_dump: Local<f64>,
 ) {
@@ -407,6 +415,7 @@ fn build_light_data(
     // clones this 8.5 KB blob every frame it reads as changed.
     let mut fresh = data.0;
     fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
+    fresh.env = env.map(|e| e.pack()).unwrap_or_default();
     // fork: modern lighting (FORK.md) — the zone look's fog tint (1 in classic).
     let (fog_tint, silhouette) = if active.as_ref().is_some_and(|a| a.is_modern()) {
         (

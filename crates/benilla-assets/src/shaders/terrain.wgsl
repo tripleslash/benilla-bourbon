@@ -14,6 +14,7 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::probegi
 #import benilla_modern::locallight
+#import benilla::env_frame
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -117,6 +118,13 @@ struct WowLight {
     // then two rows per light, `[pos.xyz, range]` and `[rgb, 0]`.
     point_count: vec4<f32>,
     points: array<vec4<f32>, 512>,
+    // fork: the environment block (`benilla::env_frame`: wind, wetness, benders), then the
+    // rain-shelter region (`weather::shelter`): `[origin_x, origin_z, 1 / cell, active]`,
+    // `[base_y, cells per side, 0, 0]` and one packed word a cell.
+    env: env_frame::EnvFrame,
+    shelter_hdr: vec4<f32>,
+    shelter_cfg: vec4<f32>,
+    shelter: array<u32, 16384>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 

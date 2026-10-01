@@ -32,6 +32,10 @@ struct VelocityPart {
 struct SkinRegions {
     _header: array<vec4<f32>, 21>,
     _points: array<vec4<f32>, 512>,
+    // fork: the environment block and the rain-shelter region (`lighting/env_frame.rs`), unread here.
+    _env: array<vec4<f32>, 12>,
+    _shelter_hdr: array<vec4<f32>, 2>,
+    _shelter: array<u32, 16384>,
     _prop_probes: array<vec4<f32>, 57344>,
     rig_table: array<u32, 2048>,
     _rig_tint: array<u32, 2048>,

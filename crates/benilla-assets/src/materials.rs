@@ -37,6 +37,17 @@ pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_cata.wgsl");
+    // fork: the importable libraries the world shaders call into, held loaded so the `#import`
+    // resolves. A headless app with no `Shader` asset type (the loader tests) has nothing to
+    // compile them for.
+    if app
+        .world()
+        .contains_resource::<Assets<bevy::shader::Shader>>()
+    {
+        // `benilla::env_frame`, the block the world `WowLight` mirrors declare after the point
+        // table (`benilla-world`'s `lighting/env_frame.rs`).
+        bevy::shader::load_shader_library!(app, "shaders/env_frame.wgsl");
+    }
 }
 
 /// The WDL far-band shader's source, for the tests that live beside the renderer (`wdl.rs`).

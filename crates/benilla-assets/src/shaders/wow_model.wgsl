@@ -15,6 +15,7 @@
 #import benilla_modern::froxelfog
 #import benilla_modern::probegi
 #import benilla_modern::locallight
+#import benilla::env_frame
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -109,6 +110,13 @@ struct WowLight {
     // in Bevy's clusterables, which the view layout gives the fragment stage only.
     point_count: vec4<f32>,
     points: array<vec4<f32>, 512>,
+    // fork: the environment block (`benilla::env_frame`: wind, wetness, benders), then the
+    // rain-shelter region (`weather::shelter`): `[origin_x, origin_z, 1 / cell, active]`,
+    // `[base_y, cells per side, 0, 0]` and one packed word a cell.
+    env: env_frame::EnvFrame,
+    shelter_hdr: vec4<f32>,
+    shelter_cfg: vec4<f32>,
+    shelter: array<u32, 16384>,
     // The interior-prop SH probes, 7 rows per slot (`MAX_PROP_PROBES` = 8192 slots). Only this
     // shader declares this tail; the other shaders bind the same buffer by its prefix.
     prop_probes: array<vec4<f32>, 57344>,
