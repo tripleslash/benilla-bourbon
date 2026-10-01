@@ -1534,6 +1534,10 @@ mod tests {
             d["rainSurfaces"] != 0.0,
             benilla_world::weather::wetness::RainSurfaces::default().0
         );
+        assert_eq!(
+            d["lavaLight"],
+            benilla_world::lighting::LavaLightGain::REGISTERED
+        );
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).

@@ -171,6 +171,8 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `static_gx.wgsl`, `static_gx/{mod,bake}.rs` | `WORD_FOLIAGE_WIND` (bit 29) from `foliage_wind_batch`; `gx_clip_position` takes the anchor and adds `gx_wind_offset`; `GxPrepassVertex` gains `anchor` | Everwood port: wind |
 | `benilla-world/src/model_render.rs`, `terrain_stream/spawn/assemble.rs` | `FOLIAGE_WIND_MARKER` (bit 14), `foliage_model_material`; a leaf batch's fade seed carries the marked pair | Everwood port: wind |
 | `benilla-world/src/world_plugins.rs`, `lib.rs` | `pub mod wind;`, `.add(crate::wind::WindPlugin)` after `WeatherPlugin` | Everwood port: wind |
+| `benilla-world/src/lighting/mod.rs`, `modern/lights/mod.rs` | `mod lava_light;` and its `register`; `update_lights` refuses a `LavaLight` a cube shadow, beside `SpellFxLight` | Everwood port: lava |
+| `benilla-app/src/cvars/{mod,table}.rs`, `video.rs` | the `lavaLight` row and its `on_cvar` arm | Everwood port: lava |
 | `benilla-world/src/weather/mod.rs` | `pub mod wetness; pub mod shelter;` and their `register` calls in `WeatherPlugin` | Everwood port: rain |
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | the wet hooks before the fog: the shelter grid's open share, `wet_hook::wet_surface` (and `wet_puddles` on terrain) on the colour, `wet_sheen` added and clamped | Everwood port: rain |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `assets/ui/OptionsFrame.xml` | the `rainSurfaces` row, its `on_cvar` arm, `GRAPHICS_CVARS`, the option rows in both windows | Everwood port: rain |

@@ -898,6 +898,9 @@ fn update_lights(
         Has<SynthesizedLight>,
         // fork: a spell's light never holds a cube — it moves and it is gone in a second.
         Has<crate::lighting::SpellFxLight>,
+        // fork: nor does a lava light: sixty-four of them stand in the open over a pool, and the
+        // glow of a river casts no hard shadow.
+        Has<crate::lighting::LavaLight>,
     )>,
     portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut out: ResMut<ModernLights>,
@@ -934,8 +937,8 @@ fn update_lights(
         let (tracks, frame) = &mut *sway;
         *frame = frame.wrapping_add(1);
         let frame = *frame;
-        for (entity, light, gt, rooms, fixture, window, synthesized, spell) in &lights_q {
-            if spell || !shadow_candidate(window, synthesized, emissive) {
+        for (entity, light, gt, rooms, fixture, window, synthesized, spell, lava) in &lights_q {
+            if spell || lava || !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
             if !crate::wmo_portal::room_admits_light(

@@ -823,6 +823,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — 1.12's rain leaves every surface as it was",
     ),
+    // `lavaLight` — magma surfaces light the rock and ground around them; 0 is the reference,
+    // where lava glows and lights nothing. No options row: the Graphics Preset governs it.
+    ours(
+        "lavaLight",
+        "1",
+        "the fork's own — 1.12's lava is fullbright and casts no light",
+    ),
     // ── end fork-owned block ──
     // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
     //

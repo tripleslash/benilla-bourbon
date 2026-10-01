@@ -204,6 +204,7 @@ pub(crate) fn on_cvar(
         Option<ResMut<benilla_world::wind::FoliageWind>>,
         Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
         Option<ResMut<benilla_world::weather::wetness::RainSurfaces>>,
+        Option<ResMut<benilla_world::lighting::LavaLightGain>>,
     ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -337,6 +338,12 @@ pub(crate) fn on_cvar(
         "rainsurfaces" => {
             if let Some(rain) = fork.5.as_deref_mut() {
                 rain.0 = ev.flag();
+            }
+        }
+        // fork: lava light, on or off; the reconcile spawns and retires the lights on the edge.
+        "lavalight" => {
+            if let Some(lava) = fork.6.as_deref_mut() {
+                lava.0 = if ev.flag() { 1.0 } else { 0.0 };
             }
         }
         "foliagewindstrength" => {

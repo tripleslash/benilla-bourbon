@@ -11,10 +11,12 @@ mod daynight; // the sun, moon and day/night curves
 mod env_frame; // fork: the environment block (wind, wetness, benders) behind the point table
 mod flicker; // fork: the flame flicker folded into the packed point table (ported from pkuzic)
 mod global_light; // the shared global-light storage buffer
+mod lava_light; // fork: breathing point lights over magma surfaces (the Everwood port)
 mod prop_probes; // the interior-prop SH probe table
 mod resolve; // the per-frame time-of-day resolve and the interior-fog crossfade
 mod sh; // the model SH probe fold
 pub use blob::LightBlob;
+pub use lava_light::{LavaLight, LavaLightGain};
 pub use env_frame::{
     shelter_region_offset, EnvFrame, ENV_FRAME_ROWS, MAX_BENDERS, SHELTER_GRID,
     SHELTER_HEADER_ROWS, SHELTER_REGION_BYTES,
@@ -260,6 +262,8 @@ impl Plugin for LightingPlugin {
             );
         // The shared light buffer, packed after the resolve and uploaded in the render world.
         global_light::register(app);
+        // fork: lava light (FORK.md).
+        lava_light::register(app);
     }
 }
 
