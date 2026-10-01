@@ -37,7 +37,8 @@ half = "2"
 include_dir = "0.7"
 # The 1.12 chat filters (`text_filter`), with one `RegexSet` for the any-match pass per line.
 regex = "1"
-# `getrusage` for perf CPU time; the audio clock and render thread's realtime policy on macOS.
+# `getrusage` for perf CPU time; `localtime_r` for the log stamp; the audio clock and render
+# thread's realtime policy on macOS.
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -60,6 +61,9 @@ toml = "0.8"
 avian3d = "0.7"
 # Shapes and rasterizes `FontString` text standalone (`ui_text`), at bevy_text's own 0.16.
 cosmic-text = "0.16"
+# The layout's unshifted character per key (`KeyEventExtModifierSupplement`), which bevy's
+# `KeyboardInput` drops; bevy_winit's own 0.30, whose features it sets.
+winit = { version = "0.30", default-features = false }
 # `cosmic-text`'s font database, named by `ui_text`; must stay the version it depends on.
 fontdb = "0.23"
 # kira renders the mix; the device it plays through is OURS (`sound::output`, decisions 1857 and
@@ -169,6 +173,12 @@ web-sys = { version = "0.3", features = [
 # default backend degrades *silently* to a mock when the feature is off.
 kira = { version = "0.12", default-features = false, features = ["cpal"] }
 
-# Windows CPU clocks for `perf::clock`.
+# Windows CPU clocks for `perf::clock`; `GetLocalTime` for the log stamp (`ui_chat::logging`); the
+# layout's virtual keys for `bindings::layout`.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

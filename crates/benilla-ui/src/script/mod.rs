@@ -259,9 +259,9 @@ pub use trainer::{
     TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
 pub use types::{
-    BlendMode, EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject,
-    FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline,
-    QuadContent, ScriptValue, TexCoords,
+    BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
+    ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
+    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{
@@ -423,8 +423,9 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnTabPressed",
     "OnTextChanged",
     "OnTextSet",
-    // The caret flush's own (`0x77da80`), fired by the tick's `drain_cursor_changed` when the
-    // caret moved: the edge `ScrollingEdit_OnCursorChanged` scrolls a multiline box by.
+    // The caret leg's own (`0x77da80`), fired by the box's flush on dirty bit 2, which a caret
+    // move, an edit, a focus change and a re-seat raise: the edge `ScrollingEdit_OnCursorChanged`
+    // scrolls a multiline box by.
     "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
@@ -993,6 +994,9 @@ impl UiScript {
                 KindState::EditBox(eb) => {
                     eb.advances_key = eb.advances_key.wrapping_add(1);
                     eb.line_height = None;
+                    // A multi-line box's height is its text's measure: owed again on the new
+                    // raster, which moves no rect here to re-seat it.
+                    eb.relayout_owed = true;
                 }
                 _ => {}
             }
@@ -1075,7 +1079,7 @@ impl UiScript {
     /// Whether the focused EditBox is in alt-arrow mode (XML `ignoreArrows`, Lua
     /// `SetAltArrowKeyMode`, `[editbox+0x318] & 0x10`): without ALT the reference declines the four
     /// arrows (`0x77b1c4`), so they reach the world's bindings and turn the player while chat has
-    /// focus. The gate is on the key, not the [`EditAction`]: HOME and END also move to an edge.
+    /// focus. The gate is on the key, not the [`EditAction`]: HOME and END also move the caret.
     pub fn editbox_alt_arrow_mode(&self) -> bool {
         let model = self.model_ref();
         model.focused_editbox.is_some_and(|h| {

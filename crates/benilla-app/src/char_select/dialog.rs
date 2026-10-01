@@ -92,7 +92,8 @@ pub(super) fn drive_delete_dialog(
         Option<&mut Text>,
         &mut Visibility,
     )>,
-    mut clipboard: NonSendMut<HostClipboard>,
+    // The pasteboard, and the layout that names the clipboard chords' letters.
+    (mut clipboard, layout): (NonSendMut<HostClipboard>, Res<crate::bindings::LayoutNames>),
     // The window drives the glue scale; its raw handle carries the Wayland clipboard's display.
     window: Query<
         (&Window, Option<&bevy::window::RawHandleWrapper>),
@@ -139,6 +140,7 @@ pub(super) fn drive_delete_dialog(
             &mut dialog.typed,
             ev,
             mods,
+            &layout,
             &mut clipboard,
             wl,
             textinput::CharFilter::Any,
@@ -385,8 +387,8 @@ fn spawn_dialog(
                                 ..default()
                             },))
                                 .with_children(|f| {
-                                    // The five-part field row: segments either side of the
-                                    // selection, a caret slot at each edge.
+                                    // The five-part field row: the text either side of the
+                                    // selection, which splits at the caret.
                                     let segment = |f: &mut ChildSpawnerCommands, part| {
                                         outlined_text(
                                             f,
@@ -404,14 +406,9 @@ fn spawn_dialog(
                                         );
                                     };
                                     segment(f, GlueFieldPart::Before);
-                                    caret_bar(
-                                        f,
-                                        (DeleteCaret, GlueFieldPart::CaretAtStart),
-                                        15.0,
-                                        s,
-                                    );
-                                    segment(f, GlueFieldPart::Selected);
-                                    caret_bar(f, (DeleteCaret, GlueFieldPart::CaretAtEnd), 15.0, s);
+                                    segment(f, GlueFieldPart::SelectedHead);
+                                    caret_bar(f, (DeleteCaret, GlueFieldPart::Caret), 15.0, s);
+                                    segment(f, GlueFieldPart::SelectedTail);
                                     segment(f, GlueFieldPart::After);
                                 });
                         });

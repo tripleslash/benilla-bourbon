@@ -604,17 +604,17 @@ impl Default for LoginForm {
 }
 
 impl LoginForm {
-    /// Give `field` the keyboard, select all its text and collapse the selection in the box left.
-    ///
-    /// Deviation: select on focus and collapse on leaving, because a player entering a login
-    /// field means to replace what is there. The reference's focus gain (`0x77e3f6`) and loss
-    /// (`0x77af50`) leave the selection alone, and its click collapses it (`0x77b800` calls
-    /// `0x77ccf0` before `SetFocus`). `HighlightText(0, -1)` (`0x77cca0`) also resets the blink,
-    /// so the caret opens solid.
+    /// Give `field` the keyboard as the stock `AccountLogin.xml` boxes take it: the box left drops
+    /// its selection (`OnEditFocusLost`, `HighlightText(0, 0)`), and the box gaining it selects
+    /// all (`OnEditFocusGained`, `HighlightText()`), which leaves its caret where it was
+    /// (`0x77cca0`). The focus change raises the caret bit (`0x77afa8`), whose flush restarts the
+    /// blink (`0x77dd68`, `0x77de35`), so the caret opens solid.
     fn focus(&mut self, field: Field) {
-        self.focused().collapse();
+        self.focused().highlight_text(0, 0);
         self.focus = field;
-        self.focused().highlight_text(0, -1);
+        let f = self.focused();
+        f.highlight_text(0, -1);
+        f.reset_blink();
     }
 
     fn focused(&mut self) -> &mut EditBoxState {
@@ -655,7 +655,8 @@ fn login_input(
     clicks: Res<crate::glue::GlueClicks>,
     mut keyboard: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut clipboard: NonSendMut<HostClipboard>,
+    // The pasteboard, and the layout that names the clipboard chords' letters.
+    (mut clipboard, layout): (NonSendMut<HostClipboard>, Res<crate::bindings::LayoutNames>),
     raw_handle: Query<&bevy::window::RawHandleWrapper, With<bevy::window::PrimaryWindow>>,
     mut form: ResMut<LoginForm>,
     mut attempt: Attempt,
@@ -722,6 +723,7 @@ fn login_input(
                     &mut dialog.edit,
                     ev,
                     mods,
+                    &layout,
                     &mut clipboard,
                     wl,
                     textinput::CharFilter::Any,
@@ -735,6 +737,7 @@ fn login_input(
             form.focused(),
             ev,
             mods,
+            &layout,
             &mut clipboard,
             wl,
             textinput::CharFilter::Any,
@@ -1376,10 +1379,16 @@ mod tests {
         form.account.set_text("remembered");
         form.password.set_text("secret");
 
+        // Mid-blink, caret off and mid-text: the focus restarts it solid, where it was.
+        form.account.caret_shown = false;
+        form.account.blink_accum = 0.3;
+        form.account.cursor = 3;
         form.focus(Field::Account);
         assert_eq!(form.focus, Field::Account);
         assert_eq!(form.account.selected_text().as_deref(), Some("remembered"));
+        assert_eq!(form.account.cursor, 3, "HighlightText leaves the caret");
         assert!(form.account.caret_shown, "a fresh focus starts solid");
+        assert_eq!(form.account.blink_accum, 0.0, "with a full half-period");
 
         // Checked as a range: a password box's `selected_text` returns the `*` mask.
         form.focus(Field::Password);
