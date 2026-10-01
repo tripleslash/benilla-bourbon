@@ -87,6 +87,9 @@ pub struct EffectMeta {
     vertices: RawBufferVec<EffectVertex>,
     // fork: fsr (FORK.md) — each vertex's world displacement ([`super::buffer::EffectMotion`]).
     motion: RawBufferVec<[f32; 3]>,
+    // fork: fsr (FORK.md) — [`Self::motion`] holds this frame's stream, one row a vertex;
+    /// false while no camera runs FSR, when nothing is built or uploaded.
+    motion_valid: bool,
     indices: RawBufferVec<u32>,
     draws: Vec<ExtractedDraw>,
     merged: Vec<MergedDraw>,
@@ -110,6 +113,7 @@ impl Default for EffectMeta {
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             motion: RawBufferVec::new(BufferUsages::VERTEX),
+            motion_valid: false,
             indices: RawBufferVec::new(BufferUsages::INDEX),
             draws: Vec::new(),
             merged: Vec::new(),
@@ -129,6 +133,9 @@ impl EffectMeta {
 
     // fork: fsr (FORK.md) — the vertex, motion and index buffers the merged draws index.
     pub(crate) fn velocity_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer)> {
+        if !self.motion_valid {
+            return None;
+        }
         Some((
             self.vertices.buffer()?,
             self.motion.buffer()?,
@@ -416,11 +423,15 @@ fn extract_effects(
     }
     meta.vertices.clear();
     meta.vertices.extend(quads.verts.iter().copied());
-    // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside.
+    // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside, while
+    // a camera runs FSR; otherwise empty, and `write_buffer` uploads nothing.
     meta.motion.clear();
-    meta.motion.extend(quads.motion.iter().copied());
-    for _ in quads.motion.len()..quads.verts.len() {
-        meta.motion.push([0.0; 3]);
+    meta.motion_valid = quads.tracks_motion();
+    if meta.motion_valid {
+        meta.motion.extend(quads.motion.iter().copied());
+        for _ in quads.motion.len()..quads.verts.len() {
+            meta.motion.push([0.0; 3]);
+        }
     }
     meta.draws.clear();
     meta.draws.extend(quads.draws.iter().map(|d| ExtractedDraw {

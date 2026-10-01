@@ -23,10 +23,11 @@ systems run in `Last`.
 | `benilla-world/src/modern/volumetrics/mod.rs` | re-exports `fog_composite_pass` and `lamp_halo_pass` for FSR's ordering |
 | `benilla-world/src/modern/volumetrics/node.rs` | `prepare_froxels` stands down on `FsrHeld`, so the scatter ping-pong flips only with its pass |
 | `benilla-world/src/ffx_glow.rs` | `FfxBackdrop::decode`; quarter targets sized from `FsrView::display`; the compose pair; `ffx_glow_pass` is `pub(crate)` and reads `FsrState::output`; the backdrop ground reads `FgPresent` then `FsrState::output`; `compose_world_final` |
-| `benilla-world/src/particles/buffer.rs` | `EffectMotion`, `EffectDrawSpec::motion`, `EffectQuads::motion` (kept parallel by `begin`/`commit`), `EffectBatch::moving`/`motion_mut` |
-| `benilla-world/src/particles/render.rs` | the motion vertex stream; `MergedDraw`'s view and pipeline key; `EffectMeta` and `EffectPipeline` accessors for the velocity pass |
+| `benilla-world/src/particles/buffer.rs` | `EffectMotion`, `EffectDrawSpec::motion`, `EffectQuads::motion` (kept parallel by `begin`/`commit`, only while `begin_effect_frame` sees an `FsrView`: `tracks_motion`), `EffectBatch::moving`/`motion_mut`/`tracks_motion`, `WorldEffectDraw::tracks_motion` |
+| `benilla-world/src/particles/render.rs` | the motion vertex stream, extracted and uploaded only while tracked (`EffectMeta::motion_valid`); `MergedDraw`'s view and pipeline key; `EffectMeta` and `EffectPipeline` accessors for the velocity pass |
 | `benilla-world/src/particles/quads.rs` | `push_particle_motion` beside `expand_quads` |
-| `benilla-world/src/particles/sim.rs` | each emitter's last placement; `PerVertex` particle motion |
+| `benilla-world/src/particles/sim.rs` | each emitter's last placement, pruned to this frame's; `PerVertex` particle motion, both while tracked |
+| `benilla-world/src/rig_palette.rs` | `RigPaletteExtract::bone_watermark`/`live_bytes`, the previous-pose copy's bound |
 | `benilla-world/src/ribbons.rs` | the head's motion (`PerVertex`) |
 | `benilla-world/src/ground_fx.rs` | the decal centre's motion (`Rigid`) |
 | `benilla-world/src/water_fx/mod.rs` | `EffectMotion::Static` |

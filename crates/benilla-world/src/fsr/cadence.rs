@@ -13,6 +13,7 @@
 
 use bevy::core_pipeline::schedule::RootNonCameraView;
 use bevy::ecs::schedule::ScheduleLabel;
+use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::ExtractComponent;
@@ -88,30 +89,50 @@ impl FgCadence {
     }
 }
 
-/// `FgMain`'s one system: hold the frame, or run the game.
-fn fg_main(world: &mut World) {
-    let window = world
-        .query_filtered::<&Window, With<PrimaryWindow>>()
-        .iter(world)
-        .next()
-        .map_or(UVec2::ZERO, |w| {
-            UVec2::new(w.physical_width(), w.physical_height())
-        });
-    let (in_world, epoch) = world
-        .query::<&FsrView>()
-        .iter(world)
-        .next()
-        .map_or((false, 0), |f| (true, f.epoch));
-    let inputs = FgInputs {
-        wanted: world.resource::<FrameGeneration>().0,
-        in_world,
-        blocked: world.resource::<FgBlocked>().0,
-        window,
-        epoch,
+/// What [`fg_main`] reads each frame: the primary window and the FSR view.
+type FgLookups = (
+    Query<'static, 'static, &'static Window, With<PrimaryWindow>>,
+    Query<'static, 'static, &'static FsrView>,
+);
+
+/// `FgMain`'s one system: hold the frame, or run the game. With frame generation off it only
+/// resets the cadence and runs `Main`; its lookups are a cached system state, not rebuilt.
+fn fg_main(world: &mut World, lookups: &mut SystemState<FgLookups>) {
+    let wanted = world.resource::<FrameGeneration>().0;
+    let held = if wanted {
+        let (window, in_world, epoch) = {
+            let (windows, views) = lookups.get(world);
+            let window = windows.iter().next().map_or(UVec2::ZERO, |w| {
+                UVec2::new(w.physical_width(), w.physical_height())
+            });
+            let (in_world, epoch) = views
+                .iter()
+                .next()
+                .map_or((false, 0), |f| (true, f.epoch));
+            (window, in_world, epoch)
+        };
+        let inputs = FgInputs {
+            wanted,
+            in_world,
+            blocked: world.resource::<FgBlocked>().0,
+            window,
+            epoch,
+        };
+        world.resource_mut::<FgCadence>().next(inputs)
+    } else {
+        // Not wanted resets the history count whatever the rest reads.
+        world.resource_mut::<FgCadence>().next(FgInputs {
+            wanted,
+            in_world: false,
+            blocked: false,
+            window: UVec2::ZERO,
+            epoch: 0,
+        })
     };
-    let held = world.resource_mut::<FgCadence>().next(inputs);
-    // Written every frame, so extraction always carries this frame's verdict.
-    world.resource_mut::<FsrHeld>().0 = held;
+    // Written on change only: the render world keeps the last extracted verdict between changes.
+    if world.resource::<FsrHeld>().0 != held {
+        world.resource_mut::<FsrHeld>().0 = held;
+    }
     if held {
         // `First`'s `time_system` does not run, so drain the render thread's frame instant here:
         // its channel holds one, and the next send would panic on a full one.

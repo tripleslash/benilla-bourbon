@@ -300,6 +300,11 @@ fn draw_weapon_trails(
     // resolve, the authored colour.
     let scene = lighting.as_deref().map_or([1.0; 3], |l| l.ambient);
     let now_ms = time.elapsed().as_millis() as u32;
+    // fork: fsr (FORK.md) — the blade's motion and its history only while a camera runs FSR.
+    let track_motion = draw.tracks_motion();
+    if !track_motion {
+        last_blade.clear();
+    }
     for (entity, mut trail, prop, vis, wearer) in &mut trails {
         // Checked through `&` first, so an idle weapon is not marked changed.
         if trail.swing.is_none() {
@@ -344,8 +349,9 @@ fn draw_weapon_trails(
             .moving(EffectMotion::PerVertex);
         // fork: fsr (FORK.md) — the blade's edge moved since the last world frame; the strip
         // laid behind it stays where it was laid.
-        let blade = last_blade
-            .insert(entity, (bottom, top))
+        let blade = track_motion
+            .then(|| last_blade.insert(entity, (bottom, top)))
+            .flatten()
             .map(|(b, t)| ((bottom - b).to_array(), (top - t).to_array()));
         let last_window = strip.len() - 2;
         for (i, w) in strip.windows(2).enumerate() {
@@ -356,12 +362,14 @@ fn draw_weapon_trails(
                 .into_iter()
                 .enumerate()
             {
-                let motion = match blade {
-                    Some((db, _)) if i == last_window && j == 1 => db,
-                    Some((_, dt)) if i == last_window && j == 2 => dt,
-                    _ => [0.0; 3],
-                };
-                batch.motion_mut().push(motion);
+                if track_motion {
+                    let motion = match blade {
+                        Some((db, _)) if i == last_window && j == 1 => db,
+                        Some((_, dt)) if i == last_window && j == 2 => dt,
+                        _ => [0.0; 3],
+                    };
+                    batch.motion_mut().push(motion);
+                }
                 batch.verts_mut().push(EffectVertex {
                     pos: pos.to_array(),
                     uv: [0.0, 0.0],

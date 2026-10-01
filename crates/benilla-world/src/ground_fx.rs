@@ -146,7 +146,9 @@ pub(crate) fn update_ground_fx_decals(
     let Ok(cam) = cam.single() else { return };
     let now = time.elapsed_secs();
     let mut surface_count = usize::MAX;
-    // fork: fsr (FORK.md) — this frame's decal centres; `last_centres` holds the last world frame's.
+    // fork: fsr (FORK.md) — this frame's decal centres, kept only while a camera runs FSR;
+    // `last_centres` holds the last world frame's.
+    let track_motion = quads.tracks_motion();
     let mut centres = bevy::ecs::entity::EntityHashMap::<Vec3>::default();
     for (entity, mut decal, mat_anim) in &mut decals {
         let Ok(joint) = joints.get(decal.joint) else {
@@ -192,12 +194,16 @@ pub(crate) fn update_ground_fx_decals(
             .map_or([1.0, 1.0, 1.0], |(anim, origin)| anim.sample(now - origin));
         let tint: [f32; 3] = std::array::from_fn(|i| decal.tint[i] * loop_tint[i]);
         let alpha = mat_anim.map_or(1.0, |m| m.current);
-        centres.insert(entity, decal.center);
-        let motion = last_centres
-            .get(&entity)
-            .map_or(EffectMotion::Static, |last| {
-                EffectMotion::Rigid(decal.center - *last)
-            });
+        let motion = if track_motion {
+            centres.insert(entity, decal.center);
+            last_centres
+                .get(&entity)
+                .map_or(EffectMotion::Static, |last| {
+                    EffectMotion::Rigid(decal.center - *last)
+                })
+        } else {
+            EffectMotion::Static
+        };
         let start = quads.begin();
         quads.verts.extend(decal.cache.iter().map(|v| EffectVertex {
             pos: v.pos,

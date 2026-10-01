@@ -666,7 +666,7 @@ fn compute_rig_palettes(
 
 /// The render-world mirror: `Arc` bumps and the frame's dirty ranges.
 #[derive(Resource, Clone, ExtractResource)]
-struct RigPaletteExtract {
+pub(crate) struct RigPaletteExtract {
     rows: Arc<Vec<[f32; 4]>>,
     table: Arc<Vec<u32>>,
     origins: Arc<Vec<[f32; 4]>>,
@@ -674,6 +674,16 @@ struct RigPaletteExtract {
     table_generation: u64,
     origin_generation: u64,
     origin_mirror_generation: u64,
+    // fork: fsr (FORK.md) — the bone offset above which no rig is allocated.
+    bone_watermark: u32,
+}
+
+impl RigPaletteExtract {
+    /// fork: fsr (FORK.md) — the shared light buffer's bytes up to the last allocated bone,
+    /// which bound the velocity pass's previous-pose copy: nothing above them is read.
+    pub(crate) fn live_bytes(&self) -> u64 {
+        palette_region_offset() + u64::from(self.bone_watermark) * BONE_BYTES
+    }
 }
 
 impl Default for RigPaletteExtract {
@@ -687,6 +697,7 @@ impl Default for RigPaletteExtract {
             table_generation: u64::MAX,
             origin_generation: u64::MAX,
             origin_mirror_generation: u64::MAX,
+            bone_watermark: 0,
         }
     }
 }
@@ -717,6 +728,8 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
     out.table_generation = p.table_generation;
     out.origin_generation = p.origin_generation;
     out.origin_mirror_generation = p.origin_mirror_generation;
+    // fork: fsr (FORK.md) — moves only with an alloc or a free, which bump the table generation.
+    out.bone_watermark = p.bone_watermark();
 }
 
 /// The glue and portrait booths' studio light buffers, which mirror the palette regions.

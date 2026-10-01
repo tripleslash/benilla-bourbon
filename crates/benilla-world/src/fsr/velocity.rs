@@ -74,6 +74,9 @@ pub struct MotionPart {
 #[derive(Resource, Default, Clone, ExtractResource)]
 pub struct FsrMotionParts {
     pub parts: Vec<MotionPart>,
+    /// A skinned part was seen this world frame, fresh ones included: the next world frame may
+    /// skin from this one's pose, so the velocity pass keeps the previous-pose copy.
+    pub skinned_seen: bool,
 }
 
 /// `Last`, on world frames only (a held frame runs no main world): gather this frame's moving
@@ -106,11 +109,17 @@ pub fn collect_motion_parts(
     mut last: Local<EntityHashMap<(Mat4, Option<u32>)>>,
     mut seen: Local<EntityHashMap<(Mat4, Option<u32>)>>,
 ) {
-    out.parts.clear();
     if fsr.is_empty() {
+        // Cleared through `&` first, so an idle list is not re-extracted every frame.
+        if !out.parts.is_empty() || out.skinned_seen {
+            out.parts.clear();
+            out.skinned_seen = false;
+        }
         last.clear();
         return;
     }
+    out.parts.clear();
+    out.skinned_seen = false;
     seen.clear();
     let coverage_of = |mode: AlphaMode, alpha_test: bool| match (alpha_test, mode) {
         (true, _) => Coverage::AlphaTest,
@@ -118,6 +127,7 @@ pub fn collect_motion_parts(
         (_, AlphaMode::Blend | AlphaMode::Premultiplied) => Coverage::Blend,
         _ => Coverage::Opaque,
     };
+    let mut skinned_seen = false;
     let mut push = |entity: Entity,
                     mesh: AssetId<Mesh>,
                     world_from_local: Mat4,
@@ -169,6 +179,7 @@ pub fn collect_motion_parts(
         let rig_slot = rig
             .and_then(|r| rigs.get(r.0).ok())
             .map(|skin| u32::from(skin.slot));
+        skinned_seen |= rig_slot.is_some();
         push(
             entity,
             mesh.0.id(),
@@ -192,6 +203,7 @@ pub fn collect_motion_parts(
         };
         push(entity, mesh.0.id(), gt.to_matrix(), None, texture, coverage);
     }
+    out.skinned_seen = skinned_seen;
     std::mem::swap(&mut *last, &mut *seen);
 }
 
@@ -261,6 +273,9 @@ pub struct VelocityFrame {
     part: Option<BindGroup>,
     skin: Option<BindGroup>,
     tex_binds: HashMap<AssetId<Image>, (TextureViewId, BindGroup)>,
+    /// The bytes of the live light buffer the pass copies as the next frame's previous pose:
+    /// `None` when no skinned part was seen, so no next frame can skin from this one's.
+    prev_copy_bytes: Option<u64>,
 }
 
 pub(super) fn init_pipelines(mut commands: Commands, shaders: Option<Res<super::FsrShaders>>) {
@@ -323,6 +338,7 @@ pub(super) fn prepare_velocity(
     light: Option<Res<SharedLightBuffer>>,
     pipeline_cache: Res<PipelineCache>,
     pipes: Option<ResMut<VelocityPipelines>>,
+    palette: Option<Res<crate::rig_palette::RigPaletteExtract>>,
     mut prev: ResMut<RigPalettePrev>,
     mut frame: ResMut<VelocityFrame>,
     views: Query<&FsrState>,
@@ -332,7 +348,16 @@ pub(super) fn prepare_velocity(
     }
     frame.draws.clear();
     frame.view = None;
-    let (Some(parts), Some(mut pipes), Some(state)) = (parts, pipes, views.iter().next()) else {
+    frame.prev_copy_bytes = None;
+    let Some(state) = views.iter().next() else {
+        // No view runs FSR: the previous-pose copy and the texture groups have no reader.
+        if prev.buffer.is_some() {
+            *prev = RigPalettePrev::default();
+        }
+        frame.tex_binds.clear();
+        return;
+    };
+    let (Some(parts), Some(mut pipes)) = (parts, pipes) else {
         return;
     };
     // The previous-pose copy follows the live buffer's size; a new one holds nothing yet.
@@ -349,6 +374,13 @@ pub(super) fn prepare_velocity(
         prev.valid = false;
     }
     let skin_ready = prev.valid && light.is_some();
+    // Up to the last allocated bone, everything below it included (`rig_palette.rs`); the whole
+    // buffer while the palette has not published.
+    frame.prev_copy_bytes = parts.skinned_seen.then(|| {
+        palette
+            .as_ref()
+            .map_or(u64::MAX, |p| p.live_bytes().next_multiple_of(4))
+    });
 
     let [raster, cur, prev_clip] = state.clip_from_world();
     let view_uniform = VelocityViewUniform {
@@ -630,18 +662,20 @@ pub(super) fn fsr_velocity_pass(
         );
         span.end(&mut pass);
     }
-    // This frame's pose becomes the next world frame's previous one.
-    if let (Some(light), Some(copy)) = (light, &prev.buffer) {
-        if copy.size() == light.0.size() {
+    // This frame's pose becomes the next world frame's previous one, while a skinned part is in
+    // view; with none, the next frame's skinned parts are all fresh and the copy stands invalid.
+    match (light, &prev.buffer, frame.prev_copy_bytes) {
+        (Some(light), Some(copy), Some(bytes)) if copy.size() == light.0.size() => {
             render_context.command_encoder().copy_buffer_to_buffer(
                 &light.0,
                 0,
                 copy,
                 0,
-                copy.size(),
+                bytes.min(copy.size()),
             );
             prev.valid = true;
         }
+        _ => prev.valid = false,
     }
 }
 

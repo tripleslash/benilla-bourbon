@@ -427,11 +427,14 @@ pub(super) fn simulate_particles(
         ),
     >,
     // A hosted emitter's sequence: its host's live `AnimationPlayer` slot and clip time.
-    // fork: fsr (FORK.md) — paired with each emitter's placement at the last world frame,
-    // for its motion (one parameter: the system is at Bevy's sixteen).
-    (hosts, mut last_placement): (
+    // fork: fsr (FORK.md) — paired with each emitter's placement at the last world frame and
+    // this one's, for its motion (one parameter: the system is at Bevy's sixteen).
+    (hosts, mut placements): (
         Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
-        Local<bevy::ecs::entity::EntityHashMap<Transform>>,
+        Local<(
+            bevy::ecs::entity::EntityHashMap<Transform>,
+            bevy::ecs::entity::EntityHashMap<Transform>,
+        )>,
     ),
     mut dumps: super::dumps::Dumps,
 ) {
@@ -461,6 +464,14 @@ pub(super) fn simulate_particles(
     let (farclip, exterior_gate, camera_instance) = gates.scene(Some((&*cam_tf, &*projection)));
     let dump_frame = dumps.depth_frame(time.elapsed_secs());
     let emit_dump = dumps.emit.due(time.elapsed_secs());
+    // fork: fsr (FORK.md) — the motion stream and its placement history only while a camera
+    // runs FSR; the history keeps only the emitters this frame placed.
+    let track_motion = quads.tracks_motion();
+    let (last_placement, placement_now) = &mut *placements;
+    placement_now.clear();
+    if !track_motion {
+        last_placement.clear();
+    }
 
     for (
         entity,
@@ -998,20 +1009,25 @@ pub(super) fn simulate_particles(
             };
         let start = quads.begin();
         // fork: fsr (FORK.md) — where the emitter stood last world frame (here, if new).
-        let prev_placement = last_placement
-            .insert(entity, *placement)
-            .unwrap_or(*placement);
+        let prev_placement = if track_motion {
+            placement_now.insert(entity, *placement);
+            last_placement.get(&entity).copied().unwrap_or(*placement)
+        } else {
+            *placement
+        };
         if want_quads && !particles.is_empty() {
             expand_quads(def, particles, &frame, placement, &cam, &mut quads.verts);
-            super::quads::push_particle_motion(
-                def,
-                particles,
-                &frame,
-                placement,
-                &prev_placement,
-                dt,
-                &mut quads.motion,
-            );
+            if track_motion {
+                super::quads::push_particle_motion(
+                    def,
+                    particles,
+                    &frame,
+                    placement,
+                    &prev_placement,
+                    dt,
+                    &mut quads.motion,
+                );
+            }
         }
         // `$WOW_PARTICLE_DEPTHDUMP` over the quads just written; booths draw to their own target.
         if let Some(fidx) = dump_frame {
@@ -1091,15 +1107,17 @@ pub(super) fn simulate_particles(
                 &cam,
                 &mut quads.verts,
             );
-            super::quads::push_particle_motion(
-                &child.def,
-                &child.particles,
-                &frame,
-                placement,
-                &prev_placement,
-                dt,
-                &mut quads.motion,
-            );
+            if track_motion {
+                super::quads::push_particle_motion(
+                    &child.def,
+                    &child.particles,
+                    &frame,
+                    placement,
+                    &prev_placement,
+                    dt,
+                    &mut quads.motion,
+                );
+            }
             let child_lighting = fold_committed_light(
                 &mut quads.verts[cstart as usize..],
                 child.def.lit,
@@ -1129,6 +1147,7 @@ pub(super) fn simulate_particles(
             );
         }
     }
+    std::mem::swap(last_placement, placement_now);
 }
 
 /// The two per-model multipliers a cloud takes from its owner: render alpha and committed light.

@@ -203,6 +203,9 @@ pub struct EffectQuads {
     // fork: fsr (FORK.md) — each vertex's world displacement since the last world frame,
     /// parallel to [`Self::verts`] once a draw commits ([`EffectMotion`]).
     pub motion: Vec<[f32; 3]>,
+    // fork: fsr (FORK.md) — whether [`Self::motion`] is kept this frame: only while a camera
+    /// runs FSR, whose velocity pass is its one reader. Off, nothing writes or uploads it.
+    track_motion: bool,
     /// Has [`begin_effect_frame`] run this frame? A commit before it would be erased, so
     /// [`Self::commit`] asserts it in debug builds: every writer needs
     /// `.after(begin_effect_frame)`. [`clear_effect_frame_flag`] resets it in `Last`.
@@ -215,6 +218,7 @@ impl Default for EffectQuads {
             verts: Vec::new(),
             draws: Vec::new(),
             motion: Vec::new(),
+            track_motion: false,
             // True, so a fixture with no clear can commit; the app's `Last` reset arms the check.
             cleared_this_frame: true,
         }
@@ -257,8 +261,16 @@ impl EffectQuads {
     /// Open a draw: remember where its vertices start. fork: fsr (FORK.md) — the motion
     /// stream catches up with the vertices first, so a `PerVertex` writer's pushes line up.
     pub fn begin(&mut self) -> u32 {
-        self.motion.resize(self.verts.len(), [0.0; 3]);
+        if self.track_motion {
+            self.motion.resize(self.verts.len(), [0.0; 3]);
+        }
         self.verts.len() as u32
+    }
+
+    /// fork: fsr (FORK.md) — whether this frame keeps the motion stream: a `PerVertex`
+    /// writer pushes to [`Self::motion`], and keeps its last-world-frame history, only while it is.
+    pub fn tracks_motion(&self) -> bool {
+        self.track_motion
     }
 
     /// Close a quad draw over everything pushed since `begin`; an empty range commits nothing.
@@ -286,15 +298,17 @@ impl EffectQuads {
         );
         let end = self.verts.len() as u32;
         // fork: fsr (FORK.md) — the draw's motion, parallel to its vertices.
-        match spec.motion {
-            EffectMotion::PerVertex => self.motion.resize(end as usize, [0.0; 3]),
-            EffectMotion::Static => {
-                self.motion.resize(start as usize, [0.0; 3]);
-                self.motion.resize(end as usize, [0.0; 3]);
-            }
-            EffectMotion::Rigid(d) => {
-                self.motion.resize(start as usize, [0.0; 3]);
-                self.motion.resize(end as usize, d.to_array());
+        if self.track_motion {
+            match spec.motion {
+                EffectMotion::PerVertex => self.motion.resize(end as usize, [0.0; 3]),
+                EffectMotion::Static => {
+                    self.motion.resize(start as usize, [0.0; 3]);
+                    self.motion.resize(end as usize, [0.0; 3]);
+                }
+                EffectMotion::Rigid(d) => {
+                    self.motion.resize(start as usize, [0.0; 3]);
+                    self.motion.resize(end as usize, d.to_array());
+                }
             }
         }
         if end > start {
@@ -320,11 +334,16 @@ impl EffectQuads {
     }
 }
 
-/// Clear the stream for a new frame; every family's writer runs after it.
-pub fn begin_effect_frame(mut quads: ResMut<EffectQuads>) {
+/// Clear the stream for a new frame; every family's writer runs after it. fork: fsr
+/// (FORK.md) — and decide whether this frame keeps the motion stream: a camera runs FSR.
+pub fn begin_effect_frame(
+    mut quads: ResMut<EffectQuads>,
+    fsr: Query<(), With<crate::fsr::FsrView>>,
+) {
     quads.verts.clear();
     quads.draws.clear();
     quads.motion.clear();
+    quads.track_motion = !fsr.is_empty();
     quads.cleared_this_frame = true;
 }
 
@@ -488,6 +507,12 @@ pub struct WorldEffectDraw<'w> {
 }
 
 impl<'w> WorldEffectDraw<'w> {
+    /// fork: fsr (FORK.md) — whether this frame keeps the motion stream
+    /// ([`EffectQuads::tracks_motion`]).
+    pub fn tracks_motion(&self) -> bool {
+        self.quads.tracks_motion()
+    }
+
     /// Open a batch drawn through `cam` with `texture`; it commits when closed, if not empty.
     pub fn batch(&mut self, cam: Entity, texture: AssetId<Image>) -> EffectBatch<'_> {
         let start = self.quads.begin();
@@ -589,6 +614,12 @@ impl EffectBatch<'_> {
     /// fork: fsr (FORK.md) — the per-vertex motion sink, parallel to [`Self::verts_mut`].
     pub fn motion_mut(&mut self) -> &mut Vec<[f32; 3]> {
         &mut self.quads.motion
+    }
+
+    /// fork: fsr (FORK.md) — whether this frame keeps the motion stream
+    /// ([`EffectQuads::tracks_motion`]); a `PerVertex` batch pushes nothing while it is off.
+    pub fn tracks_motion(&self) -> bool {
+        self.quads.tracks_motion()
     }
 
     /// Push vertices built elsewhere (the decal lanes project once and cache).

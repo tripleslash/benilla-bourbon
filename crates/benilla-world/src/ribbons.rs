@@ -229,6 +229,11 @@ pub(crate) fn simulate_ribbons(
     let dt = time.delta_secs().min(0.1);
     let now = time.elapsed_secs();
     heads_now.clear();
+    // fork: fsr (FORK.md) — the motion stream and the head history only while a camera runs FSR.
+    let track_motion = quads.tracks_motion();
+    if !track_motion {
+        last_heads.clear();
+    }
     for (entity, mut trail, mut entity_tf, mut entity_global) in &mut trails {
         let RibbonTrail {
             def,
@@ -449,7 +454,7 @@ pub(crate) fn simulate_ribbons(
         verdict.drawn += 1;
         // fork: fsr (FORK.md) — the head moved since the last world frame; the edges behind it
         // stay where they were laid.
-        let head_delta = head.and_then(|(node, _)| {
+        let head_delta = head.filter(|_| track_motion).and_then(|(node, _)| {
             heads_now.insert(entity, node);
             last_heads
                 .get(&entity)
@@ -474,11 +479,13 @@ pub(crate) fn simulate_ribbons(
                     color: rgba,
                 });
                 // The head pair is the first quad's `b₀` and `t₀`.
-                let moved = i == 0 && (j == 0 || j == 3);
-                quads.motion.push(match head_delta {
-                    Some(d) if moved => d,
-                    _ => [0.0; 3],
-                });
+                if track_motion {
+                    let moved = i == 0 && (j == 0 || j == 3);
+                    quads.motion.push(match head_delta {
+                        Some(d) if moved => d,
+                        _ => [0.0; 3],
+                    });
+                }
             }
         }
         quads.commit_quads(
