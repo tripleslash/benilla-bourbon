@@ -769,6 +769,38 @@ pub(super) fn load_third_party(
     roster: &[String],
     version_check: bool,
 ) -> Vec<String> {
+    let mut walk = open_third_party(script, identity, roster, version_check);
+    for i in 0..walk.len() {
+        load_one_addon(&mut walk, script, i);
+    }
+    walk.failures()
+}
+
+/// [`load_third_party`] held open, so the sliced entry load can step its addons one per frame.
+pub(super) struct ThirdParty {
+    addons: Vec<Addon>,
+    walk: Walk,
+}
+
+impl ThirdParty {
+    /// How many addons the walk steps through, LoadOnDemand ones included.
+    pub(super) fn len(&self) -> usize {
+        self.addons.len()
+    }
+
+    /// The walk's failures, once every addon has had its step.
+    pub(super) fn failures(self) -> Vec<String> {
+        self.walk.failures
+    }
+}
+
+/// [`load_third_party`] up to its per-addon loop: discover, register, read the enable bits.
+pub(super) fn open_third_party(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    roster: &[String],
+    version_check: bool,
+) -> ThirdParty {
     let addons = discover(script.flavor());
     // Registered even when empty: `GetNumAddOns()` must answer 0, not a previous session's list.
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
@@ -809,47 +841,53 @@ pub(super) fn load_third_party(
             .cloned()
             .unwrap_or_default(),
     );
-    if addons.is_empty() {
-        return Vec::new();
+    if !addons.is_empty() {
+        info!(
+            "ui_script: {} addon(s) found: {}",
+            addons.len(),
+            addons
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    info!(
-        "ui_script: {} addon(s) found: {}",
-        addons.len(),
-        addons
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let mut state = Walk {
-        disabled: disabled_names,
-        version_check,
-        ..Walk::default()
+    ThirdParty {
+        addons,
+        walk: Walk {
+            disabled: disabled_names,
+            version_check,
+            ..Walk::default()
+        },
+    }
+}
+
+/// The `i`th addon of the walk; one already loaded as a dependency is skipped by the walk.
+pub(super) fn load_one_addon(state: &mut ThirdParty, script: &mut UiScript, i: usize) {
+    let Some(addon) = state.addons.get(i) else {
+        return;
     };
-    for addon in &addons {
-        // `## LoadOnDemand: 1` waits for `LoadAddOn`: `0x51f600` loads only records whose
-        // LoadOnDemand byte is 0.
-        if addon.toc.load_on_demand() {
-            info!(
-                "ui_script: {} is LoadOnDemand — not loaded (no LoadAddOn() yet)",
-                addon.name
-            );
-            continue;
-        }
-        // Re-armed per addon, so one runaway cannot fail every addon after it; a dependency
-        // chain loads under its dependent's arming, as in the harness's survey.
-        script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
-        let _ = state.load(script, &addons, &addon.name);
-        let spent = script.instructions_used();
-        if spent > 1_000_000 {
-            // A heavy load gets a line: this counter is what the budget was chosen from.
-            info!(
-                "ui_script: {} spent {spent} VM instructions loading",
-                addon.name
-            );
-        }
+    // `## LoadOnDemand: 1` waits for `LoadAddOn`: `0x51f600` loads only records whose
+    // LoadOnDemand byte is 0.
+    if addon.toc.load_on_demand() {
+        info!(
+            "ui_script: {} is LoadOnDemand — not loaded (no LoadAddOn() yet)",
+            addon.name
+        );
+        return;
     }
-    state.failures
+    // Re-armed per addon, so one runaway cannot fail every addon after it; a dependency
+    // chain loads under its dependent's arming, as in the harness's survey.
+    script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
+    let _ = state.walk.load(script, &state.addons, &addon.name);
+    let spent = script.instructions_used();
+    if spent > 1_000_000 {
+        // A heavy load gets a line: this counter is what the budget was chosen from.
+        info!(
+            "ui_script: {} spent {spent} VM instructions loading",
+            addon.name
+        );
+    }
 }
 
 /// The recursive load's bookkeeping, for [`Walk::load`].

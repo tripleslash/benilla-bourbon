@@ -182,6 +182,8 @@ pub(crate) struct PendingEntryUiLoad {
     /// Frames the current step has spent waiting for its chain entry's pack to arrive
     /// (web only — see [`ENTRY_CHAIN_WAIT_FRAMES`]). Reset on every step that runs.
     waited: u32,
+    /// The third-party walk, opened at its first step and stepped one addon per step.
+    addons: Option<addons::ThirdParty>,
 }
 
 impl PendingEntryUiLoad {
@@ -208,10 +210,10 @@ enum EntryStage {
     Builtin { next: usize },
     /// `UIParent_ManageFramePositions()`.
     Positions,
-    /// Every third-party addon (one step: the walk is dependency-ordered and fires
-    /// `ADDON_LOADED` per addon — kept atomic; the page has no addon folder, and a native
-    /// player's addon burst is the reference's own behaviour).
-    ThirdParty,
+    /// The third-party addons, one per step: the walk keeps its dependency order and fires
+    /// `ADDON_LOADED` per addon, and the VM stays parked between steps, so nothing runs between
+    /// two addons that the reference's one burst would not have run.
+    ThirdParty { next: usize },
     /// Saved variables, `VARIABLES_LOADED`, the failure count, the identity record.
     Finish,
 }
@@ -472,22 +474,36 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 let _ = super::manifest::bootstrap_positions(&script);
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.done += 1;
-                pending.stage = EntryStage::ThirdParty;
+                pending.stage = EntryStage::ThirdParty { next: 0 };
             }
-            EntryStage::ThirdParty => {
-                let (identity, roster, version_check) = {
-                    let p = world.resource::<PendingEntryUiLoad>();
-                    (p.identity.clone(), p.roster.clone(), p.version_check)
-                };
-                let _ = addons::load_third_party(
-                    &mut script,
-                    identity.as_ref(),
-                    &roster,
-                    version_check,
-                );
+            EntryStage::ThirdParty { next } => {
+                if world.resource::<PendingEntryUiLoad>().addons.is_none() {
+                    let (identity, roster, version_check) = {
+                        let p = world.resource::<PendingEntryUiLoad>();
+                        (p.identity.clone(), p.roster.clone(), p.version_check)
+                    };
+                    let walk = addons::open_third_party(
+                        &mut script,
+                        identity.as_ref(),
+                        &roster,
+                        version_check,
+                    );
+                    let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                    // The bar counted the addons as one step; it counts each now.
+                    pending.total += walk.len().saturating_sub(1);
+                    pending.addons = Some(walk);
+                }
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                let mut walk = pending.addons.take().expect("opened above");
+                addons::load_one_addon(&mut walk, &mut script, next);
                 pending.done += 1;
-                pending.stage = EntryStage::Finish;
+                if next + 1 < walk.len() {
+                    pending.addons = Some(walk);
+                    pending.stage = EntryStage::ThirdParty { next: next + 1 };
+                } else {
+                    let _ = walk.failures();
+                    pending.stage = EntryStage::Finish;
+                }
             }
             EntryStage::Finish => {
                 let pending = world
