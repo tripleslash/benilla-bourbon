@@ -146,9 +146,13 @@ const SAMPLER_MARKER: char = '@';
 
 /// The `mpq://` URL of a model texture at a sampler address mode. Bevy keys the sampler to the
 /// `Image` and the `Image` to its path, so a mode other than repeat/repeat marks the path before
-/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader.
+/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader. A name with no
+/// extension (an HD model may store one so) asks for its `.blp`, as [`m2_url`] normalises models.
 pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
-    let path = internal.replace('\\', "/").to_ascii_lowercase();
+    let mut path = internal.replace('\\', "/").to_ascii_lowercase();
+    if !path.rsplit('/').next().unwrap_or(&path).contains('.') {
+        path.push_str(".blp");
+    }
     if wrap == (true, true) {
         return format!("mpq://{path}");
     }
@@ -157,10 +161,8 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
         (false, true) => "cr",
         _ => "cc",
     };
-    match path.rsplit_once('.') {
-        Some((stem, ext)) => format!("mpq://{stem}{SAMPLER_MARKER}{tag}.{ext}"),
-        None => format!("mpq://{path}{SAMPLER_MARKER}{tag}"),
-    }
+    let (stem, ext) = path.rsplit_once('.').unwrap_or((path.as_str(), "blp"));
+    format!("mpq://{stem}{SAMPLER_MARKER}{tag}.{ext}")
 }
 
 /// The `Map.dbc` [`MapCatalog`] (`mapId` to directory and `LoadingScreenID`) as a Bevy resource; a
@@ -311,6 +313,25 @@ mod tests {
     use super::*;
     use bevy::camera::primitives::MeshAabb;
     use bevy::tasks::block_on;
+
+    /// A model texture stored without an extension asks for its `.blp`; a dotted folder is not an
+    /// extension, and a named extension is kept.
+    #[test]
+    fn a_texture_name_without_an_extension_asks_for_its_blp() {
+        let raw = r"world\azeroth\redridge\passivedoodads\trees\redtreecanopy_base02";
+        assert_eq!(
+            texture_url(raw, (true, true)),
+            "mpq://world/azeroth/redridge/passivedoodads/trees/redtreecanopy_base02.blp"
+        );
+        assert_eq!(
+            texture_url(r"Foo.d\Bar", (false, false)),
+            "mpq://foo.d/bar@cc.blp"
+        );
+        assert_eq!(
+            texture_url(r"Foo\Bar.blp", (true, false)),
+            "mpq://foo/bar@rc.blp"
+        );
+    }
 
     #[test]
     fn sampler_mode_rides_the_asset_path_and_round_trips() {
