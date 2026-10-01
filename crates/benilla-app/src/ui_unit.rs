@@ -1147,7 +1147,13 @@ pub(crate) fn fire_transitions(
     if changed(|u| u64::from(u.max_health)) {
         script.fire_event("UNIT_MAXHEALTH", vec![tok()]);
     }
-    if changed(|u| u64::from(u.level)) {
+    // `UNIT_LEVEL` is the level moving on the unit the token names, not the token coming to name
+    // another unit: a retarget is `PLAYER_TARGET_CHANGED`'s to announce, and it fires after this.
+    // Stock `InspectPaperDollFrame_OnEvent` formats the inspected token's `UnitRace` on
+    // `UNIT_LEVEL` (`InspectPaperDollFrame.lua:67-75`); with the window open on a player, a
+    // retarget to a creature (no race) raised in `format` before the window could close.
+    let rebound = prev.is_some_and(|p| p.guid != cur.guid);
+    if !rebound && changed(|u| u64::from(u.level)) {
         script.fire_event("UNIT_LEVEL", vec![tok()]);
     }
     if changed(|u| u64::from(u.power_type)) {
@@ -2741,6 +2747,75 @@ mod tests {
         );
         // The control against firing always.
         assert!(fired(base.clone(), base.clone()).is_empty());
+    }
+
+    /// The inspect window open on a player, then a click on a creature: the stock handler formats
+    /// `UnitRace` on `UNIT_LEVEL` for the inspected token, and a creature has none
+    /// (`InspectPaperDollFrame.lua:67-75`, "bad argument #3 to format"). A retarget is not a
+    /// level change; the same unit's level moving still is.
+    #[test]
+    fn a_retarget_fires_no_unit_level_and_the_units_own_level_change_does() {
+        let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.set_unit("target", Some(cur.clone()));
+            s.run(
+                r#"
+                SEEN = {}
+                PLAYER_LEVEL = "Level %s %s %s"
+                INSPECTED = "target"
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_LEVEL")
+                f:SetScript("OnEvent", function()
+                    if arg1 == INSPECTED then
+                        -- The stock handler's line, which raises on a nil race.
+                        table.insert(SEEN, format(PLAYER_LEVEL, UnitLevel(arg1), UnitRace(arg1),
+                            UnitClass(arg1)))
+                    end
+                end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(
+                &mut s,
+                "target",
+                prev.as_ref(),
+                &cur,
+                &FieldEdges::default(),
+            );
+            assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let player = |level: u32| UnitState {
+            exists: true,
+            has_object: true,
+            guid: 0x2a,
+            level,
+            race: Some("Human".into()),
+            race_file: Some("Human".into()),
+            class: Some("Mage".into()),
+            class_file: Some("MAGE".into()),
+            ..Default::default()
+        };
+        let creature = UnitState {
+            exists: true,
+            has_object: true,
+            guid: 0xF130_0000_0000_0007,
+            level: 5,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        };
+
+        assert!(
+            fired(Some(player(60)), creature.clone()).is_empty(),
+            "the token now names another unit: no UNIT_LEVEL, and nothing raised"
+        );
+        assert_eq!(
+            fired(Some(player(59)), player(60)),
+            vec!["Level 60 Human Mage".to_string()],
+            "the inspected player's own level moved"
+        );
+        assert!(fired(Some(player(60)), player(60)).is_empty());
     }
 
     /// The control is a bit no `UnitState` field decodes, so the trigger is the raw dword.
