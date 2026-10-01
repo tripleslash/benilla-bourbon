@@ -32,11 +32,12 @@
 //!
 //! Off wasm this is `ComputeTaskPool::get().scope`, unchanged.
 
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 use core::future::Future;
 
 /// The parallel scope, everywhere threads may touch wgpu.
 #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-pub fn compute_scope<'env, F, T>(f: F) -> alloc::vec::Vec<T>
+pub fn compute_scope<'env, F, T>(f: F) -> Vec<T>
 where
     F: for<'scope> FnOnce(&'scope bevy_tasks::Scope<'scope, 'env, T>),
     T: Send + 'static,

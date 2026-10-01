@@ -151,7 +151,6 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("modern::lights::FixtureRadius", "wall"),
     ("modern::lights::SynthesizedLight", "wall"),
     ("modern::lights::emissive::combine", "wall"),
-    ("modern::lights::emissive::glow_anchor", "wall"),
     ("modern::lights::emissive::glow_of_geometry", "wall"),
     ("modkeys::SyntheticHold", "wall"),
     ("particles::ParticleTuning", "record"),
