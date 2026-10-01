@@ -3759,19 +3759,22 @@
                 stage(option, this.value)
             end
 
+            -- Turtle's slider calls this from its OnMouseUp alone (OptionsFrameTemplates.xml): it
+            -- has no OnValueChanged, so a SetValue here re-enters nothing.
             local sliderChanged = OptionsFrameSlider_OnValueChanged
             function OptionsFrameSlider_OnValueChanged()
                 local option = this:GetParent().option
-                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it.
-                local mark = BenillaSlider_MarkNear(option.benillaMarks, this:GetValue())
-                if ( mark and math.abs(mark - this:GetValue()) > 0.00001 ) then
-                    this:SetValue(mark) -- re-enters once with the mark
-                    return
+                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it, and
+                -- the mark is what stages.
+                local v = this:GetValue()
+                local mark = BenillaSlider_MarkNear(option.benillaMarks, v)
+                if ( mark ) then
+                    this:SetValue(mark)
+                    v = mark
                 end
                 if ( not option.benillaStaged ) then
                     return sliderChanged()
                 end
-                local v = this:GetValue()
                 stage(option, option.inverted and (option.maxval - v + option.minval) or v)
             end
 
@@ -3805,12 +3808,47 @@
                 end
             end
 
+            -- Deviation: Turtle seats a 128-wide slider and a 110-wide dropdown at the right of a
+            -- 346-wide row whose label column is 210, which leaves a fine slider like Render
+            -- Scale too short to pick a stop on. A page's sliders and dropdowns widen together
+            -- into the room its longest label leaves, up to BENILLA_TURTLE_CONTROL_MAX, and never
+            -- below Turtle's own widths.
+            BENILLA_TURTLE_CONTROL_MAX = 220
+            local function widenControls()
+                local rows, longest = {}, 0
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.type ~= "button" ) then
+                        tinsert(rows, frame)
+                        longest = max(longest, frame.label:GetStringWidth() or 0)
+                    end
+                end
+                for _, frame in ipairs(rows) do
+                    local room = min(BENILLA_TURTLE_CONTROL_MAX, frame:GetWidth() - longest - 12)
+                    if ( frame.option.type == "slider" ) then
+                        frame.control:SetWidth(max(128, room))
+                    elseif ( frame.option.type == "dropdown" ) then
+                        -- The menu's art runs past its anchor by 18 (`RIGHT` +18).
+                        UIDropDownMenu_SetWidth(max(110, room - 18), frame.control)
+                    end
+                end
+            end
+
             local listClick = OptionsListButton_OnClick
             function OptionsListButton_OnClick(category, focusOption)
                 listClick(category, focusOption)
                 if ( next(staged) ) then
                     showStaged()
                 end
+                widenControls()
+                placeMarks()
+            end
+
+            -- Apply's redraw and a reopen render the category without the list click.
+            local frameOnShow = OptionsFrame_OnShow
+            function OptionsFrame_OnShow()
+                frameOnShow()
+                widenControls()
                 placeMarks()
             end
 
