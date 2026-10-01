@@ -405,8 +405,8 @@ mod tests {
     fn a_tile_passes_its_blocks_through_only_when_every_clause_holds() {
         let ok = || {
             vec![
-                raw(BlpTexels::Bc2, 256, 8, false),
-                raw(BlpTexels::Bc2, 256, 8, false),
+                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
+                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
             ]
         };
         assert_eq!(passthrough_form(&ok(), true), Some(BlpTexels::Bc2));
@@ -415,22 +415,22 @@ mod tests {
         assert_eq!(passthrough_form(&ok(), false), None);
         // Mixed block forms, the common case: a `_s` variant is DXT3, a base without one DXT1.
         let mixed = vec![
-            raw(BlpTexels::Bc1, 256, 8, false),
-            raw(BlpTexels::Bc2, 256, 8, false),
+            raw(BlpTexels::Bc1, LAYER_TEX_SIZE, 8, false),
+            raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
         ];
         assert_eq!(passthrough_form(&mixed, true), None);
-        // Not natively 256².
-        let small = vec![raw(BlpTexels::Bc2, 128, 7, false)];
+        // Not natively the array's size.
+        let small = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE / 2, 7, false)];
         assert_eq!(passthrough_form(&small, true), None);
         // A short chain.
-        let short = vec![raw(BlpTexels::Bc2, 256, 5, false)];
+        let short = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 5, false)];
         assert_eq!(passthrough_form(&short, true), None);
         // A matte layer.
-        let matte = vec![raw(BlpTexels::Bc2, 256, 8, true)];
+        let matte = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, true)];
         assert_eq!(passthrough_form(&matte, true), None);
         // Raw1/Raw3 tilesets have no block form at all.
         let raw1 = vec![RawLayer {
-            chain: synthetic_chain(256, 8),
+            chain: synthetic_chain(LAYER_TEX_SIZE, 8),
             matte: false,
         }];
         assert_eq!(passthrough_form(&raw1, true), None);
@@ -441,9 +441,12 @@ mod tests {
     #[test]
     fn a_packed_block_array_is_exactly_the_size_its_format_implies() {
         for form in [BlpTexels::Bc1, BlpTexels::Bc2, BlpTexels::Bc3] {
-            let layers = vec![raw(form, 256, 8, false), raw(form, 256, 8, false)];
+            let layers = vec![
+                raw(form, LAYER_TEX_SIZE, 8, false),
+                raw(form, LAYER_TEX_SIZE, 8, false),
+            ];
             // A level of the wrong size must not reach the packer.
-            let mut short = raw(form, 256, 8, false);
+            let mut short = raw(form, LAYER_TEX_SIZE, 8, false);
             short.chain.mips[3].truncate(4);
             assert_eq!(passthrough_form(&[short], true), None, "{form:?}");
             let packed = pack([107, 133, 82, 0], layers, true);
