@@ -269,6 +269,11 @@ impl CharCreateCatalog {
         for combo in rules.unused_combos {
             catalog.combos.remove(combo);
         }
+        // `load_races` describes only the playable races, so a combo of a race a server added
+        // past them would offer a race with no body, files or dials.
+        catalog
+            .combos
+            .retain(|&(race, _)| rules.playable.contains(&race));
         Ok(catalog)
     }
 
