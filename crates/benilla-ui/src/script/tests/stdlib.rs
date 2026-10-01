@@ -191,7 +191,10 @@ fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     let name = crate::script::addon_chunk_name("FuBar_BagFu", "FuBar_BagFu.lua");
     assert_eq!(name, "@Interface\\AddOns\\FuBar_BagFu\\FuBar_BagFu.lua");
 
-    // FuBar's own pattern, against a traceback from a chunk loaded under that name.
+    // FuBar's own pattern, against a traceback from a chunk loaded under that name. Called from
+    // a frame deeper than the probe's caller, as FuBar's is: with `count2` 0 the frame after
+    // `count1` prints only when it is the last, and that would be this host's own chunk, named
+    // by its source path (backslashes on Windows, which the greedy capture runs into).
     let s = script();
     s.run_chunk_named(
         b"function BenillaProbeFolder() return debugstack(1, 1, 0) end",
@@ -200,7 +203,8 @@ fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     .unwrap();
     let folder: String = s
         .eval(
-            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\(.*)\\\\\") \
+            "local function caller() local stack = BenillaProbeFolder() return stack end \
+             local _, _, f = string.find(caller(), \"\\\\AddOns\\\\(.*)\\\\\") \
              return f or '<no match>'",
         )
         .unwrap();
