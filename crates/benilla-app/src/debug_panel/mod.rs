@@ -186,7 +186,9 @@ fn feed_gated_egui_output(
                     // texture delta must reach the GPU exactly once, so the cache drops it.
                     let out = ctx.get_mut().run_ui(egui::RawInput::default(), |_| {});
                     let mut keep = out.clone();
-                    keep.textures_delta = Default::default();
+                    // `clear`, not an assignment: epaint 0.36 debug-asserts in `Drop` that a
+                    // delta was applied, and the assignment dropped the clone's unapplied one.
+                    keep.textures_delta.clear();
                     keep.shapes.clear();
                     *cached = Some(keep);
                     out
