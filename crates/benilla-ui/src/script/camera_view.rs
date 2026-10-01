@@ -140,8 +140,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 /// Register `CameraZoomIn` and `CameraZoomOut` (`0x50b400`, `0x50b450`) in a Turtle WoW VM, whose
 /// barbershop calls `CameraZoomOut(2)` as it seats the player (`Turtle_Barbershop.lua`
-/// `Barbershop:SetupCamera`). A 1.12.1 VM keeps them absent: its only callers are key bindings,
-/// which the app runs itself. A number argument, a numeric string included (`0x6f34d0`), is the
+/// `Barbershop:SetupCamera`). A 1.12.1 VM keeps the reference's pair, binding inputs
+/// (`input_verbs`); this replaces it in a Turtle VM. A number argument, a numeric string included (`0x6f34d0`), is the
 /// amount, anything else 1.0 (`0x50b42d`); the camera then zooms for `amount /
 /// cameraDistanceMoveSpeed` seconds at that speed (`0x50fc60`, `0x50fcd0`), `amount` yards.
 pub(super) fn install_turtle(lua: &Lua) -> mlua::Result<()> {
@@ -168,13 +168,12 @@ mod tests {
     use crate::script::{UiFlavor, UiScript};
 
     /// A Turtle VM's zoom pair queues its amount, 1.0 for anything that is not a number; a 1.12.1
-    /// VM has neither.
+    /// VM's pair is the reference's binding input (`input_verbs`) and queues no view request.
     #[test]
-    fn a_turtle_vm_zooms_by_its_argument_and_a_vanilla_one_has_no_zoom_verbs() {
-        let vanilla = UiScript::new().unwrap();
-        assert!(vanilla
-            .eval::<bool>("return CameraZoomIn == nil and CameraZoomOut == nil")
-            .unwrap());
+    fn a_turtle_vm_zooms_by_its_argument_and_a_vanilla_one_keeps_the_binding_verbs() {
+        let mut vanilla = UiScript::new().unwrap();
+        vanilla.run("CameraZoomOut(2) CameraZoomIn()").unwrap();
+        assert!(vanilla.take_camera_view_requests().is_empty());
 
         let mut s = UiScript::new().unwrap();
         s.set_flavor(UiFlavor::Turtle);
