@@ -15,6 +15,8 @@
 #import benilla_modern::probegi
 #import benilla_modern::locallight
 #import benilla::env_frame
+// fork: rain on surfaces (the Everwood port).
+#import benilla::wet_hook
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -559,9 +561,36 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     //   specular = per-vertex sheen · gloss_mask · shadow → gated to ZERO in shadow (no sheen in shade)
     // (`tex·primary` is the MODULATE-1× diffuse; the sheen is added after, separate-specular.) Then
     // LDR-clamp; gamma/byte throughout; raw gamma out (GAMMA LANE, 0161).
+    // fork: rain on surfaces (`benilla::wet_hook`). Nothing gets wet under a roof, a porch or a
+    // bridge: the shelter grid's open share, read only while something is wet.
+    var wet_open = 1.0;
+    if (wow_light.env.wet_a.y > 0.0) {
+        let wet_st = wet_hook::shelter_taps(in.world_position.xyz, wow_light.shelter_hdr,
+            wow_light.shelter_cfg);
+        if (wet_st.live > 0.0) {
+            wet_open = 1.0 - wet_hook::shelter_amount(wet_st, wow_light.shelter[wet_st.idx.x],
+                wow_light.shelter[wet_st.idx.y], wow_light.shelter[wet_st.idx.z],
+                wow_light.shelter[wet_st.idx.w], in.world_position.y, wow_light.shelter_cfg);
+        }
+    }
+    // Rain-darkened ground and puddles; a dry frame returns `color` untouched. The combine below is
+    // gamma math in either lighting model (a modern frame decodes at the output), so one hook
+    // serves both.
+    let wet_n = normalize(in.world_normal);
+    let wet = wet_hook::wet_puddles(wet_hook::wet_surface(color, wet_n, in.world_position.xyz,
+        wet_open, wow_light.env), wet_n, in.world_position.xyz, wet_open, wow_light.env);
+    color = wet.albedo;
     let diffuse_term = color * primary * (0.3 * shadow_lit_eff + 0.7) * character_shadow_term;
     let spec_term = in.specular * specmask * spec_gate;
     var tuned = clamp(diffuse_term + spec_term, vec3<f32>(0.0), vec3<f32>(1.0));
+    // The wet sheen, and the authored `_s` sheen brightens with it. Its shadow term is the sheen
+    // gate: MCSH and the character map in a classic frame, the sun cascades in a modern one.
+    if (wet.boost > 0.0) {
+        tuned = clamp(tuned + spec_term * wet.boost + wet_hook::wet_sheen(wet.boost, wet_n,
+            normalize(view.world_position - in.world_position.xyz),
+            -normalize(wow_light.light_sun.xyz), wow_light.light_diffuse.rgb,
+            wow_light.fog_color.rgb, spec_gate), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
 
     // Gamma-space GL_LINEAR fog on planar eye-Z, as the reference computes `fogcoord`, not radial
     // distance. Per pixel matches its per-vertex fog, since a linear factor interpolates exactly.

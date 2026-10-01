@@ -919,6 +919,7 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     // fork: the Everwood port (FORK.md)
     "foliageWind",
     "foliageWindStrength",
+    "rainSurfaces",
 ];
 
 /// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
@@ -1528,6 +1529,10 @@ mod tests {
         assert_eq!(
             d["foliageWindStrength"],
             benilla_world::wind::FoliageWindStrength::REGISTERED
+        );
+        assert_eq!(
+            d["rainSurfaces"] != 0.0,
+            benilla_world::weather::wetness::RainSurfaces::default().0
         );
     }
 

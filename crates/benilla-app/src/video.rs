@@ -203,6 +203,7 @@ pub(crate) fn on_cvar(
         // fork: the Everwood port (FORK.md) — the foliage wind tier and gain.
         Option<ResMut<benilla_world::wind::FoliageWind>>,
         Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
+        Option<ResMut<benilla_world::weather::wetness::RainSurfaces>>,
     ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -330,6 +331,12 @@ pub(crate) fn on_cvar(
                 if !pinned {
                     wind.0 = v.clamp(0.0, 2.0) as u8;
                 }
+            }
+        }
+        // fork: rain on surfaces; the wetness tick reads the knob each frame.
+        "rainsurfaces" => {
+            if let Some(rain) = fork.5.as_deref_mut() {
+                rain.0 = ev.flag();
             }
         }
         "foliagewindstrength" => {

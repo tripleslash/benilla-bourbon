@@ -816,6 +816,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the gain on `foliageWind`'s sway",
     ),
+    // `rainSurfaces` — rain soaks sky-exposed surfaces (darker, puddles, a wet sheen) and they dry
+    // after it stops; 0 is the reference's dry look, exactly. Applies to the next frame.
+    ours(
+        "rainSurfaces",
+        "1",
+        "the fork's own — 1.12's rain leaves every surface as it was",
+    ),
     // ── end fork-owned block ──
     // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
     //

@@ -19,6 +19,8 @@
 // Ported from WarcraftXL (https://github.com/WarcraftXL) by iThorgrim — module
 // wxl-experimental-wind, grass/GrassWind.cpp (grass vertex displacement seam).
 #import benilla::wind_hook
+// fork: rain on surfaces (the Everwood port).
+#import benilla::wet_hook
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -1323,6 +1325,32 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
     if ((is_mod || is_mod2x) && !is_wmo) {
         rgb = base.rgb;
+    }
+
+    // fork: rain on surfaces (`benilla::wet_hook`). Nothing gets wet under a roof, a porch or a
+    // bridge: the shelter grid's open share, read only while something is wet.
+    var wet_open = 1.0;
+    if (wow_light.env.wet_a.y > 0.0) {
+        let wet_st = wet_hook::shelter_taps(in.world_position.xyz, wow_light.shelter_hdr,
+            wow_light.shelter_cfg);
+        if (wet_st.live > 0.0) {
+            wet_open = 1.0 - wet_hook::shelter_amount(wet_st, wow_light.shelter[wet_st.idx.x],
+                wow_light.shelter[wet_st.idx.y], wow_light.shelter[wet_st.idx.z],
+                wow_light.shelter[wet_st.idx.w], in.world_position.y, wow_light.shelter_cfg);
+        }
+    }
+    // Interior, booth-rig, unlit, Mod, Mod2x and additive batches stay dry; a dry frame returns
+    // `rgb` untouched. A booth's own light blob carries a zero row, so it never gets wet.
+    let wet_dry = is_interior || interior_fogged || is_rig || is_emissive || is_mod || is_mod2x
+        || (u32(m.clutter_fade.z) & 4u) != 0u;
+    let wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz,
+        select(1.0, 0.0, wet_dry) * wet_open, wow_light.env);
+    rgb = wet.albedo;
+    if (wet.boost > 0.0) {
+        rgb = min(rgb + wet_hook::wet_sheen(wet.boost, n_lit,
+            normalize(view.world_position - in.world_position.xyz), L,
+            wow_light.light_diffuse.rgb, wow_light.fog_color.rgb, player_shadow),
+            vec3<f32>(1.0));
     }
 
     // Linear fog by planar eye depth, as in terrain.wgsl. Per-batch colour policy (`clutter_fade.z`

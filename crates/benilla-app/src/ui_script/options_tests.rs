@@ -2616,6 +2616,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH",
                 "GraphicsRowFoliageWindStrength",
             ),
+            ("BENILLA_TOOLTIP_RAIN_SURFACES", "GraphicsRowRainSurfaces"),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
@@ -4863,6 +4864,7 @@ fn turtle_options_carry_every_graphics_row() {
         // fork: the Everwood port (FORK.md)
         "foliageWind",
         "foliageWindStrength",
+        "rainSurfaces",
     ] {
         assert!(
             rows.contains(&format!(":{cvar}:1;")),

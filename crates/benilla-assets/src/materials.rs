@@ -49,6 +49,8 @@ pub fn register_shaders(app: &mut App) {
         bevy::shader::load_shader_library!(app, "shaders/env_frame.wgsl");
         // `benilla::wind_hook`, the shared vertex displacement for grass and foliage.
         bevy::shader::load_shader_library!(app, "shaders/wind_hook.wgsl");
+        // `benilla::wet_hook`, the rain-on-surfaces look terrain, model and static_gx call.
+        bevy::shader::load_shader_library!(app, "shaders/wet_hook.wgsl");
     }
 }
 

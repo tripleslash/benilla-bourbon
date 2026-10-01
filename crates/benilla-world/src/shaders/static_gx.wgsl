@@ -13,6 +13,8 @@
 // Ported from WarcraftXL (https://github.com/WarcraftXL) by iThorgrim — module
 // wxl-experimental-wind (the shared foliage vertex displacement, `wind_hook.wgsl`).
 #import benilla::wind_hook
+// fork: rain on surfaces (the Everwood port).
+#import benilla::wet_hook
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -959,6 +961,29 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Unlit (M2 UNLIT 0x01, WMO UNLIT on an exterior group): texture × vertex colour, no light.
     if ((in.word & WORD_UNLIT) != 0u) {
         rgb = folded;
+    }
+    // fork: rain on surfaces (`benilla::wet_hook`). Nothing gets wet under a roof, a porch or a
+    // bridge: the shelter grid's open share, read only while something is wet.
+    var wet_open = 1.0;
+    if (wow_light.env.wet_a.y > 0.0) {
+        let wet_st = wet_hook::shelter_taps(in.world_position.xyz, wow_light.shelter_hdr,
+            wow_light.shelter_cfg);
+        if (wet_st.live > 0.0) {
+            wet_open = 1.0 - wet_hook::shelter_amount(wet_st, wow_light.shelter[wet_st.idx.x],
+                wow_light.shelter[wet_st.idx.y], wow_light.shelter[wet_st.idx.z],
+                wow_light.shelter[wet_st.idx.w], in.world_position.y, wow_light.shelter_cfg);
+        }
+    }
+    // Interior, unlit and window surfaces stay dry; a dry frame returns `rgb` untouched. The lit
+    // colour is gamma in either lighting model here (a modern frame decodes at the output).
+    let wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz,
+        select(1.0, 0.0, (in.word & (WORD_INTERIOR | WORD_UNLIT | WORD_WINDOW)) != 0u) * wet_open,
+        wow_light.env);
+    rgb = wet.albedo;
+    if (wet.boost > 0.0) {
+        rgb = min(rgb + wet_hook::wet_sheen(wet.boost, n_lit,
+            normalize(view.world_position - in.world_position.xyz), L,
+            wow_light.light_diffuse.rgb, wow_light.fog_color.rgb, world_shadow), vec3<f32>(1.0));
     }
     // Planar eye-Z fog; other fog modes belong to blends never admitted here. The interior triple
     // keys on the per-frame record bit, not `WORD_INTERIOR`: the client sets it per group under

@@ -16,6 +16,8 @@ use bevy::prelude::*;
 use crate::dev_state::DebugState;
 
 mod precip;
+pub mod shelter;
+pub mod wetness;
 
 /// Rain's forced-fog window, read by the effect lane's `EffectFog::Rain` row.
 pub(crate) use precip::{RAIN_FOG_END, RAIN_FOG_START};
@@ -309,6 +311,9 @@ impl Plugin for WeatherPlugin {
             .add_message::<WeatherMessage>()
             .add_systems(Update, weather_tick.in_set(WeatherTick));
         precip::register(app);
+        // fork: rain on surfaces (FORK.md).
+        wetness::register(app);
+        shelter::register(app);
     }
 }
 
