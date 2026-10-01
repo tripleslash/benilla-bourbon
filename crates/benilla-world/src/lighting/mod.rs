@@ -61,6 +61,11 @@ pub struct WowLighting {
     /// the storm blend: the air the lamp halos stand in, so the weather neither swells nor fades a
     /// lamp's glow (`volumetrics`' `halo_air`).
     pub(crate) clear_fog: [f32; 3],
+    /// fork: modern lighting — the zone's deep-night key colour and celestial tint: the diffuse row
+    /// and the row [`Self::spec`] samples, at midnight on the same blend. The risen moon lights
+    /// with these while the dusk and dawn rows are still the sun's (`modern::sun_arc`).
+    pub(crate) night_key: [f32; 3],
+    pub(crate) night_tint: [f32; 3],
     /// The interior fog triple (`DNState+0x80/84/88`): the scene fog lerped toward the claimed
     /// WMO's MFOG by the 4 s [`WmoCrossfade`]. Only content tagged as in a room on the camera's
     /// portal chain reads it: the group's surfaces (`0x6b5190`) and liquid (`0x6b62e0`) and the M2s

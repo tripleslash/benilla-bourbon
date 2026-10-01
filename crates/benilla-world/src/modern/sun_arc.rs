@@ -8,7 +8,10 @@
 //! ([`MOONRISE_MINUTE`], [`MOONSET_MINUTE`]); the reference moon rises only at 22:18 and sets at
 //! 04:00, which left every evening from 20:36 and every pre-dawn without a key light. The key
 //! light (`WowLighting::sun_dir`, which the light buffer, the classic lanes' N·L and the shadow
-//! cascades all read) follows whichever body lights more.
+//! cascades all read) follows whichever body lights more. The authored rows at those hours are
+//! still the sun's (Elwynn's diffuse is `[255, 110, 0]` at 20:40 and turns blue only near 21:50),
+//! so while the moon keys, the key colour and the celestial tint are the zone's own deep-night
+//! rows ([`moonlit`]); the sky, clouds and fog keep the afterglow.
 
 use std::f32::consts::PI;
 
@@ -115,7 +118,7 @@ pub fn star_alpha(minute: f32, reference: f32) -> f32 {
 }
 
 /// Whether `minute` falls between moonrise and moonset.
-fn moon_is_up(minute: f32) -> bool {
+pub(crate) fn moon_is_up(minute: f32) -> bool {
     minute >= MOONRISE_MINUTE || minute <= MOONSET_MINUTE
 }
 
@@ -136,6 +139,13 @@ pub fn moon_elevation(minute: f32) -> f32 {
         .max(0.0)
         .powf(MOON_RISE_SHAPE)
         * MOON_PEAK_ELEVATION
+}
+
+/// A colour row under the moon: the row of the hour, moved to the zone's deep-night row by how
+/// much of the key is the moon's ([`moon_key`]).
+pub fn moonlit(row: [f32; 3], night: [f32; 3], moon_key: f32) -> [f32; 3] {
+    let t = moon_key.clamp(0.0, 1.0);
+    [0, 1, 2].map(|c| row[c] + (night[c] - row[c]) * t)
 }
 
 fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
@@ -181,6 +191,13 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
     KEY_HORIZON.store(key_light.to_bits(), std::sync::atomic::Ordering::Relaxed);
     // `sun_dir` is the direction light TRAVELS.
     lighting.sun_dir = -to_key;
+    // The moon lights with the night's rows, never the sunset's it rises into: the key colour, and
+    // the one row behind the specular sheen and the disc tint.
+    if moon_key > 0.0 {
+        lighting.diffuse = moonlit(lighting.diffuse, lighting.night_key, moon_key);
+        lighting.spec = moonlit(lighting.spec, lighting.night_tint, moon_key);
+        lighting.celestial_tint = moonlit(lighting.celestial_tint, lighting.night_tint, moon_key);
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +218,22 @@ mod tests {
             assert!((v.y - e.sin()).abs() < 1e-4);
             assert!((v.length() - 1.0).abs() < 1e-4);
         }
+    }
+
+    /// Elwynn at 20:53: the sunset diffuse under a fully risen moon is the midnight row, and a
+    /// frame the sun still keys is untouched.
+    #[test]
+    fn a_risen_moon_lights_with_the_night_row() {
+        let dusk = [1.0, 110.0 / 255.0, 0.0];
+        let night = [97.0 / 255.0, 130.0 / 255.0, 162.0 / 255.0];
+        assert_eq!(moonlit(dusk, night, 0.0), dusk);
+        assert_eq!(moonlit(dusk, night, 1.0), night);
+        let half = moonlit(dusk, night, 0.5);
+        for c in 0..3 {
+            assert!((half[c] - (dusk[c] + night[c]) / 2.0).abs() < 1e-6);
+        }
+        // Full a quarter hour after moonrise, where the authored row is still the sunset's.
+        assert!(horizon_factor(moon_elevation(MOONRISE_MINUTE + 15.0)) > 0.99);
     }
 
     #[test]
