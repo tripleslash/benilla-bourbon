@@ -802,29 +802,9 @@ pub(super) fn attach_entity_visuals(
                         .map(|a| (l.def.bone, a))
                 })
                 .collect();
-            // fork: a model that draws nothing at rest (an invisible GameObject or trigger) still
-            // lights the ground as the reference's does, and stands in no halo: it put a glow
-            // floating in the open air over Darkshire's street.
-            let draws_at_rest = dm.is_none_or(|dm| {
-                let idle = dm
-                    .animations
-                    .as_ref()
-                    .and_then(benilla_assets::ModelAnimations::idle_seq)
-                    .unwrap_or(0);
-                dm.parts.iter().flatten().any(|p| {
-                    benilla_world::modern::lights::emissive::shown_at_rest(
-                        p.alpha_anim.as_deref(),
-                        idle,
-                    )
-                })
+            super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
+                light_anchors.get(&bone).copied()
             });
-            super::spawn_carried_lights(
-                &mut commands,
-                model_lights,
-                entity,
-                !draws_at_rest,
-                |bone| light_anchors.get(&bone).copied(),
-            );
             // fork: P8 — **and the GameObject brazier that authors no light at all.**
             //
             // The line above is the reference's law and it only ever spawns what an artist wrote
