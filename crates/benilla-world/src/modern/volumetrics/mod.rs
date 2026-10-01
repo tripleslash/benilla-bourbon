@@ -76,8 +76,9 @@ const HISTORY_WEIGHT: f32 = 0.95;
 /// shaft haze.
 const NIGHT_HAZE: f32 = 0.004;
 /// fork: the night air's own glow: the zone's fog colour (decoded) times this, times the night
-/// fraction, is the radiance it scatters on top of the haze's. The night fog alone solves to a near
-/// black veil (Orgrimmar's is 0.011 linear), where the reference's night haze is a lit purple.
+/// fraction and the zone look's `night_glow`, is the radiance it scatters on top of the haze's. The
+/// night fog alone solves to a near black veil (Orgrimmar's is 0.011 linear), where the reference's
+/// night haze is a lit purple.
 const NIGHT_GLOW: f32 = 5.0;
 /// fork: **the air is as faint by day as it is at midnight.** The zone rows' shaft haze was fitted
 /// to reference shots, and in play the daylight lit it into a veil — Goldshire at dusk sat in an
@@ -90,8 +91,9 @@ const HAZE_SCALE: f32 = 0.67;
 /// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, and
 /// their height falloff (yd) above the terrain under each froxel (the GI heightfield; past it, the
 /// ground under the camera). `froxel_scatter.wgsl` breaks them into patches and lights them with
-/// the shaft haze's key. Every zone has them overnight; a zone look's `ground_fog` keeps a share by
-/// day. Anchored to one plane at the camera's ground, 0.035 filled Hillsbrad's low ground and left
+/// the shaft haze's key. Overnight a zone look's `night_banks` takes its share (a faint wisp in an
+/// ordinary zone, the whole bank in a dark one), and its `ground_fog` keeps a share by day.
+/// Anchored to one plane at the camera's ground, 0.035 filled Hillsbrad's low ground and left
 /// Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
 const BANK_FALLOFF: f32 = 4.0;
@@ -570,8 +572,8 @@ fn update_volume(
     let shaft_key = shaft_key(l.diffuse, &look.0);
     let night = l.sidn_night.clamp(0.0, 1.0);
     let veil = 1.0 + (MOON_VEIL - 1.0) * super::sun_arc::moon_key();
-    let night_glow =
-        Vec3::from(l.fog_color.map(super::srgb_to_linear)) * (NIGHT_GLOW * night * veil);
+    let night_glow = Vec3::from(l.fog_color.map(super::srgb_to_linear))
+        * (NIGHT_GLOW * night * veil * look.0.night_glow);
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
@@ -670,7 +672,7 @@ fn update_volume(
             .extend(night_glow.z),
         night: Vec4::new(
             if super::banks_enabled() {
-                BANK_EXTINCTION * night.max(look.0.ground_fog)
+                BANK_EXTINCTION * (night * look.0.night_banks).max(look.0.ground_fog)
             } else {
                 0.0
             },

@@ -68,6 +68,12 @@ pub struct ZoneLook {
     /// fork: the ground-fog banks by day, as a share of the night's (`volumetrics`): 0 at night only,
     /// 1 as thick at noon as at midnight.
     pub ground_fog: f32,
+    /// fork: the night's ground-fog banks as a share of the full bank (`volumetrics`): a faint wisp
+    /// in the hollows of an ordinary zone, the whole bank in a dark one.
+    pub night_banks: f32,
+    /// fork: the night air's glow (`volumetrics::NIGHT_GLOW`) as a share: an ordinary zone's night
+    /// stays clear, a dark zone's air glows grey.
+    pub night_glow: f32,
 }
 
 impl ZoneLook {
@@ -97,6 +103,8 @@ impl ZoneLook {
         toe: 1.03,
         key_tint: [1.0, 1.0, 1.0],
         ground_fog: 0.0,
+        night_banks: 0.25,
+        night_glow: 0.33,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -123,6 +131,8 @@ impl ZoneLook {
             toe: m(self.toe, to.toe),
             key_tint: [0, 1, 2].map(|i| m(self.key_tint[i], to.key_tint[i])),
             ground_fog: m(self.ground_fog, to.ground_fog),
+            night_banks: m(self.night_banks, to.night_banks),
+            night_glow: m(self.night_glow, to.night_glow),
         }
     }
 
@@ -144,6 +154,8 @@ impl ZoneLook {
             && d(self.vignette, other.vignette)
             && d(self.toe, other.toe)
             && d(self.ground_fog, other.ground_fog)
+            && d(self.night_banks, other.night_banks)
+            && d(self.night_glow, other.night_glow)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -158,7 +170,7 @@ impl ZoneLook {
     /// fork: **the eerie look.** Duskwood's calibration, for every dark zone: a weak sun under a
     /// dimmed, greyer sky, the fill held so the key-to-fill ratio stays in band, muted colour and a
     /// harder grade, a thicker haze so the daylight comes through the canopy in cones, and the
-    /// night's ground-fog banks kept through the day. Exposure
+    /// night's full ground-fog banks and glowing air, kept through the day. Exposure
     /// is untouched, so buildings keep their own light.
     pub const EERIE: Self = Self {
         key: 0.6,
@@ -170,6 +182,8 @@ impl ZoneLook {
         shafts: 0.4,
         vignette: 0.38,
         ground_fog: 0.7,
+        night_banks: 1.0,
+        night_glow: 1.0,
         ..Self::NEUTRAL
     };
 }
@@ -329,7 +343,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -368,6 +382,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
         set(&mut look.key_tint[c], 27 + c);
     }
     set(&mut look.ground_fog, 30);
+    set(&mut look.night_banks, 31);
+    set(&mut look.night_glow, 32);
     look
 }
 
@@ -468,6 +484,20 @@ mod tests {
             let d = look_for_zone(*zone);
             assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
             assert_eq!(d.exposure, ZoneLook::NEUTRAL.exposure);
+        }
+    }
+
+    /// An ordinary zone's night is clearer than a dark zone's: faint banks and a dim air glow.
+    #[test]
+    fn only_the_dark_zones_nights_are_eerie() {
+        for zone in EERIE_ZONES {
+            let d = look_for_zone(*zone);
+            assert_eq!((d.night_banks, d.night_glow), (1.0, 1.0), "zone {zone}");
+        }
+        for zone in [12, 33, 14, 1637, 17, 215] {
+            let n = look_for_zone(zone);
+            assert!(n.night_banks < ZoneLook::EERIE.night_banks, "zone {zone}");
+            assert!(n.night_glow < ZoneLook::EERIE.night_glow, "zone {zone}");
         }
     }
 
