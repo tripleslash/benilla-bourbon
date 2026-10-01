@@ -1314,9 +1314,9 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
 }
 
 /// fork: fsr (FORK.md) — Use Frame Generation: our own checkbox, staged to Apply, and
-/// Defaults walks it back to the registered "0".
+/// Defaults walks it back to the registered "1".
 #[test]
-fn the_frame_generation_row_stages_applies_and_defaults_off() {
+fn the_frame_generation_row_stages_applies_and_defaults_on() {
     benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowFrameGeneration";
     let mut s = audio_harness();
@@ -1344,10 +1344,12 @@ fn the_frame_generation_row_stages_applies_and_defaults_off() {
         vec![("frameGeneration".to_string(), "1".to_string())]
     );
 
-    // Defaults walks it back to the registered "0".
+    // Defaults walks it back to the registered "1".
+    s.run(&format!("{ROW}Check:Click()")).unwrap();
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
-    assert!(!s
+    assert!(s
         .eval::<bool>(&format!("return {ROW}Check:GetChecked()"))
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

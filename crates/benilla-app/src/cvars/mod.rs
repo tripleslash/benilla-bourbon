@@ -1512,7 +1512,7 @@ mod tests {
             d["lightingQuality"],
             f32::from(LightingQuality::DEFAULT.as_cvar())
         );
-        // fork: fsr (FORK.md) — frame generation boots off, as the engine's knob does.
+        // fork: fsr (FORK.md) — frame generation boots on, as the engine's knob does.
         assert_eq!(
             d["frameGeneration"] != 0.0,
             benilla_world::fsr::FrameGeneration::default().0

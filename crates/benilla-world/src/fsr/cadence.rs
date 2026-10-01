@@ -35,9 +35,16 @@ pub struct HeldFrame;
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
 pub struct PresentsHeldFrames;
 
-/// Whether frame generation is wanted: the `frameGeneration` CVar, which the app writes.
-#[derive(Resource, Clone, Copy, Default, Debug, PartialEq)]
+/// Whether frame generation is wanted: the `frameGeneration` CVar, which the app writes. On by
+/// default, as the CVar registers.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct FrameGeneration(pub bool);
+
+impl Default for FrameGeneration {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 /// Frames that must render: a capture run, or anything else that reads every frame's pixels. The
 /// app sets it; while set, no frame is held.

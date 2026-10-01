@@ -795,10 +795,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // fork: fsr (FORK.md)
     // `frameGeneration` — FSR 3.1.5 frame generation: one generated frame presented between every
     // two rendered ones, FSR's upscaler at 1:1 at least (`renderScale` is capped at 1 while on).
-    // Off by default; applies to the next frame.
+    // On by default; applies to the next frame.
     ours(
         "frameGeneration",
-        "0",
+        "1",
         "benilla's own — 1.12 presents every frame it draws and no frame it did not",
     ),
     // ── end fork-owned block ──
