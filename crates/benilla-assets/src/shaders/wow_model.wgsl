@@ -848,6 +848,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // all (a preprocessor cut, not an early return, so no dead tail reaches naga's MSL writer). On
     // Chrome/Metal a colour-masked twin carrying the whole lighting stack lost its cutout: it wrote
     // depth over the entire card, and a fading tree's holes blocked the sky behind them (black).
+    // Declared ahead of the cut: both lanes write it, and the twin's lane has nothing below.
+    var out: WowFragOut;
 #ifdef WOW_ZFILL
     out.color = vec4<f32>(0.0);
 #else
@@ -1378,7 +1380,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     }
 
 
-    var out: WowFragOut;
     // Output alpha is tex × fade. Opaque intent (`clutter_fade.z` bit 3) pins it to 1: a no-op
     // under correct pipeline state, and a guard for macOS/Metal with an extra camera, where an
     // opaque draw can bind a blending pipeline and show the BLP's garbage alpha.
