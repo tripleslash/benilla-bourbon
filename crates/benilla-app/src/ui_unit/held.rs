@@ -32,6 +32,8 @@ pub(super) struct HeldUnits<'a> {
     pub(super) self_store: Option<&'a ObjectStore>,
     pub(super) classes: Option<&'a ChrClasses>,
     pub(super) types: CreatureTypeSources<'a>,
+    /// A held unit's descriptor by guid, for `CanAssist`'s owner leg.
+    pub(super) by_guid: &'a dyn Fn(u64) -> Option<ObjectStore>,
 }
 
 impl HeldUnits<'_> {
@@ -54,6 +56,14 @@ impl HeldUnits<'_> {
             self.factions,
             self.reputations,
             self.self_store,
+        );
+        // `CanAssist` (`0x6066f0`), which `UnitCanAssist` answers.
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            self.factions,
+            self.reputations,
+            self.self_store,
+            self.by_guid,
         );
         enrich_unit(
             &mut s,
@@ -134,6 +144,10 @@ pub(super) fn feed_chain_units(
         return;
     }
 
+    let by_guid = |guid: u64| {
+        let entity = *index.as_ref()?.0.get(&guid)?;
+        stores.get(entity).ok().cloned()
+    };
     let held = HeldUnits {
         names: &names,
         commands: &commands,
@@ -143,6 +157,7 @@ pub(super) fn feed_chain_units(
         self_store: self_q.iter().next(),
         classes: tables.classes(),
         types: tables.types(&names),
+        by_guid: &by_guid,
     };
     let built: HashMap<u64, UnitState> = ends
         .iter()

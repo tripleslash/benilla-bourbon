@@ -1473,6 +1473,7 @@ fn a_two_token_predicate_raises_on_either_nil_argument() {
         "UnitIsFriend",
         "UnitCanCooperate",
         "UnitCanAttack",
+        "UnitCanAssist",
         "UnitReaction",
     ] {
         assert!(
@@ -1674,6 +1675,15 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
             UnitState {
                 exists: true,
                 can_attack: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "UnitCanAssist",
+            r#"UnitCanAssist("player", "target")"#,
+            UnitState {
+                exists: true,
+                can_assist: true,
                 ..Default::default()
             },
         ),

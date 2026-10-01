@@ -222,6 +222,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitCanAssist (`0x516bb0`) delegates to `CanAssist` (`0x6066f0`), held as `UnitCanAttack`'s
+    // answer is: whether the player can assist the unit, for both argument orders.
+    g.set(
+        "UnitCanAssist",
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
+            )?);
+            let token = pick_unit_token(&a, &b);
+            unit_predicate(lua, &token, |u| u.can_assist)
+        })?,
+    )?;
+
     // GetQuestGreenRange (`0x4e17d0`): the green-to-grey boundary `QuestLogFrame.lua:593` buckets
     // by, from the table at `0x8076c0`. The reference answers 0 with no player object (`0x4e17f8`);
     // here a level of 0 reads the table's first entry, 4.
