@@ -707,38 +707,62 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // GetAuctionSellItemInfo() → name, texture, count, quality, canUse, price: six values always.
     // An empty slot answers count 1 and quality -1: the stock Lua reads `count > 1` unguarded.
+    //
+    // A Turtle WoW VM answers two more, `maxStack` and `link`: Turtle's
+    // `Blizzard_AuctionUI.lua:1121` destructures eight and computes the deposit in Lua from the
+    // seventh, at `AuctionFrameAuctions_OnLoad` with the slot still empty. What Turtle's client
+    // answers for an empty slot is untraced; 1 keeps that formula's stack term at zero, as the
+    // empty count's 1 does.
     g.set(
         "GetAuctionSellItemInfo",
         lua.create_function(|lua, ()| {
-            let info = {
+            let (info, turtle) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                sell_item_info(&model)
+                let turtle = (model.flavor == super::UiFlavor::Turtle).then(|| {
+                    model.auction_sell_item.as_ref().map(|it| {
+                        let max_stack = model
+                            .item_templates
+                            .get(&it.item_id)
+                            .map_or(1, |t| t.stackable.max(1));
+                        (max_stack, it.link.clone())
+                    })
+                });
+                (sell_item_info(&model), turtle)
             };
-            let Some((name, texture, count, quality, can_use, price)) = info else {
-                return Ok(MultiValue::from_vec(vec![
+            let mut values = match info {
+                None => vec![
                     Value::Nil,
                     Value::Nil,
                     Value::Integer(1),
                     Value::Integer(-1),
                     Value::Nil,
                     Value::Integer(0),
-                ]));
+                ],
+                Some((name, texture, count, quality, can_use, price)) => vec![
+                    if name.is_empty() {
+                        Value::Nil
+                    } else {
+                        Value::String(lua.create_string(&name)?)
+                    },
+                    match &texture {
+                        Some(t) => Value::String(lua.create_string(t)?),
+                        None => Value::Nil,
+                    },
+                    Value::Integer(i64::from(count)),
+                    Value::Integer(quality),
+                    flag(can_use),
+                    Value::Integer(i64::from(price)),
+                ],
             };
-            Ok(MultiValue::from_vec(vec![
-                if name.is_empty() {
-                    Value::Nil
-                } else {
-                    Value::String(lua.create_string(&name)?)
-                },
-                match &texture {
-                    Some(t) => Value::String(lua.create_string(t)?),
+            if let Some(extra) = turtle {
+                let (max_stack, link) = extra.unwrap_or((1, None));
+                values.push(Value::Integer(i64::from(max_stack)));
+                values.push(match &link {
+                    Some(l) => Value::String(lua.create_string(l)?),
                     None => Value::Nil,
-                },
-                Value::Integer(i64::from(count)),
-                Value::Integer(quality),
-                flag(can_use),
-                Value::Integer(i64::from(price)),
-            ]))
+                });
+            }
+            Ok(MultiValue::from_vec(values))
         })?,
     )?;
 
@@ -919,6 +943,68 @@ mod tests {
             .eval(r#"local _, _, c = GetAuctionSellItemInfo() return c"#)
             .unwrap();
         assert_eq!(count, 20, "the whole stack, not one of it");
+    }
+
+    /// Turtle WoW's auction window computes the deposit in Lua from an eight-value
+    /// `GetAuctionSellItemInfo` as it loads, the sell slot empty
+    /// (`Blizzard_AuctionUI.lua:1117-1124`, from `AuctionFrameAuctions_OnLoad`): the seventh is
+    /// arithmetic's operand. A 1.12.1 VM keeps the reference's six.
+    #[test]
+    fn a_turtle_vm_answers_max_stack_and_link_and_its_deposit_runs_on_an_empty_slot() {
+        use crate::script::cursor::CursorItem;
+        use crate::script::item_stats::ItemTemplateView;
+
+        // The shape of Turtle's own function.
+        const DEPOSIT: &str = r#"
+            function TurtleDeposit(duration)
+                local name, texture, stackSize, quality, canUse, price, maxStack, link =
+                    GetAuctionSellItemInfo()
+                return floor(price * (duration / 120) * (1 + (maxStack - stackSize) * 0.05) * 0.025)
+            end
+        "#;
+
+        let vanilla = UiScript::new().unwrap();
+        assert_eq!(vanilla.arity("GetAuctionSellItemInfo()").unwrap(), 6);
+
+        let mut s = UiScript::new().unwrap();
+        s.set_flavor(crate::script::UiFlavor::Turtle);
+        s.run(DEPOSIT).unwrap();
+        assert_eq!(s.arity("GetAuctionSellItemInfo()").unwrap(), 8);
+        assert_eq!(
+            s.eval::<i64>("return TurtleDeposit(480)").unwrap(),
+            0,
+            "an empty slot deposits nothing, and raises nothing"
+        );
+
+        // Five of a 20-stack at 100 copper each: 500 × 4 × (1 + 15 × 0.05) × 0.025 = 87.5.
+        {
+            let mut model = s.model_mut();
+            model.item_templates.insert(
+                2589,
+                ItemTemplateView {
+                    stackable: 20,
+                    sell_price: 100,
+                    ..Default::default()
+                },
+            );
+            model.auction_sell_item = Some(CursorItem {
+                bag: 0,
+                slot: 1,
+                item_id: 2589,
+                texture: None,
+                link: Some("|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r".into()),
+                count: Some(5),
+                quality: None,
+                equip_slots: Vec::new(),
+                bar_placeable: false,
+            });
+        }
+        let (max_stack, link): (i64, String) = s
+            .eval("local _, _, _, _, _, _, m, l = GetAuctionSellItemInfo() return m, l")
+            .unwrap();
+        assert_eq!(max_stack, 20);
+        assert!(link.contains("item:2589"), "{link}");
+        assert_eq!(s.eval::<i64>("return TurtleDeposit(480)").unwrap(), 87);
     }
 
     #[test]
