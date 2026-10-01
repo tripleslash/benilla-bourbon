@@ -922,6 +922,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "uiScale",
     "farclip",
     "WorldDetail",
+    // Spell Detail, a Graphics page row since upstream's panel.
+    "spellEffectLevel",
     "gamma",
     "weatherDensity",
     "gxVSync",
