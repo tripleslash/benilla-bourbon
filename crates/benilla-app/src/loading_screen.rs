@@ -275,11 +275,34 @@ impl Plugin for LoadingScreenPlugin {
             // governs asset work that lands at the tail of THIS frame.
             .add_systems(First, pace_asset_budget)
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
+            .add_observer(forget_chain_art)
             // In `WorldStage::Present`, after Input and Stream: a teleport snaps in Input and the
             // streamer refocuses in Stream, so the cover lands on the same frame, never a flash.
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present));
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
+    }
+}
+
+/// A change of the data the chain answers from (a realm of the other flavor, a content layer)
+/// changes the bytes behind a backdrop's path and may change the table: the decoded art goes and
+/// the catalog is read again. Without it a 1.12.1 realm entered after a Turtle WoW one raised
+/// Turtle's picture for the same map, out of [`LoadingScreen::art_cache`].
+fn forget_chain_art(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut screen: ResMut<LoadingScreen>,
+    world_assets: Option<ResMut<WorldAssets>>,
+    mut commands: Commands,
+) {
+    screen.art_cache.clear();
+    let Some(assets) = world_assets else {
+        return;
+    };
+    // Bound first: the lock guard must drop before `assets` does.
+    let catalog = load_loading_screens(&mut assets.chain.lock_recover());
+    match catalog {
+        Ok(c) => commands.insert_resource(LoadingScreenCatalogRes(c)),
+        Err(e) => warn!("LoadingScreens.dbc unreadable after a chain change — {e:#}"),
     }
 }
 
@@ -707,6 +730,24 @@ fn drive_loading_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backdrop decoded under one flavor's chain is not the other's: the chain change drops it.
+    #[test]
+    fn a_chain_change_forgets_the_decoded_backdrops() {
+        let mut app = App::new();
+        app.init_resource::<LoadingScreen>()
+            .add_observer(forget_chain_art);
+        app.world_mut()
+            .resource_mut::<LoadingScreen>()
+            .art_cache
+            .insert(
+                "Interface\\Glues\\LoadingScreens\\LoadScreenEasternKingdom.blp".into(),
+                Handle::default(),
+            );
+        app.world_mut().trigger(benilla_assets::ChainDataChanged);
+        app.update();
+        assert!(app.world().resource::<LoadingScreen>().art_cache.is_empty());
+    }
 
     #[test]
     fn the_cover_counts_frames_to_the_glass_and_resets_the_moment_it_drops() {
