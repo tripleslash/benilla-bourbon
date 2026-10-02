@@ -18,9 +18,9 @@
 //!   ambient share keeps at least [`SHADED_SHARE`] of it, so fog the key light cannot reach (under a
 //!   canopy) is not several times darker than the colour the zone authored.
 //!
-//! The variations the plan names ride the same solve: a storm thickens the haze and dims the key,
-//! underwater drops the height falloff and the shaft haze, and an interior (the WMO crossfade `t`)
-//! flattens the falloff toward a uniform room haze.
+//! The variations the plan names ride the same solve: a storm thickens the haze, dims the key and
+//! draws the clear range in to [`STORM_CLEAR`], underwater drops the height falloff and the shaft
+//! haze, and an interior (the WMO crossfade `t`) flattens the falloff toward a uniform room haze.
 
 /// Optical depth at the reference height over the zone's (unclamped) fog span: transmittance there is
 /// `e^−FAR_TAU`.
@@ -54,6 +54,14 @@ pub const MAX_FOG_LEVEL: f32 = 0.78;
 /// [`WALL_TAU`] over a cavern's short record put the Cleft of Shadows in a purple wall inside 50 yd.
 /// At this cap 50 yd keeps 86 % of the scene and 100 yd 74 %. Underwater keeps its wall.
 pub const ROOM_MAX_DENSITY: f32 = 0.003;
+/// fork: **a storm closes the horizon, not the street.** At full storm the zone look's clear range
+/// draws in to this (planar yd) instead of to the eye, so the storm's short authored end still
+/// walls the distance while the scene around the camera stays readable. With no clear range at
+/// all the modern storm kept 15 % of the scene at 100 yd in Elwynn, under the reference's 43 %.
+pub const STORM_CLEAR: f32 = 120.0;
+/// The shaft haze a full storm adds (1/yd). The haze is never near-cleared, so this is the veil
+/// on the near field: 0.006 alone took 45 % of the scene at 100 yd.
+pub const STORM_HAZE: f32 = 0.002;
 
 /// What one frame's media is solved from. Colours are the authored gamma values.
 #[derive(Clone, Copy, Debug)]
@@ -111,7 +119,7 @@ pub struct Media {
 /// [`MAX_FOG_SATURATION`] saturation and [`MAX_FOG_LEVEL`] on its brightest channel, hue kept: the
 /// Forever tint on Westfall's and Stranglethorn's authored fog made a saturated cyan wall over half
 /// the screen. Every zone's air passes through here.
-fn subtle(c: [f32; 3]) -> [f32; 3] {
+pub(crate) fn subtle(c: [f32; 3]) -> [f32; 3] {
     let c = c.map(|v| v.max(0.0));
     let hi = c[0].max(c[1]).max(c[2]);
     if hi <= 1e-5 {
@@ -153,10 +161,12 @@ pub fn solve(i: &MediaInputs) -> Media {
     };
     let walled = if i.underwater { 1.0 } else { interior };
     let density = open_density + (wall_density - open_density) * walled;
+    // The look's clear range, drawn in to `STORM_CLEAR` by a storm.
+    let look_clear = i.fog_clear + (i.fog_clear.min(STORM_CLEAR) - i.fog_clear) * storm;
     let near_clear = (open_start + (i.fog_start - open_start) * walled)
         .max(0.0)
         .min(MAX_CLEAR_SHARE * (open_span + (wall_span - open_span) * walled))
-        .max(i.fog_clear * (1.0 - walled) * (1.0 - storm));
+        .max(look_clear * (1.0 - walled));
     // An overcast sky scatters less direct light into the fog.
     let key_scatter = i.key_scatter.max(0.0) * (1.0 - 0.75 * storm);
 
@@ -203,7 +213,7 @@ pub fn solve(i: &MediaInputs) -> Media {
         density,
         inv_height: (1.0 - interior) / i.fog_falloff.max(1.0),
         near_clear,
-        haze: i.haze.max(0.0) + 0.006 * storm,
+        haze: i.haze.max(0.0) + STORM_HAZE * storm,
         // Faint: drifting density wisps over the ground read as cloud shadows sliding past the player.
         noise: 0.15 + 0.3 * storm,
         ambient_in,
@@ -330,6 +340,70 @@ mod tests {
         assert!(m.haze > elwynn_noon().haze);
         assert!(m.density > solve(&elwynn_noon()).density);
         assert!(m.forward_share < 0.5);
+    }
+
+    /// The scene a horizontal ray at the reference height keeps over `d` yards: the haze from the
+    /// eye, the fog past `froxelfog::fog_clear`'s ease (`smoothstep(0.8·clear, clear, d)`).
+    fn kept(m: &Media, d: f32) -> f32 {
+        let (lo, hi) = (0.8 * m.near_clear, m.near_clear);
+        let eased = |x: f32| {
+            if hi - lo < 1e-3 {
+                return (x - hi).max(0.0);
+            }
+            // ∫ smoothstep = (hi − lo)·(t³ − t⁴/2), then the full medium past `hi`.
+            let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+            (hi - lo) * (t.powi(3) - 0.5 * t.powi(4)) + (x - hi).max(0.0)
+        };
+        (-(m.haze * d + m.density * eased(d))).exp()
+    }
+
+    /// Elwynn under [`crate::modern::look::ZoneLook::NEUTRAL`] at full storm: the committed
+    /// −139/278 pair (`lighting::resolve`). The storm draws the look's clear range in to
+    /// [`STORM_CLEAR`], so the near field stays readable (the reference's linear fog keeps 43 % of
+    /// the scene at 100 yd) while the storm's authored end still walls the distance.
+    #[test]
+    fn a_storm_closes_the_horizon_and_not_the_street() {
+        let look = crate::modern::look::ZoneLook::NEUTRAL;
+        let clear = MediaInputs {
+            haze: look.haze * super::super::HAZE_SCALE,
+            fog_reach: look.fog_reach,
+            fog_clear: look.fog_clear,
+            ..elwynn_noon()
+        };
+        let storm = MediaInputs {
+            fog_start: -139.0,
+            fog_end: 278.0,
+            zone_fog_end: 278.0,
+            storm: 1.0,
+            ..clear
+        };
+        let (c, s) = (solve(&clear), solve(&storm));
+        assert_eq!(c.near_clear, look.fog_clear);
+        assert_eq!(s.near_clear, STORM_CLEAR);
+        assert!((s.haze - c.haze - STORM_HAZE).abs() < 1e-6);
+        assert!(kept(&s, 50.0) > 0.8, "{}", kept(&s, 50.0));
+        assert!(kept(&s, 100.0) > 0.6, "{}", kept(&s, 100.0));
+        // The horizon: the storm's end keeps a tenth of what the clear day does there.
+        assert!(kept(&s, 278.0) < 0.1, "{}", kept(&s, 278.0));
+        assert!(kept(&c, 278.0) > 0.6, "{}", kept(&c, 278.0));
+        // Half-way up the ramp the clear range is half-way in.
+        let half = solve(&MediaInputs {
+            storm: 0.5,
+            ..storm
+        });
+        assert!((half.near_clear - 0.5 * (look.fog_clear + STORM_CLEAR)).abs() < 1e-3);
+    }
+
+    /// A look with a shorter clear range than the storm's keeps its own: the storm never clears air.
+    #[test]
+    fn a_storm_never_lengthens_the_clear_range() {
+        let mut i = elwynn_noon();
+        i.fog_clear = 40.0;
+        i.fog_start = -139.0;
+        i.fog_end = 278.0;
+        i.zone_fog_end = 278.0;
+        i.storm = 1.0;
+        assert_eq!(solve(&i).near_clear, 40.0);
     }
 
     #[test]
