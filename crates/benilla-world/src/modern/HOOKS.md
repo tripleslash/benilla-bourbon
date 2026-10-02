@@ -181,6 +181,8 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | the wet hooks before the fog: the shelter grid's open share, `wet_hook::wet_surface` (and `wet_puddles` on terrain) on the colour, `wet_sheen` added and clamped | Everwood port: rain |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `assets/ui/OptionsFrame.xml` | the `rainSurfaces` row, its `on_cvar` arm, `GRAPHICS_CVARS`, the option rows in both windows | Everwood port: rain |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `pipe_warm/menagerie.rs`, `assets/ui/OptionsFrame.xml` | the `foliageWind` / `foliageWindStrength` rows, their `on_cvar` arms, `GRAPHICS_CVARS`, the option rows in both windows; the clutter pipelines warmed on the UV_1 layout | Everwood port: wind |
+| `benilla-world/src/weather/precip/mist.rs` | `REFERENCE_PUFF`; `push_mist` takes a `modern::weather::PuffLook` (half-extent, distance fade, life ramps, alpha cap) in place of its constants | modern weather |
+| `benilla-world/src/weather/precip/mod.rs` | `push_precip` passes `modern::weather::puff_look()` / `puff_color` in a modern frame, `REFERENCE_PUFF` and the fog colour otherwise | modern weather |
 
 ## Planned hooks (not yet landed)
 

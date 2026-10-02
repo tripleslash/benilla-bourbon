@@ -23,7 +23,7 @@ mod pool;
 mod render;
 mod wind;
 use census::{census, profile};
-use mist::{push_mist, run_mist, Mist};
+use mist::{push_mist, run_mist, Mist, REFERENCE_PUFF};
 use pool::{run_kind, HeightCache, Pool};
 use render::{push_flakes, push_patters, push_streaks, FlakeView};
 pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
@@ -508,6 +508,11 @@ fn push_precip(
             },
         );
     }
+    // fork: modern weather — a modern frame's puff is a smaller, fainter wisp in the haze's colour.
+    let (puff, mist_color) = match crate::modern::weather::puff_look() {
+        Some(puff) => (puff, crate::modern::weather::puff_color(lighting.fog_color)),
+        None => (REFERENCE_PUFF, lighting.fog_color),
+    };
     let start = quads.begin();
     push_mist(
         &mut quads.verts,
@@ -515,7 +520,8 @@ fn push_precip(
         cam_right,
         cam_up,
         cam_pos,
-        lighting.fog_color,
+        mist_color,
+        puff,
     );
     quads.commit_quads(
         start,

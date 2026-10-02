@@ -6,6 +6,7 @@
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
 
+use crate::modern::weather::PuffLook;
 use crate::weather::{WeatherKind, WeatherState};
 
 use super::pool::{HeightCache, CELL};
@@ -212,6 +213,16 @@ pub(super) fn run_mist(
     mist.nodes.retain(|n| n.age < n.life);
 }
 
+/// The reference's puff, a classic frame's: 12×12, alpha `linearstep(6, 18)` uncapped.
+// fork: modern weather — the look is a parameter; a modern frame passes `modern::weather::PUFF`.
+pub(super) const REFERENCE_PUFF: PuffLook = PuffLook {
+    half: MIST_HALF,
+    near: MIST_ALPHA_NEAR,
+    far: MIST_ALPHA_FAR,
+    fade: MIST_FADE_S,
+    alpha: 1.0,
+};
+
 /// Mist puffs: 12×12 camera-facing quads in the current fog colour (so drawn fog-off), alpha per
 /// corner (`0x67add0`, packed at `0x67ae20`) so a quad beside the camera shows its far corners.
 pub(super) fn push_mist(
@@ -221,13 +232,15 @@ pub(super) fn push_mist(
     cam_up: Vec3,
     cam_pos: Vec3,
     fog_color: [f32; 3],
+    look: PuffLook,
 ) {
-    let r = cam_right * MIST_HALF;
-    let u = cam_up * MIST_HALF;
+    let r = cam_right * look.half;
+    let u = cam_up * look.half;
     for node in mist.nodes.iter().take(MIST_CAP) {
         // A wall-bound puff's life was cut at spawn, so this same ramp fades it before the wall.
-        let trapezoid = (node.age / MIST_FADE_S).clamp(0.0, 1.0)
-            * ((node.life - node.age) / MIST_FADE_S).clamp(0.0, 1.0);
+        let trapezoid = (node.age / look.fade).clamp(0.0, 1.0)
+            * ((node.life - node.age) / look.fade).clamp(0.0, 1.0)
+            * look.alpha;
         let c = node.pos;
         // Perimeter order (bl, br, tr, tl).
         for (corner, uv) in [
@@ -236,9 +249,8 @@ pub(super) fn push_mist(
             (c + r + u, [1.0, 0.0]),
             (c - r + u, [0.0, 0.0]),
         ] {
-            let dist_a = ((corner.distance(cam_pos) - MIST_ALPHA_NEAR)
-                / (MIST_ALPHA_FAR - MIST_ALPHA_NEAR))
-                .clamp(0.0, 1.0);
+            let dist_a =
+                ((corner.distance(cam_pos) - look.near) / (look.far - look.near)).clamp(0.0, 1.0);
             out.push(crate::particles::buffer::EffectVertex {
                 pos: corner.to_array(),
                 uv,
@@ -251,6 +263,77 @@ pub(super) fn push_mist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One mid-life puff `dist` yards down −Z from a camera at the origin, as pushed vertices.
+    fn pushed(dist: f32, age: f32, look: PuffLook) -> Vec<crate::particles::buffer::EffectVertex> {
+        let mist = Mist {
+            nodes: vec![MistNode {
+                pos: Vec3::new(0.0, 0.0, -dist),
+                dir: Vec3::ZERO,
+                tail: 0.0,
+                age,
+                life: 2.7,
+                path: vec![0.0],
+                planar_speed: 0.0,
+            }],
+            budget: 0.0,
+        };
+        let mut out = Vec::new();
+        push_mist(
+            &mut out,
+            &mist,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::ZERO,
+            [0.5, 0.6, 0.7],
+            look,
+        );
+        out
+    }
+
+    /// The reference's puff: a 12×12 quad, opaque from 18 yd, nothing within 6, on 0.4 s ramps.
+    #[test]
+    fn a_classic_puff_is_the_references() {
+        let far = pushed(40.0, 1.35, REFERENCE_PUFF);
+        assert_eq!(far.len(), 4);
+        assert_eq!(far[1].pos[0] - far[0].pos[0], 12.0);
+        assert_eq!(far[3].pos[1] - far[0].pos[1], 12.0);
+        assert!(far.iter().all(|v| v.color == [0.5, 0.6, 0.7, 1.0]));
+        // Its centre 12 yd out: the corners are √(12² + 6² + 6²) = 14.7 yd from the eye.
+        let mid = pushed(12.0, 1.35, REFERENCE_PUFF);
+        let want = ((12.0f32 * 12.0 + 72.0).sqrt() - 6.0) / 12.0;
+        assert!(mid.iter().all(|v| (v.color[3] - want).abs() < 1e-6));
+        // Half-way up the 0.4 s fade-in.
+        let young = pushed(40.0, 0.2, REFERENCE_PUFF);
+        assert!(young.iter().all(|v| (v.color[3] - 0.5).abs() < 1e-6));
+    }
+
+    /// A modern frame's puff covers less of the screen and never more than its cap, and close to
+    /// the camera (12 yd) it is under half as opaque as the reference's.
+    #[test]
+    fn a_modern_puff_is_smaller_fainter_and_farther_off() {
+        let look = crate::modern::weather::PUFF;
+        let far = pushed(40.0, 1.35, look);
+        let edge = far[1].pos[0] - far[0].pos[0];
+        assert_eq!(edge, 2.0 * look.half);
+        assert!(edge * edge <= 0.7 * 144.0, "{edge} yd");
+        assert!(far.iter().all(|v| v.color[3] == look.alpha));
+        assert!(look.alpha < 1.0);
+        for dist in [0.0f32, 6.0, 12.0, 18.0, 24.0, 60.0] {
+            for age in [0.1f32, 0.5, 1.35, 2.2, 2.65] {
+                let (modern, classic) =
+                    (pushed(dist, age, look), pushed(dist, age, REFERENCE_PUFF));
+                for (m, c) in modern.iter().zip(&classic) {
+                    assert!(
+                        m.color[3] <= look.alpha * c.color[3] + 1e-6,
+                        "{dist} yd, {age} s"
+                    );
+                }
+            }
+        }
+        let (near, classic) = (pushed(12.0, 1.35, look), pushed(12.0, 1.35, REFERENCE_PUFF));
+        assert!(near[0].color[3] < 0.5 * classic[0].color[3]);
+    }
 
     /// The shader leg's 38 nodes/s against the ceiling of [`MIST_CAP`].
     #[test]

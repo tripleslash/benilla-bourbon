@@ -22,6 +22,7 @@ pub mod shadow;
 mod sky;
 pub mod sun_arc;
 pub mod volumetrics;
+pub mod weather;
 
 /// The moonlight floor a modern night keeps (gamma, the ambient row's units), ramped in by the SIDN
 /// night fraction. The authored night ambient plus a key light that fades out with the moon's own
