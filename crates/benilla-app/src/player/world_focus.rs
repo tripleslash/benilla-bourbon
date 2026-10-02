@@ -119,6 +119,7 @@ pub(super) fn release_post_snap_hold(
         ),
         (With<crate::net::SelfPlayer>, With<crate::net::Embodied>),
     >,
+    self_guid: Option<Res<crate::net::SelfGuid>>,
 ) {
     let Some(p) = progress else { return };
     // Our create block has landed and any seat in it is a pending board or a ride by now.
@@ -177,6 +178,7 @@ pub(super) fn release_post_snap_hold(
             info!("worldport: ack sent, the world is resident");
         }
     }
+    let was_settling = player.settling;
     if world_ready && deck_ready && !player.awaiting_arrival {
         player.end_settle(true, now);
     } else if player.world_stale || progressed || p.loads_in_flight > 0 {
@@ -193,6 +195,26 @@ pub(super) fn release_post_snap_hold(
     } else if now >= player.settle_deadline {
         player.awaiting_arrival = false;
         player.end_settle(false, now);
+    }
+    // A transfer is a mover change, and the server's revoke belonged to the body on the map we
+    // left: vmangos takes control for the teleport (`SetClientControl(player, 0)`) and does not
+    // promise the restore. Left set, `control_lost` parks the body for the rest of the session,
+    // because nothing else clears it: the worldport arm replaces the pose and the settle releases,
+    // and neither asks. Re-claim our own body when the settle ends, with the ack, the way login
+    // does; the reference's `SetActiveMover` reset (`wire_in.rs`) is the same teardown. A
+    // possession is left alone: there the lock is the point.
+    if was_settling && !player.settling && player.control_lost && player.foreign_mover.is_none() {
+        if let (Some(net), Some(guid)) =
+            (net_cmds.as_deref(), self_guid.as_deref().and_then(|g| g.0))
+        {
+            player.control_lost = false;
+            player.reseat = true;
+            super::move_trace::mover_claim("WORLDPORT", guid);
+            let _ = net
+                .0
+                .send(crate::net::ClientCommand::SetActiveMover { guid });
+            info!("worldport: re-claimed our own body after the transfer");
+        }
     }
     // A timeout release still pays the ack: the server keeps an unacked transfer out of world
     // until logout.
