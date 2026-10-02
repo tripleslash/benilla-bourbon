@@ -347,7 +347,9 @@ pub(super) fn update_time_lighting(
         clear_fog,
         // fork: modern lighting — the diffuse row takes the same ocean ramp as `diffuse`.
         night_key: hsv_value_scale(
-            night_atmo.as_ref().map_or(atmo.sun_diffuse, |n| n.sun_diffuse),
+            night_atmo
+                .as_ref()
+                .map_or(atmo.sun_diffuse, |n| n.sun_diffuse),
             fac2,
         ),
         night_tint: night_atmo.as_ref().map_or(atmo.sun_color, |n| n.sun_color),

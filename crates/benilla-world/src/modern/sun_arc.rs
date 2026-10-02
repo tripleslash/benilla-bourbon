@@ -145,7 +145,8 @@ pub fn moon_elevation(minute: f32) -> f32 {
 /// much of the key is the moon's ([`moon_key`]).
 pub fn moonlit(row: [f32; 3], night: [f32; 3], moon_key: f32) -> [f32; 3] {
     let t = moon_key.clamp(0.0, 1.0);
-    [0, 1, 2].map(|c| row[c] + (night[c] - row[c]) * t)
+    // Both ends exact: a day frame keeps its row bit for bit, a full moon takes the night's.
+    [0, 1, 2].map(|c| row[c] * (1.0 - t) + night[c] * t)
 }
 
 fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
