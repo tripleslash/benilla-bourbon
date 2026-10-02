@@ -3762,8 +3762,8 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
     );
 }
 
-/// Every category has rows but Keybindings, which runs its own page, and each arms Defaults; a key
-/// with no rows behind it leaves Defaults dead.
+/// Every category has rows but Keybindings and AddOns, which run their own pages, and each
+/// row-backed category arms Defaults; a key with no rows behind it leaves Defaults dead.
 #[test]
 fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     benilla_formats::wow_data_or_skip!();
@@ -3776,8 +3776,17 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
         .split(',')
         .map(str::to_string)
         .collect();
-    assert_eq!(keys.len(), 9, "the nine 1.15.9 categories: {keys:?}");
+    // Ten, not nine: the tenth is AddOns, the era's own per-addon enable list, rebuilt on show from
+    // the AddOn API.
+    assert_eq!(
+        keys.len(),
+        10,
+        "the nine 1.15.9 categories + AddOns: {keys:?}"
+    );
     for key in &keys {
+        // Keybindings and AddOns own their pages: Keybindings builds its search rows on show and
+        // AddOns builds one row per installed addon, so neither is a fixed OPTIONS_PAGE_ROWS list.
+        let owns_its_page = matches!(key.as_str(), "Keybindings" | "AddOns");
         let has_rows = s
             .eval::<bool>(&format!(
                 "return BENILLA_OPTIONS_PAGE_ROWS[\"{key}\"] ~= nil and \
@@ -3785,11 +3794,22 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
             ))
             .unwrap();
         assert!(
-            has_rows || key == "Keybindings",
+            has_rows || owns_its_page,
             "{key} opens onto nothing — every category leads somewhere"
         );
         s.run(&format!("BenillaOptionsFrameCategoryListRow{key}:Click()"))
             .unwrap();
+        // Defaults resets the CVars behind a page. The AddOns page holds none: an addon's enabled
+        // state is EnableAddOn/DisableAddOn, which the host persists to `AddOns.txt` at logout, so
+        // there is nothing there for Defaults to write back — the button stays dead on it.
+        if key == "AddOns" {
+            assert!(
+                !s.eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
+                    .unwrap(),
+                "AddOns resets nothing, so Defaults is dead there"
+            );
+            continue;
+        }
         assert!(
             s.eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
                 .unwrap(),

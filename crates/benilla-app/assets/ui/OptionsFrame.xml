@@ -93,7 +93,7 @@
         -- The category tree in list order; keys are the row name suffixes.
         BENILLA_OPTIONS_CATEGORY_KEYS = {
             "Controls", "Interface", "ActionBars", "Combat", "Chat", "Keybindings", "Nameplates",
-            "Graphics", "Audio",
+            "Graphics", "Audio", "AddOns",
         }
 
         -- The era UIParent draws smaller than our 768-unit canvas; a chosen value, not the
@@ -156,13 +156,22 @@
             BenillaOptionsFrameContainerScroll:SetVerticalScroll(0)
             -- Leaving Keybindings disarms a pending capture, which must never outlive the page.
             local kb = getglobal("BenillaOptionsFrameContainerBodyKeybindings")
+            local addons = getglobal("BenillaOptionsFrameContainerBodyAddOns")
             if key == "Keybindings" then
                 kb:Show()
+                addons:Hide()
                 BenillaKeyBindingsPage_Refresh()
                 BenillaOptionsFrameContainerUnbind:Show()
                 BenillaOptionsFrameContainerDefaults:Enable()
+            elseif key == "AddOns" then
+                kb:Hide()
+                addons:Show()
+                BenillaOptionsAddOns_Refresh()
+                BenillaOptionsFrameContainerUnbind:Hide()
+                BenillaOptionsFrameContainerDefaults:Disable()
             else
                 kb:Hide()
+                addons:Hide()
                 BenillaKeyBindings_SetSelected(nil)
                 BenillaKeyBindings_Output("")
                 BenillaOptionsFrameContainerUnbind:Hide()
@@ -260,6 +269,11 @@
             for i = 1, BENILLA_KEYBINDINGS_SEARCH_ROWS do
                 take("BenillaOptionsFrameContainerBodyKeybindSearch" .. i)
             end
+            -- The AddOns page's dynamic rows: row 0 is the Load out of date AddOns row.
+            for i = 0, table.getn(BenillaOptionsAddOns_Rows) do
+                local row = BenillaOptionsAddOns_Rows[i]
+                if row then take(row:GetName()) end
+            end
             return bottom
         end
 
@@ -342,6 +356,8 @@
             for i = 1, BENILLA_KEYBINDINGS_SEARCH_ROWS do
                 getglobal("BenillaOptionsFrameContainerBodyKeybindSearch" .. i):Hide()
             end
+            -- The AddOns page is not in BENILLA_OPTIONS_PAGE_ROWS; hide it and its rows with it.
+            BenillaOptionsFrameContainerBodyAddOns:Hide()
             BenillaKeyBindingsPage.searchPainted = nil
             BenillaKeyBindings_SetSelected(nil)
             BenillaOptionsFrameContainerUnbind:Hide()
@@ -1127,6 +1143,67 @@
             BenillaOptionsApply_Update()
         end
 
+        -- ── The AddOns page: the era's per-addon enable list ──
+        -- Rows are built on show from the AddOn API: one checkbox per installed addon (its
+        -- `GetAddOnInfo` enabled state), then the Load out of date AddOns row. A toggle calls
+        -- `EnableAddOn`/`DisableAddOn`, which the host persists to `AddOns.txt` at logout, so the
+        -- change applies on the next world entry — the reference's own contract for the AddOns
+        -- screen. Row 0 is the Load out of date AddOns row.
+        BenillaOptionsAddOns_Rows = {}
+
+        function BenillaOptionsAddOns_GetRow(i)
+            local row = BenillaOptionsAddOns_Rows[i]
+            if row then return row end
+            row = CreateFrame("Frame", "BenillaOptionsFrameContainerBodyAddOnsRow" .. i,
+                BenillaOptionsFrameContainerBodyAddOns, "BenillaOptionsCheckboxRowTemplate")
+            row.index = i
+            BenillaOptionsAddOns_Rows[i] = row
+            return row
+        end
+
+        function BenillaOptionsAddOns_OnClick(box)
+            local row = box:GetParent()
+            local checked = box:GetChecked()
+            PlaySound(checked and "igMainMenuOptionCheckBoxOn" or "igMainMenuOptionCheckBoxOff")
+            if checked then
+                EnableAddOn(row.index)
+            else
+                DisableAddOn(row.index)
+            end
+        end
+
+        function BenillaOptionsAddOns_Refresh()
+            local n = GetNumAddOns()
+            local prev = nil
+            for i = 1, n do
+                local name, title, notes, enabled = GetAddOnInfo(i)
+                local row = BenillaOptionsAddOns_GetRow(i)
+                row:Show()
+                local label = getglobal(row:GetName() .. "Label")
+                label:SetText(title or name)
+                row.searchTag = string.upper(title or name)
+                local box = getglobal(row:GetName() .. "Check")
+                box:SetChecked(enabled)
+                box:SetScript("OnClick", BenillaOptionsAddOns_OnClick)
+                BenillaOptionsSearch_Place(row:GetName(), prev)
+                prev = row:GetName()
+            end
+            for i = n + 1, table.getn(BenillaOptionsAddOns_Rows) do
+                BenillaOptionsAddOns_Rows[i]:Hide()
+            end
+            -- The Load out of date AddOns row, under the list; inverted, `checkAddonVersion`
+            -- "1" enforces the check (`0x402c3b`), so checked means "0".
+            local lod = BenillaOptionsAddOns_GetRow(0)
+            if not lod.cvar then
+                BenillaOptionsRow_OnLoad(lod, "checkAddonVersion", "Load out of date AddOns")
+                lod.invert = 1
+            end
+            lod:Show()
+            getglobal(lod:GetName() .. "Check"):SetChecked(
+                BenillaOptionsRow_Get(lod) == "0" and 1 or nil)
+            BenillaOptionsSearch_Place(lod:GetName(), prev)
+        end
+
         -- Each page's dependency rules, the 1.12 panel's own.
         function BenillaOptionsPage_UpdateDependencies(key)
             if key == "Combat" then
@@ -1705,7 +1782,7 @@
                 <NormalFont inherits="GameFontNormalSmall"/>
                 <HighlightFont inherits="GameFontNormalSmall"/>
                 <DisabledFont inherits="GameFontNormalSmall"/>
-                <!-- No addon list behind it: disabled, in the era's unselected gold. -->
+                <!-- The AddOns page below: the era's per-addon enable list. -->
                 <Scripts>
                     <OnLoad>this:Disable()</OnLoad>
                 </Scripts>
@@ -1771,6 +1848,10 @@
                     <Button name="$parentRowAudio" inherits="BenillaOptionsCategoryRowTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowGraphics" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaOptionsCategoryRow_OnLoad(this, "Audio", "Audio")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowAddOns" inherits="BenillaOptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowAudio" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaOptionsCategoryRow_OnLoad(this, "AddOns", "AddOns")</OnLoad></Scripts>
                     </Button>
                 </Frames>
             </Frame>
@@ -2183,6 +2264,15 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
+                                </Frame>
+                                <!-- The era AddOns page: one checkbox per installed addon (enabled
+                                     state), then the Load out of date AddOns row; the rows are
+                                     built by BenillaOptionsAddOns_Refresh on show. -->
+                                <Frame name="$parentAddOns" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
                                 </Frame>
                                 <!-- No useUiScale checkbox, which 1.12 has: benilla registers
                                      useUiScale but never reads it, so the UI scale always
