@@ -27,8 +27,9 @@ use benilla_world::world_map::CurrentMap;
 
 /// The cover's input half: while it is up the client takes no input (a source cut in `PreUpdate`).
 mod input;
-// The capture probes order after it (a `dev` build's).
-#[cfg(feature = "dev")]
+// The capture probes order after it, so a build without the instruments leaves it unused.
+// Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
+#[allow(unused_imports)]
 pub(crate) use input::CoverInput;
 
 // The bar, from the `LoadingScreen.cpp` descriptor table at `0x7ffd34` (read by `0x407150`):

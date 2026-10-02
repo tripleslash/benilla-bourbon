@@ -46,13 +46,11 @@ pub(crate) use motion::{
     grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
     UnitMoveModes,
 };
-// The `WOW_GROUND_CENSUS` instrument's population (a `dev` build's).
-#[cfg(feature = "dev")]
-pub(crate) use motion::ground_derived;
-// Only the ground-census probe reads this, so a build without the instruments leaves it unused.
-// Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
+// Only the ground-census probe reads these, so a build without the instruments leaves them
+// unused. Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of
+// them.
 #[allow(unused_imports)]
-pub(crate) use motion::GroundClamped;
+pub(crate) use motion::{ground_derived, GroundClamped};
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {

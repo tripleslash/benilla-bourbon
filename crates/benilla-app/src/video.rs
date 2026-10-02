@@ -327,7 +327,7 @@ pub(crate) fn on_cvar(
         // dev build's capture pin (`$WOW_FOLIAGE_WIND` under `$WOW_CAPTURE`) holds its tier.
         "foliagewind" => {
             if let Some(wind) = fork.3.as_deref_mut() {
-                let pinned = cfg!(feature = "dev")
+                let pinned = crate::run_mode::dev_affordances()
                     && benilla_world::wind::FoliageWind::capture_override().is_some();
                 if !pinned {
                     wind.0 = v.clamp(0.0, 2.0) as u8;
