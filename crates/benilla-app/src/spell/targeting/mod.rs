@@ -798,7 +798,7 @@ mod tests {
                 .expect("the feed runs");
             world
                 .non_send::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };
         for token in ["pettarget", "playertarget", "PETTARGET", "target"] {
@@ -986,7 +986,7 @@ mod tests {
                 .expect("the feed runs");
             let hover = world
                 .non_send::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean");
             assert_eq!(hover, binds, "{label}: the hover verdict");
 
@@ -1224,7 +1224,7 @@ mod tests {
                     .expect("the feed runs");
                 let hover = world
                     .non_send::<UiScript>()
-                    .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                    .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                     .expect("a boolean");
                 assert_eq!(hover, binds, "{label}: the hover verdict");
 
@@ -1277,7 +1277,7 @@ mod tests {
                 .expect("the feed runs");
             world
                 .non_send::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };
         assert!(can(10.0, HEAL, "target"), "in range");

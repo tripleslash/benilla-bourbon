@@ -472,13 +472,11 @@ fn ranged_load_idle_selects_by_weapon_and_ranks_below_ready() {
         gait_candidates(&moving_forward(3.0), 2.5, None, Some(105))[0],
         4
     );
-    // It takes the bare-Stand slot, so it also blocks the state-emote idle.
-    assert!(!is_bare_stand(gait_candidates(
-        &standing,
-        2.5,
-        None,
-        Some(105)
-    )));
+    // It outranks the state-emote resolver (`0x5fd460` runs before `0x5fd770`).
+    assert_eq!(
+        base_candidates(&standing, 2.5, None, Some(105), Some(234)).as_slice(),
+        &[105, 25, 0]
+    );
 }
 
 /// `0x5fd460` claims the drawn ranged idle ([`ranged_idle_gate`]) on the ranged sheath
@@ -510,46 +508,85 @@ fn each_ranged_load_promotes_to_its_weapon_familys_hold() {
     assert_eq!(ranged_hold_anim(46), 46); // a fire id is no Load and maps onto no hold
 }
 
+/// The state-emote resolver (`0x5fd770`) runs right after the chair loops and before the idle
+/// fallback (`0x5fd830`, `0x5fd9a1`): a set state outranks the swim idle, the prowl idle and
+/// Stand, and everything ahead of it outranks the state.
 #[test]
-fn state_emote_idle_only_fills_the_bare_stand_slot() {
-    assert!(is_bare_stand(gait_candidates(
-        &MovementState::default(),
-        2.5,
-        None,
-        None
-    )));
-    assert_eq!(state_emote_gait(200), [200, STAND]);
-
-    assert!(!is_bare_stand(gait_candidates(
-        &moving_forward(3.0),
-        2.5,
-        None,
-        None
-    )));
-    let turning = MovementState {
-        flags: move_flags::TURN_LEFT,
-        ..Default::default()
+fn a_set_state_outranks_the_idle_fallbacks_and_nothing_before_them() {
+    let claimed = |state: &MovementState, ready, ranged, anim| {
+        base_candidates(state, 2.5, ready, ranged, anim)
+            .as_slice()
+            .to_vec()
     };
-    assert!(!is_bare_stand(gait_candidates(&turning, 2.5, None, None)));
+    let still = MovementState::default();
+    assert_eq!(claimed(&still, None, None, Some(234)), [234, STAND]);
+    assert_eq!(claimed(&still, None, None, None), [STAND]);
+
+    // Behind it: the swim idle (`/stand`, state 26, plays AnimID 0) and the prowl idle.
     let swimming = MovementState {
         flags: move_flags::SWIMMING,
         ..Default::default()
     };
-    assert!(!is_bare_stand(gait_candidates(&swimming, 2.5, None, None)));
-    assert!(!is_bare_stand(gait_candidates(
-        &MovementState::default(),
-        2.5,
-        Some(26),
-        None
-    )));
-    // The chair stand states 4, 5 and 6 have their own slot, above bare Stand.
-    for stand_state in [4, 5, 6] {
-        let chair = MovementState {
-            stand_state,
-            ..Default::default()
-        };
-        assert!(!is_bare_stand(gait_candidates(&chair, 2.5, None, None)));
-    }
+    assert_eq!(claimed(&swimming, None, None, None), [41, 0]);
+    assert_eq!(claimed(&swimming, None, None, Some(0)), [0, STAND]);
+    assert_eq!(claimed(&swimming, None, None, Some(234)), [234, STAND]);
+    let prowling = MovementState {
+        stealthed: true,
+        ..Default::default()
+    };
+    assert_eq!(claimed(&prowling, None, None, None), [STEALTH_STAND, STAND]);
+    assert_eq!(claimed(&prowling, None, None, Some(234)), [234, STAND]);
+
+    // Ahead of it: locomotion (`0x5fd100`), swimming included, runs on the move bits alone.
+    let swim_forward = MovementState {
+        flags: move_flags::SWIMMING | move_flags::FORWARD,
+        ..Default::default()
+    };
+    assert_eq!(claimed(&swim_forward, None, None, Some(234)), [42, 41, 0]);
+    assert_eq!(claimed(&moving_forward(3.0), None, None, Some(234)), [4, 0]);
+    // The turn shuffle, the Ready idle (a swimmer's is the swim idle), the ranged idle and the
+    // chair loops all come first.
+    let turning = MovementState {
+        flags: move_flags::TURN_LEFT,
+        ..Default::default()
+    };
+    assert_eq!(claimed(&turning, None, None, Some(234)), [11, 0]);
+    assert_eq!(claimed(&still, Some(26), None, Some(234)), [26, 25, 0]);
+    assert_eq!(claimed(&swimming, Some(26), None, Some(234)), [41, 0]);
+    assert_eq!(claimed(&still, None, Some(105), Some(234)), [105, 25, 0]);
+    // `0x5fd460` has no swim gate: a swimmer takes it too.
+    assert_eq!(claimed(&swimming, None, Some(105), Some(234)), [105, 25, 0]);
+    let chair = MovementState {
+        stand_state: 4,
+        ..Default::default()
+    };
+    assert_eq!(claimed(&chair, None, None, Some(234)), [102, 0]);
+    // A turning swimmer is no shuffle (`0x5fce30` refuses `SWIMMING`) and no mover: the state.
+    let swim_turning = MovementState {
+        flags: move_flags::SWIMMING | move_flags::TURN_LEFT,
+        ..Default::default()
+    };
+    assert_eq!(claimed(&swim_turning, None, None, Some(234)), [234, STAND]);
+    assert_eq!(claimed(&swim_turning, None, None, None), [41, 0]);
+}
+
+/// The resolver's verdict: a row's `AnimID` is taken as it is, 0 included (`0x5fd816`); a missing
+/// row or no state passes over; the interact NPC passes over a row with `0x2000`.
+#[test]
+fn the_state_resolver_claims_a_row_even_when_its_anim_is_stand() {
+    assert_eq!(state_emote_anim(26, Some(0), Some(0), false), Some(0));
+    assert_eq!(
+        state_emote_anim(28, Some(234), Some(0x2000), false),
+        Some(234)
+    );
+    assert_eq!(state_emote_anim(28, Some(234), Some(0x2000), true), None);
+    assert_eq!(state_emote_anim(29, Some(235), Some(0), true), Some(235));
+    assert_eq!(state_emote_anim(30, None, None, false), None, "no row");
+    assert_eq!(
+        state_emote_anim(0, Some(0), Some(0), false),
+        None,
+        "no state"
+    );
 }
 
 // ── The per-play one-shot route ──
@@ -631,12 +668,68 @@ fn route_classifier_memberships_are_the_decoded_bytes() {
     for id in [16, 17, 18, 19, 85, 87, 88, 117] {
         assert!(is_combat(id) && is_class_a(id), "swing {id}");
     }
-    for id in [17, 66, 68, 80] {
-        assert!(is_class_a(id), "class-A {id}");
+    // The whole table, member and non-member alike, from the decoded bytes of `0x5fed90`.
+    let class_a: Vec<u16> = [2, 8, 9, 10, 14, 15]
+        .into_iter()
+        .chain(16..=36)
+        .chain(46..=49)
+        .chain(51..=74)
+        .chain(76..=78)
+        .chain(80..=90)
+        .chain(105..=113)
+        .chain([117, 118])
+        .chain(122..=125)
+        .chain(128..=130)
+        .chain([133, 134])
+        .chain(136..=138)
+        .chain([185, 186, 195])
+        .collect();
+    for id in 0..=300u16 {
+        assert_eq!(is_class_a(id), class_a.contains(&id), "CLASS_A {id}");
+    }
+    // The mount-set, `0x5fec80`.
+    let mount: Vec<u16> = [0, 1]
+        .into_iter()
+        .chain(3..=6)
+        .chain(8..=13)
+        .chain(37..=45)
+        .chain(92..=95)
+        .chain([119, 120, 127, 131, 132, 135, 143, 187])
+        .collect();
+    for id in 0..=300u16 {
+        assert_eq!(is_mount_set(id), mount.contains(&id), "mount-set {id}");
     }
     // Forced-full-body carve-outs never mask, even seated.
     for id in [1, 6, 131, 132, 57, 58, 118] {
         assert_eq!(route_oneshot(id, 0, 1), FullBody, "forced full-body {id}");
+    }
+}
+
+#[test]
+fn mounted_routing_sends_each_id_where_the_bytes_do() {
+    let r = |id| route_mounted(id);
+    // EmoteKneel and EmoteBeg are in neither set: they play nowhere.
+    for id in [75, 79] {
+        assert_eq!((r(id).mount, r(id).rider_upper), (false, false), "{id}");
+    }
+    assert_eq!((r(68).mount, r(68).rider_upper), (false, true));
+    assert_eq!((r(12).mount, r(12).rider_upper), (true, false));
+    // Wound ids 8-10 are in both.
+    assert_eq!((r(9).mount, r(9).rider_upper), (true, true));
+}
+
+#[test]
+fn standing_eat_is_masked_whatever_the_state() {
+    assert_eq!(route_oneshot(61, 0, 0), Masked);
+    assert_eq!(route_oneshot(61, move_flags::FORWARD, 0), Masked);
+    assert_eq!(route_oneshot(61, 0, 1), Masked);
+}
+
+#[test]
+fn whirlwind_and_birth_play_full_body_while_moving() {
+    for id in [126, 127] {
+        assert_eq!(route_oneshot(id, move_flags::FORWARD, 0), FullBody, "{id}");
+        assert_eq!(route_oneshot(id, 0, 1), FullBody, "{id}");
     }
 }
 
@@ -975,9 +1068,10 @@ fn the_prowl_idle_is_the_lowest_priority_stand() {
         gait_candidates(&idle, 2.5, None, None),
         &[STEALTH_STAND, STAND],
     );
-    assert!(
-        is_bare_stand(gait_candidates(&idle, 2.5, None, None)),
-        "the state-emote idle still owns this slot",
+    assert_eq!(
+        base_candidates(&idle, 2.5, None, None, Some(234)).as_slice(),
+        &[234, STAND],
+        "a set state outranks it",
     );
     let chair = MovementState {
         stand_state: 4,

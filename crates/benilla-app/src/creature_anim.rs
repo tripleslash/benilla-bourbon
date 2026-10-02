@@ -424,6 +424,10 @@ pub(crate) struct EmoteAnim {
     pub(crate) anim_id: u16,
     /// `PlaySeq` stamp; a kit anim inherits its `CastEvent`'s.
     pub(crate) seq: u64,
+    /// Came through the shared one-shot emote player (`0x5fcd20`: `SMSG_EMOTE`, the gesture
+    /// dispatcher), which skips an id already armed on the key bone or bone 0 (`0x5fcd56`). A kit
+    /// anim and `DoEmote`'s local play call `0x5fe2f0` directly and take no such test.
+    pub(crate) via_player: bool,
 }
 
 /// A state kit's `AnimID`, compared and never played: both field-4 callers (`0x5ff4c6`,
@@ -465,6 +469,7 @@ fn flourish_to_anim(
             entity: child.0,
             anim_id: select::MOUNT_SPECIAL,
             seq: play_seq.next(),
+            via_player: false,
         });
     }
 }
@@ -511,6 +516,7 @@ mod emote_anim;
 /// The client-local gestures (chat, NPC interact), the reference's `0x60bb30`.
 mod gesture;
 use emote_anim::emote_to_anim;
+pub(crate) use emote_anim::{local_play_eligible, LocalPlay};
 pub(crate) use gesture::{select_gesture, Gesture, GestureQueue};
 
 /// The Bevy systems that execute the state machine `select` picks.
@@ -564,6 +570,16 @@ pub(crate) struct AnimDriver {
     /// The movement flags the base was last armed for: the reference has no per-one-shot latch,
     /// so a root landing with a cast one-shot (Ice Block) still lets the base overwrite bone 0.
     gait_flags: u32,
+    /// Whether the unit was the interact NPC last frame: `SetInteractNPC` (`0x4930d0`) re-picks
+    /// its base on open (`0x493198`) and on clear (`0x493219`), so a flip cuts a one-shot.
+    interacting: bool,
+    /// Whether the interaction in `interacting` (or the one just cleared) targets a player, whose
+    /// open and clear skip the re-pick (`0x493159`, `0x493203`: the PLAYER typemask bit).
+    interact_player: bool,
+    /// The clear's re-pick (`0x493219`) runs while `[0xb4e2d0]` still names the NPC, so it picks
+    /// Stand; the global is zeroed after (`0x49334b`). The state returns at the next re-pick:
+    /// the Stand window's end, a movement-flag edge, or leaving Gait.
+    interact_hold: bool,
     /// The reference's `[unit+0xd58] & 0xc0000`: while Knockdown, LiftOff or Land holds it, base
     /// requests are refused, so a stun's knockdown survives the root's Stand recompute.
     base_lock: driver::play::BaseAnimLock,
@@ -673,6 +689,9 @@ impl Default for AnimDriver {
             mode: Mode::Gait,
             gait: None,
             gait_flags: 0,
+            interacting: false,
+            interact_player: false,
+            interact_hold: false,
             base_lock: driver::play::BaseAnimLock::default(),
             sheath_cur: None,
             sheath_byte: None,
@@ -828,6 +847,8 @@ impl Plugin for CreatureAnimPlugin {
                     // Same frame as the loot kneel: the reference force-plays Loot 50 in the
                     // handler that arms the latch.
                     .after(crate::ui_loot::resolve_loot_kneel)
+                    // `DoEmote`'s local play, written in the chat drain.
+                    .after(crate::ui_chat::ChatDrain)
                     // After Input so a sheath request (the Z toggle) executes the same frame.
                     .after(WorldStage::Input)
                     // `VisualSheath` must land before `resolve_equipment` reads it, or a sheath

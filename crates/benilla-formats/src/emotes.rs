@@ -11,7 +11,13 @@ use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::dbc::{parse, str_at, u32_at};
 
+/// The `EmoteFlags` bit `0x2000`: a state emote that yields to an interaction. The state
+/// resolver (`0x5fd7fa`) passes over it for the current interact NPC, and the facing chain
+/// (`0x600d98`) lets the unit turn toward the interactor while it is set.
+pub const EMOTE_FLAG_INTERACTION: u32 = 0x2000;
+
 /// The joined emote tables.
+#[derive(Default)]
 pub struct EmoteSoundCatalog {
     /// Uppercased `EmotesText.Name` ("WAVE") to text-emote id.
     by_name: HashMap<String, u32>,
@@ -60,6 +66,22 @@ impl EmoteSoundCatalog {
     /// the looping `UNIT_NPC_EMOTESTATE` idle, which share the id space.
     pub fn anim(&self, emote_id: u32) -> Option<u32> {
         self.anim.get(&emote_id).copied().filter(|&a| a != 0)
+    }
+
+    /// A catalog holding one `Emotes.dbc` row's `AnimID` and `EmoteFlags`, for tests of what
+    /// reads them.
+    #[doc(hidden)]
+    pub fn with_row(mut self, emote_id: u32, anim_id: u32, flags: u32) -> Self {
+        self.anim.insert(emote_id, anim_id);
+        self.emote_flags.insert(emote_id, flags);
+        self
+    }
+
+    /// The raw `AnimID` of an `Emotes.dbc` row, `0` (Stand) included: the state resolver
+    /// (`0x5fd770`) claims the base with whatever the row holds (`0x5fd816`, `row+8`), and a
+    /// missing row claims nothing.
+    pub fn state_anim(&self, emote_id: u32) -> Option<u32> {
+        self.anim.get(&emote_id).copied()
     }
 
     /// The `Emotes.dbc` id in gesture `slot`, the `code` the client's gesture dispatcher
@@ -230,6 +252,14 @@ mod tests {
         let cat = load_emote_sound_catalog(&mut chain).expect("load emote catalog");
         assert_eq!(cat.text_id("wave"), Some(101), "case-insensitive by name");
         assert_eq!(cat.text_emote(101), Some(3), "WAVE plays anim emote 3");
+        // A chat-only text emote has `EmoteID` 0, which `DoEmote` (`0x5ef591`) reads as row 0.
+        assert_eq!(
+            cat.text_emote(cat.text_id("smile").unwrap()),
+            None,
+            "SMILE is chat-only"
+        );
+        assert_eq!(cat.emote_flags(0), Some(0), "row 0 exists with no flags");
+        assert_eq!(cat.spec_proc(0), Some(0), "row 0 is no posture emote");
         assert_eq!(cat.anim(2), Some(66), "ONESHOT_BOW (id 2) plays AnimID 66");
         // The posture-gate rows (`0x47db40`), ids from vmangos `SharedDefines.h`'s `Emote` enum.
         assert_eq!(cat.emote_flags(2), Some(0x4801), "ONESHOT_BOW EmoteFlags");

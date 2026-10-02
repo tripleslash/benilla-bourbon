@@ -69,12 +69,15 @@ pub(crate) use relations::{
 // pet bar's; the melee probe's press with nothing selected.
 pub(crate) use scan::{AttackNearestRequest, AttackPick};
 // The chat layer's by-name asks (`/target`, `/assist`).
-pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
+pub(crate) use by_name::{AssistRequest, PlayerLookup, TargetByNameRequest};
+// The one SetSelection path, for the loot response's select (`0x48f3a0`).
+pub(crate) use by_name::SelectCommit;
 // The reaction decode and its faction catalog, which also tint the target frame
 // (`TargetFrame_CheckFaction`); `duel_rung` is the same walk, for `/reaction`.
 pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
 
 pub(crate) use click::DeselectGuid;
+pub use click::Interact;
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -286,6 +289,7 @@ impl Plugin for TargetPlugin {
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
             .add_message::<click::DeselectGuid>()
+            .add_message::<Interact>()
             .add_systems(Startup, (ring::setup_ring, reticle::setup_reticle))
             .add_data_loaders((ring::load_factions, scan::load_creature_types))
             // After input, so this frame's `WorldClick` is here, in order: the picks, the cursor,
@@ -320,7 +324,13 @@ impl Plugin for TargetPlugin {
                     // order is free.
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
-                    click::act_on_right_click,
+                    // The verb a walk owes runs at its stop, ahead of this frame's click.
+                    (
+                        click::act_on_arrival,
+                        click::act_on_right_click,
+                        click::act_on_interact,
+                    )
+                        .chain(),
                     // The loot close's guid-scoped deselect.
                     click::clear_target_requests,
                     // The script calls that touch the selection, the cast or the targeting cursor

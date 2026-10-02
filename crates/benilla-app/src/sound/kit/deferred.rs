@@ -44,7 +44,10 @@ use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::TryRead;
 use benilla_protocol::events::EntityKind;
 
-use super::{play_file, play_kit_ext, KitRef, PlayExtras, SoundCategory, SoundKits};
+use super::{
+    play_file, play_kit_ext, stop_older_emote_voices, KitRef, Latch, PlayExtras, SoundCategory,
+    SoundKits,
+};
 use crate::sound::creature::CreatureVoices;
 use crate::sound::{web_decode, AudioListener, SoundConfig, SoundOutput};
 
@@ -217,7 +220,15 @@ pub(super) fn land_sfx_loads(
                         ..extras
                     },
                 )
-                .map(|_| ()),
+                .map(|opened| {
+                    // An emote voice that missed opened no channel, so its caller stopped
+                    // nothing (`0x623c55`): the replay is the play that takes the unit's slot.
+                    if let (true, Latch::EmoteVoice, Some(unit)) =
+                        (opened, extras.latch, extras.source)
+                    {
+                        stop_older_emote_voices(&mut out, unit);
+                    }
+                }),
                 Deferred::File { path, category } => {
                     play_file(&mut kits, &assets, &mut out, &config, &path, category)
                 }

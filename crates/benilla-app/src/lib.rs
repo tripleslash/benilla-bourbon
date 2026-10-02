@@ -349,6 +349,10 @@ pub fn wants_worldview() -> bool {
     webenv::var("WOW_WORLDVIEW").as_deref() == Some("1")
 }
 pub use bevy::app::AppExit;
+// A crate on top of benilla reads objects and interacts through these, with no protocol dependency.
+pub use benilla_protocol::{messages::ObjectType, ObjectFields};
+pub use net::Objects;
+pub use target::Interact;
 
 /// Take `LogPlugin` off the **web** build — always in a shipped one, and in a debug one while the
 /// stutter probe is armed, so the browser console carries the probe's lines and nothing else.
