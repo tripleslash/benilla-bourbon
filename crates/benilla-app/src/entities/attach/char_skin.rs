@@ -94,11 +94,12 @@ pub(super) fn resolve_char_look(
     None
 }
 
-/// The `mpq://` URL of a baked NPC atlas under `Textures\BakedNpcTextures\`.
+/// The `mpq://` URL of a baked NPC atlas under `Textures\BakedNpcTextures\`. A bake name with no
+/// extension (some Turtle rows) asks for its `.blp`, as every texture name does.
 fn baked_npc_url(bake_name: &str) -> String {
-    format!(
-        "mpq://textures/bakednpctextures/{}",
-        bake_name.replace('\\', "/").to_ascii_lowercase()
+    benilla_assets::texture_url(
+        &format!("Textures\\BakedNpcTextures\\{bake_name}"),
+        (true, true),
     )
 }
 
@@ -431,4 +432,23 @@ pub(super) fn build_char_skin_materials(
         });
 
     (body, hair, object, skin_extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::baked_npc_url;
+
+    /// Vanilla's bake names carry `.blp`; Turtle's display 4729 (extra row 12488) names its
+    /// atlas bare, and a URL with no extension picks no loader, which left the body untextured.
+    #[test]
+    fn a_bake_name_with_or_without_its_extension_asks_for_the_blp() {
+        assert_eq!(
+            baked_npc_url("fa1833128da792145a62c21976584c9"),
+            "mpq://textures/bakednpctextures/fa1833128da792145a62c21976584c9.blp"
+        );
+        assert_eq!(
+            baked_npc_url("973E54E79012EEA3F2658F2897E681D9.blp"),
+            "mpq://textures/bakednpctextures/973e54e79012eea3f2658f2897e681d9.blp"
+        );
+    }
 }
