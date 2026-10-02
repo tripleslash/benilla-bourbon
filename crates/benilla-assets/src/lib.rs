@@ -678,7 +678,8 @@ mod tests {
         let images = app.world().resource::<Assets<Image>>();
         let layer = images.get(&layer_h).expect("layer array present");
         assert_eq!(
-            layer.texture_descriptor.size.width, 256,
+            layer.texture_descriptor.size.width,
+            crate::terrain::LAYER_TEX_SIZE,
             "layer array packed at LAYER_TEX_SIZE"
         );
         assert!(
