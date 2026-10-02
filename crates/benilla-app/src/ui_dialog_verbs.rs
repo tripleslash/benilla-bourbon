@@ -199,6 +199,10 @@ pub(crate) struct BattlefieldQueue {
     instance_expiration: Option<Instant>,
     /// Status 3 fires `UPDATE_BATTLEFIELD_SCORE` before `_STATUS` (`0x4aaa5a`, then `0x4aab05`).
     score_dirty: bool,
+    /// The player left the battleground: the active slot lost its instance, or the same slot's map
+    /// went to zero. The handler already zeroes the run-time clocks on both, so the scoreboard's
+    /// winner goes with them — [`crate::ui_battlefield_score::feed_battlefield_score`] takes this.
+    board_cleared: bool,
     /// Tutorials the handler triggers (`0x2f` on queued, `0x30` on confirm), owed to the next feed.
     tutorials: Vec<u32>,
 }
@@ -219,6 +223,7 @@ impl BattlefieldQueue {
             if self.active.is_some_and(|(i, _)| i == index) {
                 self.run_started = None;
                 self.instance_expiration = None;
+                self.board_cleared = true;
             }
             *slot = None;
             self.changed = true;
@@ -245,6 +250,7 @@ impl BattlefieldQueue {
                 self.instance_expiration = None;
                 if self.active.is_some_and(|(i, _)| i == index) {
                     self.active = None;
+                    self.board_cleared = true;
                 }
             }
         }
@@ -281,6 +287,11 @@ impl BattlefieldQueue {
 
     pub(crate) fn take_score_dirty(&mut self) -> bool {
         std::mem::take(&mut self.score_dirty)
+    }
+
+    /// Take the "the player left the battleground" mark. One packet, one board to zero.
+    pub(crate) fn take_board_cleared(&mut self) -> bool {
+        std::mem::take(&mut self.board_cleared)
     }
 
     /// The map id `AcceptBattlefieldPort` sends for a 1-based slot, if the slot holds a queue.

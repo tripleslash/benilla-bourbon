@@ -101,7 +101,7 @@ fn resolve_board(
 
 pub(crate) fn feed_battlefield_score(
     script: Option<NonSendMut<UiScript>>,
-    board: Res<BattlefieldScoreboard>,
+    mut board: ResMut<BattlefieldScoreboard>,
     mut queue: ResMut<BattlefieldQueue>,
     catalog: Option<Res<WorldStateUiRes>>,
     names: Res<NameCache>,
@@ -115,21 +115,39 @@ pub(crate) fn feed_battlefield_score(
     let now = Instant::now();
     script.set_battlefield_run_time_ms(queue.run_time_ms(now));
 
+    // Leaving the battleground ends the board, and `SMSG_BATTLEFIELD_STATUS` is the packet that
+    // says so: the active slot's map to zero, or that same slot losing its instance. The queue
+    // handler already zeroes the run-time clocks on both, so the winner goes with them. Left set,
+    // `GetBattlefieldWinner()` answers the finished battleground's winner in the open world, the
+    // stock frame shows the end-of-battleground panel again on the next score event
+    // (`WorldStateFrame.lua:351-355`), and `LeaveBattlefield` targets a map nobody is in — the
+    // button that cannot leave anything.
+    let left = queue.take_board_cleared();
+    if left {
+        *board = BattlefieldScoreboard::default();
+    }
+
     let ask = Ask::at(board.is_changed(), &commands);
-    let fresh = board.log.as_ref().and_then(|log| {
-        let rows = resolve_board(log, &names, ask, unit_names.get())?;
-        let columns = queue
-            .active_map()
-            .zip(catalog.as_deref())
-            .map(|(map, cat)| score_columns(cat, map))
-            .unwrap_or_default();
-        Some(BattlefieldScores {
-            rows,
-            ended: log.ended,
-            winner: log.winner.unwrap_or(0),
-            columns,
+    let fresh = if left {
+        // The empty board has to be pushed, not just withheld: the VM keeps whatever board it was
+        // last handed, so a clear the feed does not push leaves `GetBattlefieldWinner()` standing.
+        Some(BattlefieldScores::default())
+    } else {
+        board.log.as_ref().and_then(|log| {
+            let rows = resolve_board(log, &names, ask, unit_names.get())?;
+            let columns = queue
+                .active_map()
+                .zip(catalog.as_deref())
+                .map(|(map, cat)| score_columns(cat, map))
+                .unwrap_or_default();
+            Some(BattlefieldScores {
+                rows,
+                ended: log.ended,
+                winner: log.winner.unwrap_or(0),
+                columns,
+            })
         })
-    });
+    };
     let last = last.get(&script);
     // A held-back board is the reference's pending names: the VM's rebuild waits on it.
     script.set_battlefield_score_names_pending(board.log.is_some() && fresh.is_none());
@@ -217,6 +235,7 @@ impl Plugin for BattlefieldScorePlugin {
 mod tests {
     use super::*;
     use benilla_formats::{WorldStateUiCatalog, WorldStateUiRow};
+    use benilla_protocol::messages::BattlefieldStatus;
 
     /// The log packet looks each row's name up with the callback `0x4a9ef0` (`0x4aac79`); the
     /// frames its board waits through read. A refused name is asked by no frame after it, only by
@@ -335,5 +354,127 @@ mod tests {
         let board = app.world().resource::<BattlefieldScoreboard>();
         assert!(board.log.is_none());
         assert!(board.last_request.is_none());
+    }
+
+    fn status(slot: u32, map_id: u32, in_progress: Option<(u32, u32)>) -> BattlefieldStatus {
+        BattlefieldStatus {
+            slot,
+            map_id,
+            in_progress,
+            bracket: 0,
+            instance_id: 0,
+            status: 0,
+            time_ms: None,
+            queued: None,
+        }
+    }
+
+    /// The regression: a finished battleground, the worldport out of it, and the end-of-battleground
+    /// panel back in the open world with a leave button that has nothing to leave.
+    ///
+    /// Stock Lua gates the panel on `GetBattlefieldWinner()` (`WorldStateFrame.lua:311-318`,
+    /// `:351-355`) and only ever hides the panel itself on `PLAYER_ENTERING_WORLD` or a tab click
+    /// — which the reference fires once per session, not per teleport. So the board has to stop
+    /// answering a winner the moment the player is out of the battleground, and the empty board has
+    /// to be pushed to the VM rather than withheld, because the VM keeps whatever it was last handed.
+    #[test]
+    fn leaving_the_battleground_stops_the_board_answering_a_winner() {
+        use crate::ui_script::world_state_tests::harness;
+
+        benilla_formats::wow_data_or_skip!();
+        let mut app = App::new();
+        app.init_resource::<BattlefieldScoreboard>()
+            .init_resource::<BattlefieldQueue>()
+            .init_resource::<NameCache>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        app.insert_non_send_resource(harness());
+        app.add_systems(Update, feed_battlefield_score);
+
+        let winner = |app: &mut App| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<Option<i64>>("return GetBattlefieldWinner()")
+                .expect("the VM answers")
+        };
+
+        // A finished Alterac Valley, empty roster: no name lookups stand between the packet and
+        // the board, so the feed pushes it on the first frame.
+        app.world_mut()
+            .resource_mut::<BattlefieldScoreboard>()
+            .apply(PvpLogData {
+                ended: true,
+                winner: Some(1),
+                rows: Vec::new(),
+            });
+        app.world_mut()
+            .resource_mut::<BattlefieldQueue>()
+            .apply(status(0, 471, Some((0, 420_000))));
+        app.update();
+        assert_eq!(
+            winner(&mut app),
+            Some(1),
+            "inside the battleground: the board answers"
+        );
+
+        // The leave lands. The same slot, its map gone to zero.
+        app.world_mut()
+            .resource_mut::<BattlefieldQueue>()
+            .apply(status(0, 0, None));
+        app.update();
+        assert_eq!(
+            winner(&mut app),
+            None,
+            "out of the battleground: the winner must be gone, or the panel returns"
+        );
+        assert!(
+            app.world()
+                .resource::<BattlefieldScoreboard>()
+                .log
+                .is_none(),
+            "the finished board must not outlive the instance"
+        );
+    }
+
+    /// The other packet that ends an instance: the slot survives with its map but loses
+    /// `in_progress` (`WorldStateFrame`'s `GetBattlefieldStatus` third value).
+    #[test]
+    fn losing_the_instance_zeroes_the_board_too() {
+        use crate::ui_script::world_state_tests::harness;
+
+        benilla_formats::wow_data_or_skip!();
+        let mut app = App::new();
+        app.init_resource::<BattlefieldScoreboard>()
+            .init_resource::<BattlefieldQueue>()
+            .init_resource::<NameCache>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        app.insert_non_send_resource(harness());
+        app.add_systems(Update, feed_battlefield_score);
+
+        app.world_mut()
+            .resource_mut::<BattlefieldScoreboard>()
+            .apply(PvpLogData {
+                ended: true,
+                winner: Some(1),
+                rows: Vec::new(),
+            });
+        app.world_mut()
+            .resource_mut::<BattlefieldQueue>()
+            .apply(status(0, 471, Some((0, 420_000))));
+        app.update();
+        app.world_mut()
+            .resource_mut::<BattlefieldQueue>()
+            .apply(status(0, 471, None));
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<Option<i64>>("return GetBattlefieldWinner()")
+                .expect("the VM answers")
+                .is_none(),
+            "the instance is gone, so the winner is gone"
+        );
     }
 }
