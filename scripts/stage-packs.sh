@@ -117,6 +117,17 @@ find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data ! -name data-hd ! -name data
 # fallback copy is for a filesystem that refuses links (a FAT stick, a mounted share).
 cp -l "${DIST}"/* "${SITE}"/ 2>/dev/null || cp -r "${DIST}"/* "${SITE}"/
 
+# The bundled third-party addons (`benilla_formats::bundled_addons`), served as loose files under
+# `/addons/`, with `index.txt` naming each one: a static origin lists no directory, and the client
+# resolves a path in any case against that list, as the reference's Windows filesystem does.
+ADDONS=third_party/addons
+if [ -d "${ADDONS}" ]; then
+  mkdir -p "${SITE}/addons"
+  cp -r "${ADDONS}"/. "${SITE}/addons"/
+  (cd "${SITE}/addons" && find . -type f ! -name index.txt | sed 's|^\./||' | LC_ALL=C sort > index.txt)
+  echo "staged $(wc -l < "${SITE}/addons/index.txt") bundled addon files"
+fi
+
 # Split the wasm module. A static host refuses ANY static asset over 25 MiB and the module is
 # 77 MB — already `-O3 --strip-debug --strip-producers`, one 184-byte custom section left, so there
 # is nothing in it to remove and no flag that closes a 3x gap. `web/boot.js` concatenates the parts

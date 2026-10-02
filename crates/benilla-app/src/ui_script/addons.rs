@@ -31,6 +31,10 @@ pub(super) enum Source {
     Dir(PathBuf),
     /// The player's patch chain ([`super::reference_ui`]), by full chain path, `/` and `\` alike.
     Chain,
+    /// An addon benilla ships ([`benilla_formats::bundled_addons`]): a folder's paths
+    /// (`Interface/AddOns/<Folder>/…`), read through the chain, which answers them after its
+    /// archives.
+    Bundled,
 }
 
 /// One loadable interface: a name, its parsed manifest, and where its files come from.
@@ -84,7 +88,7 @@ impl Addon {
                     .map(String::into_bytes)
             }
             Source::Dir(root) => read_addon_file(root, req),
-            Source::Chain => super::reference_ui::read(req),
+            Source::Chain | Source::Bundled => super::reference_ui::read(req),
         }
     }
 
@@ -93,7 +97,7 @@ impl Addon {
     fn prefix(&self) -> String {
         match &self.source {
             Source::Builtin | Source::Chain => String::new(),
-            Source::Dir(_) => format!("{ADDONS_PREFIX}{}", self.name),
+            Source::Dir(_) | Source::Bundled => format!("{ADDONS_PREFIX}{}", self.name),
         }
     }
 
@@ -104,7 +108,9 @@ impl Addon {
     fn chunk_name(&self, file: &str, path: &str) -> String {
         match &self.source {
             Source::Builtin => benilla_ui::script::addon_chunk_name(&self.name, file),
-            Source::Dir(_) | Source::Chain => format!("@{}", path.replace('/', "\\")),
+            Source::Dir(_) | Source::Chain | Source::Bundled => {
+                format!("@{}", path.replace('/', "\\"))
+            }
         }
     }
 
@@ -146,7 +152,7 @@ impl Addon {
                 // `smoke.sh`.
                 match self.source {
                     Source::Builtin | Source::Chain => error!("ui_script: {e}"),
-                    Source::Dir(_) => warn!("ui_script: {e}"),
+                    Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 // Retained for the player: the commonest way an addon fails with nothing on screen.
                 script.report_load_failure(&e);
@@ -205,7 +211,7 @@ impl Addon {
                 let e = format!("{}/{file}: {m}", self.name);
                 match self.source {
                     Source::Builtin | Source::Chain => error!("ui_script: {e}"),
-                    Source::Dir(_) => warn!("ui_script: {e}"),
+                    Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 script.report_load_failure(&e);
                 failures.push(e);
@@ -354,7 +360,59 @@ fn discover(flavor: UiFlavor) -> Vec<Addon> {
             .into_iter()
             .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
     );
+    // The bundled ones last, so a copy of the same name in the player's folder is the one used.
+    let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
+    found.extend(
+        bundled_addons(flavor)
+            .into_iter()
+            .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
+    );
     found
+}
+
+/// The addons benilla bundles and the flavor each is offered in, `None` for both: pfQuest's
+/// Turtle WoW database names Turtle's own quests, zones and NPCs and means nothing on a 1.12 realm.
+const BUNDLED_ADDONS: [(&str, Option<UiFlavor>); 2] = [
+    ("pfQuest", None),
+    ("pfQuest-turtle", Some(UiFlavor::Turtle)),
+];
+
+/// The bundled addons `flavor` offers, from what the bundle actually holds. Deviation: each is off
+/// (`## DefaultState: disabled`) until the player ticks it on the AddOns screen, where a folder
+/// addon defaults on; the reference ships none, and a player never asked for these.
+fn bundled_addons(flavor: UiFlavor) -> Vec<Addon> {
+    if cfg!(test) {
+        return Vec::new(); // a unit test's addon list is the folder it built, as for `local_state`
+    }
+    bundled_addons_in(flavor, benilla_formats::bundled_addons::folders(), |path| {
+        super::reference_ui::read(path)
+    })
+}
+
+/// [`bundled_addons`] over a given folder list and reader.
+fn bundled_addons_in(
+    flavor: UiFlavor,
+    folders: &[String],
+    read: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Vec<Addon> {
+    BUNDLED_ADDONS
+        .iter()
+        .filter(|(_, only)| only.is_none_or(|f| f == flavor))
+        .filter_map(|(name, _)| {
+            let folder = folders.iter().find(|f| f.eq_ignore_ascii_case(name))?;
+            let bytes = read(&format!("{ADDONS_PREFIX}{folder}/{folder}.toc"))?;
+            let mut toc = Toc::parse(&benilla_ui::source::decode(&bytes));
+            toc.directives
+                .retain(|(k, _)| !k.eq_ignore_ascii_case("DefaultState"));
+            toc.directives
+                .push(("DefaultState".to_string(), "disabled".to_string()));
+            Some(Addon {
+                name: folder.clone(),
+                toc,
+                source: Source::Bundled,
+            })
+        })
+        .collect()
 }
 
 /// Sort folder names into NTFS directory order. The reference's loose pass (`0x42ad10`,
@@ -435,7 +493,8 @@ fn manifest_in(dir: &Path, name: &str) -> Option<String> {
 /// The AddOn API's registry row for one discovered addon.
 fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
     let mut info = info_from_toc(&addon.name, &addon.toc);
-    info.chain = matches!(addon.source, Source::Chain);
+    // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths.
+    info.chain = matches!(addon.source, Source::Chain | Source::Bundled);
     info
 }
 
@@ -542,7 +601,19 @@ impl InstalledAddOn {
 /// `0x46d460` resolves `GetAddOnInfo(i)` through `0x51df00`'s array, sorted by `0x51deb0` on
 /// `AddOn_GetTitle 0x51df20` with `SStrCmpI`. The Blizzard addons the server hides are not here.
 pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
-    let mut rows: Vec<InstalledAddOn> = discover_folder()
+    let flavor = if crate::flavor::turtle() {
+        UiFlavor::Turtle
+    } else {
+        UiFlavor::Vanilla
+    };
+    let mut addons = discover_folder();
+    let seen: HashSet<String> = addons.iter().map(|a| a.name.to_ascii_lowercase()).collect();
+    addons.extend(
+        bundled_addons(flavor)
+            .into_iter()
+            .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
+    );
+    let mut rows: Vec<InstalledAddOn> = addons
         .into_iter()
         .map(|addon| InstalledAddOn {
             default_state: addon.toc.default_state(),
@@ -1181,6 +1252,40 @@ mod tests {
             Some("Impostor"),
             "the loose manifest did not overwrite the archive's"
         );
+    }
+
+    /// pfQuest is offered on both flavors and its Turtle database on Turtle alone, each off until
+    /// ticked, from the folders the bundle holds.
+    #[test]
+    fn the_bundled_pfquest_is_offered_off_and_its_turtle_database_on_turtle_alone() {
+        let folders = ["pfQuest".to_string(), "pfQuest-turtle".to_string()];
+        let read = |path: &str| -> Option<Vec<u8>> {
+            let toc = match path {
+                "Interface/AddOns/pfQuest/pfQuest.toc" => "## Interface: 11200\npfQuest.lua\n",
+                "Interface/AddOns/pfQuest-turtle/pfQuest-turtle.toc" => {
+                    "## Interface: 11200\n## DefaultState: enabled\n## Dependencies: pfQuest\nx.lua\n"
+                }
+                _ => return None,
+            };
+            Some(toc.as_bytes().to_vec())
+        };
+        let names = |flavor| {
+            bundled_addons_in(flavor, &folders, read)
+                .into_iter()
+                .map(|a| {
+                    assert!(matches!(a.source, Source::Bundled));
+                    assert!(!a.toc.default_state(), "{} is off until ticked", a.name);
+                    assert_eq!(a.prefix(), format!("Interface/AddOns/{}", a.name));
+                    a.name
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(UiFlavor::Vanilla), ["pfQuest"]);
+        assert_eq!(names(UiFlavor::Turtle), ["pfQuest", "pfQuest-turtle"]);
+        // A folder the bundle lacks is not offered.
+        assert!(bundled_addons_in(UiFlavor::Turtle, &folders[..1], read)
+            .iter()
+            .all(|a| a.name == "pfQuest"));
     }
 
     /// A Turtle WoW VM registers Turtle's own two archive addons after the Blizzard rows, as they

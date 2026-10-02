@@ -17,6 +17,8 @@ pub use chain::{Chain, ChainEntry, TryRead};
 /// [`Chain`]: this says *whether*, that mounts it.
 pub mod layers;
 pub use layers::{hd_character_models, set_hd_character_models, HD_MODELS_ARCHIVE};
+/// The third-party addons benilla ships, which the chain answers after its archives miss.
+pub mod bundled_addons;
 /// Loose `.tga` art, as addon folders ship it.
 mod tga;
 pub use tga::tga_to_rgba;

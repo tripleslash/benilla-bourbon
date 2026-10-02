@@ -11,3 +11,7 @@
 # and on Windows that resolves System32's WSL bash before any PATH entry, which reads a CRLF
 # script's `set -euo pipefail` as the option `pipefail` and fails the whole web build.
 *.sh text eol=lf
+
+# The bundled third-party addons are vendored as their authors ship them, byte for byte: the
+# client reads them as files, and a checkout must not rewrite a line ending in a `.lua` or a `.tga`.
+third_party/addons/** -text

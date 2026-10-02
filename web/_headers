@@ -33,6 +33,12 @@
   Cache-Control: public, max-age=31536000, immutable
   Cross-Origin-Resource-Policy: same-origin
 
+/addons/*
+  # The bundled addons' loose files (`scripts/stage-packs.sh`). Not immutable: an addon update
+  # rewrites them in place under the same names, so a day is the turnover.
+  Cache-Control: public, max-age=86400
+  Cross-Origin-Resource-Policy: same-origin
+
 /data/index.bpi
   # Not immutable: a re-pack rewrites it in place, and a client holding a stale index would resolve
   # names to packs that no longer exist. A week is long enough to be free on a repeat visit and

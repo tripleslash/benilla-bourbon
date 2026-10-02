@@ -232,8 +232,10 @@ impl Chain {
 
     /// Whether `name` (`/` or `\`, any case) is a readable file, not a delete marker.
     pub fn contains(&self, name: &str) -> bool {
-        self.resolve(name)
-            .is_some_and(|a| !a.is_delete_marker(name))
+        match self.resolve(name) {
+            Some(a) => !a.is_delete_marker(name),
+            None => crate::bundled_addons::contains(name),
+        }
     }
 
     /// The path of the archive `name` resolves to, for debugging and extraction.
@@ -243,6 +245,11 @@ impl Chain {
 
     /// Read a file by internal path (`/` or `\`) from its winning archive.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
+        if self.resolve(name).is_none() {
+            if let Some(bytes) = crate::bundled_addons::read(name) {
+                return Ok(bytes);
+            }
+        }
         let archive = self.archive_for(name)?;
         archive
             .read_file(name)
@@ -473,6 +480,22 @@ impl Chain {
             || crate::layers::hd().is_some_and(|hd| hd.contains(name))
             || crate::layers::turtle().is_some_and(|t| t.contains(name))
             || self.store.contains(name)
+            || crate::bundled_addons::contains(name)
+    }
+
+    /// A bundled addon's file ([`crate::bundled_addons`]), for a name no container holds.
+    fn bundled(&self, name: &str) -> Option<Vec<u8>> {
+        if !crate::bundled_addons::contains(name) {
+            return None; // every other read leaves at the prefix check
+        }
+        let held = crate::layers::reforged().is_some_and(|r| r.contains(name))
+            || crate::layers::hd().is_some_and(|hd| hd.contains(name))
+            || crate::layers::turtle().is_some_and(|t| t.contains(name))
+            || self.store.contains(name);
+        if held {
+            return None;
+        }
+        crate::bundled_addons::read(name)
     }
 
     /// No archive *files* exist on the web target — a blob's home is a pack id, not a path — so
@@ -488,6 +511,9 @@ impl Chain {
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
+        if let Some(bytes) = self.bundled(name) {
+            return Ok(bytes);
+        }
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
         store.read_sync(alias.as_deref().unwrap_or(name))
@@ -503,6 +529,11 @@ impl Chain {
         // included — the array is deduplicated by hand and first push is still first need, so a
         // name that took three frames to arrive appears exactly where it was first wanted.
         crate::web::trace(name);
+        // A bundled addon file is a small blocking fetch, once per name: the sprite and font caches
+        // keep what it answers.
+        if let Some(bytes) = self.bundled(name) {
+            return TryRead::Ready(bytes);
+        }
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
         store.try_read_sync(alias.as_deref().unwrap_or(name))
@@ -538,6 +569,9 @@ impl Chain {
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name);
+        if let Some(bytes) = self.bundled(name) {
+            return Ok(bytes);
+        }
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
         store.read_async(alias.as_deref().unwrap_or(name)).await
