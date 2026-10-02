@@ -325,9 +325,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index)
             };
-            let Some(r) = row else {
+            // A row whose item template has not landed is an item-cache miss.
+            let Some(r) = row.filter(|r| r.quality.is_some()) else {
                 // A miss (unknown type, out of range, not cached) still answers twelve values, with
-                // `count = 1` and `quality = -1` (one shared exit, `0x4cf1ec`), read unguarded.
+                // `count = 1` and `quality = -1` (one shared exit, `0x4cf1ec`), read unguarded:
+                // `AuctionFrameBrowse_Update` indexes `ITEM_QUALITY_COLORS[quality]` at once.
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,         // name
                     Value::Nil,         // texture
@@ -358,10 +360,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 opt_str(&r.name)?,
                 opt_str(&r.texture)?,
                 Value::Integer(i64::from(r.count)),
-                match r.quality {
-                    Some(q) => Value::Integer(i64::from(q)),
-                    None => Value::Nil,
-                },
+                Value::Integer(r.quality.map_or(-1, i64::from)),
                 flag(can_use),
                 Value::Integer(i64::from(r.level)),
                 Value::Integer(i64::from(r.min_bid)),
@@ -846,6 +845,7 @@ mod tests {
                 auction_id,
                 item_id: 1000 + auction_id,
                 count: 1,
+                quality: Some(1),
                 ..Default::default()
             })
             .collect();
@@ -1009,11 +1009,20 @@ mod tests {
 
     #[test]
     fn a_missing_row_still_answers_twelve_values() {
-        let s = UiScript::new().unwrap();
+        let mut s = UiScript::new().unwrap();
         let n = s.arity(r#"GetAuctionItemInfo("list", 99)"#).unwrap();
         assert_eq!(n, 12, "twelve, even with no session open at all");
         let (count, quality): (i64, i64) = s
             .eval(r#"local _, _, c, q = GetAuctionItemInfo("list", 99) return c, q"#)
+            .unwrap();
+        assert_eq!((count, quality), (1, -1));
+
+        // A row whose item template is still in flight takes the same exit, not a nil quality.
+        let mut state = page(&[1]);
+        state.lists[LIST].rows[0].quality = None;
+        s.set_auction(Some(state));
+        let (count, quality): (i64, i64) = s
+            .eval(r#"local _, _, c, q = GetAuctionItemInfo("list", 1) return c, q"#)
             .unwrap();
         assert_eq!((count, quality), (1, -1));
 
