@@ -8,10 +8,16 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use super::{FaderState, GxCell, StaticGx};
-use crate::interact::{ray_member, ray_mesh_bounds, PickSource, RayHit, WorldObject};
+use crate::interact::{ray_member, ray_mesh_bounds, PickAccept, PickSource, RayHit, WorldObject};
 
 impl PickSource for StaticGx {
-    fn cast_objects(&self, ray: Ray3d, all_hits: bool, out: &mut Vec<(Arc<WorldObject>, RayHit)>) {
+    fn cast_objects(
+        &self,
+        ray: Ray3d,
+        all_hits: bool,
+        accept: PickAccept,
+        out: &mut Vec<(Arc<WorldObject>, RayHit)>,
+    ) {
         let (origin, dir) = (ray.origin, *ray.direction);
         // Broad phase, nearest box entry first as in the entity cast: the narrow walk stops once a
         // hit beats every remaining box.
@@ -22,7 +28,7 @@ impl PickSource for StaticGx {
                     let Some(cell) = self.cells.get(coord) else {
                         continue;
                     };
-                    gather(cell, origin, dir, &mut candidates, |cell, i| {
+                    gather(cell, origin, dir, accept, &mut candidates, |cell, i| {
                         // A fader draws here only while Steady; exiled, its entities answer.
                         match cell.items[i].fader {
                             Some(uid) => matches!(
@@ -37,7 +43,7 @@ impl PickSource for StaticGx {
                     let Some(region) = self.props.get(instance) else {
                         continue;
                     };
-                    gather(region, origin, dir, &mut candidates, |region, i| {
+                    gather(region, origin, dir, accept, &mut candidates, |region, i| {
                         region.items[i].prop.as_ref().is_some_and(|p| {
                             sets.drawn.get(usize::from(p.set)).copied().unwrap_or(false)
                         })
@@ -49,7 +55,7 @@ impl PickSource for StaticGx {
             let Some(region) = self.wmos.get(instance) else {
                 continue;
             };
-            gather(region, origin, dir, &mut candidates, |region, i| {
+            gather(region, origin, dir, accept, &mut candidates, |region, i| {
                 region.items[i].wmo.as_ref().is_some_and(|w| {
                     groups
                         .drawn
@@ -74,17 +80,18 @@ impl PickSource for StaticGx {
     }
 }
 
-/// Add one region's admitted items to the broad phase; an item without a bound enters at 0 and is
-/// always narrow-tested, as in the entity cast.
+/// Add one region's admitted items that `accept` passes to the broad phase; an item without a
+/// bound enters at 0 and is always narrow-tested, as in the entity cast.
 fn gather<'a>(
     cell: &'a GxCell,
     origin: Vec3,
     dir: Vec3,
+    accept: PickAccept,
     out: &mut Vec<(f32, &'a GxCell, usize)>,
     admitted: impl Fn(&GxCell, usize) -> bool,
 ) {
     for (i, item) in cell.items.iter().enumerate() {
-        if !admitted(cell, i) {
+        if !admitted(cell, i) || !accept(item.object.kind, item.geometry.blend) {
             continue;
         }
         let entry = match &item.local_aabb {
@@ -115,7 +122,7 @@ mod tests {
     fn cast(gx: &StaticGx) -> Vec<(String, u32, f32)> {
         let ray = Ray3d::new(Vec3::new(-0.3, 5.0, -0.3), Dir3::NEG_Y);
         let mut out = Vec::new();
-        gx.cast_objects(ray, true, &mut out);
+        gx.cast_objects(ray, true, &|_, _| true, &mut out);
         out.into_iter()
             .map(|(o, hit)| (o.label.clone(), o.id, hit.distance))
             .collect()
