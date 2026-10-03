@@ -387,3 +387,27 @@ fn mouselook_start_under_a_left_drag_is_the_both_button_run() {
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
     assert!(w.resource::<Messages<WorldClick>>().is_empty());
 }
+
+/// A disconnect mid-drag: `control` stops at the session's end with the button still down and
+/// never sees its release, so the exit edge hands the cursor back to the glue screens, shown and
+/// free, and leaves nothing held for the next world enter.
+#[test]
+fn a_session_end_mid_drag_hands_the_cursor_back() {
+    let mut w = world(false);
+    press(&mut w, MouseButton::Right);
+    frame(&mut w, 40.0);
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::Locked);
+
+    w.run_system_once(end_look_on_session_end).unwrap();
+    let rig = w.resource::<CameraControl>();
+    assert_eq!(rig.look, None);
+    assert!(!rig.freelook);
+    assert!(!rig.world_mouse.held(LookButton::Right));
+    let c = cursor(&mut w);
+    assert_eq!(
+        c.grab_mode,
+        CursorGrabMode::None,
+        "the login screen's pointer is free"
+    );
+    assert!(c.visible, "and shown");
+}

@@ -991,6 +991,30 @@ fn disengage_look(rig: &mut CameraControl, window: &mut Window, cursor_opts: &mu
     }
 }
 
+/// `OnExit(InWorld)`: a `/logout` or a lost session ends a look session in flight, as the glue
+/// screens own a visible pointer and `control`, which would see the button's release, no longer
+/// runs. The world mouse word goes with it: the next world enter starts with nothing held.
+pub(super) fn end_look_on_session_end(
+    mut rig: ResMut<CameraControl>,
+    mut window: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+) {
+    rig.world_mouse = WorldMouse::default();
+    rig.freelook = false;
+    if rig.look.is_none() {
+        return;
+    }
+    match window.single_mut() {
+        Ok((mut window, mut cursor_opts)) => {
+            disengage_look(&mut rig, &mut window, &mut cursor_opts)
+        }
+        Err(_) => {
+            rig.look = None;
+            rig.cursor_stash = None;
+            rig.cursor_released = false;
+        }
+    }
+}
+
 /// Stash the cursor, then lock and hide it for the session.
 fn take_cursor(rig: &mut CameraControl, window: &Window, cursor_opts: &mut CursorOptions) {
     rig.cursor_stash = window.cursor_position();

@@ -298,6 +298,11 @@ impl Plugin for PlayerPlugin {
             Update,
             wire_in::release_on_session_end.in_set(WorldStage::Input),
         )
+        // The same edge hands a held mouse-look cursor back to the glue screens.
+        .add_systems(
+            OnExit(crate::char_select::ClientState::InWorld),
+            camera::end_look_on_session_end,
+        )
         // Embodiment, before every reader of the marker.
         .add_systems(
             Update,
