@@ -14,6 +14,7 @@ use super::super::Creatures;
 use super::{
     attach_id, ensure_item_model, DisarmFreeze, Equipment, HeldItems, HeldSlot, ItemDisplays,
     ItemModelKind, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
+    TABARD_BODYSLOT,
 };
 
 /// Where one held slot's item hangs, if it shows: a melee item drawn in sheath state 1, else by
@@ -258,6 +259,17 @@ pub(in crate::entities) fn resolve_equipment(
                     eq.emblem = Some(design);
                     eq.tabard_preview = true;
                 }
+            }
+            // Kept only where the composite paints it (`equip_blits`: the preview, or a tabard
+            // whose display takes it), so a guild query answering after arrival re-dresses the
+            // players in a guild tabard and nobody else.
+            if !eq.tabard_preview
+                && !held
+                    .catalog
+                    .get(eq.bodyslots[TABARD_BODYSLOT])
+                    .is_some_and(|d| d.takes_guild_emblem())
+            {
+                eq.emblem = None;
             }
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);

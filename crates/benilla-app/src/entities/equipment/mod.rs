@@ -107,6 +107,9 @@ const COMPOSITE_SLOTS: [(u8, usize); 8] = [
     (18, 7),
 ];
 
+/// The tabard's `Equipment::bodyslots` index: equipment slot 18 in [`COMPOSITE_SLOTS`].
+const TABARD_BODYSLOT: usize = 7;
+
 /// The item models a unit shows this frame, in [`ATTACH_SLOT_NAMES`] order.
 #[derive(Component, Default, Clone, PartialEq, Eq)]
 pub(super) struct HeldItems {
