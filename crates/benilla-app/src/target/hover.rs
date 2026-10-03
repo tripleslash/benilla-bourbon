@@ -25,14 +25,18 @@ use benilla_world::view::WorldCamera;
 use super::{Hovered, HoveredObject, PickOcclusion};
 
 /// Trace this frame's world hit, the reference's `CWorld::Intersect` leg of the scene trace
-/// (`0x480df0`), through the [`PickOccluder`] set: terrain, the WMO walk-bake faces (about the
-/// `0x84` reject mask) and static doodad hulls. Net entities are the object trace, not occluders,
-/// so a chest never occludes itself. The picks run unbounded and compare against it after.
+/// (`0x480df0`): the [`PickOccluder`] colliders (terrain and the WMO faces outside MOPY mask
+/// `0x84`) and the static doodads' drawn opaque batches
+/// ([`benilla_world::interact::WorldPick::doodad_occluder`]), never a doodad's collision hull: the
+/// render-less `KL_AuctionHouseCollide.m2` walls Orgrimmar's auctioneers off from the floor below,
+/// yet a click reaches them over it. Net entities are the object trace, not occluders, so a chest
+/// never occludes itself. The picks run unbounded and compare against the nearer of the two after.
 pub(super) fn update_pick_occlusion(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
     spatial: avian3d::prelude::SpatialQuery,
     occluders: Query<(), With<PickOccluder>>,
+    pick: benilla_world::interact::WorldPick,
     mut occlusion: ResMut<PickOcclusion>,
 ) {
     *occlusion = PickOcclusion::default();
@@ -57,6 +61,12 @@ pub(super) fn update_pick_occlusion(
     ) {
         occlusion.distance = hit.distance;
         occlusion.point = Some(ray.origin + *ray.direction * hit.distance);
+    }
+    if let Some(hit) = pick.doodad_occluder(ray) {
+        if hit.distance < occlusion.distance {
+            occlusion.distance = hit.distance;
+            occlusion.point = Some(hit.point);
+        }
     }
 }
 

@@ -238,9 +238,9 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // The collision hull, welded into the owner tile's batch, which carries the
-                    // `PickOccluder` clamp. A hull-less model (a tree canopy) stays pick-through,
-                    // as the reference's world trace tests only collision-flagged doodads.
+                    // The collision hull, welded into the owner tile's batch. It never clamps the
+                    // mouse pick: the reference traces a doodad's opaque drawn batches for that
+                    // (`interact::WorldPick::doodad_occluder`), never its collision triangles.
                     if let Some((verts, tris)) = (!doodad_bodies_disabled())
                         .then(|| placement_collider_data(m.collision.as_ref(), &p.transform))
                         .flatten()
@@ -248,13 +248,10 @@ pub(super) fn spawn_loaded_placements(
                         if hull_weld_disabled() {
                             ents.push(
                                 commands
-                                    .spawn((
-                                        PendingCollider::new(
-                                            build_collider_task(verts, tris),
-                                            None,
-                                            !doodad_hulls_bare(),
-                                        ),
-                                        PickOccluder,
+                                    .spawn(PendingCollider::new(
+                                        build_collider_task(verts, tris),
+                                        None,
+                                        !doodad_hulls_bare(),
                                     ))
                                     .id(),
                             );
@@ -520,8 +517,10 @@ pub(super) fn spawn_loaded_placements(
                                     ),
                                     // The walk faces take the selection ring (floors, steps).
                                     GroundDecalSurface,
-                                    // Clamps the mouse pick. The reference's occluder faces are
-                                    // MOPY reject-mask 0x84; the walk bake (0x04) is the nearest.
+                                    // Clamps the mouse pick: the reference's WMO leg tests every
+                                    // face outside MOPY mask 0x84 (`0x6a37b0`, leaf `0x6bc716`),
+                                    // where 0x80 is its runtime visited bit, so the walk bake's
+                                    // non-DETAIL set is exactly it.
                                     PickOccluder,
                                 ))
                                 .id(),
@@ -731,7 +730,7 @@ pub(super) fn spawn_loaded_placements(
                 }
             }
             // Solid to body and camera iff it has a collision hull, like a map doodad; welded per
-            // placement, as every prop despawns with its building.
+            // placement, as every prop despawns with its building. Not a pick clamp, as above.
             if let Some((verts, tris)) = (!doodad_bodies_disabled())
                 .then(|| placement_collider_data(m.collision.as_ref(), &d.transform))
                 .flatten()
@@ -739,13 +738,10 @@ pub(super) fn spawn_loaded_placements(
                 if hull_weld_disabled() {
                     ents.push(
                         commands
-                            .spawn((
-                                PendingCollider::new(
-                                    build_collider_task(verts, tris),
-                                    None,
-                                    !doodad_hulls_bare(),
-                                ),
-                                PickOccluder,
+                            .spawn(PendingCollider::new(
+                                build_collider_task(verts, tris),
+                                None,
+                                !doodad_hulls_bare(),
                             ))
                             .id(),
                     );
