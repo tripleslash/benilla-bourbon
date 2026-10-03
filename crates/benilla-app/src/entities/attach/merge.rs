@@ -1,8 +1,8 @@
 //! A body's batches merged by material: one mesh entity per group of batches that nothing
 //! downstream of the spawn can tell apart (the same six-handle material set, blend, sidedness and
 //! skinning, and no alpha track, billboard, welded seam or ground quad), not one per M2 batch.
-//! A batch's own materials are keyed by its authored order (`MatKey`'s `batch_order`), so two
-//! transparent batches never merge. The key names a texture slot, never a texture, so a gear
+//! A batch's own blending materials are keyed by its authored order (`MatKey`'s `batch_order`), so
+//! two transparent batches never merge. The key names a texture slot, never a texture, so a gear
 //! change re-points a group in place and only a change to the shown set rebuilds groups.
 
 use std::collections::HashMap;

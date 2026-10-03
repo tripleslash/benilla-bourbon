@@ -60,8 +60,9 @@ pub struct MatKey {
     env_map: bool,
     /// The static terrain-shade selector, fixed per placement.
     shade: ShadeSel,
-    /// Authored batch index + 1 (0 = unordered): the transparent sort bias of every batch, and for
-    /// WMO the clip-z nudge too (MOBA batches draw in strict file order, `0x6b4f10`/`0x6b5190`).
+    /// Authored batch index + 1 (0 = unordered): the transparent sort bias of a blending batch, and
+    /// for WMO the clip-z nudge too (MOBA batches draw in strict file order, `0x6b4f10`/`0x6b5190`).
+    /// 0 for a batch whose material reads neither ([`order_is_read`]).
     batch_order: u16,
     /// The `Arc<UvAnim>` pointer, stable while its model is loaded: one material per UV loop.
     uv_anim: Option<usize>,
@@ -266,6 +267,30 @@ fn model_material_impl(
     instance: Option<Entity>,
     foliage_wind: bool,
 ) -> Handle<WowModelMaterial> {
+    // An additive batch is a (ONE, ONE) add of gamma-space premultiplied colour: the shader and
+    // `specialize` must key on the same `clutter_fade.z` bit 2.
+    let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
+    let alpha_mode = if is_additive || fade_variant {
+        // A fade twin always blends (`0x70c1fd`); its source blend only sets the cutout marker.
+        AlphaMode::Blend
+    } else {
+        match blend {
+            ModelBlend::Opaque => AlphaMode::Opaque,
+            ModelBlend::AlphaTest if source_cutout => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
+            ModelBlend::AlphaTest => AlphaMode::Opaque,
+            // Mod/Mod2x multiply what is drawn, so they need the scene under them; `specialize`
+            // sets the multiply factors from the marker bits below.
+            ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
+        }
+    };
+    // The authored index keys a material only where the material reads it: the transparent sort
+    // bias of a blending batch and a WMO batch's clip-z nudge, both below. An opaque or cutout
+    // M2 batch reads neither, so every index of it shares one material and one bind group.
+    let batch_order = if order_is_read(matches!(alpha_mode, AlphaMode::Blend), is_wmo) {
+        batch_order
+    } else {
+        0
+    };
     let key = MatKey {
         light: light.id(),
         texture: texture.as_ref().map(Handle::id),
@@ -295,22 +320,6 @@ fn model_material_impl(
     if let Some(h) = cache.fetch(&key) {
         return h;
     }
-    // An additive batch is a (ONE, ONE) add of gamma-space premultiplied colour: the shader and
-    // `specialize` must key on the same `clutter_fade.z` bit 2.
-    let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
-    let alpha_mode = if is_additive || fade_variant {
-        // A fade twin always blends (`0x70c1fd`); its source blend only sets the cutout marker.
-        AlphaMode::Blend
-    } else {
-        match blend {
-            ModelBlend::Opaque => AlphaMode::Opaque,
-            ModelBlend::AlphaTest if source_cutout => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
-            ModelBlend::AlphaTest => AlphaMode::Opaque,
-            // Mod/Mod2x multiply what is drawn, so they need the scene under them; `specialize`
-            // sets the multiply factors from the marker bits below.
-            ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
-        }
-    };
     // Single-sided unless the M2's 0x04 flag is set.
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
     // Transparent batches only: opaque passes never sort by it. Tying past index 899 is safe:
@@ -449,6 +458,12 @@ fn model_material_impl(
 
 /// `clutter_fade.z` marker bit 9: this material is a depth-prime twin ([`zfill_material`]).
 pub(crate) const ZFILL_MARKER: u16 = 1 << 9;
+
+/// Whether a batch's material reads its authored index: a blending batch sorts by it, and a WMO
+/// batch nudges its clip z by it unless the nudge is off.
+fn order_is_read(blends: bool, is_wmo: bool) -> bool {
+    blends || (is_wmo && !wmo_bias_off())
+}
 
 /// `clutter_fade.z` marker bit 10: the twin's source alpha-tests, so the shader keeps the 224/255
 /// cutout while blending. Never on an Opaque source: mode 0 has no alpha test (`0x70c237`).
