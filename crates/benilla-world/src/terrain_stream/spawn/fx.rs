@@ -123,7 +123,7 @@ pub(super) fn spawn_emissive_light_for(
     // it. Gating the spawn instead made a lamp's fate depend on whether it streamed in before or
     // after the lighting latch — see that type's note.
     use crate::modern::lights::emissive;
-    if emissive::is_living_swarm(path) {
+    if emissive::is_living_swarm(path) || emissive::is_light_shaft(path) {
         return;
     }
     // The centroid and fixture radius are `emissive`'s own law, shared with the entity lane —

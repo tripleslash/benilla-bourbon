@@ -456,6 +456,18 @@ pub fn is_living_swarm(path: &str) -> bool {
     lower.contains("\\critter\\") || file.contains("firefl")
 }
 
+/// fork: **a shaft of light is not a lamp.** A volumetric beam (`…\VolumetricLights\…`, Ahn'Qiraj's
+/// `Hive_lightshaft02.m2` and its kin) is light arriving through a hole in the roof, drawn as an
+/// additive card yards across at a few percent opacity with dust motes drifting in it. [`for_model`]
+/// reads the card as a corona of the largest size it knows and the motes as flames: each beam became
+/// a lamp of the full [`MAX_INTENSITY`] at its centroid, in the open air with no fixture there.
+pub fn is_light_shaft(path: &str) -> bool {
+    const SHAFTS: [&str; 3] = ["lightshaft", "lightbeam", "lightray"];
+    let lower = path.to_ascii_lowercase().replace('/', "\\");
+    let file = lower.rsplit('\\').next().unwrap_or(&lower);
+    lower.contains("\\volumetriclights\\") || SHAFTS.iter().any(|k| file.contains(k))
+}
+
 /// One batch read as a fixture's lit glass: UNLIT, and neither additive (a card, read by
 /// [`glow_of_geometry`]) nor env-mapped (a reflection).
 pub fn glass_of_geometry(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
@@ -881,6 +893,28 @@ mod tests {
             "World\\Generic\\Human\\Passive Doodads\\Lamps\\StormwindStreetlamp01.m2",
         ] {
             assert!(!is_living_swarm(fixture), "{fixture}");
+        }
+    }
+
+    /// Frostmane Hollow's ceiling beam stood a full-strength lamp on its bridge; a lamp is still a
+    /// lamp.
+    #[test]
+    fn a_light_shaft_derives_no_light() {
+        for shaft in [
+            "World\\Environment\\doodad\\anquiraj\\lightshaft\\hive_lightshaft02.MDX",
+            "world/nodxt/generic/passivedoodads/volumetriclights/karazahndiningrays.m2",
+            "World\\NoDXT\\Generic\\PassiveDoodads\\VolumetricLights\\UtherShrineLightBeam.m2",
+            "World\\NoDXT\\GENERIC\\PASSIVEDOODADS\\VOLUMETRICLIGHTS\\Lightray_Dusty_01.M2",
+            "World\\Generic\\Gnome\\Passive Doodads\\Subway\\UnderwaterLightShaft.m2",
+        ] {
+            assert!(is_light_shaft(shaft), "{shaft}");
+        }
+        for fixture in [
+            "world/generic/passivedoodads/lights/generaltorch01.m2",
+            "World\\Generic\\Human\\Passive Doodads\\Lamps\\StormwindStreetlamp01.m2",
+            "World\\Generic\\Gnome\\Passive Doodads\\HazardLights\\GnomeHazardLight01.m2",
+        ] {
+            assert!(!is_light_shaft(fixture), "{fixture}");
         }
     }
 
