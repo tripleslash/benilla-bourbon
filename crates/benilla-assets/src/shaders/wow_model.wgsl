@@ -1201,8 +1201,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // fork: modern lighting (FORK.md, P6) — the binned grid replaces the
     // reference's three-nearest selection where it is live, and it reaches the lanes the reference
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
-    // in a modern frame, because the bake that used to stand in for them is gone.
-    if (locallight::grid_live(modern_block.lights) && !is_rig && !modern_lite) {
+    // in a modern frame, because the bake that used to stand in for them is gone. An unlit batch
+    // drops the lit sum whole (`select(lit_rgb, unlit_rgb, is_emissive)` below), so it skips the
+    // walk and its cube lookups: a light shaft's stacked additive planes paid them per layer.
+    if (locallight::grid_live(modern_block.lights) && !is_rig && !modern_lite && !is_emissive) {
         point_diffuse = modern_local_lights(
             in.world_position.xyz,
             wow_normalize(in.world_normal),
