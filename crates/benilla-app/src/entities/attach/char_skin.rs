@@ -308,8 +308,8 @@ pub(super) fn body_atlas(
 }
 
 /// [`body_atlas`] composited on this thread on a miss ([`SkinComposites::force`]): the previews, whose
-/// composite the reference forces, a re-dress of a standing body and a rig-heal rebuild. Always
-/// [`BodyAtlas::Ready`] on native; fork: web — [`BodyAtlas::Pending`] while its blobs arrive.
+/// composite the reference forces, a native re-dress of a standing body and a rig-heal rebuild.
+/// Always [`BodyAtlas::Ready`] on native; fork: web — [`BodyAtlas::Pending`] while its blobs arrive.
 pub(super) fn forced_body_atlas(
     look: &CharLook,
     key: Option<SkinKey>,
@@ -331,6 +331,34 @@ pub(super) fn forced_body_atlas(
         || composite_plan(&key, sections, displays),
         images,
     )
+}
+
+/// A standing body's atlas for a re-dress: composited on this thread ([`forced_body_atlas`]), as
+/// the reference's incremental composite is. fork: web — the arrival's lane ([`body_atlas`]), so
+/// the blend runs on a worker and never on the page's thread; [`BodyAtlas::Pending`] until it
+/// lands, the body keeping its standing look.
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))] // `images` is the forced lane's
+pub(super) fn redress_body_atlas(
+    look: &CharLook,
+    key: Option<SkinKey>,
+    displays: Option<&super::super::ItemDisplays>,
+    sections: Option<&SkinSections>,
+    composites: &mut SkinComposites,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+) -> BodyAtlas {
+    #[cfg(not(target_arch = "wasm32"))]
+    return forced_body_atlas(
+        look,
+        key,
+        displays,
+        sections,
+        composites,
+        asset_server,
+        images,
+    );
+    #[cfg(target_arch = "wasm32")]
+    return body_atlas(look, key, displays, sections, composites, asset_server);
 }
 
 /// Build a character body's per-appearance materials: the body atlas ([`body_atlas`]), the hair,

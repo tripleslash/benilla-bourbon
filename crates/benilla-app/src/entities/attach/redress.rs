@@ -23,7 +23,7 @@ use super::super::{
     VisualAttached,
 };
 use super::char_skin::{
-    build_char_skin_materials, equip_geosets, forced_body_atlas, resolve_char_look,
+    build_char_skin_materials, equip_geosets, redress_body_atlas, resolve_char_look,
     resolve_worn_equip, skin_key, CharSkinMaterials,
 };
 use super::dress::{part_materials, spawn_group, DressedPart, PartDress};
@@ -128,8 +128,9 @@ pub(in crate::entities) fn redress_player_looks(
         // geosets apply at once and the atlas composites that frame when its sections are
         // resident, never gated or withheld. So it composites here, in the frame, taking over a
         // running composite of the same look; only an arriving body waits for its atlas.
+        // fork: web — the composite takes the arrival's lane instead (`redress_body_atlas`).
         let atlas = look.as_ref().map(|l| {
-            forced_body_atlas(
+            redress_body_atlas(
                 l,
                 skin_key(l, worn.bodyslots, worn.emblem, worn.tabard_preview),
                 displays.as_deref(),
@@ -139,8 +140,9 @@ pub(in crate::entities) fn redress_player_looks(
                 &mut images,
             )
         });
-        // fork: web — still coming: undo the stamp so this arm re-enters next frame, and leave the
-        // player in the gear they are wearing rather than re-point every part at an undressed body.
+        // fork: web — still coming, its blobs or its blend: undo the stamp so this arm re-enters
+        // next frame, and leave the player in the gear they are wearing rather than re-point
+        // every part at an undressed body.
         let body_tex = match atlas {
             Some(BodyAtlas::Pending) => {
                 applied.0 = was_applied;
