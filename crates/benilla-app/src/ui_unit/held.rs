@@ -77,10 +77,47 @@ impl HeldUnits<'_> {
     }
 }
 
+/// The objects a gated feed's last run read by descriptor, beside our own. The feed's gate opens
+/// on a change to one of them, where a change to any unit's would hold it open on every frame of
+/// a crowd. A guid that named no object is kept and opens the gate once the object manager holds
+/// it. It is every such input because which objects a run reads is decided by the feed's other
+/// gate inputs and by these descriptors themselves.
+#[derive(Default)]
+pub(super) struct StoreReads {
+    held: Vec<Entity>,
+    missing: Vec<u64>,
+}
+
+impl StoreReads {
+    /// A read of the object `entity`.
+    pub(super) fn held(&mut self, entity: Entity) {
+        self.held.push(entity);
+    }
+
+    /// A read of `guid`'s object, `entity` when the object manager holds it.
+    pub(super) fn looked_up(&mut self, guid: u64, entity: Option<Entity>) {
+        match entity {
+            Some(entity) => self.held.push(entity),
+            None => self.missing.push(guid),
+        }
+    }
+
+    /// Whether a read object's descriptor `changed`, or the manager now `holds` a missing one.
+    pub(super) fn moved(
+        &self,
+        changed: impl Fn(Entity) -> bool,
+        holds: impl Fn(u64) -> bool,
+    ) -> bool {
+        self.held.iter().any(|e| changed(*e)) || self.missing.iter().any(|g| holds(*g))
+    }
+}
+
 /// [`feed_chain_units`]' per-VM memory.
 #[derive(Default)]
 pub(super) struct ChainMemo {
     names_generation: gate::Watch,
+    /// The descriptors the last build read: the ends' and what their relations reached.
+    reads: StoreReads,
     /// The guids the last build covered, sorted.
     ends: Vec<u64>,
     /// What each was last pushed as.
@@ -110,6 +147,8 @@ pub(super) fn feed_chain_units(
     group: Res<crate::ui_party::GroupState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed: Query<(), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
+    // Our own descriptor's edge: every end's reaction reads it.
+    own_changed: Query<(), (Changed<ObjectStore>, With<SelfPlayer>)>,
     mut removed: RemovedComponents<Guid>,
     mut memo: Local<VmMemo<ChainMemo>>,
 ) {
@@ -124,7 +163,12 @@ pub(super) fn feed_chain_units(
     // unit's target.
     let names_moved = memo.names_generation.moved(names.generation());
     let ends_moved = memo.ends != ends;
-    let stores_changed = !changed.is_empty();
+    // The descriptors the last build read and ours, not any unit's ([`StoreReads`]).
+    let stores_changed = !own_changed.is_empty()
+        || memo.reads.moved(
+            |e| changed.contains(e),
+            |guid| index.as_ref().is_some_and(|i| i.0.contains_key(&guid)),
+        );
     let stores_removed = !removed.is_empty();
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();
@@ -144,10 +188,13 @@ pub(super) fn feed_chain_units(
         return;
     }
 
-    let by_guid = |guid: u64| {
-        let entity = *index.as_ref()?.0.get(&guid)?;
-        stores.get(entity).ok().cloned()
+    let reads = std::cell::RefCell::new(StoreReads::default());
+    let entity_of = |guid: u64| {
+        let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
+        reads.borrow_mut().looked_up(guid, entity);
+        entity
     };
+    let by_guid = |guid: u64| stores.get(entity_of(guid)?).ok().cloned();
     let held = HeldUnits {
         names: &names,
         commands: &commands,
@@ -162,11 +209,11 @@ pub(super) fn feed_chain_units(
     let built: HashMap<u64, UnitState> = ends
         .iter()
         .filter_map(|&guid| {
-            let entity = *index.as_ref()?.0.get(&guid)?;
-            let store = stores.get(entity).ok().filter(|s| s.is_unit())?;
+            let store = stores.get(entity_of(guid)?).ok().filter(|s| s.is_unit())?;
             Some((guid, held.state(store, guid)))
         })
         .collect();
+    memo.reads = reads.take();
 
     memo.pushed.retain(|guid, _| {
         let keep = built.contains_key(guid);

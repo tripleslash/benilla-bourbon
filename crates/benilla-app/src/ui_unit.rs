@@ -106,6 +106,9 @@ struct UnitFeedMemo {
     entered_world: bool,
     /// Per token, the last snapshot pushed.
     last: HashMap<String, UnitState>,
+    /// The descriptors the last run's snapshots read: the target's, its target's, the
+    /// interaction NPC's and what their relations reached.
+    reads: held::StoreReads,
     target_guid: Option<u64>,
     last_xp: Option<(u32, u32)>,
     /// `(rest state, pool, PLAYER_FLAGS)`, pushed as one so no binding reads it half-updated.
@@ -822,6 +825,8 @@ pub(crate) struct UnitStores<'w, 's> {
     all: Query<'w, 's, &'static ObjectStore>,
     /// The dirty gate: whose descriptor moved, items excluded (their writes name no unit token).
     changed: Query<'w, 's, (), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
+    /// Our own descriptor's edge, which every snapshot's reaction reads.
+    own_changed: Query<'w, 's, (), (Changed<ObjectStore>, With<SelfPlayer>)>,
     /// Whose object left the manager, by [`Guid`]: a fading model keeps its store 2 s longer.
     removed: RemovedComponents<'w, 's, Guid>,
     /// This run's per-field edges, which [`fire_transitions`]' watch-bridge arms fire off.
@@ -1254,7 +1259,12 @@ fn feed_units(
     let names_moved = memo.names_generation.moved(names.generation());
     let guild_moved = memo.guild_generation.moved(guild.identity_generation());
     let selection_changed = selection.is_changed();
-    let stores_changed = !stores.changed.is_empty();
+    // The descriptors the last run read and ours, not any unit's ([`held::StoreReads`]).
+    let stores_changed = !stores.own_changed.is_empty()
+        || memo.reads.moved(
+            |e| stores.changed.contains(e),
+            |guid| index.as_ref().is_some_and(|i| i.0.contains_key(&guid)),
+        );
     let stores_removed = !stores.removed.is_empty();
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();
@@ -1324,10 +1334,13 @@ fn feed_units(
         feed.warned_sideless = sideless;
     }
     // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
-    let by_guid = |guid: u64| {
-        let entity = *index.as_ref()?.0.get(&guid)?;
-        stores.all.get(entity).ok().cloned()
+    let reads = std::cell::RefCell::new(held::StoreReads::default());
+    let entity_of = |guid: u64| {
+        let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
+        reads.borrow_mut().looked_up(guid, entity);
+        entity
     };
+    let by_guid = |guid: u64| stores.all.get(entity_of(guid)?).ok().cloned();
     let held = held::HeldUnits {
         names: &names,
         commands: &commands,
@@ -1340,6 +1353,7 @@ fn feed_units(
         by_guid: &by_guid,
     };
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
+        reads.borrow_mut().held(e);
         let store = stores.all.get(e).ok()?;
         let mut s = held.state(store, guid);
         s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
@@ -1353,7 +1367,7 @@ fn feed_units(
         .and_then(|e| stores.all.get(e).ok())
         .and_then(|s| s.0.unit_target())
         .filter(|guid| *guid != 0)
-        .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
+        .and_then(|guid| Some((entity_of(guid)?, guid)))
         .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
 
     // `"player"` is pushed only while its descriptor exists: the roster seat stands in before
@@ -1390,7 +1404,11 @@ fn feed_units(
     let npc = interact
         .as_deref()
         .and_then(|i| Some((i.0?, i.1?)))
-        .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
+        .and_then(|(entity, guid)| {
+            reads.borrow_mut().held(entity);
+            Some(held.state(stores.all.get(entity).ok()?, guid))
+        });
+    memo.reads = reads.take();
     // Closing the window must clear the token, so the memo is written here, not only read. No
     // `fire_transitions`: nothing draws `"npc"` as a unit frame.
     let npc_dirty = match (&npc, memo.last.get("npc")) {
