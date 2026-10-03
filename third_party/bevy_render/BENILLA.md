@@ -57,14 +57,26 @@ updates that do not present the world view, which is how it was found (`?frame_g
 The hunk, `#[cfg(target_arch = "wasm32")]` only, drops the unpresented texture and its view, so
 `prepare_windows` acquires a fresh one every update.
 
+## The fourth delta: slab buffers are destroyed when let go (web)
+
+The mesh allocator grows a slab by creating a larger buffer, copying the old one into it and
+dropping the old one, and drops an emptied slab's buffer. Natively a drop frees the buffer once its
+last use completes. The browser backend's drop does nothing (`wgpu`'s `WebBuffer` has a no-op
+`Drop`), so the memory waits for the page's garbage collector to reach the `GPUBuffer` wrapper, and
+Firefox's collector does not weigh GPU memory: while `?worldview=1` streamed Elwynn in, Firefox 155
+created ~1.4 GB of mesh slabs, most of them abandoned by growth and none freed. The hunk,
+`#[cfg(target_arch = "wasm32")]` only, calls `destroy()` on the buffer at both points. Both are in
+`PrepareAssets`, before the frame encodes a pass, and the grow copy is submitted first.
+
 ## The delta, and the command that proves it
 
-**A few lines changed in four upstream files, one module added.**
+**A few lines changed in five upstream files, one module added.**
 
 | file | change |
 |---|---|
 | `src/view/mod.rs` | `prepare_view_attachments`: the `CameraOutputMode::Skip` early-out goes (above) |
 | `src/view/window/mod.rs` | `prepare_windows`: a `Skip` camera counts as the window's target; `extract_windows`: the wasm32-only per-task canvas texture (above) |
+| `src/slab_allocator.rs` | `reallocate_slab` and `free_empty_slabs` hand the buffer they let go to `release_buffer`, a wasm32-only `destroy()` (above) |
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/lib.rs` | `mod wasm_serial;` |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |

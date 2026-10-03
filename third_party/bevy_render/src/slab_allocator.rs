@@ -881,6 +881,9 @@ where
 
         let command_buffer = encoder.finish();
         render_queue.submit([command_buffer]);
+
+        // benilla local patch: the copy above is the old buffer's last use.
+        release_buffer(&old_buffer);
     }
 
     /// Records the location of the given newly-allocated data in the
@@ -944,7 +947,13 @@ where
                     slab_ids.remove(idx);
                 }
             });
-            self.slabs.remove(&empty_slab);
+            // benilla local patch: release the emptied slab's buffer now, not at its JS wrapper's
+            // collection (`release_buffer`).
+            if let Some(slab) = self.slabs.remove(&empty_slab)
+                && let Some(buffer) = slab.buffer()
+            {
+                release_buffer(buffer);
+            }
         }
     }
 
@@ -1149,6 +1158,22 @@ fn buffer_usages_to_str(buffer_usages: BufferUsages) -> &'static str {
         ""
     }
 }
+
+/// benilla local patch: frees a slab buffer the allocator has let go of.
+///
+/// Natively a dropped `wgpu::Buffer` is freed once its last use completes. The browser backend's
+/// drop does nothing (`wgpu::backend::webgpu`, `WebBuffer`'s `Drop`), so the GPU memory waits for
+/// the page's garbage collector to reach the `GPUBuffer` wrapper, and Firefox's collector does not
+/// count GPU memory: a world streaming in grew and abandoned slabs faster than it collected them.
+/// The allocator only lets a buffer go in `PrepareAssets`, before the frame encodes a pass, and
+/// after submitting any copy out of it, so nothing still to be submitted can name it.
+#[cfg(target_arch = "wasm32")]
+fn release_buffer(buffer: &Buffer) {
+    buffer.destroy();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn release_buffer(_buffer: &Buffer) {}
 
 #[cfg(test)]
 mod tests {
