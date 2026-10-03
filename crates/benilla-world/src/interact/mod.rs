@@ -12,6 +12,9 @@ use bevy::prelude::*;
 use crate::model_render::ModelKind;
 
 mod pick;
+mod posed_once;
+
+pub use posed_once::PosedPickScratch;
 
 pub use pick::{
     cast_nearest_accepted, cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor,
@@ -61,6 +64,9 @@ pub struct WorldRightClick;
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightPress;
 
+/// An entity that carries pick geometry, on itself or as a blob's members.
+type CarriesPickGeometry = Or<(With<PickMesh>, With<PickBlob>)>;
+
 /// The world's pick sources as one `SystemParam`: the entity pick geometry ([`PickParts`]) and
 /// every lane that draws without entities ([`PickSource`]). Use this, not [`PickParts`] alone,
 /// which still returns hits but misses most of the static world.
@@ -70,7 +76,7 @@ pub struct WorldPick<'w, 's> {
     /// The identity every entity hit resolves through.
     objects: Query<'w, 's, &'static WorldObject>,
     /// Every entity that carries pick geometry, for the casts that walk the whole drawn world.
-    geometry: Query<'w, 's, Entity, Or<(With<PickMesh>, With<PickBlob>)>>,
+    geometry: Query<'w, 's, Entity, CarriesPickGeometry>,
     /// The retained static pass; `None` when `WOW_STATIC_GX=0` keeps every placement on the entity
     /// path. The static merge's blobs are entities and answer through [`PickBlob`].
     gx: Option<Res<'w, crate::static_gx::StaticGx>>,
