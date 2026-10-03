@@ -14,6 +14,9 @@
 //! 4. An unattended run (`crate::run_mode::unattended`) takes the first realm that is up.
 //! 5. Otherwise the dialog.
 //!
+//! The first three never name a realm whose entry failed ("Unable to connect") until an entry
+//! holds, so an unreachable remembered realm is chosen again by hand, not redialled.
+//!
 //! Change Realm costs a world dial, not a login. `RequestRealmList` (`0x46ecf0` -> `0x46b8d0`)
 //! begins a realm query on the realmd socket, which stays open until world entry (`0x46b70c`), and
 //! names no screen; only `ConnectToRealm` (`0x46b210`) drops the world connection, once a realm is
@@ -76,6 +79,8 @@ pub(crate) struct Realms {
     current: Option<String>,
     /// The realm answered for whose roster has not arrived yet.
     entering: Option<String>,
+    /// The realm whose entry last failed, until an entry holds: no auto-answer names it.
+    failed: Option<String>,
     /// Seconds until the next refresh request.
     refresh_in: f32,
     /// `WOW_REALM`, read once.
@@ -232,11 +237,12 @@ impl Realms {
     /// The entered realm's roster arrived: the entry held.
     fn entry_held(&mut self) {
         self.entering = None;
+        self.failed = None;
     }
 
     /// The login failed with an entry in flight: that realm is not the session's, so the next list
     /// falls through to the remembered `realmName`, the last realm the world was entered on,
-    /// instead of dialling the failed one again.
+    /// instead of dialling the failed one again; when that is the failed realm, to the dialog.
     fn entry_failed(&mut self) {
         let Some(name) = self.entering.take() else {
             return;
@@ -244,6 +250,7 @@ impl Realms {
         if self.current.as_deref() == Some(name.as_str()) {
             self.current = None;
         }
+        self.failed = Some(name);
     }
 
     /// Raise the dialog again over a refused realm ([`crate::flavor`]), keeping the highlight.
@@ -382,6 +389,12 @@ fn auto_answer(realms: &Realms, remembered: Option<&str>, unattended: bool) -> O
     ]
     .into_iter()
     .flatten()
+    .filter(|want| {
+        !realms
+            .failed
+            .as_deref()
+            .is_some_and(|failed| failed.eq_ignore_ascii_case(want))
+    })
     .find_map(|want| {
         realms
             .realms
@@ -739,6 +752,35 @@ mod tests {
         r.entry_held();
         r.entry_failed();
         assert_eq!(r.current.as_deref(), Some("TurtleWoW"), "the entry held");
+    }
+
+    /// An unreachable world server behind the remembered realm: the next login raises the dialog
+    /// instead of dialling it again, by any name, until an entry holds.
+    #[test]
+    fn a_failed_remembered_realm_raises_the_dialog() {
+        let mut r = list(vec![
+            realm("Alpha", 1, 0, 0, 0, 1.0),
+            realm("Mu", 1, 0, 0, 0, 1.0),
+        ]);
+        r.current = Some("Mu".into());
+        r.entering = Some("Mu".into());
+        r.entry_failed();
+        assert_eq!(auto_answer(&r, Some("mu"), false), None, "ask, not redial");
+        r.env_realm = Some("MU".into());
+        assert_eq!(auto_answer(&r, Some("Mu"), false), None, "nor by WOW_REALM");
+        assert_eq!(
+            auto_answer(&r, Some("Alpha"), false).as_deref(),
+            Some("Alpha"),
+            "another remembered realm still answers"
+        );
+
+        r.entering = Some("Mu".into());
+        r.entry_held();
+        assert_eq!(
+            auto_answer(&r, Some("Mu"), false).as_deref(),
+            Some("Mu"),
+            "a held entry lifts it"
+        );
     }
 
     /// The reference disables an offline realm's Okay.
