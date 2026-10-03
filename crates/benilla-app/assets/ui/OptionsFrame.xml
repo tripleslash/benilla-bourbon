@@ -3618,6 +3618,30 @@
             BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
             BENILLA_RAIN_SURFACES = "Wet Surfaces in Rain"
             BENILLA_GRAPHICS_PRESET = "Graphics Preset"
+            -- Our window's rows Turtle's lacks, in our window's words.
+            BENILLA_AUTO_LOOT = "Auto Loot"
+            BENILLA_BACKGROUND_SOUND = "Enable Sound in Background"
+            BENILLA_DISABLE_SPAM_FILTER = "Disable Spam Filter"
+            BENILLA_TOOLTIP_AUTO_LOOT = "Take everything from a corpse as its loot window "
+                .. "opens. Hold Shift while looting to open the window instead."
+            BENILLA_ENEMY_NAMEPLATES = "Enemy Name Plates"
+            BENILLA_FRIENDLY_NAMEPLATES = "Friendly Name Plates"
+
+            -- Turtle's getter/setter shape for the plate globals: a getter its checkbox can
+            -- `tonumber`, a setter handed the number its click computes or the string Defaults
+            -- and Cancel write back.
+            function BenillaTurtle_GetEnemyPlates()
+                return NAMEPLATES_ON and "1" or "0"
+            end
+            function BenillaTurtle_SetEnemyPlates(value)
+                BenillaOptionsFrame_SetEnemyPlates(tostring(value))
+            end
+            function BenillaTurtle_GetFriendlyPlates()
+                return FRIENDNAMEPLATES_ON and "1" or "0"
+            end
+            function BenillaTurtle_SetFriendlyPlates(value)
+                BenillaOptionsFrame_SetFriendlyPlates(tostring(value))
+            end
 
             -- A dropdown's `<identifier>Dropdown_Init`, in the shape of Turtle's own
             -- (Options\Functions.lua): each entry picks through OptionsFrameDropdown_OnValueChanged.
@@ -3678,13 +3702,13 @@
                 HARDWARE_CURSOR = 1, FIX_LAG = 1,
                 -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
                 -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`,
-                -- `autointeract` and its camera style, `UnitNamePlayerPVPTitle`. Spell Detail
-                -- (`spellEffectLevel`) stays: it drives the particle and shard rates.
+                -- `UnitNamePlayerPVPTitle`. Spell Detail (`spellEffectLevel`) stays: it drives
+                -- the particle and shard rates.
                 USE_UISCALE = 1, WORLD_LOD = 1, TERRAIN_MIP = 1, TEXTURE_DETAIL = 1,
                 ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
                 FULL_SCREEN_GLOW = 1, DEATH_EFFECT = 1, VERTEX_ANIMATION_SHADERS = 1,
                 PHONG_SHADING = 1, USE_WEATHER_SHADER = 1, CINEMATIC_SUBTITLES = 1,
-                CLICK_TO_MOVE = 1, CLICK_CAMERA_STYLE = 1, SHOW_PLAYER_TITLES = 1,
+                SHOW_PLAYER_TITLES = 1,
                 -- Latched at boot into every sampler (`tex_filter`), which a page reload re-reads.
                 TRILINEAR_FILTERING = 1, ANISOTROPIC = 1,
                 -- The engine path is missing: Simple Chat's re-layout, a zone-objective tracker,
@@ -3770,12 +3794,47 @@
                 { category = DISPLAY, row = {
                     name = "BENILLA_FRAME_GENERATION", desc = BENILLA_TOOLTIP_FRAME_GENERATION,
                     type = "checkbutton", cvar = "frameGeneration" } },
+                -- Our window's rows Turtle's lacks, each beside the Turtle row it sits by in ours.
+                { after = "AUTO_SELF_CAST_TEXT", row = {
+                    name = "BENILLA_AUTO_LOOT", desc = BENILLA_TOOLTIP_AUTO_LOOT,
+                    type = "checkbutton", cvar = "autoLootDefault" } },
+                { after = "ENABLE_ERROR_SPEECH", row = {
+                    name = "BENILLA_BACKGROUND_SOUND", desc = BENILLA_TOOLTIP_BACKGROUND_SOUND,
+                    type = "checkbutton", cvar = "Sound_EnableSoundWhenGameIsInBG" } },
+                -- 1.12's Disable Spam Filter box (UIOptionsFrame.lua:47), inverted as there.
+                { after = "PROFANITY_FILTER", row = {
+                    name = "BENILLA_DISABLE_SPAM_FILTER", desc = OPTION_TOOLTIP_DISABLE_SPAM_FILTER,
+                    type = "checkbutton", cvar = "spamFilter", inverted = true } },
+                -- The V-key plates, heading the overhead names as on our Nameplates page.
+                { before = "SHOW_PLAYER_NAMES", row = {
+                    name = "BENILLA_ENEMY_NAMEPLATES", type = "checkbutton",
+                    getter = "BenillaTurtle_GetEnemyPlates",
+                    setter = "BenillaTurtle_SetEnemyPlates", defaultValue = "0" } },
+                { before = "SHOW_PLAYER_NAMES", row = {
+                    name = "BENILLA_FRIENDLY_NAMEPLATES", type = "checkbutton",
+                    getter = "BenillaTurtle_GetFriendlyPlates",
+                    setter = "BenillaTurtle_SetFriendlyPlates", defaultValue = "0" } },
             }
+            -- A row placed by its neighbour: the category holding the Turtle row of that name.
+            local function placeBeside(entry)
+                local anchor = entry.after or entry.before
+                for _, category in ipairs(GameOptions) do
+                    for k, option in ipairs(category.options or {}) do
+                        if ( option.name == anchor ) then
+                            tinsert(category.options, entry.after and k + 1 or k, entry.row)
+                            return 1
+                        end
+                    end
+                end
+            end
             -- The first category of a name: DISPLAY is both a VIDEO and an interface category,
             -- and VIDEO's comes first.
             for _, entry in ipairs(rows) do
                 local placed
-                for _, category in ipairs(GameOptions) do
+                if ( entry.after or entry.before ) then
+                    placed = placeBeside(entry)
+                end
+                for _, category in ipairs(placed and {} or GameOptions) do
                     if ( category.options and category.name == entry.category ) then
                         if ( entry.first ) then
                             tinsert(category.options, 1, entry.row)
@@ -3787,7 +3846,8 @@
                     end
                 end
                 if ( not placed ) then
-                    error("Turtle options: no category " .. tostring(entry.category)
+                    error("Turtle options: no place " .. tostring(entry.category or entry.after
+                        or entry.before)
                         .. " for " .. entry.row.name)
                 end
             end

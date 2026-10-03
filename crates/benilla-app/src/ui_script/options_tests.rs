@@ -4833,7 +4833,8 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
 }
 
 /// Turtle WoW's own options window (`GameOptions`) carries every Graphics row of ours it has no
-/// row for, including the lighting rows whose category loses all of Turtle's own rows to the cut.
+/// row for, including the lighting rows whose category loses all of Turtle's own rows to the cut,
+/// and every other row of our window it lacks, each beside its Turtle neighbour.
 #[test]
 fn turtle_options_carry_every_graphics_row() {
     benilla_formats::wow_data_or_skip!();
@@ -4855,6 +4856,19 @@ fn turtle_options_carry_every_graphics_row() {
             { name = PIXEL_SHADERS, options = {
                 { name = "ENABLE_ALL_SHADERS", type = "checkbutton" },
                 { name = "FULL_SCREEN_GLOW", type = "checkbutton" } } },
+            { name = "Sound" },
+            { name = "General", options = {
+                { name = "ENABLE_ERROR_SPEECH", type = "checkbutton", cvar = "EnableErrorSpeech" },
+                { name = "ENABLE_MUSIC", type = "checkbutton", cvar = "EnableMusic" } } },
+            { name = "Interface" },
+            { name = "Chat", options = {
+                { name = "PROFANITY_FILTER", type = "checkbutton", cvar = "profanityFilter" } } },
+            { name = "Controls", options = {
+                { name = "CLICK_TO_MOVE", type = "checkbutton", cvar = "autointeract" },
+                { name = "AUTO_SELF_CAST_TEXT", type = "checkbutton", cvar = "autoSelfCast" },
+                { name = "BLOCK_TRADES", type = "checkbutton", cvar = "BlockTrades" } } },
+            { name = DISPLAY, options = {
+                { name = "SHOW_PLAYER_NAMES", type = "checkbutton", cvar = "UnitNamePlayer" } } },
         }
         function OptionsFrame_UpdateCategories() end
         local frame = CreateFrame("Frame", "OptionsFrame", UIParent)
@@ -4916,6 +4930,48 @@ fn turtle_options_carry_every_graphics_row() {
         )
         .unwrap(),
         "PIXEL_SHADERS survives the cut, holding our five rows: {rows}"
+    );
+
+    // Our window's other rows, each beside its Turtle neighbour, and Click-to-Move kept.
+    let names = s
+        .eval::<String>(
+            r#"
+            local out = ""
+            for i, category in ipairs(GameOptions) do
+                if ( i > 5 and category.options ) then
+                    out = out .. category.name .. ":"
+                    for _, option in ipairs(category.options) do
+                        out = out .. option.name .. ","
+                    end
+                    out = out .. ";"
+                end
+            end
+            return out
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        names,
+        "General:ENABLE_ERROR_SPEECH,BENILLA_BACKGROUND_SOUND,ENABLE_MUSIC,;         Chat:PROFANITY_FILTER,BENILLA_DISABLE_SPAM_FILTER,;         Controls:CLICK_TO_MOVE,AUTO_SELF_CAST_TEXT,BENILLA_AUTO_LOOT,BLOCK_TRADES,;         Display:BENILLA_ENEMY_NAMEPLATES,BENILLA_FRIENDLY_NAMEPLATES,SHOW_PLAYER_NAMES,;"
+    );
+
+    // The plate rows read and write FrameXML's globals in Turtle's getter/setter shape: the
+    // click hands the setter a number, Defaults and Cancel a string.
+    s.run("NAMEPLATES_ON = nil; FRIENDNAMEPLATES_ON = 1")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaTurtle_GetEnemyPlates() .. BenillaTurtle_GetFriendlyPlates()"
+        )
+        .unwrap(),
+        "01"
+    );
+    s.run("BenillaTurtle_SetEnemyPlates(1); BenillaTurtle_SetFriendlyPlates(\"0\")")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return tostring(NAMEPLATES_ON) .. tostring(FRIENDNAMEPLATES_ON)")
+            .unwrap(),
+        "1nil"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
