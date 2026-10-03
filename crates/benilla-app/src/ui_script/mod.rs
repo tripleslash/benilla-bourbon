@@ -711,6 +711,9 @@ mod chat_resize_tests;
 mod dropdown_tests;
 
 #[cfg(test)]
+mod lft_teleport_tests;
+
+#[cfg(test)]
 mod action_bar_tests;
 
 #[cfg(test)]
