@@ -42,8 +42,11 @@ struct ModernBlock {
 
 // Mirrors `benilla_world::modern::shadow::ModernCascades::std430` (a layout test pins the size).
 struct ModernCascades {
-    // Reverse-Z orthographic light clip per cascade.
-    clip_from_world: array<mat4x4<f32>, 4>,
+    // Reverse-Z orthographic light clip per cascade, as four columns each: read through
+    // `cascade_clip`. Not `array<mat4x4<f32>, 4>`: Firefox (155, D3D12) transposes the matrices of
+    // such an array when the struct holding it is copied out of a storage buffer, and every helper
+    // here takes this struct by value. Same bytes, same loads.
+    clip_cols: array<vec4<f32>, 16>,
     // View distance (yd) at which each cascade ends.
     splits: vec4<f32>,
     // World size (yd) of one texel per cascade — the unit of the normal offset.
@@ -74,6 +77,12 @@ fn mirror_view(c: ModernCascades, eye: vec3<f32>) -> bool {
     return eye.y < c.sky_params.w - 0.25;
 }
 
+// Cascade `i`'s light clip.
+fn cascade_clip(c: ModernCascades, i: u32) -> mat4x4<f32> {
+    let k = i * 4u;
+    return mat4x4<f32>(c.clip_cols[k], c.clip_cols[k + 1u], c.clip_cols[k + 2u], c.clip_cols[k + 3u]);
+}
+
 fn cascade_visibility(
     map: texture_depth_2d_array,
     samp: sampler_comparison,
@@ -84,7 +93,7 @@ fn cascade_visibility(
     lite: bool,
 ) -> f32 {
     let offset_pos = world_pos + normal * (c.texel_world[i] * c.params.z);
-    let clip = c.clip_from_world[i] * vec4<f32>(offset_pos, 1.0);
+    let clip = cascade_clip(c, i) * vec4<f32>(offset_pos, 1.0);
     let ndc = clip.xyz / clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
@@ -215,7 +224,7 @@ fn sun_visibility_fast(
     let count = u32(c.params.x);
     for (var i = 0u; i < count; i = i + 1u) {
         if (view_distance < c.splits[i]) {
-            let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+            let clip = cascade_clip(c, i) * vec4<f32>(world_pos, 1.0);
             let ndc = clip.xyz / clip.w;
             let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
             if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
@@ -251,7 +260,7 @@ fn sun_visibility_anywhere(
     // A texel in from the edge, so the compare's footprint never reads past the map.
     let margin = c.params.y;
     for (var i = 0u; i < count; i = i + 1u) {
-        let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+        let clip = cascade_clip(c, i) * vec4<f32>(world_pos, 1.0);
         let ndc = clip.xyz / clip.w;
         let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
         if (all(uv >= vec2<f32>(margin)) && all(uv <= vec2<f32>(1.0 - margin)) && ndc.z >= 0.0) {
@@ -291,7 +300,7 @@ fn sun_visibility_load(
     let count = u32(c.params.x);
     for (var i = 0u; i < count; i = i + 1u) {
         if (view_distance < c.splits[i]) {
-            let clip = c.clip_from_world[i] * vec4<f32>(world_pos, 1.0);
+            let clip = cascade_clip(c, i) * vec4<f32>(world_pos, 1.0);
             let ndc = clip.xyz / clip.w;
             let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
             if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
