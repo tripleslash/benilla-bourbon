@@ -793,8 +793,18 @@
                 local x = tw / 2 + (m.value - min) / (max - min) * (w - tw)
                 mark.tick:ClearAllPoints()
                 mark.tick:SetPoint("CENTER", slider, "LEFT", x, 0)
+                mark.tick:Show()
                 mark.label:ClearAllPoints()
                 mark.label:SetPoint("TOP", mark.tick, "BOTTOM", 0, -4)
+                mark.label:Show()
+            end
+        end
+
+        -- A slider handed to another row drops the ticks it wore.
+        function BenillaSlider_HideMarks(slider)
+            for _, mark in ipairs(slider.benillaMarks or {}) do
+                mark.tick:Hide()
+                mark.label:Hide()
             end
         end
 
@@ -4001,7 +4011,8 @@
             -- ── A slider reads out its value ──
             -- Deviation: Turtle's slider labels only its ends (OptionsFrameTemplates.xml). Here
             -- each also reads out its value at its right, as every slider row of our window does
-            -- and in that row's words; the readout's column comes out of the slider's own width.
+            -- and in that row's words; the readouts' column is the right end of every row, which
+            -- the controls' column stops short of (below).
             BENILLA_TURTLE_VALUE_WIDTH = 44
             -- The readouts that are not the value as a percentage, by the name Turtle keys the
             -- row with: our window's row of that CVar. A range past 10 reads its number.
@@ -4035,17 +4046,16 @@
                 frame.benillaValue:SetTextColor(color.r, color.g, color.b)
             end
 
-            -- A rendered category's sliders get their readouts. Turtle's slider has no
-            -- OnValueChanged (below), so the script that follows a drag is ours alone.
+            -- A rendered category's sliders get their readouts, each on its row's own line, level
+            -- with the label and not with the groove Turtle seats 5 above it. Turtle's slider has
+            -- no OnValueChanged (below), so the script that follows a drag is ours alone.
             local function showValues()
                 for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
                     local option = frame:IsShown() and frame.option
                     if ( option and option.type == "slider" ) then
                         if ( not frame.benillaValue ) then
                             frame.benillaValue = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-                            frame.benillaValue:SetPoint("LEFT", frame.control, "RIGHT", 6, 0)
-                            frame.control:ClearAllPoints()
-                            frame.control:SetPoint("RIGHT", frame, "RIGHT", -BENILLA_TURTLE_VALUE_WIDTH, 5)
+                            frame.benillaValue:SetPoint("LEFT", frame, "RIGHT", 6 - BENILLA_TURTLE_VALUE_WIDTH, 0)
                             frame.control:SetScript("OnValueChanged", function()
                                 showValue(this:GetParent())
                             end)
@@ -4121,45 +4131,76 @@
             end
 
             -- fork: fsr (FORK.md) -- a rendered category's marked sliders get their ticks.
+            -- Turtle hands a category its sliders by index (`OptionsFrameSlider<n>`), so a
+            -- slider that wore another category's ticks drops them first.
             local function placeMarks()
                 for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
                     local option = frame:IsShown() and frame.option
-                    if ( option and option.benillaMarks and frame.control ) then
-                        BenillaSlider_PlaceMarks(frame.control, option.minval, option.maxval,
-                            option.benillaMarks)
+                    if ( option and option.type == "slider" ) then
+                        BenillaSlider_HideMarks(frame.control)
+                        if ( option.benillaMarks ) then
+                            BenillaSlider_PlaceMarks(frame.control, option.minval, option.maxval,
+                                option.benillaMarks)
+                        end
                     end
                 end
             end
 
-            -- Deviation: Turtle seats a 128-wide slider and a 110-wide dropdown at the right of a
-            -- 346-wide row whose label column is 210, which leaves a fine slider like Render
-            -- Scale too short to pick a stop on. A page's sliders and dropdowns widen together
-            -- into the room its longest label leaves, up to BENILLA_TURTLE_CONTROL_MAX, and never
-            -- below Turtle's own widths. A slider's readout takes its column off the right end.
-            BENILLA_TURTLE_CONTROL_MAX = 220
-            local function widenControls()
+            -- ── One control column ──
+            -- Deviation: Turtle seats each control at the right end of a 346-wide row whose label
+            -- column is 210: a 128-wide slider, a 110-wide dropdown, a checkbox. Here a page's
+            -- controls share one column, which ends BENILLA_TURTLE_VALUE_WIDTH short of the row's
+            -- right end, where the sliders read out: a slider's groove and a dropdown's capsule
+            -- span it and a checkbox closes it, so every control ends on one line and every slider
+            -- and dropdown starts on one. The column widens into the room the page's longest
+            -- slider or dropdown label leaves, from Turtle's 128 up to
+            -- BENILLA_TURTLE_CONTROL_MAX, which gives a fine slider like Render Scale the travel
+            -- to pick a stop on; a checkbox's label runs under no control, so it does not count.
+            BENILLA_TURTLE_CONTROL_MAX = 176
+            -- The column's width on a row `rowWidth` wide, its longest such label `longest` wide.
+            function BenillaTurtle_ColumnWidth(rowWidth, longest)
+                local room = rowWidth - BENILLA_TURTLE_VALUE_WIDTH - longest - 12
+                return max(128, min(BENILLA_TURTLE_CONTROL_MAX, room))
+            end
+
+            local function seatControls()
                 local rows, longest = {}, 0
                 for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
                     local option = frame:IsShown() and frame.option
                     if ( option and option.type ~= "button" ) then
                         tinsert(rows, frame)
-                        longest = max(longest, frame.label:GetStringWidth() or 0)
+                        if ( option.type ~= "checkbutton" ) then
+                            -- Turtle's UpdateOptions indents a dependent row's label by 10.
+                            local indent = option.dependency and not option.ignoreOffset and 10 or 0
+                            longest = max(longest, (frame.label:GetStringWidth() or 0) + indent)
+                        end
                     end
                 end
                 for _, frame in ipairs(rows) do
-                    local room = min(BENILLA_TURTLE_CONTROL_MAX, frame:GetWidth() - longest - 12)
-                    if ( frame.option.type == "slider" ) then
-                        frame.control:SetWidth(max(128, room - BENILLA_TURTLE_VALUE_WIDTH))
-                    elseif ( frame.option.type == "dropdown" ) then
-                        -- The menu's art runs past its anchor by 18 (`RIGHT` +18).
-                        UIDropDownMenu_SetWidth(max(110, room - 18), frame.control)
+                    local control, kind = frame.control, frame.option.type
+                    local width = BenillaTurtle_ColumnWidth(frame:GetWidth(), longest)
+                    local right = -BENILLA_TURTLE_VALUE_WIDTH
+                    control:ClearAllPoints()
+                    if ( kind == "slider" ) then
+                        -- Turtle's own seat, 5 above the row's line over its two end labels.
+                        control:SetPoint("RIGHT", frame, "RIGHT", right, 5)
+                        control:SetWidth(width)
+                    elseif ( kind == "dropdown" ) then
+                        -- The menu is its width and 50 (UIDropDownMenu_SetWidth); the capsule's
+                        -- ink stops 17 inside each end of it (CharacterCreate-LabelFrame) and
+                        -- sits 3 above its line.
+                        control:SetPoint("RIGHT", frame, "RIGHT", right + 17, -3)
+                        UIDropDownMenu_SetWidth(width - 16, control)
+                    else
+                        -- The box's ink stops 5 inside its right end (UI-CheckBox-Up).
+                        control:SetPoint("RIGHT", frame, "RIGHT", right + 5, 0)
                     end
                 end
             end
 
             -- What a rendered category gets over Turtle's own render.
             local function dress()
-                widenControls()
+                seatControls()
                 showValues()
                 placeMarks()
             end

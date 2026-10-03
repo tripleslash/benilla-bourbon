@@ -4993,5 +4993,19 @@ fn turtle_options_carry_every_graphics_row() {
         .unwrap(),
         "60%,67%,Medium,Full,50%,477"
     );
+
+    // The one control column on Turtle's 346-wide row: it takes the room the page's longest
+    // slider or dropdown label leaves beside the 44-wide readouts, between Turtle's 128 and 176.
+    assert_eq!(
+        s.eval::<String>(
+            r#"
+            return BenillaTurtle_ColumnWidth(346, 110) .. ","
+                .. BenillaTurtle_ColumnWidth(346, 155) .. ","
+                .. BenillaTurtle_ColumnWidth(346, 200)
+        "#
+        )
+        .unwrap(),
+        "176,135,128"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
