@@ -84,9 +84,9 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 /// `GI_GAIN` in `shaders/ssilvb.wgsl`) still puts the intended look at 0.5, so a player who drags to
 /// the middle gets exactly what this used to ship. Raise the look in the gain, never here.
 ///
-/// fork: **0.4 since 2026-09-17** (the director's call) — the modern look wants the contact darkening on
+/// fork: **0.6 since 2026-10-03** (the director's call) — the modern look wants the contact darkening on
 /// by default.
-pub const AO_DEFAULT: f32 = 0.4;
+pub const AO_DEFAULT: f32 = 0.6;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
 pub const GI_DEFAULT: f32 = 0.0;
@@ -664,7 +664,7 @@ mod tests {
     fn the_shipped_defaults_are_the_ones_the_cvars_register() {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
-        assert_eq!(AO_DEFAULT, 0.4); // fork: 0.4 since 2026-09-17
+        assert_eq!(AO_DEFAULT, 0.6); // fork: 0.6 since 2026-10-03
         assert_eq!(GI_DEFAULT, 0.0);
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
