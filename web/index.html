@@ -255,10 +255,12 @@
   // see web/platform.js. Durable storage is not asked for here; `packs.js::bootstrap` does it on
   // the boot path, ahead of the service worker's first write.
   import('./platform.js')
-    .then(({ installFullscreenToggle }) => {
+    .then(({ installFullscreenToggle, holdMouseNavigationButtons }) => {
       installFullscreenToggle(document.getElementById('fs'), {
         focusTarget: document.getElementById('benilla'),
       });
+      // Optional-called: a cached platform.js from before this export must not throw here.
+      holdMouseNavigationButtons?.();
     })
     .catch((e) => console.warn('platform.js:', e));
   // **Before `boot(init)`, and that ordering is load-bearing.** `init()` builds the plugin graph,

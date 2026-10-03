@@ -1,4 +1,5 @@
-// platform.js — browser-platform glue the client cannot ask for itself: full-screen key capture.
+// platform.js — browser-platform glue the client cannot ask for itself: full-screen key capture,
+// and holding the page against the mouse's side buttons.
 // Imported by the hosting page (web/index.html), the same way boot.js is.
 //
 // Everything here is best-effort. Every entry point is feature-detected and every failure is
@@ -76,4 +77,38 @@ export function installFullscreenToggle(button, { target = document.documentElem
   }
   document.addEventListener('fullscreenchange', () => sync(false));
   sync(true);
+}
+
+// Keep the mouse's side buttons from leaving the page. A browser reads them as history
+// navigation (button 3 back, 4 forward) and the client binds them: 1.12's own
+// `DefaultBindings.wtf` has `BUTTON4 TOGGLEAUTORUN`. A player reaching for autorun must not
+// leave instead, which ends the session and loses the world load.
+//
+// `preventDefault()` on the mouse events is enough in some browsers and is kept for them, but on
+// Windows Chrome decides the navigation before the page gets a say. So the history is pinned
+// too: one state pushed, and put back whenever it is popped. Back and forward then move inside
+// this same document, which never unloads. The listeners do NOT `stopPropagation()`: the events
+// must still reach the canvas, where winit turns them into `MouseButton::Back`/`Forward` for the
+// binding dispatch.
+//
+// This holds the browser's own Back button as well, deliberately: for a game client, leaving by
+// accident is the failure. The tab's close button, a typed URL and a bookmark are unaffected.
+export function holdMouseNavigationButtons(target = window) {
+  const swallow = (e) => {
+    if (e.button === 3 || e.button === 4) e.preventDefault();
+  };
+  // Capture phase, so the decision is made before anything downstream; never passive, since a
+  // passive listener may not call `preventDefault`.
+  for (const name of ['mousedown', 'mouseup', 'auxclick', 'click']) {
+    target.addEventListener(name, swallow, { capture: true, passive: false });
+  }
+  // `pushState` throws on an opaque origin, and none of this is load-bearing for the boot.
+  try {
+    history.pushState(null, '', location.href);
+    window.addEventListener('popstate', () => {
+      history.pushState(null, '', location.href);
+    });
+  } catch (e) {
+    console.warn('platform.js: history pin unavailable:', e);
+  }
 }
