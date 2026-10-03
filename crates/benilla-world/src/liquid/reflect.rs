@@ -268,6 +268,9 @@ fn spawn_reflection_camera(
         // `gxMultisample` is latched at camera spawn and never moves (see `player::setup`), so
         // copying it once here is copying it for good.
         *msaa,
+        // One cluster, as the world camera: nothing here reads Bevy's light clusters, and the
+        // default grid is a 55 KB buffer allocated afresh every frame (`view::cpu_light_clusters`).
+        bevy::light::cluster::ClusterConfig::Single,
         projection.clone(),
         Transform::IDENTITY,
     ));

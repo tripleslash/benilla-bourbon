@@ -264,8 +264,48 @@ struct ModernShadowFrame {
     /// and (P8b) per atlas SLOT what its tiles currently hold.
     local_offsets: Vec<u32>,
     atlas: std::sync::Mutex<AtlasCache>,
+    /// The restore draws' rectangle buffers, one per draw in a frame and kept across frames
+    /// ([`restore_buffer`]); `restore_next` is this frame's next unused one.
+    restore_pool: std::sync::Mutex<Vec<Buffer>>,
+    restore_next: std::sync::atomic::AtomicUsize,
     bind: Option<BindGroup>,
     count: u32,
+}
+
+/// A storage buffer holding `rects` for one restore draw. A buffer made per draw is freed in a
+/// browser only when its garbage collector runs, and Firefox's ran out of GPU memory first, so the
+/// draws of a frame each take the next buffer of a pool that lives as long as the frame resource.
+/// Each draw's buffer is its own, so the queue writes all land before the frame's submission reads.
+fn restore_buffer(
+    frame: &ModernShadowFrame,
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    rects: &[[f32; 4]],
+) -> Buffer {
+    let bytes: &[u8] = bytemuck::cast_slice(rects);
+    let i = frame
+        .restore_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut pool = frame
+        .restore_pool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pool.get(i).is_none_or(|b| b.size() < bytes.len() as u64) {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("modern_shadow_restore_rects"),
+            size: (bytes.len() as u64).next_power_of_two().max(4096),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if i < pool.len() {
+            pool[i] = buffer;
+        } else {
+            pool.push(buffer);
+        }
+    }
+    let buffer = pool[i.min(pool.len() - 1)].clone();
+    queue.write_buffer(&buffer, 0, bytes);
+    buffer
 }
 
 fn init_shadow_pipelines(
@@ -446,6 +486,7 @@ fn prepare_modern_shadow(
 ) {
     frame.count = 0;
     frame.bind = None;
+    *frame.restore_next.get_mut() = 0;
     let (Some(cascades), Some(pipes)) = (cascades, pipes) else {
         return;
     };
@@ -1013,11 +1054,12 @@ pub(crate) fn gx_shadow_pass(
                                 })
                                 .collect();
                             let device = render_context.render_device();
-                            let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
-                                label: Some("modern_shadow_restore_rects"),
-                                contents: bytemuck::cast_slice(&data),
-                                usage: BufferUsages::STORAGE,
-                            });
+                            let buffer = restore_buffer(
+                                frame,
+                                device,
+                                world.resource::<RenderQueue>(),
+                                &data,
+                            );
                             let bind = device.create_bind_group(
                                 "modern_shadow_restore",
                                 &pipeline_cache.get_bind_group_layout(layout),
@@ -1530,6 +1572,8 @@ fn draw_local_atlas(
             match restore {
                 Some((pipeline, layout)) => restore_atlas_slots(
                     render_context,
+                    frame,
+                    world.resource::<RenderQueue>(),
                     pipeline_cache,
                     pipeline,
                     layout,
@@ -1824,6 +1868,8 @@ fn draw_atlas_entities(
 #[allow(clippy::too_many_arguments)]
 fn restore_atlas_slots(
     render_context: &mut RenderContext<'_, '_>,
+    frame: &ModernShadowFrame,
+    queue: &RenderQueue,
     pipeline_cache: &PipelineCache,
     pipeline: &RenderPipeline,
     layout: &BindGroupLayoutDescriptor,
@@ -1853,11 +1899,7 @@ fn restore_atlas_slots(
         return;
     }
     let device = render_context.render_device();
-    let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("modern_local_shadow_restore_rects"),
-        contents: bytemuck::cast_slice(&rects),
-        usage: BufferUsages::STORAGE,
-    });
+    let buffer = restore_buffer(frame, device, queue, &rects);
     let bind = device.create_bind_group(
         "modern_local_shadow_restore",
         &pipeline_cache.get_bind_group_layout(layout),

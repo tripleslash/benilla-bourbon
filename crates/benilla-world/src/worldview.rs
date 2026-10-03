@@ -439,6 +439,8 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
         Hdr,
         Tonemapping::None,
         crate::ffx_glow::FfxGlow::WORLD,
+        // One cluster, as the client's world camera (`view::cpu_light_clusters`).
+        bevy::light::cluster::ClusterConfig::Single,
         Transform::from_translation(eye).looking_at(look, Vec3::Y),
         ViewCam {
             yaw,

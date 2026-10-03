@@ -383,6 +383,21 @@ pub(crate) fn plugin(app: &mut App) {
             // After the controller writes this frame's `Transform`.
             .after(crate::schedule::WorldStage::Input),
     );
+    app.add_systems(Startup, cpu_light_clusters);
+}
+
+/// Bevy's light clustering runs on the CPU, over the one cluster each world view asks for. No
+/// world shader reads Bevy's clusters (point lights ride `lighting::global_light`), and the GPU
+/// path allocates fresh cluster buffers per view every frame: a browser frees those only on its own
+/// garbage collection, and Firefox collected them too late, out of GPU memory within minutes.
+/// `WOW_CLUSTERS=1` keeps Bevy's choice, as it keeps the default grid on the world camera.
+fn cpu_light_clusters(settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>) {
+    if std::env::var_os("WOW_CLUSTERS").is_some() {
+        return;
+    }
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
+    }
 }
 
 #[cfg(test)]
