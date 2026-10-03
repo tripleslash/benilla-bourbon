@@ -4973,5 +4973,25 @@ fn turtle_options_carry_every_graphics_row() {
             .unwrap(),
         "1nil"
     );
+
+    // A slider's readout is our window's row of that CVar: a percentage, a named stop, the
+    // thumb's travel for Brightness, and the bare number past a range of 10.
+    assert_eq!(
+        s.eval::<String>(
+            r#"
+            local function text(name, lo, hi, value)
+                return BenillaTurtle_SliderText({ name = name, minval = lo, maxval = hi }, value)
+            end
+            return text("BENILLA_AMBIENT_OCCLUSION", 0, 1, 0.6) .. ","
+                .. text("BENILLA_RENDER_SCALE", 0.5, 2, 0.67) .. ","
+                .. text("ENVIRONMENT_DETAIL", 0, 2, 1) .. ","
+                .. text("WEATHER_DETAIL", 0, 3, 3) .. ","
+                .. text("GAMMA", -0.5, 0.5, 0) .. ","
+                .. text("FARCLIP", 177, 777, 477)
+        "#
+        )
+        .unwrap(),
+        "60%,67%,Medium,Full,50%,477"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

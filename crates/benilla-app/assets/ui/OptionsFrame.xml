@@ -3998,13 +3998,71 @@
                 okay()
             end)
 
+            -- ── A slider reads out its value ──
+            -- Deviation: Turtle's slider labels only its ends (OptionsFrameTemplates.xml). Here
+            -- each also reads out its value at its right, as every slider row of our window does
+            -- and in that row's words; the readout's column comes out of the slider's own width.
+            BENILLA_TURTLE_VALUE_WIDTH = 44
+            -- The readouts that are not the value as a percentage, by the name Turtle keys the
+            -- row with: our window's row of that CVar. A range past 10 reads its number.
+            local percent, raw = {}, { fmt = "raw" }
+            local readouts = {
+                GAMMA = { fmt = "travel" },
+                MAX_FOLLOW_DIST = { fmt = "yards" },
+                ENVIRONMENT_DETAIL = { stops = { "Low", "Medium", "High" } },
+                SPELL_DETAIL = { stops = { "Low", "Medium", "High" } },
+                WEATHER_DETAIL = { stops = { "Minimal", "Low", "Medium", "Full" } },
+            }
+            function BenillaTurtle_SliderText(option, value)
+                local readout = readouts[option.name]
+                    or ((tonumber(option.maxval) or 0) > 10 and raw or percent)
+                readout.minv, readout.maxv = option.minval, option.maxval
+                return BenillaOptionsRow_FormatValue(readout, value)
+            end
+
+            -- Greyed with its row, as Turtle greys the slider's own two labels.
+            local function showValue(frame)
+                local option = frame.option
+                if ( not option or option.type ~= "slider" or not frame.benillaValue ) then
+                    return
+                end
+                local v = frame.control:GetValue()
+                if ( option.inverted ) then
+                    v = option.maxval - v + option.minval
+                end
+                frame.benillaValue:SetText(BenillaTurtle_SliderText(option, v))
+                local color = frame.enabled and NORMAL_FONT_COLOR or GRAY_FONT_COLOR
+                frame.benillaValue:SetTextColor(color.r, color.g, color.b)
+            end
+
+            -- A rendered category's sliders get their readouts. Turtle's slider has no
+            -- OnValueChanged (below), so the script that follows a drag is ours alone.
+            local function showValues()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.type == "slider" ) then
+                        if ( not frame.benillaValue ) then
+                            frame.benillaValue = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+                            frame.benillaValue:SetPoint("LEFT", frame.control, "RIGHT", 6, 0)
+                            frame.control:ClearAllPoints()
+                            frame.control:SetPoint("RIGHT", frame, "RIGHT", -BENILLA_TURTLE_VALUE_WIDTH, 5)
+                            frame.control:SetScript("OnValueChanged", function()
+                                showValue(this:GetParent())
+                            end)
+                        end
+                        showValue(frame)
+                    end
+                end
+            end
+
             -- Turtle's three control handlers, each computing its value as Turtle's does; a VIDEO
-            -- row stages it, any other row goes to Turtle's own.
+            -- row stages it, any other row goes to Turtle's own, which may grey a dependent slider.
             local checkClick = OptionsFrameCheckButton_OnClick
             function OptionsFrameCheckButton_OnClick()
                 local option = this:GetParent().option
                 if ( not option.benillaStaged ) then
-                    return checkClick()
+                    checkClick()
+                    return showValues()
                 end
                 local on = this:GetChecked()
                 local value = on and (option.inverted and "0" or "1") or (option.inverted and "1" or "0")
@@ -4017,14 +4075,15 @@
                 local menu = getglobal(UIDROPDOWNMENU_OPEN_MENU)
                 local option = menu:GetParent().option
                 if ( not option.benillaStaged ) then
-                    return dropdownChanged()
+                    dropdownChanged()
+                    return showValues()
                 end
                 UIDropDownMenu_SetSelectedValue(menu, this.value)
                 stage(option, this.value)
             end
 
-            -- Turtle's slider calls this from its OnMouseUp alone (OptionsFrameTemplates.xml): it
-            -- has no OnValueChanged, so a SetValue here re-enters nothing.
+            -- Turtle's slider calls this from its OnMouseUp alone (OptionsFrameTemplates.xml): its
+            -- OnValueChanged is the readout's, so a SetValue here re-enters nothing.
             local sliderChanged = OptionsFrameSlider_OnValueChanged
             function OptionsFrameSlider_OnValueChanged()
                 local option = this:GetParent().option
@@ -4076,7 +4135,7 @@
             -- 346-wide row whose label column is 210, which leaves a fine slider like Render
             -- Scale too short to pick a stop on. A page's sliders and dropdowns widen together
             -- into the room its longest label leaves, up to BENILLA_TURTLE_CONTROL_MAX, and never
-            -- below Turtle's own widths.
+            -- below Turtle's own widths. A slider's readout takes its column off the right end.
             BENILLA_TURTLE_CONTROL_MAX = 220
             local function widenControls()
                 local rows, longest = {}, 0
@@ -4090,12 +4149,19 @@
                 for _, frame in ipairs(rows) do
                     local room = min(BENILLA_TURTLE_CONTROL_MAX, frame:GetWidth() - longest - 12)
                     if ( frame.option.type == "slider" ) then
-                        frame.control:SetWidth(max(128, room))
+                        frame.control:SetWidth(max(128, room - BENILLA_TURTLE_VALUE_WIDTH))
                     elseif ( frame.option.type == "dropdown" ) then
                         -- The menu's art runs past its anchor by 18 (`RIGHT` +18).
                         UIDropDownMenu_SetWidth(max(110, room - 18), frame.control)
                     end
                 end
+            end
+
+            -- What a rendered category gets over Turtle's own render.
+            local function dress()
+                widenControls()
+                showValues()
+                placeMarks()
             end
 
             local listClick = OptionsListButton_OnClick
@@ -4104,27 +4170,39 @@
                 if ( next(staged) ) then
                     showStaged()
                 end
-                widenControls()
-                placeMarks()
+                dress()
             end
 
             -- Apply's redraw and a reopen render the category without the list click.
             local frameOnShow = OptionsFrame_OnShow
             function OptionsFrame_OnShow()
                 frameOnShow()
-                widenControls()
-                placeMarks()
+                dress()
             end
 
-            -- Defaults writes the category's defaults outright, as Turtle's does, over anything
-            -- staged.
+            -- Turtle's Defaults button (OptionsFrame.xml, under the category list) writes the
+            -- shown category's defaults outright, as Turtle's does, over anything staged, and
+            -- renders it bare. On a VIDEO category the preset's watch follows as after Apply: the
+            -- host re-derives the preset from the rows just written, and the reforged models
+            -- moving wait for their reload.
             local setDefaults = OptionsFrame_SetDefaults
             function OptionsFrame_SetDefaults(popup)
-                if ( not popup ) then
-                    staged = {}
-                    apply:Hide()
+                if ( popup ) then
+                    return setDefaults(popup)
                 end
-                return setDefaults(popup)
+                staged = {}
+                apply:Hide()
+                local reforged = GetCVar("reforgedModels")
+                setDefaults()
+                dress()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    if ( frame:IsShown() and frame.option and frame.option.benillaStaged ) then
+                        watch.reforged = reforged
+                        watch.frames = 6
+                        watch:Show()
+                        break
+                    end
+                end
             end
 
             local onHide = OptionsFrame_OnHide
