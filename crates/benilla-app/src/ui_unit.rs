@@ -1500,7 +1500,7 @@ fn feed_units(
                 // `ChatFrame.lua:1283-1320` reads them; missing gains are zeros, since stock's
                 // `if ( argN > 0 )` raises on nil.
                 let (info, talent_points) = sink.chat.take_level_up_gains(level).unzip();
-                let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> u32| {
+                let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> i32| {
                     ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
                 };
                 script.fire_event(

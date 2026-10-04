@@ -111,6 +111,10 @@ pub(super) enum UiFixture {
     /// `water-noon` camera). Deep water is opaque (`WATER_DEEP_ALPHA` 1.0), so a name sorted before
     /// the liquid is painted out; it must read at full strength.
     NameWater,
+    /// The ranked player's overhead name line: a level-60 human holding honor rank 7 (internal;
+    /// the visual rank 3, "Sergeant") at the fixture's dry subject spot, framed close off the
+    /// `vplates` camera's bearing.
+    NameRank,
     /// One cell of the lighting matrix: a creature or GameObject spawned through the live path at
     /// `at` ([`SubjectKind`], the note above [`SUBJECT_SUN`]).
     Subject {
@@ -909,6 +913,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: WATER_LOOK,
         minute: 720,
         ui: Some(UiFixture::NameWater),
+    },
+    // The ranked player's name line at the fixture's subject spot, 5 yd out level with it on the
+    // `vplates` camera's horizontal bearing, so the body and its name line fill the frame.
+    Scenario {
+        name: "name-rank",
+        map: Some(MAP_AZEROTH),
+        eye: [-8953.92, -135.53, 85.5],
+        look: [-8949.95, -132.49, 85.5],
+        minute: 720,
+        ui: Some(UiFixture::NameRank),
     },
 ];
 

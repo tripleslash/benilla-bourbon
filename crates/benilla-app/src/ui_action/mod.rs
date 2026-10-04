@@ -145,6 +145,21 @@ impl Spells {
     }
 }
 
+/// The 5875 spell data; `None` skips where the install is absent.
+#[cfg(test)]
+pub(crate) fn real_spells() -> Option<Spells> {
+    let data = benilla_formats::wow_data_or_skip!(None);
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    Some(Spells {
+        catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
+        forms: benilla_formats::load_shapeshift_forms(&mut chain).expect("forms"),
+        ranges: benilla_formats::load_spell_ranges(&mut chain).expect("ranges"),
+        cast_times: benilla_formats::load_spell_cast_times(&mut chain).expect("cast times"),
+        durations: benilla_formats::load_spell_durations(&mut chain).expect("durations"),
+        radii: benilla_formats::load_spell_radii(&mut chain).expect("radii"),
+    })
+}
+
 /// The reference's learned-ability latches: at learn time `0x4b25e0` stores a spell's id by its
 /// `Effect[0]`, and the unlearn path `0x4b2c50` clears it. The skin cursor requires the latch
 /// (`0x482589`), so a player who never learned Skinning gets no skin cursor.

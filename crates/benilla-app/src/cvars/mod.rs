@@ -1462,10 +1462,15 @@ mod tests {
         assert_eq!(d["UnitNameNPC"] != 0.0, names.npc);
         assert_eq!(d["UnitNameOwn"] != 0.0, names.own);
         assert_eq!(d["UnitNamePlayerGuild"] != 0.0, names.player_guild);
+        assert_eq!(d["UnitNamePlayerPVPTitle"] != 0.0, names.player_pvp_title);
         assert!(
-            names.player && !names.npc && !names.own && names.player_guild,
+            names.player
+                && !names.npc
+                && !names.own
+                && names.player_guild
+                && names.player_pvp_title,
             "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\", \
-             PlayerGuild \"1\""
+             PlayerGuild \"1\", PlayerPVPTitle \"1\""
         );
         let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
@@ -1839,6 +1844,8 @@ mod tests {
         assert!(!res::<NameConfig>(&app).npc);
         apply(&mut app, "unitnameown", "1");
         assert!(res::<NameConfig>(&app).own);
+        apply(&mut app, "unitnameplayerpvptitle", "0");
+        assert!(!res::<NameConfig>(&app).player_pvp_title);
         apply(&mut app, "ChatBubbles", "0");
         assert!(!res::<BubbleConfig>(&app).all);
         apply(&mut app, "chatbubblesparty", "0");

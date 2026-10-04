@@ -586,10 +586,11 @@
                 "RowFrameGeneration",
                 "RowRenderScale",
             },
-            -- Guild Names is a child of Player Names (UIOptionsFrame.lua:703-709).
+            -- Guild Names and Player Titles are children of Player Names
+            -- (UIOptionsFrame.lua:703-709).
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
-                "RowPlayerNames", "RowGuildNames", "RowNpcNames", "RowOwnName",
+                "RowPlayerNames", "RowGuildNames", "RowPlayerTitles", "RowNpcNames", "RowOwnName",
             },
             -- 1.12's Display box by column, then Help; target-of-target sits under Status Text.
             Interface = {
@@ -1104,9 +1105,13 @@
                 return
             end
             if key == "Nameplates" then
-                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names.
-                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyNameplatesRowGuildNames,
-                    GetCVar("UnitNamePlayer") ~= "0")
+                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names and
+                -- Player Titles.
+                local on = GetCVar("UnitNamePlayer") ~= "0"
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowGuildNames, on)
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitles, on)
                 return
             end
             if key == "Interface" then
@@ -3140,10 +3145,23 @@
                                                 this.parentRow = "RowPlayerNames"
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <!-- A child of Player Names on its own CVar, CheckButton23 of
+                                             21 (`UIOptionsFrame.lua:24`), greyed with it (`:703-709`). -->
+                                        <Frame name="$parentRowPlayerTitles" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "UnitNamePlayerPVPTitle", "Player Titles",
+                                                    "OPTION_TOOLTIP_SHOW_PLAYER_TITLES", 1)
+                                                this.parentRow = "RowPlayerNames"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "UnitNameNPC", "NPC Names",
                                                 "OPTION_TOOLTIP_SHOW_NPC_NAMES")</OnLoad></Scripts>
@@ -3711,14 +3729,14 @@
                 DESKTOP_GAMMA = 1, MULTISAMPLE = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
                 HARDWARE_CURSOR = 1, FIX_LAG = 1,
                 -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
-                -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`,
-                -- `UnitNamePlayerPVPTitle`. Spell Detail (`spellEffectLevel`) stays: it drives
-                -- the particle and shard rates.
+                -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`.
+                -- Spell Detail (`spellEffectLevel`) stays: it drives the particle and shard
+                -- rates. Player Titles (`UnitNamePlayerPVPTitle`) stays: the overhead name's
+                -- rank prefix reads it.
                 USE_UISCALE = 1, WORLD_LOD = 1, TERRAIN_MIP = 1, TEXTURE_DETAIL = 1,
                 ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
                 FULL_SCREEN_GLOW = 1, DEATH_EFFECT = 1, VERTEX_ANIMATION_SHADERS = 1,
                 PHONG_SHADING = 1, USE_WEATHER_SHADER = 1, CINEMATIC_SUBTITLES = 1,
-                SHOW_PLAYER_TITLES = 1,
                 -- Latched at boot into every sampler (`tex_filter`), which a page reload re-reads.
                 TRILINEAR_FILTERING = 1, ANISOTROPIC = 1,
                 -- The engine path is missing: Simple Chat's re-layout, a zone-objective tracker,

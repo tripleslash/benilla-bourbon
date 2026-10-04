@@ -13,6 +13,8 @@
 //! Deviation: the reference watches the whole `PLAYER_BYTES_3` dword, so a drunkenness change also
 //! fires `PLAYER_PVP_RANK_CHANGED`; we watch byte 3 alone, because that repaint is identical.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use benilla_ui::script::{HonorState, InspectHonorData, ScriptValue, UiScript};
@@ -64,8 +66,41 @@ impl Plugin for UiHonorPlugin {
         net::register(app);
         app.init_resource::<InspectHonor>()
             .init_resource::<HonorFeedState>()
-            .add_systems(Update, feed_honor.in_set(UiFeed));
+            .init_resource::<crate::nameplates::PvpNameStrings>()
+            .add_systems(Update, feed_honor.in_set(UiFeed))
+            // A VM holder, so after the tick; before the driver, so a new VM's strings reach the
+            // lines the frame it arrives.
+            .add_systems(
+                Update,
+                feed_pvp_name_strings
+                    .after(crate::ui_script::UiInput)
+                    .before(crate::nameplates::drive_nameplates),
+            );
     }
+}
+
+/// The overhead name's rank strings ([`crate::nameplates::PvpNameStrings`]), read off a VM the
+/// first frame it is in the world. Every VM is installed whole, outside `Update` (the boot VM with
+/// `GlobalStrings.lua` run, a world VM after its FrameXML and addon load), so the read sees what
+/// the load defined; any other frame pays one compare.
+fn feed_pvp_name_strings(
+    script: Option<NonSend<UiScript>>,
+    mut strings: ResMut<crate::nameplates::PvpNameStrings>,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    if strings.session() != Some(script.session()) {
+        strings.set(script.session(), pvp_name_strings(&script));
+    }
+}
+
+/// The [`benilla_ui::script::pvp_name_global_keys`] that `script` defines, with their values.
+fn pvp_name_strings(script: &UiScript) -> HashMap<String, String> {
+    benilla_ui::script::pvp_name_global_keys()
+        .into_iter()
+        .filter_map(|key| benilla_ui::strings::global(script.lua(), &key).map(|value| (key, value)))
+        .collect()
 }
 
 /// Read the honor block off our own descriptor, `None` until it streams. That decides only when
@@ -263,5 +298,73 @@ mod tests {
     #[test]
     fn the_first_push_fires_both() {
         assert_eq!(events_for(None, &state()), (true, true));
+    }
+
+    fn vm(src: &str) -> UiScript {
+        let script = UiScript::new().expect("a VM");
+        script.run(src).expect("globals set");
+        script
+    }
+
+    /// The read takes the overhead name's keys a VM defines, `_FEMALE` twins included, and
+    /// nothing else.
+    #[test]
+    fn the_rank_strings_read_takes_only_the_title_keys() {
+        let strings = pvp_name_strings(&vm(r#"UNIT_PVP_NAME = "%s %s"
+               PVP_RANK_7_1 = "Sergeant"
+               PVP_RANK_7_1_FEMALE = "Sergeant (f)"
+               GARBAGE_KEY = "x""#));
+        assert_eq!(
+            strings.get("UNIT_PVP_NAME").map(String::as_str),
+            Some("%s %s")
+        );
+        assert_eq!(
+            strings.get("PVP_RANK_7_1_FEMALE").map(String::as_str),
+            Some("Sergeant (f)")
+        );
+        assert!(!strings.contains_key("GARBAGE_KEY"), "only the title keys");
+    }
+
+    /// Each VM is read once, the first frame it is in the world, so a world VM whose addon renames
+    /// a title reaches the overhead line.
+    #[test]
+    fn each_new_vm_is_read_once() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<crate::nameplates::PvpNameStrings>();
+        world.run_system_once(feed_pvp_name_strings).unwrap();
+        assert_eq!(
+            world
+                .resource::<crate::nameplates::PvpNameStrings>()
+                .session(),
+            None,
+            "no VM, no read"
+        );
+        let stock = r#"UNIT_PVP_NAME = "%s %s"
+                       PVP_RANK_7_1 = "Sergeant""#;
+        let boot = vm(stock);
+        let boot_session = boot.session();
+        world.insert_non_send(boot);
+        world.run_system_once(feed_pvp_name_strings).unwrap();
+        let held = world.resource::<crate::nameplates::PvpNameStrings>();
+        assert_eq!(held.session(), Some(boot_session));
+        assert_eq!(held.get("PVP_RANK_7_1"), Some("Sergeant"));
+
+        // The same VM is not read again: a global it sets later stays out.
+        world
+            .non_send::<UiScript>()
+            .run(r#"PVP_RANK_7_1 = "Later""#)
+            .expect("global set");
+        world.run_system_once(feed_pvp_name_strings).unwrap();
+        let held = world.resource::<crate::nameplates::PvpNameStrings>();
+        assert_eq!(held.get("PVP_RANK_7_1"), Some("Sergeant"));
+
+        let world_vm = vm(&format!("{stock}\nPVP_RANK_7_1 = \"Feldwebel\""));
+        let world_session = world_vm.session();
+        world.insert_non_send(world_vm);
+        world.run_system_once(feed_pvp_name_strings).unwrap();
+        let held = world.resource::<crate::nameplates::PvpNameStrings>();
+        assert_eq!(held.session(), Some(world_session));
+        assert_eq!(held.get("PVP_RANK_7_1"), Some("Feldwebel"));
     }
 }

@@ -4,7 +4,7 @@ use super::spell_feed::{build_view, feed_spell_tooltips, ViewCaster, ViewCtx};
 use super::*;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
-use crate::ui_action::{PlayerActions, Spells};
+use crate::ui_action::{real_spells, PlayerActions, Spells};
 
 /// The view alone, for the cell tests; the feed keeps what it read beside it.
 fn spell_tooltip_view(
@@ -103,20 +103,6 @@ impl TestCtx {
         ctx.caster = ViewCaster::Pet(pet);
         ctx
     }
-}
-
-/// The 5875 spell data the view builder reads; `None` skips where the install is absent.
-pub(super) fn real_spells() -> Option<Spells> {
-    let data = benilla_formats::wow_data_or_skip!(None);
-    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-    Some(Spells {
-        catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
-        forms: benilla_formats::load_shapeshift_forms(&mut chain).expect("forms"),
-        ranges: benilla_formats::load_spell_ranges(&mut chain).expect("ranges"),
-        cast_times: benilla_formats::load_spell_cast_times(&mut chain).expect("cast times"),
-        durations: benilla_formats::load_spell_durations(&mut chain).expect("durations"),
-        radii: benilla_formats::load_spell_radii(&mut chain).expect("radii"),
-    })
 }
 
 /// A unit's fields: level (34) and base mana (162).
@@ -218,6 +204,51 @@ fn a_pet_view_costs_seduction_from_the_pets_base_mana() {
     let v = spell_tooltip_view(6358, &spells, &mut t.pet_ctx(&objects, Some(&player), None))
         .expect("Seduction view");
     assert_eq!(v.cost, None);
+}
+
+/// The `$g`/`$G` branch (`0x508180`) reads the active player's `UNIT_FIELD_BYTES_0` byte 2
+/// (`0x508214`): the first form on 0, the second on anything else. A female player's Conjure Food
+/// and Water (587, 5504) tooltips read "her allies" and Hellfire (1949) "to herself".
+#[test]
+fn a_female_players_spell_tooltips_take_the_second_gender_form() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // A level 60 player whose `UNIT_FIELD_BYTES_0` (36) holds `gender` in byte 2.
+    let player = |gender: u32| {
+        let mut fields = unit(60, 1373);
+        fields.merge(benilla_protocol::ObjectFields::from_pairs(&[(
+            36,
+            gender << 16,
+        )]));
+        ObjectStore(fields)
+    };
+    let (her, him) = (player(1), player(0));
+    let mut text = |id: u32, store: &ObjectStore| {
+        spell_tooltip_view(id, &spells, &mut t.ctx_for(&objects, 0, None, Some(store)))
+            .unwrap_or_else(|| panic!("spell {id} view"))
+            .description
+    };
+    for id in [587u32, 5504] {
+        let female = text(id, &her);
+        assert!(female.contains("the mage and her allies"), "{id}: {female}");
+        let male = text(id, &him);
+        assert!(male.contains("the mage and his allies"), "{id}: {male}");
+    }
+    let hellfire = text(1949, &her);
+    assert!(hellfire.contains("Fire damage to herself"), "{hellfire}");
+    // The branch looks the active player up (`0x508189`-`0x5081a4`): a pet view reads the
+    // player's gender, never the pet's.
+    let pet = unit(20, 0);
+    let pets = spell_tooltip_view(
+        587,
+        &spells,
+        &mut t.pet_ctx(&objects, Some(&her), Some(&pet)),
+    )
+    .expect("Conjure Food view")
+    .description;
+    assert!(pets.contains("the mage and her allies"), "{pets}");
 }
 
 /// An object index with nothing streamed: no worn item, and every reagent count 0.

@@ -60,6 +60,8 @@ fn spell_desc_text(
     // The player's skill in a spell's line, the `$`-tokens' level (`TokenContext::skill`).
     skill: &dyn Fn(u32) -> u32,
     home_area: Option<&str>,
+    // The active player's `UNIT_FIELD_BYTES_0` byte 2, the `$g`/`$G` branch's input (`0x508214`).
+    gender: &dyn Fn() -> u8,
     mods: Option<&crate::spell::SpellModifiers>,
     // The VM's strings for the keyed `$d`/`$s` tokens.
     global: &dyn Fn(&str) -> Option<String>,
@@ -77,6 +79,7 @@ fn spell_desc_text(
                 lookup: &|i| sp.catalog.get(i),
                 mods: mods.map(|m| m as &dyn benilla_formats::SpellMods),
                 unmodified_points: false,
+                gender,
                 home_area: &|| home_area,
                 global,
                 printf: &crate::ui_script::token_printf,
@@ -85,6 +88,15 @@ fn spell_desc_text(
         }
         None => None,
     }
+}
+
+/// What the `$`-tokens read of the player beside the modifiers: the skills the per-level terms
+/// scale by, and the gender byte `$g`/`$G` branch on (`0x508214`).
+type TokenReads = (crate::spell::SkillSnapshot, u8);
+
+fn token_reads(me: Option<&ObjectStore>) -> TokenReads {
+    let gender = me.and_then(|s| s.0.unit_gender()).unwrap_or(0);
+    (crate::spell::skill_snapshot(me), gender)
 }
 
 /// Only descriptions with substitution tokens can change when the caster's spell mods change.
@@ -137,6 +149,8 @@ fn template_view(
     skill: &dyn Fn(u32) -> u32,
     skill_lines: Option<&benilla_formats::SkillLineCatalog>,
     home_area: Option<&str>,
+    // The active player's gender byte, the trigger text's `$g`/`$G` branch (`0x508214`).
+    gender: &dyn Fn() -> u8,
     factions: Option<&benilla_formats::FactionCatalog>,
     sub_classes: Option<&benilla_formats::ItemSubClassCatalog>,
     classes: Option<&benilla_formats::ItemClassCatalog>,
@@ -150,7 +164,7 @@ fn template_view(
             .and_then(|s| s.catalog.get(id))
             .map(|sd| sd.name.clone())
     };
-    let spell_text = |id: u32| spell_desc_text(spells, id, skill, home_area, mods, get);
+    let spell_text = |id: u32| spell_desc_text(spells, id, skill, home_area, gender, mods, get);
     benilla_ui::script::ItemTemplateView {
         name: t.name.clone(),
         quality: t.quality,
@@ -254,7 +268,7 @@ pub(super) fn feed_item_sets(
         crate::ui_script::VmMemo<std::collections::HashMap<u32, benilla_ui::script::ItemSetView>>,
     >,
     mut mod_sensitive: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
-    mut last_skills: Local<crate::ui_script::VmMemo<Option<crate::spell::SkillSnapshot>>>,
+    mut last_reads: Local<crate::ui_script::VmMemo<Option<TokenReads>>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -265,11 +279,12 @@ pub(super) fn feed_item_sets(
     for id in script.take_item_set_asks() {
         pending.entry(id).or_default();
     }
-    // The `$`-tokens' per-level terms follow the player's skills.
-    let skills = Some(crate::spell::skill_snapshot(me));
-    let skills_changed = *last_skills.get(&script) != skills;
-    *last_skills.get(&script) = skills;
-    if spell_mods.is_changed() || skills_changed {
+    // The `$`-tokens follow the player's skills and gender.
+    let reads = token_reads(me);
+    let gender = reads.1;
+    let reads_changed = last_reads.get(&script).as_ref() != Some(&reads);
+    *last_reads.get(&script) = Some(reads);
+    if spell_mods.is_changed() || reads_changed {
         for &id in mod_sensitive.iter() {
             pending.entry(id).or_default();
         }
@@ -308,8 +323,16 @@ pub(super) fn feed_item_sets(
                 .bonuses
                 .iter()
                 .filter_map(|&(n, spell)| {
-                    spell_desc_text(spell_res, spell, &skill, None, Some(&spell_mods), &global)
-                        .map(|desc| (n, desc))
+                    spell_desc_text(
+                        spell_res,
+                        spell,
+                        &skill,
+                        None,
+                        &|| gender,
+                        Some(&spell_mods),
+                        &global,
+                    )
+                    .map(|desc| (n, desc))
                 })
                 .collect(),
             required_skill: row.required_skill,
@@ -392,7 +415,7 @@ pub(super) fn feed_item_stats(
     mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
     mut mod_sensitive: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
     mut last_home: Local<crate::ui_script::VmMemo<Option<String>>>,
-    mut last_skills: Local<crate::ui_script::VmMemo<Option<crate::spell::SkillSnapshot>>>,
+    mut last_reads: Local<crate::ui_script::VmMemo<Option<TokenReads>>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -401,10 +424,11 @@ pub(super) fn feed_item_stats(
     let mod_sensitive = mod_sensitive.get(&script);
     let last_home = last_home.get(&script);
     let me = self_q.single().ok();
-    // The `$`-tokens' per-level terms follow the player's skills.
-    let skills = Some(crate::spell::skill_snapshot(me));
-    let skills_changed = *last_skills.get(&script) != skills;
-    *last_skills.get(&script) = skills;
+    // The `$`-tokens follow the player's skills and gender.
+    let reads = token_reads(me);
+    let gender = reads.1;
+    let reads_changed = last_reads.get(&script).as_ref() != Some(&reads);
+    *last_reads.get(&script) = Some(reads);
     // `GetBindLocation()`'s push, here so it and the `$z` token share one name, and ahead of the
     // pending gate below: the bind point can arrive while the feed idles.
     let home_area: Option<&str> = home_bind
@@ -421,7 +445,7 @@ pub(super) fn feed_item_stats(
 
     pending.extend(items.take_fresh());
     pending.extend(script.take_item_stat_asks());
-    if spell_mods.is_changed() || skills_changed {
+    if spell_mods.is_changed() || reads_changed {
         pending.extend(mod_sensitive.iter().copied());
     }
     if pending.is_empty() {
@@ -464,6 +488,7 @@ pub(super) fn feed_item_stats(
                         &skill,
                         skill_catalog,
                         home_area,
+                        &|| gender,
                         factions.as_deref().map(|f| f.catalog()),
                         sub_classes.as_deref().map(|s| &s.0),
                         classes.as_deref().map(|c| &c.0),
@@ -1695,6 +1720,7 @@ mod tests {
              this return"
         );
     }
+    use crate::ui_action::real_spells;
     use benilla_protocol::messages::ItemSpellEntry;
     use benilla_ui::script::{ContainerState, UiScript};
     use std::collections::HashMap;
@@ -1914,19 +1940,7 @@ mod tests {
     /// line (`0x52da29`-`0x52da31`), and a described one does.
     #[test]
     fn an_undescribed_spell_prints_no_trigger_line_on_real_data() {
-        let data = benilla_formats::wow_data_or_skip!();
-        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let spells = crate::ui_action::Spells {
-            catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
-            forms: benilla_formats::load_shapeshift_forms(&mut chain)
-                .expect("SpellShapeshiftForm.dbc"),
-            ranges: benilla_formats::load_spell_ranges(&mut chain).expect("SpellRange.dbc"),
-            cast_times: benilla_formats::load_spell_cast_times(&mut chain)
-                .expect("SpellCastTimes.dbc"),
-            durations: benilla_formats::load_spell_durations(&mut chain)
-                .expect("SpellDuration.dbc"),
-            radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
-        };
+        let Some(spells) = real_spells() else { return };
 
         // No string table: Fireball's description reaches no keyed token.
         let no_strings = |_: &str| None;
@@ -1939,7 +1953,7 @@ mod tests {
                 "spell {id} has a name — which is exactly what must NOT leak into the tooltip"
             );
             assert_eq!(
-                super::spell_desc_text(Some(&spells), id, &|_| 0, None, None, &no_strings),
+                super::spell_desc_text(Some(&spells), id, &|_| 0, None, &|| 0, None, &no_strings),
                 None,
                 "spell {id} ({:?}) has no description, so the reference prints no trigger line",
                 d.name
@@ -1947,11 +1961,46 @@ mod tests {
         }
 
         // The control: Fireball (133), described, still yields its line.
-        let fireball = super::spell_desc_text(Some(&spells), 133, &|_| 0, None, None, &no_strings)
-            .expect("a described spell still yields its line");
+        let fireball =
+            super::spell_desc_text(Some(&spells), 133, &|_| 0, None, &|| 0, None, &no_strings)
+                .expect("a described spell still yields its line");
         assert!(
             fireball.contains("damage"),
             "expected the substituted Fireball description, got {fireball:?}"
         );
+    }
+
+    /// The trigger text's `$g` branch reads the gender handed in (`0x508214`): Conjure Food 587's
+    /// "providing the mage and `$ghis:her;` allies" takes "her" on 1, "his" on 0.
+    #[test]
+    fn a_trigger_texts_gender_branch_follows_the_player() {
+        let Some(spells) = real_spells() else { return };
+        let no_strings = |_: &str| None;
+        let line = |gender: u8| {
+            super::spell_desc_text(
+                Some(&spells),
+                587,
+                &|_| 0,
+                None,
+                &move || gender,
+                None,
+                &no_strings,
+            )
+            .expect("a described spell")
+        };
+        assert!(line(1).contains("the mage and her allies"), "{}", line(1));
+        assert!(line(0).contains("the mage and his allies"), "{}", line(0));
+    }
+
+    /// The item feeds re-substitute a held `$`-text when what the tokens read moves: the gender
+    /// byte `$g`/`$G` branch on (`0x508214`), and no other byte of `UNIT_FIELD_BYTES_0`.
+    #[test]
+    fn the_token_reads_move_with_the_gender_byte_alone() {
+        let store = |bytes: u32| {
+            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(36, bytes)]))
+        };
+        let male = super::token_reads(Some(&store(4 | 1 << 8)));
+        assert_ne!(super::token_reads(Some(&store(4 | 1 << 8 | 1 << 16))), male);
+        assert_eq!(super::token_reads(Some(&store(1 | 2 << 8 | 1 << 24))), male);
     }
 }

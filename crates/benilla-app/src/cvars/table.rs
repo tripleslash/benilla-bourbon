@@ -301,9 +301,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("UnitNameOwn", "0"),
     // `UnitNamePlayerGuild` (`0x86c680`, "1", mask bit `0x10`) is not a show gate: `ShouldShowName`
     // (`0x6070a0`) reads bits `0x1/0x2/0x4`, and this gates the `"\n<%s>"` guild line at
-    // `0x609085`. `UnitNamePlayerPVPTitle` (bit `0x20`, "1") has no row: nothing here draws the
-    // rank prefix.
+    // `0x609085`.
     same("UnitNamePlayerGuild", "1"),
+    // `UnitNamePlayerPVPTitle` (`0x86c668`, "1", mask bit `0x20`): the a4 rank prefix on the main
+    // name line (`0x609370`), `PVP_RANK_%d_%d` through `0x5efe60`.
+    same("UnitNamePlayerPVPTitle", "1"),
     // `WorldDetail` is no 1.12 CVar but the `GetWorldDetail`/`SetWorldDetail` verb name
     // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,

@@ -1297,6 +1297,50 @@ pub(super) fn seed_ui_fixture(
             // A plated unit draws no floating name, so enemy plates go off.
             set_enemy_plates(script.as_deref(), false);
         }
+        UiFixture::NameRank => {
+            use benilla_protocol::messages::ObjectFields;
+            // The self player at the eye, as `name-water`; the subject is the other player's name.
+            const SELF_GUID: u64 = 0x51;
+            names.insert_player(SELF_GUID, "Benilla".into(), None);
+            commands.spawn((
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                    (34, 2),      // UNIT_FIELD_LEVEL
+                    (35, 1),      // UNIT_FIELD_FACTIONTEMPLATE: human
+                    (36, 0x0101), // UNIT_FIELD_BYTES_0: race human, class warrior
+                ])),
+                crate::net::SelfPlayer,
+                crate::net::Guid(SELF_GUID),
+                Transform::from_translation(wow_to_bevy(scenario.eye)),
+            ));
+            // The subject at the `vplates` wolf's dry spot: a human player holding rank,
+            // `PLAYER_BYTES_3` byte 3 (`PLAYER_BYTES_3_OFFSET_HONOR_RANK`, vmangos
+            // `HonorMgr.cpp:900`) at internal 7: the visual rank 3, "Sergeant" (team 1 off race
+            // 1's `ChrRaces` row).
+            const RANKED_GUID: u64 = 0x52;
+            names.insert_player(RANKED_GUID, "Bob".into(), None);
+            commands.spawn((
+                crate::net::Guid(RANKED_GUID),
+                crate::net::NetEntity {
+                    kind: benilla_protocol::EntityKind::Player,
+                    // HumanMale, the body a human `UNIT_FIELD_DISPLAYID` carries.
+                    display_id: Some(49),
+                    scale: 1.0,
+                },
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                    (34, 60),       // UNIT_FIELD_LEVEL
+                    (35, 1),        // UNIT_FIELD_FACTIONTEMPLATE: human
+                    (36, 0x0101),   // UNIT_FIELD_BYTES_0: race human, class warrior, male
+                    (195, 7 << 24), // PLAYER_BYTES_3 byte 3: the current honor rank, internal 7
+                ])),
+                Transform {
+                    translation: wow_to_bevy(WOLF_POS),
+                    ..default()
+                },
+                Visibility::default(),
+            ));
+            // A plated unit draws no floating name, so enemy plates go off.
+            set_enemy_plates(script.as_deref(), false);
+        }
         // The lighting matrix: one spawn with a streamed entity's component set, anonymous and
         // with plates off, so no glyph rides over the body.
         UiFixture::Subject { kind, at } => {

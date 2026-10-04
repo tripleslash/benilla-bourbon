@@ -224,6 +224,7 @@ pub(crate) struct Dispatch<'w, 's> {
     service: ServiceArms<'w>,
     feedback: Feedback<'w>,
     auto: crate::player::AutoMove<'w, 's>,
+    player: Res<'w, crate::player::Player>,
 }
 
 /// The Loot walk's stop radius: the arm (`0x611130`) takes the square root (`0x6111ab`) of what
@@ -244,6 +245,11 @@ impl Dispatch<'_, '_> {
     fn self_store(&self) -> Option<&ObjectStore> {
         let (me, ..) = self.me()?;
         self.stores.get(me).ok().map(|(s, _)| s)
+    }
+
+    /// Any `0x20ff` bit in our last streamed movement word: a direction, turn, pitch or fall.
+    fn moving(&self) -> bool {
+        self.player.move_flags() & crate::creature_anim::move_flags::INTEGRATED != 0
     }
 
     /// The reference's one mounted predicate, the player's `UNIT_FIELD_MOUNTDISPLAYID`.
@@ -449,10 +455,13 @@ impl Dispatch<'_, '_> {
         }
     }
 
-    /// `0x5df130`: `CMSG_LOOT` at a lootable corpse, walked to first when `walk` and beyond its
-    /// 5 yd (`0x5df1c3`), stopping at [`loot_stop`] of 5. A walk that does not start falls through
-    /// to the send.
+    /// `0x5df130`: `CMSG_LOOT` at a lootable corpse, never while [`Self::moving`] (`0x5df173`),
+    /// walked to first when `walk` and beyond its 5 yd (`0x5df1c3`), stopping at [`loot_stop`] of
+    /// 5. A walk that does not start falls through to the send.
     fn loot_corpse(&mut self, entity: Entity, guid: u64, walk: bool) {
+        if self.moving() {
+            return;
+        }
         if walk
             && self
                 .dist_sq(entity)
@@ -474,10 +483,10 @@ impl Dispatch<'_, '_> {
     }
 
     /// `0x5df2a0`: `CMSG_LOOT` at a dead unit, which `can_loot` (`CanLootNow 0x5ec110`) must
-    /// allow, walked to first when `walk` and beyond melee reach. A walk that does not start falls
-    /// through to the send.
+    /// allow, never while [`Self::moving`] (`0x5df2e9`), walked to first when `walk` and beyond
+    /// melee reach. A walk that does not start falls through to the send.
     fn loot_unit(&mut self, entity: Entity, guid: u64, can_loot: bool, walk: bool) {
-        if !can_loot {
+        if !can_loot || self.moving() {
             return;
         }
         let reach = self.melee_reach(entity);
@@ -987,6 +996,14 @@ pub(super) fn act_on_arrival(
 ) {
     use crate::player::{ApproachVerb, Subject};
     use benilla_protocol::EntityKind;
+    // Owed while any `0x20ff` bit is set: the reference drains it from the movement emitter
+    // `0x60e0a0` only at a stop, strafe stop, root or unroot ack that leaves none (`0x60e352`), never
+    // at a landing. Deviation: it runs on the first frame with none, so an arrival that sends no stop
+    // (mid-air, rooted, under a held turn key) acts at once or on landing or release, where the
+    // reference waits for the next ground stop and can act long after, wherever the player then is.
+    if dispatch.moving() {
+        return;
+    }
     let Some((verb, guid)) = dispatch.auto.approach.arrived.take() else {
         return;
     };
@@ -2551,33 +2568,8 @@ mod tests {
     /// `0x5df2a0`: beyond melee reach the walk comes first and nothing is looted yet.
     #[test]
     fn a_far_body_to_loot_is_walked_to_before_the_loot() {
-        const BODY: u64 = 0xB0D7;
-        const F_DYNAMIC_FLAGS: u16 = 143;
-        let (mut world, _vendor, rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
-        let body = world
-            .spawn((
-                Guid(BODY),
-                store(&[(F_HEALTH, 0), (F_MAXHEALTH, 100), (F_DYNAMIC_FLAGS, 0x1)]),
-                Transform::from_xyz(0.0, 0.0, -12.0),
-            ))
-            .id();
-        *world.resource_mut::<PressPick>() = PressPick {
-            hovered: Hovered {
-                target: Some(body),
-                guid: Some(BODY),
-                distance: 12.0,
-                ..Hovered::default()
-            },
-            cursor: WorldCursor {
-                kind: cursor_mode::CursorKind::Pickup,
-                unable: false,
-            },
-            ..PressPick::default()
-        };
-        world
-            .resource_mut::<Messages<WorldRightClick>>()
-            .write(WorldRightClick);
-        world.run_system_once(act_on_right_click).unwrap();
+        let (mut world, body, corpse, rx) = loot_world(12.0, 0, true);
+        right_click_loot(&mut world, loot_hover(false, body, corpse, 12.0));
         assert!(world.resource::<crate::player::Approach>().active());
         assert!(!rx
             .try_iter()
@@ -2589,24 +2581,8 @@ mod tests {
     /// for a unit.
     #[test]
     fn a_loot_walk_stops_at_the_square_root_of_the_melee_reach() {
-        const BODY: u64 = 0xB0D7;
-        const CORPSE: u64 = 0xC0D5;
         const F_DYNAMIC_FLAGS: u16 = 143;
         const F_COMBAT_REACH: u16 = 130;
-        let loot_click = |world: &mut World, hovered: Hovered| {
-            *world.resource_mut::<PressPick>() = PressPick {
-                hovered,
-                cursor: WorldCursor {
-                    kind: cursor_mode::CursorKind::Pickup,
-                    unable: false,
-                },
-                ..PressPick::default()
-            };
-            world
-                .resource_mut::<Messages<WorldRightClick>>()
-                .write(WorldRightClick);
-            world.run_system_once(act_on_right_click).unwrap();
-        };
         // A unit of reach 4 against our default 1.5: 4 + 1.5 + 1.3333 = 6.8333.
         let (mut world, _vendor, _rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
         let body = world
@@ -2621,7 +2597,7 @@ mod tests {
                 Transform::from_xyz(0.0, 0.0, -12.0),
             ))
             .id();
-        loot_click(
+        right_click_loot(
             &mut world,
             Hovered {
                 target: Some(body),
@@ -2647,7 +2623,7 @@ mod tests {
                 Transform::from_xyz(0.0, 0.0, -12.0),
             ))
             .id();
-        loot_click(
+        right_click_loot(
             &mut world,
             Hovered {
                 corpse: Some(corpse),
@@ -3000,6 +2976,172 @@ mod tests {
                 !held,
                 "payload held {held}"
             );
+        }
+    }
+
+    const BODY: u64 = 0xB0D7;
+    const CORPSE: u64 = 0xC0D5;
+
+    /// A dead lootable unit and a lootable corpse `at` yd off and the vendor in reach, with our last
+    /// streamed movement word `flags` and Click to Move set as `walk`.
+    fn loot_world(
+        at: f32,
+        flags: u32,
+        walk: bool,
+    ) -> (
+        World,
+        Entity,
+        Entity,
+        crossbeam_channel::Receiver<ClientCommand>,
+    ) {
+        const F_DYNAMIC_FLAGS: u16 = 143;
+        let (mut world, _vendor, rx) = walking_world(Vec3::new(2.5, 0.0, 0.0), walk);
+        world.insert_resource(crate::player::Player::with_move_flags(flags));
+        let body = world
+            .spawn((
+                Guid(BODY),
+                store(&[(F_HEALTH, 0), (F_MAXHEALTH, 100), (F_DYNAMIC_FLAGS, 0x1)]),
+                Transform::from_xyz(0.0, 0.0, -at),
+                crate::net::NetEntity {
+                    kind: benilla_protocol::EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(BODY, body);
+        let corpse = world
+            .spawn((
+                Guid(CORPSE),
+                store(&[(benilla_protocol::field::FIELD_CORPSE_DYNAMIC_FLAGS, 0x1)]),
+                Transform::from_xyz(0.0, 0.0, at),
+            ))
+            .id();
+        (world, body, corpse, rx)
+    }
+
+    fn right_click_loot(world: &mut World, hovered: Hovered) {
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered,
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Pickup,
+                unable: false,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+    }
+
+    /// The press over the corpse when `on_corpse`, else over the dead unit.
+    fn loot_hover(on_corpse: bool, body: Entity, corpse: Entity, at: f32) -> Hovered {
+        let (unit, object) = if on_corpse {
+            (None, Some(corpse))
+        } else {
+            (Some(body), None)
+        };
+        Hovered {
+            target: unit,
+            guid: unit.map(|_| BODY),
+            corpse: object,
+            corpse_guid: object.map(|_| CORPSE),
+            distance: at,
+            ..Hovered::default()
+        }
+    }
+
+    /// `0x5df2e9` and `0x5df173`: both loot senders return silently on any `0x20ff` bit, a
+    /// direction, turn, pitch or fall; swimming and walk mode are outside the mask.
+    #[test]
+    fn a_loot_click_while_moving_sends_nothing() {
+        use crate::creature_anim::move_flags as f;
+        for (flags, loots) in [
+            (0, true),
+            (f::FORWARD, false),
+            (f::BACKWARD, false),
+            (f::STRAFE_LEFT, false),
+            (f::TURN_RIGHT, false),
+            (f::FALLING, false),
+            (f::FORWARD | f::FALLING, false),
+            (f::SWIMMING, true),
+            (f::WALK_MODE, true),
+        ] {
+            for on_corpse in [false, true] {
+                let (mut world, body, corpse, rx) = loot_world(2.0, flags, false);
+                right_click_loot(&mut world, loot_hover(on_corpse, body, corpse, 2.0));
+                let looted = rx
+                    .try_iter()
+                    .any(|c| matches!(c, ClientCommand::Loot { .. }));
+                let latched = world.resource::<crate::ui_loot::LootLatch>().0.is_some();
+                assert_eq!(
+                    (looted, latched),
+                    (loots, loots),
+                    "flags {flags:#x}, corpse {on_corpse}"
+                );
+            }
+        }
+    }
+
+    /// The movement test comes before the walk (`0x5df2f6`, `0x5df180`): a far body or corpse
+    /// clicked on the run starts no Click to Move walk.
+    #[test]
+    fn a_far_loot_click_while_moving_starts_no_walk() {
+        use crate::creature_anim::move_flags as f;
+        for (flags, walks) in [(0, true), (f::FORWARD, false), (f::FALLING, false)] {
+            for on_corpse in [false, true] {
+                let (mut world, body, corpse, rx) = loot_world(12.0, flags, true);
+                right_click_loot(&mut world, loot_hover(on_corpse, body, corpse, 12.0));
+                assert_eq!(
+                    world.resource::<crate::player::Approach>().active(),
+                    walks,
+                    "flags {flags:#x}, corpse {on_corpse}"
+                );
+                assert!(!rx
+                    .try_iter()
+                    .any(|c| matches!(c, ClientCommand::Loot { .. })));
+            }
+        }
+    }
+
+    /// `0x60e352`: the owed verb (`0x60fa20`) runs only once no `0x20ff` bit is left, and the cell
+    /// stays armed until then.
+    #[test]
+    fn a_verb_owed_on_arrival_waits_for_a_word_with_no_move_bit() {
+        use crate::creature_anim::move_flags as f;
+        use crate::player::ApproachVerb;
+        for (verb, guid) in [(ApproachVerb::Loot, BODY), (ApproachVerb::Talk, VENDOR)] {
+            let (mut world, _body, _corpse, rx) = loot_world(2.0, f::FALLING, true);
+            world.resource_mut::<crate::player::Approach>().arrived = Some((verb, guid));
+            world.run_system_once(act_on_arrival).unwrap();
+            assert_eq!(rx.try_iter().count(), 0, "{verb:?} mid-air");
+            assert_eq!(
+                world.resource::<crate::player::Approach>().arrived,
+                Some((verb, guid)),
+                "{verb:?} stays owed"
+            );
+            world.insert_resource(crate::player::Player::with_move_flags(0));
+            world.run_system_once(act_on_arrival).unwrap();
+            let sent: Vec<ClientCommand> = rx.try_iter().collect();
+            assert!(
+                match verb {
+                    ApproachVerb::Loot =>
+                        matches!(sent.as_slice(), [ClientCommand::Loot { guid: BODY }]),
+                    _ => matches!(
+                        sent.as_slice(),
+                        [ClientCommand::ListInventory { guid: VENDOR }]
+                    ),
+                },
+                "{verb:?} landed: {sent:?}"
+            );
+            assert!(world
+                .resource::<crate::player::Approach>()
+                .arrived
+                .is_none());
         }
     }
 }

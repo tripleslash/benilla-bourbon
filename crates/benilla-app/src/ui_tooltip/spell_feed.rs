@@ -112,6 +112,11 @@ pub(super) fn build_view(
         deps.borrow_mut().home = true;
         home
     };
+    // `$g`/`$G` read the active player's gender byte (`0x508214`), a pet view's too.
+    let gender = || {
+        deps.borrow_mut().gender = true;
+        vctx.store.and_then(|s| s.0.unit_gender()).unwrap_or(0)
+    };
     // `0x6e3130` for this spell: the level the cost's and the cast time's per-level terms read.
     let pet_level = |pet| d.skill_level(ViewCaster::pet_skill_value(pet));
     let ctx = benilla_formats::TokenContext {
@@ -122,6 +127,7 @@ pub(super) fn build_view(
         lookup: &lookup,
         mods: Some(vctx.spell_mods),
         unmodified_points: false,
+        gender: &gender,
         home_area: &home_area,
         global: vctx.get,
         printf: &crate::ui_script::token_printf,
