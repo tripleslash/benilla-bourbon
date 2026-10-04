@@ -227,6 +227,14 @@ pub struct DoodadAnimHost {
     pub(crate) parked_at: f32,
 }
 
+/// On the anim root of a placement hosted on a streamed entity (a transport's cargo): its fade
+/// sphere's centre in the root's own frame. [`DoodadAnimHost::fade`] is built from the
+/// entity-local placement, which names no world point, so the gate re-centres it on the root's
+/// live pose each frame: a promoted rig parked on a wrong verdict draws its palette rows where it
+/// parked, and the boat sails without its sails.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct RidingSphere(pub(crate) Vec3);
+
 impl DoodadAnimHost {
     /// The armed clip's `(node, seek)` on the shared clock, `(now − armed_at) mod duration`. It
     /// answers while parked, but the reference fires no events for a doodad culled out of its
@@ -303,6 +311,7 @@ fn gate_doodad_anim(
         Has<crate::rig_palette::RigSkin>,
         Option<&mut AnimationPlayer>,
         Option<&mut GlobalSeqDrive>,
+        Option<&RidingSphere>,
     )>,
     vis: Query<&Visibility>,
     cam: Query<
@@ -342,7 +351,8 @@ fn gate_doodad_anim(
         !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
     }) && !scene.changed()
         && changed_vis.is_empty();
-    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move.
+    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move; a
+    // [`RidingSphere`] host is the exception and is judged every frame.
     let in_frustum = |frustum: &bevy::camera::primitives::Frustum,
                       fade: &crate::particles::EmitterFade| {
         frustum.intersects_sphere(
@@ -353,14 +363,20 @@ fn gate_doodad_anim(
             false,
         )
     };
-    for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
+    for (entity, mut host, lazy, pose, has_rig, player, drive, riding) in &mut hosts {
+        // A riding sphere at the root's propagated pose, last frame's as this runs before
+        // propagation; a mover never reuses a verdict, as its sphere moves under a still camera.
+        let riding_fade = riding.map(|r| crate::particles::EmitterFade {
+            center: worlds.get(entity).map_or(r.0, |g| g.transform_point(r.0)),
+            ..host.fade.clone()
+        });
+        let fade = riding_fade.as_ref().unwrap_or(&host.fade);
         // A host born this frame has no verdict to reuse (`active` starts false).
-        let drawn = if verdicts_still && !host.is_added() {
+        let drawn = if verdicts_still && !host.is_added() && riding.is_none() {
             host.active
         } else if host.meshes.is_empty() {
             // Meshless: the reference ticks any model in the draw set, and a 0-batch model is
             // admitted on its fade sphere like its emitters, through the same `in_draw_set`.
-            let fade = &host.fade;
             world_cam.as_ref().is_some_and(|(cam_tf, frustum, _, _)| {
                 fade.in_draw_set(
                     cam_tf.translation(),
@@ -380,7 +396,7 @@ fn gate_doodad_anim(
                 .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
                 && world_cam
                     .as_ref()
-                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, &host.fade))
+                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, fade))
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's
@@ -1187,6 +1203,84 @@ mod tests {
         assert!(
             !world.entity(ahead).contains::<AnimParked>(),
             "in front of the camera ⇒ drawn"
+        );
+    }
+
+    /// A transport's prop: its spawn sphere is entity-local (behind the camera here), and the
+    /// gate must judge where the root is now, every frame, even with the camera still.
+    #[test]
+    fn a_riding_host_is_judged_where_its_root_is_now() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<crate::view::ViewDistance>();
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_asset::<SkinnedMeshInverseBindposes>();
+        app.add_systems(Update, gate_doodad_anim);
+
+        // Looking down -Z from the origin.
+        let seat =
+            Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(0.0, 0.0, -20.0), Vec3::Y);
+        let projection = bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+            far: 5000.0,
+            ..default()
+        });
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
+        );
+        app.world_mut().spawn((
+            crate::view::WorldCamera,
+            GlobalTransform::from(seat),
+            seat,
+            frustum,
+            projection,
+        ));
+        let mesh = app.world_mut().spawn(Visibility::Inherited).id();
+        // The root has docked 30 yd ahead; the spawn sphere names the entity-local point behind.
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: vec![mesh],
+                    fade: crate::particles::EmitterFade::sphere(2.0, Vec3::new(0.0, 0.0, 30.0)),
+                    clip: Some((AnimationNodeIndex::new(1), 2.0)),
+                    armed_at: 0.0,
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
+                    active: false,
+                    parked_at: 0.0,
+                },
+                RidingSphere(Vec3::ZERO),
+                GlobalTransform::from_xyz(0.0, 0.0, -30.0),
+            ))
+            .id();
+        let active = |app: &App| {
+            app.world()
+                .entity(host)
+                .get::<DoodadAnimHost>()
+                .unwrap()
+                .active
+        };
+        app.update();
+        assert!(
+            active(&app),
+            "the root is in front of the camera ⇒ drawn, whatever the spawn sphere said"
+        );
+        app.update();
+        assert!(active(&app), "still drawn while the root stays put");
+
+        // The boat sails behind the camera, which does not move.
+        *app.world_mut()
+            .entity_mut(host)
+            .get_mut::<GlobalTransform>()
+            .unwrap() = GlobalTransform::from_xyz(0.0, 0.0, 30.0);
+        app.update();
+        assert!(
+            !active(&app),
+            "a still camera does not freeze a mover's verdict: behind ⇒ parked"
         );
     }
 

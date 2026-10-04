@@ -666,6 +666,13 @@ pub fn spawn_model_entities(
             active: false,
             parked_at: now,
         });
+        // On a mover the sphere above sits at the entity-local placement, so the gate follows the
+        // root instead.
+        if entity_hosted {
+            commands
+                .entity(h.root)
+                .insert(crate::doodad_anim::RidingSphere(local_center));
+        }
         // The lazy rig, only with skinnable parts: an emitter-only host never takes a slot.
         if !lazy_parts.is_empty() {
             commands.entity(h.root).insert(crate::doodad_anim::LazyRig {
