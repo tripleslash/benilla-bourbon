@@ -360,7 +360,7 @@ pub(crate) struct Player {
     pub(super) ride_abort: bool,
     /// A `MSG_MOVE_WORLDPORT_ACK` owed at the settle release: the reference sends it only after its
     /// blocking load returns (`0x401cae`, after `0x66fbe0`), and vmangos has no load timeout. A
-    /// riding crossing never settles and acks at once.
+    /// riding crossing acks at once and settles on the deck.
     pub(crate) owes_worldport_ack: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,

@@ -105,8 +105,15 @@ pub(super) fn release_post_snap_hold(
     time: Res<Time>,
     mut last_counters: Local<Option<[usize; 6]>>,
     net_cmds: Option<Res<crate::net::NetCommands>>,
+    decks: Query<(), With<avian3d::prelude::Collider>>,
 ) {
     let Some(p) = progress else { return };
+    // A rider's floor is its deck, which the world's residency does not count: it must be in the
+    // physics world too, or the release drops the body through it into the sea.
+    let deck_ready = player
+        .ride
+        .as_ref()
+        .is_none_or(|r| decks.contains(r.entity));
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
     // a free-fly eye) the release and the stale-clear are refused and only the backstop runs.
     let focus_matches = p.focus_tile.is_some_and(|t| {
@@ -137,7 +144,7 @@ pub(super) fn release_post_snap_hold(
     // the deadline is pushed while the resident world is still the map we left and while the
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
-    if p.presentable() && !player.world_stale && focus_matches {
+    if p.presentable() && !player.world_stale && focus_matches && deck_ready {
         player.end_settle(true, now);
     } else if player.world_stale || progressed || p.loads_in_flight > 0 {
         // **A stream that is fetching is a stream that is arriving.** The two terms before this one
@@ -516,6 +523,41 @@ mod tests {
         // Paid once: further quiet frames send nothing more.
         step(&mut app, 0.1, |_| {});
         assert!(rx.try_recv().is_err(), "the ack was paid twice");
+    }
+
+    /// A riding crossing: the destination is resident, but the deck the body stands on has no
+    /// collider in the physics world, so releasing would drop the body through it into the sea.
+    #[test]
+    fn a_rider_is_held_until_its_deck_collides() {
+        let mut app = app();
+        let deck = app.world_mut().spawn_empty().id();
+        {
+            let mut player = app.world_mut().resource_mut::<Player>();
+            player.world_stale = false;
+            player.ride = Some(super::super::PlayerRide {
+                entity: deck,
+                guid: 0x1F1_0000_0000_0001,
+                local_pos: Vec3::ZERO,
+                boat_yaw: 0.0,
+            });
+        }
+        let resident = |p: &mut WorldLoadProgress| {
+            p.total = 2000;
+            p.ready = 2000;
+            p.colliders_pending = 0;
+            p.scene_ready = true;
+            p.focus_resident = true;
+        };
+        step(&mut app, 0.1, resident);
+        assert!(
+            settling(&mut app),
+            "the world is resident but the deck is not collidable: the hold must stay"
+        );
+        app.world_mut()
+            .entity_mut(deck)
+            .insert(avian3d::prelude::Collider::sphere(1.0));
+        step(&mut app, 0.1, resident);
+        assert!(!settling(&mut app), "the deck collides: the hold ends");
     }
 
     /// vmangos keeps an unacked far teleport out of world, dropping every packet, until logout.

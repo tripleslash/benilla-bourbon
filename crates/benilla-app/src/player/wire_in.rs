@@ -153,8 +153,8 @@ pub(super) fn apply_server_moves(
         let riding = w.transport_entry.is_some() && player.ride.is_some();
         if riding {
             // Riding through: the pose is deck-local (`Player.cpp:2114`) and the boat survived the
-            // purge. No settle hold: it would drop `MOVEFLAG_ONTRANSPORT` from the next move
-            // packet, which the server reads as a deboard mid-ocean.
+            // purge. The ride is kept, so the hold below carries the body with the deck and keeps
+            // `MOVEFLAG_ONTRANSPORT` on the wire.
             let ride = player.ride.as_mut().expect("riding checked above");
             ride.local_pos = wow_to_bevy(w.position);
             if let Ok((boat, _, _)) = transports.get(ride.entity) {
@@ -177,21 +177,32 @@ pub(super) fn apply_server_moves(
             player.face_yaw = w.orientation;
             player.model_yaw = w.orientation; // the body snaps too, no chase
             cam.yaw = w.orientation;
-            player.settling = true; // hold (gravity off) until the new map's ground streams in
-            player.settle_since = time.elapsed_secs();
-            player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
-            // The physics world is still the old map's until the streamer swaps it.
-            player.world_stale = true;
         }
-        player.move_flags = 0;
+        // Hold (gravity off) until the new map's ground streams in, a riding crossing too: the
+        // reference's blocking load (`0x66fbe0`) freezes a rider as it does anyone, and a deck
+        // ridden through the purge is no floor while the destination's world is not resident.
+        player.settling = true;
+        player.settle_since = time.elapsed_secs();
+        player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+        // The physics world is still the old map's until the streamer swaps it.
+        player.world_stale = true;
+        // A snap clears the movement bits; a rider is still on its deck, as the hold's wire says.
+        player.move_flags = if player.ride.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        };
         player.airborne_since = None; // a snap ends any jump arc (no phantom FALL_LAND)
         commands.insert_resource(CurrentMap(w.map_id));
         if w.needs_ack {
             if riding {
-                // A riding crossing never settles, so it acks now.
+                // Deviation: the reference acks after its blocking load (`0x401cae`); a rider acks
+                // now, so the server re-adds us to the boat at once. The hold keeps
+                // `ON_TRANSPORT` on the wire, so nothing it sends reads as a deboard.
                 let _ = net_cmds.0.send(ClientCommand::WorldportAck);
                 info!(
-                    "worldport: mapId {} @ {:?} (riding, boat-local pose, acked)",
+                    "worldport: mapId {} @ {:?} (riding, boat-local pose, acked; held until \
+                     resident)",
                     w.map_id, w.position
                 );
             } else {
