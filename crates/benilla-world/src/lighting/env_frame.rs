@@ -15,7 +15,7 @@
 //! | 0 `wind_a` | dir_x, dir_y, base_heading (rad) | gust |
 //! | 1 `wind_b` | travel (yd, wrapped), sway_strength, grass_strength | tree_strength |
 //! | 2 `wet_a` | rain_rate, wetness, ripple_time_s | snow |
-//! | 3 `misc` | bender_count, 0, 0 | 0 |
+//! | 3 `misc` | bender_count, wet_ssr, 0 | 0 |
 //! | 4-11 `benders` | world x, y, z | radius |
 //!
 //! Coordinates are Bevy world space (Y up, 1 unit = 1 yd), the receivers' `world_position` space.
@@ -67,6 +67,9 @@ pub struct EnvFrame {
     pub wetness: f32,
     pub ripple_time_s: f32,
     pub snow: f32,
+    /// 1 while the wet screen-space reflection pass composites (`weather::wet_ssr`): the terrain
+    /// then tags its reflection weight in alpha instead of adding the sky colour itself.
+    pub wet_ssr: f32,
     // Benders (row 3 `.x`, rows 4-11).
     /// Only the first `min(bender_count, MAX_BENDERS)` are packed; `[x, y, z, radius]`.
     pub benders: [[f32; 4]; MAX_BENDERS],
@@ -91,7 +94,7 @@ impl EnvFrame {
         ];
         rows[2] = [self.rain_rate, self.wetness, self.ripple_time_s, self.snow];
         let n = (self.bender_count as usize).min(MAX_BENDERS);
-        rows[3] = [n as f32, 0.0, 0.0, 0.0];
+        rows[3] = [n as f32, self.wet_ssr, 0.0, 0.0];
         rows[4..4 + n].copy_from_slice(&self.benders[..n]);
         rows
     }
@@ -121,6 +124,7 @@ mod tests {
             wetness: 10.0,
             ripple_time_s: 11.0,
             snow: 12.0,
+            wet_ssr: 17.0,
             benders: [[13.0, 14.0, 15.0, 16.0]; MAX_BENDERS],
             bender_count: 20, // clamped to MAX_BENDERS
         };
@@ -128,7 +132,7 @@ mod tests {
         assert_eq!(r[0], [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(r[1], [5.0, 6.0, 7.0, 8.0]);
         assert_eq!(r[2], [9.0, 10.0, 11.0, 12.0]);
-        assert_eq!(r[3], [8.0, 0.0, 0.0, 0.0]);
+        assert_eq!(r[3], [8.0, 17.0, 0.0, 0.0]);
         assert_eq!(r[11], [13.0, 14.0, 15.0, 16.0]);
     }
 

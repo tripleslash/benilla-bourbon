@@ -13,6 +13,8 @@
 //! a deck, a floor over a room) or runs out of surfaces (open ground). A roof's own shell (its
 //! outer and ceiling faces a hand apart) is thinner than the gap, so it does not count as shelter.
 //! Doodads without a canopy collider (most trees) do not shelter; that is a limit of the source.
+//! fork: a liquid surface counts as a roof too ([`under_liquid`]): rain does not wet a riverbed,
+//! so ground a yard or more under the water line is dry, while the shore stays wet.
 //!
 //! Per cell the GPU gets one `u32` ([`pack_cell`]): the low half the top height relative to the
 //! header's `base_y` in 1/64 yd (±512 yd), the high half the soft cover 0..1 as unorm16. The cover is the
@@ -117,6 +119,19 @@ pub fn probe_column(from_y: f32, mut cast: impl FnMut(f32, f32, bool) -> Option<
     Column {
         top: Some(top),
         covered: false,
+    }
+}
+
+/// fork: a liquid surface over open ground covers it: the column's top becomes the water line, so
+/// the bed under it is sheltered like the floor under a roof. A column already covered keeps its
+/// own (higher) roof; water at or under the top (a shore, a dock) changes nothing.
+pub fn under_liquid(col: Column, surface_y: Option<f32>) -> Column {
+    match (col.top, surface_y) {
+        (Some(top), Some(s)) if !col.covered && s > top => Column {
+            top: Some(s),
+            covered: true,
+        },
+        _ => col,
     }
 }
 
@@ -447,6 +462,10 @@ fn tick_shelter(
     frame: Res<EnvFrame>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     spatial: SpatialQuery,
+    // fork: the liquid surfaces, through the spatial index (a dry cell costs one hash miss).
+    // Optional: a world without the liquid plugin simply has no water to shelter under.
+    water_index: Option<Res<crate::liquid::WaterIndex>>,
+    water: Query<&crate::liquid::WaterChunkInfo>,
     mut grid: ResMut<ShelterGrid>,
     mut out: ResMut<ShelterExtract>,
 ) {
@@ -467,7 +486,13 @@ fn tick_shelter(
     grid.follow(cam);
     let filter = crate::collision::WorldCollision::body_filter();
     let x0 = grid.cast_y;
-    grid.step(|xz| cast_column(&spatial, &filter, xz, x0));
+    grid.step(|xz| {
+        let col = cast_column(&spatial, &filter, xz, x0);
+        let surface = water_index
+            .as_deref()
+            .and_then(|index| water_surface_y(index, &water, xz));
+        under_liquid(col, surface)
+    });
     let header = grid.header();
     if out.header != header {
         out.header = header;
@@ -490,6 +515,21 @@ fn cast_column(
             .cast_ray(Vec3::new(xz.x, y, xz.y), Dir3::NEG_Y, max, first, filter)
             .map(|hit| hit.distance)
     })
+}
+
+/// The highest liquid surface over a Bevy XZ, as Bevy Y (WoW z): any kind, since nothing under
+/// lava or slime is rained on either.
+fn water_surface_y(
+    index: &crate::liquid::WaterIndex,
+    water: &Query<&crate::liquid::WaterChunkInfo>,
+    xz: Vec2,
+) -> Option<f32> {
+    let wow = benilla_assets::coords::bevy_to_wow(Vec3::new(xz.x, 0.0, xz.y));
+    index
+        .over(wow[0], wow[1])
+        .iter()
+        .filter_map(|&e| water.get(e).ok()?.surface_z_at(wow[0], wow[1]))
+        .max_by(f32::total_cmp)
 }
 
 /// Render world: writes the header each frame it moved and the changed cell rows.
@@ -599,6 +639,34 @@ mod tests {
                 covered: false
             }
         );
+    }
+
+    /// A riverbed is covered at the water line; the shore above it, a roof over the river and dry
+    /// ground keep their own answer.
+    #[test]
+    fn water_over_open_ground_covers_it_at_the_water_line() {
+        let bed = Column {
+            top: Some(-2.0),
+            covered: false,
+        };
+        assert_eq!(
+            under_liquid(bed, Some(0.0)),
+            Column {
+                top: Some(0.0),
+                covered: true
+            }
+        );
+        let shore = Column {
+            top: Some(0.5),
+            covered: false,
+        };
+        assert_eq!(under_liquid(shore, Some(0.0)), shore);
+        let bridge = Column {
+            top: Some(6.0),
+            covered: true,
+        };
+        assert_eq!(under_liquid(bridge, Some(0.0)), bridge);
+        assert_eq!(under_liquid(bed, None), bed);
     }
 
     #[test]

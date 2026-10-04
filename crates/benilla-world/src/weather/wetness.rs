@@ -14,7 +14,8 @@
 //! shader reader treats a zero row as "dry", so the image is unchanged.
 //!
 //! Capture knobs: `WOW_RAIN_SURFACES=0|1` overrides the cvar; `WOW_WETNESS=<0..1>` pins the
-//! wetness (a capture cannot wait minutes for the ramp); `WOW_WET_T=<s>` pins the ripple clock.
+//! wetness (a capture cannot wait minutes for the ramp); `WOW_WET_T=<s>` pins the ripple clock;
+//! `WOW_WET_SSR=0` turns the screen-space reflection off (the sky colour stands in for it).
 
 use bevy::prelude::*;
 
@@ -75,6 +76,7 @@ struct EnvOverrides {
     on: Option<bool>,
     wetness: Option<f32>,
     ripple_t: Option<f32>,
+    ssr: Option<bool>,
 }
 
 fn env_overrides() -> &'static EnvOverrides {
@@ -83,6 +85,7 @@ fn env_overrides() -> &'static EnvOverrides {
         on: env_f32("WOW_RAIN_SURFACES").map(|v| v >= 0.5),
         wetness: env_f32("WOW_WETNESS").map(|v| v.clamp(0.0, 1.0)),
         ripple_t: env_f32("WOW_WET_T"),
+        ssr: env_f32("WOW_WET_SSR").map(|v| v >= 0.5),
     })
 }
 
@@ -113,12 +116,23 @@ pub(super) fn wetness_tick(
     } else {
         (0.0, 0.0, 0.0)
     };
+    // The wet reflection pass runs while anything is wet (`super::wet_ssr`).
+    let ssr = if wetness > 0.0 && env.ssr.unwrap_or(true) {
+        1.0
+    } else {
+        0.0
+    };
     // Write only on change, so change detection on the frame stays meaningful.
-    if frame.rain_rate != rate || frame.wetness != wetness || frame.ripple_time_s != ripple {
+    if frame.rain_rate != rate
+        || frame.wetness != wetness
+        || frame.ripple_time_s != ripple
+        || frame.wet_ssr != ssr
+    {
         frame.rain_rate = rate;
         frame.wetness = wetness;
         frame.ripple_time_s = ripple;
         frame.snow = 0.0;
+        frame.wet_ssr = ssr;
     }
 }
 

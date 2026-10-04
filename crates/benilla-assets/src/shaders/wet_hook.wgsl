@@ -132,10 +132,9 @@ fn wet_puddles(s: WetSurface, n: vec3<f32>, world_pos: vec3<f32>, exposure: f32,
     return o;
 }
 
-// The wet sheen, added to the lit colour (gamma in a classic frame, linear in a modern one): a tight sun highlight (shadowed) and a Fresnel
-// reflection of the sky/fog colour. Zero when `boost` is zero.
-fn wet_sheen(boost: f32, n: vec3<f32>, to_view: vec3<f32>, to_light: vec3<f32>,
-    sun_rgb: vec3<f32>, sky_rgb: vec3<f32>, shadow: f32) -> vec3<f32> {
+// The wet sun highlight: tight, shadowed, `gain` × the sheen's own strength. Zero when `boost` is.
+fn wet_sun(boost: f32, n: vec3<f32>, to_view: vec3<f32>, to_light: vec3<f32>,
+    sun_rgb: vec3<f32>, shadow: f32, gain: f32) -> vec3<f32> {
     if (boost <= 0.0) {
         return vec3<f32>(0.0);
     }
@@ -143,9 +142,41 @@ fn wet_sheen(boost: f32, n: vec3<f32>, to_view: vec3<f32>, to_light: vec3<f32>,
     let h = normalize(to_light + to_view + vec3<f32>(0.0, 1.0e-4, 0.0));
     let nl = max(dot(n, to_light), 0.0);
     let spec = pow(max(dot(n, h), 0.0), 80.0) * smoothstep(0.0, 0.15, nl);
+    let gloss = min(boost, 1.0);
+    let mirror = max(boost - 1.0, 0.0);
+    return sun_rgb * ((0.9 * gloss + 1.2 * mirror) * spec * shadow * gain);
+}
+
+// How much of the surroundings a wet surface reflects, Fresnel-weighted: a faint grazing gloss on
+// soaked faces, a mirror in a puddle. The sky colour times this, or the screen-space reflection
+// (`benilla-world/src/weather/wet_ssr.rs`) where the receiver tags it. Below 0.75 always.
+fn wet_reflectance(boost: f32, n: vec3<f32>, to_view: vec3<f32>) -> f32 {
+    if (boost <= 0.0) {
+        return 0.0;
+    }
     let fres = 0.03 + 0.97 * pow(1.0 - clamp(dot(n, to_view), 0.0, 1.0), 5.0);
     let gloss = min(boost, 1.0);
     let mirror = max(boost - 1.0, 0.0);
-    return sun_rgb * ((0.9 * gloss + 1.2 * mirror) * spec * shadow)
-        + sky_rgb * (gloss * min(0.25 * fres, 0.2) + mirror * (0.22 + 0.3 * fres));
+    return gloss * min(0.25 * fres, 0.2) + mirror * (0.22 + 0.3 * fres);
+}
+
+// Whether the wet screen-space reflection pass composites this frame (`EnvFrame.misc.y`). A
+// receiver that tags its output alpha must only do so while this is set.
+fn ssr_live(ef: EnvFrame) -> bool {
+    return ef.misc.y > 0.5;
+}
+
+// The models' share of the wet sun highlight and of the sky reflection. A model's smooth-shaded
+// normals spread the highlight into a broad disc that clips to white at full strength; wet stone
+// and bark should only darken and catch a faint sheen.
+const MODEL_SUN_GAIN: f32 = 0.12;
+const MODEL_SKY_GAIN: f32 = 0.5;
+
+// The wet sheen on models (static_gx, wow_model), added to the lit colour (gamma in a classic
+// frame, linear in a modern one): a faint sun highlight (shadowed) and a Fresnel reflection of the
+// sky/fog colour. Zero when `boost` is zero.
+fn wet_sheen(boost: f32, n: vec3<f32>, to_view: vec3<f32>, to_light: vec3<f32>,
+    sun_rgb: vec3<f32>, sky_rgb: vec3<f32>, shadow: f32) -> vec3<f32> {
+    return wet_sun(boost, n, to_view, to_light, sun_rgb, shadow, MODEL_SUN_GAIN)
+        + sky_rgb * (MODEL_SKY_GAIN * wet_reflectance(boost, n, to_view));
 }

@@ -95,6 +95,12 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 // morning grass wore a hole in the ground rather than a silhouette.
 const SHADOW_SUN_FLOOR: f32 = 0.70;
 
+// fork: rain on surfaces — how far a soaked face lifts the authored `_s` sheen (×1.25 at most), and
+// the wet sun highlight's share on the ground. Wet ground reads by its reflection, not by a
+// brighter specular.
+const WET_SPEC_GAIN: f32 = 0.25;
+const WET_SUN_GAIN: f32 = 0.35;
+
 // Per-tile Vec4 uniforms, packed into one buffer (binding 106); the field order must match the Rust
 // `TerrainExtension`. params.x = layer tiling factor; yzw unused.
 struct TerrainParams {
@@ -583,13 +589,29 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     let diffuse_term = color * primary * (0.3 * shadow_lit_eff + 0.7) * character_shadow_term;
     let spec_term = in.specular * specmask * spec_gate;
     var tuned = clamp(diffuse_term + spec_term, vec3<f32>(0.0), vec3<f32>(1.0));
-    // The wet sheen, and the authored `_s` sheen brightens with it. Its shadow term is the sheen
-    // gate: MCSH and the character map in a classic frame, the sun cascades in a modern one.
+    // The wet sheen, and the authored `_s` sheen brightens a little with it. Its shadow term is the
+    // sheen gate: MCSH and the character map in a classic frame, the sun cascades in a modern one.
+    // The reflection is the screen-space pass's while it runs (`weather::wet_ssr`): the weight
+    // rides out in alpha, `1 + weight`, and the pass adds what the reflected ray finds. A modern
+    // frame's water mirror keeps the sky term, since the pass never sees that target; a classic
+    // mirror cannot tell itself apart and reflects wet ground without it.
+    var wet_reflect = 0.0;
     if (wet.boost > 0.0) {
-        tuned = clamp(tuned + spec_term * wet.boost + wet_hook::wet_sheen(wet.boost, wet_n,
-            normalize(view.world_position - in.world_position.xyz),
-            -normalize(wow_light.light_sun.xyz), wow_light.light_diffuse.rgb,
-            wow_light.fog_color.rgb, spec_gate), vec3<f32>(0.0), vec3<f32>(1.0));
+        let wet_v = normalize(view.world_position - in.world_position.xyz);
+        var sheen = spec_term * (WET_SPEC_GAIN * min(wet.boost, 1.0))
+            + wet_hook::wet_sun(wet.boost, wet_n, wet_v, -normalize(wow_light.light_sun.xyz),
+                wow_light.light_diffuse.rgb, spec_gate, WET_SUN_GAIN);
+        let reflectance = wet_hook::wet_reflectance(wet.boost, wet_n, wet_v);
+        var tag = wet_hook::ssr_live(wow_light.env);
+#ifdef WOW_MODERN
+        tag = tag && !lite;
+#endif
+        if (tag) {
+            wet_reflect = reflectance;
+        } else {
+            sheen = sheen + wow_light.fog_color.rgb * reflectance;
+        }
+        tuned = clamp(tuned + sheen, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     // Gamma-space GL_LINEAR fog on planar eye-Z, as the reference computes `fogcoord`, not radial
@@ -600,6 +622,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let denom = max(wow_light.fog_params.y - wow_light.fog_params.x, 0.001);
         let factor = clamp((wow_light.fog_params.y - eye_z) / denom, 0.0, 1.0);
         tuned = mix(wow_light.fog_color.xyz, tuned, factor);
+        // The reflection fogs with the ground it lies on.
+        wet_reflect = wet_reflect * factor;
     }
 
     // GAMMA LANE (decision 0161): the framebuffer HOLDS gamma bytes — all blending happens in
@@ -617,6 +641,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         } else {
             tuned = vec3<f32>(select(world_shadow, sunshadow::sky_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz), dbg > 1.5)); // modern shadow debug view
         }
+        wet_reflect = 0.0;
     }
-    return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0);
+    // fork: alpha above 1 is the wet reflection tag; every other opaque write stays at or below 1.
+    return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0 + wet_reflect);
 }

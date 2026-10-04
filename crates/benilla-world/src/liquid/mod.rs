@@ -50,7 +50,7 @@ pub use query::{
 pub use reflect::UNMIRRORED_RENDER_LAYER;
 // fork: modern lighting (FORK.md, P4) — the fog composite runs on the mirror and orders before the scene copy.
 pub(crate) use reflect::{LiquidReflectionCamera, ReflectionPlane};
-pub(crate) use screen::liquid_screen_pass;
+pub(crate) use screen::{liquid_screen_pass, LiquidScreenTargets, LiquidScreenView};
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,

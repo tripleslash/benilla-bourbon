@@ -20,6 +20,7 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/ssilvb.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_ripple.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/wet_ssr.wgsl");
 }
 
 /// The modern lighting model's shared WGSL libraries (`benilla_modern::*`), registered AND held
@@ -81,6 +82,6 @@ mod tests {
             );
         }
         // One per `embedded_asset!` line in `plugin`.
-        assert_eq!(found, 11, "the engine's shader set changed size");
+        assert_eq!(found, 12, "the engine's shader set changed size");
     }
 }

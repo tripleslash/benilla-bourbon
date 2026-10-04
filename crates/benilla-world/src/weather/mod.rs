@@ -17,6 +17,7 @@ use crate::dev_state::DebugState;
 
 mod precip;
 pub mod shelter;
+mod wet_ssr;
 pub mod wetness;
 
 /// Rain's forced-fog window, read by the effect lane's `EffectFog::Rain` row.
@@ -314,6 +315,7 @@ impl Plugin for WeatherPlugin {
         // fork: rain on surfaces (FORK.md).
         wetness::register(app);
         shelter::register(app);
+        wet_ssr::register(app);
     }
 }
 
