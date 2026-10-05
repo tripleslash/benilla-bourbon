@@ -35,10 +35,34 @@ pub fn set_live_reader(reader: fn(&str) -> Option<String>) {
     let _ = LIVE.set(reader);
 }
 
+/// How long a live answer is reused. Systems ask every frame, and on the browser one read is the
+/// page env object, `location.search` and a percent-decode of every pair across the JS bridge; a
+/// knob edited with `history.replaceState` is a person typing, for whom half a second is instant.
+const LIVE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
+
+type LiveCache = HashMap<String, (Option<String>, bevy::platform::time::Instant)>;
+
 /// The live value if a reader is installed, else [`var`].
 pub fn live_var(name: &str) -> Option<String> {
-    match LIVE.get() {
-        Some(read) => read(name),
-        None => var(name),
+    let Some(read) = LIVE.get() else {
+        return var(name);
+    };
+    // `try_lock`, never `lock`: a contended wait is `Atomics.wait`, which traps on the browser's
+    // main thread. A miss just reads through.
+    static CACHE: std::sync::Mutex<Option<LiveCache>> = std::sync::Mutex::new(None);
+    let now = bevy::platform::time::Instant::now();
+    if let Ok(cache) = CACHE.try_lock() {
+        if let Some((value, at)) = cache.as_ref().and_then(|c| c.get(name)) {
+            if now.duration_since(*at) < LIVE_TTL {
+                return value.clone();
+            }
+        }
     }
+    let value = read(name);
+    if let Ok(mut cache) = CACHE.try_lock() {
+        cache
+            .get_or_insert_with(HashMap::new)
+            .insert(name.to_string(), (value.clone(), now));
+    }
+    value
 }

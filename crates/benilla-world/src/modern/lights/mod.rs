@@ -941,15 +941,16 @@ fn update_lights(
             if spell || lava || !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
+            // The distance first: most of the world's lights are far, and it is the cheap test.
+            let pos = gt.translation();
+            let d = pos.distance(cam);
+            if d > SHADOW_RADIUS || light.range <= 0.0 {
+                continue;
+            }
             if !crate::wmo_portal::room_admits_light(
                 rooms.map(|r| &r.0),
                 rooms.and_then(|r| portals.get(r.0.instance).ok()),
             ) {
-                continue;
-            }
-            let pos = gt.translation();
-            let d = pos.distance(cam);
-            if d > SHADOW_RADIUS || light.range <= 0.0 {
                 continue;
             }
             // fork: where this light has been lately. A placed lamp's box is a point; a lantern on

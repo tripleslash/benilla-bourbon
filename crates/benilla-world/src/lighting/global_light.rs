@@ -511,33 +511,52 @@ fn build_light_data(
             && crate::modern::lights::lights_enabled()
     });
     wanting.clear();
+    // Past both the pack radius and the modern steering radius a light can neither be admitted nor
+    // count as wanting in, so its tier, room and glow tests are not asked; a light the world holds
+    // by the thousand is mostly that far.
+    let reach2 = if modern_pack {
+        radius.max(MODERN_PACK_RADIUS)
+    } else {
+        radius
+    }
+    .powi(2);
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, f32)> = lights_q
         .iter()
         .filter_map(
             |(entity, pl, gt, rooms, synthesized, night_glow, window, glowless, flame, spell)| {
                 let p = gt.translation();
                 let d2 = p.distance_squared(cam_pos);
+                let near = d2 < reach2;
                 // The tier gate for DERIVED lights, read where the light is READ rather than where it
                 // was spawned: a lamppost's light entity always exists, and whether it reaches the
                 // table is this frame's question — so a doodad that streamed in before the lighting
                 // latched is not left permanently dark.
-                let tier_ok = (synthesized.is_none() || crate::modern::emissive_lights_on())
-                    && (!spell || spell_tier);
+                let tier_ok = || {
+                    (synthesized.is_none() || crate::modern::emissive_lights_on())
+                        && (!spell || spell_tier)
+                };
                 // A culled room's light registers nothing in the reference ([`LightRooms`]); a
                 // light that names no rooms always passes.
-                let room_ok = crate::wmo_portal::room_admits_light(
-                    rooms.map(|r| &r.0),
-                    rooms.and_then(|r| portals.get(r.0.instance).ok()),
-                );
+                let room_ok = || {
+                    crate::wmo_portal::room_admits_light(
+                        rooms.map(|r| &r.0),
+                        rooms.and_then(|r| portals.get(r.0.instance).ok()),
+                    )
+                };
                 // A window's glow is a light only at night; by day it is not in the table at all
                 // (rather than in it at zero, holding a slot a lamp could use).
                 let lit = night_glow.is_none() || night > 0.0;
-                let wants = tier_ok && room_ok && lit;
+                let wants = near && lit && tier_ok() && room_ok();
                 if wants && modern_pack && d2 < MODERN_PACK_RADIUS * MODERN_PACK_RADIUS {
                     wanting.push(d2);
                 }
                 let admitted = wants && d2 < radius * radius;
-                let fade = admit.entry(entity).or_insert(0.0);
+                // A light with no ramp that is not admitted stays at zero: no entry is made for it.
+                let fade = if admitted {
+                    admit.entry(entity).or_insert(0.0)
+                } else {
+                    admit.get_mut(&entity)?
+                };
                 *fade = if admitted {
                     (*fade + step).min(1.0)
                 } else {
