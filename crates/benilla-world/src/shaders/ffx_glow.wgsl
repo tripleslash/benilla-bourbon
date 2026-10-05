@@ -110,7 +110,9 @@ fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
 // the luma, contrast about mid grey, a toe that deepens the shadows, and a soft vignette.
 fn cinematic_grade(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let luma = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
-    var c = mix(vec3<f32>(luma), g, ffx.grade.y);
+    // Saturation above 1 extrapolates away from the luma and can drive a vivid channel negative;
+    // floored at 0, or the toe's `pow` below turns it into NaN (flat red and blue patches on screen).
+    var c = max(mix(vec3<f32>(luma), g, ffx.grade.y), vec3<f32>(0.0));
     // Contrast as an S-curve, NOT a scale about mid grey: the latter maps everything below 0.5 toward
     // zero, so a night exterior (whose pixels all sit near 0.08) went black on screen while a daylit
     // one only gained a little snap. The curve fixes 0 and 1 and shapes the midtones between them.
