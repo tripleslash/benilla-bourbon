@@ -1089,6 +1089,12 @@ mod tests {
         app.world_mut()
             .resource_mut::<NameCache>()
             .insert_player(ME, "Seller".into(), None);
+        // The row's item has landed: a row whose template has not answers the shared miss exit
+        // (`0x4cf1ec`), `highBidder` nil included, whatever the name cache holds.
+        app.world_mut().resource_mut::<Items>().insert_template(
+            entry(ME, BIDDER_GUID).item_entry,
+            Some(crate::items::test_template("Linen Cloth")),
+        );
         let script = UiScript::new().unwrap();
         script
             .run(
