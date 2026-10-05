@@ -68,6 +68,20 @@ created ~1.4 GB of mesh slabs, most of them abandoned by growth and none freed. 
 `#[cfg(target_arch = "wasm32")]` only, calls `destroy()` on the buffer at both points. Both are in
 `PrepareAssets`, before the frame encodes a pass, and the grow copy is submitted first.
 
+## The fifth delta: pipelines are created asynchronously (web)
+
+`render_resource/pipeline_cache.rs`, `#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]`
+only. The shader modules and the layout are still made on the frame thread, but the pipeline is
+asked for with wgpu's `create_render_pipeline_async` / `create_compute_pipeline_async`
+(`third_party/wgpu`, `createRenderPipelineAsync`), and stays `CachedPipelineState::Creating` on a
+`spawn_local` task until the browser's promise settles — the state native async compilation already
+uses, so every consumer already skips a draw whose pipeline is not ready. The synchronous form
+returned at once but compiled on the GPU process's queue, stalling every frame behind it (measured in
+Chrome on D3D12: ~600 ms for one heavy fragment shader, against ~0 queue stall for the async form).
+`block_on_render_pipeline` leaves such a pipeline pending rather than spinning on a promise that can
+only settle once the frame returns; the upscaling blit, its one caller, skips its view until it
+lands. `synchronous_pipeline_compilation` still forces the synchronous path.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**

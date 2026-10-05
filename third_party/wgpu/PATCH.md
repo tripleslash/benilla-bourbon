@@ -1,7 +1,8 @@
 # Vendored wgpu 29.0.4: benilla's local patch
 
-This is the crates.io `wgpu` **29.0.4** source, unmodified except for **two entries added to one
-table and the two enum names those entries need**. It is wired in through `[patch.crates-io]` in
+This is the crates.io `wgpu` **29.0.4** source, unmodified except for the hunks below: **two entries added to one
+table and the two enum names those entries need**, the browser WGSL fix-ups, the device's
+limits and features read once, async pipeline creation and the per-frame labels. It is wired in through `[patch.crates-io]` in
 the root `Cargo.toml`. Bevy 0.19.1 asks for `^29.0.3`, which this satisfies. The upstream
 `README.md` is kept alongside this file.
 
@@ -70,6 +71,37 @@ Two things it writes, the browser's compiler rejects, so `browser_wgsl` post-pro
 
 Remove it with the rest once naga's writer emits both correctly.
 
+## Device limits and features read once (`src/backend/webgpu.rs`, `WebDevice`)
+
+`DeviceInterface::limits()` and `::features()` rebuilt their answer from the JS
+`GPUSupportedLimits` / `GPUSupportedFeatures` objects on every call — ~40 getters, each a crossing
+of the wasm→JS bridge. Bevy treats `RenderDevice::limits()` as free: `bevy_pbr`'s
+`SetMeshBindGroup` calls it once per mesh draw. Measured in the browser world viewer (JS
+Self-Profiling, Elwynn, ~3,700 draws a frame): `map_wgt_limits` was 15% of the frame thread. A
+device's limits and features are fixed at creation, so `WebDevice` keeps both in a `OnceCell`
+filled on first read.
+
+Upstream would take it as is; remove it with the rest once a wgpu release Bevy uses caches them.
+
+## Async pipeline creation (`src/api/device.rs`, `src/backend/webgpu.rs`)
+
+`Device::create_render_pipeline_async` / `create_compute_pipeline_async`, WebGPU backend only
+(`None` elsewhere): the descriptor is mapped exactly as the synchronous path maps it
+(`map_render_pipeline_descriptor`, `map_compute_pipeline_descriptor`, now shared) and handed to
+`createRenderPipelineAsync` / `createComputePipelineAsync`; the returned future owns only the
+promise. Measured in Chrome on D3D12: a synchronous `createRenderPipeline` returns at once in JS but
+holds the GPU process's queue for the whole compile (~600 ms for one heavy fragment shader), so
+every frame behind it stalls; the async form leaves the queue alone. `third_party/bevy_render`'s
+pipeline cache is the caller.
+
+## Labels on per-frame objects (`src/backend/webgpu.rs`, `HOT_LABELS`)
+
+Bind groups, command encoders and their buffers, render and compute passes and texture views carry
+their labels into the browser only in debug builds. Each label is a JS string made across the
+bridge, and `CommandEncoder::finish` read the encoder's label back out of JS to relabel the buffer;
+a frame makes ~60 bind groups, ~30 passes and ~25 encoders (~1% of the browser frame thread).
+Pipelines, buffers, textures, samplers and layouts keep their labels in every build.
+
 ## Removal
 
 Once a wgpu release that Bevy uses includes both mappings, with a real flag for tier 1:
@@ -84,4 +116,4 @@ wgpu 30 has the bindings, but still lacks the mappings as of 30.0.1.
 diff -ru <crates.io wgpu-29.0.4> third_party/wgpu
 ```
 
-The diff shows only the three hunks above, plus this file and the removed `Cargo.lock`.
+The diff shows only the hunks above, plus this file and the removed `Cargo.lock`.

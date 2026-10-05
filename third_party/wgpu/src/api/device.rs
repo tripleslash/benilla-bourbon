@@ -258,6 +258,33 @@ impl Device {
         RenderPipeline { inner: pipeline }
     }
 
+    /// benilla local patch: creates a [`RenderPipeline`] without stalling the device's queue.
+    ///
+    /// On the WebGPU backend this is `createRenderPipelineAsync`: the browser compiles the
+    /// pipeline off its command queue, where the synchronous form makes every later submit wait
+    /// for the compile. `None` on any other backend; use [`Device::create_render_pipeline`] there.
+    /// The descriptor is consumed before this returns; the future borrows nothing.
+    #[cfg(webgpu)]
+    pub fn create_render_pipeline_async(
+        &self,
+        desc: &RenderPipelineDescriptor<'_>,
+    ) -> Option<impl Future<Output = Result<RenderPipeline, String>> + 'static> {
+        let device = self.inner.as_webgpu_opt()?;
+        let fut = device.create_render_pipeline_async(desc);
+        Some(async move { fut.await.map(|inner| RenderPipeline { inner }) })
+    }
+
+    /// benilla local patch: the compute twin of [`Device::create_render_pipeline_async`].
+    #[cfg(webgpu)]
+    pub fn create_compute_pipeline_async(
+        &self,
+        desc: &ComputePipelineDescriptor<'_>,
+    ) -> Option<impl Future<Output = Result<ComputePipeline, String>> + 'static> {
+        let device = self.inner.as_webgpu_opt()?;
+        let fut = device.create_compute_pipeline_async(desc);
+        Some(async move { fut.await.map(|inner| ComputePipeline { inner }) })
+    }
+
     /// Creates a mesh shader based [`RenderPipeline`].
     #[must_use]
     pub fn create_mesh_pipeline(&self, desc: &MeshPipelineDescriptor<'_>) -> RenderPipeline {

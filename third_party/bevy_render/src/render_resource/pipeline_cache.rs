@@ -4,9 +4,9 @@ use bevy_material::descriptor::{
 };
 
 use crate::{
+    Extract,
     render_resource::*,
     renderer::{RenderAdapter, RenderDevice, WgpuWrapper},
-    Extract,
 };
 use alloc::{borrow::Cow, sync::Arc};
 use bevy_asset::{AssetEvent, AssetId, Assets, Handle};
@@ -351,6 +351,14 @@ impl PipelineCache {
         }
 
         let state = &mut self.pipelines[id.id()].state;
+        // benilla fork (web): a `Creating` pipeline here is a browser promise
+        // (`createRenderPipelineAsync`), which can only settle once this task returns to the
+        // event loop — blocking on it would spin forever. It is left pending, and its users skip
+        // their draw until it lands, as they do for any pipeline still compiling.
+        #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+        if matches!(state, CachedPipelineState::Creating(_)) {
+            return;
+        }
         if let CachedPipelineState::Creating(task) = state {
             *state = match bevy_tasks::block_on(task) {
                 Ok(p) => CachedPipelineState::Ok(p),
@@ -473,6 +481,7 @@ impl PipelineCache {
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
+        let sync = self.synchronous_pipeline_compilation;
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -565,9 +574,7 @@ impl PipelineCache {
                     cache: None,
                 };
 
-                Ok(Pipeline::RenderPipeline(
-                    device.create_render_pipeline(&descriptor),
-                ))
+                Ok(build_render_pipeline(&device, &descriptor, sync))
             },
             self.synchronous_pipeline_compilation,
         )
@@ -581,6 +588,7 @@ impl PipelineCache {
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
+        let sync = self.synchronous_pipeline_compilation;
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -623,9 +631,7 @@ impl PipelineCache {
                     cache: None,
                 };
 
-                Ok(Pipeline::ComputePipeline(
-                    device.create_compute_pipeline(&descriptor),
-                ))
+                Ok(build_compute_pipeline(&device, &descriptor, sync))
             },
             self.synchronous_pipeline_compilation,
         )
@@ -821,10 +827,13 @@ fn create_pipeline_task(
     }
 }
 
-#[cfg(any(
-    target_arch = "wasm32",
-    target_os = "macos",
-    not(feature = "multi_threaded")
+#[cfg(all(
+    any(
+        target_arch = "wasm32",
+        target_os = "macos",
+        not(feature = "multi_threaded")
+    ),
+    not(all(target_arch = "wasm32", feature = "webgpu"))
 ))]
 fn create_pipeline_task(
     task: impl Future<Output = Result<Pipeline, ShaderCacheError>> + Send + 'static,
@@ -832,6 +841,103 @@ fn create_pipeline_task(
 ) -> CachedPipelineState {
     match bevy_tasks::block_on(task) {
         Ok(pipeline) => CachedPipelineState::Ok(pipeline),
+        Err(err) => CachedPipelineState::Err(err),
+    }
+}
+
+/// What a pipeline build hands [`create_pipeline_task`]: the pipeline itself everywhere but the
+/// browser's WebGPU backend.
+#[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
+type BuiltPipeline = Pipeline;
+
+#[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
+fn build_render_pipeline(
+    device: &RenderDevice,
+    descriptor: &RawRenderPipelineDescriptor,
+    _sync: bool,
+) -> BuiltPipeline {
+    Pipeline::RenderPipeline(device.create_render_pipeline(descriptor))
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
+fn build_compute_pipeline(
+    device: &RenderDevice,
+    descriptor: &RawComputePipelineDescriptor,
+    _sync: bool,
+) -> BuiltPipeline {
+    Pipeline::ComputePipeline(device.create_compute_pipeline(descriptor))
+}
+
+/// benilla fork (web): the shader modules and layout are made on the frame thread as before, and
+/// the pipeline itself is asked for with `createRenderPipelineAsync`. The synchronous form returns
+/// at once but compiles on the browser's GPU-process command queue, so every submit behind it
+/// waits for the whole compile — measured in Chrome on D3D12 at ~600 ms of queue stall for one
+/// heavy fragment shader, against ~0 for the async form. The pipeline stays `Creating` until the
+/// promise settles, which is the state native async compilation already uses.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+enum BuiltPipeline {
+    Ready(Pipeline),
+    Pending(Task<Result<Pipeline, ShaderCacheError>>),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn build_render_pipeline(
+    device: &RenderDevice,
+    descriptor: &RawRenderPipelineDescriptor,
+    sync: bool,
+) -> BuiltPipeline {
+    match device
+        .wgpu_device()
+        .create_render_pipeline_async(descriptor)
+    {
+        Some(build) if !sync => BuiltPipeline::Pending(
+            bevy_tasks::AsyncComputeTaskPool::get().spawn_local(async move {
+                build
+                    .await
+                    .map(|p| Pipeline::RenderPipeline(p.into()))
+                    .map_err(ShaderCacheError::CreateShaderModule)
+            }),
+        ),
+        _ => BuiltPipeline::Ready(Pipeline::RenderPipeline(
+            device.create_render_pipeline(descriptor),
+        )),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn build_compute_pipeline(
+    device: &RenderDevice,
+    descriptor: &RawComputePipelineDescriptor,
+    sync: bool,
+) -> BuiltPipeline {
+    match device
+        .wgpu_device()
+        .create_compute_pipeline_async(descriptor)
+    {
+        Some(build) if !sync => BuiltPipeline::Pending(
+            bevy_tasks::AsyncComputeTaskPool::get().spawn_local(async move {
+                build
+                    .await
+                    .map(|p| Pipeline::ComputePipeline(p.into()))
+                    .map_err(ShaderCacheError::CreateShaderModule)
+            }),
+        ),
+        _ => BuiltPipeline::Ready(Pipeline::ComputePipeline(
+            device.create_compute_pipeline(descriptor),
+        )),
+    }
+}
+
+/// benilla fork (web): the module work runs now, on the frame thread; an async pipeline comes
+/// back as the task that will hold it.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn create_pipeline_task(
+    task: impl Future<Output = Result<BuiltPipeline, ShaderCacheError>> + Send + 'static,
+    _sync: bool,
+) -> CachedPipelineState {
+    match bevy_tasks::block_on(task) {
+        Ok(BuiltPipeline::Ready(pipeline)) => CachedPipelineState::Ok(pipeline),
+        Ok(BuiltPipeline::Pending(task)) => CachedPipelineState::Creating(task),
         Err(err) => CachedPipelineState::Err(err),
     }
 }
