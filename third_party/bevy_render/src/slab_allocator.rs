@@ -3,7 +3,7 @@
 use alloc::borrow::Cow;
 use bevy_derive::{Deref, DerefMut};
 use bevy_log::error;
-use bevy_platform::collections::{hash_map::Entry, HashMap, HashSet};
+use bevy_platform::collections::{HashMap, HashSet, hash_map::Entry};
 use core::{
     cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
@@ -65,6 +65,13 @@ where
 
     /// Maps slab allocation keys to the ID of the slabs that hold their data.
     pub key_to_slab: HashMap<I::Key, SlabId<I>>,
+
+    /// benilla fork: every resident allocation's slab and element range, resolved once when it
+    /// becomes resident and dropped when it is freed. [`Self::resident_slice`] is asked once per
+    /// draw per buffer, and through `key_to_slab` and the slab's own table it hashed the key twice;
+    /// this hashes it once. A slab's growth copies its data at the same offsets, so an entry stays
+    /// valid until its key is freed.
+    resident: HashMap<I::Key, (SlabId<I>, Range<u32>)>,
 
     /// Maps a layout to the slabs that hold elements of that layout.
     ///
@@ -594,6 +601,7 @@ where
                 phantom: PhantomData,
             },
             key_to_slab: HashMap::default(),
+            resident: HashMap::default(),
             slab_layouts: HashMap::default(),
             extra_buffer_usages: BufferUsages::empty(),
         }
@@ -782,6 +790,7 @@ where
     /// `empty_slabs` set for the caller to reclaim on commit.
     fn free_existing_allocation(&mut self, key: &I::Key, empty_slabs: &mut HashSet<SlabId<I>>) {
         if let Some(slab_id) = self.key_to_slab.remove(key) {
+            self.resident.remove(key);
             self.free_allocation_in_slab(key, slab_id, empty_slabs);
         }
     }
@@ -896,6 +905,22 @@ where
     /// that slab has been uploaded to the GPU.
     pub fn buffer_for_slab(&self, slab_id: SlabId<I>) -> Option<&Buffer> {
         self.slabs.get(&slab_id).and_then(|slab| slab.buffer())
+    }
+
+    /// benilla fork: the buffer and element range of the resident data under `key`, one key hash
+    /// and one slab-id hash away. `None` exactly where [`Self::slab_allocation_slice`] answers
+    /// `None` for the key's own slab: unallocated, still pending, or a slab with no buffer.
+    pub fn resident_slice(&self, key: &I::Key) -> Option<SlabAllocationBufferSlice<'_, I>> {
+        let (slab_id, range) = self.resident.get(key)?;
+        let buffer = match self.slabs.get(slab_id)? {
+            Slab::General(general_slab) => general_slab.buffer.as_ref()?,
+            Slab::LargeObject(large_object_slab) => large_object_slab.buffer.as_ref()?,
+        };
+        Some(SlabAllocationBufferSlice {
+            buffer,
+            range: range.clone(),
+            phantom: PhantomData,
+        })
     }
 
     /// Given a slab and the key of data located with it, returns the buffer
@@ -1015,6 +1040,17 @@ where
                 }
 
                 // Mark the allocation as resident.
+                let elements_per_slot = general_slab.element_layout.elements_per_slot();
+                self.resident.insert(
+                    key.clone(),
+                    (
+                        *slab_id,
+                        (allocated_range.allocation.offset * elements_per_slot)
+                            ..((allocated_range.allocation.offset + allocated_range.slot_count)
+                                * elements_per_slot)
+                                - allocated_range.padding,
+                    ),
+                );
                 general_slab
                     .resident_allocations
                     .insert(key.clone(), allocated_range);
@@ -1042,6 +1078,8 @@ where
                     fill_data(slice.slice(..len));
                 }
                 buffer.unmap();
+                let elements = (buffer.size() / large_object_slab.element_layout.size()) as u32;
+                self.resident.insert(key.clone(), (*slab_id, 0..elements));
                 large_object_slab.buffer = Some(buffer);
             }
         }

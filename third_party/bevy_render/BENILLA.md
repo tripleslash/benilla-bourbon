@@ -82,6 +82,16 @@ Chrome on D3D12: ~600 ms for one heavy fragment shader, against ~0 queue stall f
 only settle once the frame returns; the upscaling blit, its one caller, skips its view until it
 lands. `synchronous_pipeline_compilation` still forces the synchronous path.
 
+## The sixth delta: a mesh's buffer slice is one lookup
+
+`slab_allocator.rs` keeps every resident allocation's slab and element range in one map
+(`SlabAllocator::resident_slice`), filled when the data becomes resident and dropped when it is
+freed; a slab's growth copies at the same offsets, so an entry stays valid until its key is freed.
+`mesh/allocator.rs`'s `mesh_vertex_slice` and `mesh_index_slice` — asked once per draw each — read
+it instead of `key_to_slab`, the slab table and the slab's own allocation table, which hashed the
+`MeshAllocationKey` twice per slice. Measured in the browser world viewer: those lookups were ~8% of
+the frame thread.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**

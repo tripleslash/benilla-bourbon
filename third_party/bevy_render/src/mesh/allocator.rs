@@ -12,20 +12,20 @@ use bevy_ecs::{
     system::{Res, ResMut},
     world::{FromWorld, World},
 };
-use wgpu::{BufferUsages, DownlevelFlags, COPY_BUFFER_ALIGNMENT};
+use wgpu::{BufferUsages, COPY_BUFFER_ALIGNMENT, DownlevelFlags};
 
 #[cfg(feature = "morph")]
 use bevy_mesh::morph::MorphAttributes;
 
 use crate::{
+    GpuResourceAppExt, Render, RenderApp, RenderSystems,
     mesh::{Mesh, MeshVertexBufferLayouts, RenderMesh},
-    render_asset::{prepare_assets, ExtractedAssets},
+    render_asset::{ExtractedAssets, prepare_assets},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
     slab_allocator::{
         Slab, SlabAllocationBufferSlice, SlabAllocator, SlabAllocatorSettings, SlabId, SlabItem,
         SlabItemLayout,
     },
-    GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 
 /// A plugin that manages GPU memory for mesh data.
@@ -267,10 +267,8 @@ impl MeshAllocator {
     ///
     /// If the mesh wasn't allocated, returns None.
     pub fn mesh_vertex_slice(&self, mesh_id: &AssetId<Mesh>) -> Option<MeshBufferSlice<'_>> {
-        self.slab_allocation_slice(
-            &MeshAllocationKey::new(*mesh_id, ElementClass::Vertex),
-            *self.mesh_id_to_vertex_slab(mesh_id)?,
-        )
+        // benilla fork: one resolved lookup (`SlabAllocator::resident_slice`), not three.
+        self.resident_slice(&MeshAllocationKey::new(*mesh_id, ElementClass::Vertex))
     }
 
     /// Returns the buffer and range within that buffer of the index data for
@@ -278,10 +276,8 @@ impl MeshAllocator {
     ///
     /// If the mesh has no index data or wasn't allocated, returns None.
     pub fn mesh_index_slice(&self, mesh_id: &AssetId<Mesh>) -> Option<MeshBufferSlice<'_>> {
-        self.slab_allocation_slice(
-            &MeshAllocationKey::new(*mesh_id, ElementClass::Index),
-            *self.mesh_id_to_index_slab(mesh_id)?,
-        )
+        // benilla fork: one resolved lookup (`SlabAllocator::resident_slice`), not three.
+        self.resident_slice(&MeshAllocationKey::new(*mesh_id, ElementClass::Index))
     }
 
     /// Returns the buffer and range within that buffer of the morph target data
@@ -600,7 +596,7 @@ impl ElementClass {
 mod tests {
     use super::*;
     use crate::test_utils::create_dummy_device;
-    use bevy_asset::{uuid::Uuid, RenderAssetUsages};
+    use bevy_asset::{RenderAssetUsages, uuid::Uuid};
     use bevy_math::bounding::Aabb3d;
     use bevy_mesh::PrimitiveTopology;
     use glam::Vec3;
