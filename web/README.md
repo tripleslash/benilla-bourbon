@@ -304,6 +304,15 @@ whole of its security: two ports, one loopback address.
   ungrouped, the 403 boot names landed in 141 packs — 91 MB fetched to reach 14.7 MB. Grouped, it is
   **22 packs and 12.3 MB**. `benilla-pack sidecars --packs web/packs` re-translates after a
   recapture without re-packing.
+- **The glue set.** `web/glue-manifest.json` is not a capture but a list of path prefixes — the glue
+  art (`Interface\Glues\`, `Interface\GlueXML\`), every character model and texture
+  (`Character\`), the `Char*` DBCs and the glue music — resolved against each container's own
+  listfile into `boot-packs.json`'s `glue` set (~206 MB on the corpus, ~316 MB on the HD layer, ~82 MB
+  on Turtle's). The boot overlay puts it on disk behind the boot set, through the service worker and
+  not the resident map, so the login, realm, character select and character creation screens read
+  locally; a player whose last realm was Turtle WoW also gets the Turtle and reforged layers' boot
+  and glue sets there before the realm list is even shown. Run `sidecars` once per container
+  (`--packs web/packs`, `web/packs-hd`, `web/packs-turtle`, `web/packs-reforged`).
 - **The decode worker.** A pack that is fetched is not yet usable: SOLID packs are one zstd stream,
   and undoing it used to happen in Rust on the frame thread, once per pack, inside the first
   update's catalog task — so a "prefetched" pack still cost the frame its decode. `web/packworker.js`

@@ -627,6 +627,11 @@ const packs = {
       boot.packs.map(([id, bytes]) => [id + layer.keyBase, bytes]),
       () => {},
     );
+    if (name === 'turtle') rememberFlavor('turtle');
+    // The layer's character models and glue art, onto disk behind its boot packs — what the
+    // character screens of this flavor read next. `glue: false` is boot's: it folds the set into the
+    // overlay's own bar instead (`bootstrap`).
+    if (opts.glue !== false) await persistPacks(layerGlue(manifest, layer), () => {});
     return true;
   },
 
@@ -637,6 +642,7 @@ const packs = {
   closeLayer(name) {
     const layer = LAYERS[name];
     if (!layer) return;
+    if (name === 'turtle') rememberFlavor('vanilla');
     this._generation[name] += 1;
     const inLayer = (key) => key >= layer.keyBase && key < layer.keyEnd;
     for (const key of [...this._resident.keys()]) {
@@ -803,7 +809,14 @@ export async function bootstrap(base, onProgress = () => {}, opts = {}) {
   // a wasted request — and the 16-byte ask is free if it comes back as one.
   if (!packs.sw && boot.packs.length) await probe(packs.url(boot.packs[0][0]));
 
-  await prefetch(boot.packs, onProgress, [`${base}/listfile.txt`]);
+  // The glue sets ride the same bar: the corpus's, the updated character models' when that layer
+  // is open, and — for a player whose last realm was Turtle WoW — the Turtle layer's and its
+  // reforged art's (`flavorGlue`). Sized up front so the bar is one honest total.
+  const glue = await glueSets(opts);
+  const glueBytes = glue.reduce((n, [, bytes]) => n + bytes, 0);
+  const total = boot.bytes + glueBytes;
+  await prefetch(boot.packs, (done) => onProgress(done, total), [`${base}/listfile.txt`]);
+  await persistPacks(glue, (done) => onProgress(boot.bytes + done, total));
   // Now that the edge has stored these objects, ask again: this is the state a static host starts
   // answering 206 in, and it is the only promotion path (a `whole`-policy read never issues a
   // range request, so Rust can never observe a 206 on its own).
@@ -830,7 +843,7 @@ async function bootstrapHd(opts = {}) {
   // index, then `boot-packs.json` and the listfile, then the layer made real (`hdBase`, `hdIndex`),
   // then its container in the decode worker, then — unless `opts.prefetch === false` — its boot
   // packs, offset into the layer's key space.
-  const opened = await packs.openLayer('hd', { prefetch: opts.prefetch });
+  const opened = await packs.openLayer('hd', { prefetch: opts.prefetch, glue: false });
   if (!opened) {
     console.warn('wenilla: updated character models are on — running on the original art');
   }
@@ -885,16 +898,29 @@ async function openLayerInWorker(layer, base, index) {
 /// exactly the mismatch the paragraph above says neither side can produce alone — the client
 /// would mount the layer and every character read would be a cold round trip.
 function hdWanted() {
+  return settingOn('hd_models', 'hdcharactermodels');
+}
+
+/// Does the player want the reforged art over the Turtle layer? The `reforgedModels` CVar (and
+/// `?reforged_models=`), on `hdWanted`'s ladder; registered `"1"`, so absent means on. The twin of
+/// `benilla_app::cvars::reforged_models_setting`.
+function reforgedWanted() {
+  return settingOn('reforged_models', 'reforgedmodels');
+}
+
+/// One boolean setting on `webenv::var`'s ladder: the page env object, then the query string,
+/// then the saved CVar in `config.toml`, then the registered default — **on** for both readers.
+function settingOn(envKey, cvar) {
   // The URL/env lever FIRST, exactly as `benilla_app::webenv::var` orders it: the page env object
   // (`window.__wenilla_env.hd_models`), then `?hd_models=1`, then the saved setting. The key is the
   // `$WOW_` prefix dropped and lowercased, which is that function's own rule for every switch it
   // serves. Without this arm the lever would move the client and not the page — the client would
   // mount a layer the page never fetched, and every character read would be a cold round trip.
   const env = window.__wenilla_env;
-  if (env && env.hd_models !== undefined && env.hd_models !== null) {
-    return layerSwitch(String(env.hd_models)) === true;
+  if (env && env[envKey] !== undefined && env[envKey] !== null) {
+    return layerSwitch(String(env[envKey])) === true;
   }
-  const q = new URLSearchParams(location.search).get('hd_models');
+  const q = new URLSearchParams(location.search).get(envKey);
   if (q !== null) return layerSwitch(q) === true;
 
   let text = null;
@@ -909,7 +935,7 @@ function hdWanted() {
   for (const line of text.split(/\r?\n/)) {
     const eq = line.indexOf('=');
     if (eq < 0) continue;
-    if (line.slice(0, eq).trim().toLowerCase() !== 'hdcharactermodels') continue;
+    if (line.slice(0, eq).trim().toLowerCase() !== cvar) continue;
     const raw = line
       .slice(eq + 1)
       .trim()
@@ -939,6 +965,99 @@ async function fetchIndex(base) {
   return new Uint8Array(await r.arrayBuffer());
 }
 
+// ---- the glue sets ----------------------------------------------------------------------
+
+/// Where the page remembers the flavor of the last realm played, so the next boot can put that
+/// flavor's character screens on disk before the realm is even chosen. A hint and nothing more:
+/// the client mounts the Turtle layer off the realm list, never off this.
+const FLAVOR_KEY = 'wenilla.flavor';
+
+function rememberFlavor(flavor) {
+  safeLocalSet(FLAVOR_KEY, flavor);
+}
+
+/// A container manifest's glue set, offset into the layer's key space (`benilla-pack sidecars`,
+/// `web/glue-manifest.json`): its glue-screen art and every character model and texture it holds.
+function layerGlue(manifest, layer = { keyBase: 0 }) {
+  const glue = (manifest && manifest.glue) || { packs: [] };
+  return glue.packs.map(([id, bytes]) => [id + layer.keyBase, bytes]);
+}
+
+/// Every glue set this boot puts on disk: the corpus's, the open HD layer's, and the remembered
+/// flavor's (`flavorGlue`).
+async function glueSets(opts) {
+  if (opts.glue === false) return [];
+  const sets = [...layerGlue(packs.manifest)];
+  if (packs.hdIndex) sets.push(...layerGlue(packs.hdManifest, LAYERS.hd));
+  sets.push(...(await flavorGlue()));
+  return sets;
+}
+
+/// A returning Turtle WoW player's layer packs: its boot set and its glue set, and the reforged
+/// art's with that setting on — fetched onto disk only. The layers are not opened here; the client
+/// still mounts them on entering the realm, and then reads all of this locally.
+async function flavorGlue() {
+  if (safeLocalGet(FLAVOR_KEY) !== 'turtle') return [];
+  const out = [];
+  const wanted = reforgedWanted() ? ['turtle', 'reforged'] : ['turtle'];
+  for (const name of wanted) {
+    const layer = LAYERS[name];
+    const manifest = await fetchJson(`${location.origin}/${layer.segment}/boot-packs.json`);
+    if (!manifest) continue;
+    const boot = (manifest.boot && manifest.boot.packs) || [];
+    out.push(...boot.map(([id, bytes]) => [id + layer.keyBase, bytes]), ...layerGlue(manifest, layer));
+  }
+  return out;
+}
+
+/// Put packs on disk without decoding them into the resident map: the glue sets run to hundreds
+/// of megabytes, and the resident map is a 256 MB working set that would evict the boot packs to
+/// hold them. A read of one of these later is a local answer — `sw.js` serves the synchronous lane
+/// from the same store — instead of a round trip.
+///
+/// A pack already on disk costs one `match` and no body read, so a repeat visit walks this list
+/// at cache-lookup speed. With no service worker in control, `fetchWire` writes the page's own
+/// Cache Storage instead, which is the whole persistence such a page has.
+async function persistPacks(list, onProgress) {
+  const total = list.reduce((n, [, bytes]) => n + bytes, 0);
+  if (!list.length) return onProgress(0, total);
+  let cache = null;
+  if (packs.sw) {
+    try {
+      cache = await caches.open(SW_CACHE);
+    } catch (_) {
+      cache = null;
+    }
+  }
+  let done = 0;
+  const queue = list.slice();
+  const worker = async () => {
+    for (;;) {
+      const job = queue.shift();
+      if (job === undefined) return;
+      const [id, bytes] = job;
+      const url = packs.url(id);
+      try {
+        if (cache) {
+          if (!(await cache.match(new URL(url).pathname))) {
+            // Through the worker, which stores it; the body is drained so the store completes.
+            const r = await fetchRetry(url);
+            if (r.ok) await r.arrayBuffer();
+          }
+        } else if (!packs._resident.has(id)) {
+          await packs.fetchWire(id, url);
+        }
+      } catch (_) {
+        /* a miss here is a slower read later, never a failure */
+      }
+      done += bytes;
+      onProgress(done, total);
+    }
+  };
+  onProgress(0, total);
+  await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
+}
+
 /// The world-entry pack set, warmed after the client reports `ready` (see boot.js). Same shape as
 /// the boot set and deliberately separate: it is what the first in-game draw resolves, and it is
 /// warmed while the player is still at the glue screens.
@@ -952,6 +1071,8 @@ export async function prefetchWorld(onProgress = () => {}) {
 /// Root-scoped so it can see `/data/*` from any page that hosts the client — `web/index.html` at
 /// `/`, and any hosting page that boots the client from a subpath.
 const SW_URL = '/sw.js';
+/// The worker's one cache, keyed by pathname. Twin of `sw.js`'s `CACHE`.
+const SW_CACHE = 'wenilla-data';
 /// How long to wait for a first-visit worker to claim this page. It is `clients.claim()` in an
 /// `activate` handler, so this is milliseconds in practice; the bound exists so a worker that
 /// somehow never activates costs a delay instead of a boot.

@@ -41,6 +41,8 @@ pub struct AppendArgs {
     pub boot_manifest: PathBuf,
     #[arg(long, default_value = "web/world-manifest.json")]
     pub world_manifest: PathBuf,
+    #[arg(long, default_value = "web/glue-manifest.json")]
+    pub glue_manifest: PathBuf,
 }
 
 pub fn append(a: AppendArgs) -> Result<()> {
@@ -126,7 +128,13 @@ pub fn append(a: AppendArgs) -> Result<()> {
         .with_context(|| format!("writing {}", listfile.display()))?;
 
     let index = Index::parse(std::fs::read(&index_path)?).map_err(|e| anyhow::anyhow!("{e}"))?;
-    crate::sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)?;
+    crate::sidecars::write_boot_packs(
+        &a.packs,
+        &index,
+        &a.boot_manifest,
+        &a.world_manifest,
+        &a.glue_manifest,
+    )?;
     eprintln!(
         "{}: {} -> {} packs, {} -> {} entries, build {:#018x}; {} names added to listfile.txt",
         a.packs.display(),

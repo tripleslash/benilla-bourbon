@@ -2207,7 +2207,8 @@ mod tests {
     /// character read a cold round trip, and the other way round makes a visitor pay 1.7 GB for
     /// art they never see.
     ///
-    /// Read the way a human reads it: `hdWanted`'s fallback legs are bare `return <bool>;` lines,
+    /// Read the way a human reads it: `hdWanted` delegates to `settingOn`, whose fallback legs are
+    /// bare `return <bool>;` lines,
     /// while its env/query arms all end in `=== true;`, so "which way does it fall back" is a
     /// substring question with one answer.
     #[test]
@@ -2217,12 +2218,22 @@ mod tests {
             .nth(2)
             .expect("workspace root");
         let js = std::fs::read_to_string(root.join("web/packs.js")).expect("web/packs.js");
-        let body = js
-            .split_once("function hdWanted() {")
-            .expect("web/packs.js still defines hdWanted()")
-            .1;
-        let end = body.find("\n}").expect("hdWanted's closing brace");
-        let body = &body[..end];
+        let fn_body = |name: &str| -> String {
+            let body = js
+                .split_once(&format!("function {name} {{"))
+                .unwrap_or_else(|| panic!("web/packs.js still defines {name}"))
+                .1;
+            let end = body.find("\n}").expect("the function's closing brace");
+            body[..end].to_string()
+        };
+        // `hdWanted` reads the row through `settingOn`, which holds the ladder and its fallbacks
+        // (shared with `reforgedWanted`, whose row is registered on too).
+        assert!(
+            fn_body("hdWanted()").contains("settingOn('hd_models', 'hdcharactermodels')"),
+            "hdWanted() no longer reads hdCharacterModels through settingOn()"
+        );
+        let body = fn_body("settingOn(envKey, cvar)");
+        let body = body.as_str();
 
         let registered = registered_default("hdCharacterModels").expect("the row is registered");
         let on = benilla_formats::layers::layer_switch(registered)
@@ -2237,7 +2248,7 @@ mod tests {
         );
         assert!(
             body.contains("return true;"),
-            "hdWanted() has no fallback at all — every leg now depends on a saved setting"
+            "settingOn() has no fallback at all — every leg now depends on a saved setting"
         );
     }
 

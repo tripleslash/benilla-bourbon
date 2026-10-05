@@ -1,0 +1,16 @@
+{
+"version": 1,
+"prefixes": [
+"Interface\\Glues\\",
+"Interface\\GlueXML\\",
+"Character\\",
+"DBFilesClient\\Char",
+"DBFilesClient\\ChrRaces.dbc",
+"DBFilesClient\\ChrClasses.dbc",
+"Sound\\Music\\GlueScreenMusic\\"
+],
+"exclude": [
+"Interface\\Glues\\Credits\\",
+"Interface\\Glues\\LoadingScreens\\"
+]
+}

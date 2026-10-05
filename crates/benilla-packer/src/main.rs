@@ -130,6 +130,10 @@ struct BuildArgs {
     /// The world-entry read-set manifest, same treatment.
     #[arg(long, default_value = "web/world-manifest.json")]
     world_manifest: PathBuf,
+    /// The glue-screen set: path prefixes, resolved against the container's own listfile
+    /// (`sidecars::glue_names`).
+    #[arg(long, default_value = "web/glue-manifest.json")]
+    glue_manifest: PathBuf,
     /// Prefer a blob's bytes from this directory when it holds one, over the archive's own.
     ///
     /// The other half of the `extract` pipeline: the layer is packed from `patch-A.MPQ` as usual,
@@ -216,6 +220,8 @@ struct SidecarArgs {
     boot_manifest: PathBuf,
     #[arg(long, default_value = "web/world-manifest.json")]
     world_manifest: PathBuf,
+    #[arg(long, default_value = "web/glue-manifest.json")]
+    glue_manifest: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -231,7 +237,13 @@ fn main() -> Result<()> {
             let index =
                 Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sidecars::write_boot_packs(&a.packs, &index, &a.boot_manifest, &a.world_manifest)
+            sidecars::write_boot_packs(
+                &a.packs,
+                &index,
+                &a.boot_manifest,
+                &a.world_manifest,
+                &a.glue_manifest,
+            )
         }
     }
 }
@@ -733,7 +745,13 @@ fn build(a: BuildArgs) -> Result<()> {
     // a parse away, and going through the same `Index` the client uses means the prefetch lists are
     // resolved by exactly the code path that will later serve them.
     let index = Index::parse(std::fs::read(&index_path)?).map_err(|e| anyhow::anyhow!("{e}"))?;
-    sidecars::write_boot_packs(&a.out, &index, &a.boot_manifest, &a.world_manifest)?;
+    sidecars::write_boot_packs(
+        &a.out,
+        &index,
+        &a.boot_manifest,
+        &a.world_manifest,
+        &a.glue_manifest,
+    )?;
 
     wire_sizes.sort_unstable();
     let pct = |p: f64| wire_sizes[((wire_sizes.len() - 1) as f64 * p) as usize];

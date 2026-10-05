@@ -18,6 +18,24 @@
 //! manifest and a re-packed install is expected and degrades to exactly one slower read; a build
 //! that failed over it would be a build that fails because someone renamed a texture.
 //!
+//! ## The glue set — prefixes, not a recording
+//!
+//! `web/glue-manifest.json` is the third set, and the one that is not captured: it names **path
+//! prefixes** (`Interface\Glues\`, `Character\`, the `Char*` DBCs, the glue music), resolved
+//! here against the container's own `listfile.txt`, with its `exclude` prefixes taken back out. A
+//! traced boot stops at the first glue screen, so a recording holds the login screen and none of
+//! what the character screens read later: every race's model, skin, hair and face, and every race's
+//! creation backdrop. A trace would have to visit every race, gender and customization to record
+//! them; "all of `Character\`" is the set those screens can reach, so the manifest says that.
+//!
+//! One manifest serves every container: the corpus and each layer (`--packs web/packs-hd`,
+//! `web/packs-turtle`, …), whose listfile picks out its own glue art and character models. A layer
+//! with none of them gets an empty set.
+//!
+//! The page warms the glue set behind the boot overlay, after the boot set, into the service
+//! worker's disk cache rather than the resident map (`web/packs.js`, `persistPacks`): it is too big
+//! to hold decoded, and from disk a read is a local answer instead of a round trip.
+//!
 //! ## Where `config.json` went
 //!
 //! It used to be written here as a stub, and that was the wrong home for it. The gateway address
@@ -112,10 +130,34 @@ pub fn write_boot_packs(
     index: &Index,
     boot_manifest: &Path,
     world_manifest: &Path,
+    glue_manifest: &Path,
 ) -> Result<()> {
     let boot = translate(index, boot_manifest)?;
     let world = translate(index, world_manifest)?;
-    for (label, set) in [("boot", &boot), ("world", &world)] {
+    let listfile = std::fs::read_to_string(out.join("listfile.txt")).unwrap_or_default();
+    let mut glue = match std::fs::read_to_string(glue_manifest) {
+        Ok(text) => {
+            let names = glue_names(&text, &listfile).with_context(|| {
+                format!(
+                    "parsing {} — expected {{\"prefixes\": [...]}}",
+                    glue_manifest.display()
+                )
+            })?;
+            resolve(index, &names)
+        }
+        Err(_) => {
+            eprintln!(
+                "warning: no {} — the page will prefetch no glue set",
+                glue_manifest.display()
+            );
+            resolve(index, &[])
+        }
+    };
+    // The boot set is warmed, and resident, before the glue set starts.
+    let in_boot: HashSet<u32> = boot.packs.iter().map(|(id, _)| *id).collect();
+    glue.packs.retain(|(id, _)| !in_boot.contains(id));
+    glue.bytes = glue.packs.iter().map(|(_, wire)| u64::from(*wire)).sum();
+    for (label, set) in [("boot", &boot), ("world", &world), ("glue", &glue)] {
         eprintln!(
             "{label}-packs: {} names -> {} packs, {:.1} MB fetched for {:.1} MB needed ({:.1}x){}",
             set.names,
@@ -134,10 +176,11 @@ pub fn write_boot_packs(
     std::fs::write(
         &path,
         format!(
-            "{{\"version\":1,\"build_id\":\"{:016x}\",\"boot\":{},\"world\":{}}}\n",
+            "{{\"version\":1,\"build_id\":\"{:016x}\",\"boot\":{},\"world\":{},\"glue\":{}}}\n",
             index.build_id(),
             set_json(&boot),
             set_json(&world),
+            set_json(&glue),
         ),
     )
     .with_context(|| format!("writing {}", path.display()))?;
@@ -179,11 +222,15 @@ fn translate(index: &Index, manifest: &Path) -> Result<PackSet> {
             manifest.display()
         )
     })?;
+    Ok(resolve(index, &names))
+}
 
+/// Resolve names to a deduplicated pack set.
+fn resolve(index: &Index, names: &[String]) -> PackSet {
     // Frame bytes wanted per pack, so the wire size can be attributed proportionally below.
     let mut wanted: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     let mut unresolved = 0usize;
-    for name in &names {
+    for name in names {
         match index.locate(name_key(name)) {
             Some(at) => *wanted.entry(at.pack_id).or_default() += at.frame_len as u64,
             None => unresolved += 1,
@@ -199,13 +246,32 @@ fn translate(index: &Index, manifest: &Path) -> Result<PackSet> {
         needed += meta.size_wire as u64 * hit / (meta.size_raw as u64).max(1);
         packs.push((id, meta.size_wire));
     }
-    Ok(PackSet {
+    PackSet {
         packs,
         bytes,
         needed,
         names: names.len(),
         unresolved,
-    })
+    }
+}
+
+/// The glue manifest's names: every listfile name under one of its `prefixes` and under none of
+/// its `exclude`s, compared case-insensitively, the chain's own rule for a name.
+fn glue_names(manifest: &str, listfile: &str) -> Result<Vec<String>> {
+    let lower =
+        |v: Vec<String>| -> Vec<String> { v.iter().map(|p| p.to_ascii_lowercase()).collect() };
+    let prefixes = lower(manifest_array(manifest, "prefixes")?);
+    let exclude = lower(manifest_array(manifest, "exclude").unwrap_or_default());
+    Ok(listfile
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('('))
+        .filter(|name| {
+            let n = name.to_ascii_lowercase();
+            prefixes.iter().any(|p| n.starts_with(p)) && !exclude.iter().any(|p| n.starts_with(p))
+        })
+        .map(str::to_string)
+        .collect())
 }
 
 fn mb(bytes: u64) -> f64 {
@@ -219,14 +285,20 @@ fn mb(bytes: u64) -> f64 {
 /// encoding, no duplicates — so what is needed here is the string extraction, not a parser. The
 /// one real escape a chain name carries is `\\`, since names are backslash-separated.
 fn manifest_names(text: &str) -> Result<Vec<String>> {
+    manifest_array(text, "names")
+}
+
+/// One string array out of a manifest, by key.
+fn manifest_array(text: &str, key: &str) -> Result<Vec<String>> {
+    let quoted = format!("\"{key}\"");
     let start = text
-        .find("\"names\"")
+        .find(&quoted)
         .and_then(|i| text[i..].find('[').map(|j| i + j + 1))
-        .context("no \"names\" array")?;
+        .with_context(|| format!("no {quoted} array"))?;
     let end = text[start..]
         .find(']')
         .map(|j| start + j)
-        .context("unterminated \"names\" array")?;
+        .with_context(|| format!("unterminated {quoted} array"))?;
     let mut out = Vec::new();
     let mut chars = text[start..end].chars();
     while let Some(c) = chars.next() {
@@ -259,6 +331,22 @@ mod tests {
             vec![
                 "DBFilesClient\\Map.dbc".to_string(),
                 "Interface\\Glues\\a b.blp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_glue_set_is_every_listfile_name_under_a_prefix_less_the_exclusions() {
+        let manifest = r#"{"version":1,"prefixes":["Interface\\Glues\\","character\\"],
+            "exclude":["Interface\\Glues\\Credits\\"]}"#;
+        let listfile = "(listfile)\nCharacter\\Human\\Male\\HumanMale.m2\n\
+                        Interface\\GLUES\\Login\\a.blp\nInterface\\Glues\\Credits\\b.blp\n\
+                        World\\c.adt\n";
+        assert_eq!(
+            glue_names(manifest, listfile).unwrap(),
+            vec![
+                "Character\\Human\\Male\\HumanMale.m2".to_string(),
+                "Interface\\GLUES\\Login\\a.blp".to_string()
             ]
         );
     }
