@@ -99,6 +99,12 @@ event-listener = { path = "third_party/event-listener" }
 # semantics; `park` is untouched because a worker may block.
 # `third_party/parking/BENILLA.md` has the diff.
 parking = { path = "third_party/parking" }
+# web-task 1.1.3, forked for one leak in its `+atomics` runtime. A `spawn_local` task that finished
+# while its `Task` was still held left an `Atomics.waitAsync` waiter on its state word, and freeing
+# the task dropped the closure that waiter calls. The next notify at that address woke the stale
+# waiter instead of its owner: "closure invoked recursively or after being dropped", and the real
+# task never ran again. `third_party/web-task/BENILLA.md` has the diff.
+web-task = { path = "third_party/web-task" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]

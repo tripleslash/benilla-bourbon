@@ -8153,8 +8153,6 @@ dependencies = [
 [[package]]
 name = "web-task"
 version = "1.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cdc136a53ccd64a1211f107ccc34404769fbcc0f165f1afa065f5d88ab93538"
 dependencies = [
  "async-task",
  "cfg-if",
