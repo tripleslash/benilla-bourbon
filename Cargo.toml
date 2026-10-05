@@ -73,6 +73,12 @@ async-executor = { path = "third_party/async-executor" }
 # `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
 # scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
 bevy_render = { path = "third_party/bevy_render" }
+# bevy_winit 0.19.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
+# `world.query` on each window event (`RedrawRequested` is one a frame), the focus `SystemState` in
+# `redraw_requested`, and the monitor `SystemState` in `about_to_wait`. A fresh query state scans every
+# archetype in the world, and this world has thousands: measured at ~4% of the browser's frame
+# thread. `third_party/bevy_winit/BENILLA.md` has the diff.
+bevy_winit = { path = "third_party/bevy_winit" }
 # wgpu 29.0.4, forked for two WebGPU feature mappings the browser backend lacks: `"subgroups"` and
 # `"texture-formats-tier1"`, the second so the FSR 3.1.5 upscaler gets FidelityFX's one- and
 # two-channel storage formats in the browser. Two table rows and the two binding names they need;
