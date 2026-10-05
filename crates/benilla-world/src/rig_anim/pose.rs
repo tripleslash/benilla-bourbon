@@ -37,6 +37,9 @@ pub struct RigPose {
     pub anchors: Vec<(u16, Entity)>,
     /// `locals` changed since the last world pass; starts raised so the bind pose is written.
     pub pose_dirty: bool,
+    /// Each anchor's local TRS at the composed pose, `None` for a bone the skeleton lacks: worked
+    /// out beside the fold, on a worker, so the serial re-seat only compares and writes.
+    pub(crate) anchor_seats: Vec<Option<Transform>>,
 }
 
 impl RigPose {
@@ -66,9 +69,31 @@ impl RigPose {
                 .any(|j| j.billboard.is_some() || j.parent_arm.is_some()),
             anchors: Vec::new(),
             pose_dirty: true,
+            anchor_seats: Vec::new(),
         };
         rig.compose();
         rig
+    }
+
+    /// Decompose each anchor's composed model frame into [`Self::anchor_seats`].
+    pub(crate) fn seat_anchors(&mut self) {
+        let Self {
+            anchors,
+            model,
+            anchor_seats,
+            ..
+        } = self;
+        anchor_seats.clear();
+        anchor_seats.extend(anchors.iter().map(|&(bone, _)| {
+            model.get(bone as usize).map(|m| {
+                let (scale, rotation, translation) = m.to_scale_rotation_translation();
+                Transform {
+                    translation,
+                    rotation,
+                    scale,
+                }
+            })
+        }));
     }
 
     /// Fold `locals` into `model`, the `flags & 0x7` arm included since the anchors are seated

@@ -400,7 +400,7 @@ pub struct BillboardPlace;
 /// not ordered before visibility propagation, and [`crate::model_render::visibility`] owns it.
 #[allow(clippy::type_complexity)] // the card tuple, commented inline
 pub(crate) fn face_billboards(
-    mut commands: Commands,
+    par_commands: ParallelCommands,
     time: Res<Time>,
     cam: Query<(Ref<GlobalTransform>, Option<Ref<Transform>>), With<WorldCamera>>,
     owners: Query<Ref<GlobalTransform>, (Without<WorldCamera>, Without<BillboardCard>)>,
@@ -423,72 +423,82 @@ pub(crate) fn face_billboards(
     let cam_moved = cam_tf.is_changed() || cam_local.as_ref().is_some_and(|l| l.is_changed());
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
-    for (entity, mut card, mut tf, mut global, tag) in &mut cards {
-        // A track-less card is a pure function of the camera and its owner, so it is skipped
-        // when neither moved, unless it has never been placed (no attach stamp yet).
-        let tracked = card.scale_anim.is_some()
-            || card.seq_translation.is_some()
-            || card.gseq_attach_ms.is_none();
-        if let Some(owner) = card.follow {
-            match owners.get(owner) {
-                Ok(gt) => {
-                    if !tracked && !cam_moved && !gt.is_changed() {
-                        continue;
+    // Asked here, on the calling thread: the trace's switch is a lazily filled `OnceLock`, and a
+    // worker filling it while the browser's main thread asks too parks the main thread on the
+    // `Once` — an `Atomics.wait`, which traps there.
+    let trace_cards = benilla_assets::trace::enabled_for("card");
+    // In parallel: each card writes only itself, reads the camera and its owner, and a town has
+    // thousands of them. An orphan's despawn goes through `ParallelCommands`.
+    cards
+        .par_iter_mut()
+        .for_each(|(entity, mut card, mut tf, mut global, tag)| {
+            // A track-less card is a pure function of the camera and its owner, so it is skipped
+            // when neither moved, unless it has never been placed (no attach stamp yet).
+            let tracked = card.scale_anim.is_some()
+                || card.seq_translation.is_some()
+                || card.gseq_attach_ms.is_none();
+            if let Some(owner) = card.follow {
+                match owners.get(owner) {
+                    Ok(gt) => {
+                        if !tracked && !cam_moved && !gt.is_changed() {
+                            return;
+                        }
+                        let pivot = card.local_pivot;
+                        card.re_place(gt.compute_transform(), pivot);
+                        // The `card` trace (`WOW_MOVE_TRACE`, ~2 Hz): each following card's place,
+                        // scale and alpha, the three causes of an invisible card. `enabled_for`, so
+                        // `WOW_MOVE_TRACE_TAGS` drops this busiest tag cheaply.
+                        if trace_cards && elapsed_ms % 512 < 20 {
+                            benilla_assets::trace::line(
+                                "card",
+                                &format!(
+                                    "card={entity} owner={owner} scale={:.3?} a={:.2} pivot={:.2?}",
+                                    card.scale,
+                                    tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.0)),
+                                    card.world_pivot
+                                ),
+                            );
+                        }
                     }
-                    let pivot = card.local_pivot;
-                    card.re_place(gt.compute_transform(), pivot);
-                    // The `card` trace (`WOW_MOVE_TRACE`, ~2 Hz): each following card's place,
-                    // scale and alpha, the three causes of an invisible card. `enabled_for`, so
-                    // `WOW_MOVE_TRACE_TAGS` drops this busiest tag cheaply.
-                    if benilla_assets::trace::enabled_for("card") && elapsed_ms % 512 < 20 {
-                        benilla_assets::trace::line(
-                            "card",
-                            &format!(
-                                "card={entity} owner={owner} scale={:.3?} a={:.2} pivot={:.2?}",
-                                card.scale,
-                                tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.0)),
-                                card.world_pivot
-                            ),
-                        );
+                    Err(_) => {
+                        par_commands.command_scope(|mut commands| {
+                            commands.entity(entity).despawn();
+                        });
+                        return;
                     }
                 }
-                Err(_) => {
-                    commands.entity(entity).despawn();
-                    continue;
-                }
+            } else if !tracked && !cam_moved {
+                return;
             }
-        } else if !tracked && !cam_moved {
-            continue;
-        }
-        // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`).
-        let attach_ms = *card.gseq_attach_ms.get_or_insert(elapsed_ms);
-        let card = &*card;
-        let rotation = billboard_basis(card.kind, card.placement_rot, fwd, right, up);
-        // The global-sequence scale pulse on the instance's anchored cursor, `sceneNow − attach`.
-        let pulse = card.scale_anim.as_ref().map_or(Vec3::ONE, |a| {
-            Vec3::from_array(a.sample(elapsed_ms.wrapping_sub(attach_ms)))
+            // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`).
+            let attach_ms = *card.gseq_attach_ms.get_or_insert(elapsed_ms);
+            let card = &*card;
+            let rotation = billboard_basis(card.kind, card.placement_rot, fwd, right, up);
+            // The global-sequence scale pulse on the instance's anchored cursor, `sceneNow − attach`.
+            let pulse = card.scale_anim.as_ref().map_or(Vec3::ONE, |a| {
+                Vec3::from_array(a.sample(elapsed_ms.wrapping_sub(attach_ms)))
+            });
+            // The armed bob on the arm cursor `elapsed − arm_ms`, turned and sized by the placement.
+            let bob = card.seq_translation.as_ref().map_or(Vec3::ZERO, |a| {
+                card.placement_rot
+                    * (Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.arm_neg_ms)))
+                        * card.scale)
+            });
+            let placed = Transform {
+                translation: card.world_pivot + bob,
+                rotation,
+                scale: card.scale * pulse,
+            };
+            // Only a real change is written, so change-detection consumers go quiet on a still frame.
+            if *tf != placed {
+                *tf = placed;
+            }
+            // Propagation already ran this frame: the direct global write is what renders.
+            let placed_global = GlobalTransform::from(placed);
+            if *global != placed_global {
+                *global = placed_global;
+            }
         });
-        // The armed bob on the arm cursor `elapsed − arm_ms`, turned and sized by the placement.
-        let bob = card.seq_translation.as_ref().map_or(Vec3::ZERO, |a| {
-            card.placement_rot
-                * (Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.arm_neg_ms)))
-                    * card.scale)
-        });
-        let placed = Transform {
-            translation: card.world_pivot + bob,
-            rotation,
-            scale: card.scale * pulse,
-        };
-        // Only a real change is written, so change-detection consumers go quiet on a still frame.
-        if *tf != placed {
-            *tf = placed;
-        }
-        // Propagation already ran this frame: the direct global write is what renders.
-        let placed_global = GlobalTransform::from(placed);
-        if *global != placed_global {
-            *global = placed_global;
-        }
-    }
 }
 
 /// Registers the [`BillboardPlace`] pass; the model spawn sites spawn cards, in Update.
