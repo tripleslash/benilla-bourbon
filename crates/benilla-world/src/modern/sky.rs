@@ -2,8 +2,9 @@
 //!
 //! The dome's stops are already decoded to linear by `sky.rs`'s hook; this adds what an HDR sky needs
 //! beyond them — the sun's direction and glow colour for the Mie halo and the analytic disk core
-//! (`sky.wgsl`), and the key light for the cloud layer's elevation lighting and silver lining
-//! (`cloud.wgsl`). Classic frames get zeroed lanes, which both shaders read as "classic".
+//! (`sky.wgsl`), and what the cloud layer's view-dependent part needs: the key light for the silver
+//! lining, the opacity, the horizon haze and fade (`cloud.wgsl`; the rest is baked, `super::cloud_bake`).
+//! Classic frames get zeroed lanes, which both shaders read as "classic".
 
 use bevy::prelude::*;
 
@@ -16,9 +17,9 @@ use crate::sky::SkyMaterial;
 const SUN_GLOW: f32 = 0.9;
 /// The Mie halo's g.
 const MIE_G: f32 = 0.76;
-/// The cloud silver lining's strength and lobe g.
-const CLOUD_SILVER: f32 = 1.4;
-const CLOUD_G: f32 = 0.6;
+/// The cloud silver lining's strength and lobe g: a thin edge near the key, not every edge.
+const CLOUD_SILVER: f32 = 0.5;
+const CLOUD_G: f32 = 0.8;
 
 pub(super) fn plugin(app: &mut App) {
     // After the lighting resolve in the same frame, like the dome's own stop writer.
@@ -66,25 +67,43 @@ fn update_modern_sky(
         );
     }
 
-    // Clouds follow the key light (sun by day, moon by night): dim when it is low, lit from above.
-    let key = (-light.sun_dir).normalize_or(Vec3::Y);
-    let lit = smoothstep(-0.1, 0.45, key.y);
-    let cloud_modern = quantized(key.extend(flag));
-    let cloud_light = if on {
-        // A low sun lights the cloud deck from below rather than leaving it a grey slab: the floor
-        // is high enough that a dawn sky reads as lit haze.
-        quantized(Vec4::new(0.8 + 0.3 * lit, CLOUD_SILVER * lit, CLOUD_G, 0.0))
+    // Clouds follow the key light (sun by day, moon by night); the bake lights them, the shader
+    // adds the silver lining toward it.
+    let params = super::cloud_bake::cloud_params(&light, &look.0);
+    let lit = smoothstep(-0.1, 0.45, params.key.y);
+    let cloud_modern = quantized(params.key.extend(flag));
+    let (cloud_light, cloud_shape, cloud_key, cloud_haze) = if on {
+        (
+            quantized(Vec4::new(0.0, CLOUD_SILVER * lit, CLOUD_G, 0.0)),
+            quantized(Vec4::new(
+                params.style.opacity,
+                0.0,
+                0.0,
+                params.style.horizon,
+            )),
+            quantized(params.key_col.extend(0.0)),
+            quantized(params.haze_col.extend(params.style.haze)),
+        )
     } else {
-        Vec4::ZERO
+        (Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, Vec4::ZERO)
     };
     for handle in &layers {
         benilla_assets::write_gated(
             &mut clouds,
             &handle.0,
-            |m| m.extension.modern != cloud_modern || m.extension.light != cloud_light,
+            |m| {
+                m.extension.modern != cloud_modern
+                    || m.extension.light != cloud_light
+                    || m.extension.shape != cloud_shape
+                    || m.extension.key != cloud_key
+                    || m.extension.haze != cloud_haze
+            },
             |m| {
                 m.extension.modern = cloud_modern;
                 m.extension.light = cloud_light;
+                m.extension.shape = cloud_shape;
+                m.extension.key = cloud_key;
+                m.extension.haze = cloud_haze;
             },
         );
     }

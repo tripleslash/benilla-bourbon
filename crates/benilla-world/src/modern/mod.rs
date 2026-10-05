@@ -15,6 +15,7 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use crate::view::WorldCamera;
 
+mod cloud_bake;
 pub mod gi;
 pub mod lights;
 pub mod look;
@@ -328,6 +329,7 @@ impl Plugin for ModernLightingPlugin {
                 shadow::plugin,
                 look::plugin,
                 sky::plugin,
+                cloud_bake::plugin,
                 volumetrics::plugin,
                 gi::plugin,
                 lights::plugin,

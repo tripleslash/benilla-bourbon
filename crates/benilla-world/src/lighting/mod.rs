@@ -351,6 +351,7 @@ mod ordering_tests {
             ),
             ("modern/volumetrics/mod.rs", "update_volume: Last"),
             ("modern/gi/mod.rs", "update_gi: Last"),
+            ("modern/cloud_bake.rs", "bake_clouds: Last"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();

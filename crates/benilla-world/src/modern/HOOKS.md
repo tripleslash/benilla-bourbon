@@ -41,7 +41,6 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/lighting/mod.rs`, `lighting/resolve.rs` | `WowLighting::night_key` / `night_tint`: the midnight diffuse and celestial rows, sampled in `update_time_lighting` while the modern moon is up (`sun_arc::moonlit`) | P2 fix |
 | `benilla-world/src/sky.rs` | `update_sky_colors`: sky stops + fog through `decode_if_modern` | P1 |
 | `benilla-world/src/sun/follow.rs` | `disc_span` `.z` = modern flag | P1 |
-| `benilla-world/src/clouds/mod.rs` | cloud image re-upload: `Rgba8UnormSrgb` when modern | P1 |
 | `benilla-world/src/ffx_glow.rs` | render-world `combine_uniform` call: `uniform[6]` (`wave.z`) = modern flag | P1 |
 | `terrain.wgsl`, `static_gx.wgsl`, `wdl.wgsl` | `#import benilla_modern::color`; output through `color::modern_out(…, point_count.y)`; wdl's struct padded to row 20 | P1 |
 | `wow_model.wgsl` | `#import`; decode block before `out.color` (additive premultiplied in gamma, then decoded; Mod/Mod2x identity, Mod2x ×2.295) | P1 |
@@ -78,7 +77,7 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `wow_effect.wgsl`, `particles/render.rs` | image layout bindings 4-6 (block, volume, sampler; vertex); `VertexOutput.fog` from `fog_at` per vertex; the modern decode block applies it by fog policy and the classic scene fog is gated off; the bind cache also invalidates on the volume's view id | P4 |
 | `wdl.wgsl` | `WDL_ALBEDO`; modern: the band is lit with a facet normal instead of the flat fog hull | P4 |
 | `sky.rs`, `sky.wgsl` | `SkyExt.modern` / `.glow` (+ `setup_sky` zeros); modern: Mie halo + analytic disk core | P4 |
-| `clouds/layer.rs`, `cloud.wgsl` | `CloudExt.modern` / `.light` at uniform 102 (+ construction zeros); modern: key-elevation brightness + silver lining | P4 |
+| `clouds/layer.rs`, `cloud.wgsl` | `CloudExt.modern` / `.light` at uniform 102 (+ construction zeros); modern: the silver lining (the elevation brightness moved into the bake, see the modern clouds rows) | P4 |
 | `benilla-assets/src/materials.rs` | `MODERN_FOG_VOLUME`; `WowModelExt.modern_fog` (124/125); `LiquidExt` / `LiquidCataExt` gain `modern_cascades` (123) + `modern_fog` (124/125) | P4 |
 | `world_assets/mod.rs`, `model_render.rs` (×2), `liquid/surface.rs` (×2) | the new fields at each construction site | P4 |
 | `lighting/global_light.rs` | `build_light_data`: ambient × fill and diffuse × key from `modern::look::key_fill()` in a modern frame | P4 |
@@ -183,6 +182,9 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `pipe_warm/menagerie.rs`, `assets/ui/OptionsFrame.xml` | the `foliageWind` / `foliageWindStrength` rows, their `on_cvar` arms, `GRAPHICS_CVARS`, the option rows in both windows; the clutter pipelines warmed on the UV_1 layout | Everwood port: wind |
 | `benilla-world/src/weather/precip/mist.rs` | `REFERENCE_PUFF`; `push_mist` takes a `modern::weather::PuffLook` (half-extent, distance fade, life ramps, alpha cap) in place of its constants | modern weather |
 | `benilla-world/src/weather/precip/mod.rs` | `push_precip` passes `modern::weather::puff_look()` / `puff_color` in a modern frame, `REFERENCE_PUFF` and the fog colour otherwise | modern weather |
+| `clouds/layer.rs` | `CloudExt.shape` / `.key` / `.haze` at uniform 102 (+ construction zeros); `CloudLayer` is `pub(crate)` | modern clouds |
+| `clouds/mod.rs` | `pub(crate) use layer::CloudLayer`; `CloudCoverage::tile`; `tick_clouds` returns before the upload in a modern frame (the image is `modern::cloud_bake`'s 512² layer) and restores the tile's size and format on the first classic frame | modern clouds |
+| `cloud.wgsl` | the modern branch: a hole returns early; the baked layer gets the silver lining (its thinness from the alpha against `shape.x`), the horizon haze's colour low in the sky, and the horizon fade | modern clouds |
 
 ## Planned hooks (not yet landed)
 
