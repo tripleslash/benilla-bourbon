@@ -167,17 +167,22 @@ impl ZoneLook {
 }
 
 impl ZoneLook {
-    /// fork: **the eerie look.** Duskwood's calibration, for every dark zone: a weak sun under a
-    /// dimmed, greyer sky, the fill held so the key-to-fill ratio stays in band, muted colour and a
-    /// harder grade, a thicker haze so the daylight comes through the canopy in cones, and the
-    /// night's full ground-fog banks and glowing air, kept through the day. Exposure
-    /// is untouched, so buildings keep their own light.
+    /// fork: **the eerie look.** Brill's calibration (Tirisfal at 14:00 against a reference shot),
+    /// for every dark zone: a dim green sun over a deep fill, so the dapple reads under the canopy;
+    /// the shafts lit green through a haze whose shadowed air stays dark; green fog and sky, a lower
+    /// exposure and a saturated, harder grade; and the night's full ground-fog banks and glowing
+    /// air, kept through the day.
     pub const EERIE: Self = Self {
-        key: 0.6,
-        fill: 0.8,
-        sky_tint: [0.7, 0.72, 0.78],
-        saturation: 0.72,
-        contrast: 1.18,
+        key: 0.85,
+        fill: 0.55,
+        exposure: 0.6,
+        glow: [0.65, 1.0, 0.7],
+        haze_tint: [0.22, 0.34, 0.26],
+        fog_tint: [0.8, 1.0, 0.8],
+        sky_tint: [0.6, 0.7, 0.6],
+        key_tint: [0.78, 1.0, 0.8],
+        saturation: 1.15,
+        contrast: 1.25,
         haze: 0.0034,
         shafts: 0.4,
         vignette: 0.38,
@@ -458,12 +463,16 @@ mod tests {
         srgb_to_linear(lit) / srgb_to_linear(fill)
     }
 
-    /// Amendment A3's target: 6–10:1 under a canopy, and no row outside that band either.
+    /// Amendment A3's target: 6–10:1 under a canopy. The dark zones' look runs deeper, up to 25:1:
+    /// its fill was taken down against the Brill reference shot, whose shade is near black.
     #[test]
     fn every_row_keeps_the_key_to_fill_ratio_in_band() {
-        for (zone, look) in [(0, ZoneLook::NEUTRAL), (10, ZoneLook::EERIE)] {
+        for (zone, look, band) in [
+            (0, ZoneLook::NEUTRAL, 6.0..=10.0),
+            (10, ZoneLook::EERIE, 6.0..=25.0),
+        ] {
             let r = key_to_fill(look);
-            assert!((6.0..=10.0).contains(&r), "zone {zone}: {r:.2}:1");
+            assert!(band.contains(&r), "zone {zone}: {r:.2}:1");
         }
     }
 
@@ -483,7 +492,7 @@ mod tests {
         for zone in EERIE_ZONES {
             let d = look_for_zone(*zone);
             assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
-            assert_eq!(d.exposure, ZoneLook::NEUTRAL.exposure);
+            assert!(d.exposure < ZoneLook::NEUTRAL.exposure);
         }
     }
 
