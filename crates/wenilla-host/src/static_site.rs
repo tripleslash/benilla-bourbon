@@ -33,6 +33,10 @@ const COOP: (&str, &str) = ("cross-origin-opener-policy", "same-origin");
 /// `Cross-Origin-Embedder-Policy` — the other half: every cross-origin subresource must opt in.
 /// This page loads none, so the requirement is free. Must match `web/_headers`.
 const COEP: (&str, &str) = ("cross-origin-embedder-policy", "require-corp");
+/// `Document-Policy: js-profiling` — lets the page start the JS Self-Profiling API
+/// (`new Profiler(...)`), whose samples carry wasm frames: a frame-thread profile of the browser
+/// build from a plain console, on the local host only. The site does not set it.
+const DOC_POLICY: (&str, &str) = ("document-policy", "js-profiling");
 
 pub fn router(www: &Path) -> axum::Router {
     let no_cache = HeaderValue::from_static("no-cache");
@@ -62,6 +66,10 @@ pub fn router(www: &Path) -> axum::Router {
             .layer(SetResponseHeaderLayer::overriding(
                 HeaderName::from_static(COEP.0),
                 HeaderValue::from_static(COEP.1),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static(DOC_POLICY.0),
+                HeaderValue::from_static(DOC_POLICY.1),
             ))
             .service(serve),
     )
