@@ -989,6 +989,17 @@ pub(crate) fn run_pending_reload(world: &mut World) {
     info!("ui_script: ReloadUI — ending the UI session and building a new one");
     end_ui_session(world);
     load_ingame_ui_on_world_entry(world);
+    // `UI_Init` ends by re-entering the world-enter cascade (`0x490168`), its sends included, but
+    // only with the active player set (`0x490166 je`): our own player's entity exists. Not
+    // `SetActiveMover`, which only the player's create runs.
+    let seated = world
+        .query_filtered::<(), With<crate::net::SelfPlayer>>()
+        .iter(world)
+        .next()
+        .is_some();
+    if seated {
+        world.write_message(crate::net::WorldEnterCascadeMessage);
+    }
 }
 
 /// `AppExit`, the quit roots, read as a message because a quit from in-world never leaves
@@ -1198,6 +1209,31 @@ mod tests {
         run_pending_reload(&mut world);
         assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
         assert_eq!(*world.resource::<VPlateMode>(), on, "a reload keeps them");
+    }
+
+    /// A `ReloadUI()` re-enters the world-enter cascade (`0x490168`), whose readers re-send the
+    /// time, mail and battlefield queries, only with the active player set (`0x490166 je`).
+    #[test]
+    fn a_reload_reenters_the_world_enter_cascade_once_the_player_exists() {
+        use crate::net::WorldEnterCascadeMessage;
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<Messages<WorldEnterCascadeMessage>>();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
+            world
+                .resource_mut::<Messages<WorldEnterCascadeMessage>>()
+                .drain()
+                .count()
+        };
+        assert_eq!(reload(true), 1, "in the world");
+        assert_eq!(reload(false), 0, "before our own player's create");
     }
 
     /// The reference re-makes its Lua state inside `UI_Init` (`0x48fe97`).

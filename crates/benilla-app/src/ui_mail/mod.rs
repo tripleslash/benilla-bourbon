@@ -19,7 +19,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{
-    ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, Objects, SelfPlayer,
+    ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer, WorldEnterCascadeMessage,
 };
 use crate::query_cache::QueryCache;
 use crate::ui_script::{UiFeed, UiInput};
@@ -175,21 +175,22 @@ impl Plugin for UiMailPlugin {
                     close_npc_session_out_of_range::<MailOpen>.before(feed_mail),
                     feed_mail.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     drain_mail.after(UiInput),
-                    send_query_next_mail_time_on_enter,
+                    // The cascade's order: the time query, this, then the battlefield status.
+                    send_query_next_mail_time_on_enter.after(crate::net::send_query_time),
                 ),
             );
     }
 }
 
-/// `MSG_QUERY_NEXT_MAIL_TIME` at every world enter, from the mail module's init in the world-enter
-/// cascade (`0x4908c0`). The init stamps "no mail" first, so the icon goes dark across a loading
-/// screen until the reply.
-fn send_query_next_mail_time_on_enter(
-    mut entered: MessageReader<EnteredWorldMessage>,
+/// `MSG_QUERY_NEXT_MAIL_TIME` at each world-enter cascade, from the mail init (`0x4acb10`, called
+/// at `0x4909f6`), after the time query and before the battlefield status. The init stamps "no
+/// mail" first (`0x4acb87`).
+pub(crate) fn send_query_next_mail_time_on_enter(
+    mut cascades: MessageReader<WorldEnterCascadeMessage>,
     commands: Res<NetCommands>,
     mut pending: ResMut<MailPending>,
 ) {
-    if entered.read().next().is_some() {
+    if cascades.read().next().is_some() {
         pending.on_query_sent();
         let _ = commands.0.send(ClientCommand::QueryNextMailTime);
     }

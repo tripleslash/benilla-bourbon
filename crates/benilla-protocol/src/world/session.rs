@@ -343,7 +343,8 @@ impl WorldSession {
         self.send(opcode::CMSG_PLAYER_LOGIN, &messages::full_guid(guid))
     }
 
-    /// Declare the unit we move, as the 1.12 client does at login; vmangos drops moves until then.
+    /// Declare the unit we move, as the 1.12 client does at its own create; vmangos drops moves
+    /// until then.
     pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
     }
@@ -352,11 +353,6 @@ impl WorldSession {
     /// handshake reads as one uninterrupted `.await` chain rather than switching idiom mid-stride.
     pub async fn player_login_async(&mut self, guid: u64) -> Result<()> {
         self.player_login(guid)
-    }
-
-    /// [`Self::set_active_mover`], awaited — same reason as [`Self::player_login_async`].
-    pub async fn set_active_mover_async(&mut self, guid: u64) -> Result<()> {
-        self.set_active_mover(guid)
     }
 
     /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body).

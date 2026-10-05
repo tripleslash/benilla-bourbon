@@ -783,6 +783,32 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-tooltip-world seed failed to open the tooltip");
             }
         }
+        UiFixture::TooltipRank => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // A ranked player under the cursor, pushed as the mouseover feed does, then the call
+            // `drive_mouseover_tooltip` makes: the title is `0x609370`'s rank leg over the name,
+            // "Sergeant Bob".
+            script.set_unit(
+                "mouseover",
+                Some(benilla_ui::script::UnitState {
+                    exists: true,
+                    is_player: true,
+                    name: Some("Bob".into()),
+                    level: 60,
+                    reaction: 5,
+                    pvp: true,
+                    pvp_rank: 7,
+                    pvp_team: 1,
+                    sex: 2,
+                    ..Default::default()
+                }),
+            );
+            if !script.world_tooltip_unit("mouseover") {
+                warn!("capture: ui-tooltip-rank seed failed to open the tooltip");
+            }
+        }
         UiFixture::Character => {
             // A synthetic self player carrying the full stat block, which the `ui_char` feed turns
             // into snapshots and events as live. A level-12 warrior; positive (stamina, fire) and

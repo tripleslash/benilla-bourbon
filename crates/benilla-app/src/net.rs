@@ -32,6 +32,7 @@ mod session;
 mod world;
 
 pub(crate) use apply::apply_net_updates;
+pub(crate) use apply::enter_world_on_self_create;
 use apply::tag_self_player;
 pub(crate) use handlers::NetHandlerApp;
 
@@ -140,6 +141,7 @@ impl Plugin for NetPlugin {
             .add_message::<CharActionResultMessage>()
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
+            .add_message::<WorldEnterCascadeMessage>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
@@ -152,6 +154,7 @@ impl Plugin for NetPlugin {
                 (
                     apply_net_updates,
                     tag_self_player,
+                    enter_world_on_self_create,
                     sample_splines,
                     // Swim state from the water at the feet (the wire never carries it for
                     // creatures), before the clamp so a swimmer is exempt the same frame.
@@ -171,8 +174,14 @@ impl Plugin for NetPlugin {
                 // `apply_net_updates` and before `drive_display_facing`, so the `"npc"` token is
                 // current when a window's show handler reads it.
             )
-            // Not part of the movement chain above: one send on the world-enter message.
-            .add_systems(Update, send_query_time.in_set(WorldStage::Net))
+            // Not part of the movement chain above: the cascade's time query, after the self create
+            // has claimed the mover.
+            .add_systems(
+                Update,
+                send_query_time
+                    .in_set(WorldStage::Net)
+                    .after(enter_world_on_self_create),
+            )
             .add_systems(Update, population_pulse.in_set(WorldStage::Net));
     }
 }
@@ -656,19 +665,22 @@ impl ServerWallClock {
 /// `[0xbb749c]`, armed `now + 0xe10` at `0x4def11`).
 const RESYNC_AFTER: Duration = Duration::from_secs(3600);
 
-/// Ask for the server's wall clock on entering the world (login, worldport, instance transfer)
-/// and hourly after, which tracks a server re-clocked under us.
-fn send_query_time(
-    mut entered: MessageReader<EnteredWorldMessage>,
+/// Ask for the server's wall clock at each world-enter cascade (the quest-log init `0x4de430`,
+/// called at `0x4909a1`, sends it at `0x4de45b`) and hourly after, which tracks a server
+/// re-clocked under us.
+pub(crate) fn send_query_time(
+    mut cascades: MessageReader<WorldEnterCascadeMessage>,
     commands: Res<NetCommands>,
     clock: Res<ServerWallClock>,
     status: Res<NetStatus>,
     mut asked_at: Local<Option<Instant>>,
+    mut seated: Local<bool>,
 ) {
-    let entering = entered.read().next().is_some();
-    // Only while connected; the world-enter send covers a reconnect.
-    let due =
-        status.connected && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
+    let entering = cascades.read().next().is_some();
+    // `connected` rises at `CMSG_PLAYER_LOGIN`, before the server seats us, so the resync waits
+    // for the first cascade; a logout or a disconnect clears `connected` and so the wait re-arms.
+    *seated = status.connected && (*seated || entering);
+    let due = *seated && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
     if entering || due {
         *asked_at = Some(Instant::now());
         let _ = commands.0.send(ClientCommand::QueryTime);
@@ -915,8 +927,8 @@ pub(crate) enum ClientCommand {
         guid: u64,
         lag_ms: u32,
     },
-    /// `CMSG_SET_ACTIVE_MOVER`: at login and on possession; the server drops `MSG_MOVE_*` for an
-    /// unconfirmed mover.
+    /// `CMSG_SET_ACTIVE_MOVER`: at our own player's create and on possession; the server drops
+    /// `MSG_MOVE_*` for an unconfirmed mover.
     SetActiveMover {
         guid: u64,
     },
@@ -2110,6 +2122,12 @@ pub(crate) struct EnteredWorldMessage {
     /// The tutorial flags, if `SMSG_TUTORIAL_FLAGS` came during the login handshake.
     pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
+
+/// The reference's world-enter cascade (`0x4908c0`) ran: our own player's create, at login and
+/// every cross-map worldport ([`enter_world_on_self_create`]), or a `/reload`. Its sends wait for
+/// this, not [`EnteredWorldMessage`], which fires before the server has seated the player.
+#[derive(Message)]
+pub(crate) struct WorldEnterCascadeMessage;
 
 /// `SMSG_ADDON_INFO`: the addons the server hid from the Lua index space, or `None` if it did
 /// not answer. A resource, since it must exist before the world-entry UI load runs any addon;

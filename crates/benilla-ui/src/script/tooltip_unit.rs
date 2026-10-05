@@ -1,7 +1,8 @@
-//! The engine unit tooltip, in `0x529fe0`'s line order: the name (gold; FrameXML recolours it by
-//! reaction), the creature subtitle, the level line, the faction name, then "PvP", "Skinnable",
-//! "Civilian" and "Leader", with health on the `<name>StatusBar` child. The world mouseover drives
-//! it through [`super::UiScript::world_tooltip_unit`]; unit-frame hovers call `SetUnit` from Lua.
+//! The engine unit tooltip, in `0x529fe0`'s line order: the name (gold, decorated by `0x609370`
+//! as `UnitPVPName`'s is; FrameXML recolours it by reaction), the creature subtitle, the level
+//! line, the faction name, then "PvP", "Skinnable", "Civilian" and "Leader", with health on the
+//! `<name>StatusBar` child. The world mouseover drives it through
+//! [`super::UiScript::world_tooltip_unit`]; unit-frame hovers call `SetUnit` from Lua.
 
 use mlua::{Lua, Table};
 
@@ -118,10 +119,12 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
         return Ok(false);
     };
     // The name: `CGUnit_C::GetUnitName` `0x609210` (`0x52a187`), whose every miss falls to
-    // `UNKNOWNOBJECT`, as `UnitName`'s does. A token with no object never reaches the builder
+    // `UNKNOWNOBJECT`, as `UnitName`'s does, then decorated by `0x609370` with the flag a literal
+    // `1` (`0x52a19b`), as `UnitPVPName` does, so no CVar gates it: a ranked player's rank and
+    // medal line, a civilian kill's prefix. A token with no object never reaches the builder
     // (`0x468460`): no plate, and `SetUnit` answers nil.
     let title = match &u.name {
-        Some(n) => n.clone(),
+        Some(name) => super::pvp::pvp_name(lua, &u, name, player_level),
         None => unknownobject(lua)?.to_str()?.to_string(),
     };
     append_line(lua, this, (title, GOLD), None, false)?;

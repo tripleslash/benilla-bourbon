@@ -18,7 +18,7 @@ use benilla_protocol::messages::{BattlefieldList, BattlefieldStatus};
 use benilla_ui::script::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot, UiScript};
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands};
+use crate::net::{ClientCommand, NetCommands, WorldEnterCascadeMessage};
 use crate::player::Player;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
@@ -309,15 +309,16 @@ fn drain_battlefield(
     }
 }
 
-/// World enter (`0x4a9db0`): the list, the selection and the anchor clear, the queue slots stay,
-/// and the bodyless `CMSG_BATTLEFIELD_STATUS` goes out, answered slot by slot.
-fn reset_on_world_enter(
-    mut entered: MessageReader<EnteredWorldMessage>,
+/// The world-enter cascade's battlefield init (`0x4909fb` → `0x4a9db0`), after the mail query: the
+/// list, the selection and the anchor clear, the queue slots stay, and the bodyless
+/// `CMSG_BATTLEFIELD_STATUS` goes out, answered slot by slot.
+pub(crate) fn reset_on_world_enter(
+    mut cascades: MessageReader<WorldEnterCascadeMessage>,
     mut state: ResMut<Battlefield>,
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
 ) {
-    if entered.read().next().is_none() {
+    if cascades.read().next().is_none() {
         return;
     }
     state.clear_session();
@@ -364,6 +365,7 @@ impl Plugin for BattlefieldPlugin {
             (
                 reset_on_world_enter
                     .in_set(crate::ui_script::UiFeed)
+                    .after(crate::ui_mail::send_query_next_mail_time_on_enter)
                     .before(feed_battlefield),
                 feed_battlefield
                     .before(crate::ui_battlefield_score::feed_battlefield_score)

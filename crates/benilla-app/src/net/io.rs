@@ -723,8 +723,9 @@ async fn run(
             .find(|c| c.guid == guid)
             .map(|c| c.name.clone())
             .unwrap_or_default();
+        // No `CMSG_SET_ACTIVE_MOVER` here: it waits for our own player's create, as the
+        // reference's does (`super::enter_world_on_self_create`); a server may drop it before then.
         session.player_login_async(refuse_once(guid)).await?;
-        session.set_active_mover_async(guid).await?;
 
         let billing_time_rested = session.billing_time_rested();
         let tutorial_flags = session.take_tutorial_flags();

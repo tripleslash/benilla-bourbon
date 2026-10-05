@@ -317,9 +317,9 @@ pub fn decorated_name(
     Some(format_two_strings(&template, &title, name))
 }
 
-/// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding); `name` is the
-/// plain `UnitName`.
-fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level: u32) -> String {
+/// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding) and the unit
+/// tooltip's title (`0x52a1ab`), both with the decoration flag `1`; `name` is the plain `UnitName`.
+pub(super) fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level: u32) -> String {
     // Leg A: a ranked player; the title is gendered by this unit and range-unchecked.
     if u.is_player && u.pvp_rank != 0 {
         let decorated = decorated_name(
