@@ -910,6 +910,15 @@ fn classify_part(
     let far = !straddles
         && crate::particles::far_side_of_water(interleave, Some(entity), gt.translation());
     if far == far_now {
+        // The marker outlives the handle it was set for: a writer that binds another blend
+        // material before that one's twin exists leaves the near handle under a far marker, and
+        // only the twin's existence lets it resolve.
+        if far && !swapped {
+            let far_h = far_twin(twins, materials, &near);
+            if !authority_owned {
+                mat.0 = far_h;
+            }
+        }
         return;
     }
     trace_side(if far { "far-side" } else { "near-side" }, entity, gt);
