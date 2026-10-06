@@ -261,6 +261,12 @@ struct PassSums {
     /// Fragment-shader invocations summed per top-level pass (`render/<pass>/fragment_shader_invocations`,
     /// a pass span's pipeline-statistics query; absent on a device without them).
     frags: std::collections::BTreeMap<String, f64>,
+    /// Vertex-shader invocations summed per top-level pass (`…/vertex_shader_invocations`).
+    verts: std::collections::BTreeMap<String, f64>,
+    /// `ms` and `frags` again, split by the span's order within its frame: a pass that runs once
+    /// per view (the water mirror, then the world camera) reads as one figure per view.
+    view_ms: std::collections::BTreeMap<String, Vec<f64>>,
+    view_frags: std::collections::BTreeMap<String, Vec<f64>>,
     frames: u32,
     seen: Option<bevy::platform::time::Instant>,
 }
@@ -280,16 +286,29 @@ impl PassSums {
                 continue;
             };
             let timed = stat == "elapsed_gpu";
-            let sums = match stat {
-                "elapsed_gpu" => &mut self.ms,
-                "fragment_shader_invocations" => &mut self.frags,
+            let (sums, views) = match stat {
+                "elapsed_gpu" => (&mut self.ms, Some(&mut self.view_ms)),
+                "fragment_shader_invocations" => (&mut self.frags, Some(&mut self.view_frags)),
+                "vertex_shader_invocations" => (&mut self.verts, None),
                 _ => continue,
             };
+            let mut views = views.map(|v| v.entry(pass.to_string()).or_default());
+            // One frame's readings share an instant (`sync_diagnostics`), in span order.
+            let mut at = None;
+            let mut nth = 0;
             for m in diagnostic
                 .measurements()
                 .filter(|m| self.seen.is_none_or(|s| m.time > s))
             {
                 *sums.entry(pass.to_string()).or_default() += m.value;
+                nth = if at == Some(m.time) { nth + 1 } else { 0 };
+                at = Some(m.time);
+                if let Some(views) = views.as_deref_mut() {
+                    if views.len() <= nth {
+                        views.resize(nth + 1, 0.0);
+                    }
+                    views[nth] += m.value;
+                }
                 if !timed {
                     continue;
                 }
@@ -310,6 +329,9 @@ impl PassSums {
         self.fold(store);
         self.ms.clear();
         self.frags.clear();
+        self.verts.clear();
+        self.view_ms.clear();
+        self.view_frags.clear();
         self.frames = 0;
     }
 
@@ -349,6 +371,43 @@ impl PassSums {
         rows.sort_by(|a, b| b.1.total_cmp(&a.1));
         let each: Vec<String> = rows.iter().map(|(k, v)| format!("{k}={v:.3}")).collect();
         Some(format!("px={px} {}", each.join(" ")))
+    }
+
+    /// The passes that ran more than once a frame, each run on its own in span order:
+    /// `pass=ms+ms(frag/px+frag/px)`, costliest first.
+    fn views_line(&self, px: u64) -> Option<String> {
+        if self.frames == 0 {
+            return None;
+        }
+        let n = f64::from(self.frames);
+        let mut rows: Vec<(&String, &Vec<f64>)> =
+            self.view_ms.iter().filter(|(_, v)| v.len() > 1).collect();
+        rows.sort_by(|a, b| b.1.iter().sum::<f64>().total_cmp(&a.1.iter().sum::<f64>()));
+        let join = |v: &[f64], per: f64, digits: usize| {
+            let each: Vec<String> = v.iter().map(|x| format!("{:.digits$}", x / per)).collect();
+            each.join("+")
+        };
+        let each: Vec<String> = rows
+            .iter()
+            .map(|(k, v)| match self.view_frags.get(*k).filter(|_| px > 0) {
+                Some(f) => format!("{k}={}({})", join(v, n, 2), join(f, n * px as f64, 3)),
+                None => format!("{k}={}", join(v, n, 2)),
+            })
+            .collect();
+        (!each.is_empty()).then(|| each.join(" "))
+    }
+
+    /// Vertex-shader invocations per frame in thousands, per pass, highest first.
+    fn verts_line(&self) -> Option<String> {
+        if self.frames == 0 || self.verts.is_empty() {
+            return None;
+        }
+        let per = f64::from(self.frames) * 1000.0;
+        let mut rows: Vec<(&String, f64)> = self.verts.iter().map(|(k, v)| (k, *v / per)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        rows.retain(|r| r.1 >= 0.5);
+        let each: Vec<String> = rows.iter().map(|(k, v)| format!("{k}={v:.0}k")).collect();
+        Some(each.join(" "))
     }
 }
 
@@ -528,6 +587,12 @@ fn sample(
     if let Some(line) = run.passes.overdraw_line(px) {
         info!("PERF_OVERDRAW cfg={cfg} {line}");
     }
+    if let Some(line) = run.passes.views_line(px) {
+        info!("PERF_VIEWS cfg={cfg} {line}");
+    }
+    if let Some(line) = run.passes.verts_line() {
+        info!("PERF_VERTS cfg={cfg} {line}");
+    }
     if looping() {
         run.done = false;
         run.round += 1;
@@ -630,6 +695,25 @@ mod tests {
             Some("px=100 main_opaque_pass_3d=2.500 static_gx=1.000")
         );
         assert_eq!(sums.overdraw_line(0), None);
+    }
+
+    /// A pass that ran for two views reads once per view; a pass that ran once is left out.
+    #[test]
+    fn a_pass_run_per_view_reads_per_view() {
+        let mut sums = PassSums {
+            frames: 2,
+            ..default()
+        };
+        sums.view_ms.insert("static_gx".into(), vec![5.0, 2.0]);
+        sums.view_frags
+            .insert("static_gx".into(), vec![20.0, 200.0]);
+        sums.view_ms.insert("upscaling".into(), vec![1.0]);
+        assert_eq!(
+            sums.views_line(100).as_deref(),
+            Some("static_gx=2.50+1.00(0.100+1.000)")
+        );
+        sums.verts.insert("static_gx".into(), 6000.0);
+        assert_eq!(sums.verts_line().as_deref(), Some("static_gx=3k"));
     }
 
     #[test]
