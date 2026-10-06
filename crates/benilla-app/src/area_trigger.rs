@@ -18,8 +18,9 @@
 //! position the movement stream reported, and the Turtle core clears an inn's rest whenever that
 //! position is outdoors and outside the volume with no slop (`Player.cpp:7867`), so an entry
 //! claimed a heartbeat ahead of the position can set rest and drop it at once, and the latch never
-//! asks again: no rest until you walk out and back in. While still inside and not resting we
-//! re-send the claim from the now-reported position, `RETRIES` times `RETRY_AFTER` apart.
+//! asks again: no rest until you walk out and back in. While still inside, not resting, and moved
+//! `RETRY_MOVED` since the last claim, we re-send it from the newer position, at most `RETRIES`
+//! times and no sooner than `RETRY_AFTER` after the last.
 
 use std::time::Duration;
 
@@ -45,15 +46,27 @@ pub(crate) struct AreaTriggers(pub(crate) AreaTriggerCatalog);
 pub(crate) struct InsideTrigger(Option<(u32, u32)>);
 
 /// Re-sends of a latched claim that did not leave us resting (see the module's `Deviates`).
-const RETRIES: u8 = 2;
-/// Long enough for the movement stream to have reported the position inside the volume.
-const RETRY_AFTER: Duration = Duration::from_secs(2);
+const RETRIES: u8 = 3;
+/// Long enough for the movement stream to have reported the newer position.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// Yards moved since the last claim: standing still, the server would judge the same position.
+const RETRY_MOVED: f32 = 1.0;
 /// `PLAYER_FLAGS_RESTING`, set by the server while rested in an inn or a city.
 const PLAYER_FLAGS_RESTING: u32 = 0x20;
 
-/// The pending re-send for the latched trigger: its map and id, when, and how many are left.
+/// The pending re-send for the latched trigger.
 #[derive(Resource, Default)]
-struct TriggerRetry(Option<(u32, u32, Instant, u8)>);
+struct TriggerRetry(Option<Claim>);
+
+/// The last claim of the latched trigger.
+#[derive(Clone, Copy)]
+struct Claim {
+    map: u32,
+    id: u32,
+    at: Instant,
+    from: [f32; 3],
+    left: u8,
+}
 
 impl InsideTrigger {
     /// One check in the reference's order (`0x5e2110`): nothing while still inside the latched
@@ -127,33 +140,52 @@ fn check_area_triggers(
     let here = bevy_to_wow(player.pos);
     let Some(trigger_id) = inside.step(&triggers.0, map.0, here) else {
         // Still in the latched volume (or in none): re-claim it if the server left us unrested.
-        let Some((r_map, r_id, at, left)) = retry.0 else {
+        let Some(claim) = retry.0 else {
             return;
         };
-        if inside.0 != Some((r_map, r_id)) {
+        if inside.0 != Some((claim.map, claim.id)) {
             retry.0 = None;
             return;
         }
         let resting = self_q
             .single()
             .is_ok_and(|s| s.0.player_flags() & PLAYER_FLAGS_RESTING != 0);
-        if resting || left == 0 {
+        if resting || claim.left == 0 {
             retry.0 = None;
             return;
         }
-        if at.elapsed() < RETRY_AFTER {
+        let moved = here
+            .iter()
+            .zip(claim.from)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            .sqrt();
+        if claim.at.elapsed() < RETRY_AFTER || moved < RETRY_MOVED {
             return;
         }
-        let _ = net.0.send(ClientCommand::AreaTrigger { trigger_id: r_id });
-        retry.0 = Some((r_map, r_id, Instant::now(), left - 1));
+        let _ = net.0.send(ClientCommand::AreaTrigger {
+            trigger_id: claim.id,
+        });
+        retry.0 = Some(Claim {
+            at: Instant::now(),
+            from: here,
+            left: claim.left - 1,
+            ..claim
+        });
         info!(
-            "area_trigger: re-sent {r_id} on map {r_map} at [{:.2}, {:.2}, {:.2}], still unrested",
-            here[0], here[1], here[2]
+            "area_trigger: re-sent {} on map {} at [{:.2}, {:.2}, {:.2}], still unrested",
+            claim.id, claim.map, here[0], here[1], here[2]
         );
         return;
     };
     let _ = net.0.send(ClientCommand::AreaTrigger { trigger_id });
-    retry.0 = Some((map.0, trigger_id, Instant::now(), RETRIES));
+    retry.0 = Some(Claim {
+        map: map.0,
+        id: trigger_id,
+        at: Instant::now(),
+        from: here,
+        left: RETRIES,
+    });
     // At `info`: entries are rare, and this line tells whether the client saw the volume at all.
     info!(
         "area_trigger: entered {trigger_id} on map {} at [{:.2}, {:.2}, {:.2}]",
