@@ -411,10 +411,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .ok()
                 .and_then(|i| model.social.who.get(i));
             let Some(row) = row else {
+                // A miss still pushes six values with a NUMBER level (`1.12-shapes.tsv`:
+                // `(nil,nil,number,nil,nil,nil)`). An empty who slot reads level 0, and callers
+                // like `GetDifficultyColor(level)` do arithmetic on it unguarded.
                 return Ok((
                     Value::Nil,
                     Value::Nil,
-                    Value::Nil,
+                    Value::Integer(0),
                     Value::Nil,
                     Value::Nil,
                     Value::Nil,
@@ -508,6 +511,22 @@ mod tests {
             class: "Warrior".to_string(),
             zone: zone.to_string(),
         }
+    }
+
+    /// A miss still answers six values with a NUMBER level (`1.12-shapes.tsv`:
+    /// `(nil,nil,number,nil,nil,nil)`), so an unguarded `GetDifficultyColor(level)` over the empty
+    /// slots of the who list does not raise.
+    #[test]
+    fn a_who_miss_answers_six_values_with_a_number_level() {
+        let mut s = UiScript::new().unwrap();
+        s.set_social(SocialState::default());
+        let got = s
+            .eval::<(bool, bool, i64, bool, bool, bool)>(
+                "local a,b,c,d,e,f = GetWhoInfo(1) \
+                 return a == nil, b == nil, c, d == nil, e == nil, f == nil",
+            )
+            .unwrap();
+        assert_eq!(got, (true, true, 0, true, true, true));
     }
 
     /// Two `/who` hits and a `WHO_LIST_UPDATE` handler that records the order it sees.
