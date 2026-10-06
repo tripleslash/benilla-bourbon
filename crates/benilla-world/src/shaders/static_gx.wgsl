@@ -394,6 +394,11 @@ struct GxVsOut {
     @location(5) color: vec4<f32>,
     // fork: modern lighting (FORK.md, P3) — the vertex's point-light selection (flat).
     @location(6) @interpolate(flat) point_sel: vec3<u32>,
+#ifdef WOW_MODERN
+    // fork: perf — the placement anchor (flat): the water mirror's fragments make the selection
+    // themselves (see `vertex`).
+    @location(7) @interpolate(flat) anchor: vec3<f32>,
+#endif
 }
 
 @vertex
@@ -434,12 +439,27 @@ fn vertex(v: GxVertex) -> GxVsOut {
         // it), and reads the three-nearest selection only where the grid does not answer — so
         // neither walk of the whole light table runs per vertex for nothing.
         out.point_lit = vec3<f32>(0.0);
+#ifdef MODERN_VERTEX_WALKS
         if (locallight::grid_live(modern_block.lights)
             && !sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
             out.point_sel = vec3<u32>(0u);
         } else {
             out.point_sel = point_light_select(v.anchor);
         }
+#else
+        // fork: perf — nor does the water mirror walk it per vertex. The mirror lights with the
+        // three-nearest selection, which is a function of the placement's anchor alone, so its
+        // fragments make it from the flat anchor (`fragment`): the same lights, chosen for the
+        // few pixels the mirror shades instead of for every vertex it transforms (Auberdine,
+        // Cinematic: 1.7M vertices against 98k fragments).
+        // `MODERN_VERTEX_WALKS` is the A/B lever (`$WOW_MODERN_VERTEXWALKS=1`).
+        out.anchor = v.anchor;
+        if (locallight::grid_live(modern_block.lights)) {
+            out.point_sel = vec3<u32>(0u);
+        } else {
+            out.point_sel = point_light_select(v.anchor);
+        }
+#endif
 #else
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
         out.point_sel = point_light_select(v.anchor);
@@ -637,7 +657,14 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             modern_lite,
         );
     } else {
-        point_lit_px = point_light_eval(in.point_sel, in.world_position.xyz, n_lit);
+        var point_sel = in.point_sel;
+#ifndef MODERN_VERTEX_WALKS
+        // The mirror's selection, which the vertex stage leaves to it while the grid is live.
+        if (locallight::grid_live(modern_block.lights) && (in.word & (WORD_WMO | WORD_INTERIOR)) == 0u) {
+            point_sel = point_light_select(in.anchor);
+        }
+#endif
+        point_lit_px = point_light_eval(point_sel, in.world_position.xyz, n_lit);
     }
 #endif
     // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,

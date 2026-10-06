@@ -337,6 +337,25 @@ fn point_light_select(anchor: vec3<f32>) -> vec3<u32> {
     return sel;
 }
 
+// fork: perf — `point_light_sum`'s own evaluation of a selection `point_light_select` has already
+// made: the two choose by one rule, so this is that sum without its walk of the light table.
+fn point_light_gouraud(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var s = 0u; s < 3u; s = s + 1u) {
+        let id = sel[s];
+        if (id == 0u) {
+            break;
+        }
+        let pos_range = wow_light.points[2u * (id - 1u)];
+        let to_light = pos_range.xyz - P;
+        let d = length(to_light);
+        let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+        let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
+        sum += wow_light.points[2u * (id - 1u) + 1u].rgb * (atten * nl);
+    }
+    return sum;
+}
+
 // fork: modern lighting (FORK.md, P3) — the selected lights evaluated per pixel: the WoW falloff
 // `1/(0.7d + 0.03d²)` × N·L × a smooth window that reaches zero at the light's range.
 fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
@@ -398,8 +417,21 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // The whole diffuse sum on the MCNR normal, clamped per vertex: ambient, sun N·L, and the
     // chunk's three nearest point lights with their over-gamut colours raw.
     let ndotl = max(dot(n, l), 0.0);
+#ifdef WOW_MODERN
+#ifdef MODERN_VERTEX_WALKS
     let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));
     out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
+#else
+    // fork: perf — one walk of the light table per vertex, not two: the selection, and the Gouraud
+    // sum evaluated from it (`point_light_gouraud`). `MODERN_VERTEX_WALKS` is the A/B lever
+    // (`$WOW_MODERN_VERTEXWALKS=1`): the two walks, as before.
+    out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
+    let points = point_light_gouraud(out.point_sel, out.world_position.xyz, n);
+#endif
+#else
+    let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));
+    out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
+#endif
     let sun_lighting = wow_light.light_diffuse.rgb * ndotl;
     out.primary = clamp(
         wow_light.light_ambient.rgb + sun_lighting + points,

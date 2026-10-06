@@ -682,9 +682,26 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         if (m.clutter_fade.w > 0.5) {
             anchor = mcnk_cell_anchor(out.world_position.xyz);
         }
-        out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
 #ifdef WOW_MODERN
+#ifdef MODERN_VERTEX_WALKS
+        out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
         out.point_sel = point_light_select(anchor);
+#else
+        // fork: perf — each is a walk of the whole light table, and a fragment reads only one of
+        // them (`fragment`'s `point_diffuse`): the three-nearest selection in a modern frame, the
+        // Gouraud sum in a classic one (a booth through this pipeline). So a vertex makes that
+        // one. `MODERN_VERTEX_WALKS` is the A/B lever (`$WOW_MODERN_VERTEXWALKS=1`): both, as
+        // before.
+        if (wow_light.point_count.y > 0.5) {
+            out.point_lit = vec3<f32>(0.0);
+            out.point_sel = point_light_select(anchor);
+        } else {
+            out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
+            out.point_sel = vec3<u32>(0u);
+        }
+#endif
+#else
+        out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
 #endif
     }
     return out;

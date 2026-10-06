@@ -442,6 +442,9 @@ fn prepare_static_gx(
                 // light buffer — so the def can decide the path outright, as `MODERN_FRAME`.
                 if modern {
                     defs.push(ShaderDefVal::from("WOW_MODERN"));
+                    if benilla_assets::materials::modern_vertex_walks() {
+                        defs.push(ShaderDefVal::from("MODERN_VERTEX_WALKS"));
+                    }
                 }
                 if prepassed {
                     defs.push(ShaderDefVal::from("GX_PREPASSED"));

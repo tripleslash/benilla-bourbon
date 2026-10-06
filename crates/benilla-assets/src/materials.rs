@@ -24,6 +24,16 @@ pub const MODERN_SHADOW_MAP: Handle<Image> =
     bevy::asset::uuid_handle!("6d2f1e4a-3b7c-4e0a-9a51-0c7e8f2d9b31");
 pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderBuffer> =
     bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
+
+/// fork: perf — `$WOW_MODERN_VERTEXWALKS=1` (an A/B lever, read once; the browser has no
+/// environment and keeps the default): the modern pipelines of `wow_model.wgsl`, `terrain.wgsl`
+/// and `static_gx.wgsl` are built with `MODERN_VERTEX_WALKS`, and every vertex walks the light
+/// table for the Gouraud sum and the three-nearest selection whether its fragments read them or
+/// not, as before.
+pub fn modern_vertex_walks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_MODERN_VERTEXWALKS").as_deref() == Ok("1"))
+}
 // fork: modern lighting (FORK.md, P4) — the integrated froxel fog volume
 // (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
 pub const MODERN_FOG_VOLUME: Handle<Image> =
@@ -268,6 +278,15 @@ impl MaterialExtension for WowModelExt {
             descriptor.vertex.shader_defs.push("WOW_MODERN".into());
             if let Some(fragment) = descriptor.fragment.as_mut() {
                 fragment.shader_defs.push("WOW_MODERN".into());
+            }
+            if modern_vertex_walks() {
+                descriptor
+                    .vertex
+                    .shader_defs
+                    .push("MODERN_VERTEX_WALKS".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
+                }
             }
         }
         // The skybox pins clip z to 0, reverse-Z far, in the vertex stage; its bias is sort-only.
@@ -762,8 +781,7 @@ impl MaterialExtension for TerrainExtension {
     }
 
     /// fork: modern lighting — compile one lighting model, not both ([`TerrainKey`]). The def
-    /// reaches the vertex stage too, for symmetry with the model lane's `WOW_MODERN`; the vertex
-    /// stage reads nothing from it today.
+    /// reaches the vertex stage too: it decides which walk of the light table a vertex makes.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -774,6 +792,15 @@ impl MaterialExtension for TerrainExtension {
             descriptor.vertex.shader_defs.push("WOW_MODERN".into());
             if let Some(fragment) = descriptor.fragment.as_mut() {
                 fragment.shader_defs.push("WOW_MODERN".into());
+            }
+            if modern_vertex_walks() {
+                descriptor
+                    .vertex
+                    .shader_defs
+                    .push("MODERN_VERTEX_WALKS".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
+                }
             }
         }
         Ok(())
