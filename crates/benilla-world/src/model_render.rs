@@ -860,15 +860,15 @@ fn classify_part(
     };
     // The current verdict: the marker, or the handle for the batches this system swaps itself.
     let far_now = marked || swapped;
-    let qualifies = match materials.get(near.id()) {
-        Some(m) => {
-            matches!(m.base.alpha_mode, AlphaMode::Blend)
-                && m.extension.model_flags.x <= 0.5
-                // A WMO skybox sits at the eye and the far depth, on no side of the water plane.
-                && (m.extension.clutter_fade.z as u16) & SKY_DEPTH_MARKER == 0
-        }
-        None => false,
-    };
+    // Read wherever it lives: a batch first classifies as it binds, while its material is still
+    // parked (`lazy`), and a still one is not asked again.
+    let qualifies = lazy::with_material(materials, near.id(), |m| {
+        matches!(m.base.alpha_mode, AlphaMode::Blend)
+            && m.extension.model_flags.x <= 0.5
+            // A WMO skybox sits at the eye and the far depth, on no side of the water plane.
+            && (m.extension.clutter_fade.z as u16) & SKY_DEPTH_MARKER == 0
+    })
+    .unwrap_or(false);
     if !qualifies {
         // A part back on its opaque cutout has no side until it blends again.
         if marked {
@@ -937,7 +937,7 @@ fn far_twin(
     if let Some(h) = twins.to_far.get(&near.id()) {
         return h.clone();
     }
-    let twin = far_twin_of(materials.get(near.id()).unwrap());
+    let twin = lazy::with_material(materials, near.id(), far_twin_of).unwrap();
     let h = materials.add(twin);
     twins.to_far.insert(near.id(), h.clone());
     twins.to_near.insert(h.id(), near.clone());
