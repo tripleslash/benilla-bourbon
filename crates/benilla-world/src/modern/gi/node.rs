@@ -12,7 +12,7 @@ use bevy::render::render_resource::binding_types::{
     texture_depth_2d, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderStartup, RenderSystems};
@@ -396,8 +396,18 @@ fn prepare_gi(
     );
 }
 
-/// The probe trace, once per `Core3d` camera as the graph node was.
-fn gi_trace_pass(world: &World, mut render_context: RenderContext) {
+/// The probe trace, on the world camera's view alone: the field is world-space, and the water
+/// mirror and the booths, which read none of it, each ran it again ([`world_view_only`]).
+///
+/// [`world_view_only`]: crate::modern::world_view_only
+fn gi_trace_pass(
+    world: &World,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    mut render_context: RenderContext,
+) {
+    if !crate::modern::world_view_only(view.into_inner()) {
+        return;
+    }
     let frame = world.resource::<GiFrame>();
     let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
         &frame.classify_bind,

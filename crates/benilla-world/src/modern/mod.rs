@@ -274,6 +274,17 @@ pub fn mirror_tier_everywhere() -> bool {
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_MIRRORTIER").as_deref() == Some("1"))
 }
 
+/// Should a world-space compute pass (the probe trace, the light binning) run on this view?
+/// `world_camera` is whether the view is the world camera's (`volumetrics::ModernFogView`). They
+/// ran once per `Core3d` view: twice a frame with the water mirror up, and once more per booth.
+/// Dev A/B (`$WOW_MODERN_PERVIEW=1`, read once): every view again.
+pub(crate) fn world_view_only(world_camera: bool) -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    world_camera
+        || *CELL
+            .get_or_init(|| crate::launch_env::var("WOW_MODERN_PERVIEW").as_deref() == Some("1"))
+}
+
 /// The CPU-side modern hooks: sky stop decode, the cloud texture's sRGB view, the disc `span.z` flag.
 pub fn cpu_hooks_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

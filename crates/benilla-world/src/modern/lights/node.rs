@@ -11,7 +11,7 @@ use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, storage_buffer_sized,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderQueue, ViewQuery};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
@@ -141,13 +141,19 @@ fn prepare_lights(
     );
 }
 
-/// The binning pass, once per `Core3d` camera as the graph node was.
+/// The binning pass, on the world camera's view alone: the grid is world-space, and binning it
+/// again for the water mirror and the booths rewrote the same cells
+/// ([`world_view_only`](crate::modern::world_view_only)).
 fn light_bin_pass(
     frame: Res<LightFrame>,
     pipes: Res<LightPipelines>,
     pipeline_cache: Res<PipelineCache>,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
     mut render_context: RenderContext,
 ) {
+    if !crate::modern::world_view_only(view.into_inner()) {
+        return;
+    }
     let (Some(bind), true) = (&frame.bind, frame.groups > 0) else {
         return;
     };
