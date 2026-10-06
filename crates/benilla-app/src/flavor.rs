@@ -139,6 +139,17 @@ fn switch(world: &mut World, to: ClientFlavor) -> anyhow::Result<()> {
     // In force before the catalogs rerun: a loader whose checks are 1.12.1's (the create catalog's
     // race and class table) reads the flavor to know which data it is looking at.
     world.insert_resource(to);
+    // The server-answered templates kept across sessions (the reference's WDB caches) belong to
+    // the other client; the creature cache is per realm on disk and reloads with the realm.
+    if let Some(mut items) = world.get_resource_mut::<crate::items::Items>() {
+        items.forget_templates();
+    }
+    if let Some(mut gos) = world.get_resource_mut::<crate::go_templates::GameObjectTemplates>() {
+        gos.forget();
+    }
+    if let Some(mut pages) = world.get_resource_mut::<crate::ui_item_text::PageTexts>() {
+        pages.forget();
+    }
     // Before the catalogs rerun: a loader that reads art through the sprite cache must not be
     // handed the other flavor's.
     if let Some(mut assets) = world.get_resource_mut::<benilla_assets::WorldAssets>() {

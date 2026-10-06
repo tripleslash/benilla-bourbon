@@ -42,6 +42,11 @@ impl crate::query_cache::AskOnce for PageTexts {
 }
 
 impl PageTexts {
+    /// A flavor switch: the pages are the other client's.
+    pub(crate) fn forget(&mut self) {
+        self.pages.clear();
+    }
+
     pub(crate) fn insert(&mut self, page_id: u32, text: String, next: u32) {
         self.pages.insert(page_id, Some(PageText { text, next }));
     }

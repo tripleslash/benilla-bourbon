@@ -2,6 +2,7 @@
 //! replies, [`feed_taxi`] pushes the known nodes on the current node's continent with their
 //! routes (built in [`routing`]) and fires the map events, and [`drain_taxi`] sends the activate.
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::TaxiMask;
 use bevy::prelude::*;
 
@@ -292,10 +293,10 @@ impl Plugin for UiTaxiPlugin {
         net::register(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
+            .add_data_loaders(load_taxi_catalogs)
             .add_systems(
                 Update,
                 (
-                    load_taxi_catalogs,
                     // Range-close first so the clear fires `TAXIMAP_CLOSED` the same frame.
                     close_npc_session_out_of_range::<TaxiState>.before(feed_taxi),
                     feed_taxi.in_set(UiFeed),

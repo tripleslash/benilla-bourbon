@@ -88,6 +88,11 @@ impl crate::query_cache::AskOnce for GameObjectTemplates {
 }
 
 impl GameObjectTemplates {
+    /// A flavor switch: the templates are the other client's.
+    pub(crate) fn forget(&mut self) {
+        self.templates.clear();
+    }
+
     /// Asks for a template once per entry; every spawn of a template shares the one query.
     pub(crate) fn request(&self, guid: u64, commands: &NetCommands) {
         let Some(entry) = guid::entry(guid) else {

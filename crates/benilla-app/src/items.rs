@@ -476,6 +476,13 @@ impl Items {
         self.pending_enchant_times.clear();
         self.templates.clear_pending();
     }
+
+    /// A flavor switch: the templates are the other client's, so they go too.
+    pub(crate) fn forget_templates(&mut self) {
+        self.clear_session();
+        self.templates.clear();
+        self.fresh.clear();
+    }
 }
 
 impl crate::query_cache::AskOnce for Items {

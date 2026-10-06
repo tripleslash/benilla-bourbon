@@ -101,6 +101,9 @@ fn load_name_cache(
         return;
     }
     let path = crate::local_state::name_cache_path(&realm);
+    // The last realm's templates go first, so a realm with no file, or a discarded one, starts
+    // empty and its first save does not write the other server's records under its name.
+    names.install_persisted(NameCache::default());
     file.realm = Some(realm.clone());
     file.path = path.clone();
     file.saved_generation = names.generation();

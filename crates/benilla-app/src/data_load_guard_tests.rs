@@ -30,7 +30,8 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     (
         "setup_wdl",
-        "the startup continent's WDL; `stream_wdl` loads each map's on entry",
+        "the startup continent's WDL; `stream_wdl` loads each map's on entry and after \
+         `forget_wdl` on a data change",
     ),
     (
         "load_expectations",

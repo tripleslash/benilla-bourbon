@@ -76,6 +76,20 @@ struct SkyboxSpin {
 #[derive(Resource, Default)]
 struct BuiltSkyboxes(HashSet<String>);
 
+/// A change of the data the chain answers from may change a sky model under the same path, so
+/// every built box goes and the wanted one builds again on its next request.
+fn forget_skyboxes(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut commands: Commands,
+    mut built: ResMut<BuiltSkyboxes>,
+    parts: Query<Entity, With<SkyboxPart>>,
+) {
+    for e in &parts {
+        commands.entity(e).despawn();
+    }
+    built.0.clear();
+}
+
 /// [`CameraSkybox`] is settled after this set; the dome's gate runs after it, so the two backdrops
 /// agree within a frame.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,6 +103,7 @@ impl Plugin for SkyboxPlugin {
         app.init_resource::<CameraSkybox>()
             .init_resource::<SkyboxWeight>()
             .init_resource::<BuiltSkyboxes>()
+            .add_observer(forget_skyboxes)
             .add_systems(
                 Update,
                 (resolve_camera_skybox, build_skybox, apply_skybox_visibility)

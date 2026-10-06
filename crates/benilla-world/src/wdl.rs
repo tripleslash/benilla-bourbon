@@ -53,6 +53,7 @@ impl Plugin for WdlPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WdlMaterial>::default())
             .add_systems(Startup, setup_wdl.after(AssetSet::Open))
+            .add_observer(forget_wdl)
             // The ring follows the world's lifecycle: it spawns only while a world is live.
             .add_systems(Update, stream_wdl.run_if(crate::schedule::world_is_live))
             .add_systems(
@@ -316,6 +317,22 @@ fn stream_wdl(
             .id();
         streamer.loaded.insert(coords, (e, lod));
     }
+}
+
+/// A change of the data the chain answers from changes the `.wdl` under the same map id (Turtle
+/// WoW's `Azeroth.wdl` carries its added coasts), so the next stream reloads it and rebuilds the
+/// ring.
+fn forget_wdl(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut commands: Commands,
+    streamer: Option<ResMut<WdlStreamer>>,
+) {
+    let Some(mut streamer) = streamer else { return };
+    for (_, (e, _)) in streamer.loaded.drain() {
+        commands.entity(e).despawn();
+    }
+    // No map has this id, so `stream_wdl` reloads on its next run.
+    streamer.map_id = u32::MAX;
 }
 
 /// Leaving the world drops the ring; the parsed `.wdl` stays for `height_under`.
