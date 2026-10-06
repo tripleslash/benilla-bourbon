@@ -890,6 +890,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             let event = match info {
                 Some(i) => SessionEvent::GameObjectInfo {
                     entry,
+                    known: true,
                     type_id: i.type_id,
                     display_id: i.display_id,
                     name: i.name,
@@ -897,6 +898,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 },
                 None => SessionEvent::GameObjectInfo {
                     entry,
+                    known: false,
                     type_id: 0,
                     display_id: 0,
                     name: String::new(),

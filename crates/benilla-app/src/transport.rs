@@ -241,6 +241,7 @@ fn arm_transports(
     mut commands: Commands,
     mut timetables: ResMut<Timetables>,
     templates: Res<GameObjectTemplates>,
+    net: Res<crate::net::NetCommands>,
     // A re-created lift is already armed but carries a fresh seed, so it re-enters to consume it.
     pending: Query<
         (Entity, &Guid, Option<&ElevatorSeed>),
@@ -310,8 +311,13 @@ fn arm_transports(
         }
 
         // The boat arm.
-        let Some(mo) = templates.get(guid.0).and_then(|t| t.mo_transport) else {
-            continue; // template answer not in yet: next frame
+        let Some(template) = templates.get(guid.0) else {
+            // Not in yet, or evicted by a server invalidate after the spawn asked: ask (once).
+            templates.request(guid.0, &net);
+            continue;
+        };
+        let Some(mo) = template.mo_transport else {
+            continue;
         };
         let Timetables { nodes, built, .. } = &mut *timetables;
         let Some(nodes) = nodes.as_ref() else {

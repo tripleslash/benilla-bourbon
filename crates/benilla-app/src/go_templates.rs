@@ -106,7 +106,19 @@ impl GameObjectTemplates {
         });
     }
 
-    /// Records a `SMSG_GAMEOBJECT_QUERY_RESPONSE`; a miss arrives zeroed, so no lock.
+    /// A high-bit miss. Answering our own ask it is the negative, cached and never re-asked;
+    /// unasked it is a server's invalidate (the Turtle core sends one per moving transport ahead
+    /// of its creates at every map entry, `Map::SendInitTransports`), so the record is evicted and
+    /// the next spawn re-asks. Cached as a negative it left every boat unarmed for the session.
+    pub(crate) fn unknown(&mut self, entry: u32) {
+        if self.templates.is_pending(entry) {
+            self.templates.insert(entry, None);
+        } else if self.templates.evict(entry) {
+            debug!("go: template {entry} invalidated by the server");
+        }
+    }
+
+    /// Records a `SMSG_GAMEOBJECT_QUERY_RESPONSE`.
     pub(crate) fn insert(&mut self, entry: u32, type_id: u32, name: String, data: &[i32; 24]) {
         let lock_id = go_lock_slot(type_id)
             .and_then(|slot| data.get(slot))

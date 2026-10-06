@@ -372,12 +372,17 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
 fn on_gameobject_info(In(ev): In<SessionEvent>, mut sc: Scene) {
     if let SessionEvent::GameObjectInfo {
         entry,
+        known,
         type_id,
         display_id,
         name,
         data,
     } = ev
     {
+        if !known {
+            sc.go_templates.unknown(entry);
+            return;
+        }
         gameobject_info(
             entry,
             type_id,

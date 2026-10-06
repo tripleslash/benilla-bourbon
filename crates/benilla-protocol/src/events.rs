@@ -387,9 +387,11 @@ pub enum SessionEvent {
         racial_leader: bool,
     },
     /// `SMSG_GAMEOBJECT_QUERY_RESPONSE`, keyed by template `entry`; `data` is the type-specific
-    /// raw tail. An unknown entry still fires, every field zero or empty.
+    /// raw tail. An unknown entry (the lone `entry | 0x8000_0000`) still fires, `known` false and
+    /// every other field zero or empty.
     GameObjectInfo {
         entry: u32,
+        known: bool,
         type_id: u32,
         display_id: u32,
         name: String,
