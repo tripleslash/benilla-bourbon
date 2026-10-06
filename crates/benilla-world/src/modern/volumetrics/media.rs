@@ -91,6 +91,8 @@ pub struct MediaInputs {
     pub fog_falloff: f32,
     /// The zone look's minimum clear range (planar yd), open air only.
     pub fog_clear: f32,
+    /// fork: the zone look's room-fog reach (>1 = clearer): divides a building's MFOG extinction.
+    pub room_reach: f32,
 }
 
 /// The solved medium, in the units `froxelfog.wgsl` reads.
@@ -157,7 +159,7 @@ pub fn solve(i: &MediaInputs) -> Media {
     let wall_density = if i.underwater {
         WALL_TAU / wall_span
     } else {
-        (WALL_TAU / wall_span).min(ROOM_MAX_DENSITY)
+        (WALL_TAU / wall_span).min(ROOM_MAX_DENSITY) / i.room_reach.max(0.05)
     };
     let walled = if i.underwater { 1.0 } else { interior };
     let density = open_density + (wall_density - open_density) * walled;
@@ -246,6 +248,7 @@ mod tests {
             fog_tint: [1.0; 3],
             fog_falloff: HEIGHT_FALLOFF,
             fog_clear: 0.0,
+            room_reach: 1.0,
         }
     }
 
@@ -439,6 +442,7 @@ mod tests {
             fog_tint: [1.0; 3],
             fog_falloff: HEIGHT_FALLOFF,
             fog_clear: 0.0,
+            room_reach: 1.0,
         };
         let m = solve(&i);
         for c in 0..3 {

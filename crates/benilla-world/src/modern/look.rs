@@ -74,6 +74,8 @@ pub struct ZoneLook {
     /// fork: the night air's glow (`volumetrics::NIGHT_GLOW`) as a share: an ordinary zone's night
     /// stays clear, a dark zone's air glows grey.
     pub night_glow: f32,
+    /// fork: how far a building's own fog (its MFOG) reaches against its authored span (>1 = clearer).
+    pub room_reach: f32,
 }
 
 impl ZoneLook {
@@ -105,6 +107,7 @@ impl ZoneLook {
         ground_fog: 0.0,
         night_banks: 0.25,
         night_glow: 0.33,
+        room_reach: 1.0,
     };
 
     fn lerp(self, to: Self, t: f32) -> Self {
@@ -133,6 +136,7 @@ impl ZoneLook {
             ground_fog: m(self.ground_fog, to.ground_fog),
             night_banks: m(self.night_banks, to.night_banks),
             night_glow: m(self.night_glow, to.night_glow),
+            room_reach: m(self.room_reach, to.room_reach),
         }
     }
 
@@ -156,6 +160,7 @@ impl ZoneLook {
             && d(self.ground_fog, other.ground_fog)
             && d(self.night_banks, other.night_banks)
             && d(self.night_glow, other.night_glow)
+            && d(self.room_reach, other.room_reach)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -193,6 +198,61 @@ impl ZoneLook {
     };
 }
 
+impl ZoneLook {
+    /// fork: **the cold look.** Dun Morogh's calibration (Kharanos at noon, approved in the viewer),
+    /// for the snow zones: a blue key, fog, sky and haze over the snow, the far ridges set in a
+    /// blue haze while the near field stays crisp, and a brighter exposure for the snow.
+    pub const COLD: Self = Self {
+        fill: 1.0,
+        exposure: 1.22,
+        haze: 0.004,
+        forward: 0.6,
+        key_scatter: 0.6,
+        glow: [0.72, 0.88, 1.18],
+        haze_tint: [0.42, 0.68, 1.28],
+        fog_reach: 0.38,
+        fog_tint: [0.58, 0.82, 1.32],
+        sky_tint: [0.6, 0.84, 1.32],
+        fog_clear: 250.0,
+        shafts: 0.25,
+        contrast: 1.1,
+        saturation: 1.0,
+        vignette: 0.28,
+        key_tint: [0.72, 0.9, 1.2],
+        ..Self::NEUTRAL
+    };
+}
+
+impl ZoneLook {
+    /// fork: **Ironforge.** The city is one hall under the mountain, whose MFOG filled it with a blue
+    /// wash at Cinematic: the room fog reaches three times its authored span, the shaft haze is near
+    /// cleared with a faint forge-warm tint, and the exposure lifts the hall (approved in the viewer).
+    pub const IRONFORGE: Self = Self {
+        fill: 1.05,
+        exposure: 1.3,
+        haze: 0.0008,
+        key_scatter: 0.4,
+        haze_tint: [1.0, 0.92, 0.82],
+        fog_reach: 1.5,
+        fog_clear: 900.0,
+        shafts: 0.15,
+        contrast: 1.08,
+        saturation: 0.95,
+        vignette: 0.2,
+        toe: 1.0,
+        night_banks: 0.0,
+        night_glow: 0.0,
+        room_reach: 3.0,
+        ..Self::NEUTRAL
+    };
+}
+
+/// `AreaTable.dbc` zone id that takes [`ZoneLook::IRONFORGE`].
+const IRONFORGE_ZONE: u32 = 1537;
+
+/// `AreaTable.dbc` zone ids that take [`ZoneLook::COLD`]: Dun Morogh, Winterspring, Alterac Valley and the Alterac Mountains.
+const COLD_ZONES: &[u32] = &[1, 618, 2597, 36];
+
 /// `AreaTable.dbc` zone ids that take [`ZoneLook::EERIE`]: Duskwood, Silverpine Forest, Tirisfal
 /// Glades, Deadwind Pass, the Western and Eastern Plaguelands, Swamp of Sorrows and Felwood, and
 /// Turtle WoW's Gilneas and Gilneas City.
@@ -201,6 +261,10 @@ const EERIE_ZONES: &[u32] = &[10, 130, 85, 41, 28, 139, 8, 361, 5179, 5208];
 pub fn look_for_zone(zone: u32) -> ZoneLook {
     if EERIE_ZONES.contains(&zone) {
         ZoneLook::EERIE
+    } else if zone == IRONFORGE_ZONE {
+        ZoneLook::IRONFORGE
+    } else if COLD_ZONES.contains(&zone) {
+        ZoneLook::COLD
     } else {
         ZoneLook::NEUTRAL
     }
@@ -348,7 +412,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -389,6 +453,7 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.ground_fog, 30);
     set(&mut look.night_banks, 31);
     set(&mut look.night_glow, 32);
+    set(&mut look.room_reach, 33);
     look
 }
 
@@ -470,6 +535,8 @@ mod tests {
         for (zone, look, band) in [
             (0, ZoneLook::NEUTRAL, 6.0..=10.0),
             (10, ZoneLook::EERIE, 6.0..=25.0),
+            (1, ZoneLook::COLD, 6.0..=10.0),
+            (1537, ZoneLook::IRONFORGE, 6.0..=10.0),
         ] {
             let r = key_to_fill(look);
             assert!(band.contains(&r), "zone {zone}: {r:.2}:1");
@@ -493,6 +560,18 @@ mod tests {
             let d = look_for_zone(*zone);
             assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
             assert!(d.exposure < ZoneLook::NEUTRAL.exposure);
+        }
+    }
+
+    /// The snow zones' key, fog and sky lean blue.
+    #[test]
+    fn the_snow_zones_are_cold() {
+        for zone in COLD_ZONES {
+            let c = look_for_zone(*zone);
+            assert_eq!(c, ZoneLook::COLD, "zone {zone}");
+            for tint in [c.key_tint, c.fog_tint, c.sky_tint, c.haze_tint] {
+                assert!(tint[2] > 1.0 && tint[0] < tint[1] && tint[1] < tint[2], "zone {zone}");
+            }
         }
     }
 

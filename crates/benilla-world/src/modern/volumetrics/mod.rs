@@ -500,6 +500,7 @@ fn update_volume(
             fog_tint: look.0.fog_tint,
             fog_falloff: look.0.fog_falloff,
             fog_clear: look.0.fog_clear,
+            room_reach: look.0.room_reach,
         };
     let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
     // fork: the lamp halos' air — the same zone solved in clear weather, so rain and storms neither
