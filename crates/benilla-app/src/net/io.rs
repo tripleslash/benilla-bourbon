@@ -224,6 +224,10 @@ pub(super) struct NetHandles {
 /// Spawns the sequencer with its park and cycle loop: natively on a read thread beside the one
 /// long-lived write thread, on wasm32 as a `spawn_local` task.
 pub(super) fn spawn_net(connect: bool) -> NetHandles {
+    // The outbound opcode trace (tag `out`), armed before any thread can send.
+    if benilla_assets::trace::enabled_for("out") {
+        benilla_protocol::observe_sends(trace_out);
+    }
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (pick_tx, pick_rx) = async_channel::unbounded::<CharRequest>();
@@ -880,19 +884,16 @@ fn refuse_once(guid: u64) -> u64 {
     }
 }
 
-/// Drains the writer's sent-packet log into the trace as `out` lines, one per packet that reached
-/// the socket; a no-op unless the `out` tag armed it. Shared with the browser's own pump
-/// (`crate::net::web_writer_pump`), which has no write thread.
-pub(super) fn trace_sends(w: &mut WorldWriter) {
-    w.drain_sent(|opcode, len| {
-        benilla_assets::trace::line(
-            "out",
-            &format!(
-                "{opcode:#06x} {} len={len}",
-                benilla_protocol::messages::opcode_name(opcode).unwrap_or("?")
-            ),
-        );
-    });
+/// One `out` trace line per client packet written to the world socket, whichever session or writer
+/// sent it: the hook [`spawn_net`] installs when the `out` tag is on.
+fn trace_out(opcode: u16, len: usize) {
+    benilla_assets::trace::line(
+        "out",
+        &format!(
+            "{opcode:#06x} {} len={len}",
+            benilla_protocol::messages::opcode_name(opcode).unwrap_or("?")
+        ),
+    );
 }
 
 /// The write thread: app commands, writer swaps and the [`PING_INTERVAL`] keepalive. With no live
@@ -913,11 +914,7 @@ fn writer_loop(
     loop {
         crossbeam_channel::select! {
             recv(writer_rx) -> w => match w {
-                Ok(mut w) => {
-                    // Arm the outbound opcode trace (tag `out`); a fresh socket starts a fresh log.
-                    if benilla_assets::trace::enabled_for("out") {
-                        w.watch_sends();
-                    }
+                Ok(w) => {
                     writer = Some(w);
                     warned = 0;
                     // Sequence 1 is the new socket's first ping, so an old socket's pong cannot
@@ -954,7 +951,6 @@ fn writer_loop(
                             warned += 1;
                         }
                     }
-                    trace_sends(w);
                 }
             },
             recv(cmd_rx) -> cmd => {
@@ -985,8 +981,6 @@ fn writer_loop(
                         warned += 1;
                     }
                 }
-                // What reached the socket, by name (tag `out`); one command can be several packets.
-                trace_sends(w);
             },
         }
     }

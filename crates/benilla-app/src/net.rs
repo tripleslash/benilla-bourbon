@@ -215,12 +215,7 @@ pub(crate) struct WebWriter {
 #[cfg(target_arch = "wasm32")]
 fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingShared>) {
     let web = &mut *web;
-    while let Ok(mut w) = web.writer_rx.try_recv() {
-        // The outbound opcode trace (tag `out`), armed per connection exactly as the native write
-        // thread arms it — a fresh socket starts a fresh log.
-        if benilla_assets::trace::enabled_for("out") {
-            w.watch_sends();
-        }
+    while let Ok(w) = web.writer_rx.try_recv() {
         web.writer = Some(w);
         web.warned = 0;
         web.last_ping = time.elapsed_secs_f64();
@@ -249,7 +244,6 @@ fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingSh
             }
         }
     }
-    io::trace_sends(writer);
     let now = time.elapsed_secs_f64();
     if now - web.last_ping >= io::PING_INTERVAL.as_secs_f64() {
         web.last_ping = now;
@@ -265,7 +259,6 @@ fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingSh
                 web.warned += 1;
             }
         }
-        io::trace_sends(writer);
     }
 }
 

@@ -840,7 +840,6 @@ impl WorldSession {
                 writer,
                 encrypter,
                 chat_language: self.chat_language,
-                sent: None,
             },
         ))
     }
