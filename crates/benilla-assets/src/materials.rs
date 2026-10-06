@@ -687,6 +687,21 @@ impl MaterialExtension for LiquidCataExt {
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
     }
+
+    /// As [`LiquidExt`]'s: `sky_order::WATER_BIAS` is a sort rung, kept out of the rasterizer. As a
+    /// depth-bias constant it sinks the surface in reversed-Z, and whatever stands just under the
+    /// water wins the depth test and draws unshaded by it.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(ds) = descriptor.depth_stencil.as_mut() {
+            ds.bias.constant = 0;
+        }
+        Ok(())
+    }
 }
 
 impl MaterialExtension for LiquidExt {
