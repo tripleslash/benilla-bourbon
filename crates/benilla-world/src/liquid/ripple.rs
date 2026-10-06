@@ -146,8 +146,22 @@ const WIND_RADIUS: f32 = 0.8;
 const WIND_AMPLITUDE: f32 = 0.09;
 const RAIN_SPREAD: f32 = 50.0;
 
-/// The intensity below which rain makes no ripples — the reference's `> 0.2` gate.
+/// The density from which rain rings the water at its full rate — the reference's `> 0.2` gate.
+///
+/// Deviation: the reference emits nothing at or below it, which leaves a light rain (a server's
+/// intensity under 0.4, a density under 0.2) falling into still water. Below it the drop count
+/// here falls off with the density instead, so every rain that draws drops rings in proportion.
 const RAIN_MIN_DENSITY: f32 = 0.2;
+
+/// Rain drops this step at `density`: [`RAIN_DROPS`] past [`RAIN_MIN_DENSITY`], a linear share of
+/// it below, none without rain.
+fn rain_drops(density: f32) -> usize {
+    if density <= 0.0 {
+        return 0;
+    }
+    let share = (density / RAIN_MIN_DENSITY).min(1.0);
+    (RAIN_DROPS as f32 * share).ceil() as usize
+}
 
 /// A wading body's radius and amplitude.
 ///
@@ -551,9 +565,7 @@ pub(super) fn collect_stamps(
     let Some(weather) = weather else {
         return;
     };
-    if weather.effect_kind != crate::weather::WeatherKind::Rain
-        || weather.effect_density <= RAIN_MIN_DENSITY
-    {
+    if weather.effect_kind != crate::weather::WeatherKind::Rain {
         return;
     }
     let Ok(cam) = camera.single() else {
@@ -561,7 +573,7 @@ pub(super) fn collect_stamps(
     };
     let budget = MAX_STAMPS
         .saturating_sub(field.stamps.len())
-        .min(RAIN_DROPS);
+        .min(rain_drops(weather.effect_density));
     for _ in 0..budget {
         // A cheap LCG rather than `rand`: this runs every step and wants no allocation, no thread
         // local and no reproducibility contract beyond "different every drop".
