@@ -23,6 +23,12 @@ webgl2 = ["bevy/webgl2"]
 # fork: perf — Bevy's per-system spans, summed by `system_profile` (`WOW_SYSTEM_PROFILE=1`). Off in
 # every shipped build; `cargo build -p benilla-worldview --features trace_systems` for a profile.
 trace_systems = ["bevy/trace"]
+# Tuning only: every embedded shader (`embedded_asset!`, `load_shader_library!`) is re-read from the
+# source tree when its file is saved, and the pipelines that use it recompile in the running app.
+# Native dev builds only, in no default set; `cargo build -p benilla-worldview --features shader_reload`.
+# The watcher resolves each shader's `file!()` path against Bevy's asset root, which for a binary
+# launched by hand is the binary's own folder: run with `BEVY_ASSET_ROOT=<the repo root>`.
+shader_reload = ["bevy/embedded_watcher"]
 webgpu = ["bevy/webgpu"]
 
 [dependencies]

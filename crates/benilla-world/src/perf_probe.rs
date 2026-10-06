@@ -187,10 +187,30 @@ fn warmup() -> u32 {
         .unwrap_or(WARMUP_FRAMES)
 }
 
+/// `WOW_PERF_LOOP=1` — keep sampling: after each window's lines the probe starts the next window,
+/// numbering them in the `cfg=` column (`base#3`). With the `shader_reload` feature a saved shader
+/// discards the window in flight and waits [`RELOAD_SKIP_FRAMES`] for the pipelines to recompile,
+/// so each printed window is wholly before or wholly after an edit.
+fn looping() -> bool {
+    crate::launch_env::var("WOW_PERF_LOOP").as_deref() == Some("1")
+}
+
+/// Frames a looping probe skips after a shader reload: the recompiles land over the next few.
+const RELOAD_SKIP_FRAMES: u32 = 30;
+
 /// `WOW_PERF_LABEL=<text>` — what to call this configuration in the line's `cfg=` column. The
 /// sweep sets it per leg; by hand it is whatever names the ablation ("`ssao0`", "`base`").
 fn label() -> String {
     crate::launch_env::var("WOW_PERF_LABEL").unwrap_or_else(|| "base".to_string())
+}
+
+/// The `cfg=` column for window `round` (numbered only when looping).
+fn window_label(round: u32) -> String {
+    if looping() {
+        format!("{}#{round}", label())
+    } else {
+        label()
+    }
 }
 
 /// The probe's sample window.
@@ -223,6 +243,12 @@ struct ProbeRun {
     /// span, the frames those readings covered, and the newest reading already folded.
     passes: PassSums,
     done: bool,
+    /// The window being sampled, counted from 0 (`WOW_PERF_LOOP`).
+    round: u32,
+    /// A shader was saved mid-window (`shader_reload`): drop the window and start over.
+    restart: bool,
+    /// Frames still skipped after a restart.
+    skip: u32,
 }
 
 /// The sample window's per-pass GPU sums, read out of bevy's render diagnostics — the same
@@ -232,6 +258,9 @@ struct ProbeRun {
 #[derive(Default)]
 struct PassSums {
     ms: std::collections::BTreeMap<String, f64>,
+    /// Fragment-shader invocations summed per top-level pass (`render/<pass>/fragment_shader_invocations`,
+    /// a pass span's pipeline-statistics query; absent on a device without them).
+    frags: std::collections::BTreeMap<String, f64>,
     frames: u32,
     seen: Option<bevy::platform::time::Instant>,
 }
@@ -241,20 +270,29 @@ impl PassSums {
         let mut newest = self.seen;
         let mut times: Vec<bevy::platform::time::Instant> = Vec::new();
         for diagnostic in store.iter() {
-            let Some(pass) = diagnostic
+            let Some((pass, stat)) = diagnostic
                 .path()
                 .as_str()
                 .strip_prefix("render/")
-                .and_then(|p| p.strip_suffix("/elapsed_gpu"))
-                .filter(|p| !p.contains('/'))
+                .and_then(|p| p.rsplit_once('/'))
+                .filter(|(p, _)| !p.contains('/'))
             else {
                 continue;
+            };
+            let timed = stat == "elapsed_gpu";
+            let sums = match stat {
+                "elapsed_gpu" => &mut self.ms,
+                "fragment_shader_invocations" => &mut self.frags,
+                _ => continue,
             };
             for m in diagnostic
                 .measurements()
                 .filter(|m| self.seen.is_none_or(|s| m.time > s))
             {
-                *self.ms.entry(pass.to_string()).or_default() += m.value;
+                *sums.entry(pass.to_string()).or_default() += m.value;
+                if !timed {
+                    continue;
+                }
                 if !times.contains(&m.time) {
                     times.push(m.time);
                 }
@@ -271,6 +309,7 @@ impl PassSums {
     fn mark(&mut self, store: &bevy::diagnostic::DiagnosticsStore) {
         self.fold(store);
         self.ms.clear();
+        self.frags.clear();
         self.frames = 0;
     }
 
@@ -296,6 +335,21 @@ impl PassSums {
             each.join(" ")
         ))
     }
+
+    /// Fragment-shader invocations per frame per screen pixel, per pass, highest first: how many
+    /// times the pass shaded each pixel of a `px`-pixel view. A pass that shades every pixel once
+    /// reads 1.0; above it is overdraw (an offscreen pass's figure is its own size over the
+    /// screen's).
+    fn overdraw_line(&self, px: u64) -> Option<String> {
+        if self.frames == 0 || px == 0 || self.frags.is_empty() {
+            return None;
+        }
+        let per = f64::from(self.frames) * px as f64;
+        let mut rows: Vec<(&String, f64)> = self.frags.iter().map(|(k, v)| (k, *v / per)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let each: Vec<String> = rows.iter().map(|(k, v)| format!("{k}={v:.3}")).collect();
+        Some(format!("px={px} {}", each.join(" ")))
+    }
 }
 
 pub struct PerfProbePlugin;
@@ -315,6 +369,9 @@ impl Plugin for PerfProbePlugin {
             samples: Vec::with_capacity(want as usize),
             passes: PassSums::default(),
             done: false,
+            round: 0,
+            restart: false,
+            skip: 0,
         })
         // `Startup`, not the plugin body: the primary window does not exist until `WindowPlugin`
         // has run, and on the web its physical size is the canvas's, which winit fills in later
@@ -322,6 +379,27 @@ impl Plugin for PerfProbePlugin {
         .add_systems(Startup, apply_superscale)
         // `Last`, so the sample covers the whole frame the way `Time<Real>`'s own delta does.
         .add_systems(Last, sample);
+        #[cfg(feature = "shader_reload")]
+        app.add_systems(Last, note_shader_reload.before(sample));
+    }
+}
+
+/// A saved shader restarts the window in flight (`WOW_PERF_LOOP`).
+#[cfg(feature = "shader_reload")]
+fn note_shader_reload(
+    mut events: MessageReader<AssetEvent<Shader>>,
+    assets: Res<AssetServer>,
+    mut run: ResMut<ProbeRun>,
+) {
+    for event in events.read() {
+        if let AssetEvent::Modified { id } = event {
+            let path = assets.get_path(*id).map(|p| p.to_string());
+            info!(
+                "perf probe: shader reloaded ({}) — restarting the window",
+                path.as_deref().unwrap_or("?")
+            );
+            run.restart = true;
+        }
     }
 }
 
@@ -405,6 +483,20 @@ fn sample(
     }
 
     // Phase 3 — the measurement.
+    if std::mem::take(&mut run.restart) {
+        run.samples.clear();
+        run.skip = RELOAD_SKIP_FRAMES;
+        return;
+    }
+    if run.skip > 0 {
+        run.skip -= 1;
+        if run.skip == 0 {
+            if let Some(store) = diagnostics.as_deref() {
+                run.passes.mark(store);
+            }
+        }
+        return;
+    }
     let dt = time.delta_secs() * 1000.0;
     // A zero or absurd delta is a tab that was backgrounded or a frame the browser skipped —
     // neither is a measurement of this configuration.
@@ -419,14 +511,30 @@ fn sample(
     }
     run.done = true;
     let settled = run.settled;
+    let cfg = window_label(run.round);
     emit(
+        &cfg,
         &run.samples,
         settled,
         windows.single().ok(),
         adapter.as_deref(),
     );
     if let Some(line) = run.passes.line() {
-        info!("PERF_PASSES cfg={} {line}", label());
+        info!("PERF_PASSES cfg={cfg} {line}");
+    }
+    let px = windows.single().map_or(0, |w| {
+        u64::from(w.resolution.physical_width()) * u64::from(w.resolution.physical_height())
+    });
+    if let Some(line) = run.passes.overdraw_line(px) {
+        info!("PERF_OVERDRAW cfg={cfg} {line}");
+    }
+    if looping() {
+        run.done = false;
+        run.round += 1;
+        run.samples.clear();
+        if let Some(store) = diagnostics.as_deref() {
+            run.passes.mark(store);
+        }
     }
 }
 
@@ -441,6 +549,7 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 }
 
 fn emit(
+    cfg: &str,
     samples: &[f32],
     settled: bool,
     window: Option<&Window>,
@@ -476,7 +585,7 @@ fn emit(
         "PERF_PROBE cfg={} frames={} px={}x{} scale={:.2} \
          min_ms={:.2} mean_ms={:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} \
          fps={:.1} railed={} settled={} gpu={}",
-        label(),
+        cfg,
         s.len(),
         px.x,
         px.y,
@@ -498,8 +607,7 @@ fn emit(
              {RAIL_SLACK_MS} ms of the run's fastest frame. Ablation deltas read off this row are \
              meaningless (decision 0717). Raise WOW_SUPERSCALE until railed=no, or on native run \
              with WOW_NOVSYNC=1.",
-            label(),
-            p50,
+            cfg, p50,
         );
     }
 }
@@ -507,6 +615,22 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two frames of a 100-pixel view: a pass that shaded 200 fragments shaded each pixel once.
+    #[test]
+    fn overdraw_is_fragments_per_frame_per_pixel() {
+        let mut sums = PassSums {
+            frames: 2,
+            ..default()
+        };
+        sums.frags.insert("main_opaque_pass_3d".into(), 500.0);
+        sums.frags.insert("static_gx".into(), 200.0);
+        assert_eq!(
+            sums.overdraw_line(100).as_deref(),
+            Some("px=100 main_opaque_pass_3d=2.500 static_gx=1.000")
+        );
+        assert_eq!(sums.overdraw_line(0), None);
+    }
 
     #[test]
     fn percentiles_are_nearest_rank() {

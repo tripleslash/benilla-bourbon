@@ -16,6 +16,8 @@ dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:be
 tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
+# Tuning only: embedded shaders reload from the source tree on save (`benilla-world`'s).
+shader_reload = ["benilla-world/shader_reload"]
 # Browser render backend, forwarded from `wenilla` (see benilla-world's note on why the world
 # needs WebGPU).
 webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
