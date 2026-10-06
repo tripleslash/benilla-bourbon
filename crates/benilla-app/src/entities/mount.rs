@@ -66,7 +66,9 @@ pub(super) fn spawn_mount_child(
         commands.entity(child).insert(super::equipment::Reattached);
     }
     commands.entity(host).add_child(child);
-    commands.entity(host).insert(MountChild(child));
+    // `try_`: the host may be torn down in the same frame this build runs (a battleground's
+    // stream churn), and a plain insert would panic where `despawn` only warns.
+    commands.entity(host).try_insert(MountChild(child));
     child
 }
 

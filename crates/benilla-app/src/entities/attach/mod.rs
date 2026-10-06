@@ -140,7 +140,7 @@ fn setup_skinned_instance(
         if let Some(drive) =
             benilla_world::rig_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
-            commands.entity(entity).insert(drive);
+            commands.entity(entity).try_insert(drive);
         }
     }
     Some(RigBuild { pose, slot })
@@ -175,14 +175,14 @@ fn arm_sequence_clock(
             }
         }
     }
-    commands.entity(entity).insert((
+    commands.entity(entity).try_insert((
         player,
         AnimationGraphHandle(anims.graph.clone()),
         anims.clone(),
     ));
     match kind {
         EntityKind::GameObject if go_state_machine => {
-            commands.entity(entity).insert((
+            commands.entity(entity).try_insert((
                 // Cross-fades each transition over the clip's blend-in time, from the seed.
                 transitions,
                 crate::go_anim::GoAnim::default(),
@@ -195,13 +195,13 @@ fn arm_sequence_clock(
         EntityKind::Corpse => {
             commands
                 .entity(entity)
-                .insert(AnimationTransitions::new())
+                .try_insert(AnimationTransitions::new())
                 .remove::<benilla_world::rig_anim::AnimParked>();
         }
         _ => {
             commands
                 .entity(entity)
-                .insert((
+                .try_insert((
                     // Cross-fades over each clip's blend-in time, so a gait change eases.
                     AnimationTransitions::new(),
                     AnimDriver::default(),
@@ -568,7 +568,7 @@ pub(super) fn attach_entity_visuals(
                 for m in &d.markers {
                     markers.entry(m.ident).or_insert((m.bone, m.offset));
                 }
-                commands.entity(entity).insert(super::BoneAttach {
+                commands.entity(entity).try_insert(super::BoneAttach {
                     points: d
                         .attachments
                         .iter()
@@ -587,7 +587,7 @@ pub(super) fn attach_entity_visuals(
                 if spine.is_some() || head.is_some() {
                     commands
                         .entity(entity)
-                        .insert(crate::creature_anim::BodyTwist::new(spine, head));
+                        .try_insert(crate::creature_anim::BodyTwist::new(spine, head));
                 }
             }
             // The worn geoset selectors, the helm's hide-mask rows included (`0x4799a0`).
@@ -645,7 +645,7 @@ pub(super) fn attach_entity_visuals(
                 .map(|c| bevy::camera::primitives::Aabb::from_min_max(c.bounds_min, c.bounds_max))
                 .or_else(|| union_aabb(model.unwrap_or_default().iter().filter_map(|p| p.aabb)));
             if let Some(aabb) = election_bound {
-                commands.entity(entity).insert(super::ModelBound(aabb));
+                commands.entity(entity).try_insert(super::ModelBound(aabb));
             }
             // A billboard card rides its live joint, so card anchors resolve here, over the spawn
             // loop's geoset predicate: a hidden variant's card bone spawns no anchor.
@@ -737,10 +737,10 @@ pub(super) fn attach_entity_visuals(
             if let (EntityKind::Player, Some(e)) = (net.kind, equipment) {
                 commands
                     .entity(entity)
-                    .insert(super::equipment::AppliedEquipment(*e));
+                    .try_insert(super::equipment::AppliedEquipment(*e));
             }
             // The camera's framing pivot, model-local, before scale.
-            commands.entity(entity).insert(CameraPivot {
+            commands.entity(entity).try_insert(CameraPivot {
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
                 mounted_delta_local: dm.map(|d| d.mounted_pivot_delta_local).unwrap_or(0.0),
                 seat_z_local: dm.map(|d| d.mount_seat_z_local).unwrap_or(0.0),
@@ -749,15 +749,15 @@ pub(super) fn attach_entity_visuals(
                 swim_drop_local: dm.map(|d| d.swim_pivot_drop_local).unwrap_or(0.0),
             });
             // The overhead fallback for a model with no PlayerName attachment (`0x608640`).
-            commands.entity(entity).insert(super::OverheadFallback(
+            commands.entity(entity).try_insert(super::OverheadFallback(
                 dm.map(|d| d.bbox_z_local).unwrap_or(0.0),
             ));
             // The chat bubble's height: the Stand box's Z, not the posed PlayerName attachment.
-            commands.entity(entity).insert(super::StandBoxHeight(
+            commands.entity(entity).try_insert(super::StandBoxHeight(
                 dm.map(|d| d.stand_box_z_local).unwrap_or(0.0),
             ));
             // The selection ring's model-local radius, scaled by the unit's scale.
-            commands.entity(entity).insert(SelectionRadius(
+            commands.entity(entity).try_insert(SelectionRadius(
                 dm.map(|d| d.ground_radius_local).unwrap_or(0.0),
             ));
             // Emitters ride their host bone's anchor, origin rebased into the bone frame
@@ -948,7 +948,7 @@ pub(super) fn attach_entity_visuals(
             }
             // The pose lands last, with every anchor the build resolved into it.
             if let Some(rb) = skin {
-                commands.entity(entity).insert(rb.pose);
+                commands.entity(entity).try_insert(rb.pose);
             }
             // A GameObject with a hull collides; an anchored transport stays Kinematic, as its arm
             // labelled it, since its body moves every frame.
@@ -959,7 +959,7 @@ pub(super) fn attach_entity_visuals(
                     } else {
                         RigidBody::Static
                     };
-                    commands.entity(entity).insert((body, col));
+                    commands.entity(entity).try_insert((body, col));
                     // This lane bypasses the streamer's attach queue, so it stamps the collider
                     // set itself.
                     collider_epoch.bump();
@@ -1025,11 +1025,11 @@ pub(super) fn attach_entity_visuals(
                 .map_or(0, |s| s.0.unit_mount_display_id());
             commands
                 .entity(entity)
-                .insert(super::mount::AppliedMount(applied));
+                .try_insert(super::mount::AppliedMount(applied));
         }
         commands
             .entity(entity)
-            .insert(VisualAttached)
+            .try_insert(VisualAttached)
             // The display the visual was built with, for `refresh_live_display` to diff.
             .insert(super::live_display::AppliedDisplay(net.display_id))
             .remove::<(
