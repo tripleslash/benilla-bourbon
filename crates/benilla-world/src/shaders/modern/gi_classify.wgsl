@@ -81,7 +81,7 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     // normal bias it samples along, are inside it — and every probe within those two spacings of
     // the camera. Four periods stay coprime with the 7 (every tier's period is 3·2^k·…), so the
     // schedule still visits every probe.
-    let spacing = g.grid[cascade].w;
+    let spacing = probegi::grid_row(g, cascade).w;
     let d = probegi::probe_pos(g, cascade, w) - trace.cam.xyz;
     let dist = length(d);
     let margin = 2.0 * spacing;

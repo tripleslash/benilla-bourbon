@@ -27,11 +27,20 @@ pub(crate) fn plugin(app: &mut App) {
 /// loaded so an `#import` of them resolves (`FORK.md`). Called by
 /// [`crate::modern::ModernLightingPlugin`]; lives here for the same path reason as [`plugin`].
 pub(crate) fn modern_libraries(app: &mut App) {
+    // fork: perf — `$WOW_MODERN_ARRAYINDEX=1` (an A/B lever, read once) builds the two libraries
+    // that hold an array inside a by-value struct with the computed index they had before
+    // (`sunshadow::cascade_clip`, `probegi::grid_row`).
+    let array_index = crate::launch_env::var("WOW_MODERN_ARRAYINDEX").as_deref() == Some("1");
+    let block_defs = move |settings: &mut bevy::shader::ShaderSettings| {
+        if array_index {
+            settings.shader_defs.push("MODERN_ARRAY_INDEX".into());
+        }
+    };
     bevy::shader::load_shader_library!(app, "shaders/modern/color.wgsl");
     bevy::shader::load_shader_library!(app, "shaders/modern/frame.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/modern/sunshadow.wgsl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/sunshadow.wgsl", block_defs);
     bevy::shader::load_shader_library!(app, "shaders/modern/froxelfog.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/modern/probegi.wgsl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/probegi.wgsl", block_defs);
     bevy::shader::load_shader_library!(app, "shaders/modern/locallight.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");

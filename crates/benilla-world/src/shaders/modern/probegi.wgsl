@@ -39,6 +39,33 @@ struct GiParams {
     spare: array<vec4<f32>, 9>,
 }
 
+// Cascade `c`'s grid row, picked by constant index: `g` is a by-value copy, and a computed index
+// into an array inside a value is a copy of the array per call (`sunshadow::cascade_clip`, whose
+// A/B lever `MODERN_ARRAY_INDEX` this shares).
+fn grid_row(g: GiParams, c: u32) -> vec4<f32> {
+#ifdef MODERN_ARRAY_INDEX
+    return g.grid[c];
+#else
+    switch c {
+        case 0u: {
+            return g.grid[0];
+        }
+        case 1u: {
+            return g.grid[1];
+        }
+        case 2u: {
+            return g.grid[2];
+        }
+        case 3u: {
+            return g.grid[3];
+        }
+        default: {
+            return g.grid[4];
+        }
+    }
+#endif
+}
+
 fn interior_grid(g: GiParams) -> bool {
     return (u32(g.interior.w) & 1u) != 0u;
 }
@@ -127,7 +154,7 @@ fn slot_probe(g: GiParams, c: u32, slot: u32) -> vec3<i32> {
     let s = i32(slot);
     let n = vec3<i32>(g.dims.xyz);
     let texel = vec3<i32>(s % n.x, (s / n.x) % n.y, s / (n.x * n.y));
-    let base = vec3<i32>(g.grid[c].xyz);
+    let base = vec3<i32>(grid_row(g, c).xyz);
     return base + vec3<i32>(
         wrap(texel.x - base.x, n.x),
         wrap(texel.y - base.y, n.y),
@@ -136,7 +163,7 @@ fn slot_probe(g: GiParams, c: u32, slot: u32) -> vec3<i32> {
 }
 
 fn probe_pos(g: GiParams, c: u32, w: vec3<i32>) -> vec3<f32> {
-    return vec3<f32>(w) * g.grid[c].w;
+    return vec3<f32>(w) * grid_row(g, c).w;
 }
 
 // Where a world point falls in one cascade: the low corner of its probe cell, the trilinear
@@ -153,11 +180,11 @@ struct GiPick {
 }
 
 fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -> GiPick {
-    let spacing = g.grid[c].w;
+    let spacing = grid_row(g, c).w;
     let n = g.dims.xyz;
     // Sampled a little along the normal, so a surface never interpolates the probe behind it.
     let biased = p + nrm * (spacing * g.params.w);
-    let f = biased / spacing - g.grid[c].xyz;
+    let f = biased / spacing - grid_row(g, c).xyz;
     let lo = floor(f);
     // One cell of margin on each side keeps the trilinear footprint inside the cascade, and the
     // outermost cell fades so the next cascade can take the remainder.
@@ -166,7 +193,7 @@ fn pick(g: GiParams, c: u32, p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32) -
     out.cascade = c;
     out.spacing = spacing;
     out.recv = clamp(recv_interior, 0.0, 1.0);
-    out.base = vec3<i32>(clamp(lo, vec3<f32>(0.0), n - vec3<f32>(2.0))) + vec3<i32>(g.grid[c].xyz);
+    out.base = vec3<i32>(clamp(lo, vec3<f32>(0.0), n - vec3<f32>(2.0))) + vec3<i32>(grid_row(g, c).xyz);
     out.frac = clamp(f - lo, vec3<f32>(0.0), vec3<f32>(1.0));
     out.inside = clamp((edge - 0.5) / CASCADE_FADE, 0.0, 1.0);
     return out;
@@ -284,9 +311,9 @@ fn nearest_index(g: GiParams, p: vec3<f32>) -> vec2<f32> {
     let n = g.dims.xyz;
     let count = u32(g.dims.w);
     for (var c = 0u; c < count; c = c + 1u) {
-        let f = p / g.grid[c].w - g.grid[c].xyz;
+        let f = p / grid_row(g, c).w - grid_row(g, c).xyz;
         if (all(f >= vec3<f32>(0.0)) && all(f <= n - vec3<f32>(1.0))) {
-            let w = vec3<i32>(round(f)) + vec3<i32>(g.grid[c].xyz);
+            let w = vec3<i32>(round(f)) + vec3<i32>(grid_row(g, c).xyz);
             return vec2<f32>(f32(probe_index(g, c, w)), 1.0);
         }
     }

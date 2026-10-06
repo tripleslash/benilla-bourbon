@@ -78,9 +78,32 @@ fn mirror_view(c: ModernCascades, eye: vec3<f32>) -> bool {
 }
 
 // Cascade `i`'s light clip.
+//
+// The columns are picked by CONSTANT index. `c` is a by-value copy, and a computed index into an
+// array inside a value has no SPIR-V form: naga writes the array to a function-local variable
+// first, on every call, and the lanes that did so ran several times slower for it (the froxel
+// scatter 10.9 -> 0.9 ms; RTX 3080 Laptop, Vulkan). `MODERN_ARRAY_INDEX` is the A/B lever
+// (`$WOW_MODERN_ARRAYINDEX=1`): the computed index again.
 fn cascade_clip(c: ModernCascades, i: u32) -> mat4x4<f32> {
+#ifdef MODERN_ARRAY_INDEX
     let k = i * 4u;
     return mat4x4<f32>(c.clip_cols[k], c.clip_cols[k + 1u], c.clip_cols[k + 2u], c.clip_cols[k + 3u]);
+#else
+    switch i {
+        case 0u: {
+            return mat4x4<f32>(c.clip_cols[0], c.clip_cols[1], c.clip_cols[2], c.clip_cols[3]);
+        }
+        case 1u: {
+            return mat4x4<f32>(c.clip_cols[4], c.clip_cols[5], c.clip_cols[6], c.clip_cols[7]);
+        }
+        case 2u: {
+            return mat4x4<f32>(c.clip_cols[8], c.clip_cols[9], c.clip_cols[10], c.clip_cols[11]);
+        }
+        default: {
+            return mat4x4<f32>(c.clip_cols[12], c.clip_cols[13], c.clip_cols[14], c.clip_cols[15]);
+        }
+    }
+#endif
 }
 
 fn cascade_visibility(
