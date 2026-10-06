@@ -483,10 +483,14 @@ fn prepare_modern_shadow(
     pipeline_cache: Res<PipelineCache>,
     mut uniforms: ResMut<CasterViewBuffer>,
     mut frame: ResMut<ModernShadowFrame>,
+    mut uploaded_plane: Option<ResMut<crate::modern::shadow::UploadedMirrorPlane>>,
 ) {
     frame.count = 0;
     frame.bind = None;
     *frame.restore_next.get_mut() = 0;
+    if let Some(plane) = uploaded_plane.as_deref_mut() {
+        plane.0 = None;
+    }
     let (Some(cascades), Some(pipes)) = (cascades, pipes) else {
         return;
     };
@@ -495,6 +499,9 @@ fn prepare_modern_shadow(
     };
     // Always uploaded, so receivers see `count == 0` in a classic frame.
     queue.write_buffer(&block.buffer, 0, &cascades.std430());
+    if let Some(plane) = uploaded_plane.as_deref_mut() {
+        plane.0 = Some(cascades.sky_params[3]);
+    }
     if cascades.count == 0 {
         return;
     }

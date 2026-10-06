@@ -185,6 +185,10 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `clouds/layer.rs` | `CloudExt.shape` / `.key` / `.haze` at uniform 102 (+ construction zeros); `CloudLayer` is `pub(crate)` | modern clouds |
 | `clouds/mod.rs` | `pub(crate) use layer::CloudLayer`; `CloudCoverage::tile`; `tick_clouds` returns before the upload in a modern frame (the image is `modern::cloud_bake`'s 512² layer) and restores the tile's size and format on the first classic frame | modern clouds |
 | `cloud.wgsl` | the modern branch: a hole returns early; the baked layer gets the silver lining (its thinness from the alpha against `shape.x`), the horizon haze's colour low in the sky, and the horizon fade | modern clouds |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: `$WOW_MODERN_ARRAYINDEX=1` adds `MODERN_ARRAY_INDEX` to the `sunshadow` and `probegi` libraries (the computed index into a by-value array, as before) | perf |
+| `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl` | modern vertex stages: one walk of the light table at most, none where the light grid answers the fragment (`point_light_gouraud` in terrain; `GxVsOut.anchor` @7 and the mirror's selection in static_gx's fragment); `MODERN_VERTEX_WALKS` restores both walks | perf |
+| `benilla-assets/src/materials.rs`, `static_gx/render.rs` | `modern_vertex_walks()` (`$WOW_MODERN_VERTEXWALKS=1`) pushes `MODERN_VERTEX_WALKS` beside `WOW_MODERN` | perf |
+| the shared light buffer (`lighting::global_light`) | row 20 `.z` / `.w` are the modern vertex hints (`modern::shadow::VERTEX_HINT_OFFSET`): `build_light_data` still packs 0, `modern::lights`' `prepare_lights` writes them in the render world after `upload_light` | perf |
 
 ## Planned hooks (not yet landed)
 

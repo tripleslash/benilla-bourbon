@@ -110,6 +110,20 @@ fn caster_reach() -> f32 {
 }
 /// `sky_params.w` while no water mirror renders: below any eye, so no view takes the mirror's tier.
 pub const NO_MIRROR_PLANE: f32 = -1.0e9;
+
+/// fork: perf — render world: the mirror plane that went into the block this frame (`static_gx`'s
+/// `prepare_modern_shadow`, where the cascades are uploaded), `None` in a frame that uploaded none.
+/// `modern::lights`' `prepare_lights` hands it to the vertex stages beside the grid's live bit
+/// ([`VERTEX_HINT_OFFSET`]).
+#[derive(Resource, Default)]
+pub(crate) struct UploadedMirrorPlane(pub Option<f32>);
+
+/// fork: perf — where the vertex stages' two facts sit in the shared light buffer: row 20's `.z`
+/// (1 = the block's light grid is live this frame, and `.w` is valid) and `.w` (the block's mirror
+/// plane, `sky_params.w`). `wow_model.wgsl` and `terrain.wgsl` bind the block fragment-only, and
+/// their vertex stages skip a walk of the light table when these say no fragment will read it.
+/// `build_light_data` packs both as 0, which reads as "walk".
+pub(crate) const VERTEX_HINT_OFFSET: u64 = 20 * 16 + 8;
 /// Constant depth bias, in yards along the light.
 const DEPTH_BIAS_YD: f32 = 0.15;
 /// Yards a rigged caster's box is widened by for the cascade cull (a pose strays from its bind box).

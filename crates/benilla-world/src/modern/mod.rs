@@ -285,6 +285,14 @@ pub(crate) fn world_view_only(world_camera: bool) -> bool {
             .get_or_init(|| crate::launch_env::var("WOW_MODERN_PERVIEW").as_deref() == Some("1"))
 }
 
+/// Dev A/B (`$WOW_MODERN_VERTEXHINTS=0`, read once): the light buffer's vertex hints stay unwritten
+/// (`shadow::VERTEX_HINT_OFFSET`), so every `wow_model.wgsl` and `terrain.wgsl` vertex walks the
+/// light table whether or not the light grid will answer its fragments.
+pub(crate) fn vertex_hints_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch_on(&CELL, "WOW_MODERN_VERTEXHINTS")
+}
+
 /// The CPU-side modern hooks: sky stop decode, the cloud texture's sRGB view, the disc `span.z` flag.
 pub fn cpu_hooks_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

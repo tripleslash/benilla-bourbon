@@ -692,9 +692,24 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         // Gouraud sum in a classic one (a booth through this pipeline). So a vertex makes that
         // one. `MODERN_VERTEX_WALKS` is the A/B lever (`$WOW_MODERN_VERTEXWALKS=1`): both, as
         // before.
+        //
+        // And neither where the light grid answers the fragment instead (its own test, in
+        // `fragment`: the grid live, not a rig, not the water mirror, not an unlit batch). The
+        // block is bound fragment-only here, so the grid's live bit and the mirror's plane reach
+        // this stage in the light row's spare lanes (`modern::shadow::VERTEX_HINT_OFFSET`): `.z`
+        // is 1 only in a frame both were written to the block, and `.w` is then the plane
+        // `sunshadow::mirror_view` tests.
+        let grid_answers = wow_light.point_count.z > 0.5
+            && view.world_position.y >= wow_light.point_count.w - 0.25
+            && m.sun_scale.x < 1.5
+            && m.model_flags.w <= 0.5;
         if (wow_light.point_count.y > 0.5) {
             out.point_lit = vec3<f32>(0.0);
-            out.point_sel = point_light_select(anchor);
+            if (grid_answers) {
+                out.point_sel = vec3<u32>(0u);
+            } else {
+                out.point_sel = point_light_select(anchor);
+            }
         } else {
             out.point_lit = point_light_sum(out.world_position.xyz, out.world_normal, anchor);
             out.point_sel = vec3<u32>(0u);

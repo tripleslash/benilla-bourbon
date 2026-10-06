@@ -425,8 +425,19 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // fork: perf — one walk of the light table per vertex, not two: the selection, and the Gouraud
     // sum evaluated from it (`point_light_gouraud`). `MODERN_VERTEX_WALKS` is the A/B lever
     // (`$WOW_MODERN_VERTEXWALKS=1`): the two walks, as before.
-    out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
-    let points = point_light_gouraud(out.point_sel, out.world_position.xyz, n);
+    //
+    // And none where the fragment reads neither: outside the water mirror it rebuilds the primary
+    // per pixel, and with the light grid live it takes its lights from the grid (`fragment`). The
+    // block is bound fragment-only here, so the grid's live bit and the mirror's plane reach this
+    // stage in the light row's spare lanes (`modern::shadow::VERTEX_HINT_OFFSET`): `.z` is 1 only
+    // in a frame both were written to the block, and `.w` is then the plane
+    // `sunshadow::mirror_view` tests.
+    var points = vec3<f32>(0.0);
+    out.point_sel = vec3<u32>(0u);
+    if (wow_light.point_count.z <= 0.5 || view.world_position.y < wow_light.point_count.w - 0.25) {
+        out.point_sel = point_light_select(mcnk_cell_anchor(out.world_position.xyz));
+        points = point_light_gouraud(out.point_sel, out.world_position.xyz, n);
+    }
 #endif
 #else
     let points = point_light_sum(out.world_position.xyz, n, mcnk_cell_anchor(out.world_position.xyz));

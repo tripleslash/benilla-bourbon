@@ -81,6 +81,7 @@ fn prepare_lights(
     light_buffer: Option<Res<SharedLightBuffer>>,
     pipes: Option<Res<LightPipelines>>,
     pipeline_cache: Res<PipelineCache>,
+    uploaded_plane: Option<Res<crate::modern::shadow::UploadedMirrorPlane>>,
     mut frame: ResMut<LightFrame>,
 ) {
     frame.bind = None;
@@ -104,6 +105,22 @@ fn prepare_lights(
         return;
     }
     queue.write_buffer(&block.buffer, LIGHT_OFFSET, &bytes);
+    // fork: perf — the vertex stages' copy of the live bit just written and of the mirror plane
+    // the block took this frame (`shadow::VERTEX_HINT_OFFSET`). Written only when both went into
+    // the block, after `upload_light` has packed the row (this is `PrepareBindGroups`), so a
+    // vertex stage that reads "skip" agrees with what its fragments read from the block.
+    let live = (params.base.w as u32) & 1 != 0;
+    if let (true, Some(light_buffer), Some(plane)) = (
+        live && crate::modern::vertex_hints_enabled(),
+        light_buffer.as_deref(),
+        uploaded_plane.and_then(|p| p.0),
+    ) {
+        queue.write_buffer(
+            &light_buffer.0,
+            crate::modern::shadow::VERTEX_HINT_OFFSET,
+            bytemuck::cast_slice(&[1.0f32, plane]),
+        );
+    }
     if !on {
         return;
     }
@@ -180,6 +197,7 @@ fn light_bin_pass(
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<LightFrame>()
+        .init_resource::<crate::modern::shadow::UploadedMirrorPlane>()
         .add_systems(RenderStartup, init_pipelines)
         .add_systems(
             Render,
