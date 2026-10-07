@@ -480,6 +480,7 @@ fn update_volume(
     // shader because a room's medium reaches only as far as the room does ([`CameraRoomExtent`]):
     // one blended medium is what wrapped the city seen from Orgrimmar's gate hall in 292 yd of the
     // building's teal.
+    let noon_tint = look.0.noon_tint();
     let shared =
         |fog_color: [f32; 3], fog_start: f32, fog_end: f32, interior: f32| media::MediaInputs {
             fog_color,
@@ -489,7 +490,8 @@ fn update_volume(
             // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
             ambient: super::night_floor(l.ambient, l.sidn_night),
             // The key's horizon fade (a set moon scatters nothing into the haze).
-            diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
+            // fork: with the zone look's noon tint, so the haze scatters the key the surfaces take.
+            diffuse: [0, 1, 2].map(|i| l.diffuse[i] * noon_tint[i] * super::sun_arc::key_horizon()),
             storm: l.storm_bcc,
             underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
             interior,
@@ -723,7 +725,10 @@ fn fading_room(
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
     let horizon = super::sun_arc::key_horizon() * super::look::key_scatter_gain();
     let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
-    Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
+    Vec3::from(diffuse.map(super::srgb_to_linear))
+        * Vec3::from(look.noon_tint())
+        * Vec3::from(look.glow)
+        * scale
 }
 
 /// How far the regional reference may sit below the ground under the camera (yd) — most of a

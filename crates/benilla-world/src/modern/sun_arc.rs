@@ -52,6 +52,27 @@ static KEY_HORIZON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 
 static MOON_KEY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+static MIDDAY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The hours the zone look's noon tint ramps over (minutes): in from 09:00 to 11:00, out from
+/// 15:00 to 17:00, so the morning's and the evening's rows keep their authored hue.
+const MIDDAY_IN: (f32, f32) = (540.0, 660.0);
+const MIDDAY_OUT: (f32, f32) = (900.0, 1020.0);
+
+/// How much of the frame is midday: 1 from 11:00 to 15:00, 0 before 09:00 and after 17:00 (0 in a
+/// classic frame).
+pub fn midday() -> f32 {
+    f32::from_bits(MIDDAY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn midday_at(minute: f32) -> f32 {
+    let ramp = |(a, b): (f32, f32)| {
+        let t = ((minute - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    ramp(MIDDAY_IN) * (1.0 - ramp(MIDDAY_OUT))
+}
+
 /// The key light's horizon factor (1 in a classic frame, or with the arc switched off).
 pub fn key_horizon() -> f32 {
     f32::from_bits(KEY_HORIZON.load(std::sync::atomic::Ordering::Relaxed))
@@ -153,12 +174,17 @@ fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting
     if !super::frame_is_modern() || !super::sun_arc_enabled() {
         KEY_HORIZON.store(1.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
         MOON_KEY.store(0, std::sync::atomic::Ordering::Relaxed);
+        MIDDAY.store(0, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let Some(clock) = clock else {
         return;
     };
     let minute = clock.minute as f32;
+    MIDDAY.store(
+        midday_at(minute).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let sun_elev = lighting
         .celestial_dir
         .normalize_or_zero()

@@ -76,6 +76,10 @@ pub struct ZoneLook {
     pub night_glow: f32,
     /// fork: how far a building's own fog (its MFOG) reaches against its authored span (>1 = clearer).
     pub room_reach: f32,
+    /// fork: a further multiplier on the key light's colour around noon, per channel, ramped by
+    /// [`super::sun_arc::midday`]: the authored noon sun is a deeper orange than the reference
+    /// grade's, while the morning's and the evening's rows keep their hue.
+    pub noon_key_tint: [f32; 3],
 }
 
 impl ZoneLook {
@@ -108,7 +112,20 @@ impl ZoneLook {
         night_banks: 0.25,
         night_glow: 0.33,
         room_reach: 1.0,
+        noon_key_tint: [0.9, 1.0, 1.15],
     };
+
+    /// The noon tint at this hour: 1 outside midday, [`Self::noon_key_tint`] across it.
+    pub fn noon_tint(&self) -> [f32; 3] {
+        let t = super::sun_arc::midday();
+        self.noon_key_tint.map(|c| 1.0 + (c - 1.0) * t)
+    }
+
+    /// The key light's colour multiplier at this hour.
+    pub fn key_tint_now(&self) -> [f32; 3] {
+        let noon = self.noon_tint();
+        [0, 1, 2].map(|i| self.key_tint[i] * noon[i])
+    }
 
     fn lerp(self, to: Self, t: f32) -> Self {
         let m = |a: f32, b: f32| a + (b - a) * t;
@@ -137,6 +154,7 @@ impl ZoneLook {
             night_banks: m(self.night_banks, to.night_banks),
             night_glow: m(self.night_glow, to.night_glow),
             room_reach: m(self.room_reach, to.room_reach),
+            noon_key_tint: [0, 1, 2].map(|i| m(self.noon_key_tint[i], to.noon_key_tint[i])),
         }
     }
 
@@ -167,6 +185,7 @@ impl ZoneLook {
                     && d(self.fog_tint[i], other.fog_tint[i])
                     && d(self.sky_tint[i], other.sky_tint[i])
                     && d(self.key_tint[i], other.key_tint[i])
+                    && d(self.noon_key_tint[i], other.noon_key_tint[i])
             })
     }
 }
@@ -194,6 +213,7 @@ impl ZoneLook {
         ground_fog: 0.7,
         night_banks: 1.0,
         night_glow: 1.0,
+        noon_key_tint: [1.0, 1.0, 1.0],
         ..Self::NEUTRAL
     };
 }
@@ -219,6 +239,7 @@ impl ZoneLook {
         saturation: 1.0,
         vignette: 0.28,
         key_tint: [0.72, 0.9, 1.2],
+        noon_key_tint: [1.0, 1.0, 1.0],
         ..Self::NEUTRAL
     };
 }
@@ -243,6 +264,7 @@ impl ZoneLook {
         night_banks: 0.0,
         night_glow: 0.0,
         room_reach: 3.0,
+        noon_key_tint: [1.0, 1.0, 1.0],
         ..Self::NEUTRAL
     };
 }
@@ -373,7 +395,9 @@ fn publish(look: ZoneLook) {
     for i in 0..3 {
         FOG_TINT[i].store(look.fog_tint[i].to_bits(), Ordering::Relaxed);
         SKY_TINT[i].store(look.sky_tint[i].to_bits(), Ordering::Relaxed);
-        KEY_TINT[i].store(look.key_tint[i].to_bits(), Ordering::Relaxed);
+    }
+    for (i, v) in look.key_tint_now().into_iter().enumerate() {
+        KEY_TINT[i].store(v.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -412,7 +436,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key_tint r,g,b`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -454,6 +478,9 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.night_banks, 31);
     set(&mut look.night_glow, 32);
     set(&mut look.room_reach, 33);
+    for c in 0..3 {
+        set(&mut look.noon_key_tint[c], 34 + c);
+    }
     look
 }
 
@@ -570,7 +597,10 @@ mod tests {
             let c = look_for_zone(*zone);
             assert_eq!(c, ZoneLook::COLD, "zone {zone}");
             for tint in [c.key_tint, c.fog_tint, c.sky_tint, c.haze_tint] {
-                assert!(tint[2] > 1.0 && tint[0] < tint[1] && tint[1] < tint[2], "zone {zone}");
+                assert!(
+                    tint[2] > 1.0 && tint[0] < tint[1] && tint[1] < tint[2],
+                    "zone {zone}"
+                );
             }
         }
     }
