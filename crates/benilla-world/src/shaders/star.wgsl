@@ -41,9 +41,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
         a *= c1.a;
     }
 #endif
-    // fork: modern lighting (FORK.md) — a linear frame takes linear colour.
+    // fork: modern lighting (FORK.md) — a linear frame takes linear colour. The
+    // alpha folds in gamma first, then the product decodes, as `wow_model.wgsl` does: a linear
+    // `texel × a` is far brighter than the reference's gamma one. `dst`'s share decodes likewise,
+    // `(1 − a)` on gamma bytes being `(1 − a)^2.2` on linear ones.
     if star.z > 0.5 {
-        rgb = srgb_to_linear(rgb);
+        let keep = pow(1.0 - a, 2.2);
+        return vec4<f32>(srgb_to_linear(rgb * a), select(1.0 - keep, 0.0, star.x > 0.5));
     }
     // Premultiplied; alpha 0 leaves `dst` whole, the additive blend.
     return vec4<f32>(rgb * a, select(a, 0.0, star.x > 0.5));
