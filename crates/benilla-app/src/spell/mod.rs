@@ -130,6 +130,15 @@ pub(crate) fn spell_skill_value(
     skill_line_value(me, line)
 }
 
+/// A pet's `[vtbl+0xa8]`, `CGUnit`'s `0x60cd80`: `UNIT_FIELD_LEVEL × 5`, which
+/// [`benilla_formats::SpellDisplay::skill_level`] caps at `maxLevel × 5` and divides by 5 as
+/// `0x60cdb2`-`0x60cdb9` and `0x6e3195` do. No unit reads 0 (`0x6e31a4`).
+pub(crate) fn pet_skill_value(pet: Option<&benilla_protocol::ObjectFields>) -> u32 {
+    pet.and_then(|p| p.unit_level())
+        .unwrap_or(0)
+        .saturating_mul(5)
+}
+
 /// The player's skill in `line`, [`spell_skill_value`]'s second half: 0 without a player or a
 /// slot for it.
 pub(crate) fn skill_line_value(me: Option<&crate::net::ObjectStore>, line: u32) -> u32 {

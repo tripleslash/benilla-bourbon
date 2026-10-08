@@ -6,8 +6,9 @@
 //! does (`0x4dfb50` copies the selection `0xbb7480`, a quest id, to `0xbb7484`), so a re-index
 //! before the popup's Yes cannot retarget them.
 //!
-//! Not built: `IsUnitOnQuest` and `GetAbandonQuestItems` answer nil; the first needs the party
-//! members' quest logs.
+//! `IsUnitOnQuest` reads a unit's quest-log window off its snapshot ([`super::UnitState`]).
+//!
+//! Not built: `GetAbandonQuestItems` answers nil.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -598,9 +599,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             super::quest::reward_spell_returns(lua, spell)
         })?,
     )?;
+    // `IsUnitOnQuest(index, "unit")` (`0x4dfe10`): 1 when the unit's quest log holds row
+    // `index`'s quest, else nil; the stock rows count `[n]` mates (`QuestLogFrame.lua:175`).
     g.set(
         "IsUnitOnQuest",
-        lua.create_function(|_, (_q, _unit): (Value, Value)| Ok(flag(false)))?,
+        lua.create_function(|lua, (index, token): (Value, Value)| {
+            const USAGE: &str = "Usage: IsUnitOnQuest(index, \"unit\")";
+            // Both are checked before either is read: `lua_isnumber` (`0x4dfe1e`), `lua_isstring`
+            // (`0x4dfe32`); the index is `_ftol`'d (`0x4dfe4d`).
+            let n = number_arg(lua, index, USAGE)?;
+            let token = super::binding_abi::string_arg(lua, token, USAGE)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            // The row's quest id (`0x4df150`): 0 for a header or a row past the list, which
+            // answers nil before the token is resolved (`0x4dfe5e`).
+            let quest_id = usize::try_from(n)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|row| model.quest_log.entries.get(row))
+                .filter(|e| !e.is_header)
+                .map_or(0, |e| e.quest_id);
+            if quest_id == 0 {
+                return Ok(Value::Nil);
+            }
+            // The token's guid (`0x515970`), which raises on an unknown token.
+            super::unit::check_unit_token(&Some(token.clone()))?;
+            let Some(unit) = model.unit(&token) else {
+                return Ok(Value::Nil);
+            };
+            // The active player or one of the four party slots, by guid (`0x4e7f70`): a raid mate
+            // outside our subgroup, a pet or a stranger answers nil.
+            let me = model.unit("player").map_or(0, |p| p.guid);
+            let grouped = unit.guid != 0
+                && (unit.guid == me || model.party.members.iter().any(|m| m.guid == unit.guid));
+            // Held as a player (`0x468460`, typemask `0x10`) and not deactivated (`0x614ea0`, a
+            // state the app's despawn never leaves held), then the 20 slots' ids, stride 12
+            // (`0x4dfebd`-`0x4dfed7`); a non-player's window is all zero.
+            Ok(flag(
+                grouped && unit.has_object && unit.quest_log.iter().any(|s| s[0] == quest_id),
+            ))
+        })?,
     )?;
     // ── The party share and the quest watch ──────────────────────────────────────────────────────
     /// The selected row, which the share verbs read.
@@ -1411,5 +1448,198 @@ mod tests {
             s.take_quest_log_pushes().is_empty(),
             "a header is not a quest"
         );
+    }
+
+    // ── IsUnitOnQuest (`0x4dfe10`) ──
+
+    const ME: u64 = 0x10;
+    const MATE: u64 = 0x300;
+    const FAR_MATE: u64 = 0x301;
+
+    /// A held unit whose quest-log window holds `ids`, one per slot from the last slot down, so the
+    /// scan must reach slot 19.
+    fn held(guid: u64, ids: &[u32]) -> crate::script::UnitState {
+        let mut quest_log = [[0; 3]; 20];
+        for (slot, &id) in quest_log.iter_mut().rev().zip(ids) {
+            *slot = [id, 0, 0];
+        }
+        crate::script::UnitState {
+            exists: true,
+            has_object: true,
+            is_player: true,
+            guid,
+            quest_log,
+            ..Default::default()
+        }
+    }
+
+    /// A header, then quest 783 (row 2) and quest 7 (row 3). We hold both; `party1` holds 783 and
+    /// `party2` is out of range. `target` is `party1`; `mouseover` a stranger and `raid7` a raid
+    /// mate outside our subgroup, both holding 783.
+    fn on_quest_world() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries.insert(
+            0,
+            QuestLogEntryView {
+                title: "Elwynn Forest".into(),
+                is_header: true,
+                ..Default::default()
+            },
+        );
+        s.set_quest_log(state);
+        s.set_party(crate::script::PartyState {
+            members: vec![
+                crate::script::PartyMemberInfo {
+                    name: "Mate".into(),
+                    guid: MATE,
+                },
+                crate::script::PartyMemberInfo {
+                    name: "Far".into(),
+                    guid: FAR_MATE,
+                },
+            ],
+            ..Default::default()
+        });
+        s.set_unit("player", Some(held(ME, &[7, 783])));
+        s.set_unit("party1", Some(held(MATE, &[783])));
+        s.set_unit(
+            "party2",
+            Some(crate::script::UnitState {
+                exists: true,
+                is_player: true,
+                guid: FAR_MATE,
+                ..Default::default()
+            }),
+        );
+        s.set_unit("target", Some(held(MATE, &[783])));
+        s.set_unit("mouseover", Some(held(0x500, &[783])));
+        s.set_unit("raid7", Some(held(0x700, &[783])));
+        s.set_unit(
+            "pet",
+            Some(crate::script::UnitState {
+                exists: true,
+                has_object: true,
+                guid: 0xF140_0000_0000_0001,
+                ..Default::default()
+            }),
+        );
+        s
+    }
+
+    /// The number 1 when the unit's log holds the row's quest (`0x4dfef5` pushes 1.0), else nil
+    /// (`0x4dfedb`), never a boolean.
+    #[test]
+    fn is_unit_on_quest_answers_one_for_the_player_and_a_held_party_member_on_it() {
+        let mut s = on_quest_world();
+        let on = |s: &mut UiScript, call: &str| -> Option<i64> {
+            s.eval::<Option<i64>>(&format!("return {call}")).unwrap()
+        };
+        assert!(s
+            .eval::<bool>("return type(IsUnitOnQuest(2, 'party1')) == 'number'")
+            .unwrap());
+        assert_eq!(on(&mut s, "IsUnitOnQuest(2, 'party1')"), Some(1));
+        assert_eq!(on(&mut s, "IsUnitOnQuest(3, 'party1')"), None, "not on 7");
+        assert_eq!(on(&mut s, "IsUnitOnQuest(2, 'player')"), Some(1));
+        assert_eq!(on(&mut s, "IsUnitOnQuest(3, 'player')"), Some(1));
+        assert_eq!(
+            on(&mut s, "IsUnitOnQuest(2, 'PARTY1')"),
+            Some(1),
+            "tokens fold case"
+        );
+        // The guid decides, not the token: `target` names party1 (`0x4e7f70`'s slot compare).
+        assert_eq!(on(&mut s, "IsUnitOnQuest(2, 'target')"), Some(1));
+    }
+
+    /// `0x4e7f70` admits the active player and the four party slots alone, and `0x468460` needs
+    /// the object held: every other unit answers nil whatever its log holds.
+    #[test]
+    fn is_unit_on_quest_is_nil_off_the_party_or_out_of_range() {
+        let mut s = on_quest_world();
+        for token in [
+            "party2",    // in the party, not held
+            "party3",    // no such slot
+            "mouseover", // held, on the quest, not grouped
+            "raid7",     // a raid mate outside our subgroup
+            "pet",       // not a player, no quest log
+            "",          // names nobody
+        ] {
+            assert!(
+                s.eval::<bool>(&format!("return IsUnitOnQuest(2, '{token}') == nil"))
+                    .unwrap(),
+                "{token:?} answers nil"
+            );
+        }
+        // The party stops at four slots of guids: a member who left reads nil off a stale log.
+        s.set_party(crate::script::PartyState::default());
+        assert!(s
+            .eval::<bool>("return IsUnitOnQuest(2, 'target') == nil")
+            .unwrap());
+    }
+
+    /// The index is `_ftol`'d and 1-based (`0x4dfe4d`, `dec` at `0x4dfe52`); a header or a row
+    /// past the list has no quest id (`0x4df150`) and answers nil before the token is read, so an
+    /// unknown token raises only on a quest row (`0x515c14`).
+    #[test]
+    fn is_unit_on_quest_reads_the_row_before_the_token() {
+        let s = on_quest_world();
+        for index in ["1", "0", "-1", "4", "99", "-0.5"] {
+            assert!(
+                s.eval::<bool>(&format!("return IsUnitOnQuest({index}, 'party1') == nil"))
+                    .unwrap(),
+                "index {index}"
+            );
+            assert!(
+                s.eval::<bool>(&format!("return IsUnitOnQuest({index}, 'bogus') == nil"))
+                    .unwrap(),
+                "index {index} answers before the token is resolved"
+            );
+        }
+        assert!(s
+            .eval::<bool>("return IsUnitOnQuest(2.9, 'party1') == 1")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return IsUnitOnQuest('2', 'party1') == 1")
+            .unwrap());
+        for (token, shown) in [("'bogus'", "bogus"), ("5", "5")] {
+            let e = format!(
+                "{:?}",
+                s.eval::<mlua::Value>(&format!("return IsUnitOnQuest(2, {token})"))
+                    .unwrap_err()
+            );
+            assert!(
+                e.contains(&format!("Unknown unit name: {shown}")),
+                "{token}: {e}"
+            );
+        }
+    }
+
+    /// `lua_isnumber` on 1 and `lua_isstring` on 2, both ahead of any read (`0x4dfe1e`,
+    /// `0x4dfe32`), raise the one Usage line (`0x84b564`), an out-of-range index included.
+    #[test]
+    fn is_unit_on_quest_raises_usage_on_a_bad_argument() {
+        let s = on_quest_world();
+        for args in [
+            "",
+            "2",
+            "99",
+            "nil, 'party1'",
+            "'x', 'party1'",
+            "{}, 'party1'",
+            "2, nil",
+            "2, {}",
+            "2, true",
+        ] {
+            let e = format!(
+                "{:?}",
+                s.eval::<mlua::Value>(&format!("return IsUnitOnQuest({args})"))
+                    .unwrap_err()
+            );
+            assert!(
+                e.contains("Usage: IsUnitOnQuest(index, \\\"unit\\\")")
+                    || e.contains("Usage: IsUnitOnQuest(index, \"unit\")"),
+                "({args}) must raise Usage:, got {e}"
+            );
+        }
     }
 }

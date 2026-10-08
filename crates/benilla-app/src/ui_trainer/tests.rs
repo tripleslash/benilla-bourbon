@@ -27,6 +27,43 @@ fn probe_strings(key: &str) -> Option<String> {
     }
 }
 
+/// Run `f` with the description contexts over the test catalogs: the casters' skill values
+/// (`level × 5` for a pet) and the bind point `$z` names.
+fn with_text<R>(
+    spells: &SpellCatalog,
+    player_skill: u32,
+    pet_skill: u32,
+    home: Option<&str>,
+    f: impl FnOnce(&ServiceText) -> R,
+) -> R {
+    let durations = benilla_formats::SpellDurationCatalog::default();
+    let radii = benilla_formats::SpellRadiusCatalog::default();
+    let lookup = |id: u32| spells.get(id);
+    let skill_of = |_: u32| player_skill;
+    let pet_of = |_: u32| pet_skill;
+    let ctx = TokenContext {
+        durations: &durations,
+        radii: &radii,
+        ranges: None,
+        skill: &skill_of,
+        lookup: &lookup,
+        mods: None,
+        unmodified_points: false,
+        gender: &|| 0,
+        home_area: &|| home,
+        global: &probe_strings,
+        printf: &crate::ui_script::token_printf,
+    };
+    let pet_ctx = TokenContext {
+        skill: &pet_of,
+        ..ctx
+    };
+    f(&ServiceText {
+        player: &ctx,
+        pet: &pet_ctx,
+    })
+}
+
 /// [`resolve_service`] with no icon sources.
 fn resolve_service(
     wire: &TrainerSpell,
@@ -36,17 +73,20 @@ fn resolve_service(
     known: &BTreeSet<u32>,
 ) -> TrainerService {
     let deps = Deps::new();
-    super::resolve_service(
-        wire,
-        trainer_type,
-        spells,
-        skill_lines,
-        known,
-        None,
-        &deps.items,
-        &deps.commands,
-        &probe_strings,
-    )
+    with_text(spells, 0, 0, None, |text| {
+        super::resolve_service(
+            wire,
+            trainer_type,
+            spells,
+            skill_lines,
+            known,
+            None,
+            &deps.items,
+            &deps.commands,
+            text,
+            &probe_strings,
+        )
+    })
 }
 
 fn wire(spell: u32, state: u8, cost: u32, req_level: u8, req_skill: u32) -> TrainerSpell {
@@ -66,16 +106,19 @@ fn wire(spell: u32, state: u8, cost: u32, req_level: u8, req_skill: u32) -> Trai
 /// [`snapshot`] with no icon sources.
 fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
     let deps = Deps::new();
-    snapshot(
-        open,
-        spells,
-        None,
-        &BTreeSet::new(),
-        None,
-        &deps.items,
-        &deps.commands,
-        &probe_strings,
-    )
+    with_text(spells, 0, 0, None, |text| {
+        snapshot(
+            open,
+            spells,
+            None,
+            &BTreeSet::new(),
+            None,
+            &deps.items,
+            &deps.commands,
+            text,
+            &probe_strings,
+        )
+    })
 }
 
 /// Wrapper 100 teaches 200 by a slot-0 `LEARN_SPELL`, 200 creates item 777, and 777's display 5
@@ -459,6 +502,378 @@ fn ability_req_shows_the_required_rank_on_real_data() {
     let svc = resolve_service(&w, 0, &spells, None, &BTreeSet::new());
     assert!(!svc.ability_reqs[0].met);
     assert_eq!(svc.ability_reqs[0].name, "Heroic Strike (Rank 1)");
+}
+
+/// `GetTrainerServiceDescription 0x4d9b40`: a class trainer's plain ability row expands the wire
+/// spell's own `Spell.dbc` Description (`0x4d9c32`).
+#[test]
+fn service_description_expands_the_wire_spells_own_text() {
+    let d = SpellDisplay {
+        description: Some("Increases melee damage by $s1.".into()),
+        // A flat 11: base points are stored one under the total, on one one-sided die.
+        effect_base_points: [10, 0, 0],
+        effect_base_dice: [1, 0, 0],
+        effect_die_sides: [1, 0, 0],
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([(78, d)]));
+    let deps = Deps::new();
+    with_text(&spells, 0, 0, None, |text| {
+        assert_eq!(
+            service_description(
+                &wire(78, trainer_spell_state::GREEN, 10, 1, 0),
+                0,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            ),
+            "Increases melee damage by 11."
+        );
+    });
+}
+
+/// A learn wrapper has no text of its own, so the taught spell's Description is expanded
+/// (`0x4d9c6f`); the description is the taught record's, not the wrapper's.
+#[test]
+fn service_description_hops_to_the_taught_spell() {
+    let wrapper = SpellDisplay {
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let taught = SpellDisplay {
+        name: "Growl".into(),
+        description: Some("Causes $s1 threat.".into()),
+        effect_base_points: [9, 0, 0],
+        effect_base_dice: [1, 0, 0],
+        effect_die_sides: [1, 0, 0],
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([(100, wrapper), (200, taught)]));
+    let deps = Deps::new();
+    with_text(&spells, 0, 0, None, |text| {
+        assert_eq!(
+            service_description(
+                &wire(100, trainer_spell_state::GREEN, 10, 1, 0),
+                0,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            ),
+            "Causes 10 threat."
+        );
+    });
+}
+
+/// The third arm: a tradeskill recipe has no text of its own, so the created item's Description is
+/// returned verbatim — never expanded (`0x4d9cd0`-`0x4d9d22`).
+#[test]
+fn service_description_takes_the_recipes_product_text_verbatim() {
+    let wrapper = SpellDisplay {
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let recipe = SpellDisplay {
+        attributes: SPELL_ATTR_IS_TRADESKILL,
+        effects: [SPELL_EFFECT_CREATE_ITEM, 0, 0],
+        effect_item_type: [777, 0, 0],
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([(100, wrapper), (200, recipe)]));
+    let mut deps = Deps::new();
+    let mut item = crate::items::test_template("Copper Shortsword");
+    item.description = "Keeps $s1 for later.".into();
+    deps.items.insert_template(777, Some(item));
+    with_text(&spells, 0, 0, None, |text| {
+        assert_eq!(
+            service_description(
+                &wire(100, trainer_spell_state::GREEN, 10, 1, 0),
+                TRAINER_TYPE_TRADESKILL,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            ),
+            "Keeps $s1 for later.",
+            "the product's text is the item's own, tokens and all"
+        );
+    });
+}
+
+/// A used row at a mount trainer skips its own text (`0x4d9c29`); the same row at a class trainer
+/// shows it.
+#[test]
+fn service_description_skips_the_wire_text_for_a_used_mount_row() {
+    let d = SpellDisplay {
+        description: Some("Summons a mount.".into()),
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let taught = SpellDisplay {
+        description: Some("Riding skill.".into()),
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([(100, d), (200, taught)]));
+    let deps = Deps::new();
+    let description = |trainer_type, state| {
+        with_text(&spells, 0, 0, None, |text| {
+            service_description(
+                &wire(100, state, 10, 1, 0),
+                trainer_type,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            )
+        })
+    };
+    assert_eq!(
+        description(0, trainer_spell_state::GREEN),
+        "Summons a mount."
+    );
+    assert_eq!(
+        description(TRAINER_TYPE_MOUNT, trainer_spell_state::GRAY),
+        "Riding skill."
+    );
+}
+
+/// The caster selector: a `LEARN_PET_SPELL` wrapper expands against the pet (`0x6e3130`'s nonzero
+/// selector), the same taught spell under a plain `LEARN_SPELL` against the player.
+#[test]
+fn service_description_expands_against_the_pet_for_a_learn_pet_row() {
+    // One point per level over `baseLevel` 1: level 0 reads 10, a level-2 pet reads 11.
+    let taught = SpellDisplay {
+        description: Some("Causes $s1 threat.".into()),
+        base_level: 1,
+        effect_base_points: [9, 0, 0],
+        effect_base_dice: [1, 0, 0],
+        effect_die_sides: [1, 0, 0],
+        effect_dice_per_level: [1, 0, 0],
+        ..Default::default()
+    };
+    let pet_wrapper = SpellDisplay {
+        effects: [SPELL_EFFECT_LEARN_PET_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let plain_wrapper = SpellDisplay {
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (100, pet_wrapper),
+        (101, plain_wrapper),
+        (200, taught),
+    ]));
+    let deps = Deps::new();
+    // A level-2 pet (skill 10) against a player with no skill in the taught spell's line at all.
+    with_text(&spells, 0, 10, None, |text| {
+        assert_eq!(
+            service_description(
+                &wire(100, trainer_spell_state::GREEN, 10, 1, 0),
+                0,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            ),
+            "Causes 11 threat.",
+            "the pet's level drives the taught spell's points"
+        );
+        assert_eq!(
+            service_description(
+                &wire(101, trainer_spell_state::GREEN, 10, 1, 0),
+                0,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            ),
+            "Causes 10 threat.",
+            "the same taught spell under LEARN_SPELL reads the player's"
+        );
+    });
+}
+
+/// The `$z` token: the bind point's area name (`AreaTable.dbc`), and raw where no bind point has
+/// arrived, as the item and tooltip feeds' `$z` behaves.
+#[test]
+fn service_description_expands_z_to_the_bind_area() {
+    let d = SpellDisplay {
+        description: Some("Returns you to $z.".into()),
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([(556, d)]));
+    let deps = Deps::new();
+    for (home, want) in [
+        (Some("Razor Hill"), "Returns you to Razor Hill."),
+        (None, "Returns you to $z."),
+    ] {
+        with_text(&spells, 0, 0, home, |text| {
+            assert_eq!(
+                service_description(
+                    &wire(556, trainer_spell_state::GREEN, 4000, 30, 0),
+                    0,
+                    &spells,
+                    &deps.items,
+                    &deps.commands,
+                    text,
+                ),
+                want
+            );
+        });
+    }
+}
+
+/// On the shipped `Spell.dbc`: the warrior wrapper 1605 teaches 78 Heroic Strike, so the row's
+/// description is the taught ability's text, not the wrapper's empty one. Skips without client
+/// data.
+#[test]
+fn service_description_on_real_data_expands_the_taught_ability() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+
+    let svc = resolve_service(
+        &wire(1605, trainer_spell_state::GREEN, 10, 1, 0),
+        0,
+        &spells,
+        None,
+        &BTreeSet::new(),
+    );
+    assert!(
+        svc.description
+            .starts_with("A strong attack that increases melee damage by "),
+        "the taught 78's description, not the wrapper's empty one: {:?}",
+        svc.description
+    );
+    assert!(
+        !svc.description.contains('$'),
+        "every token resolved: {:?}",
+        svc.description
+    );
+}
+
+/// On the shipped `Spell.dbc`: 1352 is the shaman trainer's Astral Recall wrapper, teaching 556,
+/// whose text is the one trainer-taught description carrying `$z`. Skips without client data.
+#[test]
+fn service_description_on_real_data_reads_astral_recalls_bind_area() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+
+    let deps = Deps::new();
+    let svc = with_text(&spells, 0, 0, Some("Razor Hill"), |text| {
+        super::resolve_service(
+            &wire(1352, trainer_spell_state::GREEN, 4000, 30, 0),
+            0,
+            &spells,
+            None,
+            &BTreeSet::new(),
+            None,
+            &deps.items,
+            &deps.commands,
+            text,
+            &probe_strings,
+        )
+    });
+    assert_eq!(
+        svc.description,
+        "Yanks the caster through the twisting nether back to Razor Hill.  Speak to an \
+         Innkeeper in a different place to change your home location."
+    );
+}
+
+/// On the shipped `Spell.dbc`: 2020 is the "Apprentice Blacksmith" wrapper a Blacksmithing trainer
+/// lists, teaching 2018 "Blacksmithing" — the profession-learn row whose text is the taught
+/// profession's. Skips without client data.
+#[test]
+fn service_description_on_real_data_reads_the_profession_learn_row() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+
+    // The wrapper carries no text of its own, so the taught profession's is the only one there is.
+    assert_eq!(
+        spells.get(2020).and_then(|d| d.description.as_deref()),
+        None
+    );
+    let svc = resolve_service(
+        &wire(2020, trainer_spell_state::GREEN, 9, 5, 0),
+        TRAINER_TYPE_TRADESKILL,
+        &spells,
+        None,
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        svc.description,
+        "Allows a Blacksmith to make basic weapons and armor up to a maximum potential skill of \
+         75.  Requires stone and metal found with the mining skill."
+    );
+}
+
+/// On the shipped `Spell.dbc`: 7820 is the recipe wrapper a Blacksmithing trainer lists, 7818 the
+/// recipe it teaches and 6338 the Silver Rod it makes, so the row's text is that item's
+/// description, read out of the item cache (`0x4d9cd0`-`0x4d9d22`). The product's record arrives
+/// with the item query, so the template seeded below, with vmangos's text, stands in for it.
+/// Skips without client data.
+#[test]
+fn service_description_on_real_data_reaches_for_the_recipes_product() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+
+    // Neither the wrapper nor the recipe carries text of its own, so the item is the only source.
+    assert_eq!(
+        spells.get(7820).and_then(|d| d.description.as_deref()),
+        None
+    );
+    assert_eq!(
+        spells.get(7818).and_then(|d| d.description.as_deref()),
+        None
+    );
+
+    // The law alone, never through `resolve_service`: the icon law asks for the same template
+    // first, and one ask per pending entry reaches the cache.
+    let describe = |deps: &Deps| {
+        with_text(&spells, 0, 0, None, |text| {
+            service_description(
+                &wire(7820, trainer_spell_state::GREEN, 90, 0, 164),
+                TRAINER_TYPE_TRADESKILL,
+                &spells,
+                &deps.items,
+                &deps.commands,
+                text,
+            )
+        })
+    };
+
+    let deps = Deps::new();
+    assert_eq!(
+        describe(&deps),
+        "",
+        "nothing to show until the product's template lands"
+    );
+    assert_eq!(
+        deps.queried_entries(),
+        vec![6338],
+        "the description law reached for the crafted rod's template"
+    );
+
+    // With the product's record present, its description is the row's text, verbatim.
+    let mut product = crate::items::test_template("Silver Rod");
+    product.description = "Needed by Enchanters.".into();
+    let landed = {
+        let mut deps = Deps::new();
+        deps.items.insert_template(6338, Some(product));
+        deps
+    };
+    assert_eq!(describe(&landed), "Needed by Enchanters.");
 }
 
 #[test]

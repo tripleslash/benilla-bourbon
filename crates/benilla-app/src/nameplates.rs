@@ -35,7 +35,7 @@ use benilla_ui::script::{JustifyH, JustifyV, Outline};
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::target::{ring_reaction, ring_variant, CombatFlash, Factions, RingVariant, Selection};
+use crate::target::{selection_variant, CombatFlash, Factions, RingVariant, Selection};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, TextSeat, UiFontAtlas};
 use benilla_world::view::WorldCamera;
 
@@ -209,8 +209,8 @@ pub(crate) fn height_scale(d: f32) -> f32 {
     }
 }
 
-/// What a name line is painted with: the ring's selector ([`ring_variant`]), which the reference's
-/// name render also calls (`0x605960`), or the combat flash.
+/// What a name line is painted with: the ring's selector ([`selection_variant`]), which the
+/// reference's name render also calls (`0x605960`), or the combat flash.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum NamePaint {
     /// The selector's answer.
@@ -513,27 +513,17 @@ pub(crate) fn drive_nameplates(
                 .and_then(|s| crate::ui_guild::unit_guild_name(&s.0, &mut guilds, &net_commands)),
             _ => None,
         };
-        // The colour: the ring's reaction rank and the shared selector.
-        let rank = ring_reaction(
-            factions.as_deref(),
-            &reputations,
-            store,
-            self_store.single().ok(),
-        );
-        let is_dead = store.is_some_and(|s| s.0.unit_is_dead());
-        // The ring's player inputs, for this unit: PvP flag (`UNIT_FIELD_FLAGS` 0x1000) and party.
-        let pvp = store.is_some_and(|s| s.0.unit_flags() & 0x1000 != 0);
-        let in_party = group.members.iter().any(|m| m.guid == guid.0);
         // The selector's first-priority branch: the combat flash while we melee this unit.
         let color = if flash.unit == Some(entity) {
             NamePaint::Flash
         } else {
-            NamePaint::Variant(ring_variant(
-                rank,
+            NamePaint::Variant(selection_variant(
+                factions.as_deref(),
+                &reputations,
+                store,
+                self_store.single().ok(),
                 net.kind == EntityKind::Player,
-                is_dead,
-                pvp,
-                in_party,
+                group.members.iter().any(|m| m.guid == guid.0),
             ))
         };
 
@@ -797,6 +787,7 @@ fn evict_name_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::{ring_variant, PlayerPath, SelectorInput};
 
     /// `>` not `>=` at the knee and `0.075*d` beyond: the jump at the knee is the reference's.
     #[test]
@@ -831,12 +822,18 @@ mod tests {
     /// A PvP-flagged friendly player's name is the ring's green, not the soft blue.
     #[test]
     fn name_color_is_the_ring_selector_itself() {
-        let paint = |rank, is_player, is_dead, pvp, in_party| {
-            NamePaint::Variant(ring_variant(rank, is_player, is_dead, pvp, in_party))
+        let player = |attacks_us, attackable, pvp, in_party| {
+            NamePaint::Variant(ring_variant(SelectorInput::Player(PlayerPath {
+                attacks_us,
+                attackable,
+                pvp,
+                in_party,
+            })))
         };
+        let npc = |rank, dead| NamePaint::Variant(ring_variant(SelectorInput::Npc { rank, dead }));
         // Flagged is green, unflagged the soft blue, and the two differ.
-        let flagged = paint(6, true, false, true, false);
-        let unflagged = paint(6, true, false, false, false);
+        let flagged = player(false, false, true, false);
+        let unflagged = player(false, false, false, false);
         assert_eq!(flagged, NamePaint::Variant(RingVariant::Friendly));
         assert_eq!(unflagged, NamePaint::Variant(RingVariant::Player));
         assert_ne!(flagged.color(), unflagged.color());
@@ -846,24 +843,25 @@ mod tests {
             "0xFF00FF00 — the ring's own green, byte for byte"
         );
         assert_eq!(
-            paint(6, true, false, true, true),
+            player(false, false, true, true),
             NamePaint::Variant(RingVariant::PartyPvp)
         );
         assert_eq!(
-            paint(6, true, false, false, true),
+            player(false, false, false, true),
             NamePaint::Variant(RingVariant::Party)
         );
-        assert_eq!(paint(0, false, false, false, false).color(), RED);
+        assert_eq!(npc(0, false).color(), RED);
         assert_eq!(
-            paint(6, true, true, false, false),
-            NamePaint::Variant(RingVariant::Player),
-            "dead player never grays"
+            player(true, true, true, false).color(),
+            RED,
+            "mutual attack"
         );
-        assert_eq!(paint(1, true, false, true, false).color(), RED, "hostile");
         assert_eq!(
-            paint(6, false, true, false, false),
-            NamePaint::Variant(RingVariant::Dead)
+            player(false, true, false, false).color(),
+            Color::linear_rgb(1.0, 1.0, 0.0),
+            "attackable, not attacking: yellow"
         );
+        assert_eq!(npc(6, true), NamePaint::Variant(RingVariant::Dead));
     }
 
     const RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);

@@ -31,17 +31,6 @@ pub(super) enum ViewCaster<'a> {
     Pet(Option<&'a benilla_protocol::ObjectFields>),
 }
 
-impl ViewCaster<'_> {
-    /// The pet's `[vtbl+0xa8]`, `CGUnit`'s `0x60cd80`: `UNIT_FIELD_LEVEL × 5`, which
-    /// [`benilla_formats::SpellDisplay::skill_level`] caps at `maxLevel × 5` and divides by 5 as
-    /// `0x60cdb2`-`0x60cdb9` and `0x6e3195` do. No unit reads 0 (`0x6e31a4`).
-    fn pet_skill_value(pet: Option<&benilla_protocol::ObjectFields>) -> u32 {
-        pet.and_then(|p| p.unit_level())
-            .unwrap_or(0)
-            .saturating_mul(5)
-    }
-}
-
 /// The caster-dependent inputs of a spell view: the worn set (`0x5f0c50`), the bags, the form and
 /// the bind point `$z` names.
 pub(super) struct ViewCtx<'a, 'w, 's> {
@@ -99,7 +88,7 @@ pub(super) fn build_view(
             line.map_or(0, |line| crate::spell::skill_line_value(vctx.store, line))
         }
         // The pet's level is one of the pet's own inputs.
-        ViewCaster::Pet(pet) => ViewCaster::pet_skill_value(pet),
+        ViewCaster::Pet(pet) => crate::spell::pet_skill_value(pet),
     };
     // A cross-referenced spell's own family mask decides its modifiers.
     let lookup = |id| {
@@ -118,7 +107,7 @@ pub(super) fn build_view(
         vctx.store.and_then(|s| s.0.unit_gender()).unwrap_or(0)
     };
     // `0x6e3130` for this spell: the level the cost's and the cast time's per-level terms read.
-    let pet_level = |pet| d.skill_level(ViewCaster::pet_skill_value(pet));
+    let pet_level = |pet| d.skill_level(crate::spell::pet_skill_value(pet));
     let ctx = benilla_formats::TokenContext {
         durations: &spells.durations,
         radii: &spells.radii,

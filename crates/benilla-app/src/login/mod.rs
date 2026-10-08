@@ -665,8 +665,9 @@ fn login_input(
     mut sounds: MessageWriter<GlueSound>,
 ) {
     // The reference's `RealmList` is a DIALOG-strata frame over this screen, so while it is up
-    // everything here is inert, Escape included (it is the list's Cancel).
-    if realms.shown {
+    // everything here is inert, Escape included (it is the list's Cancel), through the frame
+    // its own Escape closes it in.
+    if realms.owns_input() {
         return;
     }
     let empty = GlueStrings::default();
@@ -963,6 +964,73 @@ mod tests {
         app.world_mut().resource_mut::<LoginIntent>().env_read = true;
         // Returned, not dropped: a dropped receiver turns every submit into an `Err`.
         (app, rx)
+    }
+
+    /// Escape on the realm list over this screen closes the list and nothing else: the press is
+    /// the list's (`Realms::owns_input`), so the login screen stays inert through the frame the
+    /// list hides itself in, in either order the two run. This fork's login screen binds nothing
+    /// to Escape (the module header's deviation), so the reference's quit has no twin to refuse.
+    #[test]
+    fn escape_on_the_realm_list_closes_only_the_list() {
+        for list_first in [true, false] {
+            let (tx, requests) = async_channel::unbounded();
+            let (realm_tx, realm_rx) = async_channel::unbounded();
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<crate::glue::GlueClicks>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .init_resource::<crate::bindings::LayoutNames>()
+                .insert_non_send(HostClipboard::default())
+                .init_resource::<LoginForm>()
+                .init_resource::<LoginIntent>()
+                .init_resource::<GlueDialog>()
+                .init_resource::<crate::realm_select::Realms>()
+                .insert_resource(crate::realmlist::Realmlist::unpinned(
+                    crate::realmlist::DEFAULT_REALMLIST,
+                ))
+                .insert_resource(LoginSubmit(tx))
+                .insert_resource(LoginAbandon(std::sync::Arc::new(
+                    std::sync::atomic::AtomicU64::new(0),
+                )))
+                .insert_resource(crate::net::RealmChoice(realm_tx))
+                .add_message::<KeyboardInput>()
+                .add_message::<GlueSound>()
+                .add_message::<bevy::input::mouse::MouseWheel>()
+                .add_systems(PreUpdate, crate::realm_select::take_input);
+            let list = crate::realm_select::list_keys;
+            if list_first {
+                app.add_systems(Update, (list, login_input).chain());
+            } else {
+                app.add_systems(Update, (login_input, list).chain());
+            }
+            // The list stands over this screen, as the realm park raises it after logon.
+            app.world_mut()
+                .resource_mut::<crate::realm_select::Realms>()
+                .shown = true;
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Escape);
+            app.update();
+
+            let order = if list_first {
+                "list first"
+            } else {
+                "screen first"
+            };
+            assert!(
+                !app.world().resource::<crate::realm_select::Realms>().shown,
+                "{order}: the list's Cancel closed it"
+            );
+            assert!(
+                std::iter::from_fn(|| realm_rx.try_recv().ok())
+                    .any(|r| matches!(r, crate::net::RealmRequest::Abandon)),
+                "{order}: and answered the park"
+            );
+            assert!(
+                requests.try_recv().is_err(),
+                "{order}: the press was the list's, so the login screen submits nothing"
+            );
+        }
     }
 
     /// A lost session does not log itself back in: a displaced client's resubmit would kick the

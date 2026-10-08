@@ -118,7 +118,9 @@ pub(crate) use probes::{
 };
 pub(crate) use scenarios::ui_opted_in;
 use scenarios::GlueScreen;
-use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};
+use scenarios::{
+    Scenario, SubjectKind, TrainerList, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS,
+};
 
 pub(crate) mod fxview;
 // The scripted aim, swim-pitch and camera-rig drivers order themselves before `player::control`:

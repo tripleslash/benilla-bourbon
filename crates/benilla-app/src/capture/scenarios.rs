@@ -18,6 +18,20 @@ pub(super) struct Scenario {
     pub(super) ui: Option<UiFixture>,
 }
 
+/// Which trainer [`UiFixture::Trainer`] captures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrainerList {
+    /// Llane Beshere (entry 911), Northshire's warrior trainer: the rank-1 learn wrappers a
+    /// vmangos trainer lists, so the description is the taught ability's own text.
+    Warrior,
+    /// A shaman trainer's Astral Recall row (wrapper 1352 teaches 556), the shipped spell whose
+    /// description carries the `$z` token, so the shot pins the bind area's name too.
+    Shaman,
+    /// A profession trainer's two row shapes: the learn wrapper whose text is the taught
+    /// profession's, and a recipe whose text is its product's.
+    Blacksmith,
+}
+
 /// A UI window opened with synthetic state that mirrors what the server sends, so the capture
 /// runs the real feed, VM, extract and render chain.
 #[derive(Clone, Copy, PartialEq)]
@@ -29,6 +43,9 @@ pub(super) enum UiFixture {
     Merchant,
     Gossip,
     Quest,
+    /// The class trainer window fed as `SMSG_TRAINER_LIST` would: the first learnable service
+    /// selected, its description expanded from `Spell.dbc`.
+    Trainer(TrainerList),
     /// The bank window fed through a synthetic self-player descriptor: `PLAYER_FIELD_BANK_SLOT`
     /// guids, a bank bag, the purchased count in `PLAYER_BYTES_2` byte 2, and coinage.
     Bank,
@@ -935,6 +952,35 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: [-8949.95, -132.49, 85.5],
         minute: 720,
         ui: Some(UiFixture::NameRank),
+    },
+    // The warrior trainer's window over the noon ground view, a learnable service selected.
+    Scenario {
+        name: "ui-trainer",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Warrior)),
+    },
+    // A shaman trainer's window: the one shipped service whose description carries `$z`, over a
+    // bind point, so the shot pins the token against `AreaTable`.
+    Scenario {
+        name: "ui-trainer-astral",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Shaman)),
+    },
+    // A blacksmithing trainer's window: the profession-learn row, whose text is the taught
+    // profession's, with a recipe row beneath it.
+    Scenario {
+        name: "ui-trainer-blacksmith",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Blacksmith)),
     },
 ];
 

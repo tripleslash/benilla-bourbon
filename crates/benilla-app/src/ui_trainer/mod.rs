@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use benilla_formats::{SkillLineCatalog, SpellCatalog};
+use benilla_formats::{SkillLineCatalog, SpellCatalog, TokenContext};
 use benilla_protocol::messages::TrainerSpell;
 use bevy::prelude::*;
 
@@ -163,6 +163,7 @@ fn resolve_service(
     icons: Option<&ItemDisplays>,
     items: &Items,
     commands: &NetCommands,
+    text: &ServiceText,
     // The VM's own `GlobalStrings.lua`, for the group header labels.
     get: &dyn Fn(&str) -> Option<String>,
 ) -> TrainerService {
@@ -224,9 +225,7 @@ fn resolve_service(
         subtext: display.and_then(|d| d.rank.clone()),
         // Over the wire spell, like the name and subtext ([`service_icon`]).
         texture: service_icon(wire.spell, trainer_type, spells, icons, items, commands),
-        // Empty: the 1.12 `GetTrainerServiceDescription` returns `Spell.dbc`'s Description with
-        // its `$s1`/`$o1`/`$d`/`$a1` tokens substituted, and that substitution is not built.
-        description: String::new(),
+        description: service_description(wire, trainer_type, spells, items, commands, text),
         cost: wire.cost,
         prof_first_rank: wire.is_primary_prof_first_rank,
         category: cat,
@@ -249,6 +248,7 @@ fn snapshot(
     icons: Option<&ItemDisplays>,
     items: &Items,
     commands: &NetCommands,
+    text: &ServiceText,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<TrainerState> {
     open.trainer?;
@@ -268,6 +268,7 @@ fn snapshot(
                     icons,
                     items,
                     commands,
+                    text,
                     get,
                 )
             })
@@ -288,6 +289,16 @@ pub(crate) struct ReEvalInputs<'w, 's> {
     edges: MessageReader<'w, 's, FieldChanged>,
 }
 
+/// The resources a service description's `$`-tokens read beside the caster's descriptor: the
+/// spell-modifier tables and the bind point `$z` names, the same two reads the item and spell
+/// tooltip feeds make.
+#[derive(SystemParam)]
+pub(crate) struct DescriptionReads<'w> {
+    spell_mods: Res<'w, crate::spell::SpellModifiers>,
+    home_bind: Option<Res<'w, crate::net::HomeBind>>,
+    area_names: Option<Res<'w, crate::ui_quest_log::QuestHeaderNamesRes>>,
+}
+
 /// Push the current trainer into the VM and fire its events on a change. Another trainer while
 /// open is a close then an open: `ShowUIPanel` returns early on a visible frame.
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
@@ -299,6 +310,7 @@ pub(crate) fn feed_trainer(
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
     mut re_eval: ReEvalInputs,
+    desc: DescriptionReads,
     // A tradeskill row shows its created item's icon: the template cache and `ItemDisplayInfo.dbc`.
     icons: Option<Res<ItemDisplays>>,
     items: Res<Items>,
@@ -416,23 +428,63 @@ pub(crate) fn feed_trainer(
             &player,
         );
     }
-    let fresh = snapshot(
-        &open,
-        &spells.catalog,
-        Some(&skill_lines.catalog),
-        &actions.spells,
-        icons.as_deref(),
-        &items,
-        &commands,
-        &|key: &str| {
+    // The spell tooltip's description reads (`0x52f717`), and `0x6e3159`'s charm-else-summon for
+    // a `LEARN_PET_SPELL` row.
+    let store = self_player.map(|(_, store)| store);
+    let pet = store
+        .and_then(|s| s.0.unit_pet_guid())
+        .and_then(|guid| re_eval.index.0.get(&guid).copied())
+        .and_then(|entity| re_eval.stores.get(entity).ok());
+    let fresh = {
+        let gender = store.and_then(|s| s.0.unit_gender()).unwrap_or(0);
+        let home_area: Option<&str> = desc
+            .home_bind
+            .as_deref()
+            .and_then(|b| b.0)
+            .and_then(|id| desc.area_names.as_deref()?.0.resolve(id as i32));
+        let player_skill =
+            |id: u32| crate::spell::spell_skill_value(store, Some(&skill_lines.catalog), id);
+        let pet_skill = |_: u32| crate::spell::pet_skill_value(pet.map(|p| &p.0));
+        let get = |key: &str| {
             script
                 .lua()
                 .globals()
                 .get::<String>(key)
                 .ok()
                 .filter(|t| !t.is_empty())
-        },
-    );
+        };
+        let ctx = TokenContext {
+            durations: &spells.durations,
+            radii: &spells.radii,
+            ranges: Some(&spells.ranges),
+            skill: &player_skill,
+            lookup: &|id| spells.catalog.get(id),
+            mods: Some(&*desc.spell_mods),
+            unmodified_points: false,
+            gender: &|| gender,
+            home_area: &|| home_area,
+            global: &get,
+            printf: &crate::ui_script::token_printf,
+        };
+        let pet_ctx = TokenContext {
+            skill: &pet_skill,
+            ..ctx
+        };
+        snapshot(
+            &open,
+            &spells.catalog,
+            Some(&skill_lines.catalog),
+            &actions.spells,
+            icons.as_deref(),
+            &items,
+            &commands,
+            &ServiceText {
+                player: &ctx,
+                pet: &pet_ctx,
+            },
+            &get,
+        )
+    };
     // A spell subject's view must be in the store before the detail icon is hovered.
     let mut fresh_tooltip_subjects = TrainerTooltipSubjects::default();
     for service in fresh.iter().flat_map(|state| &state.services) {
@@ -528,7 +580,9 @@ fn drain_trainer(
 }
 
 mod law;
-use law::{category, service_group, service_icon, service_tooltip};
+use law::{
+    category, service_description, service_group, service_icon, service_tooltip, ServiceText,
+};
 
 #[cfg(test)]
 mod tests;

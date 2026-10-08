@@ -1,6 +1,7 @@
 //! The capture UI fixtures: each arm seeds one window's synthetic but realistic state.
 
 use super::*;
+use benilla_protocol::messages::trainer_spell_state;
 
 /// The `vplates` fixture's wolf, the reference screenshot's subject (vmangos `creature_template`
 /// 69 "Timber Wolf": level 2, faction template 32, display 604), at the scenario's look point.
@@ -23,6 +24,66 @@ const CHEST_GUID: u64 = (0xF110u64 << 48) | 0x744;
 /// 45°), so `front` shows the lit side and `rear` the unlit one.
 const SUBJECT_YAW: f32 = 2.36;
 
+/// One trainer fixture's canned seed: the trainer's identity, its `SMSG_TRAINER_LIST` type, its
+/// greeting, the character's hearthstone bind area, and the wire rows
+/// `(spell, state, copper cost, required level)`.
+struct TrainerSeed {
+    name: &'static str,
+    subname: &'static str,
+    trainer_type: u32,
+    greeting: &'static str,
+    bind: u32,
+    rows: &'static [(u32, u8, u32, u8)],
+}
+
+/// Llane Beshere (entry 911), Northshire's warrior trainer: the rank-1 learn wrappers a vmangos
+/// trainer lists (`1605` teaches Heroic Strike 78 and so on), so each row's name and rank mirror
+/// the ability while its description is the taught spell's own text.
+const TRAINER_WARRIOR: TrainerSeed = TrainerSeed {
+    name: "Llane Beshere",
+    subname: "Warrior Trainer",
+    trainer_type: 0,
+    greeting: "I can train you in the ways of the warrior.",
+    bind: 9, // Northshire Valley, where this character's hearthstone is
+    rows: &[
+        (1605, trainer_spell_state::GREEN, 10, 1), // Heroic Strike Rank 1
+        (1738, trainer_spell_state::GREEN, 100, 4), // Charge Rank 1
+        (1423, trainer_spell_state::GREEN, 100, 4), // Rend Rank 1
+        (6674, trainer_spell_state::GREEN, 200, 6), // Battle Shout Rank 1
+        (1716, trainer_spell_state::GREEN, 300, 8), // Hamstring Rank 1
+        (3128, trainer_spell_state::GREEN, 200, 8), // Parry
+    ],
+};
+
+/// A shaman trainer's Astral Recall (wrapper 1352 teaches 556). One service only: the stock
+/// window's `ClassTrainer_SelectFirstLearnableSkill` selects row 2, so the row the shot is about
+/// must be the first service of the first group.
+const TRAINER_SHAMAN: TrainerSeed = TrainerSeed {
+    name: "Sian'tsu",
+    subname: "Shaman Trainer",
+    trainer_type: 0,
+    greeting: "The spirits are strong within you, shaman.",
+    bind: 362, // Razor Hill, a Durotar hearthstone
+    rows: &[(1352, trainer_spell_state::GREEN, 4000, 30)],
+};
+
+/// Bengus Deepforge, Ironforge's blacksmithing trainer, with the two row shapes a profession
+/// trainer lists: the profession-learn wrapper (2020 teaches 2018, whose own text the row shows)
+/// and a recipe (7820 teaches 7818, whose text is the description of the Silver Rod it makes).
+/// The learn row sorts into group 1 (`Effect` 44 `SKILL_STEP`) ahead of the recipe's group 2
+/// (`0x4d77b6`), so the stock window's row-2 selection lands on it.
+const TRAINER_BLACKSMITH: TrainerSeed = TrainerSeed {
+    name: "Bengus Deepforge",
+    subname: "Blacksmithing Trainer",
+    trainer_type: 2, // a tradeskill trainer
+    greeting: "The forge shapes what the mine provides.",
+    bind: 1537, // Ironforge
+    rows: &[
+        (2020, trainer_spell_state::GREEN, 9, 5), // Apprentice Blacksmith
+        (7820, trainer_spell_state::GREEN, 90, 0), // Silver Rod
+    ],
+};
+
 /// Seeds the fixture window's state once the scene is resident; the real feeds push it into the VM
 /// during the settle window as live wire data would. Icons resolve through the offline
 /// `ItemDisplayCatalog`, and names go straight into the caches.
@@ -35,9 +96,14 @@ pub(super) fn seed_ui_fixture(
     mut quest: ResMut<crate::ui_quest::QuestGiver>,
     mut quest_log: ResMut<crate::ui_quest_log::QuestLog>,
     mut loot: ResMut<crate::ui_loot::LootState>,
+    mut trainer: ResMut<crate::ui_trainer::TrainerOpen>,
     // One param under Bevy's 16-param cap: item objects are entities in the index, spawned as
-    // the wire does.
-    store: (ResMut<crate::items::Items>, ResMut<crate::net::GuidIndex>),
+    // the wire does; the hearthstone bind (`SMSG_BINDPOINTUPDATE`) rides along for the `$z` token.
+    store: (
+        ResMut<crate::items::Items>,
+        ResMut<crate::net::GuidIndex>,
+        ResMut<crate::net::HomeBind>,
+    ),
     mut names: ResMut<crate::names::NameCache>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
     mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
@@ -51,7 +117,7 @@ pub(super) fn seed_ui_fixture(
         ResMut<crate::loading_screen::LoadingScreen>,
     ),
 ) {
-    let (mut items, mut index) = store;
+    let (mut items, mut index, mut home_bind) = store;
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
     let Some(scenario) = ctx.scenario else {
         return;
@@ -205,6 +271,62 @@ pub(super) fn seed_ui_fixture(
                     ..Default::default()
                 });
             }
+        }
+        UiFixture::Trainer(list) => {
+            // The seed's rows are the wire list: its copper costs, level gates and the states the
+            // server computed, in wire order.
+            use benilla_protocol::messages::TrainerSpell;
+            let seed = match list {
+                TrainerList::Warrior => &TRAINER_WARRIOR,
+                TrainerList::Shaman => &TRAINER_SHAMAN,
+                TrainerList::Blacksmith => &TRAINER_BLACKSMITH,
+            };
+            names.insert_creature(
+                NPC_ENTRY,
+                Some(crate::names::CreatureRecord {
+                    name: seed.name.into(),
+                    subname: Some(seed.subname.into()),
+                    creature_type: 7,
+                    pet_family: 0,
+                    rank: 0,
+                    type_flags: 0,
+                    civilian: false,
+                    racial_leader: false,
+                    display_id: 0,
+                }),
+            );
+            home_bind.0 = Some(seed.bind);
+            let Some(script) = script.as_mut() else {
+                return;
+            };
+            // The window's title and portrait read `UnitName("npc")`; no session seats it here.
+            script.set_unit(
+                "npc",
+                Some(benilla_ui::script::UnitState {
+                    exists: true,
+                    name: Some(seed.name.into()),
+                    level: 12,
+                    ..Default::default()
+                }),
+            );
+            // A purse large enough for every cost above, so the money frame renders white.
+            script.set_money(10_000);
+            let services: Vec<TrainerSpell> = seed
+                .rows
+                .iter()
+                .map(|&(spell, state, cost, req_level)| TrainerSpell {
+                    spell,
+                    state,
+                    cost,
+                    can_learn_primary_prof: false,
+                    is_primary_prof_first_rank: false,
+                    req_level,
+                    req_skill: 0,
+                    req_skill_value: 0,
+                    req_spells: [0; 3],
+                })
+                .collect();
+            trainer.open(NPC_GUID, seed.trainer_type, services, seed.greeting.into());
         }
         UiFixture::Gossip => {
             names.insert_creature(

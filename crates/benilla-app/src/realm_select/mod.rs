@@ -28,7 +28,9 @@ mod load;
 mod screen;
 mod smoke;
 
-pub(crate) use load::pvp_rp;
+/// The list's own keys, for a screen's test to run beside its own input.
+#[cfg(test)]
+pub(crate) use input::keys as list_keys;
 
 use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
@@ -37,7 +39,7 @@ use crate::flavor::ClientFlavor;
 use crate::net::{
     CharListMessage, LoginFailedMessage, RealmChoice, RealmListMessage, RealmRequest,
 };
-use benilla_formats::RealmCategory;
+use benilla_formats::{RealmCategory, RealmConfigs};
 use benilla_protocol::RealmInfo;
 
 /// The persisted 1.12 CVar naming the last realm connected to (`0x83f2d0`); the SavedVariables
@@ -58,6 +60,9 @@ pub(crate) struct Realms {
     /// The client Region's categories ([`category`]), read at every data load, so a realm switch
     /// reads the mounted layer's; `None` until the first, and every realm lists untabbed.
     pub(super) categories: Option<Vec<RealmCategory>>,
+    /// `Cfg_Configs.dbc`, the realm types ([`Self::pvp_rp`]), read at every data load, so a realm
+    /// switch reads the mounted layer's; empty until the first, and every type reads Normal.
+    pub(super) types: RealmConfigs,
     /// The tab in front, `RealmList.selectedCategory`: a 1-based ordinal over the categories
     /// holding a realm.
     pub(super) category: Option<usize>,
@@ -71,6 +76,9 @@ pub(crate) struct Realms {
     /// `RealmList:IsVisible()`. While set, a published list is a refresh and is never
     /// auto-answered.
     pub(super) shown: bool,
+    /// [`Self::shown`] as this frame's input found it, taken once in `PreUpdate` by
+    /// [`take_input`]; read through [`Self::owns_input`].
+    owns_input: bool,
     /// `GetRealmInfo`'s `currentRealm`, the row highlighted when nothing else is. The reference
     /// case-folds the `realmName` CVar (`0x46ef9e`, via `0x5ab7d0` on the handle from `0x63db90`)
     /// against the realm name, and `ConnectToRealm` (`0x46b217`) writes the CVar before it dials.
@@ -137,6 +145,19 @@ impl Sort {
 }
 
 impl Realms {
+    /// Whether this frame's keys and clicks are the list's, not the screen's beneath it.
+    ///
+    /// The reference walks a key-down once, strata 8 down to 0 (`0x765f10`), and the first frame
+    /// whose `OnKeyDown` slot returns nonzero ends the walk (`0x765f86`, then `0x765f64`), whatever
+    /// that handler did. `RealmList` is a keyboard-enabled `DIALOG` frame with `OnKeyDown` bound,
+    /// so while it is shown `0x76b7d0` consumes every key it is reached with, ahead of
+    /// `AccountLogin` and `CharacterSelect`, which set no strata. So a press has one owner even
+    /// when its handler hides the list: the list and the screens ask this, never [`Self::shown`],
+    /// which the list's own Escape or Enter clears mid-frame.
+    pub(crate) fn owns_input(&self) -> bool {
+        self.owns_input
+    }
+
     /// The rows the screen draws: indices into [`Self::realms`] for the tab in front, sorted per
     /// category (`0x46e750`).
     pub(super) fn rows(&self) -> Vec<usize> {
@@ -154,7 +175,7 @@ impl Realms {
                         la.total_cmp(&lb)
                     }
                     SortKey::Name => ra.name.to_lowercase().cmp(&rb.name.to_lowercase()),
-                    SortKey::Type => load::pvp_rp(ra.realm_type).cmp(&load::pvp_rp(rb.realm_type)),
+                    SortKey::Type => self.pvp_rp(ra.realm_type).cmp(&self.pvp_rp(rb.realm_type)),
                 };
                 if ord != std::cmp::Ordering::Equal {
                     return if descending { ord.reverse() } else { ord };
@@ -165,6 +186,16 @@ impl Realms {
             std::cmp::Ordering::Equal
         });
         rows
+    }
+
+    /// A realm type's `(pvp, rp)` in `Cfg_Configs.dbc`, `(false, false)` for a type with no row.
+    pub(crate) fn pvp_rp(&self, realm_type: u32) -> (bool, bool) {
+        load::pvp_rp(&self.types, realm_type)
+    }
+
+    /// A realm type's `PlayerKillingAllowed`, `None` for a type with no row.
+    pub(crate) fn row_pvp(&self, realm_type: u32) -> Option<bool> {
+        self.types.get(realm_type).map(|c| c.pvp)
     }
 
     /// The load distribution, over every realm, not the selected category: `0x46e510` walks the
@@ -285,13 +316,23 @@ pub(super) fn is_invalid(realm: &RealmInfo) -> bool {
     realm.flags & 0x01 != 0
 }
 
+/// Settle who owns this frame's input before the list or any glue screen reads it
+/// ([`Realms::owns_input`]).
+pub(crate) fn take_input(mut realms: ResMut<Realms>) {
+    if realms.owns_input != realms.shown {
+        realms.owns_input = realms.shown;
+    }
+}
+
 /// The realm-selection subsystem: the park's policy plus the screen.
 pub(crate) struct RealmSelectPlugin;
 
 impl Plugin for RealmSelectPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Realms>()
-            .add_data_loaders(category::load_categories)
+            // `shown` is written only in `Update`, so any slot here sees the frame's start.
+            .add_systems(PreUpdate, take_input)
+            .add_data_loaders((category::load_categories, load::load_realm_types))
             .add_systems(
                 Update,
                 (
@@ -302,13 +343,14 @@ impl Plugin for RealmSelectPlugin {
                     // Input before the row refresh, so a click shows on the frame it landed.
                     smoke::debug_realm_smoke,
                     (
-                        input::clicks,
-                        input::keys,
-                        tick_refresh,
-                        screen::refresh_list,
+                        (input::clicks, input::keys)
+                            .chain()
+                            .run_if(|realms: Res<Realms>| realms.owns_input()),
+                        (tick_refresh, screen::refresh_list)
+                            .chain()
+                            .run_if(|realms: Res<Realms>| realms.shown),
                     )
-                        .chain()
-                        .run_if(|realms: Res<Realms>| realms.shown),
+                        .chain(),
                 )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Net)

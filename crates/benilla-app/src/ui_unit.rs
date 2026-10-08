@@ -961,6 +961,13 @@ pub(crate) fn snapshot(
         pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
         // `PLAYER_BYTES_3` byte 2, the city-protector title (`PVP_MEDAL<n>`), unset by vmangos.
         pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
+        // The quest-log window, off a player alone: `IsUnitOnQuest` looks the guid up with
+        // TYPEMASK_PLAYER (`0x4dfe97`) before it reads `[obj+0xe68]`.
+        quest_log: if matches!(store.0.object_type(), Some(ObjectType::Player)) {
+            store.0.player_quest_log_window()
+        } else {
+            Default::default()
+        },
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
@@ -1182,6 +1189,15 @@ pub(crate) fn fire_transitions(
     // fires it. No stock file registers it; addons do, to repaint the tapped state.
     if edges.moved(cur.guid, benilla_protocol::field::FIELD_UNIT_DYNAMIC_FLAGS) {
         script.fire_event("UNIT_DYNAMIC_FLAGS", vec![tok()]);
+    }
+    // `UNIT_QUEST_LOG_CHANGED` (id 522), the player-window watch over the quest-log slots
+    // (`0x51bc63`: offset `0x28`, length `0xf0`, callback `0x51bd90`): one compare over the 60
+    // dwords, so one event however many moved. A group mate's ids are all of it on the wire.
+    let log = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+    if (log..log + 3 * u16::from(benilla_protocol::messages::PLAYER_QUEST_LOG_SLOTS))
+        .any(|i| edges.moved(cur.guid, i))
+    {
+        script.fire_event("UNIT_QUEST_LOG_CHANGED", vec![tok()]);
     }
     // 1.12 names the power events per resource (`UNIT_MANA`, `UNIT_MAXRAGE`, …;
     // `UnitFrame.lua:190-199`), and `power_token` yields the suffix.
@@ -2635,6 +2651,46 @@ mod tests {
         );
     }
 
+    /// `UNIT_QUEST_LOG_CHANGED` (id 522) is the player-window watch over the 60 quest-log dwords
+    /// (`0x51bc63`: offset `0x28`, length `0xf0`, callback `0x51bd90`): any of them moving fires it
+    /// once with the token, and a dword either side does not.
+    #[test]
+    fn a_quest_log_change_fires_unit_quest_log_changed_with_the_token() {
+        let fired = |prev: &UnitState, cur: &UnitState, edges: &[(u64, u16)]| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_QUEST_LOG_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "party1", Some(prev), cur, &FieldEdges::of(edges));
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        const MATE: u64 = 0x300;
+        const LOG: u16 = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+        let before = UnitState {
+            exists: true,
+            has_object: true,
+            guid: MATE,
+            ..Default::default()
+        };
+        let mut after = before.clone();
+        after.quest_log[4][0] = 783;
+        let once = vec!["UNIT_QUEST_LOG_CHANGED:party1".to_string()];
+        assert_eq!(fired(&before, &after, &[(MATE, LOG + 12)]), once);
+        // One watch over the window: two slots moving in one pass is one event.
+        assert_eq!(
+            fired(&before, &after, &[(MATE, LOG), (MATE, LOG + 59)]),
+            once
+        );
+        assert!(fired(&before, &after, &[(MATE, LOG - 1), (MATE, LOG + 60)]).is_empty());
+        assert!(fired(&before, &after, &[(MATE + 1, LOG + 12)]).is_empty());
+    }
+
     /// LOST going down, GAINED going up (boot is in control); far sight on every change.
     #[test]
     fn the_control_and_far_sight_edges_fire_once_each_way() {
@@ -3388,6 +3444,42 @@ mod tests {
         assert_eq!(
             (alive.max_health, alive.max_power, alive.level),
             (feigning.max_health, feigning.max_power, feigning.level),
+        );
+    }
+
+    /// The quest-log window rides a player's snapshot whole, and a non-player's is all zero, as
+    /// `IsUnitOnQuest`'s lookup is TYPEMASK_PLAYER (`0x4dfe97`).
+    #[test]
+    fn a_players_snapshot_carries_its_quest_log_window_and_a_creatures_none() {
+        use benilla_protocol::messages::ObjectFields;
+
+        const OBJECT_TYPE: u16 = 2;
+        const QUEST_LOG_1_1: u16 = 198;
+        let log = [
+            (QUEST_LOG_1_1, 783),
+            (QUEST_LOG_1_1 + 1, 0x0100_0003),
+            (QUEST_LOG_1_1 + 57, 7),
+        ];
+        let snap = |type_bits: u32| {
+            snapshot(
+                &ObjectStore(ObjectFields::from_pairs(
+                    &[log.as_slice(), &[(OBJECT_TYPE, type_bits)]].concat(),
+                )),
+                0,
+                None,
+                0,
+                None,
+                Default::default(),
+            )
+        };
+        let player = snap(0x19);
+        assert_eq!(player.quest_log[0], [783, 0x0100_0003, 0]);
+        assert_eq!(player.quest_log[19], [7, 0, 0]);
+        assert_eq!(player.quest_log[1], [0, 0, 0]);
+        assert_eq!(
+            snap(0x09).quest_log,
+            [[0; 3]; 20],
+            "a creature has no PLAYER block"
         );
     }
 

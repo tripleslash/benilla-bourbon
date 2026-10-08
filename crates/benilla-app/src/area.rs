@@ -26,13 +26,13 @@
 //! Deviation: the indoor dedup keys `(WMOID, MOGP uniqueID)`, not the client's raw per-WMO group
 //! index, because the raw index can alias across adjacent buildings.
 //!
-//! The reference's PvP display gate `[0x88272c]` (a cached boolean, not the realm type) is
-//! untraced; ours is always open.
+//! `GetZonePVPInfo`'s type and faction show only on a PvP realm or in one of the six capitals
+//! (zone Flags `0x10`); elsewhere they are nil and the stock zone texts stay uncoloured.
 
 use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 
-use benilla_formats::AreaTableCatalog;
+use benilla_formats::{AreaTableCatalog, AreaTableRow};
 use benilla_ui::script::UiScript;
 
 use crate::net::{ObjectStore, SelfPlayer};
@@ -108,6 +108,7 @@ fn feed_zone_events(
     areas: Option<Res<AreaTableRes>>,
     factions: Option<Res<Factions>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    realm_pvp: Option<Res<RealmPvp>>,
     mut cache: Local<crate::ui_script::VmMemo<ZoneCache>>,
 ) {
     let (Some(mut script), Some(areas)) = (script, areas) else {
@@ -194,26 +195,23 @@ fn feed_zone_events(
         return;
     }
 
-    // GetZonePVPInfo (`0x48d540`): isArena is the leaf's Flags `0x80`; the type is the zone's
-    // FactionGroupMask against the player template's friend then enemy masks, "contested" when
-    // neither; never "arena"; nil only on structural failure. factionName is FactionGroup.dbc's
-    // Name for the zone's mask bit; the realm type never enters.
-    let is_arena = leaf_row.flags & 0x80 != 0;
-    let zone_mask = areas.0.get(zone).map_or(0, |r| r.faction_group_mask);
-    let pvp = factions
+    let zone_row = areas.0.get(zone);
+    let template = factions
         .as_ref()
         .zip(self_store.single().ok())
-        .and_then(|(f, store)| {
-            let tpl = f.catalog().template(store.0.unit_faction_template()?)?;
-            let ty = if zone_mask & tpl.friend_group_mask != 0 {
-                "friendly"
-            } else if zone_mask & tpl.enemy_group_mask != 0 {
-                "hostile"
-            } else {
-                "contested"
-            };
-            Some((ty, f.catalog().faction_group_name(zone_mask).unwrap_or("")))
-        });
+        .and_then(|(f, store)| f.catalog().template(store.0.unit_faction_template()?))
+        .map(|t| (t.friend_group_mask, t.enemy_group_mask));
+    let realm_pvp = realm_pvp.is_some_and(|r| r.0);
+    let (ty, is_arena) = zone_pvp_info(realm_pvp, leaf_row, zone_row, template);
+    // factionName is FactionGroup.dbc's Name for the zone's mask bit.
+    let pvp = ty.map(|ty| {
+        let mask = zone_row.map_or(0, |r| r.faction_group_mask);
+        let name = factions
+            .as_ref()
+            .and_then(|f| f.catalog().faction_group_name(mask))
+            .unwrap_or("");
+        (ty, name)
+    });
     let pvp_type = pvp.map_or("", |(ty, _)| ty);
 
     script.set_zone_texts(benilla_ui::script::ZoneTexts {
@@ -248,20 +246,79 @@ fn feed_zone_events(
     cache.wmo_group = wmo_group;
 }
 
+/// `GetZonePVPInfo` (`0x48d540`): `(pvpType, isArena)`. isArena is the leaf's Flags `0x80`, read
+/// before any bail. The type is nil with no zone row, no faction template, or the display gate
+/// closed: it opens on a PvP realm ([`RealmPvp`]) or in a zone whose Flags carry `0x10`, the six
+/// capitals (`0x48d5c2`/`0x48d5cc`). Open, it is the zone's FactionGroupMask against the template's
+/// `(friend, enemy)` masks, "contested" when neither, never "arena".
+fn zone_pvp_info(
+    realm_pvp: bool,
+    leaf: &AreaTableRow,
+    zone: Option<&AreaTableRow>,
+    template: Option<(u32, u32)>,
+) -> (Option<&'static str>, bool) {
+    let is_arena = leaf.flags & 0x80 != 0;
+    let ty = zone
+        .filter(|z| realm_pvp || z.flags & 0x10 != 0)
+        .zip(template)
+        .map(|(z, (friend, enemy))| {
+            let mask = z.faction_group_mask;
+            if mask & friend != 0 {
+                "friendly"
+            } else if mask & enemy != 0 {
+                "hostile"
+            } else {
+                "contested"
+            }
+        });
+    (ty, is_arena)
+}
+
+/// `[0x88272c]`, the realm's PvP flag the display gate reads: the selected realm's
+/// `PlayerKillingAllowed` in `Cfg_Configs.dbc`, stored once per world entry from the character
+/// list (`0x4015de` in `0x401570`), so a `/reload` or a far teleport keeps it.
+#[derive(Resource, Default)]
+pub(crate) struct RealmPvp(bool);
+
+/// Latch [`RealmPvp`] from the realm this session entered the world on.
+fn latch_realm_pvp(
+    mut latch: ResMut<RealmPvp>,
+    roster: Option<Res<crate::char_select::Roster>>,
+    realms: Option<Res<crate::realm_select::Realms>>,
+) {
+    let realm_type = roster.and_then(|r| r.realm.as_ref().map(|realm| realm.realm_type));
+    let row = realm_type
+        .zip(realms)
+        .and_then(|(t, realms)| realms.row_pvp(t));
+    latch.0 = latched_realm_pvp(latch.0, row);
+}
+
+/// A realm type with no `Cfg_Configs.dbc` row skips the store (`0x4015d2`) and keeps the last
+/// world entry's value, which the process starts at 0 (`.data`).
+fn latched_realm_pvp(previous: bool, row_pvp: Option<bool>) -> bool {
+    row_pvp.unwrap_or(previous)
+}
+
 /// The shared area catalog and the zone-event feed.
 pub(crate) struct AreaPlugin;
 
 impl Plugin for AreaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_data_loaders(load_area_table).add_systems(
-            Update,
-            // After the leaf authority: leaf, indoor bit and names must come from one frame,
-            // as in the client's single-pass resolve (`0x67e510`), or a stale leaf fires a
-            // spurious splash.
-            feed_zone_events
-                .after(crate::ui_script::UiInput)
-                .after(benilla_world::terrain_stream::AreaAuthoritySet),
-        );
+        app.init_resource::<RealmPvp>()
+            .add_data_loaders(load_area_table)
+            .add_systems(
+                OnEnter(crate::char_select::ClientState::InWorld),
+                latch_realm_pvp,
+            )
+            .add_systems(
+                Update,
+                // After the leaf authority: leaf, indoor bit and names must come from one frame,
+                // as in the client's single-pass resolve (`0x67e510`), or a stale leaf fires a
+                // spurious splash.
+                feed_zone_events
+                    .after(crate::ui_script::UiInput)
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
+            );
     }
 }
 
@@ -327,6 +384,108 @@ mod tests {
             elect_event(&c, &sig(12, "Elwynn Forest", "Goldshire", false)),
             None
         );
+    }
+
+    fn row(flags: u32, faction_group_mask: u32) -> AreaTableRow {
+        AreaTableRow {
+            map_id: 0,
+            zone_id: 0,
+            explore_flag: 0,
+            flags,
+            faction_group_mask,
+            exploration_level: 0,
+            name: String::new(),
+        }
+    }
+
+    /// An Alliance player's template: friend Alliance (2), enemy Horde (4).
+    const ALLIANCE: Option<(u32, u32)> = Some((2, 4));
+
+    /// The display gate (`0x48d5c2`/`0x48d5cc`): a PvE realm outside a capital gets no type; a
+    /// capital's Flags `0x10` opens it there, and a PvP realm opens it everywhere.
+    #[test]
+    fn the_pvp_type_shows_on_a_pvp_realm_or_in_a_capital() {
+        let elwynn = row(0x40, 2);
+        let stormwind = row(0x138, 2);
+        let orgrimmar = row(0x138, 4);
+        let stranglethorn = row(0x40, 0);
+        let pvp =
+            |realm_pvp, zone: &AreaTableRow| zone_pvp_info(realm_pvp, zone, Some(zone), ALLIANCE).0;
+
+        assert_eq!(pvp(false, &elwynn), None, "PvE realm, outside a capital");
+        assert_eq!(
+            pvp(false, &stranglethorn),
+            None,
+            "PvE realm, ownerless zone"
+        );
+        assert_eq!(
+            pvp(false, &stormwind),
+            Some("friendly"),
+            "PvE realm, own capital"
+        );
+        assert_eq!(
+            pvp(false, &orgrimmar),
+            Some("hostile"),
+            "PvE realm, enemy capital"
+        );
+
+        assert_eq!(pvp(true, &elwynn), Some("friendly"));
+        assert_eq!(pvp(true, &stranglethorn), Some("contested"));
+        assert_eq!(pvp(true, &orgrimmar), Some("hostile"));
+    }
+
+    /// isArena is the leaf's `0x80`, read before any bail, so a closed gate keeps it.
+    #[test]
+    fn is_arena_survives_a_closed_gate() {
+        let battle_ring = row(0xd0, 0);
+        let stranglethorn = row(0x40, 0);
+        assert_eq!(
+            zone_pvp_info(false, &battle_ring, Some(&stranglethorn), ALLIANCE),
+            (None, true)
+        );
+        assert_eq!(
+            zone_pvp_info(true, &battle_ring, Some(&stranglethorn), ALLIANCE),
+            (Some("contested"), true)
+        );
+        assert_eq!(
+            zone_pvp_info(true, &battle_ring, Some(&stranglethorn), None),
+            (None, true),
+            "no faction template"
+        );
+    }
+
+    /// A realm type with no row keeps what the last world entry stored.
+    #[test]
+    fn a_realm_type_with_no_row_keeps_the_last_latch() {
+        assert!(!latched_realm_pvp(false, None));
+        assert!(latched_realm_pvp(true, None));
+        assert!(!latched_realm_pvp(true, Some(false)));
+        assert!(latched_realm_pvp(false, Some(true)));
+    }
+
+    /// No zone row is a bail, not an ownerless zone.
+    #[test]
+    fn a_missing_zone_row_has_no_pvp_type() {
+        assert_eq!(
+            zone_pvp_info(true, &row(0, 0), None, ALLIANCE),
+            (None, false)
+        );
+    }
+
+    /// On the install's AreaTable the gate opens in exactly the six capitals for a PvE realm.
+    #[test]
+    fn the_six_capitals_are_the_zones_a_pve_realm_colours() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("chain");
+        let cat = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+        let open: Vec<u32> = (0..=u32::from(u16::MAX))
+            .filter(|&id| {
+                cat.get(id).is_some_and(|r| {
+                    r.zone_id == 0 && zone_pvp_info(false, r, Some(r), ALLIANCE).0.is_some()
+                })
+            })
+            .collect();
+        assert_eq!(open, [1497, 1519, 1537, 1637, 1638, 1657]);
     }
 
     /// The `0x67e670` override skip (abbey) and fire (inn) branches on the install's data.
