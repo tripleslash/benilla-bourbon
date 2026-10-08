@@ -20,7 +20,8 @@
 //! claimed a heartbeat ahead of the position can set rest and drop it at once, and the latch never
 //! asks again: no rest until you walk out and back in. While still inside, not resting, and moved
 //! `RETRY_MOVED` since the last claim, we re-send it from the newer position, at most `RETRIES`
-//! times and no sooner than `RETRY_AFTER` after the last.
+//! times and no sooner than `RETRY_AFTER` after the last. A rest that came on and went again is
+//! re-claimed the same way: the flag showing for a moment is not the claim holding.
 
 use std::time::Duration;
 
@@ -147,11 +148,15 @@ fn check_area_triggers(
             retry.0 = None;
             return;
         }
+        if claim.left == 0 {
+            retry.0 = None;
+            return;
+        }
+        // Resting now keeps the claim armed: the server can drop the rest a tick after setting it.
         let resting = self_q
             .single()
             .is_ok_and(|s| s.0.player_flags() & PLAYER_FLAGS_RESTING != 0);
-        if resting || claim.left == 0 {
-            retry.0 = None;
+        if resting {
             return;
         }
         let moved = here
