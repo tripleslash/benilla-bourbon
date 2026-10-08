@@ -157,11 +157,18 @@ fn far_sun_visibility(
     return mix(FAR_SUN_UNDER_COVER, 1.0, sky_visibility_fast(map, samp, c, world_pos));
 }
 
-// A surface in full shade still keeps this share of the key: leaves and edges scatter sunlight
-// around, and a zero floor made a canopy floor read as night next to classic's 0.7 (which keeps
-// nearly all of it). The froxels do NOT take it — the contrast between lit and shadowed air is the
-// shafts.
-const SUN_SHADE_FLOOR: f32 = 0.35;
+// A surface in full shade still keeps a share of the key: sunlight scattered in through the leaves
+// and around the edges of whatever shades it. How much depends on how open that cover is toward the
+// sun — under one thin crown the shade stays light, under layered canopy it goes deep — so the share
+// runs from `SUN_SHADE_DEEP` (every cover tap blocked) to `SUN_SHADE_OPEN` (none), and a half-open
+// cover keeps the 0.35 one floor used to give everywhere. A zero floor made a canopy floor read as
+// night next to classic's 0.7 (which keeps nearly all of it). The froxels do NOT take it — the
+// contrast between lit and shadowed air is the shafts.
+const SUN_SHADE_DEEP: f32 = 0.12;
+const SUN_SHADE_OPEN: f32 = 0.58;
+// The radius (yd) of the cover read: about a crown's depth of leaves, wide enough that one crown's
+// holes count and narrow enough that the open ground past a neighbouring tree does not.
+const COVER_RADIUS_YD: f32 = 1.5;
 
 fn sun_visibility(
     map: texture_depth_2d_array,
@@ -172,7 +179,57 @@ fn sun_visibility(
     view_distance: f32,
     lite: bool,
 ) -> f32 {
-    return mix(SUN_SHADE_FLOOR, 1.0, sun_visibility_raw(map, samp, c, world_pos, normal, view_distance, lite));
+    let v = sun_visibility_raw(map, samp, c, world_pos, normal, view_distance, lite);
+    // Only a fragment the sun does not fully reach pays for the cover read.
+    var open = 0.5;
+    if (v < 1.0 && !lite) {
+        open = sun_cover_open(map, samp, c, world_pos, normal, view_distance);
+    }
+    return mix(mix(SUN_SHADE_DEEP, SUN_SHADE_OPEN, open), 1.0, v);
+}
+
+// How open the cover toward the sun is around a point (1 = no caster within `COVER_RADIUS_YD`): eight
+// compares on two rings in the receiver's own tangent plane, so a slope or an oblique sun never
+// counts the receiver's own ground as cover. Past the cascades 0.5: the far field has its own floor.
+fn sun_cover_open(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    c: ModernCascades,
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    view_distance: f32,
+) -> f32 {
+    let count = u32(c.params.x);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if (view_distance < c.splits[i]) {
+            let clip_from_world = cascade_clip(c, i);
+            // The light clip is orthographic (w = 1), so a tangent step is a fixed step in clip.
+            let base = (clip_from_world * vec4<f32>(world_pos + normal * (c.texel_world[i] * c.params.z), 1.0)).xyz;
+            let side = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(normal.x) > 0.9);
+            let t1 = normalize(cross(normal, side));
+            let t2 = cross(normal, t1);
+            let a = (clip_from_world * vec4<f32>(t1 * COVER_RADIUS_YD, 0.0)).xyz;
+            let b = (clip_from_world * vec4<f32>(t2 * COVER_RADIUS_YD, 0.0)).xyz;
+            var ring = array<vec2<f32>, 8>(
+                vec2<f32>(1.0, 0.0),
+                vec2<f32>(0.0, 1.0),
+                vec2<f32>(-1.0, 0.0),
+                vec2<f32>(0.0, -1.0),
+                vec2<f32>(0.35, 0.35),
+                vec2<f32>(-0.35, 0.35),
+                vec2<f32>(-0.35, -0.35),
+                vec2<f32>(0.35, -0.35),
+            );
+            var open = 0.0;
+            for (var t = 0u; t < 8u; t = t + 1u) {
+                let p = base + a * ring[t].x + b * ring[t].y;
+                let uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+                open = open + textureSampleCompareLevel(map, samp, uv, i32(i), p.z + c.depth_bias[i] * 2.0);
+            }
+            return open / 8.0;
+        }
+    }
+    return 0.5;
 }
 
 // Sun visibility (1 = lit) at a world position seen `view_distance` yd in front of the camera.
