@@ -52,20 +52,13 @@ static KEY_HORIZON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 
 static MOON_KEY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-static MIDDAY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// The hours the zone look's noon tint ramps over (minutes): in from 09:00 to 11:00, out from
-/// 15:00 to 17:00, so the morning's and the evening's rows keep their authored hue.
+/// The hours the zone look's noon row ramps over (minutes): in from 09:00 to 11:00, out from 14:30
+/// to 16:30, so the morning's and the afternoon's rows keep their authored warmth.
 const MIDDAY_IN: (f32, f32) = (540.0, 660.0);
-const MIDDAY_OUT: (f32, f32) = (900.0, 1020.0);
+const MIDDAY_OUT: (f32, f32) = (870.0, 990.0);
 
-/// How much of the frame is midday: 1 from 11:00 to 15:00, 0 before 09:00 and after 17:00 (0 in a
-/// classic frame).
-pub fn midday() -> f32 {
-    f32::from_bits(MIDDAY.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-fn midday_at(minute: f32) -> f32 {
+/// How much of `minute` is midday: 1 from 11:00 to 14:30, 0 before 09:00 and after 16:30.
+pub fn midday_at(minute: f32) -> f32 {
     let ramp = |(a, b): (f32, f32)| {
         let t = ((minute - a) / (b - a)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
@@ -170,21 +163,25 @@ pub fn moonlit(row: [f32; 3], night: [f32; 3], moon_key: f32) -> [f32; 3] {
     [0, 1, 2].map(|c| row[c] * (1.0 - t) + night[c] * t)
 }
 
-fn apply_sun_arc(clock: Option<Res<GameClock>>, mut lighting: ResMut<WowLighting>) {
+fn apply_sun_arc(
+    clock: Option<Res<GameClock>>,
+    look: Option<Res<super::look::ActiveLook>>,
+    mut lighting: ResMut<WowLighting>,
+) {
     if !super::frame_is_modern() || !super::sun_arc_enabled() {
         KEY_HORIZON.store(1.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
         MOON_KEY.store(0, std::sync::atomic::Ordering::Relaxed);
-        MIDDAY.store(0, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let Some(clock) = clock else {
         return;
     };
     let minute = clock.minute as f32;
-    MIDDAY.store(
-        midday_at(minute).to_bits(),
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    // fork: around noon the key takes the zone look's noon hue; every reader of the row (the
+    // surfaces, GI, haze, shafts and clouds) takes it with it.
+    if let Some(look) = look {
+        lighting.diffuse = look.0.noon_key_row(lighting.diffuse);
+    }
     let sun_elev = lighting
         .celestial_dir
         .normalize_or_zero()
@@ -261,6 +258,24 @@ mod tests {
         }
         // Full a quarter hour after moonrise, where the authored row is still the sunset's.
         assert!(horizon_factor(moon_elevation(MOONRISE_MINUTE + 15.0)) > 0.99);
+    }
+
+    /// The noon key: warm until 09:00, full from 11:00 to 14:30, warm again from 16:30.
+    #[test]
+    fn midday_ramps_in_by_eleven_and_out_by_half_past_four() {
+        for (minute, want) in [
+            (0.0, 0.0),
+            (540.0, 0.0),
+            (660.0, 1.0),
+            (690.0, 1.0),
+            (870.0, 1.0),
+        ] {
+            assert_eq!(midday_at(minute), want, "{minute}");
+        }
+        assert_eq!(midday_at(990.0), 0.0);
+        assert_eq!(midday_at(1200.0), 0.0);
+        let (rising, falling) = (midday_at(600.0), midday_at(930.0));
+        assert!((rising - 0.5).abs() < 1e-6 && (falling - 0.5).abs() < 1e-6);
     }
 
     #[test]
