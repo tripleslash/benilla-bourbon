@@ -415,29 +415,57 @@ fn tick_transports(
     }
 }
 
+/// The travel phase last handed to a ship prop, the reference's `[transport+0x38]` (4.1.0): the
+/// sequence is set only when the phase changes, so a one-shot runs its own course in between.
+#[derive(Component)]
+struct ShipPropPhase(ShipMotion);
+
+/// The world object's sequence-finished handler (4.1.0 `CGGameObject_C_Type_WorldObj::
+/// SequenceFinishedHandler`): ShipStart hands over to ShipMoving, ShipStop to Stand. Without it a
+/// long acceleration or approach replays the 2 s spin-up or 3 s spin-down from its start.
+fn ship_sequence_then(anim_id: u16) -> Option<u16> {
+    match anim_id {
+        162 => Some(163),
+        164 => Some(0),
+        _ => None,
+    }
+}
+
 /// Play each transport's travel phase on its ship props (the zeppelin's rotor, the ship's sails):
 /// Stand docked, then ShipStart, ShipMoving and ShipStop, as the reference's MO-transport tick
-/// hands the model `ShipPath::GetPosition`'s sequence on every change (4.1.0
-/// `CGGameObject_C_Type_MapObjTransport`). Level-triggered, so a prop that finishes loading
-/// mid-voyage joins the phase it arrives in.
+/// hands the model `ShipPath::GetPosition`'s sequence when it changes (4.1.0
+/// `CGGameObject_C_Type_MapObjTransport`), and each one-shot chains on as it finishes. A prop
+/// that finishes loading mid-voyage takes the phase it arrives in.
 fn drive_ship_props(
+    mut commands: Commands,
     transports: Query<(&Transport, &Children)>,
     mut hosts: Query<(
         &mut benilla_world::doodad_anim::DoodadAnimHost,
         &benilla_assets::ModelAnimations,
+        Option<&mut ShipPropPhase>,
     )>,
 ) {
     for (transport, children) in &transports {
-        let want = transport.motion.anim_id();
+        let motion = transport.motion;
         for &child in children {
-            let Ok((mut host, anims)) = hosts.get_mut(child) else {
+            let Ok((mut host, anims, phase)) = hosts.get_mut(child) else {
                 continue;
             };
-            if host.anim_id() != Some(want)
-                && benilla_world::doodad_anim::is_ship_prop(anims)
-                && anims.clips.iter().any(|c| c.anim_id == want)
+            if phase.as_ref().is_some_and(|p| p.0 == motion)
+                || !benilla_world::doodad_anim::is_ship_prop(anims)
             {
-                host.rearm(want);
+                continue;
+            }
+            match phase {
+                Some(mut p) => p.0 = motion,
+                None => {
+                    commands.entity(child).insert(ShipPropPhase(motion));
+                }
+            }
+            let want = motion.anim_id();
+            // Already playing it (ShipStart's own hand-over to ShipMoving): no restart.
+            if host.anim_id() != Some(want) && anims.clips.iter().any(|c| c.anim_id == want) {
+                host.rearm(want, ship_sequence_then(want));
             }
         }
     }

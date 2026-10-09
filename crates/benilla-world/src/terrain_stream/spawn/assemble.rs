@@ -661,6 +661,7 @@ pub fn spawn_model_entities(
             // loader's var-0 seed, the reference's two-stage load.
             window_hi: f32::NEG_INFINITY,
             anim_id: h.anim_id,
+            then: None,
             // Born parked: the spawn frame's default `Visibility` is not yet a verdict, so the
             // first real one decides the slot.
             active: false,

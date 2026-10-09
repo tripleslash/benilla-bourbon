@@ -235,6 +235,9 @@ pub struct DoodadAnimHost {
     pub(crate) window_hi: f32,
     /// The animation id to re-roll over; `None` on the gseq-only tier, which has no window.
     pub(crate) anim_id: Option<u16>,
+    /// The id to arm when the current play-window ends, in place of a fresh roll of
+    /// [`Self::anim_id`]: an object's sequence-finished chain ([`Self::rearm`]).
+    pub(crate) then: Option<u16>,
     /// Whether the host was ticking last frame (edge-triggered pause/resume).
     pub active: bool,
     /// `Time::elapsed_secs` when `active` last went false: the reaper demotes the longest-parked.
@@ -257,9 +260,12 @@ impl DoodadAnimHost {
 
     /// Re-arm onto `anim_id`, as the reference's `ObjectSetSequence` sets a transport's sequence:
     /// the window expires now, so `reroll_doodad_variation` snaps to a variation of it this or
-    /// next frame and loops it from there.
-    pub fn rearm(&mut self, anim_id: u16) {
+    /// next frame. With `then`, the play-window that follows ends on `then` instead of a fresh
+    /// roll of `anim_id`, as a sequence-finished handler moves a one-shot on (ShipStart plays once
+    /// and hands over to ShipMoving); without it, `anim_id` loops.
+    pub fn rearm(&mut self, anim_id: u16, then: Option<u16>) {
         self.anim_id = Some(anim_id);
+        self.then = then;
         self.window_hi = f32::NEG_INFINITY;
     }
 
@@ -304,6 +310,16 @@ fn reroll_doodad_variation(
         if now < host.window_hi {
             continue;
         }
+        // A finished window with a chain hands over; a fresh arm (`NEG_INFINITY`) plays its own id
+        // first.
+        let anim_id = match host.then {
+            Some(next) if host.window_hi > f32::NEG_INFINITY => {
+                host.then = None;
+                host.anim_id = Some(next);
+                next
+            }
+            _ => anim_id,
+        };
         let Some(clip) = anims.pick_variation(anim_id, rng.draw()) else {
             // No chain for this id: stop asking.
             host.anim_id = None;
@@ -753,6 +769,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -825,6 +842,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: None,
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -921,6 +939,7 @@ mod tests {
                     // Far future: no window may expire and change the armed clip mid-test.
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1037,6 +1056,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: false,
                     parked_at: 0.0,
                 })
@@ -1127,6 +1147,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1214,6 +1235,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 })
@@ -1277,6 +1299,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: false,
                     parked_at: 0.0,
                 },
@@ -1320,6 +1343,7 @@ mod tests {
             armed_at: 10.0,
             window_hi: f32::NEG_INFINITY,
             anim_id: Some(0),
+            then: None,
             // Parked, and the clock still answers: honouring the animate set is the caller's job.
             active: false,
             parked_at: 0.0,

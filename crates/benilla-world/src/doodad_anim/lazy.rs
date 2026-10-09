@@ -200,6 +200,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: false,
                     parked_at: 0.0,
                 },
