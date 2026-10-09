@@ -916,7 +916,7 @@ fn apply_gpu_tier(cvars: &mut Cvars) {
 }
 
 /// fork: web build — the CVars the Graphics page writes: its CVar rows, and `gamma` behind
-/// Brightness's `SetGamma`. A player's write to any of them is "applied new graphics settings",
+/// Gamma's `SetGamma`. A player's write to any of them is "applied new graphics settings",
 /// which is what retires `web/gpu.js`'s recovery tier.
 pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "uiScale",
@@ -925,6 +925,7 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     // Spell Detail, a Graphics page row since upstream's panel.
     "spellEffectLevel",
     "gamma",
+    "brightness",
     "weatherDensity",
     "gxVSync",
     "worldShadows",
@@ -1908,6 +1909,18 @@ mod tests {
             res::<crate::ui_gamma::DisplayGamma>(&app).0,
             *crate::ui_gamma::GAMMA_RANGE.end()
         );
+        // `brightness` is the slider's 0 to 1, its 0.5 default the identity lift.
+        for (wrote, want, lift) in [
+            ("0.5", 0.5, 0.0),
+            ("1", 1.0, crate::ui_gamma::BRIGHTNESS_SPAN),
+            ("0", 0.0, -crate::ui_gamma::BRIGHTNESS_SPAN),
+            ("7", 1.0, crate::ui_gamma::BRIGHTNESS_SPAN),
+        ] {
+            apply(&mut app, crate::ui_gamma::CVAR_BRIGHTNESS, wrote);
+            let brightness = *res::<crate::ui_gamma::DisplayBrightness>(&app);
+            assert_eq!(brightness.0, want, "brightness {wrote}");
+            assert_eq!(brightness.lift(), lift, "brightness {wrote}");
+        }
         assert_eq!(res::<ClutterConfig>(&app).frill_density(), 32.0);
         // Both spellings reach the field from a state neither holds; `$WOW_CLUTTER_DENSITY` takes
         // both for the session. Two values, since writing the sibling's mirrored value is a no-op.
@@ -2323,6 +2336,7 @@ mod tests {
             .init_resource::<benilla_world::particles::ParticleTuning>()
             .init_resource::<crate::video::SpellEffectLevel>()
             .init_resource::<crate::ui_gamma::DisplayGamma>()
+            .init_resource::<crate::ui_gamma::DisplayBrightness>()
             .init_resource::<ClickConfig>()
             .init_resource::<crate::target::AssistAttack>()
             .init_resource::<LootConfig>()

@@ -1355,12 +1355,12 @@ fn the_frame_generation_row_stages_applies_and_defaults_on() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Brightness is an API row over `GetGamma`/`SetGamma`, the reference's slider 6
+/// Gamma is an API row over `GetGamma`/`SetGamma`, the reference's slider 6
 /// (`OptionsFrame.lua:30`): a drag writes `gamma`, and a revisit reads it back.
 #[test]
-fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() {
+fn the_gamma_slider_writes_through_its_engine_pair_and_survives_a_reopen() {
     benilla_formats::wow_data_or_skip!();
-    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowGamma";
     let s = audio_harness();
     let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -1369,13 +1369,14 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
             .unwrap(),
-        "Brightness"
+        "Gamma"
     );
-    // The registered `gamma` "1.0" is `GetGamma() == 0`, the centre of the slider's travel.
+    // The registered `gamma` "1.0" is `GetGamma() == 0`, the centre of the slider's travel, and
+    // reads as the display gamma it gives, `1 / gamma`.
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
             .unwrap(),
-        "50%"
+        "1.00"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
@@ -1384,9 +1385,9 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
 
     // `SetGamma` writes the reference's `1 - slider`, with six decimals.
     for (slider, cvar, readout) in [
-        (0.5, "0.500000", "100%"),
-        (-0.5, "1.500000", "0%"),
-        (0.2, "0.800000", "70%"),
+        (0.5, "0.500000", "2.00"),
+        (-0.5, "1.500000", "0.67"),
+        (0.2, "0.800000", "1.25"),
     ] {
         s.run(&format!("{ROW}ControlSlider:SetValue({slider})"))
             .unwrap();
@@ -1411,13 +1412,68 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
             .unwrap(),
-        "70%",
+        "1.25",
         "the reopened page reads the store, not the registered default"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
         "…and the refresh itself writes nothing"
     );
+}
+
+/// Brightness, benilla's own level control above Gamma, is a CVar row over `brightness`: 0 to
+/// 100%, the registered 0.5 at the centre, staged to Apply like every Graphics row.
+#[test]
+fn the_brightness_slider_reads_its_cvar_and_stages_to_apply() {
+    benilla_formats::wow_data_or_skip!();
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let s = audio_harness();
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Brightness"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "50%"
+    );
+    assert!(s
+        .eval::<bool>(&format!(
+            "local lo, hi = {ROW}ControlSlider:GetMinMaxValues() return lo == 0 and hi == 1"
+        ))
+        .unwrap());
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    s.run(&format!("{ROW}ControlSlider:SetValue(0.75)"))
+        .unwrap();
+    assert!(s.take_cvar_changes().is_empty(), "staged, not written");
+    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("brightness".to_string(), "0.75".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "75%"
+    );
+    // The two are independent: Gamma's pair still sits at the registered 1.0.
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowGammaControlValue:GetText()"
+        )
+        .unwrap(),
+        "1.00"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 /// Environment Detail over `WorldDetail`: the readout names the stop, and an out-of-range value
@@ -2026,7 +2082,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
 }
 
 /// fork: web build — `cvars::GRAPHICS_CVARS`, the writes that retire the GPU recovery tier, is
-/// exactly what the Graphics page writes: each CVar row's own, and `gamma` behind Brightness's
+/// exactly what the Graphics page writes: each CVar row's own, and `gamma` behind Gamma's
 /// `SetGamma`. A row added to the page and not to the list would apply without clearing the tier.
 #[test]
 fn the_gpu_tier_graphics_list_is_the_graphics_page() {
@@ -2630,7 +2686,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         // pulled on this fork, so its key is not here.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
-            ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
+            ("BENILLA_TOOLTIP_GAMMA", "GraphicsRowGamma"),
             ("BENILLA_TOOLTIP_HD_MODELS", "GraphicsRowHdModels"),
             ("BENILLA_TOOLTIP_WORLD_SHADOWS", "GraphicsRowWorldShadows"),
             (
@@ -4957,6 +5013,7 @@ fn turtle_options_carry_every_graphics_row() {
         "foliageWindStrength",
         "rainSurfaces",
         "graphicsQuality",
+        "brightness",
     ] {
         assert!(
             rows.contains(&format!(":{cvar}:1;")),
@@ -4976,6 +5033,24 @@ fn turtle_options_carry_every_graphics_row() {
         )
         .unwrap(),
         "PIXEL_SHADERS survives the cut, holding our five rows: {rows}"
+    );
+    // Our Brightness sits directly above Turtle's Gamma, as above ours, and that Gamma is tipped
+    // as ours.
+    assert_eq!(
+        s.eval::<String>(
+            r#"
+            for _, category in ipairs(GameOptions) do
+                for k, option in ipairs(category.options or {}) do
+                    if ( option.name == "GAMMA" ) then
+                        return category.options[k - 1].name .. ","
+                            .. tostring(option.desc == BENILLA_TOOLTIP_GAMMA)
+                    end
+                end
+            end
+        "#
+        )
+        .unwrap(),
+        "BENILLA_BRIGHTNESS,true"
     );
 
     // Our window's other rows, each beside its Turtle neighbour, and Click-to-Move kept; Player
@@ -5022,7 +5097,7 @@ fn turtle_options_carry_every_graphics_row() {
     );
 
     // A slider's readout is our window's row of that CVar: a percentage, a named stop, the
-    // thumb's travel for Brightness, and the bare number past a range of 10.
+    // display gamma for Gamma, and the bare number past a range of 10.
     assert_eq!(
         s.eval::<String>(
             r#"
@@ -5034,11 +5109,13 @@ fn turtle_options_carry_every_graphics_row() {
                 .. text("ENVIRONMENT_DETAIL", 0, 2, 1) .. ","
                 .. text("WEATHER_DETAIL", 0, 3, 3) .. ","
                 .. text("GAMMA", -0.5, 0.5, 0) .. ","
+                .. text("GAMMA", -0.5, 0.5, 0.5) .. ","
+                .. text("BENILLA_BRIGHTNESS", 0, 1, 0.5) .. ","
                 .. text("FARCLIP", 177, 777, 477)
         "#
         )
         .unwrap(),
-        "60%,67%,Medium,Full,50%,477"
+        "60%,67%,Medium,Full,1.00,2.00,50%,477"
     );
 
     // The one control column on Turtle's 346-wide row: it takes the room the page's longest

@@ -1758,7 +1758,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
     // Our Graphics row drives the pair, as the stock slider does, with the bounds of the stock
     // `OptionsFrameSliders[6]`.
     s.eval::<()>("SetGamma(0)").unwrap();
-    let row = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let row = "BenillaOptionsFrameContainerBodyGraphicsRowGamma";
     let bounds = s
         .eval::<Vec<f64>>(&format!(
             "local r = getglobal({row:?}) \
@@ -1778,7 +1778,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
         "…and its step: {}",
         bounds[2]
     );
-    // The readout is the thumb's share of the groove (default 50%), not the stored offset; the
+    // The readout is the display gamma `1 / gamma` (default 1.00), not the stored offset; the
     // page's refresh writes it, so the window must be up.
     s.eval::<()>(
         "ShowUIPanel(BenillaOptionsFrame) \
@@ -1790,7 +1790,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
             "return getglobal({row:?} .. \"ControlValue\"):GetText()"
         ))
         .unwrap(),
-        "50%",
+        "1.00",
     );
 }
 

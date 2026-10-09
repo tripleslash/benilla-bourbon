@@ -29,17 +29,20 @@ use bevy::ui_render::{init_ui_pipeline, UiPipeline};
 use benilla_world::final_pass::FinalPassTarget;
 
 /// Marks the camera whose target holds the gamma-composited UI, with the [`DisplayGamma`]
-/// exponent the decode applies.
+/// exponent and the [`DisplayBrightness`] lift the decode applies.
 #[derive(Component, Clone, Copy, ExtractComponent)]
 pub(crate) struct UiGammaLane {
     /// The clamped `gamma` CVar; `1.0` is the identity ramp.
     pub(crate) gamma: f32,
+    /// The signed level shift of [`DisplayBrightness::lift`]; `0.0` changes no byte.
+    pub(crate) lift: f32,
 }
 
 impl Default for UiGammaLane {
     fn default() -> Self {
         Self {
             gamma: DEFAULT_GAMMA,
+            lift: 0.0,
         }
     }
 }
@@ -71,13 +74,49 @@ impl Default for DisplayGamma {
     }
 }
 
-/// Copies the clamped gamma onto the lane camera when it changes.
-fn stamp_lane_gamma(gamma: Res<DisplayGamma>, mut lanes: Query<&mut UiGammaLane>) {
-    if !gamma.is_changed() {
+/// benilla's `brightness` CVar, 0 to 1. The reference has no such CVar: its one whole-frame
+/// grade is the `gamma` ramp ([`DisplayGamma`]), which bends the midtones and leaves black and
+/// white where they are. This is the level control beside it, applied after the ramp: above the
+/// default it lifts the blacks toward [`BRIGHTNESS_SPAN`] with white held, below it dims the
+/// whites by up to that much with black held. The default is the identity.
+pub(crate) const CVAR_BRIGHTNESS: &str = "brightness";
+
+/// The registered `"0.5"`, the slider's centre, at which the pass changes no byte.
+pub(crate) const DEFAULT_BRIGHTNESS: f32 = 0.5;
+
+/// How far either end of the slider moves the image: black up to this byte share at 1, white down
+/// by it at 0.
+pub(crate) const BRIGHTNESS_SPAN: f32 = 0.25;
+
+/// The clamped `brightness` CVar.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DisplayBrightness(pub(crate) f32);
+
+impl Default for DisplayBrightness {
+    fn default() -> Self {
+        Self(DEFAULT_BRIGHTNESS)
+    }
+}
+
+impl DisplayBrightness {
+    /// The signed shift the decode applies: `0` at the default, `±BRIGHTNESS_SPAN` at the ends.
+    pub(crate) fn lift(self) -> f32 {
+        (self.0.clamp(0.0, 1.0) - DEFAULT_BRIGHTNESS) * 2.0 * BRIGHTNESS_SPAN
+    }
+}
+
+/// Copies the clamped gamma and the brightness lift onto the lane camera when either changes.
+fn stamp_lane_gamma(
+    gamma: Res<DisplayGamma>,
+    brightness: Res<DisplayBrightness>,
+    mut lanes: Query<&mut UiGammaLane>,
+) {
+    if !gamma.is_changed() && !brightness.is_changed() {
         return;
     }
     for mut lane in &mut lanes {
         lane.gamma = gamma.0.clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
+        lane.lift = brightness.lift();
     }
 }
 
@@ -88,7 +127,7 @@ struct UiGammaPipeline {
     sampler: Sampler,
     shader: Handle<Shader>,
     fullscreen: FullscreenShader,
-    /// The exponent's 16-byte uniform, queue-written each frame, which lands before the graph's
+    /// The exponent and lift's 16-byte uniform, queue-written each frame, which lands before the graph's
     /// submit. One buffer, not one per view: [`UiGammaLane`] is on exactly one camera.
     ramp: Buffer,
 }
@@ -152,7 +191,8 @@ fn init_pipeline(
             (
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
-                // The exponent as a `vec4<f32>`: a uniform is 16-byte aligned, so no padding field.
+                // The exponent and lift as a `vec4<f32>`: a uniform is 16-byte aligned, so no
+                // padding field.
                 uniform_buffer_sized(false, Some(std::num::NonZero::new(16).unwrap())),
             ),
         ),
@@ -198,11 +238,11 @@ fn ui_gamma_decode(
         // Still compiling: the UI stays undecoded, over-bright, for a frame or two.
         return;
     };
-    // This frame's exponent as `[g, 0, 0, 0]`; the shader reads `.x`.
+    // This frame's exponent and lift as `[g, lift, 0, 0]`; the shader reads `.x` and `.y`.
     queue.write_buffer(
         &pipelines.ramp,
         0,
-        bytemuck::cast_slice(&[lane.gamma, 0.0, 0.0, 0.0]),
+        bytemuck::cast_slice(&[lane.gamma, lane.lift, 0.0, 0.0]),
     );
     // The swapchain for the `Skip` player-UI camera, the ping-pong target for a `Write` one.
     let Some(out) = FinalPassTarget::resolve(camera, view_target) else {
@@ -257,10 +297,17 @@ fn use_gamma_ui_shaders(
 
 pub(crate) struct UiGammaPlugin;
 
-/// The `gamma` CVar's change callback, clamped to [`GAMMA_RANGE`].
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gamma: ResMut<DisplayGamma>) {
+/// The `gamma` CVar's change callback, clamped to [`GAMMA_RANGE`], and `brightness`'s, clamped to
+/// its slider's 0 to 1.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut gamma: ResMut<DisplayGamma>,
+    mut brightness: ResMut<DisplayBrightness>,
+) {
     if ev.is(benilla_ui::script::CVAR_GAMMA) {
         gamma.0 = ev.num().clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
+    } else if ev.is(CVAR_BRIGHTNESS) {
+        brightness.0 = ev.num().clamp(0.0, 1.0);
     }
 }
 
@@ -268,6 +315,7 @@ impl Plugin for UiGammaPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         app.init_resource::<DisplayGamma>()
+            .init_resource::<DisplayBrightness>()
             .add_plugins(ExtractComponentPlugin::<UiGammaLane>::default())
             .add_systems(Update, stamp_lane_gamma);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

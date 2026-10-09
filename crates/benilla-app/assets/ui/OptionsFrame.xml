@@ -533,12 +533,19 @@
             .. "Has no effect on Classic lighting. Applies when you click Apply."
 
         -- 1.12's GAMMA text points at gray-bar art this page does not have.
-        BENILLA_TOOLTIP_BRIGHTNESS =
-            "Lightens or darkens the whole picture — nights, caves and interiors are what it is "
-            .. "for.\n\n"
+        BENILLA_TOOLTIP_GAMMA =
+            "Bends the midtones of the whole picture while black stays black and white stays "
+            .. "white. Above 1.00 brightens them and softens the contrast; below 1.00 darkens them "
+            .. "and deepens it.\n\n"
             .. "This is the same correction 1.12 applied through the display's own gamma ramp, "
             .. "which it could only do in exclusive fullscreen. benilla applies it to the "
             .. "finished image instead, so it works in both display modes."
+
+        -- benilla's own level control beside Gamma; 1.12 has none.
+        BENILLA_TOOLTIP_BRIGHTNESS =
+            "Raises or lowers the level of the whole picture. Above 50% lifts the darkest shades "
+            .. "— nights, caves and interiors are what it is for; below 50% dims the brightest. "
+            .. "At 50% the picture is unchanged."
 
         BENILLA_OPTIONS_PAGE_ROWS = {
             -- The era Controls order first; the rest follow their 1.12 box's columns.
@@ -559,7 +566,7 @@
                 -- fork: the Graphics Preset heads the page it names (FORK.md).
                 "RowGraphicsPreset",
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
-                "RowWeatherDensity",
+                "RowGamma", "RowWeatherDensity",
                 -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
                 -- window states and the window's own title-bar control already moves between
                 -- them, so the row was a second way to say one thing. `gxWindow` survives as the
@@ -568,9 +575,10 @@
                 -- modern Classic's boolean dropdown); this branch keeps it pulled, and the CVar
                 -- it rode is untouched either way, so nothing downstream of the panel differs.
                 --
-                -- Brightness and Weather Intensity arrive from upstream ABOVE that seat rather
-                -- than below it: both are "what the world IS" rows, and the group they join runs
-                -- from scale and distance down through detail to the picture's own gamma.
+                -- Brightness, Gamma and Weather Intensity arrive from upstream ABOVE that seat
+                -- rather than below it: all are "what the world IS" rows, and the group they join
+                -- runs from scale and distance down through detail to the picture's own level and
+                -- gamma.
                 --
                 -- Updated Character Models closes the "what the world IS" group: it is the only
                 -- row on the page that changes the ART rather than how the art is drawn.
@@ -738,7 +746,7 @@
         -- Holes at 4, 5 and 7, so the OnShow loop uses the pairs form: ipairs would stop at 3.
         BENILLA_GRAPHICS_SLIDER_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail",
-            [6] = "RowBrightness", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
+            [6] = "RowGamma", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
         }
 
         -- A graphics row's bounds: the stock table's row. Turtle WoW's OptionsFrame.lua has no
@@ -824,7 +832,7 @@
         function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
             row.fmt = fmt
-            -- Kept for the "travel" readout, a share of the row's own range.
+            -- Kept for the groove's marks, placed by the row's own range.
             row.minv, row.maxv = min, max
             -- Deviation: a named ladder reads out its stop; 1.12's slider labels only its ends, and
             -- a bare index would mean nothing to a player.
@@ -913,11 +921,11 @@
                 if i > table.getn(row.stops) then i = table.getn(row.stops) end
                 return row.stops[i]
             end
-            -- "travel": the thumb's share of the groove. Brightness stores the reference's
-            -- `1 - gamma` (-0.5 to +0.5, default 0) and reads 0 to 100% with the default at 50.
-            if row.fmt == "travel" and row.minv and row.maxv and row.maxv > row.minv then
-                return string.format("%d%%",
-                    math.floor((value - row.minv) / (row.maxv - row.minv) * 100 + 0.5))
+            -- "gamma": the display gamma the ramp gives, `1 / gamma`. Gamma stores the reference's
+            -- `1 - gamma` (-0.5 to +0.5, default 0), so the registered 1.0 reads 1.00, and right of
+            -- it, where the ramp brightens the midtones, the readout climbs to 2.00.
+            if row.fmt == "gamma" then
+                return string.format("%.2f", 1 / math.max(1 - value, 0.01))
             end
             -- "yards": the zoom limit, cameraDistanceMax x cameraDistanceMaxFactor held to [0, 50]
             -- (`0x5112d6`).
@@ -2213,32 +2221,45 @@
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- An API row over GetGamma/SetGamma, whose unit is
-                                             `1 - gamma`; writing `gamma` would invert the
-                                             control. -->
+                                        <!-- Deviation: benilla's own level control, beside
+                                             1.12's Gamma (ui_gamma.rs). -->
                                         <Frame name="$parentRowBrightness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "brightness", "Brightness",
+                                                    "BENILLA_TOOLTIP_BRIGHTNESS")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- An API row over GetGamma/SetGamma, whose unit is
+                                             `1 - gamma`; writing `gamma` would invert the
+                                             control. -->
+                                        <Frame name="$parentRowGamma" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
                                                 -- OptionsFrame_SetDefaults' default (l.444-445);
                                                 -- `or 1` covers a VM with no CVars.
                                                 local gd = tonumber(GetCVarDefault("gamma")) or 1
                                                 BenillaOptionsNumFuncRow_OnLoad(this, GetGamma, SetGamma,
-                                                    tostring(1 - gd), "Brightness",
-                                                    "BENILLA_TOOLTIP_BRIGHTNESS")
+                                                    tostring(1 - gd), GAMMA,
+                                                    "BENILLA_TOOLTIP_GAMMA")
                                                 local info = BenillaGraphicsSliderInfo(6)
                                                 BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
-                                                    info.valueStep, "travel")
+                                                    info.valueStep, "gamma")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
                                              SetweatherDensity global. -->
                                         <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "weatherDensity", "Weather Intensity",
@@ -3645,6 +3666,7 @@
             BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
             BENILLA_RAIN_SURFACES = "Wet Surfaces in Rain"
             BENILLA_GRAPHICS_PRESET = "Graphics Preset"
+            BENILLA_BRIGHTNESS = "Brightness"
             -- Our window's rows Turtle's lacks, in our window's words.
             BENILLA_AUTO_LOOT = "Auto Loot"
             BENILLA_BACKGROUND_SOUND = "Enable Sound in Background"
@@ -3750,9 +3772,14 @@
                         local option = category.options[k]
                         if ( cut[option.name] ) then
                             tremove(category.options, k)
-                        elseif ( option.name == "UI_SCALE" or option.name == "GAMMA" ) then
-                            -- Gated on a cut row (`useUiScale`, `desktopGamma`): always live here.
+                        elseif ( option.name == "UI_SCALE" ) then
+                            -- Gated on a cut row (`useUiScale`): always live here.
                             option.dependency = nil
+                        elseif ( option.name == "GAMMA" ) then
+                            -- Gated on a cut row (`desktopGamma`): always live here, and tipped
+                            -- as our window's Gamma, beside our Brightness.
+                            option.dependency = nil
+                            option.desc = BENILLA_TOOLTIP_GAMMA
                         elseif ( option.name == "ENVIRONMENT_DETAIL" ) then
                             -- Turtle's `smallCull` 0-2 is our `WorldDetail` 0-2, which the 1.12
                             -- slider of this name drives.
@@ -3812,6 +3839,10 @@
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_WATER_DETAIL", desc = BENILLA_TOOLTIP_WATER_DETAIL,
                     type = "dropdown", identifier = "BenillaWaterDetail", cvar = "waterDetail" } },
+                -- Our level control, above Turtle's Gamma as above ours.
+                { before = "GAMMA", row = {
+                    name = "BENILLA_BRIGHTNESS", desc = BENILLA_TOOLTIP_BRIGHTNESS,
+                    type = "slider", cvar = "brightness", minval = 0, maxval = 1.0, step = 0.05 } },
                 { category = DISPLAY, row = {
                     name = "BENILLA_RENDER_SCALE", desc = BENILLA_TOOLTIP_RENDER_SCALE,
                     type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.01,
@@ -4035,7 +4066,7 @@
             -- row with: our window's row of that CVar. A range past 10 reads its number.
             local percent, raw = {}, { fmt = "raw" }
             local readouts = {
-                GAMMA = { fmt = "travel" },
+                GAMMA = { fmt = "gamma" },
                 MAX_FOLLOW_DIST = { fmt = "yards" },
                 ENVIRONMENT_DETAIL = { stops = { "Low", "Medium", "High" } },
                 SPELL_DETAIL = { stops = { "Low", "Medium", "High" } },
@@ -4044,7 +4075,6 @@
             function BenillaTurtle_SliderText(option, value)
                 local readout = readouts[option.name]
                     or ((tonumber(option.maxval) or 0) > 10 and raw or percent)
-                readout.minv, readout.maxv = option.minval, option.maxval
                 return BenillaOptionsRow_FormatValue(readout, value)
             end
 

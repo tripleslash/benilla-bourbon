@@ -6,7 +6,8 @@
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var screen_sampler: sampler;
-// `.x` = the `gamma` CVar; the rest is padding (a uniform is 16-byte aligned).
+// `.x` = the `gamma` CVar, `.y` = the `brightness` lift (`DisplayBrightness::lift`); the rest is
+// padding (a uniform is 16-byte aligned).
 @group(0) @binding(2) var<uniform> ramp: vec4<f32>;
 
 // sRGB to linear (IEC 61966-2-1), the exact inverse of `ui_quad.wgsl`'s `linear_to_srgb`.
@@ -24,6 +25,13 @@ fn fs_decode(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // an exact identity and the floor guards `log2(0)` inside `pow`.
     if (ramp.x != 1.0) {
         rgb = pow(max(rgb, vec3<f32>(1e-6)), vec3<f32>(ramp.x));
+    }
+    // benilla's Brightness, after the ramp: a positive lift raises black toward it with white
+    // held, a negative one dims white by it with black held. Zero is an exact identity.
+    if (ramp.y > 0.0) {
+        rgb = rgb + (vec3<f32>(1.0) - rgb) * ramp.y;
+    } else if (ramp.y < 0.0) {
+        rgb = rgb * (1.0 + ramp.y);
     }
     return vec4<f32>(srgb_to_linear(rgb), ui.a);
 }

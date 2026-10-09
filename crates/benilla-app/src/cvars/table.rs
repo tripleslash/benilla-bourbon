@@ -655,6 +655,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the stock window ticks this box whenever Windowed Mode is (`:399-408`), so honouring it would
     // drop the gamma of every windowed player who opens that window.
     same("DesktopGamma", "0"),
+    // `brightness` — the Graphics page's level control beside Gamma, applied after the ramp in the
+    // same composite pass ([`crate::ui_gamma::DisplayBrightness`]). 0.5 is the identity, so the
+    // default image is the reference's at `gamma` 1.0. Applies to the next frame.
+    ours(
+        "brightness",
+        "0.5",
+        "benilla's own (the maintainer's call) — 1.12's one whole-frame grade is the `gamma`          ramp, which bends the midtones; this lifts the blacks or dims the whites instead",
+    ),
     // ── The stock Video Options window's other boxes (`OptionsFrame.lua:5-22`) ───────────────────
     //
     // `ffx` (`0x6ccfe3`: name `0x86f2ac`, record `[0xce8a04]`), `ffxGlow` (`0x6cc17d`, name
