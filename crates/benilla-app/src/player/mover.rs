@@ -100,11 +100,8 @@ pub(super) fn step(
     // reach includes the hover offset: the finalize probe (`0x636e45` → `0x632ba0` → `0x631e70`)
     // measures to the water, so hover rests a yard over it. Feet under the surface count too.
     let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= ground_reach);
-    let mut ground_entity = if on_walkable {
-        classify.map(|h| h.entity)
-    } else {
-        None
-    };
+    let classify_entity = classify.as_ref().map(|h| h.entity);
+    let mut ground_entity = if on_walkable { classify_entity } else { None };
     // The settle hold after a teleport or login: the world streams in over several frames, so the
     // body is frozen with gravity off. The terrain streamer releases it on the destination's
     // residency, never on ground contact, which a flyer or a swimmer never makes.
@@ -244,6 +241,11 @@ pub(super) fn step(
         player.steep_support = g.steep_support;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
+        } else if g.steep_support && ground_entity.is_none() {
+            // A body held up by the edge it climbs, or by the bank it is descending, stands on that
+            // collider: a step-up on a moving deck stays in the deck's frame. With no entity the
+            // attachment read the climb as world geometry and deboarded the rider mid-step.
+            ground_entity = g.contact.or(classify_entity);
         }
     } else {
         let velocity = if held || anchored {
@@ -388,6 +390,9 @@ pub(crate) struct GroundedStep {
     pub(crate) center: Vec3,
     /// The walkable floor's collider the snap settled onto; `None` keeps what the caller believed.
     pub(crate) ground: Option<Entity>,
+    /// The collider the snap touched below, walkable or not: what holds a
+    /// [`Self::steep_support`] body up when [`Self::ground`] is `None`.
+    pub(crate) contact: Option<Entity>,
     /// The height (yd) this frame's pop or cone ride gained.
     pub(crate) climb: Option<f32>,
     /// On a certified steep contact, the reference's `0x4000000`: riding a cone up, or following a
@@ -520,6 +525,7 @@ pub(crate) fn grounded_step(
         }
         + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
+    let contact = hit.as_ref().map(|h| h.entity);
     // The water is one more candidate within the same reach, flat, nearest wins, as in the
     // reference's one masked trace; with no entity it keeps the caller's support.
     let water = support.water.and_then(|s| {
@@ -576,6 +582,7 @@ pub(crate) fn grounded_step(
         // A ride or a pop that found no walkable floor is held up by the edge it climbs.
         steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
         ground,
+        contact,
         snap,
         unsupported,
     }
