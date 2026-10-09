@@ -466,6 +466,18 @@ impl TransportTimetable {
         self.frames.iter().any(|f| f.map_id == map_id)
     }
 
+    /// The leg `cycle_ms` is on: the runs between teleports in path order, cut where
+    /// [`crate::ship_legs`] cuts. The reference's tick keeps this index at `[transport+0x58]` and
+    /// hands the leg it left to the loading screen (`0x5f5461`).
+    pub fn leg_at(&self, cycle_ms: u32) -> usize {
+        let cycle_ms = cycle_ms.min(self.period_ms.saturating_sub(1));
+        self.frames
+            .iter()
+            .find(|f| cycle_ms < f.next_arrive_time)
+            .or(self.frames.last())
+            .map_or(0, |f| f.leg)
+    }
+
     /// `TransportMgr::GenerateWaypoints` phase by phase, with a chosen time mode and chord count.
     fn build_with_variant(
         nodes: &[TaxiPathNode],

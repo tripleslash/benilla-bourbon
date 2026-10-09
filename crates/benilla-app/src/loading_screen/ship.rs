@@ -1,7 +1,9 @@
 //! The transport loading screen: the world map with a dotted route from the dock we leave to the
 //! dock we reach, in place of the map's art, bar and tip. `SMSG_TRANSFER_PENDING` with a transport
 //! block raises it (`0x401900` → `0x4072c0`) when we ride that transport and its path's leg has a
-//! `LoadingScreenTaxiSplines.dbc` row; any miss leaves the plain screen.
+//! `LoadingScreenTaxiSplines.dbc` row; any miss leaves the plain screen. The transport's own tick
+//! raises it too, when the transport under us moves onto its next leg without leaving the map
+//! (`0x5f5461` → `0x407de0`), as the Grom'gol to Undercity zeppelin does at its teleport node.
 //!
 //! The route (`0x4075a0`) is a Catmull-Rom curve through the departure dock, the row's bend points
 //! and the arrival dock, drawn as dots a fixed arc length apart. The dots are the progress bar:
@@ -230,6 +232,17 @@ impl ShipRoutes {
             .route
             .as_ref()
     }
+
+    /// The route out of `path_id`'s leg `leg`, which the tick's entry names outright (`0x407de0`
+    /// hands its index straight to `0x4073f0`).
+    pub(crate) fn leg_route(&self, path_id: u32, leg: usize) -> Option<&ShipRoute> {
+        self.by_path
+            .get(&path_id)?
+            .get(leg)?
+            .as_ref()?
+            .route
+            .as_ref()
+    }
 }
 
 /// The route screen's textures; the reference loads them at the raise and takes the plain screen
@@ -332,6 +345,42 @@ impl ShipLookup<'_, '_> {
                 .zip(self.routes.as_ref())
                 .and_then(|(mo, routes)| routes.route(mo.taxi_path_id, from_map)),
         )
+    }
+
+    /// The route the tick's entry asks for (`0x407de0`): `deck` is the transport we ride, `left`
+    /// the leg it left. `None` when the transport is gone; else that leg's route, or `Some(None)`
+    /// when it draws none.
+    fn leg_route(&self, deck: Entity, left: usize) -> Option<Option<&ShipRoute>> {
+        let guid = self.guids.get(deck).ok()?;
+        let path_id = self.templates.get(guid.0).and_then(|t| t.mo_transport);
+        Some(
+            path_id
+                .zip(self.routes.as_ref())
+                .and_then(|(mo, routes)| routes.leg_route(mo.taxi_path_id, left)),
+        )
+    }
+
+    /// Give the screen the route of the leg the transport under us left; [`Self::board`]'s twin
+    /// for the tick's raise.
+    pub(super) fn board_leg(
+        &self,
+        screen: &mut LoadingScreen,
+        deck: Entity,
+        left: usize,
+        assets: Option<&mut WorldAssets>,
+        images: &mut Assets<Image>,
+    ) {
+        let Some(route) = self.leg_route(deck, left) else {
+            return;
+        };
+        screen.show_route(route, assets, images);
+        info!(
+            "loading screen: the transport under us left leg {left} — {}",
+            match screen.ship {
+                Some(_) => "its route",
+                None => "no drawn route, plain screen",
+            }
+        );
     }
 
     /// Give the screen the route of a transfer's raise. Riding the transport the server named,
@@ -516,16 +565,25 @@ mod tests {
 
     #[test]
     fn the_curve_passes_through_its_bend_points() {
-        // Two equal spans: half the arc length is the bend itself.
         let bend = Vec2::new(0.5, 0.6);
         let route = ShipRoute::new(Vec2::new(0.2, 0.3), Vec2::new(0.8, 0.3), &[bend.into()]);
-        let count = route.dots.len() - 1;
-        assert_eq!(count % 2, 0, "the fixture needs a middle dot: {count}");
-        assert!(
-            near(route.dots[count / 2], bend),
-            "{:?}",
-            route.dots[count / 2]
-        );
+        // The bend lies on the dotted line: within a chord's sag of the segment between the two
+        // dots around it.
+        let off_line = route
+            .dots
+            .windows(2)
+            .map(|w| {
+                let along = (w[1] - w[0]).normalize();
+                let t = (bend - w[0]).dot(along).clamp(0.0, w[0].distance(w[1]));
+                bend.distance(w[0] + along * t)
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(off_line < 1e-3, "the bend is {off_line} off the route");
+        // And the dots keep their spacing through it.
+        assert!(route
+            .dots
+            .windows(2)
+            .all(|w| (0.003..0.03).contains(&w[0].distance(w[1]))));
     }
 
     #[test]
@@ -611,6 +669,15 @@ mod tests {
             "the server named another transport"
         );
         assert_eq!(lookup.route(None, Some((BOAT, 0))), None, "not aboard");
+
+        // The tick's entry names the leg outright.
+        assert_eq!(
+            lookup.leg_route(deck, 0),
+            Some(Some(&route_fixture())),
+            "the leg it left: that leg's route"
+        );
+        assert_eq!(lookup.leg_route(deck, 1), Some(None), "a leg with no row");
+        assert_eq!(lookup.leg_route(deck, 7), Some(None), "no such leg");
         assert_eq!(
             lookup.route(Some(deck), None),
             None,
@@ -654,12 +721,17 @@ mod tests {
             .expect("and leaving the Eastern Kingdoms");
         assert!(near(back.depart, out.arrive) && near(back.arrive, out.depart));
 
-        // Undercity to Grom'gol never leaves map 0: both its legs start there, and the lookup
-        // takes the first.
-        let south = routes.route(301, 0).expect("the Undercity zeppelin");
-        assert!(south.depart.y > south.arrive.y, "it flies south: {south:?}");
-
         assert!(routes.route(241, 530).is_none(), "no leg on that map");
+
+        // Grom'gol to Undercity never leaves map 0, so the tick asks by leg: leg 0 leaves
+        // Grom'gol in the south for Undercity, leg 1 is the way back.
+        let north = routes.leg_route(301, 0).expect("the Grom'gol zeppelin");
+        assert!(north.depart.y < north.arrive.y, "it flies north: {north:?}");
+        let south = routes.leg_route(301, 1).expect("the way back");
+        assert!(near(south.depart, north.arrive) && near(south.arrive, north.depart));
+        assert!(routes.leg_route(301, 2).is_none());
+        // By departure map both its legs match map 0, and the lookup takes the first.
+        assert_eq!(routes.route(301, 0), Some(north));
         assert!(routes.route(6, 0).is_none(), "a flight path draws no route");
     }
 }

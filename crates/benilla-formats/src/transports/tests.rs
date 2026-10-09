@@ -300,3 +300,51 @@ fn first_cycle_on_map_lands_on_that_map() {
         "no golden path crosses continents — this test proves nothing"
     );
 }
+
+/// The timetable's legs are the loading screen's ([`crate::ship_legs`]), which the tick's leg
+/// index is handed to as is: on every golden path a transport standing at a dock is on the leg
+/// whose stop that dock is, and a path with a teleport changes leg where its position jumps.
+#[test]
+fn leg_at_indexes_the_ship_legs() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
+
+    for g in GOLDENS {
+        let nodes = cat.path(g.path_id).expect("golden path exists");
+        let tt = TransportTimetable::build(nodes, g.move_speed, g.accel_rate).expect("builds");
+        let legs = crate::ship_legs(nodes);
+        let mut docked = 0usize;
+        for ms in (0..tt.period_ms).step_by(250) {
+            let sample = tt.sample(ms);
+            let at_dock = legs.iter().position(|l| {
+                l.is_some_and(|l| l.first_stop.pos == sample.pos || l.last_stop.pos == sample.pos)
+            });
+            if let Some(dock_leg) = at_dock {
+                assert_eq!(tt.leg_at(ms), dock_leg, "path {} at {ms} ms", g.path_id);
+                docked += 1;
+            }
+        }
+        assert!(docked > 0, "path {} never stood at a dock", g.path_id);
+    }
+
+    // Grom'gol to Undercity (301) stays on map 0 and teleports once: two legs, changed where the
+    // deck jumps the length of the continent, at the node and again at the wrap.
+    let g = GOLDENS.iter().find(|g| g.path_id == 301).expect("301");
+    let tt = TransportTimetable::build(cat.path(301).unwrap(), g.move_speed, g.accel_rate).unwrap();
+    let mut changes = 0;
+    for ms in 1..tt.period_ms {
+        if tt.leg_at(ms) != tt.leg_at(ms - 1) {
+            let (a, b) = (tt.sample(ms - 1), tt.sample(ms));
+            assert_eq!((a.map, b.map), (0, 0));
+            assert!(dist64(a.pos, b.pos) > 5000.0, "a teleport, not a step");
+            changes += 1;
+        }
+    }
+    assert_eq!(
+        (tt.leg_at(0), changes),
+        (0, 1),
+        "one change inside the cycle"
+    );
+    assert_eq!(tt.leg_at(tt.period_ms - 1), 1, "and the wrap is the other");
+}

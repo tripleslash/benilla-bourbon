@@ -39,6 +39,7 @@ pub(crate) struct TransportPlugin;
 impl Plugin for TransportPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Timetables>()
+            .add_message::<TransportLegMessage>()
             // After `AssetSet::Open`, whose Commands insert `WorldAssets` (unordered, this finds
             // none and silently does nothing), and again when the chain's data changes.
             .add_data_loaders(setup_taxi_nodes)
@@ -96,10 +97,24 @@ pub(crate) struct ElevatorSeed {
     pub(crate) quat: Option<[f32; 4]>,
 }
 
+/// The transport we ride moved onto its next leg without leaving our map (a teleport node, as
+/// between Grom'gol and Undercity): the reference's tick raises the route screen for the leg it
+/// left (`0x5f5461` → `0x407de0`). A leg onto another map raises nothing here; the server's
+/// transfer does.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct TransportLegMessage {
+    pub(crate) deck: Entity,
+    /// The leg left, an index into the path's legs (`benilla_formats::ship_legs`).
+    pub(crate) left: usize,
+}
+
 /// A ticking transport, armed by [`arm_transports`].
 #[derive(Component)]
 pub(crate) struct Transport {
     drive: Drive,
+    /// The path leg last ticked, the reference's `[transport+0x58]`; `None` before the first tick
+    /// and on a lift.
+    leg: Option<usize>,
     /// Last frame's `moving`, for the dock and depart log lines.
     was_moving: bool,
     /// This frame's travel phase, which [`drive_ship_props`] plays on the props.
@@ -169,6 +184,17 @@ impl Transport {
         anchor.progress_ms = target;
         anchor.at = Instant::now();
         Some((t.sample(target), Some(target)))
+    }
+
+    /// Keep the path leg `cycle_ms` is on and answer the leg left when it is another: the
+    /// reference's compare at `0x5f5461`. `None` on the first tick, while the leg holds, and on a
+    /// lift, which has no legs.
+    fn take_leg_change(&mut self, cycle_ms: u32) -> Option<usize> {
+        let Drive::Taxi(t) = &self.drive else {
+            return None;
+        };
+        let leg = t.leg_at(cycle_ms);
+        self.leg.replace(leg).filter(|&left| left != leg)
     }
 
     /// Whether any leg of the cycle lies on `map_id`, the cross-map worldport's spare predicate. A
@@ -318,6 +344,7 @@ fn arm_transports(
                         quat,
                         yaw: seed.yaw,
                     }),
+                    leg: None,
                     was_moving: false,
                     motion: ShipMotion::Docked,
                 },
@@ -367,6 +394,7 @@ fn arm_transports(
             commands.entity(entity).insert((
                 Transport {
                     drive: Drive::Taxi(timetable),
+                    leg: None,
                     was_moving: false,
                     motion: ShipMotion::Docked,
                 },
@@ -382,7 +410,10 @@ fn arm_transports(
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn tick_transports(
     current_map: Option<Res<CurrentMap>>,
+    player: Option<Res<crate::player::Player>>,
+    mut legs: MessageWriter<TransportLegMessage>,
     mut transports: Query<(
+        Entity,
         &Guid,
         &mut Transport,
         &TransportAnchor,
@@ -395,12 +426,15 @@ fn tick_transports(
     let Some(current_map) = current_map else {
         return;
     };
-    for (guid, mut transport, anchor, mut transform, mut visibility, position, rotation) in
+    let deck = player.as_ref().and_then(|p| p.ride_entity());
+    for (entity, guid, mut transport, anchor, mut transform, mut visibility, position, rotation) in
         &mut transports
     {
         let cycle = transport.cycle_ms(anchor);
         let sample = transport.sample(cycle, current_map.0);
         transport.motion = sample.motion;
+        // The leg is kept on and off our map (`0x5f5279`, `0x5f5471`).
+        let left = transport.take_leg_change(cycle);
         if sample.moving != transport.was_moving {
             transport.was_moving = sample.moving;
             debug!(
@@ -418,6 +452,14 @@ fn tick_transports(
         }
         visibility.set_if_neq(Visibility::Inherited);
         write_deck_pose(&sample, &mut transform, position, rotation);
+        // A new leg on our map under our feet: the route screen's second entry (`0x5f5461`).
+        if let Some(left) = left.filter(|_| deck == Some(entity)) {
+            info!(
+                "transport {:#x}: left leg {left} on map {} with us aboard",
+                guid.0, sample.map
+            );
+            legs.write(TransportLegMessage { deck: entity, left });
+        }
     }
 }
 
@@ -780,9 +822,49 @@ mod tests {
         let tt = TransportTimetable::build(nodes, 30.0, 1.0).expect("path 241 builds");
         Transport {
             drive: Drive::Taxi(Arc::new(tt)),
+            leg: None,
             was_moving: false,
             motion: ShipMotion::Docked,
         }
+    }
+
+    /// The Grom'gol to Undercity zeppelin (path 301) teleports once on map 0: its tick answers
+    /// the leg it left at that node and at the wrap, and nothing on its first tick or between.
+    #[test]
+    fn a_leg_change_answers_the_leg_left_and_the_first_tick_answers_nothing() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let cat = benilla_formats::load_taxi_path_nodes(&mut chain).expect("TaxiPathNode.dbc");
+        let tt = TransportTimetable::build(cat.path(301).expect("path 301"), 30.0, 1.0)
+            .expect("path 301 builds");
+        let teleport = (1..tt.period_ms)
+            .find(|&ms| tt.leg_at(ms) != tt.leg_at(ms - 1))
+            .expect("path 301 changes leg inside its cycle");
+        let last = tt.period_ms - 1;
+        let mut zeppelin = Transport {
+            drive: Drive::Taxi(Arc::new(tt)),
+            leg: None,
+            was_moving: false,
+            motion: ShipMotion::Docked,
+        };
+        assert_eq!(zeppelin.take_leg_change(0), None, "the first tick");
+        assert_eq!(
+            zeppelin.take_leg_change(teleport - 1),
+            None,
+            "the leg holds"
+        );
+        assert_eq!(zeppelin.take_leg_change(teleport), Some(0), "the node");
+        assert_eq!(zeppelin.take_leg_change(last), None, "the second leg holds");
+        assert_eq!(zeppelin.take_leg_change(0), Some(1), "the wrap");
+
+        let mut lift = Transport {
+            drive: Drive::Lift(parked_lift()),
+            leg: None,
+            was_moving: false,
+            motion: ShipMotion::Docked,
+        };
+        assert_eq!(lift.take_leg_change(0), None);
+        assert_eq!(lift.take_leg_change(5000), None, "a lift has no legs");
     }
 
     /// Path 241's Kalimdor legs are the first frames of the cycle, so crossing to Kalimdor is the
@@ -856,6 +938,7 @@ mod tests {
     fn a_lift_has_no_seam_to_reanchor() {
         let lift = Transport {
             drive: Drive::Lift(parked_lift()),
+            leg: None,
             was_moving: false,
             motion: ShipMotion::Docked,
         };
@@ -905,11 +988,13 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(CurrentMap(0))
             .init_resource::<Dirty>()
+            .add_message::<TransportLegMessage>()
             .add_systems(Update, (tick_transports, spy).chain());
         app.world_mut().spawn((
             Guid(0xF110_0000_0000_0001),
             Transport {
                 drive: Drive::Lift(parked_lift()),
+                leg: None,
                 was_moving: false,
                 motion: ShipMotion::Docked,
             },
@@ -939,6 +1024,7 @@ mod tests {
         let mut app = App::new();
         // Alterac Valley, a map with no type-11 GameObject: the value must not matter.
         app.insert_resource(CurrentMap(30))
+            .add_message::<TransportLegMessage>()
             .add_systems(Update, tick_transports);
         let lift = app
             .world_mut()
@@ -946,6 +1032,7 @@ mod tests {
                 Guid(0xF110_0000_0000_0002),
                 Transport {
                     drive: Drive::Lift(parked_lift()),
+                    leg: None,
                     was_moving: false,
                     motion: ShipMotion::Docked,
                 },

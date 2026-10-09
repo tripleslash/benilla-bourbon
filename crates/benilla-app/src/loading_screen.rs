@@ -507,6 +507,7 @@ fn drive_loading_screen(
         Option<Res<crate::net::PendingTransfer>>,
         Option<Res<crate::char_select::Roster>>,
         ship::ShipLookup,
+        MessageReader<crate::transport::TransportLegMessage>,
     ),
 ) {
     let (
@@ -520,6 +521,7 @@ fn drive_loading_screen(
         transfer,
         roster,
         ship_lookup,
+        mut transport_legs,
     ) = edges;
     let (progress, focus) = (&stream.0, &stream.1);
     let now = time.elapsed_secs();
@@ -577,6 +579,21 @@ fn drive_loading_screen(
                 w.transport_entry.zip(w.transport_map),
             );
         }
+    }
+    // The transport under us moved onto its next leg on this map (`0x5f5461` → `0x407de0`): the
+    // route of the leg it left, or on a miss the plain screen with whatever art the last raise
+    // named, since `0x407de0` leaves `[0x82f00c]` alone. The reference loads the new place inside
+    // this call and dismisses; here the readiness poll clears it.
+    for leg in transport_legs.read() {
+        ship_lookup.board_leg(
+            &mut screen,
+            leg.deck,
+            leg.left,
+            assets.as_deref_mut(),
+            &mut images,
+        );
+        let art = screen.map.filter(|_| screen.ship.is_none());
+        screen.raise("transport leg", false, art, now);
     }
     // A same-map teleport ends any awaited snap; whether it needs a screen is decided below.
     let teleported = teleports.read().next().is_some();
