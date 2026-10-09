@@ -343,6 +343,9 @@ pub use taxi::{load_taxi_path_nodes, TaxiPathNode, TaxiPathNodes};
 mod transport_period;
 mod transports;
 pub use transports::{ShipMotion, TransportSample, TransportTimetable};
+// The transport loading screen's legs and route bend points.
+mod loading_screen_ship;
+pub use loading_screen_ship::{load_ship_splines, ship_legs, ShipLeg, ShipSplines};
 // Type-11 elevator and lift keyframe paths.
 mod elevators;
 pub use elevators::{

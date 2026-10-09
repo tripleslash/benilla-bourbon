@@ -110,11 +110,14 @@ pub(super) fn seed_ui_fixture(
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // A nested tuple, one param under Bevy's 16-param cap.
-    (mut actions, mut bank, mut exit, mut loading): (
+    (mut actions, mut bank, mut exit, mut loading, ship_routes, mut assets, mut images): (
         ResMut<crate::ui_action::PlayerActions>,
         ResMut<crate::ui_bank::BankOpen>,
         MessageWriter<AppExit>,
         ResMut<crate::loading_screen::LoadingScreen>,
+        Option<Res<crate::loading_screen::ShipRoutes>>,
+        Option<ResMut<benilla_assets::WorldAssets>>,
+        ResMut<Assets<Image>>,
     ),
 ) {
     let (mut items, mut index, mut home_bind) = store;
@@ -213,6 +216,13 @@ pub(super) fn seed_ui_fixture(
         UiFixture::Bare => {}
         // Holds the world-entry loading screen, tip and all, over the settled scene.
         UiFixture::LoadingTip => loading.hold_for_capture(scenario.map),
+        // Path 292 is the Menethil Harbor to Theramore boat; leaving map 0 is its outbound leg.
+        UiFixture::LoadingShip => loading.hold_ship_for_capture(
+            ship_routes.as_deref(),
+            (292, 0),
+            assets.as_deref_mut(),
+            &mut images,
+        ),
         UiFixture::Merchant => {
             names.insert_creature(
                 NPC_ENTRY,

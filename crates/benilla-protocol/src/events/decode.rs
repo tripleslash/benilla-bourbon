@@ -727,7 +727,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }],
         ServerPacket::TransferPending { map, transport } => vec![SessionEvent::TransferPending {
             map_id: map,
-            transport_entry: transport.map(|(entry, _old_map)| entry),
+            transport_entry: transport.map(|(entry, _)| entry),
+            transport_map: transport.map(|(_, old_map)| old_map),
         }],
         ServerPacket::TransferAborted { reason } => {
             vec![SessionEvent::TransferAborted { reason }]

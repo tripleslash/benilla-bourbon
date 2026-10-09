@@ -220,7 +220,11 @@ struct Timetables {
     lifts: HashMap<u32, Arc<Vec<ElevatorKeyframe>>>,
 }
 
-fn setup_taxi_nodes(mut timetables: ResMut<Timetables>, world_assets: Option<Res<WorldAssets>>) {
+fn setup_taxi_nodes(
+    mut commands: Commands,
+    mut timetables: ResMut<Timetables>,
+    world_assets: Option<Res<WorldAssets>>,
+) {
     let Some(world_assets) = world_assets else {
         return;
     };
@@ -228,6 +232,8 @@ fn setup_taxi_nodes(mut timetables: ResMut<Timetables>, world_assets: Option<Res
     match load_taxi_path_nodes(&mut chain) {
         Ok(nodes) => {
             info!("taxi path nodes: {} paths", nodes.len());
+            // The loading screen's routes are cut from the same paths.
+            commands.insert_resource(crate::loading_screen::ShipRoutes::load(&nodes, &mut chain));
             timetables.nodes = Some(nodes);
         }
         // Without taxi data boats stay at their create pose.

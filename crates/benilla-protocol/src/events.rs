@@ -267,9 +267,11 @@ pub enum SessionEvent {
         needs_ack: bool,
     },
     /// `SMSG_TRANSFER_PENDING`: a worldport follows, boat-local when `transport_entry` is set.
+    /// `transport_map` is the block's second dword, the map the transport leaves.
     TransferPending {
         map_id: u32,
         transport_entry: Option<u32>,
+        transport_map: Option<u32>,
     },
     /// `SMSG_TRANSFER_ABORTED`: the announced transfer is off (map full, no instance).
     TransferAborted { reason: u8 },

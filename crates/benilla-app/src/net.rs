@@ -2283,6 +2283,8 @@ pub(crate) struct WorldportMessage {
     /// The transport carrying us, from `SMSG_TRANSFER_PENDING` ([`PendingTransfer`]). `None`
     /// means the server detached us and any ride is stale.
     pub(crate) transport_entry: Option<u32>,
+    /// The map that transport leaves, the same block's second dword.
+    pub(crate) transport_map: Option<u32>,
 }
 
 /// The `SMSG_TRANSFER_PENDING` latch: whether the coming worldport rides a transport. Cleared
@@ -2294,6 +2296,8 @@ pub(crate) struct PendingTransfer(pub(crate) Option<PendingTransferInfo>);
 pub(crate) struct PendingTransferInfo {
     pub(crate) map_id: u32,
     pub(crate) transport_entry: Option<u32>,
+    /// The map the transport leaves; set with `transport_entry`.
+    pub(crate) transport_map: Option<u32>,
 }
 
 /// `SMSG_PLAY_SOUND`, `PLAY_MUSIC` or `PLAY_OBJECT_SOUND`: a SoundEntries id. An unstreamed

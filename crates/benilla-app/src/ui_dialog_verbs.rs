@@ -1530,6 +1530,7 @@ mod tests {
             orientation: 0.0,
             needs_ack,
             transport_entry: None,
+            transport_map: None,
         }
     }
 
