@@ -85,6 +85,9 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("CustomCursorImage", Plumbing),
     ("InputPlugin", Plumbing),
     ("WinitPlugin", Plumbing),
+    // The event loop's pacing, set once for a background run; neither reads the player.
+    ("WinitSettings", Plumbing),
+    ("UpdateMode", Plumbing),
     ("InputSystems", Plumbing),
     ("Key", Plumbing),
     ("KeyCode", Plumbing),
