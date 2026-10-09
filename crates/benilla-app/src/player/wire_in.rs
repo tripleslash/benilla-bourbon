@@ -198,8 +198,18 @@ pub(super) fn apply_server_moves(
                  on arrival",
                 w.map_id, w.transport_entry
             );
+        } else if !w.needs_ack && (player.ride.is_some() || player.pending_board.is_some()) {
+            // The login snap (`SMSG_LOGIN_VERIFY_WORLD`, the one worldport with no ack) with a
+            // seat already taken: vmangos sends it before our create block, whose transport tail
+            // seated us, and both can apply in one frame, the seat first. The seat is the newer
+            // fact; dropping it as stale put a passenger on the ground and the next heartbeat,
+            // without `ON_TRANSPORT`, unseated it server-side. The carry poses the body.
+            player.pos = wow_to_bevy(w.position);
         } else {
             // No transport carried through: a world pose, and any ride is stale.
+            if player.ride.is_some() && crate::webdiag::armed() {
+                crate::webdiag::out("transport: deboard (a worldport with no transport)");
+            }
             player.ride = None;
             player.pending_board = None;
             player.pos = wow_to_bevy(w.position);
