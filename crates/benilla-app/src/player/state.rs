@@ -471,6 +471,21 @@ pub(crate) struct Player {
     /// [`crate::transport::Transport`] support, kept through deck jumps, detached on world ground,
     /// in water or when the transport despawns.
     pub(super) ride: Option<PlayerRide>,
+    /// A ride the server named before its transport could carry us, held until that transport is
+    /// armed ([`super::ride::board_from_create`]): our own create block's transport tail at a login
+    /// aboard, or a worldport carrying us with a transport we had not boarded yet. The post-snap
+    /// hold waits on it, so the body is not released into the air the deck has left.
+    pub(super) pending_board: Option<PendingBoard>,
+}
+
+/// A transport to board once it is armed, by guid when the create block named it, else by the
+/// template entry a worldport names (`SMSG_TRANSFER_PENDING`'s transport tail).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PendingBoard {
+    pub(super) guid: Option<u64>,
+    pub(super) entry: Option<u32>,
+    /// Feet in the transport's frame (Bevy axes).
+    pub(super) local_pos: Vec3,
 }
 
 /// The player's attachment to a transport's frame ([`Player::ride`]).

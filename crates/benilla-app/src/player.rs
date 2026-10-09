@@ -311,6 +311,15 @@ impl Plugin for PlayerPlugin {
                 .before(control)
                 .before(mirror_mover_collision_height),
         )
+        // A login aboard a transport boards it once it is armed, before `control` carries us.
+        .add_systems(
+            Update,
+            ride::board_from_create
+                .in_set(WorldStage::Input)
+                .after(embody::maintain_embodiment)
+                .before(control)
+                .in_set(crate::char_select::InWorldGated),
+        )
         // Before `control`, which evaluates the swim depth lines.
         .add_systems(
             Update,

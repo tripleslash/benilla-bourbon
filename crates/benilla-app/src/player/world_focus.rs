@@ -110,10 +110,11 @@ pub(super) fn release_post_snap_hold(
     let Some(p) = progress else { return };
     // A rider's floor is its deck, which the world's residency does not count: it must be in the
     // physics world too, or the release drops the body through it into the sea.
-    let deck_ready = player
-        .ride
-        .as_ref()
-        .is_none_or(|r| decks.contains(r.entity));
+    let deck_ready = player.pending_board.is_none()
+        && player
+            .ride
+            .as_ref()
+            .is_none_or(|r| decks.contains(r.entity));
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
     // a free-fly eye) the release and the stale-clear are refused and only the backstop runs.
     let focus_matches = p.focus_tile.is_some_and(|t| {

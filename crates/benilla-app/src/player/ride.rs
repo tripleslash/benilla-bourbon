@@ -4,7 +4,16 @@
 
 use bevy::prelude::*;
 
+use super::state::PendingBoard;
 use super::{wrap_pi, FlyCam, Player, PlayerRide, TransportQuery};
+
+/// A board or deboard line: the log, and on a `?diag=1` web build, which has no log, the console.
+fn note(line: String) {
+    info!("{line}");
+    if crate::webdiag::armed() {
+        crate::webdiag::out(&line);
+    }
+}
 
 /// Recomposes the rider from the deck's this-frame pose.
 pub(super) fn carry(player: &mut Player, cam: &mut FlyCam, transports: &TransportQuery) {
@@ -30,9 +39,74 @@ pub(super) fn carry(player: &mut Player, cam: &mut FlyCam, transports: &Transpor
                     r.boat_yaw = yaw_now;
                 }
             }
-            Err(_) => player.ride = None,
+            Err(_) => {
+                note(format!(
+                    "transport: deboard {:#x} (its entity is gone)",
+                    ride.guid
+                ));
+                player.ride = None;
+            }
         }
     }
+}
+
+/// A login aboard a transport: vmangos seats a passenger at the transport's current position plus
+/// its saved offset (`Player::LoadFromDB` → `CalculatePassengerPosition`) and sends our create
+/// block with `MOVEFLAG_ONTRANSPORT` and that offset, which the create path tags on our body as a
+/// [`crate::transport::TransportRider`]. Our body is the mover's, not `compose_riders`', so the
+/// tag becomes a pending board, and the ride starts once its transport is armed and posed. A
+/// worldport that carries us with a transport we had not boarded yet (it changed continents during
+/// the login load) leaves one too, by entry, and the transport is found on the new map.
+pub(super) fn board_from_create(
+    mut commands: Commands,
+    mut player: ResMut<Player>,
+    tagged: Query<(Entity, &crate::transport::TransportRider), With<crate::net::Embodied>>,
+    decks: Query<
+        (
+            Entity,
+            &crate::net::Guid,
+            &Transform,
+            Option<&crate::net::ObjectStore>,
+        ),
+        With<crate::transport::Transport>,
+    >,
+) {
+    for (body, tail) in &tagged {
+        commands
+            .entity(body)
+            .remove::<crate::transport::TransportRider>();
+        if player.ride.is_none() {
+            player.pending_board = Some(PendingBoard {
+                guid: Some(tail.transport_guid),
+                entry: None,
+                local_pos: benilla_assets::coords::wow_to_bevy(tail.local_pos),
+            });
+        }
+    }
+    let Some(pending) = player.pending_board else {
+        return;
+    };
+    if player.ride.is_some() {
+        player.pending_board = None;
+        return;
+    }
+    let found = decks.iter().find(|(_, g, _, store)| match pending.guid {
+        Some(guid) => g.0 == guid,
+        None => store.and_then(|s| s.0.object_entry()) == pending.entry,
+    });
+    let Some((entity, guid, boat, _)) = found else {
+        return; // not streamed in or not armed yet: the hold keeps the body where it is
+    };
+    let (guid, local_pos) = (guid.0, pending.local_pos);
+    player.pending_board = None;
+    player.pos = boat.translation + boat.rotation * local_pos;
+    player.ride = Some(PlayerRide {
+        entity,
+        guid,
+        local_pos,
+        boat_yaw: boat.rotation.to_euler(EulerRot::YXZ).0,
+    });
+    note(format!("transport: board {guid:#x} (logged in aboard)"));
 }
 
 /// Attaches or detaches against this frame's walkable support, then re-snapshots the deck-local
@@ -59,13 +133,16 @@ pub(super) fn update_attachment(
     };
     if swimming {
         if player.ride.take().is_some() {
-            info!("transport: deboard (entered the water)");
+            note("transport: deboard (entered the water)".into());
         }
     } else if grounded {
         match ground.and_then(owning_transport) {
             Some((entity, _, guid)) => {
                 if player.ride.as_ref().map(|r| r.entity) != Some(entity) {
-                    info!("transport: board {:#x} (support is its deck)", guid.0);
+                    note(format!(
+                        "transport: board {:#x} (support is its deck, collider {:?})",
+                        guid.0, ground
+                    ));
                 }
                 player.ride = Some(PlayerRide {
                     entity,
@@ -75,8 +152,32 @@ pub(super) fn update_attachment(
                 });
             }
             None => {
-                if player.ride.take().is_some() {
-                    info!("transport: deboard (support is world geometry)");
+                if let Some(ride) = player.ride.take() {
+                    // What the support was, up its parent chain, and where the feet stood on the
+                    // deck: the one line that tells a deck seam from a world collider.
+                    let mut chain = Vec::new();
+                    let mut e = ground;
+                    while let Some(x) = e {
+                        chain.push(format!("{x:?}"));
+                        e = child_of.get(x).ok().map(ChildOf::parent);
+                        if chain.len() > 8 {
+                            break;
+                        }
+                    }
+                    let local = transports
+                        .get(ride.entity)
+                        .ok()
+                        .map(|(t, _, _)| t.rotation.inverse().mul_vec3(player.pos - t.translation));
+                    note(format!(
+                        "transport: deboard {:#x} (support is not its deck) collider chain [{}] \
+                         feet {:?} deck-local {:?} steep {} wedged {}",
+                        ride.guid,
+                        chain.join(" < "),
+                        player.pos,
+                        local,
+                        player.steep_support,
+                        player.wedged,
+                    ));
                 }
             }
         }

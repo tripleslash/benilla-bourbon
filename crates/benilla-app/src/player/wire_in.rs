@@ -150,7 +150,15 @@ pub(super) fn apply_server_moves(
     }
     // Cross-map worldport: snap, bump `CurrentMap` for the terrain streamer, ack if required.
     for w in worldports.read() {
-        let riding = w.transport_entry.is_some() && player.ride.is_some();
+        // A transport tail makes the pose deck-local (`Player.cpp:2114`), never a world one.
+        let riding = w.transport_entry.is_some()
+            && player
+                .ride
+                .as_ref()
+                .is_some_and(|r| transports.get(r.entity).is_ok());
+        // Carried by a transport we do not ride yet (it changed continents during the login load,
+        // before its deck was armed): board it on the new map, by guid if we knew it.
+        let boarding = w.transport_entry.is_some() && !riding;
         if riding {
             // Riding through: the pose is deck-local (`Player.cpp:2114`) and the boat survived the
             // purge. The ride is kept, so the hold below carries the body with the deck and keeps
@@ -165,14 +173,27 @@ pub(super) fn apply_server_moves(
                 player.face_yaw += dyaw;
                 player.model_yaw = wrap_pi(player.model_yaw + dyaw);
                 cam.yaw += dyaw;
-            } else {
-                warn!("worldport: riding but the boat entity is missing — using raw pose");
-                player.pos = wow_to_bevy(w.position);
-                player.ride = None;
             }
+        } else if boarding {
+            let guid = player
+                .ride
+                .take()
+                .map(|r| r.guid)
+                .or(player.pending_board.and_then(|p| p.guid));
+            player.pending_board = Some(super::state::PendingBoard {
+                guid,
+                entry: w.transport_entry,
+                local_pos: wow_to_bevy(w.position),
+            });
+            info!(
+                "worldport: mapId {} carried by transport entry {:?} not yet boarded — boarding \
+                 on arrival",
+                w.map_id, w.transport_entry
+            );
         } else {
             // No transport carried through: a world pose, and any ride is stale.
             player.ride = None;
+            player.pending_board = None;
             player.pos = wow_to_bevy(w.position);
             player.face_yaw = w.orientation;
             player.model_yaw = w.orientation; // the body snaps too, no chase
@@ -195,7 +216,7 @@ pub(super) fn apply_server_moves(
         player.airborne_since = None; // a snap ends any jump arc (no phantom FALL_LAND)
         commands.insert_resource(CurrentMap(w.map_id));
         if w.needs_ack {
-            if riding {
+            if riding || boarding {
                 // Deviation: the reference acks after its blocking load (`0x401cae`); a rider acks
                 // now, so the server re-adds us to the boat at once. The hold keeps
                 // `ON_TRANSPORT` on the wire, so nothing it sends reads as a deboard.
@@ -377,6 +398,7 @@ fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessag
     // (`Player.cpp:1866-1893`), and the reference's apply (`0x6186b0`) re-parents to the packet's
     // transport guid, zero here. A kept ride would carry us back onto the deck.
     player.ride = None;
+    player.pending_board = None;
     player.pos = wow_to_bevy(t.position);
     player.face_yaw = t.orientation;
     *cam_yaw = t.orientation;

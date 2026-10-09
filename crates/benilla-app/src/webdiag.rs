@@ -845,7 +845,7 @@ pub(crate) fn out(s: &str) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn out(s: &str) {
+pub(crate) fn out(s: &str) {
     println!("{s}");
 }
 
