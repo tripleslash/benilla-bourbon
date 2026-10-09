@@ -486,6 +486,8 @@ pub(super) struct PendingBoard {
     pub(super) entry: Option<u32>,
     /// Feet in the transport's frame (Bevy axes).
     pub(super) local_pos: Vec3,
+    /// Facing in the transport's frame (WoW radians), the server's own.
+    pub(super) local_yaw: f32,
 }
 
 /// The player's attachment to a transport's frame ([`Player::ride`]).

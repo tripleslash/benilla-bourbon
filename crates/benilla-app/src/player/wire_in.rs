@@ -184,6 +184,7 @@ pub(super) fn apply_server_moves(
                 guid,
                 entry: w.transport_entry,
                 local_pos: wow_to_bevy(w.position),
+                local_yaw: w.orientation,
             });
             info!(
                 "worldport: mapId {} carried by transport entry {:?} not yet boarded — boarding \
@@ -284,14 +285,24 @@ pub(super) fn apply_server_moves(
             player.hover_launch = true;
         }
         let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
+        // A rider's ack keeps `ON_TRANSPORT` and its tail: vmangos relocates us from every ack
+        // (`HandleMoverRelocation`), and one without the bit removes us from the transport, which
+        // the root of a `/logout` then saves, so the next login lands where the deck was.
+        let transport = movement_net::wire_transport(player);
         let _ = net_cmds.0.send(ClientCommand::MoveModeAck {
             guid: m.guid,
             counter: m.counter,
             mode: m.mode,
             apply: m.apply,
-            flags: player.modes.wire_flags(),
+            flags: player.modes.wire_flags()
+                | if transport.is_some() {
+                    move_flags::ON_TRANSPORT
+                } else {
+                    0
+                },
             pos: bevy_to_wow(player.pos),
             orientation: facing,
+            transport,
         });
         info!(
             "mover mode {:?} {} (acked)",
@@ -373,19 +384,26 @@ pub(super) fn apply_server_moves(
     // parked pose, so ack here.
     let speed_acks: Vec<SpeedChangeMessage> = speed_msgs.read().copied().collect();
     if !player.active || player.detached {
+        // A rider stays one (`ON_TRANSPORT` and its tail), as on every ack.
+        let transport = movement_net::wire_transport(player);
+        let flags = if transport.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        };
         for ack in &speed_acks {
             let _ = net_cmds.0.send(ClientCommand::ForceSpeedAck {
                 kind: ack.kind,
                 guid: ack.guid,
                 counter: ack.counter,
                 speed: ack.speed,
-                flags: 0,
+                flags,
                 pos: bevy_to_wow(player.pos),
                 orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
                 pitch: 0.0,
                 fall_time: 0,
                 jump: None,
-                transport: None, // flags 0 → no transport tail
+                transport,
             });
         }
     }

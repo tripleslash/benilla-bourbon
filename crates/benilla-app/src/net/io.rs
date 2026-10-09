@@ -1411,7 +1411,16 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             flags,
             pos,
             orientation,
-        } => w.move_mode_ack(guid, counter, mode, apply, flags, (pos, orientation)),
+            transport,
+        } => w.move_mode_ack(
+            guid,
+            counter,
+            mode,
+            apply,
+            flags,
+            (pos, orientation),
+            transport,
+        ),
         ClientCommand::KnockBackAck {
             guid,
             counter,

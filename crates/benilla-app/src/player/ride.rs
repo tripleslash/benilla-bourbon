@@ -76,10 +76,15 @@ pub(super) fn board_from_create(
             .entity(body)
             .remove::<crate::transport::TransportRider>();
         if player.ride.is_none() {
+            note(format!(
+                "transport: seated by the server on {:#x} at deck-local {:?}; boarding once it is                  armed",
+                tail.transport_guid, tail.local_pos
+            ));
             player.pending_board = Some(PendingBoard {
                 guid: Some(tail.transport_guid),
                 entry: None,
                 local_pos: benilla_assets::coords::wow_to_bevy(tail.local_pos),
+                local_yaw: tail.local_orientation,
             });
         }
     }

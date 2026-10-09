@@ -1782,6 +1782,8 @@ pub(crate) enum ClientCommand {
         flags: u32,
         pos: [f32; 3],
         orientation: f32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_MOVE_KNOCK_BACK_ACK`, `launch` echoed as the jump tail. Sent on the frame the mover
     /// takes off, never on receipt: the reference applies (`0x61624d call 0x6179c0`) then sends

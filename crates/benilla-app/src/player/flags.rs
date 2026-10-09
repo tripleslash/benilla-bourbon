@@ -136,7 +136,7 @@ pub(super) fn this_frame(
     // ON_TRANSPORT, whose local-pose tail is built at the send, from the post-attach state so
     // the two agree on the frame we board or step off. A held rider keeps it: the hold carries it
     // on the deck, and a word without it reads to the server as a deboard mid-ocean.
-    if player.ride.is_some() {
+    if super::movement_net::wire_transport(player).is_some() {
         move_flags_now |= move_flags::ON_TRANSPORT;
     }
 

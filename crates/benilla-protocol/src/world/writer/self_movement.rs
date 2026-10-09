@@ -134,6 +134,9 @@ impl WorldWriter {
     /// pose, plus a trailing `u32 apply` for all but root. Unacked, the server never applies it.
     /// `flags` must carry the mode's bit (a root apply-ack without it is a kick, vmangos
     /// `MovementHandler.cpp:715-722`) and no moving bit beside `MOVEFLAG_ROOT`; turn bits are fine.
+    /// A rider's ack carries `ON_TRANSPORT` and `transport`: the server relocates us from it
+    /// (`HandleMoverRelocation`), and an ack without the bit removes us from the transport.
+    #[allow(clippy::too_many_arguments)] // one wire record, field for field
     pub fn move_mode_ack(
         &mut self,
         guid: u64,
@@ -142,8 +145,10 @@ impl WorldWriter {
         apply: bool,
         flags: u32,
         pose: ([f32; 3], f32),
+        transport: Option<TransportPose>,
     ) -> Result<()> {
-        let info = movement_info(pose.0, pose.1, flags);
+        let mut info = movement_info(pose.0, pose.1, flags);
+        info.transport = transport;
         let trailing = mode.ack_carries_apply().then_some(apply);
         self.send(
             mode.ack_opcode(apply),
