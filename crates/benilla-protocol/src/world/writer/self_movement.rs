@@ -56,9 +56,13 @@ impl WorldWriter {
         pos: [f32; 3],
         orientation: f32,
         fall_time: u32,
+        transport: Option<TransportPose>,
     ) -> Result<()> {
         let mut info = movement_info(pos, orientation, flags);
         info.fall_time = fall_time;
+        // The server relocates the body we let go from this (`HandleMoveNotActiveMoverOpcode`):
+        // a rider's keeps `ON_TRANSPORT` and its tail, or it is removed from the deck.
+        info.transport = transport;
         let mut body = messages::full_guid(guid);
         body.extend_from_slice(&messages::movement(&info));
         self.send(opcode::CMSG_MOVE_NOT_ACTIVE_MOVER, &body)

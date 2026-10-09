@@ -55,12 +55,19 @@ fn yield_own_body(net_cmds: &NetCommands, player: &mut Player, self_guid: Option
         return;
     }
     super::move_trace::mover_claim("NOT_ACTIVE_MOVER", me);
+    // A rider lets go of a body still aboard: vmangos relocates it from this word too.
+    let transport = movement_net::wire_transport(player);
     let _ = net_cmds.0.send(ClientCommand::NotActiveMover {
         guid: me,
-        flags: 0,
+        flags: if transport.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        },
         pos: bevy_to_wow(player.pos),
         orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
         fall_time: 0,
+        transport,
     });
 }
 

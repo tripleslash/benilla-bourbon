@@ -1055,7 +1055,8 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             pos,
             orientation,
             fall_time,
-        } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time),
+            transport,
+        } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time, transport),
         ClientCommand::FarSight { engage } => w.far_sight(engage),
         ClientCommand::TeleportAck { guid, counter } => w.teleport_ack(guid, counter),
         ClientCommand::WorldportAck => w.worldport_ack(),
@@ -1572,6 +1573,9 @@ fn note_transport_bit(cmd: &ClientCommand) {
         ClientCommand::KnockBackAck {
             flags, transport, ..
         } => ("KnockBackAck".to_string(), *flags, transport.is_some()),
+        ClientCommand::NotActiveMover {
+            flags, transport, ..
+        } => ("NotActiveMover".to_string(), *flags, transport.is_some()),
         _ => return,
     };
     let on = flags & crate::creature_anim::move_flags::ON_TRANSPORT != 0 && tail;

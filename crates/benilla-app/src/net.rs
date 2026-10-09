@@ -934,6 +934,8 @@ pub(crate) enum ClientCommand {
         pos: [f32; 3],
         orientation: f32,
         fall_time: u32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_FAR_SIGHT`: `true` on attach, `false` on release; neither names an object.
     FarSight {
