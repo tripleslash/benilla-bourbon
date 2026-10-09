@@ -252,14 +252,11 @@ pub(super) fn apply_model_visibility(
                     } else {
                         &f.cutout
                     };
-                    // A feathering doodad beyond the water plane takes its pick's far twin
-                    // (`sky_order::FAR_SIDE_BIAS`); an opaque draw settles by depth. A twin not
-                    // built yet keeps the base until next frame.
-                    let want = if far_side && fade_alpha < 1.0 {
-                        far_twins.far_of(base).unwrap_or(base)
-                    } else {
-                        base
-                    };
+                    // A transparent pick beyond the water plane takes its far twin
+                    // (`sky_order::FAR_SIDE_BIAS`), feathering or steady in an authored blend mode
+                    // (`0x707680` lists every transparent batch); an opaque pick has no twin and
+                    // settles by depth. A twin not built yet keeps the base until next frame.
+                    let want = super::far_resolved(base, far_side, &far_twins);
                     if mat.0 != *want {
                         mat.0 = want.clone();
                     }
@@ -474,6 +471,71 @@ mod tests {
             Visibility::Inherited,
             "an unreadable owner fails OPEN"
         );
+    }
+
+    /// A doodad batch authored `Blend` is a transparent at fade 1 too, so beyond the water plane it
+    /// draws on the far list (`0x707680`), under the water, as a feathering one does.
+    #[test]
+    fn a_steady_blend_doodad_beyond_the_water_takes_its_far_twin() {
+        let cutout: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("c0000000-0000-4000-8000-0000000000a1");
+        let blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("b1000000-0000-4000-8000-0000000000a2");
+        let far: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("fa000000-0000-4000-8000-0000000000a3");
+        // The pair `classify_water_side` builds for the authored-blend steady material.
+        let mut twins = super::super::FarSideTwins::default();
+        twins.to_far.insert(cutout.id(), far.clone());
+        twins.to_near.insert(far.id(), cutout.clone());
+
+        let mut app = App::new();
+        app.init_resource::<DebugState>()
+            .init_resource::<ViewDistance>()
+            .init_resource::<crate::wmo_portal::ExteriorWindows>()
+            .init_resource::<crate::wmo_portal::CameraInteriorClaim>()
+            .insert_resource(twins)
+            .add_systems(Update, apply_model_visibility);
+        let part = app
+            .world_mut()
+            .spawn((
+                ModelPart {
+                    kind: ModelKind::Doodad,
+                    blend: ModelBlend::Blend,
+                },
+                GlobalTransform::IDENTITY,
+                Visibility::Inherited,
+                // Past `NEVER_FADE_RADIUS`: the fade is 1 at any distance.
+                DoodadFade {
+                    radius: 20.0,
+                    local_center: Vec3::ZERO,
+                    cutout: cutout.clone(),
+                    blend,
+                },
+                MeshMaterial3d(cutout.clone()),
+                super::super::FarSideOfWater,
+            ))
+            .id();
+        let drawn = |app: &App| {
+            app.world()
+                .entity(part)
+                .get::<MeshMaterial3d<WowModelMaterial>>()
+                .unwrap()
+                .0
+                .clone()
+        };
+        app.update();
+        assert_eq!(
+            drawn(&app),
+            far,
+            "a steady blended batch under the water must draw before the water pass"
+        );
+
+        // The control: off the far side it is back on its authored material.
+        app.world_mut()
+            .entity_mut(part)
+            .remove::<super::super::FarSideOfWater>();
+        app.update();
+        assert_eq!(drawn(&app), cutout, "the near side keeps the authored pick");
     }
 
     /// The reference's WMO liquid drain `0x684cd0` gates on the "Map objects" bit
