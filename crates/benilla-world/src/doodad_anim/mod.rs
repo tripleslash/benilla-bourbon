@@ -78,10 +78,24 @@ pub fn classify<'a>(
     // pose renders identically to the static mesh.
     match anims.first_seq.and_then(|i| anims.clips.get(i)) {
         Some(clip) => DoodadAnimTier::FirstSeq(clip),
+        // A transport prop is re-armed by its transport's motion (ShipStart, ShipMoving,
+        // ShipStop), so it rigs even when its idle holds bind pose: the zeppelin's rotor.
+        None if is_ship_prop(anims) => anims
+            .idle_clip()
+            .map_or(DoodadAnimTier::Static, DoodadAnimTier::FirstSeq),
         None if !anims.global_bones.is_empty() => DoodadAnimTier::GlobalSeqOnly,
         None => DoodadAnimTier::Static,
     }
 }
+
+/// Whether a model authors `AnimationData.dbc` 163 ShipMoving, the sequence a moving transport
+/// hands its props ([`benilla_formats::ShipMotion`]).
+pub fn is_ship_prop(anims: &ModelAnimations) -> bool {
+    anims.clips.iter().any(|c| c.anim_id == SHIP_MOVING)
+}
+
+/// `AnimationData.dbc` 163 ShipMoving.
+const SHIP_MOVING: u16 = 163;
 
 /// What [`spawn_anim_host`] set up for one placement; the [`RigPose`] rides here by value until
 /// [`Self::finish`], so anchors ([`Self::anchor`]) are minted only for bones something rides.
@@ -236,6 +250,19 @@ pub struct DoodadAnimHost {
 pub(crate) struct RidingSphere(pub(crate) Vec3);
 
 impl DoodadAnimHost {
+    /// The animation id the host plays; `None` on the gseq-only tier.
+    pub fn anim_id(&self) -> Option<u16> {
+        self.anim_id
+    }
+
+    /// Re-arm onto `anim_id`, as the reference's `ObjectSetSequence` sets a transport's sequence:
+    /// the window expires now, so `reroll_doodad_variation` snaps to a variation of it this or
+    /// next frame and loops it from there.
+    pub fn rearm(&mut self, anim_id: u16) {
+        self.anim_id = Some(anim_id);
+        self.window_hi = f32::NEG_INFINITY;
+    }
+
     /// The armed clip's `(node, seek)` on the shared clock, `(now − armed_at) mod duration`. It
     /// answers while parked, but the reference fires no events for a doodad culled out of its
     /// scene list (`[CM2Scene+0x20]`), so a consumer reads [`DoodadAnimHost::active`] beside it.

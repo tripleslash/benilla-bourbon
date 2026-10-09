@@ -21,7 +21,8 @@ use avian3d::collider_tree::update_moved_collider_aabbs as republish_moved_colli
 use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
 use benilla_formats::{
     elevator_period_ms, elevator_sample, load_elevator_paths, load_taxi_path_nodes,
-    ElevatorKeyframe, ElevatorPaths, TaxiPathNodes, TransportSample, TransportTimetable,
+    ElevatorKeyframe, ElevatorPaths, ShipMotion, TaxiPathNodes, TransportSample,
+    TransportTimetable,
 };
 use bevy::prelude::*;
 
@@ -52,6 +53,7 @@ impl Plugin for TransportPlugin {
                     arm_transports,
                     reseek_ridden_transport_at_worldport,
                     tick_transports,
+                    drive_ship_props,
                     watch_ridden_transport_map,
                     republish_moved_collider_aabbs::<Collider>,
                     compose_riders,
@@ -100,6 +102,8 @@ pub(crate) struct Transport {
     drive: Drive,
     /// Last frame's `moving`, for the dock and depart log lines.
     was_moving: bool,
+    /// This frame's travel phase, which [`drive_ship_props`] plays on the props.
+    motion: ShipMotion,
 }
 
 /// The two cycle evaluators; consumers key on [`Transport`], never on the drive.
@@ -189,6 +193,12 @@ impl Transport {
                     pos,
                     heading: l.yaw,
                     moving,
+                    // A lift's model is no ship prop; the phase only reads the moving bit.
+                    motion: if moving {
+                        ShipMotion::Cruising
+                    } else {
+                        ShipMotion::Docked
+                    },
                 }
             }
         }
@@ -303,6 +313,7 @@ fn arm_transports(
                         yaw: seed.yaw,
                     }),
                     was_moving: false,
+                    motion: ShipMotion::Docked,
                 },
                 // Kinematic for the same reason as the boats below.
                 RigidBody::Kinematic,
@@ -351,6 +362,7 @@ fn arm_transports(
                 Transport {
                     drive: Drive::Taxi(timetable),
                     was_moving: false,
+                    motion: ShipMotion::Docked,
                 },
                 RigidBody::Kinematic,
             ));
@@ -382,6 +394,7 @@ fn tick_transports(
     {
         let cycle = transport.cycle_ms(anchor);
         let sample = transport.sample(cycle, current_map.0);
+        transport.motion = sample.motion;
         if sample.moving != transport.was_moving {
             transport.was_moving = sample.moving;
             debug!(
@@ -399,6 +412,34 @@ fn tick_transports(
         }
         visibility.set_if_neq(Visibility::Inherited);
         write_deck_pose(&sample, &mut transform, position, rotation);
+    }
+}
+
+/// Play each transport's travel phase on its ship props (the zeppelin's rotor, the ship's sails):
+/// Stand docked, then ShipStart, ShipMoving and ShipStop, as the reference's MO-transport tick
+/// hands the model `ShipPath::GetPosition`'s sequence on every change (4.1.0
+/// `CGGameObject_C_Type_MapObjTransport`). Level-triggered, so a prop that finishes loading
+/// mid-voyage joins the phase it arrives in.
+fn drive_ship_props(
+    transports: Query<(&Transport, &Children)>,
+    mut hosts: Query<(
+        &mut benilla_world::doodad_anim::DoodadAnimHost,
+        &benilla_assets::ModelAnimations,
+    )>,
+) {
+    for (transport, children) in &transports {
+        let want = transport.motion.anim_id();
+        for &child in children {
+            let Ok((mut host, anims)) = hosts.get_mut(child) else {
+                continue;
+            };
+            if host.anim_id() != Some(want)
+                && benilla_world::doodad_anim::is_ship_prop(anims)
+                && anims.clips.iter().any(|c| c.anim_id == want)
+            {
+                host.rearm(want);
+            }
+        }
     }
 }
 
@@ -706,6 +747,7 @@ mod tests {
         Transport {
             drive: Drive::Taxi(Arc::new(tt)),
             was_moving: false,
+            motion: ShipMotion::Docked,
         }
     }
 
@@ -781,6 +823,7 @@ mod tests {
         let lift = Transport {
             drive: Drive::Lift(parked_lift()),
             was_moving: false,
+            motion: ShipMotion::Docked,
         };
         let mut anchor = TransportAnchor {
             progress_ms: 0,
@@ -834,6 +877,7 @@ mod tests {
             Transport {
                 drive: Drive::Lift(parked_lift()),
                 was_moving: false,
+                motion: ShipMotion::Docked,
             },
             TransportAnchor {
                 progress_ms: 0,
@@ -869,6 +913,7 @@ mod tests {
                 Transport {
                     drive: Drive::Lift(parked_lift()),
                     was_moving: false,
+                    motion: ShipMotion::Docked,
                 },
                 TransportAnchor {
                     progress_ms: 0,

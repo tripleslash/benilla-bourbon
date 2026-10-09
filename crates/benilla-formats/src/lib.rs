@@ -342,7 +342,7 @@ mod taxi;
 pub use taxi::{load_taxi_path_nodes, TaxiPathNode, TaxiPathNodes};
 mod transport_period;
 mod transports;
-pub use transports::{TransportSample, TransportTimetable};
+pub use transports::{ShipMotion, TransportSample, TransportTimetable};
 // Type-11 elevator and lift keyframe paths.
 mod elevators;
 pub use elevators::{

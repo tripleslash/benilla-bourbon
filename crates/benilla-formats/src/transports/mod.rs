@@ -22,6 +22,33 @@ pub struct TransportSample {
     pub heading: f32,
     /// False while parked at a stop or on a keyframe's zero-width instant.
     pub moving: bool,
+    /// Where in its stop-to-stop trapezoid the transport is ([`ShipMotion`]).
+    pub motion: ShipMotion,
+}
+
+/// The phase of a transport's travel between two stops, which picks its props' sequence: the
+/// reference's `ShipPath::DistanceMoved` hands the model ShipStart while accelerating, ShipMoving
+/// at cruise and ShipStop while decelerating, and `ShipPath::GetPosition` hands it Stand while it
+/// waits at a stop (4.1.0 `ShipPath.cpp`, set through `ObjectSetSequence` on a change). The 1.12
+/// transport props author exactly these four (`zepanimation.m2`, `transportship_sails.m2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShipMotion {
+    Docked,
+    Starting,
+    Cruising,
+    Stopping,
+}
+
+impl ShipMotion {
+    /// The `AnimationData.dbc` id: 0 Stand, 162 ShipStart, 163 ShipMoving, 164 ShipStop.
+    pub fn anim_id(self) -> u16 {
+        match self {
+            ShipMotion::Docked => 0,
+            ShipMotion::Starting => 162,
+            ShipMotion::Cruising => 163,
+            ShipMotion::Stopping => 164,
+        }
+    }
 }
 
 /// A keyframe that survives the map-change skip (`TransportMgr.cpp:128-152`), with what `sample`
@@ -659,6 +686,7 @@ impl TransportTimetable {
                 pos: [0.0; 3],
                 heading: 0.0,
                 moving: false,
+                motion: ShipMotion::Docked,
             };
         }
         let cycle_ms = cycle_ms.min(self.period_ms.saturating_sub(1));
@@ -678,6 +706,7 @@ impl TransportTimetable {
                 pos: frame.pos,
                 heading: frame.initial_orientation,
                 moving: false,
+                motion: ShipMotion::Docked,
             };
         }
 
@@ -687,6 +716,19 @@ impl TransportTimetable {
         let since_departure = now - frame.departure_time as f32 * 0.001;
         let time_since_stop = frame.time_from + since_departure;
         let time_until_stop = frame.time_to - since_departure;
+        // `DistanceMoved`'s split of the same trapezoid: accelerating for the first
+        // `min(accel_time, half)` after a stop, decelerating for the last before one.
+        let motion = if time_since_stop < time_until_stop {
+            if time_since_stop < self.accel_time {
+                ShipMotion::Starting
+            } else {
+                ShipMotion::Cruising
+            }
+        } else if time_until_stop < self.accel_time {
+            ShipMotion::Stopping
+        } else {
+            ShipMotion::Cruising
+        };
         let dist = if time_since_stop < time_until_stop {
             let d = if time_since_stop < self.accel_time {
                 0.5 * self.accel_rate * time_since_stop * time_since_stop
@@ -714,6 +756,7 @@ impl TransportTimetable {
             pos,
             heading,
             moving: true,
+            motion,
         }
     }
 }
