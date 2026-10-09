@@ -236,8 +236,11 @@ pub(crate) struct Model {
     pub(crate) diagnostics: super::diagnostics::DiagnosticLog,
     /// Non-fatal warnings for the host, such as a dropped `inherits=` template.
     pub(crate) warnings: Vec<String>,
-    /// The screen-root rect (`[bottom, left, top, right]`), the anchor base for top-level frames.
+    /// The screen-root rect (`[bottom, left, top, right]`), the anchor base for top-level frames:
+    /// 768 tall at scale 1, whatever the UI scale ([`super::ui_scale`]).
     pub(crate) screen: Rect,
+    /// The host's `uiScale`, which [`super::UiScript::apply_ui_scale`] makes `UIParent`'s scale.
+    pub(crate) ui_scale_request: Option<f32>,
 
     /// Each unit token's state as pushed this frame, keyed lowercased because 1.12's resolver
     /// (`0x515970`) matches with `SStrCmpI`: read it only through `unit`, where the fold lives.
@@ -354,6 +357,9 @@ pub(crate) struct Model {
     pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
     /// `Logout`, `Quit`, `CancelLogout`, `ForceQuit` calls; Lua sees the countdown only as events.
     pub(crate) session_requests: Vec<session::SessionRequest>,
+    /// `PLAYER_LOGIN`'s one-shot, the reference's `[0xb4e260]`: armed by the UI load, spent by
+    /// the next world-enter cascade ([`super::UiScript::fire_world_enter`]).
+    pub(crate) player_login_armed: bool,
     /// `TogglePVP` calls, a count because `CMSG_TOGGLE_PVP` has no body.
     pub(crate) pvp_toggles: u32,
     /// The player's private honor fields; before the first push the six self getters read zeros.
@@ -924,8 +930,9 @@ pub(crate) struct Model {
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
-    /// A `Minimap:PingLocation(x, y)`, drained the same frame: centre-relative offsets in UI units,
-    /// `GetCursorPosition`'s space, not the window pixels of the app's minimap geometry.
+    /// A `Minimap:PingLocation(x, y)`, drained the same frame: centre-relative offsets in the screen
+    /// root's units, `GetCursorPosition`'s space, not the window pixels of the app's minimap
+    /// geometry.
     pub(crate) minimap_ping_request: Option<(f32, f32)>,
     /// The ping's offsets as fractions of the minimap's side, updated by the app every frame.
     /// `GetPingPosition()` always answers both, from statics never cleared (`0x4eefd0`).
@@ -1114,6 +1121,7 @@ impl Model {
             warnings: Vec::new(),
             // 1024x768 until the host calls `set_screen_size`; y-up `[bottom, left, top, right]`.
             screen: Rect::new(0.0, 0.0, 768.0, 1024.0),
+            ui_scale_request: None,
             units_by_lower: HashMap::new(),
             units_by_guid: HashMap::new(),
             player_auras: Vec::new(),
@@ -1170,6 +1178,7 @@ impl Model {
             follow_requests: Vec::new(),
             camera_view_requests: Vec::new(),
             session_requests: Vec::new(),
+            player_login_armed: false,
             pvp_toggles: 0,
             honor: None,
             inspect_honor: None,
@@ -1503,6 +1512,19 @@ impl Model {
         // A new region can join the resolve's external set, so it opens the gate too.
         self.touch_layout();
         id
+    }
+
+    /// `CSimpleFrame::SetScale` (`0x76ac10`): store `h`'s own scale, cascade the effective scale
+    /// down its subtree, and re-lay out and re-measure on a change, since the owner's effective
+    /// scale is in every descendant FontString's measure key. Lua `SetScale` and the UI scale
+    /// ([`super::ui_scale`]) both come here, as both reach `0x76ac10` in the reference.
+    pub(crate) fn set_frame_scale(&mut self, h: FrameHandle, scale: f32) {
+        let changed = self.arena.frame(h).is_some_and(|f| f.scale != scale);
+        self.arena.set_scale(h, scale);
+        if changed {
+            self.touch_layout();
+            self.touch_measure_all();
+        }
     }
 
     /// A layout write that names no node. The resolve's tooltip pre-pass must not call this, or

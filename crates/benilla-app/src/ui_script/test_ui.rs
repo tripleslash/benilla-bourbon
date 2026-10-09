@@ -644,6 +644,8 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // `CharacterFrame.xml`'s tab template, for the hidden parent `PaperDollFrame` needs below.
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     // The dialog engine, after the `UIPanelCloseButton` it inherits.
     r"Interface\FrameXML\StaticPopup.xml",
     // `ContainerFrameItemButton_OnClick` hides `StackSplitFrame` on every plain click
@@ -667,7 +669,9 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     // `BagSlotButtonTemplate` inherits `PaperDollItemSlotButtonTemplate`, and its OnLoad
     // (`PaperDollItemSlotButton_OnLoad`) gives each bag button its inventory-slot id, 20..23.
-    // `CharacterFrame.xml` stays out: a missing `parent=` only warns.
+    // Its hidden parent `CharacterFrame` comes first: a parentless `PaperDollFrame` would be
+    // visible at the end of its load and run its OnShow, which reaches for the Honor tab.
+    "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     // The stock bag bar, with `BagSlotButtonTemplate` and `KEYRING_CONTAINER`.
     "Interface\\FrameXML\\MainMenuBarBagButtons.xml",
