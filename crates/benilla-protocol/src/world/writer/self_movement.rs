@@ -74,15 +74,18 @@ impl WorldWriter {
     }
 
     /// `CMSG_MOVE_SPLINE_DONE`: owed, at rest, when an `SMSG_MONSTER_MOVE` on our own guid ends.
-    /// The server checks `spline_id` against its newest, then relocates us and tells observers.
+    /// The server checks `spline_id` against its newest, then relocates us and tells observers. A
+    /// rider's carries `ON_TRANSPORT` and `transport`, or the relocation removes it from the deck.
     pub fn move_spline_done(
         &mut self,
         flags: u32,
         pos: [f32; 3],
         orientation: f32,
         spline_id: u32,
+        transport: Option<TransportPose>,
     ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
+        let mut info = movement_info(pos, orientation, flags);
+        info.transport = transport;
         self.send(
             opcode::CMSG_MOVE_SPLINE_DONE,
             &messages::move_spline_done(&info, spline_id),

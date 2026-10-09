@@ -412,6 +412,9 @@ pub(super) fn apply_server_moves(
 
 /// Apply one same-map teleport's snap (`MSG_MOVE_TELEPORT_ACK` inbound); the caller echoes it.
 fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessage, now: f32) {
+    if player.ride.is_some() && crate::webdiag::armed() {
+        crate::webdiag::out("transport: deboard (a near teleport snapped us off the deck)");
+    }
     // A near teleport arrives detached: vmangos takes this path only off a transport
     // (`Player.cpp:1866-1893`), and the reference's apply (`0x6186b0`) re-parents to the packet's
     // transport guid, zero here. A kept ride would carry us back onto the deck.

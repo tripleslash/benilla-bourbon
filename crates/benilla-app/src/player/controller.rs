@@ -321,6 +321,16 @@ pub(super) fn control(
                     player.face_yaw = yaw;
                     player.model_yaw = yaw;
                 }
+                // On a deck, the deck-local pose follows the driven body, so control comes back
+                // where the fear left us, still aboard.
+                let deck = player
+                    .ride
+                    .as_ref()
+                    .and_then(|r| transports.get(r.entity).ok())
+                    .map(|(t, ..)| *t);
+                if let Some(d) = deck {
+                    ride::follow_body(&mut player, &d);
+                }
             }
             let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
             // Far sight outlives all three (Sentry Totem has no interrupt flags), and the

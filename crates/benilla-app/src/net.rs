@@ -897,6 +897,8 @@ pub(crate) enum ClientCommand {
         pos: [f32; 3],
         orientation: f32,
         spline_id: u32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_FORCE_*_SPEED_CHANGE_ACK`: echoes guid, counter and exact speed with a live movement
     /// payload. Unacked, the server force-resolves after ~4 s and flags the session.

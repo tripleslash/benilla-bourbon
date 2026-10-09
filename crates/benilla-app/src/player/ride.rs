@@ -60,7 +60,14 @@ pub(super) fn carry(player: &mut Player, cam: &mut FlyCam, transports: &Transpor
 pub(super) fn board_from_create(
     mut commands: Commands,
     mut player: ResMut<Player>,
-    tagged: Query<(Entity, &crate::transport::TransportRider), With<crate::net::Embodied>>,
+    tagged: Query<
+        (
+            Entity,
+            &crate::transport::TransportRider,
+            Has<crate::net::Spline>,
+        ),
+        With<crate::net::Embodied>,
+    >,
     decks: Query<
         (
             Entity,
@@ -71,11 +78,16 @@ pub(super) fn board_from_create(
         With<crate::transport::Transport>,
     >,
 ) {
-    for (body, tail) in &tagged {
+    for (body, tail, spline) in &tagged {
+        // A server spline on a deck (a fear, a charge) is sampled in the deck's frame and composed
+        // through it (`compose_riders`): the tag is that frame until the spline ends.
+        if spline {
+            continue;
+        }
         commands
             .entity(body)
             .remove::<crate::transport::TransportRider>();
-        if player.ride.is_none() {
+        if player.ride.is_none() && !player.server_riding {
             note(format!(
                 "transport: seated by the server on {:#x} at deck-local {:?}; boarding once it is                  armed",
                 tail.transport_guid, tail.local_pos
@@ -112,6 +124,16 @@ pub(super) fn board_from_create(
         boat_yaw: boat.rotation.to_euler(EulerRot::YXZ).0,
     });
     note(format!("transport: board {guid:#x} (logged in aboard)"));
+}
+
+/// While something else moves the body on a deck (a server spline, a fear), keep the deck-local
+/// pose on it, so the carry composes the body where it was moved to, the wire's tail says the same,
+/// and taking control back resumes there rather than where the forced move began.
+pub(super) fn follow_body(player: &mut Player, deck: &Transform) {
+    let pos = player.pos;
+    if let Some(r) = player.ride.as_mut() {
+        r.local_pos = deck.rotation.inverse() * (pos - deck.translation);
+    }
 }
 
 /// Attaches or detaches against this frame's walkable support, then re-snapshots the deck-local

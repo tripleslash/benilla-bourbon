@@ -992,6 +992,9 @@ fn writer_loop(
 /// the `select!` around it). The map is TOTAL: every command has exactly one send, and a new
 /// command that forgets one fails to compile here rather than going quietly missing.
 pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
+    if crate::webdiag::armed() {
+        note_transport_bit(&cmd);
+    }
     match cmd {
         ClientCommand::Move {
             kind,
@@ -1017,7 +1020,8 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             pos,
             orientation,
             spline_id,
-        } => w.move_spline_done(flags, pos, orientation, spline_id),
+            transport,
+        } => w.move_spline_done(flags, pos, orientation, spline_id, transport),
         ClientCommand::MoveTimeSkipped { guid, lag_ms } => w.move_time_skipped(guid, lag_ms),
         ClientCommand::ForceSpeedAck {
             kind,
@@ -1529,6 +1533,56 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
 // Loopback sockets and a blocked thread: native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod cycle_tests;
+
+/// The `?diag=1` wire probe for transport seats: one console line each time `ON_TRANSPORT` comes
+/// on or goes off our outbound movement, naming the packet. vmangos unseats a passenger on the
+/// first movement word without the bit (`HandleMoverRelocation` → `RemovePassenger`), so the line
+/// that turns it off is the packet that unseated us.
+fn note_transport_bit(cmd: &ClientCommand) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 nothing sent yet, 1 the last word carried the bit, 2 it did not.
+    static LAST: AtomicU8 = AtomicU8::new(0);
+    let (name, flags, tail) = match cmd {
+        ClientCommand::Move {
+            kind,
+            flags,
+            transport,
+            ..
+        } => (format!("{kind:?}"), *flags, transport.is_some()),
+        ClientCommand::MoveSplineDone {
+            flags, transport, ..
+        } => ("SplineDone".to_string(), *flags, transport.is_some()),
+        ClientCommand::ForceSpeedAck {
+            kind,
+            flags,
+            transport,
+            ..
+        } => (format!("SpeedAck {kind:?}"), *flags, transport.is_some()),
+        ClientCommand::MoveModeAck {
+            mode,
+            apply,
+            flags,
+            transport,
+            ..
+        } => (
+            format!("ModeAck {mode:?} {apply}"),
+            *flags,
+            transport.is_some(),
+        ),
+        ClientCommand::KnockBackAck {
+            flags, transport, ..
+        } => ("KnockBackAck".to_string(), *flags, transport.is_some()),
+        _ => return,
+    };
+    let on = flags & crate::creature_anim::move_flags::ON_TRANSPORT != 0 && tail;
+    let state = if on { 1 } else { 2 };
+    if LAST.swap(state, Ordering::Relaxed) != state {
+        crate::webdiag::out(&format!(
+            "wire: {name} flags {flags:#x} -> ON_TRANSPORT {}",
+            if on { "on" } else { "OFF" }
+        ));
+    }
+}
 
 #[cfg(test)]
 mod rtt_tests {
