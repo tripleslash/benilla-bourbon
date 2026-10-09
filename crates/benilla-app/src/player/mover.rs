@@ -101,6 +101,8 @@ pub(super) fn step(
     // measures to the water, so hover rests a yard over it. Feet under the surface count too.
     let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= ground_reach);
     let classify_entity = classify.as_ref().map(|h| h.entity);
+    // Whether the liquid plane, which has no collider, is what holds the body this frame.
+    let mut on_liquid = on_water;
     let mut ground_entity = if on_walkable { classify_entity } else { None };
     // The settle hold after a teleport or login: the world streams in over several frames, so the
     // body is frozen with gravity off. The terrain streamer releases it on the destination's
@@ -239,6 +241,7 @@ pub(super) fn step(
         climb = g.climb;
         snap_probe = g.snap;
         player.steep_support = g.steep_support;
+        on_liquid |= g.liquid;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
         } else if g.steep_support && ground_entity.is_none() {
@@ -302,11 +305,13 @@ pub(super) fn step(
             player.vel_y = 0.0;
             player.wedged = false;
             grounded = true;
+            on_liquid = true;
         } else if !on_walkable && feet > rest && feet - surface <= ground_reach {
             center.y = rest + half_h.y;
             player.vel_y = 0.0;
             player.wedged = false;
             grounded = true;
+            on_liquid = true;
         }
     }
 
@@ -340,10 +345,12 @@ pub(super) fn step(
     // The mover's own airborne record: a launch frame counts though the body still stands, or the
     // next frame reads as a fresh step-off and re-seeds the arc.
     player.airborne_prev = !held && !anchored && (jumped || !grounded);
-    // A body held up by an edge with no collider in sight (the capsule hanging over the lip
-    // mid-climb), wedged, or taking off this frame, stands on what it stood on: the deck it rides
-    // keeps it, where no entity read as world geometry and deboarded it from a moving transport.
-    if ground_entity.is_none() && (player.steep_support || player.wedged || jumped) {
+    // A grounded frame with no collider named stands on what it stood on, unless the liquid plane
+    // holds it: a body held by an edge it climbs, wedged, taking off, or on the frame a failed
+    // step-up finds no floor and elects its fall (still grounded, falling from the next frame).
+    // Each of those read as world geometry and deboarded the rider from a moving transport, which
+    // then sailed on through a body falling in the world frame.
+    if ground_entity.is_none() && !on_liquid {
         ground_entity = player.ride_entity();
     }
     Outcome {
@@ -399,6 +406,8 @@ pub(crate) struct GroundedStep {
     /// The collider the snap touched below, walkable or not: what holds a
     /// [`Self::steep_support`] body up when [`Self::ground`] is `None`.
     pub(crate) contact: Option<Entity>,
+    /// The snap settled onto the liquid plane ([`Support::water`]), which has no collider.
+    pub(crate) liquid: bool,
     /// The height (yd) this frame's pop or cone ride gained.
     pub(crate) climb: Option<f32>,
     /// On a certified steep contact, the reference's `0x4000000`: riding a cone up, or following a
@@ -546,6 +555,7 @@ pub(crate) fn grounded_step(
     };
     let snap = Some((reach, floor.map(|(d, n, _)| (d, n))));
     let mut ground = None;
+    let mut liquid = false;
     let mut steep_support = false;
     let mut unsupported = None;
     // A ride's height is earned. The reference's cone rests on the edge it climbs, but our capsule
@@ -570,6 +580,7 @@ pub(crate) fn grounded_step(
                 steep_support = true;
             } else if walkable {
                 ground = entity;
+                liquid = entity.is_none();
             } else {
                 // Support is earned by descending, not by touching: within reach alone would perch
                 // a motionless body on a steep bank.
@@ -589,6 +600,7 @@ pub(crate) fn grounded_step(
         steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
         ground,
         contact,
+        liquid,
         snap,
         unsupported,
     }
