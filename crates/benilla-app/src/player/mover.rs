@@ -340,6 +340,12 @@ pub(super) fn step(
     // The mover's own airborne record: a launch frame counts though the body still stands, or the
     // next frame reads as a fresh step-off and re-seeds the arc.
     player.airborne_prev = !held && !anchored && (jumped || !grounded);
+    // A body held up by an edge with no collider in sight (the capsule hanging over the lip
+    // mid-climb), wedged, or taking off this frame, stands on what it stood on: the deck it rides
+    // keeps it, where no entity read as world geometry and deboarded it from a moving transport.
+    if ground_entity.is_none() && (player.steep_support || player.wedged || jumped) {
+        ground_entity = player.ride_entity();
+    }
     Outcome {
         held,
         grounded,
