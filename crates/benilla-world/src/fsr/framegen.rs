@@ -46,7 +46,7 @@ use bytemuck::{Pod, Zeroable};
 
 use super::caps::Formats;
 use super::upscaler::{FsrState, VIEW_SPACE_TO_METERS};
-use super::{FsrHeld, FsrShaders, FsrView};
+use super::{FgSolo, FsrHeld, FsrShaders, FsrView};
 use crate::ffx_glow::FfxBackdrop;
 
 /// Compute workgroup edge; `@workgroup_size(8, 8, 1)` in every pass.
@@ -575,13 +575,15 @@ pub(super) fn init_pipelines(
 /// `PrepareResources`, after [`super::upscaler::prepare_fsr`]: for a world view with frame
 /// generation on and a backdrop camera claiming it, allocate the chain in that camera's format,
 /// advance it by one rendered frame (parity, reset, parameters), and publish [`FgPresent`]. A held
-/// frame advances nothing and presents the real frame the last world frame composed.
+/// frame advances nothing and presents the real frame the last world frame composed; so does a
+/// world frame no held frame follows ([`FgSolo`]), with the one it composes itself.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn prepare_framegen(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     held: Res<FsrHeld>,
+    solo: Res<FgSolo>,
     shaders: Option<Res<FsrShaders>>,
     present: Option<Res<FgPresentPipeline>>,
     pipeline_cache: Res<PipelineCache>,
@@ -669,8 +671,9 @@ pub(super) fn prepare_framegen(
             state.frame_index_since_reset = state.frame_index_since_reset.saturating_add(1);
         }
 
-        // A world frame grounds on the generated frame, the held frame after it on the real one.
-        let (source, ready) = if held.0 {
+        // A world frame grounds on the generated frame, the held frame after it on the real one,
+        // and a solo world frame on the real one it composes.
+        let (source, ready) = if held.0 || solo.0 {
             (
                 &state.targets.finals[state.parity].sampled,
                 state.composed.clone(),
@@ -698,11 +701,13 @@ pub(super) fn prepare_framegen(
 
 /// `PostProcess`, after the FFXGlow filter passes: compose this world frame into `WorldFinal[p]`
 /// (the FFXGlow combine of the upscaled world, `ffx_glow::compose_world_final`), then run the
-/// chain from `WorldFinal[1 − p]` and `WorldFinal[p]` to the generated frame.
+/// chain from `WorldFinal[1 − p]` and `WorldFinal[p]` to the generated frame. A solo world frame
+/// ([`FgSolo`]) composes and stops: nothing presents a generated frame.
 pub(super) fn fsr_framegen_pass(
     world: &World,
     view: ViewQuery<(&FgState, &FsrState)>,
     held: Res<FsrHeld>,
+    solo: Res<FgSolo>,
     pipelines: Option<Res<FgPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     mut render_context: RenderContext,
@@ -753,6 +758,9 @@ pub(super) fn fsr_framegen_pass(
         return;
     }
     state.composed.store(true, Ordering::Release);
+    if solo.0 {
+        return;
+    }
 
     let t = &state.targets;
     let p = state.parity;

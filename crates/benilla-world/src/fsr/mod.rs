@@ -113,6 +113,12 @@ impl FsrView {
 #[derive(Resource, Default, Clone, Copy, ExtractResource)]
 pub struct FsrHeld(pub bool);
 
+/// Render-world flag: this world frame is not followed by a held frame, because the world frame
+/// alone outlasts a held one and the pair would split the interval unevenly ([`cadence`]). It
+/// presents the real frame it rendered and skips the interpolation chain.
+#[derive(Resource, Default, Clone, Copy, ExtractResource)]
+pub struct FgSolo(pub bool);
+
 /// The chain's shaders, built once for this device's formats (`caps`).
 #[derive(Resource, Clone)]
 pub struct FsrShaders {
@@ -346,11 +352,13 @@ pub struct FsrPlugin;
 impl Plugin for FsrPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FsrHeld>()
+            .init_resource::<FgSolo>()
             .init_resource::<velocity::FsrMotionParts>()
             .add_plugins((
                 ExtractComponentPlugin::<FsrView>::default(),
                 ExtractComponentPlugin::<PresentsHeldFrames>::default(),
                 ExtractResourcePlugin::<FsrHeld>::default(),
+                ExtractResourcePlugin::<FgSolo>::default(),
                 ExtractResourcePlugin::<velocity::FsrMotionParts>::default(),
             ))
             // `Last`, not `PostUpdate` (`modern/HOOKS.md`, "Scheduling rule"): after the camera's

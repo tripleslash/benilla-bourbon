@@ -184,19 +184,22 @@ fn track(
     }
 }
 
-/// Every two seconds of real time, `FSR_FRAMES rendered=<n> presented=<m>`: world frames (one per
-/// main-world update, which a held frame skips) against frames presented, held ones included.
+/// Every two seconds of real time, `FSR_FRAMES rendered=<n> presented=<m> solo=<s>`: world frames
+/// (one per main-world update, which a held frame skips) against frames presented, held ones
+/// included, and the world frames no held frame followed.
 fn log_frames(time: Res<Time<bevy::time::Real>>, mut acc: Local<(f32, u32)>) {
     acc.0 += time.delta_secs();
     acc.1 += 1;
     if acc.0 >= 2.0 {
         let presented =
             crate::fsr::cadence::PRESENTED.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let solo = crate::fsr::cadence::SOLO.swap(0, std::sync::atomic::Ordering::Relaxed);
         let (mean, cv, max) = crate::fsr::cadence::take_cadence().unwrap_or_default();
         info!(
-            "FSR_FRAMES rendered={:.1}/s presented={:.1}/s present_ms={mean:.1} cv={cv:.2} max_ms={max:.1}",
+            "FSR_FRAMES rendered={:.1}/s presented={:.1}/s solo={:.1}/s present_ms={mean:.1} cv={cv:.2} max_ms={max:.1}",
             acc.1 as f32 / acc.0,
-            presented as f32 / acc.0
+            presented as f32 / acc.0,
+            solo as f32 / acc.0
         );
         *acc = (0.0, 0);
     }
