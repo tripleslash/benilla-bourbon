@@ -87,6 +87,7 @@ const TRAINER_BLACKSMITH: TrainerSeed = TrainerSeed {
 /// Seeds the fixture window's state once the scene is resident; the real feeds push it into the VM
 /// during the settle window as live wire data would. Icons resolve through the offline
 /// `ItemDisplayCatalog`, and names go straight into the caches.
+#[allow(clippy::type_complexity)]
 pub(super) fn seed_ui_fixture(
     mut ctx: ResMut<CaptureCtx>,
     mut commands: Commands,

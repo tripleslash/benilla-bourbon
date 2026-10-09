@@ -600,15 +600,17 @@ mod tests {
     /// `[0x8828e4]`); the dismiss frees it (`0x407f1e`).
     #[test]
     fn only_the_dismiss_takes_a_route_off_the_screen() {
-        let mut screen = LoadingScreen::default();
-        screen.ship = Some(ShipScreen {
-            route: route_fixture(),
-            art: ShipArt {
-                elements: (Handle::default(), Vec2::ONE),
-                tiles: Vec::new(),
-            },
-            serial: 1,
-        });
+        let mut screen = LoadingScreen {
+            ship: Some(ShipScreen {
+                route: route_fixture(),
+                art: ShipArt {
+                    elements: (Handle::default(), Vec2::ONE),
+                    tiles: Vec::new(),
+                },
+                serial: 1,
+            }),
+            ..Default::default()
+        };
         screen.raise("transfer pending", true, Some(1), 0.0);
         assert!(screen.ship.is_some(), "a raise keeps the route");
         screen.dismiss();

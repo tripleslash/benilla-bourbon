@@ -235,7 +235,7 @@ pub(super) fn drive_self_ride(
             if stopped.is_some() {
                 commands.entity(entity).remove::<SplineStopped>();
             }
-            let (flags, transport) = tail(&*player, player.pos);
+            let (flags, transport) = tail(&player, player.pos);
             let _ = net.0.send(ClientCommand::MoveSplineDone {
                 flags,
                 pos: bevy_to_wow(player.pos),
@@ -249,7 +249,7 @@ pub(super) fn drive_self_ride(
         None if stopped.is_some() => {
             let id = stopped.expect("checked above").0;
             commands.entity(entity).remove::<SplineStopped>();
-            let (flags, transport) = tail(&*player, transform.translation);
+            let (flags, transport) = tail(&player, transform.translation);
             let _ = net.0.send(ClientCommand::MoveSplineDone {
                 flags,
                 pos: bevy_to_wow(transform.translation),
