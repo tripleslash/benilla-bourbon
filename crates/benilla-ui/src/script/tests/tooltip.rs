@@ -510,6 +510,39 @@ fn unmeasured_lines_hold_declared_size() {
     assert!(near(w, 138.88), "auto width after measures, got {w}");
 }
 
+/// With the host's font engine installed, the plate is sized in the call that showed it: addon
+/// code reads `GetWidth` and `GetLeft` straight after `Show` or a content setter, with no frame
+/// between. An `AddLine` alone resizes nothing until the next `Show`.
+#[test]
+fn a_shown_plate_answers_its_size_in_the_same_call_with_a_font_engine() {
+    struct Mono;
+    impl TextMeasure for Mono {
+        fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+            let w = req.text.len() as f32 * 10.0;
+            (w, 12.0, w)
+        }
+    }
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(Mono));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "A7"); a:SetPoint("TOPLEFT", 100, -100); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT7")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:AddLine("Tough Jerky")
+        tt:AddDoubleLine("One-Hand", "Sword")
+        tt:Show()
+        local width, left, right = tt:GetWidth(), tt:GetLeft(), tt:GetRight()
+        assert(width > 130, "the widest row is measured inside Show, got " .. width)
+        assert(left == 110 and right == left + width, "the rect follows the size, got " .. tostring(left))
+        tt:SetText("A considerably longer single line")
+        assert(tt:GetWidth() > 330, "a content setter sizes the plate too, got " .. tt:GetWidth())
+    "#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn minimum_width_floors_autosize() {
     let mut s = script();

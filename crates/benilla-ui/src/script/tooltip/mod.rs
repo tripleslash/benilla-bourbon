@@ -309,9 +309,35 @@ pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
     };
     if live {
         visibility::base_show(lua, h);
+        measure_lines(lua, h);
     } else {
         visibility::set_shown_bit(lua, h, false);
         visibility::hide(lua, h);
+    }
+}
+
+/// Measure a shown plate's lines in the call that drew them, so the size the layout pre-pass
+/// writes is the one a script reads next: 1.12 sizes the plate inside Show, and addon code reads
+/// `GetWidth` and `GetLeft` straight after it. A no-op without a host font engine, and for a line
+/// whose measure is current.
+pub(super) fn measure_lines(lua: &Lua, h: FrameHandle) {
+    let lines: Vec<crate::widget::RegionHandle> = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        match tip_mut(&mut model, h) {
+            Ok(t) => {
+                let n = t.num_lines;
+                t.left_lines
+                    .iter()
+                    .take(n)
+                    .chain(t.right_lines.iter().take(n))
+                    .copied()
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+    for line in lines {
+        super::measure::ensure_measured(lua, line);
     }
 }
 
