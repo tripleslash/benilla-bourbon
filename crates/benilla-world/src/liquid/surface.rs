@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::MeshAabb;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
@@ -165,9 +166,56 @@ fn record_lane(entity: &mut EntityCommands, lane: LiquidLane) {
     entity.insert(lane);
 }
 
-/// Marks a spawned liquid surface: one per MCNK liquid layer or WMO group pool.
+/// Marks a spawned liquid surface: one per MCNK liquid layer or WMO group pool, and the cell entity
+/// that draws an ADT tile's layers ([`spawn_liquids`]).
 #[derive(Component)]
 pub(crate) struct LiquidSurface;
+
+/// On an ADT draw entity: the world box (centre, half extents) of each MCNK layer it draws. The
+/// mirror tracks its plane per liquid instance (`reflect`), and a cell is several.
+#[derive(Component)]
+pub(crate) struct LiquidLayerBoxes(pub(crate) Vec<(Vec3, Vec3)>);
+
+/// A tile's liquid layers draw in cells of 4×4 chunks, the span its terrain cells take
+/// (`terrain_stream::furnish`).
+const CELL_SPAN: usize = 4;
+
+/// What ADT layers must share to draw as one mesh.
+#[derive(PartialEq)]
+enum DrawGroup {
+    /// Layers of one kind lying flat at one height (`level`, the height's bits) in one cell.
+    Cell {
+        cell: (usize, usize),
+        kind: LiquidKind,
+        level: u32,
+    },
+    /// A layer with any slope draws alone, the `n`th of its tile.
+    Alone(usize),
+}
+
+impl DrawGroup {
+    /// The group of the tile's `n`th layer, which sits in MCIN chunk `chunk` (row·16 + column).
+    fn of(n: usize, chunk: usize, lq: &LiquidMesh) -> Self {
+        let level = lq.positions.first().map_or(0.0, |p| p[2]);
+        if lq.positions.iter().all(|p| p[2] == level) {
+            Self::Cell {
+                cell: (chunk / 16 / CELL_SPAN, chunk % 16 / CELL_SPAN),
+                kind: lq.kind,
+                level: level.to_bits(),
+            }
+        } else {
+            Self::Alone(n)
+        }
+    }
+}
+
+/// A layer's world box, as its own mesh's `Aabb` was: over every grid vertex, wet or dry.
+fn layer_box(lq: &LiquidMesh) -> Option<(Vec3, Vec3)> {
+    let mut points = lq.positions.iter().map(|p| wow_to_bevy(*p));
+    let first = points.next()?;
+    let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+    Some(((lo + hi) * 0.5, (hi - lo) * 0.5))
+}
 
 /// `WOW_NO_LIQUID`: hide every liquid surface and only the surface, since the swim grid, foam and
 /// sound ride sibling components. An override run after both per-frame `Visibility` owners (the
@@ -188,10 +236,16 @@ pub(crate) struct LiquidSoundSource {
     pub(crate) nibble: u8,
 }
 
-/// Spawn an ADT tile's liquid surfaces into `entities`, to despawn with the tile.
+/// Spawn an ADT tile's liquid surfaces into `entities`, to despawn with the tile. `liquids` pairs
+/// each layer with its MCIN chunk index.
+///
+/// Each MCNK layer is an entity carrying its facts: the swim grid, the sound class, the foam mark
+/// and the waterline collider. The drawing is per cell ([`DrawGroup`]): the reference queues one
+/// batch per layer (`0x683ab0`), and a coast is a thousand of them in view, each a draw of the same
+/// material. Every per-layer fact the shader reads is per vertex, so a cell's layers are one mesh.
 pub(crate) fn spawn_liquids<'a>(
     commands: &mut Commands,
-    liquids: impl Iterator<Item = &'a LiquidMesh>,
+    liquids: impl Iterator<Item = (usize, &'a LiquidMesh)>,
     liquid_assets: Option<&LiquidAssets>,
     meshes: &mut Assets<Mesh>,
     entities: &mut Vec<Entity>,
@@ -199,7 +253,9 @@ pub(crate) fn spawn_liquids<'a>(
     let Some(liquid) = liquid_assets else {
         return;
     };
-    for lq in liquids {
+    // The draw groups in first-seen order: a tile holds a few dozen at most.
+    let mut groups: Vec<(DrawGroup, LiquidLane, Vec<&LiquidMesh>)> = Vec::new();
+    for (n, (chunk, lq)) in liquids.enumerate() {
         // The scene fog (the ADT passes submit none and draw under the scene submit `0x66ff20`),
         // and never a scroll, though ADT magma is nibble 6: its kernel zeroes the v-translate.
         let lane = LiquidLane {
@@ -210,41 +266,52 @@ pub(crate) fn spawn_liquids<'a>(
         if liquid.material(lq.kind, LiquidPath::Adt, false).is_none() {
             continue; // this kind's frames failed to load (warned at setup)
         }
-        let info = wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk);
-        let foam = !lq.kind.is_fullbright(); // white surf is a water thing
-        entities.push({
-            let mut ec = commands.spawn((
-                Mesh3d(meshes.add(liquid_bevy_mesh(lq, None))),
-                Transform::IDENTITY,
-                LiquidSurface,
-                // Exterior scene: the ADT liquid producer `0x683ab0` is called only from the
-                // per-window populate `0x682fa0`, like ADT terrain (`0x683bf0`) and doodads
-                // (`0x683700`), one entity per MCNK layer. The exterior cull is its only
-                // `Visibility` writer.
-                crate::exterior_cull::ExteriorScene,
-                info,
-                LiquidSoundSource {
-                    nibble: lq.sound_nibble,
-                },
-                // Water is world geometry to every camera EXCEPT the mirror that reflects it
-                // — see `reflect`'s header, and the reference's own reflection view, which
-                // never sets the `0x200` water-pass bit.
-                bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
-            ));
-            record_lane(&mut ec, lane);
-            ec.id()
-        });
-        if foam {
-            commands
-                .entity(*entities.last().expect("just pushed"))
-                .insert(FoamPatch);
+        let mut facts = commands.spawn((
+            Transform::IDENTITY,
+            LiquidSurface,
+            wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk),
+            LiquidSoundSource {
+                nibble: lq.sound_nibble,
+            },
+        ));
+        if !lq.kind.is_fullbright() {
+            facts.insert(FoamPatch); // white surf is a water thing
         }
         // The waterline for the camera sweep under `cameraWaterCollision`; nothing else queries it.
         if let Some(collider) = liquid_collider(lq) {
-            commands
-                .entity(*entities.last().expect("just pushed"))
-                .insert((collider, RigidBody::Static, liquid_layers()));
+            facts.insert((collider, RigidBody::Static, liquid_layers()));
         }
+        entities.push(facts.id());
+
+        let group = DrawGroup::of(n, chunk, lq);
+        match groups.iter_mut().find(|(g, ..)| *g == group) {
+            Some((.., layers)) => layers.push(lq),
+            None => groups.push((group, lane, vec![lq])),
+        }
+    }
+    for (_, lane, layers) in groups {
+        let mesh = liquid_bevy_mesh(&layers, None);
+        // Computed here, so the exterior cull tests the cell from its first frame.
+        let aabb = mesh.compute_aabb();
+        let mut ec = commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            Transform::IDENTITY,
+            LiquidSurface,
+            LiquidLayerBoxes(layers.iter().filter_map(|lq| layer_box(lq)).collect()),
+            // Exterior scene: the ADT liquid producer `0x683ab0` is called only from the
+            // per-window populate `0x682fa0`, like ADT terrain (`0x683bf0`) and doodads
+            // (`0x683700`). The exterior cull is its only `Visibility` writer.
+            crate::exterior_cull::ExteriorScene,
+            // Water is world geometry to every camera EXCEPT the mirror that reflects it
+            // — see `reflect`'s header, and the reference's own reflection view, which
+            // never sets the `0x200` water-pass bit.
+            bevy::camera::visibility::RenderLayers::layer(super::UNMIRRORED_RENDER_LAYER),
+        ));
+        if let Some(aabb) = aabb {
+            ec.insert(aabb);
+        }
+        record_lane(&mut ec, lane);
+        entities.push(ec.id());
     }
 }
 
@@ -265,15 +332,22 @@ fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
     Some(Collider::trimesh(verts, tris))
 }
 
-/// The render mesh for one [`LiquidMesh`] in its own space (absolute for MCLQ, model-local for WMO
-/// liquid): a flat up normal, the tiling UVs, and the per-vertex depth `V` in UV1.x.
-fn liquid_bevy_mesh(lq: &LiquidMesh, body_color: Option<[f32; 3]>) -> Mesh {
-    let positions: Vec<[f32; 3]> = lq
-        .positions
-        .iter()
-        .map(|p| wow_to_bevy(*p).to_array())
-        .collect();
-    let n = positions.len();
+/// The render mesh for `layers` in their own space (absolute for MCLQ, model-local for WMO
+/// liquid), one after another: a flat up normal, the tiling UVs, and the per-vertex depth `V` in
+/// UV1.x.
+fn liquid_bevy_mesh(layers: &[&LiquidMesh], body_color: Option<[f32; 3]>) -> Mesh {
+    let n: usize = layers.iter().map(|lq| lq.positions.len()).sum();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n);
+    let mut uv1: Vec<[f32; 2]> = Vec::with_capacity(n);
+    let mut indices: Vec<u32> = Vec::with_capacity(layers.iter().map(|lq| lq.indices.len()).sum());
+    for lq in layers {
+        let base = positions.len() as u32;
+        positions.extend(lq.positions.iter().map(|p| wow_to_bevy(*p).to_array()));
+        uvs.extend_from_slice(&lq.uvs);
+        uv1.extend(lq.depths.iter().map(|&d| [d, 0.0]));
+        indices.extend(lq.indices.iter().map(|i| base + i));
+    }
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -281,15 +355,14 @@ fn liquid_bevy_mesh(lq: &LiquidMesh, body_color: Option<[f32; 3]>) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     // WoW up (0, 0, 1) is Bevy up (0, 1, 0).
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, lq.uvs.clone());
-    let uv1: Vec<[f32; 2]> = lq.depths.iter().map(|&d| [d, 0.0]).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
     // An interior pool's `MOMT.diffColor` rides the vertex colour, where the reference's interior
     // vertex carries it, keeping one material per lane; other lanes take the shader's white.
     if let Some([red, green, blue]) = body_color {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[red, green, blue, 1.0]; n]);
     }
-    mesh.insert_indices(Indices::U32(lq.indices.clone()));
+    mesh.insert_indices(Indices::U32(indices));
     mesh
 }
 
@@ -339,7 +412,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
         }
         let surface = {
             let mut ec = commands.spawn((
-                Mesh3d(meshes.add(liquid_bevy_mesh(lq, body_color))),
+                Mesh3d(meshes.add(liquid_bevy_mesh(&[lq], body_color))),
                 transform,
                 LiquidSurface,
                 // Bit 30 is the interior-fog lane (`liquid.wgsl`'s `room_fog`), written each frame
@@ -861,25 +934,22 @@ mod tests {
         }
     }
 
-    /// An ADT surface carries `ExteriorScene` and none of the components `UnownedSceneFilter`
-    /// excludes, so the exterior cull reaches it.
-    #[test]
-    fn an_adt_liquid_surface_is_tagged_exterior_scene() {
+    /// `spawn_liquids` over `sheets`, each with its MCIN chunk index: the app and what it spawned.
+    fn spawn_adt(sheets: Vec<(usize, LiquidMesh)>) -> (App, Vec<Entity>) {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();
         app.add_plugins(bevy::asset::AssetPlugin::default())
             .init_asset::<Mesh>()
             .init_asset::<LiquidMaterial>();
-        let sheets = [one_sheet([100.0, 100.0, 5.0])];
         let assets = adt_assets();
-        let mut spawned = Vec::new();
-        app.world_mut()
+        let spawned = app
+            .world_mut()
             .run_system_once(
                 move |mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>| {
                     let mut ents = Vec::new();
                     spawn_liquids(
                         &mut commands,
-                        sheets.iter(),
+                        sheets.iter().map(|(chunk, lq)| (*chunk, lq)),
                         Some(&assets),
                         &mut meshes,
                         &mut ents,
@@ -887,10 +957,74 @@ mod tests {
                     ents
                 },
             )
-            .map(|ents| spawned = ents)
             .expect("the spawn system ran");
-        assert_eq!(spawned.len(), 1, "one sheet in, one surface out");
-        let e = app.world().entity(spawned[0]);
+        (app, spawned)
+    }
+
+    /// The spawned entities that draw, with the index count of each one's mesh.
+    fn draws(app: &App, spawned: &[Entity]) -> Vec<(Entity, usize)> {
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        spawned
+            .iter()
+            .filter_map(|&e| {
+                let mesh = app.world().entity(e).get::<Mesh3d>()?;
+                Some((e, meshes.get(&mesh.0)?.indices()?.len()))
+            })
+            .collect()
+    }
+
+    /// Flat layers of one kind at one height in one 4×4-chunk cell are one draw; another height,
+    /// another cell or a slope is its own. Every layer keeps its own facts entity.
+    #[test]
+    fn a_cells_flat_layers_at_one_height_draw_as_one() {
+        let mut sloped = one_sheet([300.0, 100.0, 5.0]);
+        sloped.positions[3][2] = 6.0;
+        let (app, spawned) = spawn_adt(vec![
+            // Chunks 0, 1 and 17 share cell (0, 0); chunk 4 opens cell (0, 1).
+            (0, one_sheet([100.0, 100.0, 5.0])),
+            (1, one_sheet([100.0, 108.0, 5.0])),
+            (17, one_sheet([108.0, 108.0, 5.0])),
+            (1, one_sheet([100.0, 108.0, 9.0])),
+            (4, one_sheet([100.0, 132.0, 5.0])),
+            (0, sloped),
+        ]);
+        let mut counts: Vec<usize> = draws(&app, &spawned).iter().map(|d| d.1).collect();
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            [6, 6, 6, 18],
+            "three layers at one height share a mesh; the higher layer, the next cell and the \
+             slope each draw alone"
+        );
+        let facts = spawned
+            .iter()
+            .filter(|&&e| {
+                app.world()
+                    .entity(e)
+                    .contains::<crate::liquid::WaterChunkInfo>()
+            })
+            .count();
+        assert_eq!(facts, 6, "every layer keeps its swim grid");
+        let boxes: usize = spawned
+            .iter()
+            .filter_map(|&e| app.world().entity(e).get::<LiquidLayerBoxes>())
+            .map(|b| b.0.len())
+            .sum();
+        assert_eq!(boxes, 6, "…and its own box for the mirror's plane");
+    }
+
+    /// An ADT surface carries `ExteriorScene` and none of the components `UnownedSceneFilter`
+    /// excludes, so the exterior cull reaches it.
+    #[test]
+    fn an_adt_liquid_surface_is_tagged_exterior_scene() {
+        let (app, spawned) = spawn_adt(vec![(0, one_sheet([100.0, 100.0, 5.0]))]);
+        let drawn = draws(&app, &spawned);
+        assert_eq!(drawn.len(), 1, "one sheet in, one surface drawn");
+        let e = app.world().entity(drawn[0].0);
+        assert!(
+            e.contains::<bevy::camera::primitives::Aabb>(),
+            "the cull tests the surface's box from its first frame"
+        );
         assert!(
             e.contains::<crate::exterior_cull::ExteriorScene>(),
             "an open-world liquid surface is exterior scene — untagged, the window cull never \

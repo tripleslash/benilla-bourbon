@@ -785,8 +785,8 @@ mod tests {
         (vis, *app.world().resource::<ExteriorCullVerdict>())
     }
 
-    /// One MCNK liquid layer's world box at `at`: a flat 33.333 yd sheet, the granularity
-    /// `spawn_liquids` produces (one entity per `LiquidMesh`).
+    /// One MCNK liquid layer's world box at `at`: a flat 33.333 yd sheet, the smallest surface
+    /// `spawn_liquids` draws (a cell of them is up to four across).
     fn lake(at: Vec3) -> Aabb {
         const CELL: f32 = 33.333 / 2.0;
         Aabb::from_min_max(

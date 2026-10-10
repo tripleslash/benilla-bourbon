@@ -321,7 +321,12 @@ fn sync_reflection_camera(
     view: Res<crate::view::ViewDistance>,
     time: Res<Time>,
     liquids: Query<
-        (&GlobalTransform, Option<&Aabb>, &ViewVisibility),
+        (
+            &GlobalTransform,
+            Option<&Aabb>,
+            &ViewVisibility,
+            Option<&super::surface::LiquidLayerBoxes>,
+        ),
         With<super::surface::LiquidSurface>,
     >,
     mut plane_out: ResMut<ReflectionPlane>,
@@ -355,10 +360,17 @@ fn sync_reflection_camera(
     // snapped to zero, and the height guard in the shader fades a surface that disagrees with it.
     // Zero is only the value before any water has been drawn.
     let eye = world_pose.translation();
+    // An ADT cell answers for each MCNK layer it draws; a WMO pool for its own box.
     let boxes = || {
-        liquids
-            .iter()
-            .filter_map(|(gt, aabb, seen)| aabb.map(|a| (world_box(gt, a), seen.get())))
+        liquids.iter().flat_map(|(gt, aabb, seen, layers)| {
+            let own = match layers {
+                Some(_) => None,
+                None => aabb.map(|a| world_box(gt, a)),
+            };
+            own.into_iter()
+                .chain(layers.into_iter().flat_map(|l| l.0.iter().copied()))
+                .map(move |b| (b, seen.get()))
+        })
     };
     let plane = match closest_reflection_height(eye, boxes()) {
         Some(surface) => {
