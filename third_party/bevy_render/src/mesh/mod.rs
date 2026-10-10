@@ -149,6 +149,12 @@ impl RenderAsset for RenderMesh {
             .map_err(|_| AssetExtractionError::AlreadyExtracted)
     }
 
+    // benilla fork: `allocate_and_free_meshes` has copied this mesh's bytes into its slab before
+    // `prepare_assets` runs, budget or no, so a deferral saves no upload. It only withholds the
+    // record: a rewritten mesh loses its previous one first and every entity drawing it goes
+    // blank until the budget has room.
+    const DEFERRABLE: bool = false;
+
     fn byte_len(mesh: &Self::SourceAsset) -> Option<usize> {
         let mut vertex_size = 0;
         for attribute_data in mesh.attributes() {

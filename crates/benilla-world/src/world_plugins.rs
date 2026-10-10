@@ -201,6 +201,9 @@ impl Plugin for WorldFoundation {
         // In the browser the render world prepares on the thread that draws, so a zone line whose
         // textures and meshes all land together would upload them inside one frame; there the
         // default is `WEB_UPLOAD_BUDGET_MB`. A single asset over the cap still uploads whole.
+        // fork: web — only an image ever waits. A mesh counts against the frame and is prepared
+        // in it (`third_party/bevy_render/BENILLA.md`, the seventh delta): held back, a rewritten
+        // mesh draws nothing, which blanked the player UI's batches under a streaming backlog.
         let upload_mb = std::env::var("WOW_UPLOAD_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -209,8 +212,6 @@ impl Plugin for WorldFoundation {
             app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
                 mb * 1024 * 1024,
             ));
-            // fork: web — a mesh the budget defers must still be specialized when it lands.
-            crate::late_mesh::plugin(app);
         }
         // Direct draws on every camera: Bevy's indirect lane is a per-draw encode loop on Metal
         // (no MULTI_DRAW_INDIRECT) plus GPU preprocessing; `WOW_INDIRECT=1` restores it. A
@@ -229,3 +230,99 @@ impl Plugin for WorldFoundation {
 const WEB_UPLOAD_BUDGET_MB: Option<usize> = Some(16);
 #[cfg(not(target_arch = "wasm32"))]
 const WEB_UPLOAD_BUDGET_MB: Option<usize> = None;
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use bevy::asset::{Asset, AssetId};
+    use bevy::ecs::system::{RunSystemOnce, SystemParamItem};
+    use bevy::prelude::*;
+    use bevy::render::mesh::RenderMesh;
+    use bevy::render::render_asset::{
+        prepare_assets, ExtractedAssets, PrepareAssetError, PrepareNextFrameAssets, RenderAsset,
+        RenderAssetBytesPerFrameLimiter, RenderAssets,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Asset, TypePath, Clone)]
+    struct Source(u32);
+
+    /// A budgeted asset the way upstream prepares one.
+    struct Waits;
+    /// A budgeted asset that says what [`RenderMesh`] says.
+    struct Never(u32);
+
+    impl RenderAsset for Waits {
+        type SourceAsset = Source;
+        type Param = ();
+        fn byte_len(_: &Source) -> Option<usize> {
+            Some(1)
+        }
+        fn prepare_asset(
+            _: Source,
+            _: AssetId<Source>,
+            (): &mut SystemParamItem<()>,
+            _: Option<&Self>,
+        ) -> Result<Self, PrepareAssetError<Source>> {
+            Ok(Self)
+        }
+    }
+
+    impl RenderAsset for Never {
+        type SourceAsset = Source;
+        type Param = ();
+        const DEFERRABLE: bool = false;
+        fn byte_len(_: &Source) -> Option<usize> {
+            Some(1)
+        }
+        fn prepare_asset(
+            source: Source,
+            _: AssetId<Source>,
+            (): &mut SystemParamItem<()>,
+            _: Option<&Self>,
+        ) -> Result<Self, PrepareAssetError<Source>> {
+            Ok(Self(source.0))
+        }
+    }
+
+    /// A render world one frame into a spent budget: asset `id` prepared as 1, rewritten as 2.
+    fn rewritten_under_a_spent_budget<A: RenderAsset<SourceAsset = Source>>(
+        prepared: A,
+    ) -> (World, AssetId<Source>) {
+        let id = AssetId::<Source>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(7),
+        };
+        let mut world = World::new();
+        world.insert_resource(RenderAssetBytesPerFrameLimiter {
+            max_bytes: Some(1),
+            bytes_written: AtomicUsize::new(1),
+        });
+        let mut assets = RenderAssets::<A>::default();
+        assets.insert(id, prepared);
+        world.insert_resource(assets);
+        world.init_resource::<PrepareNextFrameAssets<A>>();
+        let mut extracted = ExtractedAssets::<A>::default();
+        extracted.extracted.push((id, Source(2)));
+        extracted.modified.insert(id);
+        world.insert_resource(extracted);
+        world.run_system_once(prepare_assets::<A>).unwrap();
+        (world, id)
+    }
+
+    /// The player UI rewrites its pooled batch meshes in place. Upstream's budget takes the
+    /// prepared one away and makes the new one wait, so the batch draws nothing meanwhile.
+    #[test]
+    fn a_rewritten_mesh_is_prepared_on_a_frame_whose_budget_is_spent() {
+        let (world, id) = rewritten_under_a_spent_budget(Waits);
+        assert!(
+            world.resource::<RenderAssets<Waits>>().get(id).is_none(),
+            "a deferrable asset is gone while it waits: the blank this test is about"
+        );
+        let (world, id) = rewritten_under_a_spent_budget(Never(1));
+        assert_eq!(
+            world.resource::<RenderAssets<Never>>().get(id).map(|a| a.0),
+            Some(2),
+            "an asset that is not deferrable is prepared in the frame that rewrote it"
+        );
+        const { assert!(!<RenderMesh as RenderAsset>::DEFERRABLE) };
+    }
+}

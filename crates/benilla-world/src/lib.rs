@@ -127,8 +127,6 @@ pub mod interior;
 pub mod launch_env;
 pub mod layout_keys;
 pub mod lighting;
-// fork: web — the upload budget's deferred meshes, re-specialized when they land.
-mod late_mesh;
 pub mod liquid;
 pub mod log_ring;
 // fork: perf — per-system CPU time, only in a `trace_systems` build.

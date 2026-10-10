@@ -70,6 +70,11 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
         None
     }
 
+    /// benilla fork: whether an exhausted [`RenderAssetBytesPerFrame`] budget may hold this asset
+    /// over to a later frame. An asset that says `false` is prepared the frame it is extracted
+    /// and its [`RenderAsset::byte_len`] still counts against that frame.
+    const DEFERRABLE: bool = true;
+
     /// Prepares the [`RenderAsset::SourceAsset`] for the GPU by transforming it into a [`RenderAsset`].
     ///
     /// ECS data may be accessed via `param`.
@@ -399,7 +404,7 @@ pub fn prepare_assets<A: RenderAsset>(
             // forward progress even if the asset is larger than the max bytes per frame.
             // this way we always write at least one (sized) asset per frame.
             // in future we could also consider partial asset uploads.
-            if bpf.exhausted() {
+            if A::DEFERRABLE && bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
                 continue;
             }
@@ -439,7 +444,7 @@ pub fn prepare_assets<A: RenderAsset>(
         let previous_asset = render_assets.remove(id);
 
         let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
-            if bpf.exhausted() {
+            if A::DEFERRABLE && bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
                 continue;
             }

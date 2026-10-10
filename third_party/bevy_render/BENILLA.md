@@ -92,6 +92,22 @@ it instead of `key_to_slab`, the slab table and the slab's own allocation table,
 `MeshAllocationKey` twice per slice. Measured in the browser world viewer: those lookups were ~8% of
 the frame thread.
 
+## The seventh delta: the upload budget never holds a mesh back
+
+`RenderAssetBytesPerFrame` (benilla sets it in the browser, `WEB_UPLOAD_BUDGET_MB`) makes
+`prepare_assets` push an asset to a later frame once the frame's bytes are spent, and for an asset
+that is being updated it removes the prepared one first. For an image that spreads a real upload.
+For a mesh it spreads nothing: `allocate_and_free_meshes` runs before `prepare_assets::<RenderMesh>`
+and copies every extracted mesh into its slab whatever the budget says, so only the `RenderMesh`
+record waits, and while it waits nothing that draws the mesh is drawn. The player UI rewrites its
+pooled batch meshes in place, so a rebuild on a frame whose budget the streaming world had spent
+took the whole UI off the screen until the backlog cleared. A new mesh that waited had a second
+cost: its entity is specialized only on the frame it is marked dirty, and the mesh was not there.
+
+The hunk adds `RenderAsset::DEFERRABLE` (default `true`), which `prepare_assets` asks before both
+deferrals, and `RenderMesh` says `false`. A mesh's bytes still count against the frame, so images
+prepared after it wait as before.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -102,6 +118,8 @@ the frame thread.
 | `src/view/window/mod.rs` | `prepare_windows`: a `Skip` camera counts as the window's target; `extract_windows`: the wasm32-only per-task canvas texture (above) |
 | `src/slab_allocator.rs` | `reallocate_slab` and `free_empty_slabs` hand the buffer they let go to `release_buffer`, a wasm32-only `destroy()` (above) |
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
+| `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
+| `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
 | `src/lib.rs` | `mod wasm_serial;` |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
 
