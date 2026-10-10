@@ -671,8 +671,9 @@ fn watch_ridden_transport_map(
 }
 
 /// An observed mover's pose in a transport's frame, the `MOVEFLAG_ONTRANSPORT` tail of its
-/// `LIVING` create block or `MSG_MOVE_*` relay. [`compose_riders`] carries it every frame; the
-/// local pose changes only per packet, with no extrapolation in the deck frame.
+/// `LIVING` create block or `MSG_MOVE_*` relay. [`compose_riders`] carries it every frame; between
+/// packets `net::extrapolate_remote_units` dead-reckons it in the deck frame, and a deck spline
+/// samples into it.
 #[derive(Component)]
 pub(crate) struct TransportRider {
     pub(crate) transport_guid: u64,
@@ -683,8 +684,10 @@ pub(crate) struct TransportRider {
 }
 
 /// Compose each observed rider's world pose through its transport's this-frame pose, after
-/// [`tick_transports`], and refresh [`RemoteMotion`]'s WoW pose to match. A rider whose transport
-/// is not streamed keeps its last world pose; the server despawns the pair together.
+/// [`tick_transports`], and refresh [`RemoteMotion`]'s WoW pose to match. A relayed mover's body
+/// pose past its facing (the strafe lean, the swim pitch) rides along: its rotation is always its
+/// facing composed with that remainder. A rider whose transport is not streamed keeps its last
+/// world pose; the server despawns the pair together.
 fn compose_riders(
     guid_index: Res<crate::net::GuidIndex>,
     boats: Query<&Transform, (With<Transport>, Without<TransportRider>)>,
@@ -708,10 +711,14 @@ fn compose_riders(
         let world = boat.translation + boat.rotation * local;
         let yaw = rider.local_orientation + boat.rotation.to_euler(EulerRot::YXZ).0;
         transform.translation = world;
-        transform.rotation = Quat::from_rotation_y(yaw);
-        if let Some(mut rm) = motion {
-            rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
-            rm.orientation = yaw;
+        match motion {
+            Some(mut rm) => {
+                let body = Quat::from_rotation_y(-rm.orientation) * transform.rotation;
+                transform.rotation = (Quat::from_rotation_y(yaw) * body).normalize();
+                rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
+                rm.orientation = yaw;
+            }
+            None => transform.rotation = Quat::from_rotation_y(yaw),
         }
     }
 }
@@ -947,6 +954,69 @@ mod tests {
             at: Instant::now(),
         };
         assert!(lift.reseek_to_map(&mut anchor, 1).is_none());
+    }
+
+    /// A relayed rider's body pose past its facing, here a swim pitch, survives the carry.
+    #[test]
+    fn compose_carries_a_riders_body_pose_with_its_facing() {
+        use bevy::ecs::system::RunSystemOnce;
+        const BOAT: u64 = 0xF110_0000_0000_0003;
+        let mut w = World::new();
+        let boat = w
+            .spawn((
+                Transport {
+                    drive: Drive::Lift(parked_lift()),
+                    leg: None,
+                    was_moving: false,
+                    motion: ShipMotion::Docked,
+                },
+                Transform::from_xyz(10.0, 0.0, 0.0).with_rotation(Quat::from_rotation_y(0.5)),
+            ))
+            .id();
+        let mut index = crate::net::GuidIndex::default();
+        index.0.insert(BOAT, boat);
+        w.insert_resource(index);
+        // Drawn facing 1.0 pitched 0.3, as the extrapolator left it through last frame's deck.
+        let pitch = Quat::from_rotation_x(0.3);
+        let rider = w
+            .spawn((
+                TransportRider {
+                    transport_guid: BOAT,
+                    local_pos: [0.0; 3],
+                    local_orientation: 0.25,
+                },
+                crate::net::RemoteMotion {
+                    wow_pos: [0.0; 3],
+                    orientation: 1.0,
+                    flags: 0,
+                    pitch: 0.3,
+                    speed: 0.0,
+                    vertical_velocity: 0.0,
+                    jump_xy_vel: [0.0; 2],
+                    fall_start_z: None,
+                    pending: std::collections::VecDeque::new(),
+                    relay: Default::default(),
+                    last_apply_ms: 0.0,
+                    last_apply_pos: [0.0; 3],
+                },
+                Transform::from_rotation(Quat::from_rotation_y(1.0) * pitch),
+            ))
+            .id();
+        w.run_system_once(compose_riders).unwrap();
+        let want = Quat::from_rotation_y(0.75) * pitch;
+        let got = w.get::<Transform>(rider).unwrap().rotation;
+        assert!(
+            got.dot(want).abs() > 0.99999,
+            "facing 0.25 on a deck at 0.5, still pitched: {got:?} vs {want:?}"
+        );
+        assert!(
+            (w.get::<crate::net::RemoteMotion>(rider)
+                .unwrap()
+                .orientation
+                - 0.75)
+                .abs()
+                < 1e-6
+        );
     }
 
     /// A two-frame pause path at `base_pos`.

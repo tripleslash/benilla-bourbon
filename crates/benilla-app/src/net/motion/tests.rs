@@ -983,7 +983,8 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
 
     let mut app = App::new();
     // `WorldCollision` needs the trace exclusions the world plugins would initialise.
-    app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+    app.init_resource::<benilla_world::collision::MoverTraceExclusions>()
+        .init_resource::<crate::net::GuidIndex>();
     app.add_plugins((
         MinimalPlugins,
         TransformPlugin,
