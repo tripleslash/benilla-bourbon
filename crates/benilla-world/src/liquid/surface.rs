@@ -171,16 +171,16 @@ fn record_lane(entity: &mut EntityCommands, lane: LiquidLane) {
 #[derive(Component)]
 pub(crate) struct LiquidSurface;
 
-/// On an ADT draw entity: the world box (centre, half extents) of each MCNK layer it draws. The
-/// mirror tracks its plane per liquid instance (`reflect`), and a cell is several.
+/// fork: perf — on an ADT draw entity: the world box (centre, half extents) of each MCNK layer
+/// it draws. The mirror tracks its plane per liquid instance (`reflect`), and a cell is several.
 #[derive(Component)]
 pub(crate) struct LiquidLayerBoxes(pub(crate) Vec<(Vec3, Vec3)>);
 
-/// A tile's liquid layers draw in cells of 4×4 chunks, the span its terrain cells take
-/// (`terrain_stream::furnish`).
+/// fork: perf — a tile's liquid layers draw in cells of 4×4 chunks, the span its terrain cells
+/// take (`terrain_stream::furnish`).
 const CELL_SPAN: usize = 4;
 
-/// What ADT layers must share to draw as one mesh.
+/// fork: perf — what ADT layers must share to draw as one mesh.
 #[derive(PartialEq)]
 enum DrawGroup {
     /// Layers of one kind lying flat at one height (`level`, the height's bits) in one cell.
@@ -239,10 +239,11 @@ pub(crate) struct LiquidSoundSource {
 /// Spawn an ADT tile's liquid surfaces into `entities`, to despawn with the tile. `liquids` pairs
 /// each layer with its MCIN chunk index.
 ///
-/// Each MCNK layer is an entity carrying its facts: the swim grid, the sound class, the foam mark
-/// and the waterline collider. The drawing is per cell ([`DrawGroup`]): the reference queues one
-/// batch per layer (`0x683ab0`), and a coast is a thousand of them in view, each a draw of the same
-/// material. Every per-layer fact the shader reads is per vertex, so a cell's layers are one mesh.
+/// fork: perf — each MCNK layer is an entity carrying its facts: the swim grid, the sound class,
+/// the foam mark and the waterline collider. The drawing is per cell ([`DrawGroup`]): the
+/// reference queues one batch per layer (`0x683ab0`), and a coast is a thousand of them in view,
+/// each a draw of the same material. Every per-layer fact the shader reads is per vertex, so a
+/// cell's layers are one mesh.
 pub(crate) fn spawn_liquids<'a>(
     commands: &mut Commands,
     liquids: impl Iterator<Item = (usize, &'a LiquidMesh)>,

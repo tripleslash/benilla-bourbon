@@ -232,7 +232,8 @@ fn weather_tick(
     // The `WOW_WEATHER` script drives the panel override, so captures and headless runs can
     // force weather without a GM `.wchange`.
     let script = env_script.get_or_insert_with(|| {
-        // Through `launch_env`, so the browser's viewer reaches it too (`?weather=1,1`).
+        // fork: perf — through `launch_env`, so the browser's viewer reaches it too
+        // (`?weather=1,1`).
         crate::launch_env::var("WOW_WEATHER")
             .map(|v| parse_env_script(&v))
             .unwrap_or_default()

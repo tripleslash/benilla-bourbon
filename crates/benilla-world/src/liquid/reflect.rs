@@ -360,7 +360,7 @@ fn sync_reflection_camera(
     // snapped to zero, and the height guard in the shader fades a surface that disagrees with it.
     // Zero is only the value before any water has been drawn.
     let eye = world_pose.translation();
-    // An ADT cell answers for each MCNK layer it draws; a WMO pool for its own box.
+    // fork (perf): an ADT cell answers for each MCNK layer it draws; a WMO pool for its own box.
     let boxes = || {
         liquids.iter().flat_map(|(gt, aabb, seen, layers)| {
             let own = match layers {
