@@ -951,6 +951,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // light on (`light_sun.w`).
     let is_wmo = m.model_flags.x > 0.5;
     let is_interior = m.model_flags.z > 0.5;
+    // Unlit fullbright (model_flags.w): M2 UNLIT (0x01) glass/glow cards, or WMO UNLIT on an
+    // exterior-group batch (`tex × white` — the inn's always-lit outside panes). Wins over the lit
+    // path with no emission terms (lighting is off, so GL_EMISSION is dead there) — only the
+    // highlight is added (below). Hoisted: the lit sum is dropped whole for it
+    // (`select(lit_rgb, unlit_rgb, is_emissive)`), so the shadow, probe-field, sky and point-light
+    // lookups that only feed that sum are skipped for it. A light shaft is stacked unlit additive
+    // planes yards across, and standing in one paid every lookup per layer per pixel.
+    let is_emissive = m.model_flags.w > 0.5;
     // fork: modern lighting (FORK.md, P6) — the AUTHORED-RIG lane's flag, hoisted
     // from its own lane below (documented there) because the modern interior light has to exclude a
     // booth: a glue scene's light is entirely its authored rig and there is no room around it.
@@ -985,7 +993,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
     let modern_interior = wow_light.point_count.y > 0.5 && modern_block.gi.params.x > 0.5 && !modern_lite;
     var lit_modern_room = vec3<f32>(0.0);
-    if (modern_interior && is_interior && !is_rig) {
+    if (modern_interior && is_interior && !is_rig && !is_emissive) {
         let rn = wow_normalize(in.world_normal);
         let room_gi = modern_gi_ambient(in.world_position.xyz, rn, 1.0, modern_lite);
         // The building's own `MOHD.ambColor` is the floor: where the field has nothing to say yet
@@ -1061,7 +1069,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // through `point_diffuse` below like any exterior entity.
     let lit = select(select(lit_exterior, lit_interior, is_interior), lit_m2_interior, is_rig);
     var player_shadow = 1.0;
-    if (lights.n_directional_lights > 0u) {
+    if (lights.n_directional_lights > 0u && !is_emissive) {
         let view_z = (view.view_from_world * in.world_position).z;
         for (var light_id = 0u; light_id < lights.n_directional_lights; light_id = light_id + 1u) {
             if ((lights.directional_lights[light_id].flags & 1u) != 0u) {
@@ -1115,7 +1123,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // every lane (units included); a shadowed fragment keeps only its ambient.
 #ifdef WOW_MODERN
     let modern_frame = wow_light.point_count.y > 0.5;
-    if (modern_frame && !modern_lite) {
+    if (modern_frame && !modern_lite && !is_emissive) {
         let mview_z = (view.view_from_world * in.world_position).z;
         var shadow_p = in.world_position.xyz;
 #ifdef WOW_RIG_SKIN
@@ -1169,7 +1177,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // fork: modern lighting (FORK.md, P3) — modern exterior: ambient under the sky-occlusion map.
 #ifdef WOW_MODERN
     var lit_with_shadow_sky = lit_with_shadow_base;
-    if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig && !modern_lite) {
+    if (wow_light.point_count.y > 0.5 && !is_interior && !is_rig && !modern_lite && !is_emissive) {
         let amb = wow_light.light_ambient.rgb;
         // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
         let gi = modern_gi_ambient(in.world_position.xyz, wow_normalize(in.world_normal), 0.0, modern_lite);
@@ -1191,11 +1199,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // tint the vertex colours carry for constant tracks, so it folds at the same point.
     let anim_tint = m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz;
     let albedo = base.rgb * anim_tint;
-    // Unlit fullbright (model_flags.w): M2 UNLIT (0x01) glass/glow cards, or WMO UNLIT on an
-    // exterior-group batch (`tex × white` — the inn's always-lit outside panes). Wins over the lit
-    // path with no emission terms (lighting is off, so GL_EMISSION is dead there) — only the
-    // highlight is added (below).
-    let is_emissive = m.model_flags.w > 0.5;
     // SIDN night glow: the emissive × the night fraction (ramping 20:30→21:30, 06:00→07:00), a
     // GL_EMISSION term inside the clamped lit sum, on lit lanes only.
     var sidn_w = 1.0;
@@ -1225,17 +1228,15 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
     // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
 #ifdef WOW_MODERN
-    var point_diffuse = select(
-        in.point_lit,
-        point_light_eval(in.point_sel, in.world_position.xyz, wow_normalize(in.world_normal)),
-        wow_light.point_count.y > 0.5,
-    );
+    var point_diffuse = in.point_lit;
+    if (wow_light.point_count.y > 0.5 && !is_emissive) {
+        point_diffuse = point_light_eval(in.point_sel, in.world_position.xyz, wow_normalize(in.world_normal));
+    }
     // fork: modern lighting (FORK.md, P6) — the binned grid replaces the
     // reference's three-nearest selection where it is live, and it reaches the lanes the reference
     // gives no point light at all: a WMO surface and an interior prop are lit by the room's fixtures
     // in a modern frame, because the bake that used to stand in for them is gone. An unlit batch
-    // drops the lit sum whole (`select(lit_rgb, unlit_rgb, is_emissive)` below), so it skips the
-    // walk and its cube lookups: a light shaft's stacked additive planes paid them per layer.
+    // skips the walk and its cube lookups, as it skips every lookup that only feeds the lit sum.
     if (locallight::grid_live(modern_block.lights) && !is_rig && !modern_lite && !is_emissive) {
         point_diffuse = modern_local_lights(
             in.world_position.xyz,
