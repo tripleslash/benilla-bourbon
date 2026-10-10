@@ -71,13 +71,100 @@ impl EffectBlend {
     }
 }
 
-/// How a draw's vertex range is indexed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// fork: perf — one point of a point draw: the vertex stage builds its triangle or quad around
+/// it ([`EffectShape`], `effect_points.wgsl`), so a field of them uploads these 32 bytes each and
+/// no CPU touches a corner. Heavy rain was 2.6 MB of triangles built, copied and uploaded a frame.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EffectPoint {
+    /// World position, absolute: the shader takes it camera-relative before it builds anything,
+    /// so the corners keep their precision far from the origin.
+    pub pos: [f32; 3],
+    /// The shape's scalar ([`EffectShape`]).
+    pub a: f32,
+    /// The shape's vector.
+    pub v: [f32; 3],
+    /// The shape's second scalar.
+    pub b: f32,
+}
+
+/// fork: perf — what a point draw builds around each [`EffectPoint`]: the weather's four sprites.
+/// The laws are in `effect_points.wgsl`; the numbers are the producer's.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EffectShape {
+    /// A white triangle along a velocity (`v`): base `pos ∓ half_w·right` across the eye line,
+    /// apex `pos + tilt·(tail·antiVel̂)`.
+    Streak { half_w: f32, tail: f32, tilt: Quat },
+    /// A white camera-facing triangle `pos ∓ right·view_right`, `pos + up·view_up`, stepping the
+    /// four frames of row `b` of a 4×4 atlas over `life` seconds of age `a`.
+    Patter { right: f32, up: f32, life: f32 },
+    /// A white screen-aligned quad of alpha `a`, sized in pixels of a reference screen:
+    /// `max(px_min, px_at_eye·clamp01(1 − falloff·d))` at `d` yards, a pixel being
+    /// `world_per_px` world units per unit of view depth.
+    Flake {
+        px_at_eye: f32,
+        falloff: f32,
+        px_min: f32,
+        world_per_px: f32,
+    },
+    /// A camera-facing quad of half-extent `half` in `color`, each corner's alpha
+    /// `a·linearstep(near, far, the corner's distance)`.
+    Puff {
+        half: f32,
+        near: f32,
+        far: f32,
+        color: [f32; 3],
+    },
+}
+
+impl EffectShape {
+    /// Vertices drawn per point: a triangle, or a quad as two.
+    pub(crate) fn vertices(self) -> u32 {
+        match self {
+            Self::Streak { .. } | Self::Patter { .. } => 3,
+            Self::Flake { .. } | Self::Puff { .. } => 6,
+        }
+    }
+
+    /// The two params rows `effect_points.wgsl` reads; the first row's `x` names the shape.
+    pub(crate) fn rows(self) -> [Vec4; 2] {
+        match self {
+            Self::Streak { half_w, tail, tilt } => {
+                [Vec4::new(1.0, half_w, tail, 0.0), Vec4::from(tilt)]
+            }
+            Self::Patter { right, up, life } => [Vec4::new(2.0, right, up, life), Vec4::ZERO],
+            Self::Flake {
+                px_at_eye,
+                falloff,
+                px_min,
+                world_per_px,
+            } => [
+                Vec4::new(3.0, px_at_eye, falloff, px_min),
+                Vec4::new(world_per_px, 0.0, 0.0, 0.0),
+            ],
+            Self::Puff {
+                half,
+                near,
+                far,
+                color,
+            } => [
+                Vec4::new(4.0, half, near, far),
+                Vec3::from(color).extend(0.0),
+            ],
+        }
+    }
+}
+
+/// How a draw's range is drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum EffectTopology {
     /// Whole quads: 4 perimeter-order corners each, indexed `[b, b+1, b+2, b, b+2, b+3]`.
     Quads,
-    /// A plain triangle list: identity indices (the decal projector's fans, rain's streaks).
+    /// A plain triangle list: identity indices (the decal projector's fans).
     Tris,
+    /// fork: perf — a range of [`EffectQuads::points`], each built into this shape by the vertex
+    /// stage.
+    Points(EffectShape),
 }
 
 /// One draw's fog colour policy, one canonical row of the shader's params uniform.
@@ -186,7 +273,8 @@ pub struct EffectDraw {
     pub(crate) raster_slope: f32,
     pub(crate) cam_relative: bool,
     pub(crate) no_depth_test: bool,
-    /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris).
+    /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris); a point
+    /// draw's range is in [`EffectQuads::points`].
     pub range: Range<u32>,
     /// The producing entity, the item's identity in the phase (`item.entity.1`).
     pub main_entity: Entity,
@@ -199,6 +287,8 @@ pub struct EffectDraw {
 #[derive(Resource)]
 pub struct EffectQuads {
     pub verts: Vec<EffectVertex>,
+    /// fork: perf — the point draws' records ([`EffectTopology::Points`]).
+    pub points: Vec<EffectPoint>,
     pub draws: Vec<EffectDraw>,
     // fork: fsr (FORK.md) — each vertex's world displacement since the last world frame,
     /// parallel to [`Self::verts`] once a draw commits ([`EffectMotion`]).
@@ -216,6 +306,7 @@ impl Default for EffectQuads {
     fn default() -> Self {
         Self {
             verts: Vec::new(),
+            points: Vec::new(),
             draws: Vec::new(),
             motion: Vec::new(),
             track_motion: false,
@@ -312,24 +403,55 @@ impl EffectQuads {
             }
         }
         if end > start {
-            self.draws.push(EffectDraw {
-                cam: spec.cam,
-                texture: spec.texture,
-                blend: spec.blend,
-                topology,
-                fog: spec.fog,
-                lit: spec.lighting == EffectLighting::Scene,
-                anchor: spec.anchor,
-                bias: spec.bias,
-                raster_bias: spec.raster_bias,
-                raster_slope: spec.raster_slope,
-                cam_relative: spec.cam_relative,
-                no_depth_test: spec.no_depth_test,
-                range: start..end,
-                main_entity: spec.main_entity,
-                light: spec.light,
-                clip: spec.clip,
-            });
+            self.draws.push(EffectDraw::new(spec, topology, start..end));
+        }
+    }
+
+    /// fork: perf — open a point draw: remember where its points start.
+    pub fn begin_points(&mut self) -> u32 {
+        self.points.len() as u32
+    }
+
+    /// fork: perf — close a point draw over everything pushed to [`Self::points`] since
+    /// `begin_points`; an
+    /// empty range commits nothing. A point draw is free-floating, unlit and still in the world:
+    /// the spec's raster bias, lighting and motion do not apply to it.
+    pub fn commit_points(&mut self, start: u32, shape: EffectShape, spec: EffectDrawSpec) {
+        debug_assert!(
+            self.cleared_this_frame,
+            "effect-stream write before `begin_effect_frame`: this draw is about to be erased"
+        );
+        debug_assert_eq!(spec.raster_bias, 0, "a point draw takes no raster bias");
+        let end = self.points.len() as u32;
+        if end > start {
+            self.draws.push(EffectDraw::new(
+                spec,
+                EffectTopology::Points(shape),
+                start..end,
+            ));
+        }
+    }
+}
+
+impl EffectDraw {
+    fn new(spec: EffectDrawSpec, topology: EffectTopology, range: Range<u32>) -> Self {
+        Self {
+            cam: spec.cam,
+            texture: spec.texture,
+            blend: spec.blend,
+            topology,
+            fog: spec.fog,
+            lit: spec.lighting == EffectLighting::Scene,
+            anchor: spec.anchor,
+            bias: spec.bias,
+            raster_bias: spec.raster_bias,
+            raster_slope: spec.raster_slope,
+            cam_relative: spec.cam_relative,
+            no_depth_test: spec.no_depth_test,
+            range,
+            main_entity: spec.main_entity,
+            light: spec.light,
+            clip: spec.clip,
         }
     }
 }
@@ -341,6 +463,7 @@ pub fn begin_effect_frame(
     fsr: Query<(), With<crate::fsr::FsrView>>,
 ) {
     quads.verts.clear();
+    quads.points.clear();
     quads.draws.clear();
     quads.motion.clear();
     quads.track_motion = !fsr.is_empty();
@@ -398,6 +521,129 @@ mod tests {
             EffectBlend::from_model(ModelBlend::Mod2x, false),
             EffectBlend::Mod2x
         );
+    }
+
+    /// `effect_points.wgsl` reads a shape's numbers by lane: the first row's `x` names the
+    /// shape, and the rest sit where its branch takes them.
+    #[test]
+    fn a_shape_packs_its_numbers_in_the_lanes_the_shader_reads() {
+        let tilt = Quat::from_xyzw(0.1, 0.2, 0.3, 0.9);
+        let streak = EffectShape::Streak {
+            half_w: 0.05,
+            tail: 2.0,
+            tilt,
+        };
+        assert_eq!(
+            streak.rows(),
+            [
+                Vec4::new(1.0, 0.05, 2.0, 0.0),
+                Vec4::new(0.1, 0.2, 0.3, 0.9)
+            ]
+        );
+        let patter = EffectShape::Patter {
+            right: 0.25,
+            up: 0.5,
+            life: 0.75,
+        };
+        assert_eq!(patter.rows(), [Vec4::new(2.0, 0.25, 0.5, 0.75), Vec4::ZERO]);
+        let flake = EffectShape::Flake {
+            px_at_eye: 14.0,
+            falloff: 0.02,
+            px_min: 1.0,
+            world_per_px: 0.001,
+        };
+        assert_eq!(
+            flake.rows(),
+            [
+                Vec4::new(3.0, 14.0, 0.02, 1.0),
+                Vec4::new(0.001, 0.0, 0.0, 0.0)
+            ]
+        );
+        let puff = EffectShape::Puff {
+            half: 6.0,
+            near: 6.0,
+            far: 18.0,
+            color: [0.5, 0.6, 0.7],
+        };
+        assert_eq!(
+            puff.rows(),
+            [
+                Vec4::new(4.0, 6.0, 6.0, 18.0),
+                Vec4::new(0.5, 0.6, 0.7, 0.0)
+            ]
+        );
+        // A triangle a point, or a quad as two.
+        assert_eq!(
+            [streak, patter, flake, puff].map(EffectShape::vertices),
+            [3, 3, 6, 6]
+        );
+    }
+
+    /// The point library parses and validates as plain WGSL, its import path aside: the effect
+    /// lane and FSR's velocity pass both build their point draws through it.
+    #[test]
+    fn the_point_library_validates() {
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+        let source = include_str!("../shaders/effect_points.wgsl")
+            .strip_prefix("#define_import_path benilla_world::effect_points")
+            .expect("the library opens with its import path");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            module
+                .functions
+                .iter()
+                .any(|(_, f)| f.name.as_deref() == Some("expand")),
+            "the entry both shaders call"
+        );
+    }
+
+    /// A point draw rides the same records as a vertex draw, its range in the point stream.
+    #[test]
+    fn a_point_draw_commits_its_range_of_points() {
+        let mut quads = EffectQuads::default();
+        let shape = EffectShape::Patter {
+            right: 1.0,
+            up: 1.0,
+            life: 1.0,
+        };
+        let spec = || EffectDrawSpec {
+            cam: Entity::PLACEHOLDER,
+            texture: AssetId::default(),
+            blend: EffectBlend::Mod2x,
+            fog: EffectFog::Rain,
+            lighting: EffectLighting::None,
+            anchor: Vec3::ZERO,
+            bias: 0.0,
+            raster_bias: 0,
+            raster_slope: 0.0,
+            cam_relative: false,
+            no_depth_test: false,
+            main_entity: Entity::PLACEHOLDER,
+            light: None,
+            clip: None,
+            motion: EffectMotion::Static,
+        };
+        let start = quads.begin_points();
+        quads.commit_points(start, shape, spec());
+        assert!(quads.draws.is_empty(), "an empty range commits nothing");
+        let point = EffectPoint {
+            pos: [1.0, 2.0, 3.0],
+            a: 0.0,
+            v: [0.0; 3],
+            b: 0.0,
+        };
+        quads.points.extend([point; 5]);
+        let start = quads.begin_points();
+        quads.points.extend([point; 3]);
+        quads.commit_points(start, shape, spec());
+        assert_eq!(quads.draws.len(), 1);
+        assert_eq!(quads.draws[0].range, 5..8);
+        assert_eq!(quads.draws[0].topology, EffectTopology::Points(shape));
+        assert!(quads.verts.is_empty(), "no vertex is built on the CPU");
     }
 
     /// A writer without `.after(begin_effect_frame)` runs first when the clear carries a

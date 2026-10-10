@@ -16,6 +16,9 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
 #import bevy_render::view::View
+#ifdef EFFECT_POINTS
+#import benilla_world::effect_points
+#endif
 
 // Prefix of `lighting::global_light`'s buffer; keep in sync with wow_model.wgsl's copy.
 struct WowLight {
@@ -46,9 +49,12 @@ struct WowLight {
 // flag 0x8, 1 scene, 2 black for Add, 3 white for Mod, 4 grey for Mod2x); y rain's forced fog, zw
 // its start and end. `clip`: the target rect in pixels (min.xy, max.xy), the whole target when
 // z <= x; the reference clips a UI model to its widget's viewport, and model panes share an atlas.
+// `shape_a`, `shape_b`: a point draw's shape (`effect_points.wgsl`), zero on every other draw.
 struct EffectParams {
     fog: vec4<f32>,
     clip: vec4<f32>,
+    shape_a: vec4<f32>,
+    shape_b: vec4<f32>,
 };
 @group(1) @binding(3) var<uniform> wow_params: EffectParams;
 // fork: modern lighting (FORK.md, P4) — the froxel fog, sampled in the vertex stage.
@@ -59,6 +65,15 @@ struct EffectParams {
 // The rain pass's forced fog colour: 0x80808080 → grey (render-state 0x0d).
 const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
 
+#ifdef EFFECT_POINTS
+// fork: perf — a point draw: one instance a point, its corner picked by vertex index
+// (`effect_points.wgsl`).
+struct Vertex {
+    @builtin(vertex_index) index: u32,
+    @location(0) point_a: vec4<f32>, // world position, the shape's scalar
+    @location(1) point_b: vec4<f32>, // the shape's vector, its second scalar
+};
+#else
 struct Vertex {
     // Camera-relative for f32 precision (absolute verts through `clip_from_world` shear thin
     // geometry far from the origin), except decals under DECAL_WORLD_CLIP, which arrive absolute.
@@ -66,6 +81,7 @@ struct Vertex {
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,    // raw authored gamma RGBA; α is the blend weight
 };
+#endif
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -80,13 +96,33 @@ struct VertexOutput {
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
+#ifdef EFFECT_POINTS
+    let built = effect_points::expand(
+        v.point_a,
+        v.point_b,
+        v.index,
+        wow_params.shape_a,
+        wow_params.shape_b,
+        view.world_position.xyz,
+        view.world_from_view[0].xyz,
+        view.world_from_view[1].xyz,
+        -view.world_from_view[2].xyz,
+    );
+    let position = built.rel;
+    let uv = built.uv;
+    let color = built.color;
+#else
+    let position = v.position;
+    let uv = v.uv;
+    let color = v.color;
+#endif
 #ifdef DECAL_WORLD_CLIP
     // Decals (raster_bias ≠ 0) take absolute verts through the world meshes' `clip_from_world`:
     // their depth must tie the ground within the raster bias, and the cam-relative route rounds
     // differently by more than that at world-scale coordinates.
-    out.clip_position = view.clip_from_world * vec4<f32>(v.position, 1.0);
+    out.clip_position = view.clip_from_world * vec4<f32>(position, 1.0);
     // Eye-Z via the full affine transform; its rounding is yard-scale and harmless.
-    out.view_z = -(view.view_from_world * vec4<f32>(v.position, 1.0)).z;
+    out.view_z = -(view.view_from_world * vec4<f32>(position, 1.0)).z;
 #else
     // Cam-relative verts: view_from_world is [R | −R·cam] and the rebase already subtracted cam,
     // so only the rotation applies.
@@ -94,20 +130,20 @@ fn vertex(v: Vertex) -> VertexOutput {
         view.view_from_world[0].xyz,
         view.view_from_world[1].xyz,
         view.view_from_world[2].xyz,
-    ) * v.position;
+    ) * position;
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
     out.view_z = -view_pos.z;
 #endif
     // fork: modern lighting (FORK.md, P4) — the froxel fog per vertex, like the
     // reference's fog on this path (an off block returns no fog).
 #ifdef DECAL_WORLD_CLIP
-    let fog_world = v.position;
+    let fog_world = position;
 #else
-    let fog_world = view.world_position.xyz + v.position;
+    let fog_world = view.world_position.xyz + position;
 #endif
     out.fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, fog_world);
-    out.uv = v.uv;
-    out.color = v.color;
+    out.uv = uv;
+    out.color = color;
     return out;
 }
 

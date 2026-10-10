@@ -21,6 +21,9 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_ripple.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wet_ssr.wgsl");
+    // fork: perf — a library (`benilla_world::effect_points`): registered and held loaded, so
+    // the effect lane's and FSR's `#import` of it resolves.
+    bevy::shader::load_shader_library!(app, "shaders/effect_points.wgsl");
 }
 
 /// The modern lighting model's shared WGSL libraries (`benilla_modern::*`), registered AND held
@@ -68,6 +71,9 @@ mod tests {
     fn every_engine_shader_answers_at_its_embedded_path() {
         let mut app = App::new();
         app.add_plugins(bevy::asset::AssetPlugin::default());
+        // The library line loads its shader, which wants the io pool and the asset type.
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        app.init_asset::<bevy::shader::Shader>();
         app.add_plugins(super::plugin);
         let server = app.world().resource::<AssetServer>();
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
@@ -90,7 +96,7 @@ mod tests {
                  `shaders::plugin`, or was registered from a file that is not directly under src/"
             );
         }
-        // One per `embedded_asset!` line in `plugin`.
-        assert_eq!(found, 12, "the engine's shader set changed size");
+        // One per `embedded_asset!` or `load_shader_library!` line in `plugin`.
+        assert_eq!(found, 13, "the engine's shader set changed size");
     }
 }

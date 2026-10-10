@@ -31,7 +31,7 @@ use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::TrackedRenderPass;
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer_sized,
+    sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
@@ -45,7 +45,7 @@ use super::upscaler::FsrState;
 use super::{FsrHeld, FsrVelocityTarget, FsrView};
 use crate::lighting::SharedLightBuffer;
 use crate::particles::buffer::EffectBlend;
-use crate::particles::render::{EffectMeta, EffectPipeline};
+use crate::particles::render::{EffectMeta, EffectParams, EffectPipeline, PointRun};
 
 /// How a part covers the pixels it draws, as the main pass's own test: opaque everywhere, alpha
 /// test at the vanilla 224/255, a blend where alpha is at least one half, an add where the colour
@@ -688,16 +688,20 @@ pub struct EffectVelocityPipeline {
     view_layout: BindGroupLayoutDescriptor,
     tex_layout: BindGroupLayoutDescriptor,
     motion_layout: BindGroupLayoutDescriptor,
+    /// A point draw's row of the lane's params, by dynamic offset: its shape.
+    params_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
 }
 
-/// What varies an effect draw's velocity pipeline: its coverage rule and its depth state.
+/// What varies an effect draw's velocity pipeline: its coverage rule, its depth state and whether
+/// it is a point draw (`particles::buffer::EffectTopology::Points`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectVelocityKey {
     blend: EffectBlend,
     raster_bias: i32,
     raster_slope_bits: u32,
     no_depth_test: bool,
+    points: bool,
 }
 
 impl SpecializedRenderPipeline for EffectVelocityPipeline {
@@ -727,18 +731,28 @@ impl SpecializedRenderPipeline for EffectVelocityPipeline {
         if key.raster_bias != 0 {
             defs.push("DECAL_WORLD_CLIP".into());
         }
+        let mut layouts = vec![
+            self.view_layout.clone(),
+            self.tex_layout.clone(),
+            self.motion_layout.clone(),
+        ];
+        // A point draw: the lane's instance layout, no motion stream (it is still in the world),
+        // and its shape row.
+        let buffers = if key.points {
+            defs.push("EFFECT_POINTS".into());
+            layouts.push(self.params_layout.clone());
+            vec![crate::particles::render::point_layout()]
+        } else {
+            vec![layout, motion]
+        };
         RenderPipelineDescriptor {
             label: Some("fsr_effect_velocity".into()),
-            layout: vec![
-                self.view_layout.clone(),
-                self.tex_layout.clone(),
-                self.motion_layout.clone(),
-            ],
+            layout: layouts,
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some("vertex".into()),
-                buffers: vec![layout, motion],
+                buffers,
             },
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
@@ -804,16 +818,24 @@ pub(super) fn init_effect_pipeline(
                 uniform_buffer_sized(false, std::num::NonZero::new(128)),
             ),
         ),
+        params_layout: BindGroupLayoutDescriptor::new(
+            "fsr_effect_velocity_params_layout",
+            &BindGroupLayoutEntries::single(
+                ShaderStages::VERTEX,
+                uniform_buffer::<EffectParams>(true),
+            ),
+        ),
         shader: shaders.effect_velocity.clone(),
     };
-    // Warm: every coverage rule at the free-floating depth state, what particles, ribbons and
-    // precipitation draw with, compiles at startup behind the entry cover; a decal's biased
-    // variant compiles on first sight.
-    for blend in [
-        EffectBlend::Add,
-        EffectBlend::Alpha,
-        EffectBlend::AlphaKey,
-        EffectBlend::Opaque,
+    // Warm: every coverage rule at the free-floating depth state, what particles and ribbons
+    // draw with, and the point draw the snow and the mist take, compile at startup behind the
+    // entry cover; a decal's biased variant compiles on first sight.
+    for (blend, points) in [
+        (EffectBlend::Add, false),
+        (EffectBlend::Alpha, false),
+        (EffectBlend::AlphaKey, false),
+        (EffectBlend::Opaque, false),
+        (EffectBlend::Alpha, true),
     ] {
         pipelines.specialize(
             &pipeline_cache,
@@ -823,6 +845,7 @@ pub(super) fn init_effect_pipeline(
                 raster_bias: 0,
                 raster_slope_bits: 0.0f32.to_bits(),
                 no_depth_test: false,
+                points,
             },
         );
     }
@@ -834,6 +857,8 @@ struct EffectVelocityDraw {
     pipeline: CachedRenderPipelineId,
     index_range: std::ops::Range<u32>,
     texture: AssetId<Image>,
+    /// A point draw's instances and its params row; `None` draws `index_range`.
+    points: Option<(PointRun, u32)>,
 }
 
 /// This frame's effect draws for the world view, their texture groups and the motion matrices.
@@ -843,6 +868,8 @@ pub struct EffectVelocityDraws {
     draws: Vec<EffectVelocityDraw>,
     motion_buffer: Option<Buffer>,
     motion: Option<BindGroup>,
+    /// The lane's params buffer for the point draws' shape rows, while this frame has any.
+    params: Option<BindGroup>,
     tex_binds: HashMap<AssetId<Image>, (TextureViewId, BindGroup)>,
 }
 
@@ -859,18 +886,15 @@ impl EffectVelocityDraws {
         if self.view != Some(view) || self.draws.is_empty() {
             return;
         }
-        let (Some(motion), Some(view_group), Some((vertices, motion_vertices, indices))) = (
-            &self.motion,
-            meta.view_bind_group(),
-            meta.velocity_buffers(),
-        ) else {
+        let (Some(motion), Some(view_group)) = (&self.motion, meta.view_bind_group()) else {
             return;
         };
         pass.set_bind_group(0, view_group, &[view_offset]);
         pass.set_bind_group(2, motion, &[]);
-        pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_vertex_buffer(1, motion_vertices.slice(..));
-        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        // The vertex streams exist only in a frame with a vertex draw, the points only with a
+        // point draw: each draw takes its own, and a frame may hold either alone.
+        let streams = meta.velocity_buffers();
+        let points = meta.point_buffers().map(|(buffer, _)| buffer);
         for draw in &self.draws {
             let (Some(pipeline), Some((_, texture))) = (
                 pipeline_cache.get_render_pipeline(draw.pipeline),
@@ -878,9 +902,29 @@ impl EffectVelocityDraws {
             ) else {
                 continue;
             };
-            pass.set_render_pipeline(pipeline);
-            pass.set_bind_group(1, texture, &[]);
-            pass.draw_indexed(draw.index_range.clone(), 0, 0..1);
+            match &draw.points {
+                Some((run, params_offset)) => {
+                    let (Some(points), Some(params)) = (points, &self.params) else {
+                        continue;
+                    };
+                    pass.set_render_pipeline(pipeline);
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_bind_group(3, params, &[*params_offset]);
+                    pass.set_vertex_buffer(0, points.slice(..));
+                    pass.draw(0..run.vertices, run.instances.clone());
+                }
+                None => {
+                    let Some((vertices, motion_vertices, indices)) = streams else {
+                        continue;
+                    };
+                    pass.set_render_pipeline(pipeline);
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_vertex_buffer(1, motion_vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+                    pass.draw_indexed(draw.index_range.clone(), 0, 0..1);
+                }
+            }
         }
     }
 }
@@ -932,6 +976,13 @@ pub(super) fn prepare_effect_velocity(
         &BindGroupEntries::single(buffer.as_entire_binding()),
     ));
     let tex_layout = pipeline_cache.get_bind_group_layout(&pipeline.tex_layout);
+    out.params = meta.point_buffers().map(|(_, rows)| {
+        device.create_bind_group(
+            "fsr_effect_velocity_params",
+            &pipeline_cache.get_bind_group_layout(&pipeline.params_layout),
+            &BindGroupEntries::single(rows),
+        )
+    });
     let mut draws = Vec::new();
     for merged in meta.merged_for(main) {
         if matches!(merged.blend, EffectBlend::Multiply | EffectBlend::Mod2x) {
@@ -961,12 +1012,14 @@ pub(super) fn prepare_effect_velocity(
                 raster_bias: merged.raster_bias,
                 raster_slope_bits: merged.raster_slope.to_bits(),
                 no_depth_test: merged.no_depth_test,
+                points: merged.points.is_some(),
             },
         );
         draws.push(EffectVelocityDraw {
             pipeline: id,
             index_range: merged.index_range.clone(),
             texture: merged.texture,
+            points: merged.points.clone().map(|run| (run, merged.params_offset)),
         });
     }
     if out.tex_binds.len() > 512 {

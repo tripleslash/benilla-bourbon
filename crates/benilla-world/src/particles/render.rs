@@ -42,7 +42,9 @@ use bevy::shader::Shader;
 
 use crate::lighting::SharedLightBuffer;
 
-use super::buffer::{EffectBlend, EffectFog, EffectQuads, EffectTopology, EffectVertex};
+use super::buffer::{
+    EffectBlend, EffectFog, EffectPoint, EffectQuads, EffectTopology, EffectVertex,
+};
 
 /// One extracted draw: the render-world copy of a [`super::buffer::EffectDraw`].
 struct ExtractedDraw {
@@ -70,8 +72,10 @@ pub(crate) struct MergedDraw {
     pub(crate) index_range: Range<u32>,
     pub(crate) texture: AssetId<Image>,
     light: Option<Buffer>,
-    /// This draw's fog and clip row in [`EffectMeta::params`].
-    params_offset: u32,
+    /// This draw's fog, clip and shape row in [`EffectMeta::params`].
+    pub(crate) params_offset: u32,
+    /// A point draw's instances; `None` draws [`Self::index_range`].
+    pub(crate) points: Option<PointRun>,
     // fork: fsr (FORK.md) — the camera whose phase drew it, and what its pipeline keyed on,
     /// for the velocity pass's redraw.
     pub(crate) view: MainEntity,
@@ -81,10 +85,20 @@ pub(crate) struct MergedDraw {
     pub(crate) no_depth_test: bool,
 }
 
-/// The lane's per-frame GPU state: vertices, indices, draws, merged draws and params rows.
+/// fork: perf — a merged point draw: its range of [`EffectMeta::points`], one instance a point,
+/// and the vertices its shape takes.
+#[derive(Clone)]
+pub(crate) struct PointRun {
+    pub(crate) instances: Range<u32>,
+    pub(crate) vertices: u32,
+}
+
+/// The lane's per-frame GPU state: vertices, points, indices, draws, merged draws and params rows.
 #[derive(Resource)]
 pub struct EffectMeta {
     vertices: RawBufferVec<EffectVertex>,
+    /// fork: perf — the point draws' instances ([`EffectTopology::Points`]).
+    points: RawBufferVec<EffectPoint>,
     // fork: fsr (FORK.md) — each vertex's world displacement ([`super::buffer::EffectMotion`]).
     motion: RawBufferVec<[f32; 3]>,
     // fork: fsr (FORK.md) — [`Self::motion`] holds this frame's stream, one row a vertex;
@@ -97,21 +111,28 @@ pub struct EffectMeta {
     params: DynamicUniformBuffer<EffectParams>,
     /// The six canonical fog rows' dynamic offsets, in [`EffectFog::slot`] order.
     params_offsets: [u32; 6],
+    /// fork: perf — each point draw's own row, by its index in [`Self::draws`]: its fog policy
+    /// and its shape.
+    point_rows: HashMap<usize, u32>,
     /// The params buffer last written; a new one invalidates the bind-group cache.
     params_buffer: Option<BufferId>,
 }
 
-/// One per-draw uniform row: the fog policy and the target-pixel clip (`clip.z <= clip.x`: none).
+/// One per-draw uniform row: the fog policy, the target-pixel clip (`clip.z <= clip.x`: none) and
+/// a point draw's shape ([`super::buffer::EffectShape::rows`]; zero on every other draw).
 #[derive(Clone, Copy, bevy::render::render_resource::ShaderType)]
-struct EffectParams {
+pub(crate) struct EffectParams {
     fog: Vec4,
     clip: Vec4,
+    shape_a: Vec4,
+    shape_b: Vec4,
 }
 
 impl Default for EffectMeta {
     fn default() -> Self {
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
+            points: RawBufferVec::new(BufferUsages::VERTEX),
             motion: RawBufferVec::new(BufferUsages::VERTEX),
             motion_valid: false,
             indices: RawBufferVec::new(BufferUsages::INDEX),
@@ -120,6 +141,7 @@ impl Default for EffectMeta {
             view_bind_group: None,
             params: DynamicUniformBuffer::default(),
             params_offsets: [0; 6],
+            point_rows: HashMap::default(),
             params_buffer: None,
         }
     }
@@ -141,6 +163,14 @@ impl EffectMeta {
             self.motion.buffer()?,
             self.indices.buffer()?,
         ))
+    }
+
+    // fork: fsr (FORK.md) — the point draws' instance buffer and the params rows their
+    // shapes ride, for the velocity pass's redraw of them.
+    pub(crate) fn point_buffers(
+        &self,
+    ) -> Option<(&Buffer, bevy::render::render_resource::BindingResource<'_>)> {
+        Some((self.points.buffer()?, self.params.binding()?))
     }
 
     // fork: fsr (FORK.md) — this frame's merged draws of one camera's phase.
@@ -181,6 +211,8 @@ impl EffectMeta {
             offsets[i] = self.params.push(&EffectParams {
                 fog: *fog,
                 clip: NO_CLIP,
+                shape_a: Vec4::ZERO,
+                shape_b: Vec4::ZERO,
             });
         }
         self.params_offsets = offsets;
@@ -196,8 +228,25 @@ impl EffectMeta {
             let off = self.params.push(&EffectParams {
                 fog: fog_rows[slot as usize],
                 clip,
+                shape_a: Vec4::ZERO,
+                shape_b: Vec4::ZERO,
             });
             clip_rows.insert(key, off);
+        }
+        // fork: perf — a point draw's row is its own: the vertex stage reads its shape off it.
+        self.point_rows.clear();
+        for i in 0..self.draws.len() {
+            let EffectTopology::Points(shape) = self.draws[i].topology else {
+                continue;
+            };
+            let [shape_a, shape_b] = shape.rows();
+            let off = self.params.push(&EffectParams {
+                fog: fog_rows[self.draws[i].fog.slot() as usize],
+                clip: NO_CLIP,
+                shape_a,
+                shape_b,
+            });
+            self.point_rows.insert(i, off);
         }
         self.params.write_buffer(device, queue);
         self.params_buffer = self.params.buffer().map(|b| b.id());
@@ -248,8 +297,9 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
                 sampler(SamplerBindingType::Filtering),
                 // The shared light and fog blob, sized at bind time; the WGSL struct pins it.
                 storage_buffer_read_only_sized(false, None),
-                // The per-draw params row, by dynamic offset.
-                uniform_buffer::<EffectParams>(true),
+                // The per-draw params row, by dynamic offset; a point draw's vertex stage reads
+                // its shape off it.
+                uniform_buffer::<EffectParams>(true).visibility(ShaderStages::VERTEX_FRAGMENT),
                 // fork: modern lighting (FORK.md, P4) — the froxel fog, sampled per
                 // vertex: the modern block (its parameters), the integrated volume, its sampler.
                 storage_buffer_read_only_sized(false, None).visibility(ShaderStages::VERTEX),
@@ -280,23 +330,39 @@ pub struct EffectPipelineKey {
     lit: bool,
     /// Depth compare `Always`; see [`super::buffer::EffectDrawSpec::no_depth_test`].
     no_depth_test: bool,
+    /// fork: perf — a point draw: one instance a point, built by the vertex stage
+    /// (`EFFECT_POINTS`).
+    points: bool,
+}
+
+/// fork: perf — a point draw's vertex buffer: one [`EffectPoint`] an instance.
+pub(crate) fn point_layout() -> VertexBufferLayout {
+    VertexBufferLayout::from_vertex_formats(
+        VertexStepMode::Instance,
+        // position + scalar, vector + scalar
+        vec![VertexFormat::Float32x4, VertexFormat::Float32x4],
+    )
 }
 
 impl SpecializedRenderPipeline for EffectPipeline {
     type Key = EffectPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        let vertex_layout = VertexBufferLayout::from_vertex_formats(
-            VertexStepMode::Vertex,
-            vec![
-                // position: camera-relative, absolute for decals
-                VertexFormat::Float32x3,
-                // uv
-                VertexFormat::Float32x2,
-                // color: raw authored gamma RGBA
-                VertexFormat::Float32x4,
-            ],
-        );
+        let vertex_layout = if key.points {
+            point_layout()
+        } else {
+            VertexBufferLayout::from_vertex_formats(
+                VertexStepMode::Vertex,
+                vec![
+                    // position: camera-relative, absolute for decals
+                    VertexFormat::Float32x3,
+                    // uv
+                    VertexFormat::Float32x2,
+                    // color: raw authored gamma RGBA
+                    VertexFormat::Float32x4,
+                ],
+            )
+        };
         let (blend, depth_write, blend_def) = match key.blend {
             EffectBlend::Add => (
                 Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -344,6 +410,9 @@ impl SpecializedRenderPipeline for EffectPipeline {
         }
         if key.lit {
             shader_defs.push("EFFECT_LIT".into());
+        }
+        if key.points {
+            shader_defs.push("EFFECT_POINTS".into());
         }
         // `$WOW_PARTICLE_FLAT`: solid magenta, no fragment inputs.
         if std::env::var_os("WOW_PARTICLE_FLAT").is_some() {
@@ -423,6 +492,8 @@ fn extract_effects(
     }
     meta.vertices.clear();
     meta.vertices.extend(quads.verts.iter().copied());
+    meta.points.clear();
+    meta.points.extend(quads.points.iter().copied());
     // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside, while
     // a camera runs FSR; otherwise empty, and `write_buffer` uploads nothing.
     meta.motion.clear();
@@ -493,19 +564,35 @@ fn queue_effects(
             if view.retained_view_entity.main_entity != MainEntity::from(draw.cam) {
                 continue;
             }
-            let pipeline = pipelines.specialize(
-                &pipeline_cache,
-                &effect_pipeline,
-                EffectPipelineKey {
-                    samples: msaa.samples(),
-                    hdr: view.target_format == TextureFormat::Rgba16Float,
-                    blend: draw.blend,
-                    raster_bias: draw.raster_bias,
-                    raster_slope_bits: draw.raster_slope.to_bits(),
-                    lit: draw.lit,
-                    no_depth_test: draw.no_depth_test,
-                },
-            );
+            let key = EffectPipelineKey {
+                samples: msaa.samples(),
+                hdr: view.target_format == TextureFormat::Rgba16Float,
+                blend: draw.blend,
+                raster_bias: draw.raster_bias,
+                raster_slope_bits: draw.raster_slope.to_bits(),
+                lit: draw.lit,
+                no_depth_test: draw.no_depth_test,
+                points: matches!(draw.topology, EffectTopology::Points(_)),
+            };
+            let pipeline = pipelines.specialize(&pipeline_cache, &effect_pipeline, key);
+            // fork: perf — the weather's point draws take the free-floating Mod2x and Alpha
+            // states: their pipelines compile with the vertex twin's, so the first shower does
+            // not wait on one.
+            if !key.points
+                && key.raster_bias == 0
+                && !key.lit
+                && !key.no_depth_test
+                && matches!(key.blend, EffectBlend::Mod2x | EffectBlend::Alpha)
+            {
+                pipelines.specialize(
+                    &pipeline_cache,
+                    &effect_pipeline,
+                    EffectPipelineKey {
+                        points: true,
+                        ..key
+                    },
+                );
+            }
             // The material path's metric: the sort point's view z plus the rung. Bevy's
             // `recalculate_sort_keys` recomputes `distance` from `sorting_info` before the sort.
             let sorting_info = TransparentSortingInfo3d::Sorted {
@@ -570,6 +657,11 @@ fn prepare_effects(
         );
     }
     for draw in &meta.draws {
+        // fork: perf — a point draw has no vertices here: its range is in `points`, and its
+        // shader rebases.
+        if matches!(draw.topology, EffectTopology::Points(_)) {
+            continue;
+        }
         // Coplanar draws stay absolute: `DECAL_WORLD_CLIP` keys on the same `raster_bias != 0`.
         if draw.raster_bias != 0 {
             continue;
@@ -590,6 +682,7 @@ fn prepare_effects(
         }
     }
     meta.vertices.write_buffer(&device, &queue);
+    meta.points.write_buffer(&device, &queue);
     meta.motion.write_buffer(&device, &queue);
 
     // The merge walk, over each live view's sorted items, never the raw phase map (an unswept
@@ -639,6 +732,32 @@ fn prepare_effects(
                 continue;
             };
             n_items += 1;
+            if let EffectTopology::Points(shape) = draw.topology {
+                // fork: perf — a point draw is never merged: the row its shape rides is its own.
+                close(phase, &mut open, meta.merged.len());
+                let Some(&params_offset) = meta.point_rows.get(&draw_idx) else {
+                    phase.items[i].batch_range = 0..0;
+                    continue;
+                };
+                let m = meta.merged.len() as u32;
+                meta.merged.push(MergedDraw {
+                    index_range: 0..0,
+                    texture: draw.texture,
+                    light: draw.light.clone(),
+                    params_offset,
+                    points: Some(PointRun {
+                        instances: draw.range.clone(),
+                        vertices: shape.vertices(),
+                    }),
+                    view: view.retained_view_entity.main_entity,
+                    blend: draw.blend,
+                    raster_bias: draw.raster_bias,
+                    raster_slope: draw.raster_slope,
+                    no_depth_test: draw.no_depth_test,
+                });
+                phase.items[i].batch_range = m..m + 1;
+                continue;
+            }
             let index_start = meta.indices.len() as u32;
             match draw.topology {
                 EffectTopology::Quads => {
@@ -655,6 +774,7 @@ fn prepare_effects(
                         meta.indices.push(k);
                     }
                 }
+                EffectTopology::Points(_) => {}
             }
             let index_end = meta.indices.len() as u32;
             if let (true, Some(lane)) = (trace, decal_lane(draw.bias)) {
@@ -696,6 +816,7 @@ fn prepare_effects(
                         texture: draw.texture,
                         light: draw.light.clone(),
                         params_offset,
+                        points: None,
                         view: view.retained_view_entity.main_entity,
                         blend: draw.blend,
                         raster_bias: draw.raster_bias,
@@ -853,11 +974,19 @@ impl<P: PhaseItem> RenderCommand<P> for DrawEffectBatch {
         let Some(image_bind_group) = bind_groups.into_inner().images.get(&key) else {
             return RenderCommandResult::Skip;
         };
+        pass.set_bind_group(1, image_bind_group, &[draw.params_offset]);
+        if let Some(run) = &draw.points {
+            let Some(points) = meta.points.buffer() else {
+                return RenderCommandResult::Failure("effect lane points not available");
+            };
+            pass.set_vertex_buffer(0, points.slice(..));
+            pass.draw(0..run.vertices, run.instances.clone());
+            return RenderCommandResult::Success;
+        }
         let (Some(vertices), Some(indices)) = (meta.vertices.buffer(), meta.indices.buffer())
         else {
             return RenderCommandResult::Failure("effect lane buffers not available");
         };
-        pass.set_bind_group(1, image_bind_group, &[draw.params_offset]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         // `$WOW_EFFECT_TRACE`: what `draw_indexed` actually ran.

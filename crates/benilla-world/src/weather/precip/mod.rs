@@ -23,9 +23,9 @@ mod pool;
 mod render;
 mod wind;
 use census::{census, profile};
-use mist::{push_mist, run_mist, Mist, REFERENCE_PUFF};
+use mist::{puff_shape, push_mist, run_mist, Mist, REFERENCE_PUFF};
 use pool::{run_kind, HeightCache, Pool};
-use render::{push_flakes, push_patters, push_streaks, FlakeView};
+use render::{flake_shape, push_flakes, push_patters, push_streaks, streak_shape, PATTER_SHAPE};
 pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 
 // ===== The reference's constants =====
@@ -422,6 +422,8 @@ fn simulate_precip(
 /// under the forced grey fog (both textures' grounds are exactly RGB 128), snow and mist as
 /// alpha quads with fog off (`0x678610`, `0x67ae20`). Anchored at the camera, they sort after
 /// every world transparent and before the biased glare and nameplate rungs.
+///
+/// fork: perf — as point draws: a point a particle, its geometry built by the vertex stage.
 fn push_precip(
     precip: Option<Res<Precip>>,
     assets: Option<Res<PrecipAssets>>,
@@ -441,23 +443,6 @@ fn push_precip(
         return;
     };
     let cam_pos = cam_tf.translation();
-    let cam_right = cam_tf.right().as_vec3();
-    let cam_up = cam_tf.up().as_vec3();
-    // The live viewport only gates whether this camera draws: flakes are sized in era pixels.
-    let flake_view = camera
-        .physical_viewport_size()
-        .filter(|vp| vp.y > 0)
-        .map(|_| FlakeView {
-            eye: cam_pos,
-            forward: cam_tf.forward().as_vec3(),
-            right: cam_right,
-            up: cam_up,
-            world_per_px: match proj {
-                Projection::Perspective(p) => (p.fov * 0.5).tan(),
-                // The reference has no orthographic mode; this keeps the sprites sane.
-                _ => (crate::view::CAM_FOVY * 0.5).tan(),
-            } / SNOW_PX_REF_HEIGHT,
-        });
     let spec = |texture: &Handle<Image>, blend: EffectBlend, fog: EffectFog| EffectDrawSpec {
         cam: cam_entity,
         texture: texture.id(),
@@ -469,7 +454,6 @@ fn push_precip(
         bias: 0.0,
         raster_bias: 0,
         raster_slope: 0.0,
-        // Absolute verts suit centimetre-scale geometry; the flakes override this.
         cam_relative: false,
         no_depth_test: false,
         main_entity: Entity::PLACEHOLDER,
@@ -479,33 +463,33 @@ fn push_precip(
         // fall slowly enough for the camera's reprojection.
         motion: crate::particles::buffer::EffectMotion::Static,
     };
-    let start = quads.begin();
-    push_streaks(&mut quads.verts, &precip.rain.drops, wind.tilt, cam_pos);
-    quads.commit_tris(
+    let start = quads.begin_points();
+    push_streaks(&mut quads.points, &precip.rain.drops);
+    quads.commit_points(
         start,
+        streak_shape(wind.tilt),
         spec(&assets.streak, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    let start = quads.begin();
-    push_patters(&mut quads.verts, &precip.rain.patters, cam_right, cam_up);
-    quads.commit_tris(
+    let start = quads.begin_points();
+    push_patters(&mut quads.points, &precip.rain.patters);
+    quads.commit_points(
         start,
+        PATTER_SHAPE,
         spec(&assets.splash, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    if let Some(view) = &flake_view {
-        let start = quads.begin();
-        push_flakes(
-            &mut quads.verts,
-            &precip.snow.drops,
-            &precip.snow.patters,
-            view,
-        );
-        quads.commit_quads(
+    // The live viewport only gates whether this camera draws: flakes are sized in era pixels.
+    if camera.physical_viewport_size().is_some_and(|vp| vp.y > 0) {
+        let fov_y = match proj {
+            Projection::Perspective(p) => p.fov,
+            // The reference has no orthographic mode; this keeps the sprites sane.
+            _ => crate::view::CAM_FOVY,
+        };
+        let start = quads.begin_points();
+        push_flakes(&mut quads.points, &precip.snow.drops, &precip.snow.patters);
+        quads.commit_points(
             start,
-            EffectDrawSpec {
-                // `push_flakes` wrote camera-relative offsets: its millimetre quads need them.
-                cam_relative: true,
-                ..spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off)
-            },
+            flake_shape(fov_y),
+            spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off),
         );
     }
     // fork: modern weather — a modern frame's puff is a smaller, fainter wisp in the haze's colour.
@@ -513,18 +497,11 @@ fn push_precip(
         Some(puff) => (puff, crate::modern::weather::puff_color(lighting.fog_color)),
         None => (REFERENCE_PUFF, lighting.fog_color),
     };
-    let start = quads.begin();
-    push_mist(
-        &mut quads.verts,
-        &precip.mist,
-        cam_right,
-        cam_up,
-        cam_pos,
-        mist_color,
-        puff,
-    );
-    quads.commit_quads(
+    let start = quads.begin_points();
+    push_mist(&mut quads.points, &precip.mist, puff);
+    quads.commit_points(
         start,
+        puff_shape(puff, mist_color),
         spec(&assets.mist, EffectBlend::Alpha, EffectFog::Off),
     );
 }

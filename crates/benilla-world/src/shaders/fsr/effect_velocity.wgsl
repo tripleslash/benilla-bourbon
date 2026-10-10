@@ -9,6 +9,9 @@
 // least one half, an add where the premultiplied colour is.
 
 #import bevy_render::view::View
+#ifdef EFFECT_POINTS
+#import benilla_world::effect_points
+#endif
 
 @group(0) @binding(0) var<uniform> view: View;
 @group(1) @binding(0) var effect_texture: texture_2d<f32>;
@@ -20,6 +23,23 @@ struct EffectMotionMatrices {
 }
 @group(2) @binding(0) var<uniform> motion: EffectMotionMatrices;
 
+#ifdef EFFECT_POINTS
+// A point draw's row of the lane's params (`wow_effect.wgsl`): its shape.
+struct EffectParams {
+    fog: vec4<f32>,
+    clip: vec4<f32>,
+    shape_a: vec4<f32>,
+    shape_b: vec4<f32>,
+}
+@group(3) @binding(0) var<uniform> wow_params: EffectParams;
+
+// A point draw (`effect_points.wgsl`): still in the world, so it has no displacement.
+struct Vertex {
+    @builtin(vertex_index) index: u32,
+    @location(0) point_a: vec4<f32>,
+    @location(1) point_b: vec4<f32>,
+}
+#else
 struct Vertex {
     // Camera-relative, absolute for decals under DECAL_WORLD_CLIP (`particles/render.rs`).
     @location(0) position: vec3<f32>,
@@ -28,6 +48,7 @@ struct Vertex {
     // World displacement since the last world frame: current minus previous.
     @location(3) delta: vec3<f32>,
 }
+#endif
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -40,22 +61,44 @@ struct VertexOutput {
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
+#ifdef EFFECT_POINTS
+    let built = effect_points::expand(
+        v.point_a,
+        v.point_b,
+        v.index,
+        wow_params.shape_a,
+        wow_params.shape_b,
+        view.world_position.xyz,
+        view.world_from_view[0].xyz,
+        view.world_from_view[1].xyz,
+        -view.world_from_view[2].xyz,
+    );
+    let position = built.rel;
+    let uv = built.uv;
+    let color = built.color;
+    let delta = vec3<f32>(0.0);
+#else
+    let position = v.position;
+    let uv = v.uv;
+    let color = v.color;
+    let delta = v.delta;
+#endif
 #ifdef DECAL_WORLD_CLIP
-    out.clip_position = view.clip_from_world * vec4<f32>(v.position, 1.0);
-    let rel = v.position - view.world_position.xyz;
+    out.clip_position = view.clip_from_world * vec4<f32>(position, 1.0);
+    let rel = position - view.world_position.xyz;
 #else
     let view_pos = mat3x3<f32>(
         view.view_from_world[0].xyz,
         view.view_from_world[1].xyz,
         view.view_from_world[2].xyz,
-    ) * v.position;
+    ) * position;
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
-    let rel = v.position;
+    let rel = position;
 #endif
     out.cur_clip = motion.clip_from_cur_rel * vec4<f32>(rel, 1.0);
-    out.prev_clip = motion.prev_clip_from_cur_rel * vec4<f32>(rel - v.delta, 1.0);
-    out.uv = v.uv;
-    out.color = v.color;
+    out.prev_clip = motion.prev_clip_from_cur_rel * vec4<f32>(rel - delta, 1.0);
+    out.uv = uv;
+    out.color = color;
     return out;
 }
 
