@@ -95,11 +95,13 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 // morning grass wore a hole in the ground rather than a silhouette.
 const SHADOW_SUN_FLOOR: f32 = 0.70;
 
-// fork: rain on surfaces — how far a soaked face lifts the authored `_s` sheen (×1.25 at most), and
-// the wet sun highlight's share on the ground. Wet ground reads by its reflection, not by a
-// brighter specular.
-const WET_SPEC_GAIN: f32 = 0.25;
-const WET_SUN_GAIN: f32 = 0.35;
+// fork: rain on surfaces — how far a soaked face lifts the authored `_s` sheen (×1.2 at most), the
+// wet sun highlight's share on the ground, and the ground's share of the wet reflectance
+// (`wet_hook::wet_reflectance`, the screen-space pass's weight or the sky term's). Each a fifth
+// under what the first cut shipped: at full strength soaked ground read as lacquer.
+const WET_SPEC_GAIN: f32 = 0.2;
+const WET_SUN_GAIN: f32 = 0.28;
+const WET_REFLECT_GAIN: f32 = 0.8;
 
 // Per-tile Vec4 uniforms, packed into one buffer (binding 106); the field order must match the Rust
 // `TerrainExtension`. params.x = layer tiling factor; yzw unused.
@@ -644,7 +646,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         var sheen = spec_term * (WET_SPEC_GAIN * min(wet.boost, 1.0))
             + wet_hook::wet_sun(wet.boost, wet_n, wet_v, -normalize(wow_light.light_sun.xyz),
                 wow_light.light_diffuse.rgb, spec_gate, WET_SUN_GAIN);
-        let reflectance = wet_hook::wet_reflectance(wet.boost, wet_n, wet_v);
+        let reflectance = WET_REFLECT_GAIN * wet_hook::wet_reflectance(wet.boost, wet_n, wet_v);
         var tag = wet_hook::ssr_live(wow_light.env);
 #ifdef WOW_MODERN
         tag = tag && !lite;
