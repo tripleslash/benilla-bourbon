@@ -268,8 +268,25 @@ struct ModernShadowFrame {
     /// ([`restore_buffer`]); `restore_next` is this frame's next unused one.
     restore_pool: std::sync::Mutex<Vec<Buffer>>,
     restore_next: std::sync::atomic::AtomicUsize,
+    /// Frames prepared so far, the clock [`holds_entities`] alternates the far cascades on.
+    frame_no: u32,
     bind: Option<BindGroup>,
     count: u32,
+}
+
+/// fork (perf): the first cascade whose entity casters are redrawn every other frame.
+///
+/// Such a cascade starts 60 yd out or more on the tiers that have it and resolves a fifth of a
+/// yard a texel at best, so a swaying crown or a runner's step moves its shadow by less than a
+/// texel or two between frames. Each such cascade is a few hundred draws a frame at a wooded
+/// coast, as many as the near two together.
+const HELD_CASCADES_FROM: usize = 2;
+
+/// Does cascade `layer` keep last frame's entity casters this frame? The far cascades take turns,
+/// one a frame, so the frame's cost stays even. Only a layer whose static cache holds
+/// ([`cascade_key`]) may be held: a re-centred cascade is redrawn whole.
+fn holds_entities(layer: usize, frame_no: u32) -> bool {
+    layer >= HELD_CASCADES_FROM && (frame_no as usize + layer) % 2 == 1
 }
 
 /// A storage buffer holding `rects` for one restore draw. A buffer made per draw is freed in a
@@ -487,6 +504,7 @@ fn prepare_modern_shadow(
 ) {
     frame.count = 0;
     frame.bind = None;
+    frame.frame_no = frame.frame_no.wrapping_add(1);
     *frame.restore_next.get_mut() = 0;
     if let Some(plane) = uploaded_plane.as_deref_mut() {
         plane.0 = None;
@@ -1028,6 +1046,11 @@ pub(crate) fn gx_shadow_pass(
             let slot = &frame.cache_keys[i];
             let cached =
                 active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
+            // A held layer keeps what it shows: no restore, no entity pass, and its dirty
+            // rectangles stand for the frame that next redraws it.
+            if cached && !is_sky && holds_entities(i, frame.frame_no) {
+                continue;
+            }
 
             if cached {
                 // Only what the previous frame's entity casters dirtied needs putting back.
@@ -2309,6 +2332,17 @@ mod tests {
 
     /// The restore's rectangles cover every marked tile exactly once — disjoint, so no texel is
     /// written twice — and nothing else.
+    /// The near cascades redraw their entities every frame; the far ones alternate, never both in
+    /// one frame and never neither.
+    #[test]
+    fn the_far_cascades_take_their_entities_on_alternate_frames() {
+        for frame_no in 0..8 {
+            assert!(!holds_entities(0, frame_no) && !holds_entities(1, frame_no));
+            assert_ne!(holds_entities(2, frame_no), holds_entities(3, frame_no));
+            assert_ne!(holds_entities(2, frame_no), holds_entities(2, frame_no + 1));
+        }
+    }
+
     #[test]
     fn restore_runs_cover_the_marked_tiles_once() {
         let size = SHADOW_MAP_SIZE;
