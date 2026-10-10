@@ -125,8 +125,9 @@
 //! Guards 2 and 3 are this port's, not the reference's, and they exist because this renders **one**
 //! mirror per frame where the reference re-renders per instance group.
 
-use bevy::camera::primitives::Aabb;
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::CameraProjection;
 use bevy::camera::Hdr;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -298,6 +299,28 @@ const WATER_REACH_MARGIN: f32 = 133.0;
 /// fork (perf): how long the mirror stays up after the last frame water was in reach (seconds).
 const RELEASE_SECS: f32 = 1.0;
 
+/// fork (perf): how far outside the world camera's view a liquid surface still arms the mirror
+/// (radians, added to each side of the frustum). The test runs on this frame's pose, so the only
+/// way to see unmirrored water is a turn wider than this in one frame.
+const VIEW_MARGIN: f32 = 0.175;
+
+/// fork (perf): the world camera's frustum widened by [`VIEW_MARGIN`] on every side and cut at
+/// `far`. `None` for a projection that is not perspective, which arms on distance alone.
+fn mirror_frustum(pose: &GlobalTransform, projection: &Projection, far: f32) -> Option<Frustum> {
+    let Projection::Perspective(p) = projection else {
+        return None;
+    };
+    let half_v = (p.fov * 0.5 + VIEW_MARGIN).min(1.5);
+    let half_h = ((p.fov * 0.5).tan() * p.aspect_ratio).atan() + VIEW_MARGIN;
+    let wide = PerspectiveProjection {
+        fov: 2.0 * half_v,
+        aspect_ratio: half_h.min(1.5).tan() / half_v.tan(),
+        far,
+        ..p.clone()
+    };
+    Some(wide.compute_frustum(pose))
+}
+
 /// Mirror the world camera into it, and decide whether the mirror runs at all.
 ///
 /// The conditions are the reference's own plus two: [`MIN_EYE_HEIGHT`], and — fork (perf) — that
@@ -382,21 +405,29 @@ fn sync_reflection_camera(
 
     // fork (perf): is there water near enough to be worth a second scene render?
     //
-    // Deliberately a DISTANCE test and not a frustum one. A frustum test would also stand the
-    // mirror down for a lake directly behind the camera — and then arm it mid-turn, one frame after
-    // the water is already on screen, which is a visible pop. Residency plus farclip is the
-    // conservative side of the same question: it keeps the mirror for every surface that could
-    // reach the frame however the camera turns, and drops it only where the streamer is holding no
-    // liquid at all. `RELEASE_SECS` then keeps it a moment longer, so a shoreline at the edge of
-    // the radius cannot toggle a whole scene pass on and off frame to frame.
+    // Not a test on last frame's visibility, which would arm the mirror one frame after the water
+    // is already on screen, a visible pop. Distance first, then the frustum widened on this
+    // frame's pose. `RELEASE_SECS` then keeps it a moment longer, so a shoreline at
+    // the edge of either cannot toggle a whole scene pass on and off frame to frame.
     // The box, not the transform: an ADT surface's transform is IDENTITY (MCLQ is absolute), so its
     // translation is the world origin and every open-world lake read as out of reach.
+    //
+    // fork (perf): and inside this frame's view, widened ([`mirror_frustum`]): water off screen
+    // has nothing to reflect into. The frustum is the pose this frame renders with, so a turn
+    // arms the mirror before the water is on screen.
     let reach = view.farclip + WATER_REACH_MARGIN;
+    let frustum = mirror_frustum(world_pose, world_projection, reach);
     let near_water = boxes().any(|((centre, half), _)| {
         ((eye - centre).abs() - half)
             .max(Vec3::ZERO)
             .length_squared()
             <= reach * reach
+            && frustum.as_ref().is_none_or(|f| {
+                f.intersects_obb_identity(&Aabb {
+                    center: centre.into(),
+                    half_extents: half.into(),
+                })
+            })
     });
     if near_water {
         *water_seen_at = time.elapsed_secs();
@@ -611,6 +642,45 @@ mod tests {
     use super::*;
     use bevy::camera::CameraProjection;
     use bevy::render::view::Msaa;
+
+    /// fork (perf): the viewer's 70° camera at 16:9, looking down -Z from the origin.
+    fn frustum_ahead() -> Frustum {
+        let pose = GlobalTransform::from(Transform::IDENTITY);
+        let projection = Projection::Perspective(PerspectiveProjection {
+            fov: 1.221_730_5,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        });
+        mirror_frustum(&pose, &projection, 1133.0).unwrap()
+    }
+
+    /// Does a one-chunk water box `dist` yards out at `deg` degrees right of the view arm it?
+    fn arms(deg: f32, dist: f32) -> bool {
+        let (s, c) = deg.to_radians().sin_cos();
+        frustum_ahead().intersects_obb_identity(&Aabb {
+            center: Vec3A::new(s * dist, 0.0, -c * dist),
+            half_extents: Vec3A::new(16.6, 0.5, 16.6),
+        })
+    }
+
+    #[test]
+    fn water_ahead_arms_the_mirror_and_water_behind_does_not() {
+        assert!(arms(0.0, 400.0));
+        assert!(!arms(180.0, 400.0));
+        assert!(!arms(0.0, 1400.0), "past the reach");
+    }
+
+    #[test]
+    fn water_just_off_screen_still_arms_the_mirror() {
+        // The frame's edge is ~51° right of axis at 16:9; the margin carries ten more.
+        assert!(arms(58.0, 400.0));
+        assert!(!arms(80.0, 400.0));
+    }
+
+    #[test]
+    fn water_around_the_eye_arms_the_mirror_whatever_the_heading() {
+        assert!(arms(180.0, 5.0));
+    }
 
     /// The clip test wgpu applies, on a world point: kept iff `0 ≤ clip.z ≤ clip.w`.
     ///
