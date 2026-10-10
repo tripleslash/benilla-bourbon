@@ -12,7 +12,9 @@
 //! sines per packed entry and zero GPU work. Nothing is written back onto the
 //! [`super::WorldPointLight`], which keeps the flicker out of every OTHER reader of its intensity:
 //! the lamp-shadow ranking (`modern::lights::update_lights`) scores the unmodulated light, so a
-//! flame breathing at 5 Hz can never make a cube slot thrash.
+//! flame breathing at 5 Hz can never make a cube slot thrash, and the grid's eight-a-cell ranking
+//! (`light_bin.wgsl`) reads the pack's steady strengths ([`super::LightRank`]) rather than the
+//! committed colour, so it can never trade two flames in and out of a full cell either.
 //!
 //! **What it must not be** is a strobe. The waveform is band-limited by construction rather than
 //! tuned by eye:

@@ -23,8 +23,15 @@ struct LightBlock {
     cells: array<vec4<u32>, 55296>,
 }
 
+// fork: each table light's steady strength (`lighting::LightRank`): the luminance of its committed
+// colour with no flame flicker on it, in the table's order.
+struct LightRank {
+    lum: array<f32, 256>,
+}
+
 @group(0) @binding(0) var<storage, read> light: LightTable;
 @group(0) @binding(1) var<storage, read_write> grid: LightBlock;
+@group(0) @binding(2) var<storage, read> light_rank: LightRank;
 
 // Which atlas slot a light holds, or `MAX_SHADOWED` when it holds none. Matched on position rather
 // than on table order: the shadowed set is chosen on the CPU a frame's worth of systems before the
@@ -107,10 +114,10 @@ fn bin_lights(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         seen = seen + 1u;
         // Ranked by what the cell's centre would actually receive, so an overflowing cell drops the
-        // lights that were about to contribute least.
-        let rgb = light.points[2u * i + 1u].rgb;
-        let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let w = lum * locallight::falloff(length(mid - pos_range.xyz), pos_range.w);
+        // lights that were about to contribute least. fork: by the light's STEADY strength, never
+        // the table's colour: that carries the flame flicker, and two flames near the cut of a full
+        // cell then traded places as they breathed, stepping the cell's light each time.
+        let w = light_rank.lum[i] * locallight::falloff(length(mid - pos_range.xyz), pos_range.w);
         // Insertion into a descending list of eight.
         var slot = held;
         for (var k = 0u; k < held; k = k + 1u) {

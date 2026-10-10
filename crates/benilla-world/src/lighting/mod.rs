@@ -23,8 +23,9 @@ pub use env_frame::{
 pub(crate) use flicker::is_warm;
 pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
 pub use global_light::{
-    new_shared_light_buffer, Glowless, LightOwner, LightRooms, NightGlow, SharedLightBuffer,
-    SpellFxLight, WindowPane, WorldPointLight, MODERN_PACK_RADIUS,
+    new_shared_light_buffer, Glowless, LightOwner, LightRank, LightRooms, NightGlow,
+    SharedLightBuffer, SpellFxLight, WindowPane, WorldPointLight, MAX_POINT_LIGHTS,
+    MODERN_PACK_RADIUS,
 };
 pub use lava_light::{LavaLight, LavaLightGain};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};

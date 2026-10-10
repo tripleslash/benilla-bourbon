@@ -91,7 +91,7 @@ pub fn commit_raw(rgb: [f32; 3]) -> [f32; 3] {
 
 /// Capacity of the point-light table, fixed in the WGSL mirror structs (keep in sync); past it
 /// [`build_light_data`] keeps the lights nearest the camera.
-pub(super) const MAX_POINT_LIGHTS: usize = 256;
+pub const MAX_POINT_LIGHTS: usize = 256;
 
 /// Lights are packed only within this camera distance (yd): a light's effect ends at its 48 yd
 /// range, a pool past 300 yd is sub-pixel and fogged, and the cap bounds the per-vertex walk.
@@ -288,6 +288,24 @@ impl Default for WowLightData {
     }
 }
 
+/// fork: **each packed light's steady strength** — the luminance of the colour it would commit
+/// with no flame flicker on it, in the point table's own order (entries past the count are 0).
+///
+/// The modern grid keeps eight lights a cell and ranks the ones that reach it
+/// (`light_bin.wgsl`). Ranked by the committed colour, which carries the flicker, two flames a few
+/// percent apart at a cell's cut traded places as they breathed, and the one that lost its place
+/// stopped lighting that cell: around Northshire Abbey, where sixteen and more lights reach every
+/// cell of the walls, whole 3 yd cells of stone stepped a tenth in brightness several times a
+/// second. The ranking reads this row and no flame can move it.
+#[derive(Resource, Clone, Copy, PartialEq, ExtractResource)]
+pub struct LightRank(pub [f32; MAX_POINT_LIGHTS]);
+
+impl Default for LightRank {
+    fn default() -> Self {
+        Self([0.0; MAX_POINT_LIGHTS])
+    }
+}
+
 /// The persistent storage buffer every material binds, created by [`new_shared_light_buffer`] and
 /// extracted to the render world; a `Buffer` clone shares the GPU resource.
 #[derive(Resource, Clone, ExtractResource)]
@@ -296,9 +314,11 @@ pub struct SharedLightBuffer(pub Buffer);
 /// Registers the light pack, the probe publish, their extracts and the render-world uploads.
 pub(super) fn register(app: &mut App) {
     app.init_resource::<WowLightData>()
+        .init_resource::<LightRank>()
         .init_resource::<super::EnvFrame>()
         .init_resource::<super::prop_probes::PropProbeExtract>()
         .add_plugins(ExtractResourcePlugin::<WowLightData>::default())
+        .add_plugins(ExtractResourcePlugin::<LightRank>::default())
         .add_plugins(ExtractResourcePlugin::<SharedLightBuffer>::default())
         .add_plugins(ExtractResourcePlugin::<super::prop_probes::PropProbeExtract>::default())
         // After transform propagation: a carried light (a torch in a hand) is a child of a moving
@@ -396,7 +416,9 @@ fn build_light_data(
     // wrongly "outdoor" leaves a light doing exactly what it did before this test existed, wrongly
     // "indoor" switches a working lamp off (the 1276 lopsided-error rule again).
     wmos: Option<Res<bevy::asset::Assets<benilla_assets::WmoModel>>>,
-    mut data: ResMut<WowLightData>,
+    // The blob, and the table's steady strengths beside it ([`LightRank`]; absent in a bare test
+    // app, which ranks nothing).
+    (mut data, rank): (ResMut<WowLightData>, Option<ResMut<LightRank>>),
     time: Res<Time>,
     // fork: modern lighting — row 20 `.y` tells every world shader the frame is linear.
     active: Option<Res<crate::modern::ActiveLighting>>,
@@ -520,7 +542,7 @@ fn build_light_data(
         radius
     }
     .powi(2);
-    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, f32)> = lights_q
+    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, f32, f32)> = lights_q
         .iter()
         .filter_map(
             |(entity, pl, gt, rooms, synthesized, night_glow, window, glowless, flame, spell)| {
@@ -580,13 +602,14 @@ fn build_light_data(
                 let flick = flame.map_or(super::flicker::FlickerMod::STEADY, |f| {
                     f.at(flicker_t, flicker_gain)
                 });
-                let s = pl.intensity / (4.0 * std::f32::consts::PI)
-                    * *fade
-                    * reach
-                    * glow
-                    * gain
-                    * flick.intensity;
+                let steady =
+                    pl.intensity / (4.0 * std::f32::consts::PI) * *fade * reach * glow * gain;
+                let s = steady * flick.intensity;
                 let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * flick.blue]);
+                // What the grid ranks this light by ([`LightRank`]): the same commit with no
+                // flicker on it, as the luminance `light_bin.wgsl` used to take from `rgb`.
+                let [r, g, b] = commit_raw(c.map(|c| c * steady));
+                let rank = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
                 let indoors = rooms.is_some_and(|r| {
                     portals
@@ -603,7 +626,7 @@ fn build_light_data(
                 } else {
                     0.0
                 };
-                Some((d2, p, pl.range, rgb, indoors, tag))
+                Some((d2, p, pl.range, rgb, indoors, tag, rank))
             },
         )
         .collect();
@@ -647,7 +670,18 @@ fn build_light_data(
         0.0
     };
     fresh.rows[20] = [pts.len() as f32, modern, 0.0, 0.0];
-    for (i, (_, p, range, rgb, indoors, tag)) in pts.iter().enumerate() {
+    // Written through `ResMut` only when an entry moved, like the blob below: a settled table's
+    // strengths hold still (the flicker is not in them), so they are not extracted again.
+    if let Some(mut rank) = rank {
+        let mut steady = LightRank::default();
+        for (slot, pt) in steady.0.iter_mut().zip(&pts) {
+            *slot = pt.6;
+        }
+        if *rank != steady {
+            *rank = steady;
+        }
+    }
+    for (i, (_, p, range, rgb, indoors, tag, _)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
         // fork: modern lighting (P8) — **`w` is 1 for a light that is INDOORS**, and the surface
         // lanes' class test runs both ways off it: an interior fragment takes only indoor lights,
@@ -687,7 +721,7 @@ fn build_light_data(
             let snap = |v: f32| (((half + v) / cell).floor() + 0.5) * cell - half;
             let anchor = Vec3::new(snap(cam_pos.x), cam_pos.y, snap(cam_pos.z));
             let (mut boxed, mut sphere) = (0usize, 0usize);
-            for (_, p, _, _, _, _) in &pts {
+            for (_, p, _, _, _, _, _) in &pts {
                 let dv = *p - anchor;
                 boxed += usize::from(dv.x.abs().max(dv.z.abs()) <= 33.570_166);
                 sphere += usize::from(dv.length() <= 48.0);
@@ -703,7 +737,7 @@ fn build_light_data(
                 "[points] {} packed, cam {cam_pos:.1?} — this chunk's candidates: {boxed} (was {sphere} at the 48 yd sphere), 3 slots",
                 pts.len()
             );
-            for (d2, p, _, rgb, _, tag) in pts.iter().take(8) {
+            for (d2, p, _, rgb, _, tag, _) in pts.iter().take(8) {
                 out.push_str(&format!(
                     "\n  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  tag {tag}",
                     d2.sqrt(),
@@ -951,6 +985,54 @@ mod tests {
             "green commits raw: {rgb:?}"
         );
         assert!((rgb[2] - 0.4).abs() < 1e-4, "blue commits raw: {rgb:?}");
+    }
+
+    /// A flame's committed colour breathes and the strength the grid ranks it by does not: the
+    /// rank is the luminance of the same commit with no flicker on it. Ranked by the breathing
+    /// colour, two flames near a full cell's cut traded places and the cell's light stepped.
+    #[test]
+    fn a_flames_rank_holds_still_while_its_colour_flickers() {
+        let mut app = App::new();
+        app.init_resource::<WowLighting>()
+            .init_resource::<crate::dev_state::DebugState>()
+            .init_resource::<crate::view::ViewDistance>()
+            .init_resource::<WowLightData>()
+            .init_resource::<LightRank>()
+            .init_resource::<Time>()
+            .add_systems(Update, build_light_data);
+        app.world_mut()
+            .spawn((crate::view::WorldCamera, GlobalTransform::IDENTITY));
+        let color = [1.0, 0.72, 0.40];
+        app.world_mut().spawn((
+            crate::terrain_stream::point_light(color, 0.6),
+            GlobalTransform::from_translation(Vec3::new(0.0, 1.5, 0.0)),
+            crate::lighting::FlameFlicker::new(crate::lighting::FlameKind::Candle, 7),
+        ));
+        // Past the admission ramp (see the torch golden above), then on through the flicker.
+        let mut seen: Vec<(f32, f32)> = Vec::new();
+        for _ in 0..12 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(100));
+            app.update();
+            let red = app.world().resource::<WowLightData>().0.points[1][0];
+            seen.push((red, app.world().resource::<LightRank>().0[0]));
+        }
+        let steady = 0.6 * (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]);
+        for (_, rank) in &seen {
+            assert!((rank - steady).abs() < 1e-5, "rank {rank} vs {steady}");
+        }
+        let (lo, hi) = seen
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (red, _)| {
+                (lo.min(*red), hi.max(*red))
+            });
+        assert!(hi - lo > 0.01, "the candle did not flicker: {lo}..{hi}");
+        assert_eq!(
+            app.world().resource::<LightRank>().0[1],
+            0.0,
+            "past the count"
+        );
     }
 
     /// The packed SH block gives `Model2.bls`'s `clamp01(A + D·I·(3 + 16μ + 15μ²)/34)` at each

@@ -18,7 +18,7 @@ use bevy::render::{Render, RenderStartup, RenderSystems};
 use benilla_assets::materials::MODERN_SHADOW_CASCADES;
 
 use super::{ModernLights, BLOCK_LIGHT_BYTES, LIGHT_PARAM_BYTES};
-use crate::lighting::SharedLightBuffer;
+use crate::lighting::{LightRank, SharedLightBuffer};
 use crate::modern::gi::GI_PARAMS_BYTES;
 use crate::modern::shadow::{CASCADES_BYTES, SHADOW_MAP_SIZE};
 use crate::modern::volumetrics::BLOCK_TAIL_BYTES;
@@ -33,6 +33,8 @@ pub const LIGHT_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES + GI_PARAMS_BYT
 struct LightPipelines {
     layout: BindGroupLayoutDescriptor,
     bin: CachedComputePipelineId,
+    /// The table's steady strengths ([`LightRank`]), which the binning pass ranks a cell by.
+    rank: Buffer,
 }
 
 #[derive(Resource, Default)]
@@ -45,6 +47,7 @@ fn init_pipelines(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    device: Res<bevy::render::renderer::RenderDevice>,
 ) {
     let layout = BindGroupLayoutDescriptor::new(
         "modern_light_bin",
@@ -53,9 +56,16 @@ fn init_pipelines(
             (
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
+    let rank = device.create_buffer(&BufferDescriptor {
+        label: Some("modern_light_rank"),
+        size: std::mem::size_of::<LightRank>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let bin = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
@@ -65,7 +75,7 @@ fn init_pipelines(
         entry_point: Some("bin_lights".into()),
         zero_initialize_workgroup_memory: false,
     });
-    commands.insert_resource(LightPipelines { layout, bin });
+    commands.insert_resource(LightPipelines { layout, bin, rank });
 }
 
 /// Write the grid's parameters and get the binning pass ready. The parameters go out every modern
@@ -79,6 +89,7 @@ fn prepare_lights(
     lights: Option<Res<ModernLights>>,
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
     light_buffer: Option<Res<SharedLightBuffer>>,
+    rank: Option<Res<LightRank>>,
     pipes: Option<Res<LightPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     uploaded_plane: Option<Res<crate::modern::shadow::UploadedMirrorPlane>>,
@@ -130,6 +141,12 @@ fn prepare_lights(
     if pipeline_cache.get_compute_pipeline(pipes.bin).is_none() {
         return;
     }
+    // The strengths of the table `upload_light` wrote this frame: both are extracted from the one
+    // pack, so entry `i` here is entry `i` there.
+    let Some(rank) = rank else {
+        return;
+    };
+    queue.write_buffer(&pipes.rank, 0, bytemuck::cast_slice(&rank.0));
     frame.bind = Some(
         device.create_bind_group(
             "modern_light_bin",
@@ -146,6 +163,7 @@ fn prepare_lights(
                             .expect("the light region is never empty"),
                     ),
                 }),
+                pipes.rank.as_entire_binding(),
             )),
         ),
     );
