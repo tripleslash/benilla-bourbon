@@ -717,12 +717,19 @@ fn queue_terrain_shadow_pipelines(
     meshes: Res<RenderAssets<RenderMesh>>,
     pipeline_cache: Res<PipelineCache>,
     pipes: Option<ResMut<TerrainShadowPipelines>>,
+    mut unprepared: Local<bool>,
 ) {
     let (Some(casters), Some(mut pipes)) = (casters, pipes) else {
         return;
     };
+    // A new stride arrives with a new cell, or with a cell's mesh finishing its upload.
+    if !casters.is_changed() && !*unprepared {
+        return;
+    }
+    *unprepared = false;
     for (mesh_id, _, _) in &casters.cells {
         let Some(mesh) = meshes.get(*mesh_id) else {
+            *unprepared = true;
             continue;
         };
         let stride = mesh.layout.0.layout().array_stride;
@@ -989,33 +996,13 @@ pub(crate) fn gx_shadow_pass(
 
         let terrain = world.get_resource::<ModernTerrainCasters>();
         let terrain_pipes = world.get_resource::<TerrainShadowPipelines>();
-        // Order-independent fingerprint of the static caster set: cached layers are reused only
-        // while it (and the cascade's matrix) is unchanged.
+        // The static caster set's identity: cached layers are reused only while it (and the
+        // cascade's matrix) is unchanged. Both halves count their own changes, so a standing frame
+        // no longer hashes every caster to learn that nothing moved.
         let static_hash = {
-            use std::hash::{Hash, Hasher};
-            let item = |f: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                f(&mut h);
-                h.finish()
-            };
-            let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
-            for (gpu, draw) in &casters {
-                acc = acc.wrapping_add(item(&|h| {
-                    gpu.mesh.hash(h);
-                    gpu.killed_applied.hash(h);
-                    gpu.runs.len().hash(h);
-                    draw.origin.to_array().map(f32::to_bits).hash(h);
-                }));
-            }
-            if let Some(t) = terrain {
-                for (mesh_id, center, _) in &t.cells {
-                    acc = acc.wrapping_add(item(&|h| {
-                        mesh_id.hash(h);
-                        center.to_array().map(f32::to_bits).hash(h);
-                    }));
-                }
-            }
-            acc
+            use std::hash::BuildHasher;
+            bevy::platform::hash::FixedHasher
+                .hash_one((cache.rev, terrain.map(|t| (t.rev, t.cells.len()))))
         };
         let (Some(working), Some(static_cache)) = (frame.texture.as_ref(), frame.cache.as_ref())
         else {

@@ -179,6 +179,8 @@ pub struct ModernCascades {
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct ModernTerrainCasters {
     pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3)>,
+    /// Bumped whenever `cells` changes, so a reader keyed on the set skips re-hashing it.
+    pub rev: u64,
 }
 
 /// One entity-lane model part that casts: mesh, world matrix (ignored when skinned — the palette
@@ -471,18 +473,25 @@ fn collect_terrain_casters(
     active: Res<ActiveLighting>,
     cells: Query<(&Mesh3d, &Aabb, &GlobalTransform), With<MeshMaterial3d<TerrainMaterial>>>,
     mut out: ResMut<ModernTerrainCasters>,
+    mut scratch: Local<Vec<(AssetId<Mesh>, Vec3, Vec3)>>,
 ) {
     if !active.is_modern() {
         if !out.cells.is_empty() {
             out.cells.clear();
+            out.rev += 1;
         }
         return;
     }
-    out.cells.clear();
+    scratch.clear();
     for (mesh, aabb, gt) in &cells {
         let center = gt.transform_point(Vec3::from(aabb.center));
-        out.cells
-            .push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+        scratch.push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+    }
+    // Written only when it moved: the extract copies it and the render side re-scans it on a
+    // change, and the resident terrain stands still on most frames.
+    if out.cells != *scratch {
+        std::mem::swap(&mut out.cells, &mut *scratch);
+        out.rev += 1;
     }
 }
 
