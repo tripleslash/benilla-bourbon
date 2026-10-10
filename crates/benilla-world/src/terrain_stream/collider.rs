@@ -110,6 +110,8 @@ pub(super) fn finish_colliders(
 
     // Pass 2: attach. The deadline is checked after each attach, so an oversized one still lands.
     let mut attached = 0u32;
+    // fork: where each one lands, for `crate::collision::ColliderChanges`.
+    let mut changes = world.remove_resource::<crate::collision::ColliderChanges>();
     let budget = world.get_resource::<AttachBudget>().map(|b| b.0);
     let deadline = Instant::now() + budget.unwrap_or(ATTACH_BUDGET);
     /// Attaches between deadline checks — see the check below.
@@ -129,6 +131,9 @@ pub(super) fn finish_colliders(
         let Some(collider) = pc.built.take() else {
             continue;
         };
+        if let Some(changes) = changes.as_mut() {
+            changes.note_attached(&collider, entity_mut.get::<GlobalTransform>());
+        }
         entity_mut.insert(collider);
         if pc.static_body {
             entity_mut.insert(RigidBody::Static);
@@ -147,6 +152,9 @@ pub(super) fn finish_colliders(
         if attached.is_multiple_of(stride) && Instant::now() >= deadline {
             break;
         }
+    }
+    if let Some(changes) = changes {
+        world.insert_resource(changes);
     }
     if let Some(mut activity) = world.get_resource_mut::<crate::terrain_stream::StreamActivity>() {
         activity.colliders_attached += attached;

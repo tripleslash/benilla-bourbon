@@ -165,6 +165,9 @@ impl Plugin for WorldFoundation {
             // The collider-set stamp cached collision answers are dated by; a removal is stamped in
             // `First`, before any consumer.
             .init_resource::<crate::collision::ColliderEpoch>()
+            // fork: where it changed, for the rain's ground columns.
+            .init_resource::<crate::collision::ColliderChanges>()
+            .add_observer(crate::collision::note_collider_removal)
             .init_resource::<crate::collision::MoverTraceExclusions>()
             .add_systems(First, crate::collision::track_collider_removals);
         // No pre-step transform propagation: movers write `Position`/`Rotation` directly, so a

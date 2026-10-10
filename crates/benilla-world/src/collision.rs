@@ -10,10 +10,12 @@ use avian3d::character_controller::move_and_slide::{
 };
 use avian3d::prelude::*;
 use bevy::ecs::component::Component;
-use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::lifecycle::{Remove, RemovedComponents};
+use bevy::ecs::observer::On;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::ResMut;
-use bevy::math::{Dir3, Quat, Vec3};
+use bevy::ecs::system::{Query, ResMut};
+use bevy::math::{Dir3, Quat, Vec2, Vec3};
+use bevy::transform::components::GlobalTransform;
 
 mod one_sided;
 
@@ -72,6 +74,76 @@ impl ColliderEpoch {
     /// GameObject hull lane) must call it.
     pub fn bump(&mut self) {
         self.0 = self.0.wrapping_add(1);
+    }
+}
+
+/// fork: where the collider set changed since its reader last looked, as the Bevy XZ boxes of the
+/// colliders the streamer attached and of every collider removed. [`ColliderEpoch`] says that the
+/// set changed; a lane whose cached answers lie around the camera (the rain's ground columns)
+/// asks whether it changed within reach, since a zone streams colliders in a thousand yards out
+/// on most frames of a journey. One reader, which drains it ([`Self::take_near`]).
+#[derive(Resource, Default)]
+pub(crate) struct ColliderChanges {
+    boxes: Vec<(Vec2, Vec2)>,
+    /// A change whose place is not known counts as near.
+    unplaced: bool,
+}
+
+impl ColliderChanges {
+    /// Boxes kept before the lot folds into "somewhere": no reader, or a zone's worth in a frame.
+    const CAP: usize = 4096;
+
+    fn note(&mut self, aabb: ColliderAabb) {
+        let (min, max) = (
+            Vec2::new(aabb.min.x, aabb.min.z),
+            Vec2::new(aabb.max.x, aabb.max.z),
+        );
+        // An unset box (avian's default, before its first step) or a non-finite one has no place.
+        if !(min.is_finite() && max.is_finite()) || min.cmpgt(max).any() {
+            self.unplaced = true;
+        } else if self.boxes.len() < Self::CAP {
+            self.boxes.push((min, max));
+        } else {
+            self.unplaced = true;
+            self.boxes.clear();
+        }
+    }
+
+    /// Records a collider about to be attached to an entity placed at `at`.
+    pub(crate) fn note_attached(&mut self, collider: &Collider, at: Option<&GlobalTransform>) {
+        let (_, rotation, translation) = at
+            .copied()
+            .unwrap_or(GlobalTransform::IDENTITY)
+            .to_scale_rotation_translation();
+        self.note(collider.aabb(translation, rotation));
+    }
+
+    /// Did the set change within `reach` yards (XZ) of `at`, or with no camera to measure from?
+    /// Forgets what it held.
+    pub(crate) fn take_near(&mut self, at: Option<Vec3>, reach: f32) -> bool {
+        let near = self.unplaced
+            || (!self.boxes.is_empty()
+                && at.is_none_or(|at| {
+                    let p = Vec2::new(at.x, at.z);
+                    self.boxes.iter().any(|(min, max)| {
+                        (p.clamp(*min, *max) - p).length_squared() <= reach * reach
+                    })
+                }));
+        self.boxes.clear();
+        self.unplaced = false;
+        near
+    }
+}
+
+/// Records where a collider leaves the world ([`ColliderChanges`]), by its last world box.
+pub(crate) fn note_collider_removal(
+    removed: On<Remove, Collider>,
+    boxes: Query<&ColliderAabb>,
+    mut changes: ResMut<ColliderChanges>,
+) {
+    match boxes.get(removed.entity) {
+        Ok(aabb) => changes.note(*aabb),
+        Err(_) => changes.unplaced = true,
     }
 }
 
@@ -596,6 +668,61 @@ mod liquid_trace_mask {
 
 /// The contact pipeline `world_plugins` disables: the stock broad phase pairs a resting kinematic
 /// trimesh with the static world for a manifold every tick, and dropping it keeps the shape casts.
+#[cfg(test)]
+mod collider_changes {
+    use super::*;
+
+    /// A change is near by the gap between its box and the point, in XZ; a change with no place
+    /// is near wherever the point is; and a look forgets what it saw.
+    #[test]
+    fn a_change_is_near_by_its_boxs_distance_in_the_plane() {
+        let floor = Collider::cuboid(10.0, 1.0, 10.0);
+        let at = |x: f32| GlobalTransform::from_translation(Vec3::new(x, 500.0, 0.0));
+        let mut changes = ColliderChanges::default();
+        assert!(
+            !changes.take_near(Some(Vec3::ZERO), 50.0),
+            "nothing changed"
+        );
+
+        // A box spanning x 995..1005: 945 yd from the origin, whatever its height.
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(!changes.take_near(Some(Vec3::ZERO), 900.0));
+        assert!(
+            !changes.take_near(Some(Vec3::ZERO), 2000.0),
+            "already taken"
+        );
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(changes.take_near(Some(Vec3::ZERO), 1000.0));
+        // Standing inside the box.
+        changes.note_attached(&floor, Some(&at(0.0)));
+        assert!(changes.take_near(Some(Vec3::new(2.0, -300.0, 3.0)), 1.0));
+        // No camera to measure from: any change counts.
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(changes.take_near(None, 1.0));
+
+        // A collider avian has not boxed yet has no place.
+        changes.note(ColliderAabb::INVALID);
+        assert!(changes.take_near(Some(Vec3::ZERO), 1.0));
+        assert!(!changes.take_near(Some(Vec3::ZERO), 1.0));
+    }
+
+    /// With no reader the list folds into "somewhere" at its cap and holds nothing more.
+    #[test]
+    fn the_list_is_bounded() {
+        let far = Collider::cuboid(1.0, 1.0, 1.0);
+        let at = GlobalTransform::from_translation(Vec3::new(5000.0, 0.0, 0.0));
+        let mut changes = ColliderChanges::default();
+        for _ in 0..ColliderChanges::CAP + 10 {
+            changes.note_attached(&far, Some(&at));
+        }
+        assert!(changes.boxes.len() <= ColliderChanges::CAP);
+        assert!(
+            changes.take_near(Some(Vec3::ZERO), 1.0),
+            "past the cap: somewhere"
+        );
+    }
+}
+
 #[cfg(test)]
 mod contact_pipeline {
     use super::*;

@@ -237,8 +237,8 @@ fn setup_precip(
 
 /// Per frame: wind, spawn budgets, integrate, land; [`push_precip`] draws in `PostUpdate`.
 /// fork: perf — `WOW_PRECIP_PROFILE=1`: every two seconds, the simulation's mean CPU ms a frame,
-/// the ground rays it cast a frame and the height-cache clears, so a rain frame's cost is read
-/// from numbers.
+/// the ground rays it cast a frame, the height-cache clears and the stale columns it re-cast, so
+/// a rain frame's cost is read from numbers.
 #[derive(Default)]
 struct PrecipProfile {
     on: Option<bool>,
@@ -261,12 +261,13 @@ impl PrecipProfile {
         if now - since >= std::time::Duration::from_secs(2) && self.frames > 0 {
             let f = self.frames as f32;
             info!(
-                "PRECIP_PROFILE sim_ms={:.3} rays_per_frame={:.0} clears={}",
+                "PRECIP_PROFILE sim_ms={:.3} rays_per_frame={:.0} clears={} recasts={}",
                 self.busy.as_secs_f32() * 1000.0 / f,
                 heights.rays as f32 / f,
                 heights.clears,
+                heights.recasts,
             );
-            (heights.rays, heights.clears, self.frames) = (0, 0, 0);
+            (heights.rays, heights.clears, heights.recasts, self.frames) = (0, 0, 0, 0);
             self.busy = std::time::Duration::ZERO;
             self.since = Some(now);
         }
@@ -284,6 +285,9 @@ fn simulate_precip(
     viewer: Res<crate::view::Viewer>,
     spatial: SpatialQuery,
     indoors: Res<WeatherIndoors>,
+    // fork: where the collider set changed, which dates the ground columns; absent, nothing
+    // ever does.
+    mut colliders: Option<ResMut<crate::collision::ColliderChanges>>,
     mut wind: ResMut<WeatherWind>,
     mut heights: ResMut<HeightCache>,
     mut precip: Option<ResMut<Precip>>,
@@ -292,6 +296,12 @@ fn simulate_precip(
     mut census_frames: Local<u32>,
     mut prof: Local<PrecipProfile>,
 ) {
+    // Drained every frame, whatever stops the simulation below.
+    let eye = cam.single().ok().map(GlobalTransform::translation);
+    let colliders_changed = colliders
+        .as_deref_mut()
+        .is_some_and(|c| c.take_near(eye, pool::NEAR_REACH));
+    heights.begin_frame(colliders_changed);
     let Some(precip) = precip.as_deref_mut() else {
         return;
     };

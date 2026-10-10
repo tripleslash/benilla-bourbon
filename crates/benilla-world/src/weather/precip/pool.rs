@@ -131,13 +131,29 @@ impl Pool {
 /// (`PRECIP_PROFILE`, Duskwood in rain). Its bound covers the band of cells a flight leaves drops
 /// in (packets replay up to [`RETIRE_DIST`] behind the camera), and past it the cells far from the
 /// camera go, once a frame ([`HeightCache::evict_far`]).
+///
+/// fork: a column answers for the colliders it was cast against. A zone streams them in over
+/// seconds, and until a tile's or a building's own lands the rays meet its stand-in (the far
+/// band's coarse ground, a bounding box: `terrain_stream::provisional`) or nothing at all; a
+/// column kept past that had the rain landing on a plane yards off the floor, or falling through
+/// it, for as long as the camera stayed. So the cache holds only the cells round the camera
+/// ([`Self::evict_far`]), and when a collider comes or goes within [`NEAR_REACH`] of it
+/// (`crate::collision::ColliderChanges`) every column is stale: re-cast when next asked for,
+/// [`STALE_RECASTS`] a frame, and answering as it is until its turn.
 #[derive(Resource, Default)]
 pub(super) struct HeightCache {
     cells: HashMap<(i32, i32), Column>,
-    /// fork: perf — rays cast and evictions since the profile last read them
-    /// (`WOW_PRECIP_PROFILE`).
+    /// How many times the colliders near the camera have changed ([`Self::begin_frame`]).
+    epoch: u64,
+    /// Frames since the cells far from the camera last went.
+    since_trim: u32,
+    /// Stale columns this frame may still re-cast.
+    recasts_left: u32,
+    /// fork: perf — rays cast, evictions and stale columns re-cast since the profile last read
+    /// them (`WOW_PRECIP_PROFILE`).
     pub(super) rays: u32,
     pub(super) clears: u32,
+    pub(super) recasts: u32,
 }
 
 /// One cell's surfaces, highest first, from `top` down to `bottom` (the known span).
@@ -146,6 +162,8 @@ struct Column {
     bottom: f32,
     hits: [f32; COLUMN_HITS],
     len: u8,
+    /// The cache's stamp when it was cast.
+    epoch: u64,
 }
 
 /// The reference's cell stride (`0x80ff98` = 1.0416666).
@@ -162,6 +180,13 @@ const COLUMN_HITS: usize = 4;
 /// The cache's bound (about 8 MB), and the square half-width (yd) kept around the camera past it.
 const CACHE_CELLS: usize = 1 << 17;
 const KEEP_HALF: f32 = 160.0;
+/// Stale columns re-cast per frame: the rain's ~16 000 cells follow a change in about two
+/// seconds, at a few hundred rays a frame while they do.
+const STALE_RECASTS: u32 = 128;
+/// Frames between trims to [`KEEP_HALF`], and how far from the camera (yd, XZ) a collider change
+/// still dates the columns: the kept square's half-width plus what a flight covers between trims.
+const TRIM_FRAMES: u32 = 120;
+pub(super) const NEAR_REACH: f32 = KEEP_HALF + 100.0;
 
 impl Column {
     /// The oracle's answer for a probe from `plane`: the first surface at or below it within
@@ -185,6 +210,25 @@ impl Column {
 }
 
 impl HeightCache {
+    /// Opens a frame's lookups; `changed` when a collider came or went within [`NEAR_REACH`].
+    pub(super) fn begin_frame(&mut self, changed: bool) {
+        if changed {
+            self.epoch += 1;
+        }
+        self.recasts_left = STALE_RECASTS;
+    }
+
+    /// Does a column cast at stamp `cast_epoch` answer this lookup as it is? One from before the
+    /// last nearby change is re-cast instead while the frame's budget lasts.
+    fn serves(&mut self, cast_epoch: u64) -> bool {
+        if cast_epoch == self.epoch || self.recasts_left == 0 {
+            return true;
+        }
+        self.recasts_left -= 1;
+        self.recasts += 1;
+        false
+    }
+
     pub(super) fn ground_y(
         &mut self,
         x: f32,
@@ -194,8 +238,14 @@ impl HeightCache {
         filter: &SpatialQueryFilter,
     ) -> f32 {
         let key = Self::key(x, z);
-        if let Some(y) = self.cells.get(&key).and_then(|c| c.ground(cast_from_y)) {
-            return y;
+        let cached = self
+            .cells
+            .get(&key)
+            .and_then(|c| Some((c.ground(cast_from_y)?, c.epoch)));
+        if let Some((y, cast_epoch)) = cached {
+            if self.serves(cast_epoch) {
+                return y;
+            }
         }
         let cx = (key.0 as f32 + 0.5) * CELL;
         let cz = (key.1 as f32 + 0.5) * CELL;
@@ -207,11 +257,14 @@ impl HeightCache {
         y
     }
 
-    /// Past the bound, keep only the cells within [`KEEP_HALF`] of the camera.
+    /// Keep only the cells within [`KEEP_HALF`] of the camera: past the bound, and every
+    /// [`TRIM_FRAMES`], so no column outlives the reach its staleness is judged over.
     pub(super) fn evict_far(&mut self, cam: Vec3) {
-        if self.cells.len() < CACHE_CELLS {
+        self.since_trim += 1;
+        if self.cells.len() < CACHE_CELLS && self.since_trim < TRIM_FRAMES {
             return;
         }
+        self.since_trim = 0;
         let (kx, kz) = Self::key(cam.x, cam.z);
         let keep = (KEEP_HALF / CELL).ceil() as i32;
         self.cells
@@ -236,6 +289,7 @@ impl HeightCache {
             bottom: plane - PROBE_REACH,
             hits: [0.0; COLUMN_HITS],
             len: 0,
+            epoch: self.epoch,
         };
         let mut from = top;
         while usize::from(column.len) < COLUMN_HITS {
@@ -487,6 +541,7 @@ mod tests {
             bottom: 40.0 - PROBE_REACH,
             hits,
             len: 2,
+            epoch: 0,
         };
         assert_eq!(column.ground(40.0), Some(30.0));
         assert_eq!(column.ground(100.0), Some(30.0));
@@ -500,10 +555,60 @@ mod tests {
             bottom: 400.0 - COLUMN_HEADROOM - PROBE_REACH,
             hits,
             len: 2,
+            epoch: 0,
         };
         assert_eq!(low.ground(300.0), Some(300.0 - MISS_DEPTH));
         // Below every surface and past what the column covers: re-cast.
         assert_eq!(column.ground(5.0), None);
+    }
+
+    /// A column cast before the last nearby collider change is re-cast when asked for, a bounded
+    /// number a frame; past the budget it answers as it is, and the next frame takes up where
+    /// this one stopped. A frame with no nearby change dates nothing.
+    #[test]
+    fn a_stale_column_is_recast_within_the_frames_budget() {
+        let mut heights = HeightCache::default();
+        heights.begin_frame(false);
+        assert!(heights.serves(0), "nothing changed: a column answers");
+        heights.begin_frame(true);
+        for _ in 0..STALE_RECASTS {
+            assert!(!heights.serves(0), "cast before the change: re-cast");
+        }
+        assert!(
+            heights.serves(0),
+            "the budget is spent: it answers as it is"
+        );
+        assert!(heights.serves(1), "cast since the change");
+        assert_eq!(heights.recasts, STALE_RECASTS);
+        heights.begin_frame(false);
+        assert!(!heights.serves(0), "a new frame, a new budget");
+        assert!(heights.serves(1));
+    }
+
+    /// The cells far from the camera go on a clock as well as at the bound, so every column the
+    /// cache holds lies inside the reach a collider change is judged over.
+    #[test]
+    fn the_cache_keeps_only_the_cells_round_the_camera() {
+        let mut heights = HeightCache::default();
+        let column = |epoch| Column {
+            top: 0.0,
+            bottom: 0.0,
+            hits: [0.0; COLUMN_HITS],
+            len: 0,
+            epoch,
+        };
+        heights.cells.insert(HeightCache::key(0.0, 0.0), column(0));
+        heights
+            .cells
+            .insert(HeightCache::key(KEEP_HALF + 20.0, 0.0), column(0));
+        for _ in 0..TRIM_FRAMES - 1 {
+            heights.evict_far(Vec3::ZERO);
+        }
+        assert_eq!(heights.cells.len(), 2, "not yet due");
+        heights.evict_far(Vec3::ZERO);
+        assert_eq!(heights.cells.len(), 1, "the far cell went with the trim");
+        assert!(heights.cells.contains_key(&HeightCache::key(0.0, 0.0)));
+        const { assert!(NEAR_REACH > KEEP_HALF) };
     }
 
     /// A converged [`WeatherWind`] for a run along Bevy +X at `speed`, through the real window.
