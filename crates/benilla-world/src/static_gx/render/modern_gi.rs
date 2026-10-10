@@ -110,6 +110,12 @@ struct GiVoxelState {
     base: [IVec3; gi::MAX_LEVELS],
     /// The static casters the clipmap currently holds.
     casters: GiMap<CasterKey, VoxelCaster>,
+    /// The `GxGpuCache::rev` [`Self::casters`] was last diffed against; `None` forces a diff.
+    diffed_rev: Option<u64>,
+    /// Arrivals were left past the per-frame budget, so the next frame diffs again.
+    backlog: bool,
+    /// The top of every caster in [`Self::casters`] (`clip.bounds.y` before its rounding margin).
+    caster_top: f32,
     jobs: Vec<VoxelJob>,
     albedo: Option<(Texture, TextureView)>,
     normal: Option<(Texture, TextureView)>,
@@ -119,6 +125,8 @@ struct GiVoxelState {
     height_key: u64,
     height_offset: u32,
     height_pending: bool,
+    /// A terrain cell's mesh was not prepared at the last stride scan, so the next frame rescans.
+    height_unprepared: bool,
     view_bind: Option<BindGroup>,
     store_bind: Option<BindGroup>,
     height_bind: Option<BindGroup>,
@@ -388,6 +396,7 @@ fn prepare_gi_voxels(
         });
         state.depth = Some(depth.create_view(&TextureViewDescriptor::default()));
         state.casters.clear();
+        state.diffed_rev = None;
         state.tier = Some(tier);
         state.store_bind = None;
         state.height_key = 0;
@@ -456,96 +465,111 @@ fn prepare_gi_voxels(
     }
 
     // --- what the static world has, against what the clipmap holds -----------------------------
-    let mut current: GiMap<CasterKey, VoxelCaster> = GiMap::default();
-    let drawable = |gpu: &GxCellGpu, draw: &GxCellDraw| -> Option<VoxelCaster> {
-        if gpu.runs.is_empty() {
-            return None;
+    // Only when the cache moved, a backlog is draining, or the clipmap is new: on a standing
+    // camera the diff below finds nothing, and walking every cached region to learn that was the
+    // largest single cost of the browser's frame.
+    let mut current_len = state.casters.len();
+    if fresh || state.backlog || state.diffed_rev != Some(cache.rev) {
+        let mut current: GiMap<CasterKey, VoxelCaster> = GiMap::default();
+        let drawable = |gpu: &GxCellGpu, draw: &GxCellDraw| -> Option<VoxelCaster> {
+            if gpu.runs.is_empty() {
+                return None;
+            }
+            meshes.get(draw.mesh.id())?;
+            allocator.mesh_vertex_slice(&draw.mesh.id())?;
+            allocator.mesh_index_slice(&draw.mesh.id())?;
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            {
+                use std::hash::Hash;
+                gpu.mesh.hash(&mut hash);
+                gpu.killed_applied.hash(&mut hash);
+                gpu.runs.len().hash(&mut hash);
+                draw.origin.to_array().map(f32::to_bits).hash(&mut hash);
+            }
+            Some(VoxelCaster {
+                fingerprint: {
+                    use std::hash::Hasher;
+                    hash.finish()
+                },
+                center: draw.origin + Vec3::from(draw.aabb.center),
+                half: Vec3::from(draw.aabb.half_extents),
+            })
+        };
+        for (key, gpu) in &cache.cells {
+            if let Some(draw) = gx.cells.get(key) {
+                if let Some(v) = drawable(gpu, draw) {
+                    current.insert(CasterKey::Cell(key.0, key.1), v);
+                }
+            }
         }
-        meshes.get(draw.mesh.id())?;
-        allocator.mesh_vertex_slice(&draw.mesh.id())?;
-        allocator.mesh_index_slice(&draw.mesh.id())?;
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for (entity, gpu) in &cache.wmos {
+            if let Some(draw) = gx.wmos.get(entity) {
+                if let Some(v) = drawable(gpu, draw) {
+                    current.insert(CasterKey::Wmo(*entity), v);
+                }
+            }
+        }
+        for (entity, gpu) in &cache.props {
+            if let Some(draw) = gx.props.get(entity) {
+                if let Some(v) = drawable(gpu, draw) {
+                    current.insert(CasterKey::Prop(*entity), v);
+                }
+            }
+        }
+
+        // Gone or changed: their old box is emptied and rebuilt from whatever still overlaps it.
+        let mut departed: Vec<VoxelCaster> = Vec::new();
+        state.casters.retain(|key, had| match current.get(key) {
+            Some(now) if now == had => true,
+            _ => {
+                departed.push(*had);
+                false
+            }
+        });
+        let mut arrived: Vec<(CasterKey, VoxelCaster)> = current
+            .iter()
+            .filter(|(key, _)| !state.casters.contains_key(*key))
+            .map(|(key, v)| (*key, *v))
+            .collect();
+        let arrived_len = arrived.len();
+        // Near the camera first: the finest cascade is what the player is standing in.
+        arrived.sort_by(|a, b| {
+            let d = |v: &VoxelCaster| v.center.distance_squared(gi.camera);
+            d(&a.1).total_cmp(&d(&b.1))
+        });
+        let admitted = if fresh {
+            0
+        } else {
+            arrived.len().min(ARRIVAL_BUDGET)
+        };
+        current_len = current.len();
+
+        for v in departed
+            .iter()
+            .chain(arrived.iter().take(admitted).map(|(_, v)| v))
         {
-            use std::hash::Hash;
-            gpu.mesh.hash(&mut hash);
-            gpu.killed_applied.hash(&mut hash);
-            gpu.runs.len().hash(&mut hash);
-            draw.origin.to_array().map(f32::to_bits).hash(&mut hash);
-        }
-        Some(VoxelCaster {
-            fingerprint: {
-                use std::hash::Hasher;
-                hash.finish()
-            },
-            center: draw.origin + Vec3::from(draw.aabb.center),
-            half: Vec3::from(draw.aabb.half_extents),
-        })
-    };
-    for (key, gpu) in &cache.cells {
-        if let Some(draw) = gx.cells.get(key) {
-            if let Some(v) = drawable(gpu, draw) {
-                current.insert(CasterKey::Cell(key.0, key.1), v);
+            for level in 0..tier.levels {
+                let voxel = tier.voxel[level];
+                if let Some((lo, hi)) = box_voxels(v.center, v.half, voxel, state.base[level], n) {
+                    boxes.push((level, lo, hi));
+                }
             }
         }
-    }
-    for (entity, gpu) in &cache.wmos {
-        if let Some(draw) = gx.wmos.get(entity) {
-            if let Some(v) = drawable(gpu, draw) {
-                current.insert(CasterKey::Wmo(*entity), v);
-            }
+        for (key, v) in arrived.into_iter().take(admitted) {
+            state.casters.insert(key, v);
         }
-    }
-    for (entity, gpu) in &cache.props {
-        if let Some(draw) = gx.props.get(entity) {
-            if let Some(v) = drawable(gpu, draw) {
-                current.insert(CasterKey::Prop(*entity), v);
-            }
+        if fresh {
+            // The full-level boxes queued above cover every caster there is.
+            state.casters = current;
         }
-    }
 
-    // Gone or changed: their old box is emptied and rebuilt from whatever still overlaps it.
-    let mut departed: Vec<VoxelCaster> = Vec::new();
-    state.casters.retain(|key, had| match current.get(key) {
-        Some(now) if now == had => true,
-        _ => {
-            departed.push(*had);
-            false
-        }
-    });
-    let mut arrived: Vec<(CasterKey, VoxelCaster)> = current
-        .iter()
-        .filter(|(key, _)| !state.casters.contains_key(*key))
-        .map(|(key, v)| (*key, *v))
-        .collect();
-    // Near the camera first: the finest cascade is what the player is standing in.
-    arrived.sort_by(|a, b| {
-        let d = |v: &VoxelCaster| v.center.distance_squared(gi.camera);
-        d(&a.1).total_cmp(&d(&b.1))
-    });
-    let admitted = if fresh {
-        0
-    } else {
-        arrived.len().min(ARRIVAL_BUDGET)
-    };
-    let current_len = current.len();
-
-    for v in departed
-        .iter()
-        .chain(arrived.iter().take(admitted).map(|(_, v)| v))
-    {
-        for level in 0..tier.levels {
-            let voxel = tier.voxel[level];
-            if let Some((lo, hi)) = box_voxels(v.center, v.half, voxel, state.base[level], n) {
-                boxes.push((level, lo, hi));
-            }
-        }
-    }
-    for (key, v) in arrived.into_iter().take(admitted) {
-        state.casters.insert(key, v);
-    }
-    if fresh {
-        // The full-level boxes queued above cover every caster there is.
-        state.casters = current;
+        state.backlog = !fresh && arrived_len > admitted;
+        state.diffed_rev = Some(cache.rev);
+        state.caster_top = state
+            .casters
+            .values()
+            .map(|c| c.center.y + c.half.y)
+            .fold(crate::modern::gi::NO_TERRAIN, f32::max);
     }
 
     // --- the jobs' uniforms ---------------------------------------------------------------------
@@ -682,21 +706,24 @@ fn prepare_gi_voxels(
         });
     let mut key = 0u64;
     if let Some(t) = terrain.as_deref() {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        clip_from_world
-            .to_cols_array()
-            .map(f32::to_bits)
-            .hash(&mut h);
+        // Order-free over the cells, and a fast hasher: this runs every frame over every resident
+        // terrain cell.
+        use std::hash::BuildHasher;
+        let hasher = bevy::platform::hash::FixedHasher;
         for (mesh_id, center, _) in &t.cells {
-            let mut cell = std::collections::hash_map::DefaultHasher::new();
-            mesh_id.hash(&mut cell);
-            center.to_array().map(f32::to_bits).hash(&mut cell);
-            key = key.wrapping_add(cell.finish());
+            key = key.wrapping_add(hasher.hash_one((mesh_id, center.to_array().map(f32::to_bits))));
         }
-        key = key.wrapping_add(h.finish()).max(1);
-        for (mesh_id, _, _) in &t.cells {
+        key = key
+            .wrapping_add(hasher.hash_one(clip_from_world.to_cols_array().map(f32::to_bits)))
+            .max(1);
+        // A new stride arrives with a new cell, which moves the key, or with a mesh finishing its
+        // upload.
+        let rescan = key != state.height_key || state.height_unprepared;
+        state.height_unprepared = false;
+        let cells = if rescan { &t.cells[..] } else { &[][..] };
+        for (mesh_id, _, _) in cells {
             let Some(mesh) = meshes.get(*mesh_id) else {
+                state.height_unprepared = true;
                 continue;
             };
             let stride = mesh.layout.0.layout().array_stride;
@@ -758,12 +785,7 @@ fn prepare_gi_voxels(
     // fork: the highest voxel the clipmap can hold — the top of every caster it holds, plus two of
     // the coarsest voxels for a box's rounding out to whole voxels. A ray rising above it and the
     // ground (`probegi::march`) can hit nothing more, and ends as the sky it would have reached.
-    clip.bounds.y = state
-        .casters
-        .values()
-        .map(|c| c.center.y + c.half.y)
-        .fold(crate::modern::gi::NO_TERRAIN, f32::max)
-        + 2.0 * tier.voxel[tier.levels - 1];
+    clip.bounds.y = state.caster_top + 2.0 * tier.voxel[tier.levels - 1];
     scene.clip = clip;
     // The probes trace as soon as there is a clipmap to trace against — an empty one only means an
     // open sky, which is what the sky-occlusion map says there too.

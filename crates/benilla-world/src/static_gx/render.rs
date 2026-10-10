@@ -213,6 +213,9 @@ struct GxGpuCache {
     cells: HashMap<(i32, i32), GxCellGpu>,
     wmos: HashMap<Entity, GxCellGpu>,
     props: HashMap<Entity, GxCellGpu>,
+    /// Bumped whenever an entry is added, dropped, or has its runs rebuilt, so a reader that diffs
+    /// the cache (`modern_gi`) can skip a frame where nothing moved.
+    rev: u64,
 }
 
 #[derive(Resource)]
@@ -555,6 +558,9 @@ fn prepare_static_gx(
         if !pool.is_empty() {
             *pool = GxTexturePool::default();
         }
+        if !(cache.cells.is_empty() && cache.wmos.is_empty() && cache.props.is_empty()) {
+            cache.rev += 1;
+        }
         cache.cells.clear();
         cache.wmos.clear();
         cache.props.clear();
@@ -562,6 +568,7 @@ fn prepare_static_gx(
     }
 
     // Drop cache entries whose region vanished or re-baked.
+    let held = cache.cells.len() + cache.wmos.len() + cache.props.len();
     cache
         .cells
         .retain(|c, gpu| gx.cells.get(c).is_some_and(|d| d.mesh.id() == gpu.mesh));
@@ -571,6 +578,9 @@ fn prepare_static_gx(
     cache
         .props
         .retain(|e, gpu| gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
+    if cache.cells.len() + cache.wmos.len() + cache.props.len() != held {
+        cache.rev += 1;
+    }
 
     // The assemblies' index copies, submitted below, before any pass draws this frame.
     let mut copies = render_device.create_command_encoder(&CommandEncoderDescriptor {
@@ -601,6 +611,7 @@ fn prepare_static_gx(
                     &mut copies,
                 ) {
                     cache.cells.insert(*cell, gpu);
+                    cache.rev += 1;
                 }
             }
             GxDoodadVis::Prop(entity, _) => {
@@ -626,6 +637,7 @@ fn prepare_static_gx(
                     &mut copies,
                 ) {
                     cache.props.insert(*entity, gpu);
+                    cache.rev += 1;
                 }
             }
         }
@@ -653,6 +665,7 @@ fn prepare_static_gx(
             &mut copies,
         ) {
             cache.wmos.insert(*entity, gpu);
+            cache.rev += 1;
         }
     }
     pool.drain_pending(&render_device, &render_queue);
@@ -660,6 +673,7 @@ fn prepare_static_gx(
 
     // The kill-bit sync: on a new bitmap revision, rewrite the kill column, re-upload and rebuild
     // the runs. A cell that changed out of view syncs on re-entry.
+    let mut killed_synced = false;
     for vis in &gx.visible {
         let GxDoodadVis::Cell(cell) = vis else {
             continue; // prop regions carry no faders
@@ -670,6 +684,7 @@ fn prepare_static_gx(
         if gpu.killed_applied == draw.killed_rev {
             continue;
         }
+        killed_synced = true;
         let hidden = hidden_bits(&draw.killed, &gpu.unready);
         for (i, rec) in gpu.records.iter_mut().enumerate() {
             // Column w also carries the probe slot and fog bit: rewrite bit 0 alone.
@@ -685,6 +700,9 @@ fn prepare_static_gx(
         );
         gpu.whole = whole_runs(&gpu.runs);
         gpu.killed_applied = draw.killed_rev;
+    }
+    if killed_synced {
+        cache.rev += 1;
     }
 
     // The interior-fog sync: the client's per-group `[0xca7f00]` picks a WMO group's and its
