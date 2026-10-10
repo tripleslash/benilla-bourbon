@@ -68,7 +68,7 @@ impl Wetness {
 }
 
 fn env_f32(key: &str) -> Option<f32> {
-    std::env::var(key).ok()?.trim().parse().ok()
+    crate::launch_env::var(key)?.trim().parse().ok()
 }
 
 /// The session-only overrides, read once.
