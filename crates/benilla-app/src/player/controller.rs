@@ -350,7 +350,7 @@ pub(super) fn control(
                         player.move_flags() & crate::creature_anim::move_flags::SWIMMING != 0,
                     )
                 }),
-                view_subject,
+                &view_subject.seated_on(body.single().ok().map(|b| b.0), player.pos),
                 &mut rig,
                 &mut cam,
                 &mut cam_t,
@@ -737,7 +737,7 @@ pub(super) fn control(
             player.pos,
             head,
             cam_pivot_target,
-            view_subject,
+            &view_subject.seated_on(body.single().ok().map(|b| b.0), player.pos),
             &mut rig,
             &mut cam,
             &mut cam_t,
