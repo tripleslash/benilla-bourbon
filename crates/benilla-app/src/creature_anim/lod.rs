@@ -135,9 +135,18 @@ pub(super) fn gate_rig_animation(
     out_since.retain(|e, _| rigs.contains(*e));
 }
 
-/// Register [`gate_rig_animation`] before the frame's pose evaluation.
+/// Register [`gate_rig_animation`] before the frame's pose evaluation, and behind it the hold on
+/// the effect models its parked rigs host, so a wake restores both in the same frame.
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
+    app.add_systems(
+        PostUpdate,
+        (
+            gate_rig_animation,
+            crate::entities::spell_fx::park_effect_rigs,
+        )
+            .chain()
+            .before(AnimationSystems),
+    );
 }
 
 #[cfg(test)]

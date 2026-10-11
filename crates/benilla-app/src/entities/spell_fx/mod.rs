@@ -12,6 +12,9 @@
 //! for the client's completion callback.
 
 mod lifecycle;
+// fork: an effect on a parked host stops writing its joints.
+mod park;
+pub(crate) use park::park_effect_rigs;
 // fork: the light a luminous effect throws (fire / holy / fel) and its envelope — ported from
 // pkuzic's benilla-lighting.
 mod light;
@@ -150,6 +153,11 @@ fn fx_part_material(
     }
     handle
 }
+
+/// fork: an effect instance's root whose player [`arm_effect_rig`] armed, the population
+/// [`park_effect_rigs`] holds while its host is parked.
+#[derive(Component)]
+pub(crate) struct EffectPlayer;
 
 /// Where an effect-model instance sits in the client's model graph.
 #[derive(Clone, Copy, Default)]
@@ -429,9 +437,11 @@ pub(super) fn arm_effect_rig(
             let mut player = AnimationPlayer::default();
             // The stage owns the repeat policy (`0x60ed00` repeats a clamping precast).
             let life = FxAnimLife::arm(&mut player, clip, stage.unwrap_or(FxStage::OneShot));
-            commands
-                .entity(root)
-                .insert((player, AnimationGraphHandle(anims.graph.clone())));
+            commands.entity(root).insert((
+                player,
+                AnimationGraphHandle(anims.graph.clone()),
+                EffectPlayer,
+            ));
             // The lifecycle watcher, on a `CEffect` only.
             if stage.is_some() {
                 commands.entity(root).insert((life, anims.clone()));
