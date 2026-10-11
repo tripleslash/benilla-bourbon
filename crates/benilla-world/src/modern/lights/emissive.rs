@@ -362,6 +362,7 @@ fn glow_anchor_by<'a>(
         if positions.is_empty() {
             continue;
         }
+        let shift = carried_shift(geometry);
         let mut mid = [0.0f32; 3];
         for p in positions {
             for c in 0..3 {
@@ -369,7 +370,7 @@ fn glow_anchor_by<'a>(
             }
         }
         for c in 0..3 {
-            sum[c] += mid[c] / positions.len() as f32;
+            sum[c] += mid[c] / positions.len() as f32 + shift[c];
         }
         n += 1.0;
     }
@@ -382,12 +383,34 @@ fn glow_anchor_by<'a>(
         if glows(geometry).is_none() {
             continue;
         }
+        let shift = carried_shift(geometry);
         for p in &geometry.positions {
-            let d = (0..3).map(|c| (p[c] - mid[c]).powi(2)).sum::<f32>().sqrt();
+            let d = (0..3)
+                .map(|c| (p[c] + shift[c] - mid[c]).powi(2))
+                .sum::<f32>()
+                .sqrt();
             radius = radius.max(d);
         }
     }
     Some((mid, radius))
+}
+
+/// From where a card's file parks it to where it is seen. A card under a billboard bone is swung
+/// about that bone's pivot ([`benilla_formats::Billboard::carriers`]) and drawn over it from every
+/// side, so its light stands there; any other batch is seen where it is authored.
+fn carried_shift(geometry: &benilla_formats::RenderSubmesh) -> [f32; 3] {
+    geometry
+        .billboard
+        .as_ref()
+        .and_then(|b| {
+            let (seat, _) = b.carriers.first()?;
+            Some([
+                seat[0] - b.pivot[0],
+                seat[1] - b.pivot[1],
+                seat[2] - b.pivot[2],
+            ])
+        })
+        .unwrap_or_default()
 }
 
 /// fork: **a lamp whose glow is its glass.** Some fixtures author neither a light, an emitter nor an
@@ -876,6 +899,40 @@ mod tests {
         assert!(!is_light_fixture(
             "World\\ENVIRONMENT\\DOODAD\\ANQUIRAJ\\Fireflies\\Hive_Fireflies_01.m2"
         ));
+    }
+
+    /// A glow card under a billboard bone lights from that bone's pivot, where the card is drawn
+    /// from every side: a street lamp's head, not the 0.81 yd the file parks the card beside it.
+    #[test]
+    fn a_carried_glow_card_lights_from_its_carriers_pivot() {
+        let glow = |carriers| benilla_formats::RenderSubmesh {
+            additive: true,
+            positions: vec![[-0.81, -2.88, 1.21], [-0.81, 1.29, 5.85]],
+            billboard: Some(benilla_formats::Billboard {
+                pivot: [-0.81, -0.795, 3.53],
+                bone: 2,
+                kind: benilla_formats::BillboardKind::Spherical,
+                carriers,
+                scale_anim: None,
+                seq_translations: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let head = [0.0, -0.8, 3.51];
+        let carried = glow(vec![(head, benilla_formats::BillboardKind::Spherical)]);
+        let (at, radius) = glow_anchor([], [&carried]).unwrap();
+        for c in 0..3 {
+            assert!((at[c] - head[c]).abs() < 1e-3, "{at:?} vs {head:?}");
+        }
+        let (parked, own_radius) = glow_anchor([], [&glow(Vec::new())]).unwrap();
+        assert!(
+            (parked[0] + 0.81).abs() < 1e-3,
+            "a card under no billboard bone lights where it is authored: {parked:?}"
+        );
+        assert!(
+            (radius - own_radius).abs() < 1e-4,
+            "the card keeps its reach"
+        );
     }
 
     /// Darkshire's firefly swarms floated a lamp's halo in the air; a lamp is still a lamp.
