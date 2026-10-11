@@ -1022,6 +1022,33 @@ impl UiScript {
 
     // ── Input: the pointer leaving the window ────────────────────────────────────────────────────
 
+    /// The OS pointer left the window: the hovered frame loses the hover, with its leave notify
+    /// ([`mouseover::leave`]) as a walk that found nothing would run it. It is no cursor event, so
+    /// it feeds no position: no probe runs and a move or size in flight holds its last sample
+    /// (`[root+0xd08]`/`[root+0xd0c]`), as the reference's pump only sees real cursor events
+    /// (`0x7655b0`). The saved cursor position stays too.
+    pub fn pointer_left_hover(&mut self) {
+        let leave = {
+            let mut model = self.model_mut();
+            // A frame destroyed since it took the hover gets no leave.
+            let old = model
+                .mouseover
+                .take()
+                .filter(|&h| model.arena.frame(h).is_some());
+            old.map(|h| {
+                let script = model
+                    .frame_to_id
+                    .get(&h)
+                    .copied()
+                    .filter(|_| button::hover_notify_runs(&model, Some(h)));
+                (h, script)
+            })
+        };
+        if let Some((h, script)) = leave {
+            mouseover::leave(&self.lua, h, script);
+        }
+    }
+
     /// The OS pointer left the window, so no release will be fed: clears [`Model::drag`], which
     /// would start a drag on re-entry, and [`Model::mouse_down_on`], which would click the frame
     /// it left. The app calls it where it fires the synthetic `OnLeave`.
