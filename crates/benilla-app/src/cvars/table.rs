@@ -771,10 +771,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // player opts into rather than one they have to find and switch off. The reasoning lives on the
     // engine constant; the engine owns the number ([`AO_DEFAULT`]) and this string is welded to it
     // below, so the two cannot drift. `$WOW_SSAO` overrides session-only.
-    // fork: 0.6 since 2026-10-03 (the director's call), welded to `AO_DEFAULT` below.
+    // fork: 0.3 since 2026-10-11 (the director's call), welded to `AO_DEFAULT` below.
     ours(
         "ssaoStrength",
-        "0.6",
+        "0.3",
         "benilla's own — the reference renders straight to the backbuffer with no depth to \
          gather over, and its ambient IS the authored `LightParams` row",
     ),

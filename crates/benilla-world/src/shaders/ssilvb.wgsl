@@ -479,13 +479,6 @@ fn fs_blur_v(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// downstream keeps the over-driven half in range.
 const AO_GAIN: f32 = 2.0;
 
-/// [AO_GAIN] in a modern (linear) frame. The occlusion used to reach a modern frame through the
-/// classic composite's ^(1/2.2) as well, and `AO_DEFAULT` was tuned by eye against that strength;
-/// `(1 − k·d)^(1/2.2) ≈ 1 − (k/2.2)·d` for the shallow darkening that makes up most of the frame,
-/// so dividing the gain by 2.2 keeps the shipped 60% looking as it did. Deep creases come out a
-/// little lighter than the old curve put them.
-const AO_GAIN_LINEAR: f32 = AO_GAIN / 2.2;
-
 /// What one unit of the indirect slider is worth. See [AO_GAIN] for why the gains exist at all.
 /// The gather's bounce, enclosed on every side by a uniform radiance L, sums to 2/π · L (the slice
 /// average of the receiver's cosine), and the stand-in albedo is a full-brightness one where a real
@@ -506,8 +499,7 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let indirect = textureLoad(src_tex, vec2<i32>(in.position.xy), 0);
     // At `strength.x == 0` the mix factor is 0 and this is exactly 1.0, so the off state stays a
     // bit-exact no-op no matter what the gain is.
-    let ao_gain = select(AO_GAIN, AO_GAIN_LINEAR, frame_is_linear());
-    let occlusion = saturate(mix(1.0, saturate(indirect.a), params.strength.x * ao_gain));
+    let occlusion = saturate(mix(1.0, saturate(indirect.a), params.strength.x * AO_GAIN));
     let bounce = max(indirect.rgb, vec3<f32>(0.0)) * (params.strength.y * GI_GAIN);
     // The sum must NOT be saturated: a bounce is the one thing here that legitimately pushes a
     // factor above one, and clamping it at one meant the whole colour-bleed half did nothing

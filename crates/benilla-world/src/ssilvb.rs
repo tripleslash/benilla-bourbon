@@ -85,8 +85,10 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 /// the middle gets exactly what this used to ship. Raise the look in the gain, never here.
 ///
 /// fork: **0.6 since 2026-10-03** (the director's call) — the modern look wants the contact darkening on
-/// by default.
-pub const AO_DEFAULT: f32 = 0.6;
+/// by default. **0.3 since 2026-10-11** (the director's call): a modern frame now takes the
+/// occlusion in linear light rather than through the gamma lane's ^(1/2.2), which roughly doubled
+/// its strength at any one setting; 0.3 matches the old 0.6 to first order.
+pub const AO_DEFAULT: f32 = 0.3;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
 pub const GI_DEFAULT: f32 = 0.0;
@@ -677,7 +679,7 @@ mod tests {
     fn the_shipped_defaults_are_the_ones_the_cvars_register() {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
-        assert_eq!(AO_DEFAULT, 0.6); // fork: 0.6 since 2026-10-03
+        assert_eq!(AO_DEFAULT, 0.3); // fork: 0.3 since 2026-10-11
         assert_eq!(GI_DEFAULT, 0.0);
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
