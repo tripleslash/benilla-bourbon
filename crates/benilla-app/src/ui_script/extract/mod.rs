@@ -105,7 +105,19 @@ fn content_kind(c: &QuadContent) -> &'static str {
 /// Which axes run past the texture, the reference's tiling idiom (`SetTexCoord(0, n, 0, 1)`
 /// repeats the art n times), and so sample `Repeat`; a bounded axis on `Repeat` would filter its
 /// edge against the opposite one. Its tolerance must match [`uv_clamp_window`]'s.
+///
+/// Only an axis-aligned mapping tiles. A rotated quad, `SetTexCoord`'s eight-number form as stock
+/// `TaxiFrame.lua`'s `DrawRouteLine` draws a route, runs past the texture in its bounding box's
+/// slack corners, which must clamp onto `UI-Taxi-Line.blp`'s transparent border
+/// (`TAXIROUTE_LINEFACTOR` = 32/30 scales the box for that border): repeated, each corner draws a
+/// neighbouring copy of the line beside it.
 pub(crate) fn tiling_axes(uv: &UvRect) -> (bool, bool) {
+    let [tl, tr, _, bl] = uv.corners;
+    let one_axis =
+        |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1.0e-4 || (a[1] - b[1]).abs() < 1.0e-4;
+    if !(one_axis(tl, tr) && one_axis(tl, bl)) {
+        return (false, false);
+    }
     let past = |axis: usize| {
         uv.corners
             .iter()
@@ -1633,6 +1645,37 @@ mod uv_clamp_tests {
             tiling_axes(&UvRect::from_tex_coords([0.453125, 0.875, 0.0, 1.0])),
             (false, false)
         );
+    }
+
+    /// A taxi route line: stock `DrawRouteLine`'s `dy >= 0` arm for a hop 100 right and 60 up at
+    /// width 32, its `SetTexCoord(TLx, TLy, BLx, BLy, TRx, TRy, BRx, BRy)` stored as `paint.rs`
+    /// stores it. The quad runs past the texture on both axes, and still tiles neither.
+    #[test]
+    fn a_rotated_route_line_tiles_nothing() {
+        let (dx, dy, w) = (100.0f32, 60.0f32, 32.0f32);
+        let l = (dx * dx + dy * dy).sqrt();
+        let (s, c) = (-dy / l, dx / l);
+        let sc = s * c;
+        let (blx, bly, bry) = ((w / l) * sc, s * s, (l / w) * sc);
+        let (brx, tlx, tly, trx) = (1.0 - bly, bly, 1.0 - bry, 1.0 - blx);
+        let try_ = brx;
+        let uv = UvRect::from_corners([[tlx, tly], [trx, try_], [brx, bry], [blx, bly]]);
+        assert!(
+            uv.corners
+                .iter()
+                .any(|c| !(0.0..=1.0).contains(&c[0]) || !(0.0..=1.0).contains(&c[1])),
+            "the route quad reaches past the texture: {:?}",
+            uv.corners
+        );
+        assert_eq!(tiling_axes(&uv), (false, false));
+    }
+
+    /// A quarter turn is still axis-aligned (a backdrop edge maps atlas u to screen y): it tiles by
+    /// its ranges as a plain strip does.
+    #[test]
+    fn a_quarter_turned_strip_still_tiles() {
+        let uv = UvRect::from_corners([[0.0, 0.0], [0.0, 3.0], [1.0, 3.0], [1.0, 0.0]]);
+        assert_eq!(tiling_axes(&uv), (false, true));
     }
 
     #[test]
