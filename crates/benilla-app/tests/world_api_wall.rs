@@ -103,6 +103,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("doodad_anim::MatAnim", "record"),
     ("doodad_anim::TintLoop", "record"),
     ("doodad_anim::UvLoops", "record"),
+    ("doodad_anim::is_ship_prop", "wall"),
     ("doodad_anim::register_entity_uv", "record"),
     ("doodad_anim::register_fx_uv", "record"),
     ("doodad_anim::register_tint", "record"),
@@ -111,20 +112,30 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("ffx_glow::FfxGlow", "record"),
     ("ffx_glow::FfxSwitches", "record"),
     ("ffx_glow::GlueFfx", "record"),
+    ("ffx_glow::ffx_transparent_pass_2d", "wall"),
     ("final_pass::FinalPassTarget", "record"),
+    ("fsr::FgBlocked", "wall"),
+    ("fsr::FrameGeneration", "wall"),
+    ("fsr::FsrView", "wall"),
+    ("fsr::PresentsHeldFrames", "wall"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
     ("interact::PickMesh", "record"),
+    ("interact::PosedPickScratch", "wall"),
     ("interact::WorldObject", "record"),
     ("interact::WorldPick", "record"),
     ("interact::cast_pick_ray", "record"),
     ("interior::NodeAmbient", "record"),
     ("launch_env::seed", "wall"),
     ("launch_env::set_live_reader", "wall"),
+    ("lighting::LavaLightGain", "wall"),
     ("lighting::LightBlob", "record"),
     ("lighting::LightOwner", "wall"),
+    ("lighting::SpellFxLight", "wall"),
+    ("lighting::WorldPointLight", "wall"),
     ("lighting::WorldTime", "record"),
     ("lighting::WowLighting", "record"),
+    ("lighting::flame_flicker", "wall"),
     ("liquid::UNMIRRORED_RENDER_LAYER", "wall"),
     ("liquid::WaterDetail", "wall"),
     ("mac_quit::MacQuitPlugin", "record"),
@@ -155,6 +166,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("modkeys::SyntheticHold", "wall"),
     ("particles::ParticleTuning", "record"),
     ("particles::ViewThrottled", "record"),
+    ("particles::buffer::EffectMotion", "wall"),
     ("particles::render::EFFECT_DRAW_STATS", "record"),
     ("particles::spawn_emitter", "record"),
     ("ride_frame::RideFrame", "record"),
@@ -187,6 +199,9 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("vis_chain::VisChainOnly", "record"),
     ("weather::WeatherMessage", "record"),
     ("weather::WeatherState", "record"),
+    ("weather::wetness::RainSurfaces", "wall"),
+    ("wind::FoliageWind", "wall"),
+    ("wind::FoliageWindStrength", "wall"),
     ("wmo_portal::room_pvs_visible", "record"),
     ("world_census::CensusReport", "record"),
     ("world_census::WorldCensus", "record"),
@@ -309,8 +324,11 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// This fork's engine work publishes its own doors as `wall` rows in [`PUBLISHED`]: the water and
 /// lighting tier knobs (`liquid::WaterDetail`, `modern::Lighting*`), the indirect-lighting pass
 /// (`ssilvb::*`), the shadow-caster marker, the mirror's render layer, the entity lane's light
-/// derivation (`modern::lights::*`) and the page's launch keys (`launch_env::*`). They gate
-/// nothing; only the leaks do.
+/// derivation (`modern::lights::*`) and the page's launch keys (`launch_env::*`); and FSR's frame
+/// generation (`fsr::*`, `ffx_glow::ffx_transparent_pass_2d`), the light lanes it drives
+/// (`lighting::WorldPointLight`, `SpellFxLight`, `LavaLightGain`, `flame_flicker`), the foliage
+/// wind and wet surfaces' settings, the transport's prop test, the posed pick's scratch and the
+/// effect lane's motion. They gate nothing; only the leaks do.
 const LEAK_CEILING: usize = 107;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be

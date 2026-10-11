@@ -41,6 +41,9 @@
 //! bevy_render = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! event-listener = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! parking = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! web-task = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! # fork: bevy_winit 0.19.1 without the runner's per-event query rebuilds (the browser's frame).
+//! bevy_winit = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! # fork: wgpu 29 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
 //! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //!
