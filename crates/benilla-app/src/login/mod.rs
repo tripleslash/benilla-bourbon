@@ -114,7 +114,8 @@ pub(crate) struct LoginIntent {
     creds: Option<(String, String)>,
     /// Between our send and its LoginFailed or CharacterList answer.
     in_flight: bool,
-    /// The in-flight submit came from the screen, which shows its connecting dialog and failure.
+    /// The attempt is a person's (the screen's submit, or a realm picked by hand), so its failure
+    /// shows and nothing silently resubmits it.
     announced: bool,
     park: IoPark,
     /// `Time::elapsed_secs` deadline for the next silent resubmit.
@@ -137,6 +138,12 @@ impl LoginIntent {
             self.in_flight = false;
             self.clear();
         }
+    }
+
+    /// A realm Okay'd by hand: its entry's failure is the player's to read, as a typed submit's
+    /// is, so it shows `LOGIN_FAILED` and is not resubmitted into the remembered realm.
+    pub(crate) fn realm_chosen(&mut self) {
+        self.announced = true;
     }
 
     /// The account this session authenticated as, from the env fast path or the screen; it
@@ -462,8 +469,9 @@ fn drive_policy(
     for msg in failures.read() {
         attempt.intent.in_flight = false;
         attempt.intent.park = IoPark::AtLogin;
-        // `announced` is set only by the screen's submit, and `LoginIntent::clear` leaves it, so
-        // it says a person typed this attempt; only an untyped attempt may end the run.
+        // `announced` is set only by the screen's submit or a realm picked by hand, and
+        // `LoginIntent::clear` leaves it, so it says a person made this attempt; only an
+        // unattended one may end the run.
         let typed = attempt.intent.announced;
         let may_end_the_run = !typed && !smoke;
         if msg.terminal {

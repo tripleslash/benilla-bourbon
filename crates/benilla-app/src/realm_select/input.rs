@@ -62,7 +62,7 @@ pub(super) fn clicks(
         }
     }
     if enter {
-        try_enter(&mut realms, &mut commands, &mut sounds);
+        try_enter(&mut realms, &mut intent, &mut commands, &mut sounds);
     }
     if let Some(with_sound) = leave {
         do_cancel(&mut realms, &choice, &mut intent, &mut sounds, with_sound);
@@ -84,7 +84,7 @@ pub(crate) fn keys(
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        try_enter(&mut realms, &mut commands, &mut sounds);
+        try_enter(&mut realms, &mut intent, &mut commands, &mut sounds);
         return;
     }
 
@@ -172,11 +172,18 @@ fn do_cancel(
     intent.realm_list_cancelled();
 }
 
-/// `RealmList_OnOk`: play the click, hide the frame, answer the park.
+/// `RealmList_OnOk`: play the click, hide the frame, answer the park. The entry is the player's,
+/// so a world server that cannot be reached shows its failure rather than a silent re-login into
+/// the remembered realm ([`crate::login::LoginIntent::realm_chosen`]).
 ///
 /// Not built: the reference's `REALM_IS_FULL` Yes/No confirm for a `Full` realm with no characters
 /// on it; ours enters directly. `Full` is the `0x80` flag, which vmangos never sets.
-fn try_enter(realms: &mut Realms, commands: &mut Commands, sounds: &mut MessageWriter<GlueSound>) {
+fn try_enter(
+    realms: &mut Realms,
+    intent: &mut crate::login::LoginIntent,
+    commands: &mut Commands,
+    sounds: &mut MessageWriter<GlueSound>,
+) {
     let Some(realm) = realms.selected() else {
         return; // the reference disables Okay with nothing highlighted
     };
@@ -184,6 +191,7 @@ fn try_enter(realms: &mut Realms, commands: &mut Commands, sounds: &mut MessageW
         return; // the reference disables OK for an offline realm
     }
     let name = realm.name.clone();
+    intent.realm_chosen();
     sounds.write(GlueSound("gsLoginChangeRealmOK"));
     realms.hide();
     realms.store_front_category();
