@@ -409,8 +409,9 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
-    // The model pane's two, fired by the tick's model pass (`tick_model_panes`): `OnUpdateModel`
-    // at the top of a visible pane's paint, `OnAnimFinished` when the armed sequence completes.
+    // The model pane's two: `OnUpdateModel` from its paint in the draw pass
+    // (`paint_model_panes`), `OnAnimFinished` from its clock advance in the update walk
+    // (`advance_pane`) when the armed sequence completes.
     "OnUpdateModel",
     "OnAnimFinished",
     "OnShow",
@@ -1029,7 +1030,8 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         let mut model = self.model_mut();
-        let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
+        let held: Vec<crate::widget::FrameHandle> =
+            model.mouse_down_on.values().copied().flatten().collect();
         model.mouse_down_on.clear();
         // Every held button gets the release edge never fed (`0x7793de`), else it stays pushed.
         for h in held {

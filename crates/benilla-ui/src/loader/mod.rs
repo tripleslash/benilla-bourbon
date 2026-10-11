@@ -690,12 +690,20 @@ impl Loader<'_> {
         // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, `0x767800`).
         self.apply_size(el, wrapper, dbg_name);
         self.apply_anchors(el, wrapper, parent_name, dbg_name);
-        // 5 · <Layers> regions (`0x769d70`); `$parent` in a region name is this frame.
-        self.apply_layers(el, wrapper, self_name, dbg_name);
+        // 5 · <Layers> regions (`0x769d70`) and the <Backdrop> plate (`0x77e6c0`), whose nine
+        //     pieces are regions too, in document order: both are arms of the one child loop
+        //     (`0x769b1c`), so the order they link into `GetRegions` is the file's. A template's
+        //     children come first, as its LoadXML runs first. `$parent` in a region name is this
+        //     frame.
+        for child in &el.children {
+            if child.tag.eq_ignore_ascii_case("Layers") {
+                self.apply_layers(child, wrapper, self_name, dbg_name);
+            } else if child.tag.eq_ignore_ascii_case("Backdrop") {
+                self.apply_backdrop(child, wrapper, dbg_name);
+            }
+        }
         // 5·b · a direct-child `<FontString>`: the widget's own text font (EditBox, message frame).
         self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
-        // 5a · <Backdrop> plate (LoadXML `0x77e6c0`): the tiled bg + 8-piece border.
-        self.apply_backdrop(el, wrapper, dbg_name);
         // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
         self.apply_title_region(el, wrapper, self_name, dbg_name);
         // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
@@ -710,6 +718,9 @@ impl Loader<'_> {
         self.apply_minimap(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (`0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
+        // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
+        //      inside the load window, so ahead of every <Frames> child and of our own OnLoad.
+        self.apply_scrollframe(el, wrapper, self_name, dbg_name);
 
         // 7 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
         //     <Frames>, whose OnLoads fire before ours (`0x76a060`).
@@ -718,26 +729,6 @@ impl Loader<'_> {
             for child in &frames_el.children {
                 let expanded = self.expand(child);
                 self.materialize(&expanded, Some(wrapper), self_name);
-            }
-        }
-
-        // 7b · <ScrollChild>: its one child is built through `Instantiate 0x6ee280` like
-        //      `<Frames>`, then stored at `+0x318` with `+0x314 = 1`, which is `SetScrollChild`
-        //      and gives the ScrollFrame its scroll range. An empty one errors in the reference.
-        for sc in children_named(el, "ScrollChild") {
-            let Some(child) = sc.children.first() else {
-                self.report.fault(format!(
-                    "{dbg_name}: <ScrollChild> is empty — the reference errors here, and a \
-                     ScrollFrame with no child has no scroll range at all"
-                ));
-                continue;
-            };
-            let expanded = self.expand(child);
-            let Some(child_wrapper) = self.materialize(&expanded, Some(wrapper), self_name) else {
-                continue; // materialize already reported why
-            };
-            if let Err(e) = wrapper.call_method::<()>("SetScrollChild", child_wrapper) {
-                self.report.fault(format!("{dbg_name}: <ScrollChild>: {e}"));
             }
         }
 

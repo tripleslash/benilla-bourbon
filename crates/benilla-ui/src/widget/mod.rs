@@ -120,12 +120,13 @@ mod kinds;
 pub use kinds::{
     model_key, slider_fraction, slider_grab, slider_set_value, ArmedSequence, ButtonFont,
     ButtonState, ButtonVisualState, ColorSelectState, EditAction, EditBoxState, EditOutcome,
-    EditUnit, FrameKind, InsertMode, KindState, MessageFrameState, MessageLine, MinimapState,
-    ModelFileFacts, ModelFog, ModelLight, ModelPlayHead, ModelState, RegionKind, ScrollFrameState,
-    ScrollingMessageState, SequenceFacts, SliderState, StatusBarState, TooltipAnchor, TooltipState,
-    MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
-    MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
-    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
+    EditUnit, FrameKind, InsertMode, KindState, KindUpdate, MessageFrameState, MessageLine,
+    MinimapState, ModelFileFacts, ModelFog, ModelLight, ModelPlayHead, ModelState, RegionKind,
+    ScrollFrameState, ScrollingMessageState, SequenceFacts, SliderState, StatusBarState,
+    TooltipAnchor, TooltipState, MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK,
+    MINIMAP_DEFAULT_PLAYER_MODEL, MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN,
+    MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
+    TOOLTIP_WRAP_WIDTH,
 };
 
 // ── Frame and Region nodes ───────────────────────────────────────────────────────────────────
@@ -212,6 +213,9 @@ pub struct Frame {
     /// The link position in the `(strata, level)` bucket, re-stamped at the tail on each relink.
     /// Drawing puts the later-linked frame on top; the hit test probes the earlier-linked first.
     pub insertion_seq: u32,
+    /// The place on the list of every live frame (`root+0xcc4`), which the constructor appends to
+    /// (`0x76930d` → `0x7646a0`): creation order, which arena order is not once a slot is reused.
+    created: u64,
     pub kind_state: KindState,
     next_decl: u32,
 }
@@ -250,6 +254,12 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
+    /// Each stratum's level bound, the reference's `bucket+0x8`: one above the highest level a
+    /// visible frame has linked at since the last compaction set it. It starts at 0 and only a
+    /// visible link grows it ([`Self::link_bound`]); nothing else lowers it but the compaction.
+    level_bound: [u32; Strata::ALL.len()],
+    /// The next [`Frame::created`].
+    next_created: u64,
     /// How many times the link stamps were renumbered at the cap, so a reader holding stamps can
     /// tell they are still comparable with the live ones.
     renumbers: u32,
@@ -260,15 +270,18 @@ pub struct WidgetArena {
     pub(crate) order_cache: crate::order::OrderCache,
     /// Minimap frames ever created, so the state feed notices a new one without a walk.
     minimap_created: u64,
-    /// The live frames the host ticks (message fades, model scene clocks), so the tick skips the
-    /// rest of the arena. Added at creation, as kinds never change; `destroy` removes its own.
+    /// The live message frames and model panes, so the host's passes over them (message fades,
+    /// model paint) skip the rest of the arena. Added at creation, as kinds never change;
+    /// `destroy` removes its own.
     ticked_kinds: Vec<FrameHandle>,
-    /// The live GameTooltips, kept the same way, for the layout pre-pass, fade tick and unit push.
+    /// The live frames whose kind has a [`KindUpdate`], kept the same way: the update walk reaches
+    /// each one shown, with an `OnUpdate` or without.
+    walked_kinds: Vec<FrameHandle>,
+    /// The live GameTooltips, kept the same way, for the layout pre-pass and unit push.
     tooltip_kinds: Vec<FrameHandle>,
     /// The live Minimaps, kept the same way, for the containment, zoom and arrow-facing feeds.
     minimap_kinds: Vec<FrameHandle>,
-    /// The live EditBoxes, kept the same way, for the resize re-seat (`reseat_resized`) and the
-    /// tick's walk, which flushes every shown box.
+    /// The live EditBoxes, kept the same way, for the resize re-seat (`reseat_resized`).
     editbox_kinds: Vec<FrameHandle>,
 }
 
@@ -307,11 +320,14 @@ impl WidgetArena {
             regions: Arena::new(),
             names: HashMap::new(),
             next_insertion: 0,
+            level_bound: [0; Strata::ALL.len()],
+            next_created: 0,
             renumbers: 0,
             link_log: None,
             minimap_created: 0,
             order_cache: Default::default(),
             ticked_kinds: Vec::new(),
+            walked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
             editbox_kinds: Vec::new(),
@@ -326,6 +342,11 @@ impl WidgetArena {
     /// The frames the host advances each tick.
     pub fn ticked_kinds(&self) -> &[FrameHandle] {
         &self.ticked_kinds
+    }
+
+    /// The frames whose kind has an update of its own in the walk ([`FrameKind::kind_update`]).
+    pub fn walked_kinds(&self) -> &[FrameHandle] {
+        &self.walked_kinds
     }
 
     pub fn tooltip_kinds(&self) -> &[FrameHandle] {
@@ -392,13 +413,26 @@ impl WidgetArena {
             self.renumbers += 1;
         }
         let seq = self.next_insertion;
+        let mut linked = None;
         if let Some(f) = self.frame_mut(h) {
             f.insertion_seq = seq;
+            linked = Some((f.strata, f.level));
             self.next_insertion += 1;
             if let Some(log) = &mut self.link_log {
                 log.push(h);
             }
         }
+        if let Some((strata, level)) = linked {
+            self.link_bound(strata, level);
+        }
+    }
+
+    /// A visible frame linked into `strata` at `level`: the stratum's bound grows to one above it
+    /// (`0x764882`-`0x764887`, inside the bucket add `0x764780`, which the level setter reaches
+    /// only for a visible frame, `0x76a541`). A hidden frame's level never reaches it.
+    fn link_bound(&mut self, strata: Strata, level: u16) {
+        let bound = &mut self.level_bound[strata.index() as usize];
+        *bound = (*bound).max(u32::from(level) + 1);
     }
 
     /// Start recording every link into a bucket, for the update walk (`0x765650`), which must see
@@ -446,6 +480,8 @@ impl WidgetArena {
 
         let insertion_seq = self.next_insertion;
         self.next_insertion += 1;
+        let created = self.next_created;
+        self.next_created += 1;
 
         let shown = true;
         let scale = 1.0f32;
@@ -496,6 +532,7 @@ impl WidgetArena {
             ignore_parent_scale: false,
             wow_id: 0,
             insertion_seq,
+            created,
             kind_state: match kind {
                 FrameKind::StatusBar => KindState::StatusBar(StatusBarState::default()),
                 // `CLootButton` and `CSimpleCheckbox` extend `CSimpleButton` by one field each,
@@ -539,15 +576,20 @@ impl WidgetArena {
                 | FrameKind::TabardModel
         );
         let visible = frame.effective_visible;
+        let (strata, level) = (frame.strata, frame.level);
         let (index, generation) = self.frames.insert(frame);
         let handle = FrameHandle { index, generation };
         if visible {
+            self.link_bound(strata, level);
             if let Some(log) = &mut self.link_log {
                 log.push(handle);
             }
         }
         if ticked {
             self.ticked_kinds.push(handle);
+        }
+        if kind.kind_update().is_some() {
+            self.walked_kinds.push(handle);
         }
         if matches!(kind, FrameKind::GameTooltip) {
             self.tooltip_kinds.push(handle);
@@ -618,6 +660,7 @@ impl WidgetArena {
         let name = frame.name.clone();
         // Each recursive call removes its own handle, so the registries hold no dead frame.
         self.ticked_kinds.retain(|&t| t != h);
+        self.walked_kinds.retain(|&t| t != h);
         self.tooltip_kinds.retain(|&t| t != h);
         self.minimap_kinds.retain(|&t| t != h);
         self.editbox_kinds.retain(|&t| t != h);
@@ -648,12 +691,7 @@ impl WidgetArena {
         draw_layer: DrawLayer,
         sub_level: i8,
     ) -> Option<RegionHandle> {
-        let decl_seq = {
-            let f = self.frame_mut(owner)?;
-            let d = f.next_decl;
-            f.next_decl += 1;
-            d
-        };
+        let decl_seq = self.take_decl(owner)?;
         let (index, generation) = self.regions.insert(Region {
             kind,
             owner,
@@ -670,15 +708,38 @@ impl WidgetArena {
         Some(handle)
     }
 
-    /// Free one region, as only `CSimpleHTML::SetText` does in the client, pool-freeing the last
-    /// parse's blocks (`0x78adc6`). The caller drops the region's script-model state too, and never
-    /// frees a region some state holds by handle.
+    /// The next declaration seq on `owner`, the region's link position. At the draw key's cap the
+    /// frame's regions renumber from 0 in link order (`regions` ascends by seq), so a frame that
+    /// rebuilds regions for ever, a backdrop set on every show, keeps its order and never
+    /// outgrows the key.
+    pub(crate) fn take_decl(&mut self, owner: FrameHandle) -> Option<u32> {
+        if self.frame(owner)?.next_decl >= crate::order::DECL_CAP {
+            let regions = self.frame(owner)?.regions.clone();
+            let mut next = 0;
+            for rh in regions {
+                if let Some(r) = self.region_mut(rh) {
+                    r.decl_seq = next;
+                    next += 1;
+                }
+            }
+            self.frame_mut(owner)?.next_decl = next;
+        }
+        let f = self.frame_mut(owner)?;
+        let d = f.next_decl;
+        f.next_decl += 1;
+        Some(d)
+    }
+
+    /// Free one region, as `CSimpleHTML::SetText` pool-frees the last parse's blocks (`0x78adc6`)
+    /// and a backdrop's teardown its nine pieces (`0x77f4d0`). The caller drops the region's
+    /// script-model state too, and never frees a region some state holds by handle.
     pub fn destroy_region(&mut self, h: RegionHandle) -> bool {
         let Some(region) = self.region(h) else {
             return false;
         };
         let owner = region.owner;
         if let Some(f) = self.frame_mut(owner) {
+            f.kind_state.region_removed(h);
             f.regions.retain(|&r| r != h);
             if f.title_region == Some(h) {
                 f.title_region = None;

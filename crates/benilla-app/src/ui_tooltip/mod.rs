@@ -58,6 +58,13 @@ enum LastHover {
     Corpse(u64),
 }
 
+/// The publisher's teardown (`0x4928d5`–`0x492909`): every change of the mouseover away from a
+/// non-null one requests the fade (`0x530ae0`) before the new plate builds, so a cursor-seated
+/// plate hides and the next one shows afresh; a first hover has nothing to tear down.
+fn fades_on_change(last: LastHover, next: LastHover) -> bool {
+    last != LastHover::None && last != next
+}
+
 /// The world-hover driver's memory, one `SystemParam` because the driver is at Bevy's 16-param
 /// ceiling.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -163,6 +170,10 @@ fn drive_mouseover_tooltip(
         script.set_unit("mouseover", Some(state));
         *published = true;
         if *last != LastHover::Unit(guid) || last_lines.as_ref() != Some(&key) {
+            // A late name rebuilds under the same hover with no teardown.
+            if fades_on_change(*last, LastHover::Unit(guid)) {
+                script.world_tooltip_fade();
+            }
             script.world_tooltip_unit("mouseover");
             *last = LastHover::Unit(guid);
             *last_lines = Some(key);
@@ -213,7 +224,10 @@ fn drive_mouseover_tooltip(
         ) else {
             return;
         };
-        script.world_tooltip_gameobject(&plate, &[], None);
+        if fades_on_change(*last, LastHover::Corpse(guid)) {
+            script.world_tooltip_fade();
+        }
+        script.world_tooltip_gameobject(&plate, &[], false);
         *last = LastHover::Corpse(guid);
         return;
     }
@@ -252,10 +266,8 @@ fn drive_mouseover_tooltip(
                     *trace = line;
                 }
             }
-            // The cursor arm follows the pointer; the corner arm has nothing to re-seat.
-            if let Some((x, y)) = cursor_ui {
-                script.world_tooltip_move(x, y);
-            }
+            // A cursor-seated plate follows the pointer in its own update (mode 6); the corner arm
+            // has nothing to re-seat.
             return;
         }
         if cursor_seated && cursor_ui.is_none() {
@@ -344,12 +356,15 @@ fn drive_mouseover_tooltip(
                 _ => {}
             }
         }
-        script.world_tooltip_gameobject(&template.name, &lines, cursor_ui);
+        if fades_on_change(*last, LastHover::Go(guid)) {
+            script.world_tooltip_fade();
+        }
+        script.world_tooltip_gameobject(&template.name, &lines, cursor_seated);
         *last = LastHover::Go(guid);
         return;
     }
-    if !matches!(*last, LastHover::None) {
-        // Hover lost: arm the fade (`0x492909` → `0x530ae0`).
+    if fades_on_change(*last, LastHover::None) {
+        // Hover lost: the same teardown, with no plate after it.
         script.world_tooltip_fade();
         *last = LastHover::None;
     }

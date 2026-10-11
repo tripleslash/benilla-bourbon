@@ -144,36 +144,45 @@ impl WidgetArena {
     }
 
     /// Level compaction (`0x764eb0`), run by `CSimpleTop::Raise` (`0x7650f0`) before it sets the
-    /// raised frame's level to the returned count: renumber the occupied levels of `strata` in
-    /// order, hidden frames included (the scan tests only strata and level, `0x764f18`/`0x764f20`),
-    /// without propagating (`0x764faf`). `level` is written directly, so `insertion_seq` survives
-    /// where the reference re-levels through `0x76a4f0` (`0x764fb6`) and relinks visible frames.
+    /// raised frame's level to the stratum's level bound (`0x7651d0`/`0x7651d3`):
+    /// renumber the occupied levels below the bound in order, hidden frames included (the scan
+    /// tests only strata and level, `0x764f18`/`0x764f20`), and set the bound to the count. Only
+    /// the levels below the bound are examined (`0x764f4c`) and moved (`0x764fcf`), so a frame
+    /// given a level above it while hidden is neither counted nor moved. Each frame of a shifted
+    /// level moves through [`Self::set_frame_level`] without propagating (`0x764faf`/`0x764fb6`),
+    /// the levels from the bottom and each in creation order (`0x764f80`-`0x764fc9`), so a moved
+    /// visible frame relinks and a shifted level's visible frames end in creation order. A frame
+    /// whose level holds is not moved.
     ///
     /// Deviation: levels pack contiguously, because the reference's resuming cursor
-    /// (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at count 7 gives {0, 1, 3}
-    /// at count 4) that no draw or hit order can see.
+    /// (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at bound 7 gives {0, 1, 3}
+    /// at bound 4). No draw or hit order sees the hole, but the raised frame takes the bound, so
+    /// `GetFrameLevel` shows one level more there than here.
     pub fn compact_levels(&mut self, strata: Strata) -> u16 {
+        let bound = self.level_bound[strata.index() as usize];
+        let below = |f: &super::Frame| f.strata == strata && u32::from(f.level) < bound;
         let mut occupied: Vec<u16> = self
             .iter_frames()
-            .filter(|(_, f)| f.strata == strata)
+            .filter(|(_, f)| below(f))
             .map(|(_, f)| f.level)
             .collect();
         occupied.sort_unstable();
         occupied.dedup();
-        let renumber: Vec<(FrameHandle, u16)> = self
+        let mut moves: Vec<(u16, u64, FrameHandle, u16)> = self
             .iter_frames()
-            .filter(|(_, f)| f.strata == strata)
+            .filter(|(_, f)| below(f))
             .filter_map(|(h, f)| {
                 let idx = occupied.binary_search(&f.level).ok()? as u16;
-                (idx != f.level).then_some((h, idx))
+                (idx != f.level).then_some((f.level, f.created, h, idx))
             })
             .collect();
-        for (h, level) in renumber {
-            if let Some(f) = self.frame_mut(h) {
-                f.level = level;
-            }
+        moves.sort_unstable_by_key(|&(from, created, ..)| (from, created));
+        for (_, _, h, level) in moves {
+            self.set_frame_level(h, level, false);
         }
-        occupied.len() as u16
+        let count = occupied.len() as u16;
+        self.level_bound[strata.index() as usize] = u32::from(count);
+        count
     }
 
     // ── Toplevel ─────────────────────────────────────────────────────────────────────────────────
@@ -344,6 +353,13 @@ impl WidgetArena {
             None if was_detached => return false,
             _ => {}
         }
+        // Leaving its parent runs the parent's region-removed hook (`0x77fd55`); a detached
+        // region already left.
+        if !was_detached {
+            if let Some(of) = self.frame_mut(old_owner) {
+                of.kind_state.region_removed(rh);
+            }
+        }
         let Some(new_owner) = new_owner else {
             if let Some(r) = self.region_mut(rh) {
                 r.detached = true;
@@ -353,12 +369,7 @@ impl WidgetArena {
         if let Some(of) = self.frame_mut(old_owner) {
             of.regions.retain(|&r| r != rh);
         }
-        let decl_seq = {
-            let f = self.frame_mut(new_owner).expect("live new owner");
-            let d = f.next_decl;
-            f.next_decl += 1;
-            d
-        };
+        let decl_seq = self.take_decl(new_owner).expect("live new owner");
         if let Some(r) = self.region_mut(rh) {
             r.owner = new_owner;
             r.decl_seq = decl_seq;

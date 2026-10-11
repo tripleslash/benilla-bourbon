@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 
 use crate::layout::{self, Anchor, LayoutInput, Point, Rect};
-use crate::order::ZTarget;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle};
 
-use super::backdrop;
 use super::types::RegionData;
-use super::{ExtractedQuad, MeasureRequest, Model, QuadContent, UiScript, SCREEN};
+use super::{MeasureRequest, Model, UiScript, SCREEN};
 
 /// A frame's `effective_alpha` and `effective_scale`, worn by the quads it emits itself.
 #[derive(Clone, Copy)]
@@ -196,8 +194,6 @@ const REGION_TAG: u32 = 0x8000_0000;
 pub(crate) struct LayoutScope {
     /// Per id: the hash the last converged resolve saw, or [`NO_NODE`]; a mismatch seeds dirty.
     last: Vec<u64>,
-    /// How many ids `last` holds a hash for; a pass matching fewer lost a node: full scope.
-    last_count: usize,
     /// The screen `last` was hashed under, every chain's root, so a move is full scope.
     last_screen: Option<Rect>,
     /// This pass's hash per id (parallel to `last`); swapped into `last` on convergence.
@@ -236,7 +232,11 @@ struct RegionRow {
 impl LayoutScope {
     /// Size the per-id arrays for `n` ids and clear all but `last`, ahead of a full derivation.
     fn begin_full(&mut self, n: usize) {
-        self.last.resize(n, NO_NODE);
+        // `last` only grows: a dead node past the new count keeps its hash, so the scope still
+        // seeds what anchored to it.
+        if self.last.len() < n {
+            self.last.resize(n, NO_NODE);
+        }
         self.now.clear();
         self.now.resize(n, NO_NODE);
         self.node_of.clear();
@@ -359,7 +359,7 @@ impl LayoutScope {
         }
     }
 
-    /// Mark every node dirty, for what a per-node diff cannot see (a death, a screen move).
+    /// Mark every node dirty, for what a per-node diff cannot see (no memory, a screen move).
     fn dirty_all(&mut self) {
         for (id, &n) in self.node_of.iter().enumerate() {
             if n != u32::MAX {
@@ -369,14 +369,13 @@ impl LayoutScope {
     }
 
     /// Adopt this pass's hashes as the converged memory.
-    fn commit(&mut self, count: usize, screen: Rect) {
+    fn commit(&mut self, screen: Rect) {
         std::mem::swap(&mut self.last, &mut self.now);
-        self.last_count = count;
         self.last_screen = Some(screen);
     }
 
-    /// [`Self::commit`] for an incremental pass: only the re-hashed slots. `last_count` and
-    /// `last_screen` stay, since a structural change always takes the full path.
+    /// [`Self::commit`] for an incremental pass: only the re-hashed slots. `last_screen` stays,
+    /// since a structural change always takes the derivation.
     fn commit_incremental(&mut self) {
         for &(id, h) in &self.staged {
             self.last[id as usize] = h;
@@ -386,7 +385,6 @@ impl LayoutScope {
 
     /// Forget the memory, so the next resolve derives the graph in full scope.
     pub(crate) fn invalidate(&mut self) {
-        self.last_count = 0;
         self.last_screen = None;
         self.last.clear();
         // The roster and `node_of` too: `has_node` must not vouch for a node the memory forgot.
@@ -520,7 +518,12 @@ impl UiScript {
     /// as `UpdateScrollChildRect` must report a range reflecting a same-tick `SetHeight`.
     pub(super) fn resolve_layout(model: &mut Model) {
         Self::name_landed_art(model);
+        let solves = model.layout_solves;
         Self::resolve_layout_inner(model);
+        // A solve may have resized a frame: its backdrop re-runs its texcoords (`0x76b580`).
+        if model.layout_solves != solves {
+            super::backdrop::after_resolve(model);
+        }
         if !model.layout_verify_recheck {
             return;
         }
@@ -657,7 +660,6 @@ impl UiScript {
         // ── The incremental seed ─────────────────────────────────────────────
         // Re-hash only the named nodes and seed those whose hash moved. It runs before the gate
         // because on this path it is the verdict: an empty seed set means nothing moved.
-        let mut scope_nodes = 0usize;
         let mut full_scope = false;
         if let Some(touched) = &touched {
             scope.begin_incremental();
@@ -728,29 +730,37 @@ impl UiScript {
         // ── The scope: which nodes this solve may touch ────
         // A node with unchanged inputs and no moved dependency recomputes to the rect it holds, so
         // the solve runs over the dirty closure and feeds other rects in as externals. Full scope
-        // when there is no memory yet, the screen moved, a node died (fewer nodes match `last`
-        // than `last_count`), or under verify. The incremental pass seeded its closure above.
+        // when there is no memory yet, the screen moved, or under verify. The incremental pass
+        // seeded its closure above.
         if touched.is_none() {
-            let mut matched = 0usize;
-            for (id, &n) in scope.node_of.iter().enumerate() {
-                if n == u32::MAX {
-                    continue;
-                }
-                scope_nodes += 1;
-                if scope.last.get(id).copied().unwrap_or(NO_NODE) != NO_NODE {
-                    matched += 1;
-                }
-            }
-            let a_node_died = matched != scope.last_count;
+            // A node that died past the new id count has no edges recorded (the derivation sized
+            // them to the count), so only a full scope reaches what anchored to it.
+            let died_past_end = scope
+                .last
+                .iter()
+                .skip(scope.node_of.len())
+                .any(|&h| h != NO_NODE);
             full_scope = scope.last.is_empty()
                 || scope.last_screen != Some(*screen)
-                || a_node_died
+                || died_past_end
                 || gate_skips; // the verify path's re-run: it must reproduce the whole graph
             if full_scope {
                 scope.dirty_all();
             } else {
                 for (id, &n) in scope.node_of.iter().enumerate() {
                     if n != u32::MAX && scope.now[id] != scope.last[id] {
+                        scope.stack.push(id as u32);
+                        scope.dirty[id] = true;
+                    }
+                }
+                // A node that died has no hash left to differ, so its id is seeded instead: the
+                // derivation recorded the edges of whatever still anchors to it, and the closure
+                // re-resolves those against its missing rect, as a full scope would.
+                for id in 0..scope.node_of.len() {
+                    if scope.last[id] != NO_NODE
+                        && scope.node_of[id] == u32::MAX
+                        && !scope.dirty[id]
+                    {
                         scope.stack.push(id as u32);
                         scope.dirty[id] = true;
                     }
@@ -994,7 +1004,7 @@ impl UiScript {
                 if touched.is_some() {
                     scope.commit_incremental();
                 } else {
-                    scope.commit(scope_nodes, *screen);
+                    scope.commit(*screen);
                 }
                 // ── Re-arm the ledger ─────────────────────────────────────────────────────────
                 // The graph now describes a converged model, so writes may name nodes against it.
@@ -1284,62 +1294,6 @@ impl UiScript {
             }
         }
         out
-    }
-
-    /// Push one [`QuadContent::Backdrop`] per piece of frame `fh`'s backdrop, at the frame slot's
-    /// `z`: behind its regions, and background before border by the stable sort.
-    pub(super) fn emit_backdrop(
-        model: &Model,
-        fh: FrameHandle,
-        fr: Rect,
-        z: u64,
-        paint: FramePaint,
-        clip: Option<Rect>,
-        out: &mut Vec<ExtractedQuad>,
-    ) {
-        let Some(bd) = model.backdrops.get(&fh) else {
-            return;
-        };
-        let scale = crate::script::object::eff_scale(model, fh);
-        for piece in backdrop::pieces(fr, bd, scale) {
-            // The piece's screen bounding box: the render is axis-aligned, so the reference's slant
-            // under unequal top and bottom insets is not drawn (stock insets are symmetric).
-            let xs = piece.corners.map(|c| c[0]);
-            let ys = piece.corners.map(|c| c[1]);
-            let (left, right) = (
-                xs.iter().copied().fold(f32::MAX, f32::min),
-                xs.iter().copied().fold(f32::MIN, f32::max),
-            );
-            let (bottom, top) = (
-                ys.iter().copied().fold(f32::MAX, f32::min),
-                ys.iter().copied().fold(f32::MIN, f32::max),
-            );
-            let path = if piece.is_bg {
-                bd.bg_file.clone()
-            } else {
-                bd.edge_file.clone()
-            };
-            let Some(path) = path else { continue };
-            let color = if piece.is_bg {
-                bd.bg_color
-            } else {
-                bd.border_color
-            };
-            out.push(ExtractedQuad {
-                target: ZTarget::Frame(fh),
-                z,
-                rect: Some(Rect::new(bottom, left, top, right)),
-                alpha: paint.alpha,
-                content: QuadContent::Backdrop {
-                    path,
-                    color,
-                    uvs: piece.uvs,
-                    tile: piece.tile,
-                },
-                clip,
-                scale: paint.scale,
-            });
-        }
     }
 }
 

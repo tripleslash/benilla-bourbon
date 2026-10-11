@@ -15,6 +15,7 @@ use mlua::{Lua, Table, Value};
 use super::event;
 use super::object::{frame_handle_of, publish_global};
 use super::region::region_wrapper;
+use super::visibility;
 use super::{FontObject, Model, RegionData};
 use crate::layout::{Anchor, Point};
 use crate::order::DrawLayer;
@@ -266,9 +267,9 @@ pub(super) fn write_cell(
     model.touch_measure(rh);
 }
 
-/// Hides and blanks every line cell and resets the counters; the caller fires `OnTooltipCleared`
-/// outside the model borrow.
-pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
+/// Blanks every line cell and resets the counters and the subject: the model half of the clear
+/// ([`clear_silent`]).
+fn clear_content(model: &mut Model, h: FrameHandle) {
     let (lefts, rights) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Tooltip(t)) => (t.left_lines.clone(), t.right_lines.clone()),
         _ => return,
@@ -288,20 +289,37 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
         t.min_width = 0.0;
         // Clear drops the subject and unregisters its health watcher (`0x5300ad`, `0x53007c`).
         t.unit_guid = None;
-        t.world_owned = false;
     }
     // New content replaces a spell render still waiting on its view.
     model.spell_tooltip_waits.remove(&h);
-    // The `<name>StatusBar` health bar is unit content: it hides with the lines, and the next
-    // unit render re-shows it.
-    let bar = model
-        .arena
-        .frame(h)
-        .and_then(|f| f.name.clone())
-        .and_then(|n| model.arena.lookup(&format!("{n}StatusBar")));
+}
+
+/// The tooltip's `<name>StatusBar` health bar (`[+0x348]`), if it has one.
+pub(super) fn status_bar(model: &Model, h: FrameHandle) -> Option<FrameHandle> {
+    let name = model.arena.frame(h)?.name.as_deref()?;
+    model.arena.lookup(&format!("{name}StatusBar"))
+}
+
+/// The tooltip clear (`0x530050`) without its last act, the `OnTooltipCleared` fire: while the
+/// tooltip holds a unit (`0x530070`) the health bar hides by its own transition, shown bit then
+/// hide slot (`0x53009b`/`0x5300a1`), so its `OnHide` runs; then the lines, counters and subject.
+pub(super) fn clear_silent(lua: &Lua, h: FrameHandle) {
+    let bar = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let held = tip_mut(&mut model, h).is_ok_and(|t| t.unit_guid.is_some());
+        held.then(|| status_bar(&model, h)).flatten()
+    };
     if let Some(bar) = bar {
-        model.arena.set_shown(bar, false);
+        visibility::set_shown(lua, bar, false);
     }
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    clear_content(&mut model, h);
+}
+
+/// The tooltip clear (`0x530050`): [`clear_silent`], then `OnTooltipCleared` (`0x530263`).
+pub(super) fn clear(lua: &Lua, h: FrameHandle) {
+    clear_silent(lua, h);
+    fire_cleared(lua, h);
 }
 
 /// Fires `OnTooltipCleared`; a script error is recorded, never propagated.
@@ -317,42 +335,177 @@ pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
     }
 }
 
-/// A content `Set*`'s tail: shown with lines, hidden without. The reference leaves an uncached
-/// tooltip cleared and collapsed to nothing; this plate keeps its declared size, so it hides. It
-/// hides without [`hide_tooltip`] to keep the owner, which the hover loop's `IsOwned` needs.
+/// A content `Set*`'s tail: the builders' show, the shown bit and the show slot (`0x52a711`/
+/// `0x52a71b`, `0x52e14e`), whose override restores full alpha and disarms a fade, or, for a plate
+/// with no owner or no lines, hides and un-owns it (`0x530aba`). An item builder whose template is
+/// not cached ends the same way, by its own hide (`0x52b735`–`0x52b73f`), and its clear zeroes the
+/// remembered item id (`0x5300dd`) that the cache callback `0x52e530` needs (`0x52e55e`), so the
+/// plate stays down until the next hover.
+///
+/// A spell render still waiting on its view ([`Model::spell_tooltip_waits`], filled by the host
+/// ahead of a hover) is the one exception: the reference reads spells synchronously and has no
+/// such state. That plate takes the base hide, keeping its owner and its wait, so the view's
+/// arrival renders it in place.
 pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
-    let lines = {
+    let waiting = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        match tip_mut(&mut model, h) {
-            Ok(t) => t.num_lines,
-            Err(_) => 0,
-        }
+        let empty = tip_mut(&mut model, h).is_ok_and(|t| t.num_lines == 0);
+        empty && model.spell_tooltip_waits.contains_key(&h)
     };
-    set_shown(lua, h, lines > 0);
+    if waiting {
+        visibility::set_shown_bit(lua, h, false);
+        visibility::base_hide(lua, h);
+    } else {
+        visibility::set_shown(lua, h, true);
+    }
 }
 
-/// New content cancels a running fade at full alpha; with no fade running, an alpha the addon set
-/// stays, since only the paths in [`full_alpha`] reset it.
-fn cancel_fade(model: &mut Model, h: FrameHandle) {
-    if let Ok(t) = tip_mut(model, h) {
-        if t.fade_start.take().is_some() {
-            model.arena.set_alpha(h, 1.0);
+/// The tooltip's show (`0x530a80`, slot `+0x88`), however the show comes: with an owner and a line
+/// (`0x530a83`–`0x530a95`) it restores full alpha, disarms the fade (`0x530aa3`) and runs the base
+/// show; else it clears its shown bit and hides through its own hide (`0x530abe`, `0x530ac8`).
+/// So a parent's show brings back only a tooltip that still has an owner.
+pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
+    let live = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let live = tip_mut(&mut model, h).is_ok_and(|t| t.owner.is_some() && t.num_lines > 0);
+        if live {
+            full_alpha(&mut model, h);
+        }
+        live
+    };
+    if live {
+        visibility::base_show(lua, h);
+    } else {
+        visibility::set_shown_bit(lua, h, false);
+        visibility::hide(lua, h);
+    }
+}
+
+/// The tooltip's hide (`0x530a60`, slot `+0x84`), however the hide comes, its parent's included:
+/// the SetOwner core with no owner ([`set_owner_core`]), then the base hide. It runs whether or
+/// not the tooltip is shown: only the base hide gates on visibility (`0x76ad5b`).
+pub(in crate::script) fn hide_override(lua: &Lua, h: FrameHandle) {
+    let is_tip = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        tip_mut(&mut model, h).is_ok()
+    };
+    if is_tip {
+        set_owner_core(lua, h, None, TooltipAnchor::None, 0.0, 0.0);
+    }
+    visibility::base_hide(lua, h);
+}
+
+/// The SetOwner core (`0x52ffe0`), reached from the Lua `SetOwner` after its hide, from the
+/// tooltip's own hide with no owner, and from the engine's mode-6 seats (`0x492a1e`, `0x4eb587`).
+/// It clears and fires `OnTooltipCleared` ([`clear`], `0x52ffe6`), restores full alpha
+/// (`0x52fff4`), disarms the fade (`0x530002`), stores the owner (`0x53000c`) and mode 7,
+/// `ANCHOR_NONE` (`0x530012`); only an owner overwrites the mode with the caller's (`0x530031`)
+/// and applies the anchor (`0x52fe90`, [`apply_anchor`]).
+pub(in crate::script) fn set_owner_core(
+    lua: &Lua,
+    h: FrameHandle,
+    owner: Option<FrameHandle>,
+    anchor: TooltipAnchor,
+    x: f32,
+    y: f32,
+) {
+    clear(lua, h);
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    full_alpha(&mut model, h);
+    let Ok(t) = tip_mut(&mut model, h) else {
+        return;
+    };
+    t.owner = owner;
+    t.anchor = TooltipAnchor::None;
+    // A re-own, or the hide's un-own, ends the world plate; a content re-set alone does not.
+    t.world_owned = false;
+    if let Some(owner) = owner {
+        t.anchor = anchor;
+        apply_anchor(&mut model, h, owner, anchor, x, y);
+    }
+}
+
+/// The anchor apply (`0x52fe90`, with the core's 1): `ANCHOR_PRESERVE` returns first
+/// (`0x52fead`); every other mode clears all points (`0x767ed0` at `0x52fec2`); modes 0..5 then
+/// set one point on the owner (`0x52ffbc`), and 6 and 7 stop there. The clear lets
+/// `GameTooltip_SetDefaultAnchor` (GameTooltip.lua:76-77) set one point with no stale owner
+/// anchor; mode 6 is then placed per frame by `cursor_anchor`.
+fn apply_anchor(
+    model: &mut Model,
+    h: FrameHandle,
+    owner: FrameHandle,
+    anchor: TooltipAnchor,
+    x: f32,
+    y: f32,
+) {
+    let pts = match anchor {
+        TooltipAnchor::Right => Some((Point::BottomLeft, Point::TopRight)),
+        TooltipAnchor::Left => Some((Point::BottomRight, Point::TopLeft)),
+        TooltipAnchor::TopRight => Some((Point::BottomRight, Point::TopRight)),
+        TooltipAnchor::TopLeft => Some((Point::BottomLeft, Point::TopLeft)),
+        TooltipAnchor::BottomRight => Some((Point::TopLeft, Point::BottomRight)),
+        TooltipAnchor::BottomLeft => Some((Point::TopRight, Point::BottomLeft)),
+        TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => None,
+    };
+    // The drop is a named retarget to no targets, not a conservative touch.
+    if matches!(anchor, TooltipAnchor::Cursor | TooltipAnchor::None) {
+        let dropped: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
+            Some(input) if !input.anchors.is_empty() => {
+                Some(input.anchors.drain(..).map(|a| a.relative_to).collect())
+            }
+            _ => None,
+        };
+        if let Some(old_targets) = dropped {
+            model.touch_layout_retarget_frame(h, &old_targets, &[]);
+        }
+    }
+    if let Some((own, rel)) = pts {
+        let owner_id = model.frame_id(owner);
+        let new = Anchor::new(own, owner_id, rel, x, y);
+        let input = model.layout_inputs.entry(h).or_default();
+        // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout.
+        let same = input.anchors.len() == 1
+            && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
+        if !same {
+            // A named retarget: the cached layout graph re-points this edge instead of being
+            // rebuilt.
+            let old_targets: Vec<u32> = input.anchors.iter().map(|a| a.relative_to).collect();
+            input.anchors = vec![new];
+            model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
         }
     }
 }
 
-/// `SetAlpha(255)`, unconditional: the SetOwner core `0x52ffe0` does it first (`0x52fff4`), and
-/// Show (`0x530a80`) and its self-hide (`0x530a60`, the core with no owner) reach it too.
+/// The fade request (`0x530ae0`), from the Lua `FadeOut` (`0x531fba`) and the world mouseover's
+/// change (`0x492909`). A cursor-anchored plate, mode 6, hides at once through the hide slot,
+/// with no shown-bit write, and is disarmed (`0x530ae3`–`0x530af4`); any other mode arms the fade
+/// with the full duration on every call (`0x530b00`–`0x530b10`), so a second call restarts it.
+pub(in crate::script) fn fade_out(lua: &Lua, h: FrameHandle) {
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let Ok(t) = tip_mut(&mut model, h) else {
+            return;
+        };
+        if t.anchor != TooltipAnchor::Cursor {
+            t.fade_left = Some(TOOLTIP_FADE_SECS);
+            return;
+        }
+    }
+    visibility::hide(lua, h);
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if let Ok(t) = tip_mut(&mut model, h) {
+        t.fade_left = None;
+    }
+}
+
+/// `SetAlpha(255)` and the fade disarmed, unconditional: the SetOwner core `0x52ffe0` does both
+/// (`0x52fff4`, `0x530002`), and Show (`0x530a80`) and its self-hide (`0x530a60`, the core with no
+/// owner) reach them too.
 fn full_alpha(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
-        t.fade_start = None;
+        t.fade_left = None;
     }
     model.arena.set_alpha(h, 1.0);
-}
-
-/// The engine's `GetTime` clock, which [`super::UiScript::tick`] advances.
-fn now(lua: &Lua) -> f64 {
-    crate::script::clock::now(lua)
 }
 
 /// Shows or hides as the Lua verbs do, handlers included.
@@ -474,9 +627,9 @@ fn text_of(v: Option<&Value>) -> String {
     }
 }
 
-/// Appends one line and cancels any fade, without showing the tooltip: `AddLine` callers call
-/// `Show`. The reference's line core drops a line whose sides are both empty (`0x530270`); this
-/// appends it.
+/// Appends one line, without showing the tooltip or touching a fade (`0x5303b0`): `AddLine`
+/// callers call `Show`. The reference's line core drops a line whose sides are both empty
+/// (`0x530270`); this appends it.
 pub(super) fn append_line(
     lua: &Lua,
     this: &Table,
@@ -512,26 +665,11 @@ pub(super) fn append_line(
     if let Ok(t) = tip_mut(&mut model, h) {
         t.num_lines = n;
     }
-    cancel_fade(&mut model, h);
     Ok(())
 }
 
 mod verbs;
 pub(super) use verbs::install;
-
-/// The full hide shared by `Hide`, a `Show` with no owner or no lines, and the end of a fade.
-pub(super) fn hide_tooltip(lua: &Lua, h: FrameHandle) {
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        full_alpha(&mut model, h);
-        if let Ok(t) = tip_mut(&mut model, h) {
-            t.owner = None;
-        }
-        clear_content(&mut model, h);
-    }
-    set_shown(lua, h, false);
-    fire_cleared(lua, h);
-}
 
 /// A line cell's measured extent; `None` for a hidden or unmeasured cell, which adds no size and
 /// no gap, so a fresh tooltip keeps its declared size until its lines are measured.
@@ -669,47 +807,54 @@ pub(super) fn layout_tooltips(model: &mut Model) {
     }
 }
 
-/// Advances every fading tooltip: alpha ramps from 1 to 0 over [`TOOLTIP_FADE_SECS`], then the
-/// full hide.
-pub(super) fn tick_fades(lua: &Lua) {
-    let t = now(lua);
-    let mut ramping: Vec<(FrameHandle, f32)> = Vec::new();
-    let mut finished: Vec<FrameHandle> = Vec::new();
-    {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        // Roster-gated as in `layout_tooltips`, since `hide_tooltip` below writes layout.
-        for &h in model.arena.tooltip_kinds() {
-            if !model.frame_to_id.contains_key(&h) {
-                continue;
-            }
-            let Some(frame) = model.arena.frame(h) else {
-                continue;
-            };
-            let KindState::Tooltip(tip) = &frame.kind_state else {
-                continue;
-            };
-            let Some(start) = tip.fade_start else {
-                continue;
-            };
-            if !frame.shown {
-                finished.push(h); // hidden mid-fade by other means: just tidy the state
-                continue;
-            }
-            let a = 1.0 - ((t - start) / TOOLTIP_FADE_SECS) as f32;
-            if a <= 0.0 {
-                finished.push(h);
-            } else {
-                ramping.push((h, a));
-            }
-        }
-    }
-    {
+/// The tooltip's own update after its `OnUpdate` (`0x530b20`, from `0x530b9c`): an armed fade
+/// counts down by the elapsed time (`0x530baa`–`0x530bc2`). At zero or below it ends in the full
+/// hide (`0x530bd8` full alpha, `0x530be9` the hide slot), whose `OnHide` runs here, in the
+/// tooltip's place in the walk. Otherwise the alpha is 255 while at least half the duration
+/// remains (`0x7ffa24` = 0.5, `0x530c0c`), else `trunc(255 × left / half)` (`0x530c18`–`0x530c2c`,
+/// `0x40a2b0` truncates). Nothing gates it on shown, owner or lines.
+pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
+    let done = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        for (h, a) in ramping {
-            model.arena.set_alpha(h, a);
+        // Roster-gated as in `layout_tooltips`, since the hide writes layout.
+        if !model.frame_to_id.contains_key(&h) {
+            return;
         }
+        let Ok(tip) = tip_mut(&mut model, h) else {
+            return;
+        };
+        let Some(left) = tip.fade_left else {
+            return;
+        };
+        let left = left - elapsed;
+        tip.fade_left = Some(left);
+        if left <= 0.0 {
+            true
+        } else {
+            model.arena.set_alpha(h, fade_alpha(left));
+            false
+        }
+    };
+    // The end: full alpha (`0x530bd8`), then the shown bit cleared and the hide slot (`0x530bdf`,
+    // `0x530be9`), as the Lua `Hide` does, so the hide's `OnTooltipCleared` sees 255.
+    if done {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .arena
+            .set_alpha(h, 1.0);
+        set_shown(lua, h, false);
     }
-    for h in finished {
-        hide_tooltip(lua, h);
-    }
+}
+
+/// The fade's alpha with `left` seconds to go, in whole 255ths as the reference's `SetAlpha`
+/// takes them. The product is formed in f64, where `left × 255` is exact as in the x87 original.
+fn fade_alpha(left: f32) -> f32 {
+    let half = f64::from(TOOLTIP_FADE_SECS) * 0.5;
+    let left = f64::from(left);
+    let units = if left < half {
+        (left / half * 255.0).trunc()
+    } else {
+        255.0
+    };
+    (units / 255.0) as f32
 }

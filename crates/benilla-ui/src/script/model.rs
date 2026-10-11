@@ -163,8 +163,9 @@ pub(crate) struct Model {
     pub(crate) link_spans: HashMap<FrameHandle, Vec<(Rect, String, String)>>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
-    /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`).
-    pub(crate) backdrops: HashMap<FrameHandle, backdrop::Backdrop>,
+    /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
+    /// its spec and the nine Texture regions it built.
+    pub(crate) backdrops: HashMap<FrameHandle, backdrop::Installed>,
     /// `CSimpleHTML`'s state: element fonts `+0x350`, link format `+0x360`, content nodes `+0x340`.
     pub(crate) simple_html: simplehtml::SimpleHtmlStates,
     /// Named `<Font>` objects by lowercased name, as 1.12 matches them with `SStrCmpI` (`0x783870`,
@@ -212,12 +213,15 @@ pub(crate) struct Model {
 
     /// The mouse-enabled frame under the cursor, for the next move's `OnLeave`/`OnEnter`.
     pub(crate) mouseover: Option<FrameHandle>,
-    /// A frame under a still cursor hid or showed, so the tick re-runs the hover walk at the saved
-    /// position and a newly exposed frame gets `OnEnter` without a mouse move: the reference's
-    /// `[root+0x1100]` flag (set at `0x764cbb`/`0x764b8d`, pumped at `0x7657a1` into `0x7660d0`).
+    /// The hovered frame hid, or a mouse-enabled frame showed, so the tick re-runs the hover walk
+    /// at the saved position and a newly exposed frame gets `OnEnter` without a mouse move: the
+    /// reference's `[root+0x1100]` flag (set at `0x764cbb`/`0x764b8d`, pumped at `0x7657a1` into
+    /// `0x7660d0`).
     pub(crate) hover_repick: bool,
-    /// Per button, the frame its press landed on, for `OnClick`'s same-frame release test.
-    pub(crate) mouse_down_on: HashMap<String, FrameHandle>,
+    /// Per button held, the frame its press went to, the capture else the hover (`0x7662c0`), for
+    /// the release; `None` once that frame left the mouse index (hide or mouse disable emptied
+    /// the capture), so the release has no target but the button still counts as held.
+    pub(crate) mouse_down_on: HashMap<String, Option<FrameHandle>>,
     /// The client's one mouse-capture slot (`root+0x80`), read by the mouse-down raise. Set at
     /// `0x7663e6` to the capture, else the hovered frame, so a chorded press keeps the capture;
     /// cleared at `0x7664bb` once no button is down. A title-region press captures nothing.

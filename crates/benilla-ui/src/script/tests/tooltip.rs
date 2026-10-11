@@ -331,7 +331,7 @@ fn fadeout_ramps_then_hides() {
     )
     .unwrap();
     // Half the ramp: still shown, alpha well below 1.
-    s.tick(0.25);
+    s.tick(1.5);
     s.run(r#"assert(TT5:IsShown(), "still shown mid-fade")"#)
         .unwrap();
     s.resolve();
@@ -366,7 +366,7 @@ fn fadeout_ramps_then_hides() {
     assert_eq!(fresh_alpha, 1.0, "fresh content restored full alpha");
     // A full ramp ends hidden and cleared.
     s.run("TT5:FadeOut()").unwrap();
-    s.tick(0.6);
+    s.tick(2.1);
     s.run(
         r#"
         assert(not TT5:IsShown(), "hidden at ramp end")
@@ -877,4 +877,196 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
         "the unrecognised anchor is still reported to us: {:?}",
         s.warnings()
     );
+}
+
+/// `FadeOut` (`0x530ae0`) arms `[+0x3b8]` with the 2.0 s at `0x808e7c` on every call
+/// (`0x530b10`); the update (`0x530b20`) holds 255 while at least half remains (`0x7ffa24` = 0.5,
+/// `0x530c0c`) and below it sets `trunc(255 × left / half)` (`0x530c18`–`0x530c2c`), then hides at
+/// zero (`0x530bc8`–`0x530be9`).
+#[test]
+fn fadeout_holds_a_second_then_ramps_over_the_next_and_every_call_rearms() {
+    let mut s = script();
+    s.run(
+        r#"
+        FadeHost = CreateFrame("Frame", "FadeHost")
+        FadeTip = CreateFrame("GameTooltip", "FadeTip")
+        FadeTip:SetOwner(FadeHost, "ANCHOR_RIGHT")
+        FadeTip:SetText("Timber Wolf")
+        FadeTip:FadeOut()
+        "#,
+    )
+    .unwrap();
+    let alpha = |s: &UiScript| s.eval::<f32>("return FadeTip:GetAlpha()").unwrap();
+    let shown = |s: &UiScript| s.eval::<bool>("return FadeTip:IsShown() == 1").unwrap();
+    s.tick(0.5);
+    assert_eq!(alpha(&s), 1.0, "1.5 s left of 2: the hold");
+    assert!(shown(&s));
+    s.tick(1.0);
+    assert_eq!(
+        alpha(&s),
+        127.0 / 255.0,
+        "0.5 s left: trunc(255 × 0.5 / 1.0)"
+    );
+    assert!(shown(&s));
+    s.tick(0.5);
+    assert!(!shown(&s), "2.0 s: the fade ends in the hide");
+
+    // A second call restarts the countdown from the full duration.
+    s.run(
+        r#"
+        FadeTip:SetOwner(FadeHost, "ANCHOR_RIGHT")
+        FadeTip:SetText("Timber Wolf")
+        FadeTip:FadeOut()
+        "#,
+    )
+    .unwrap();
+    s.tick(1.5);
+    assert_eq!(alpha(&s), 127.0 / 255.0);
+    s.run("FadeTip:FadeOut()").unwrap();
+    s.tick(0.5);
+    assert_eq!(alpha(&s), 1.0, "re-armed: 1.5 s left, back in the hold");
+    s.tick(1.0);
+    assert!(
+        shown(&s),
+        "the first arm's end has passed, the second's has not"
+    );
+    s.tick(0.5);
+    assert!(!shown(&s));
+    assert!(s.take_errors().is_empty());
+}
+
+/// `FadeOut` on an `ANCHOR_CURSOR` plate (mode 6) hides it at once through the hide slot
+/// (`0x530ae3`–`0x530aff`), which un-owns it; the shown bit is not written, so only visibility
+/// drops.
+#[test]
+fn fadeout_on_a_cursor_anchored_tooltip_hides_at_once() {
+    let mut s = script();
+    s.run(
+        r#"
+        hid = 0
+        CurHost = CreateFrame("Frame", "CurHost")
+        CurTip = CreateFrame("GameTooltip", "CurTip")
+        CurTip:SetScript("OnHide", function() hid = hid + 1 end)
+        CurTip:SetOwner(CurHost, "ANCHOR_CURSOR")
+        CurTip:AddLine("Copper Ore")
+        CurTip:Show()
+        assert(CurTip:IsVisible())
+        hid = 0
+        CurTip:FadeOut()
+        assert(not CurTip:IsVisible(), "mode 6 hides at once")
+        assert(CurTip:IsShown(), "through the hide slot alone: the shown bit stays (0x530aee)")
+        assert(hid == 1, "OnHide fired in the call")
+        assert(not CurTip:IsOwned(CurHost), "the hide slot un-owns")
+        assert(CurTip:NumLines() == 0, "and clears")
+        assert(CurTip:GetAlpha() == 1, "no fade ran")
+        "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// Only `FadeOut`, the show, the `SetOwner` core and the ctor write the fade flag `[+0x3b4]`;
+/// `AddLine` (`0x531630`) and `AddDoubleLine` append through `0x5303b0` and leave it.
+#[test]
+fn a_line_added_mid_fade_keeps_fading() {
+    let mut s = script();
+    s.run(
+        r#"
+        LateHost = CreateFrame("Frame", "LateHost")
+        LateTip = CreateFrame("GameTooltip", "LateTip")
+        LateTip:SetOwner(LateHost, "ANCHOR_RIGHT")
+        LateTip:SetText("Linen Cloth")
+        LateTip:FadeOut()
+        "#,
+    )
+    .unwrap();
+    s.tick(1.5);
+    s.run(
+        r#"
+        LateTip:AddLine("Sell Price: 1c")
+        LateTip:AddDoubleLine("Vendor", "1c")
+        assert(math.abs(LateTip:GetAlpha() - 127 / 255) < 1e-6, "the appends leave the ramp, got " .. LateTip:GetAlpha())
+        "#,
+    )
+    .unwrap();
+    s.tick(0.5);
+    s.run(r#"assert(not LateTip:IsShown(), "the fade ends on time")"#)
+        .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetOwner` (`0x5310d0`) clears the shown bit (`0x531179`) and calls the tooltip's own hide
+/// (`0x531183` → `0x530a60`: the core with no owner, which clears and fires `OnTooltipCleared`,
+/// then the base hide's `OnHide`), and only then runs the core with the new owner, which clears
+/// and fires again.
+#[test]
+fn set_owner_hides_the_tooltip_first() {
+    let mut s = script();
+    s.run(
+        r#"
+        log = {}
+        OwnA = CreateFrame("Frame", "OwnA")
+        OwnB = CreateFrame("Frame", "OwnB")
+        ReTip = CreateFrame("GameTooltip", "ReTip")
+        ReTip:SetScript("OnTooltipCleared", function() table.insert(log, "cleared") end)
+        ReTip:SetScript("OnHide", function() table.insert(log, "hide") end)
+        ReTip:SetOwner(OwnA, "ANCHOR_RIGHT")
+        ReTip:SetText("first hover")
+        assert(ReTip:IsShown())
+        log = {}
+        ReTip:SetOwner(OwnB, "ANCHOR_LEFT")
+        assert(table.concat(log, ",") == "cleared,hide,cleared", "got " .. table.concat(log, ","))
+        assert(not ReTip:IsShown(), "hidden until the next content call")
+        assert(ReTip:IsOwned(OwnB), "owned by the new owner")
+        assert(ReTip:GetAnchorType() == "ANCHOR_LEFT")
+        "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// Every hide un-owns through the core with no owner, which stores mode 7 (`0x530012`), so
+/// `GetAnchorType` (`0x5313e0`) answers `"ANCHOR_NONE"` until the next `SetOwner`.
+#[test]
+fn get_anchor_type_answers_anchor_none_after_a_hide() {
+    let mut s = script();
+    s.run(
+        r#"
+        NoneHost = CreateFrame("Frame", "NoneHost")
+        NoneTip = CreateFrame("GameTooltip", "NoneTip")
+        NoneTip:SetOwner(NoneHost, "ANCHOR_RIGHT")
+        NoneTip:SetText("Peacebloom")
+        assert(NoneTip:GetAnchorType() == "ANCHOR_RIGHT", "owned: the name round-trips")
+        NoneTip:Hide()
+        assert(NoneTip:GetAnchorType() == "ANCHOR_NONE", "got " .. NoneTip:GetAnchorType())
+        "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// The fade's end sets full alpha (`0x530bd8`) before the hide slot (`0x530be9`), so the hide's
+/// `OnTooltipCleared` reads 255, not the last step of the ramp.
+#[test]
+fn the_fade_end_restores_full_alpha_before_its_hide() {
+    let mut s = script();
+    s.run(
+        r#"
+        seen = nil
+        EndHost = CreateFrame("Frame", "EndHost")
+        EndTip = CreateFrame("GameTooltip", "EndTip")
+        EndTip:SetOwner(EndHost, "ANCHOR_RIGHT")
+        EndTip:SetText("Silverleaf")
+        EndTip:SetScript("OnTooltipCleared", function() seen = EndTip:GetAlpha() end)
+        EndTip:FadeOut()
+        "#,
+    )
+    .unwrap();
+    s.tick(1.5);
+    s.run(r#"assert(seen == nil and EndTip:GetAlpha() < 0.5)"#)
+        .unwrap();
+    s.tick(0.5);
+    s.run(r#"assert(not EndTip:IsShown() and seen == 1, "cleared at alpha " .. tostring(seen))"#)
+        .unwrap();
+    assert!(s.take_errors().is_empty());
 }

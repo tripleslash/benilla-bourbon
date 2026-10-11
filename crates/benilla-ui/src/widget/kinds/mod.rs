@@ -49,6 +49,37 @@ pub enum FrameKind {
     Minimap,
 }
 
+/// A kind's own per-frame update: the `vtable+0x38` override the update walk calls in the frame's
+/// place (`0x765710`), which fires the frame's `OnUpdate` (`0x76b2c0`) first and then does the
+/// kind's engine work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KindUpdate {
+    /// `CSimpleEditBox`'s `0x77a790`: the flush, then the caret blink.
+    EditBox,
+    /// `CGameTooltip`'s `0x530b20`: the fade.
+    Tooltip,
+    /// `CSimpleModel`'s `0x76d7f0`, in the slot of every model kind's vtable (`0x81c608`,
+    /// `0x8084f8`, `0x8083a8`, `0x808260`): the scene clock and the completions it reports.
+    Model,
+}
+
+impl FrameKind {
+    /// The kind's own update, run in the walk after the frame's `OnUpdate`. The reference
+    /// overrides the slot on more kinds; benilla runs the message frames' fades (`0x786200`,
+    /// `0x788460`) after the walk, and models none of the rest there.
+    pub fn kind_update(self) -> Option<KindUpdate> {
+        match self {
+            FrameKind::EditBox => Some(KindUpdate::EditBox),
+            FrameKind::GameTooltip => Some(KindUpdate::Tooltip),
+            FrameKind::Model
+            | FrameKind::PlayerModel
+            | FrameKind::DressUpModel
+            | FrameKind::TabardModel => Some(KindUpdate::Model),
+            _ => None,
+        }
+    }
+}
+
 /// The kind of a [`Region`] leaf, the client's `CScriptRegion`-derived non-frame objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegionKind {
@@ -93,6 +124,34 @@ pub enum KindState {
 }
 
 impl KindState {
+    /// The owner's region-removed hook, frame vtable `+0x2c`, which `0x77fd10` runs on the old
+    /// parent whenever a region leaves it, freed, reparented or detached (`0x77fd55`): a kind
+    /// that keeps a region in a slot drops it there, so no slot names a dead region. Button
+    /// `0x778cb0`, CheckButton `0x785230`, StatusBar `0x783110`, Slider `0x789790` and ColorSelect
+    /// `0x78b530` override it; every other kind keeps the base unlink `0x76a7f0` alone.
+    pub fn region_removed(&mut self, rh: RegionHandle) {
+        let clear = |slot: &mut Option<RegionHandle>| {
+            if *slot == Some(rh) {
+                *slot = None;
+            }
+        };
+        match self {
+            KindState::Button(bs) => bs.region_removed(rh),
+            // The bar texture, `+0x324`.
+            KindState::StatusBar(sb) => clear(&mut sb.bar),
+            // The thumb, `+0x328`.
+            KindState::Slider(sl) => clear(&mut sl.thumb),
+            // The four art slots, `+0x318` to `+0x324`.
+            KindState::ColorSelect(cs) => {
+                clear(&mut cs.wheel);
+                clear(&mut cs.wheel_thumb);
+                clear(&mut cs.value_strip);
+                clear(&mut cs.value_thumb);
+            }
+            _ => {}
+        }
+    }
+
     /// The display lines of either message-frame class, which share the [`MessageLine`] record.
     pub fn message_lines(&self) -> Option<&VecDeque<MessageLine>> {
         match self {
@@ -183,17 +242,23 @@ pub struct TooltipState {
     pub right_lines: Vec<RegionHandle>,
     /// `SetOwner`'s frame, dropped on hide.
     pub owner: Option<FrameHandle>,
-    /// The last `SetOwner`'s mode, read back by `GetAnchorType()`.
+    /// The anchor mode (`+0x318`), read back by `GetAnchorType()`: the last `SetOwner`'s while
+    /// owned, `None` (mode 7) since a hide.
     pub anchor: TooltipAnchor,
     /// `SetMinimumWidth`: a floor on the auto-sized width, cleared with the content.
     pub min_width: f32,
-    /// `FadeOut()`'s start on the `GetTime` clock; any fresh content or `Show` cancels the fade.
-    pub fade_start: Option<f64>,
+    /// `FadeOut()`'s countdown in seconds (`[+0x3b4]` armed, `[+0x3b8]` left): the tooltip's own
+    /// update counts it down by its elapsed, so it stands still while the tooltip is not walked.
+    /// `FadeOut` arms it; the show, the SetOwner core (so every hide) and a cursor-mode `FadeOut`
+    /// disarm it, and nothing else.
+    pub fade_left: Option<f32>,
     /// The guid of the unit this tooltip shows (`+0x368`/`+0x36c`, stored at `0x52a070`), whose
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
-    /// Shows world-hover content, which fades when the hover is lost; a window hover never fades.
+    /// The plate a world hover put up, set after its build and cleared by the next SetOwner core
+    /// (a Lua `SetOwner`, an engine seat, or any hide's un-own), not by a content re-set. Hover loss
+    /// fades only such a plate.
     pub world_owned: bool,
     /// Armed for a compare render: the next `SetInventoryItem` prepends "Currently Equipped"
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
@@ -211,8 +276,9 @@ pub const TOOLTIP_PAD: f32 = 10.0;
 pub const TOOLTIP_LINE_GAP: f32 = 2.0;
 /// The least double-line column gap, the stock `TextRightN` offset; the reference's is untraced.
 pub const TOOLTIP_DOUBLE_GAP: f32 = 40.0;
-/// `FadeOut`'s ramp length in seconds; the reference's constant is untraced.
-pub const TOOLTIP_FADE_SECS: f64 = 0.5;
+/// `FadeOut`'s duration in seconds, `[0x808e7c]` = 2.0: the plate holds full alpha for the first
+/// half and ramps over the second.
+pub const TOOLTIP_FADE_SECS: f32 = 2.0;
 /// A wrap-flagged line's width, pinned when it is appended; the reference's column is untraced.
 pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
 
@@ -854,6 +920,26 @@ impl ButtonState {
         }
         if state == self.state {
             self.shown = rh;
+        }
+    }
+
+    /// The region-removed hook: a CheckButton drops its checked pair (`0x785230`, `+0x4e0` and
+    /// `+0x4e4`), then every button its label (`+0x338`), its three state slots (`+0x4b8` to
+    /// `+0x4c0`), the shown one (`+0x4c4`) and its highlight (`+0x4c8`) (`0x778cb0`).
+    fn region_removed(&mut self, rh: RegionHandle) {
+        for slot in [
+            &mut self.checked_tex,
+            &mut self.disabled_checked,
+            &mut self.text,
+            &mut self.disabled,
+            &mut self.normal,
+            &mut self.pushed,
+            &mut self.shown,
+            &mut self.highlight,
+        ] {
+            if *slot == Some(rh) {
+                *slot = None;
+            }
         }
     }
 
