@@ -19,18 +19,20 @@
 // buffer — which terrain, the opaque and alpha-masked model lanes and the retained cell pass all
 // write into — and reconstructs view-space normals from it.
 //
-// **Gamma, and why the composite is a BLEND.** The pass runs before FFXGlow, so the buffer holds
-// GAMMA bytes (decision 0161; ffx_glow.wgsl owns the frame's single decode) — and it cannot use the
-// ping-pong every other post pass uses, because it runs mid-graph: flipping the view target here
+// **Gamma, and why the composite is a BLEND.** The pass runs before FFXGlow, so a classic frame's
+// buffer holds GAMMA bytes (decision 0161; ffx_glow.wgsl owns the frame's single decode) and a
+// modern frame's holds linear HDR radiance (`frame_is_linear`) — and it cannot use the ping-pong
+// every other post pass uses, because it runs mid-graph: flipping the view target here
 // would hand MainTransparentPass a texture it has not drawn into yet, and Bevy clears a colour
 // attachment on its first use per texture, wiping the whole opaque frame.
 //
 // So the composite writes no colour of its own. It emits a per-pixel FACTOR and multiplies it into
 // the main texture with a Dst/Zero blend, leaving the target and its load flags exactly where the
-// opaque pass left them. The factor is raised to 1/2.2 first: a multiply belongs in linear light,
-// and for a power-law transfer `encode(decode(g)·f) == g · f^(1/2.2)`, so pre-warping the factor is
-// the same operation with no decode of the buffer at all. It is an approximation only against
-// sRGB's linear toe, where it errs toward LESS darkening — the safe direction.
+// opaque pass left them. In a classic frame the factor is raised to 1/2.2 first: a multiply
+// belongs in linear light, and for a power-law transfer `encode(decode(g)·f) == g · f^(1/2.2)`, so
+// pre-warping the factor is the same operation with no decode of the buffer at all. It is an
+// approximation only against sRGB's linear toe, where it errs toward LESS darkening — the safe
+// direction. A modern frame is linear already and takes the factor as it is.
 //
 // It also makes the off state exact: at both sliders zero the factor is `pow(1, 1/2.2) == 1` and
 // `dst · 1.0` is bit-exact in float, so the frame is the frame a build without this pass renders.
@@ -63,9 +65,18 @@
 // The pass input: the scene colour for the gather, and this pass's own ping-pong half for each blur
 // and for the composite. Single-sampled throughout.
 @group(0) @binding(2) var src_tex: texture_2d<f32>;
-// x = AO strength, y = indirect strength (both zero and the node never runs at all), z = the world
-// sample radius in yards, w = the assumed occluder thickness in yards.
-@group(0) @binding(3) var<uniform> params: vec4<f32>;
+// strength: x = AO strength, y = indirect strength (both zero and the node never runs at all), z =
+// the world sample radius in yards, w = the assumed occluder thickness in yards. frame: x = 1 when
+// the buffer holds linear radiance (the modern lighting model), 0 when it holds gamma bytes.
+struct SsilvbParams {
+    strength: vec4<f32>,
+    frame: vec4<f32>,
+}
+@group(0) @binding(3) var<uniform> params: SsilvbParams;
+
+fn frame_is_linear() -> bool {
+    return params.frame.x > 0.5;
+}
 
 const PI: f32 = 3.14159265358979;
 const HALF_PI: f32 = 1.57079632679490;
@@ -213,10 +224,27 @@ fn sector_bits(lo: f32, hi: f32) -> u32 {
     return (0xFFFFFFFFu >> (SECTORS - width)) << start;
 }
 
+/// The darkest a receiver is taken to be, in linear light, when the bounce is normalised by it. A
+/// near-black texel would otherwise turn a faint bounce into an unbounded ratio — and since the
+/// composite multiplies that ratio back into the same near-black texel, all it could ever buy is
+/// noise from the blur carrying it onto a brighter neighbour.
+const RECEIVER_FLOOR: f32 = 0.005;
+
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// The scene colour at a pixel, in linear light. A modern frame is linear HDR already: decoding it a
+// second time crushed every bounce toward black, and saturating it clipped the sun-lit emitters
+// that should bleed the most.
+fn scene_linear(px: vec2<i32>) -> vec3<f32> {
+    let c = textureLoad(src_tex, px, 0).rgb;
+    if (frame_is_linear()) {
+        return max(c, vec3<f32>(0.0));
+    }
+    return srgb_to_linear(saturate(c));
 }
 
 
@@ -239,8 +267,8 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let n = view_normal_at(px, p, dims, bounds);
     let v = normalize(-p);
 
-    let radius_world = params.z;
-    let thickness = params.w;
+    let radius_world = params.strength.z;
+    let thickness = params.strength.w;
     let range = radius_world * RANGE_SCALE;
     let range_sq = range * range;
 
@@ -262,7 +290,7 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // cheapest way to get two independent-looking sequences out of one hash.
     let noise_step = fract(noise + 0.6180339887);
 
-    let want_gi = params.y > 0.0;
+    let want_gi = params.strength.y > 0.0;
     var visibility = 0.0;
     var radiance = vec3<f32>(0.0);
 
@@ -352,7 +380,7 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                         // face points away from this pixel must not light it through itself.
                         let en = emitter_normal(spx, sp, dims, bounds);
                         if (dot(en, -to_sample) > 0.0) {
-                            let c = srgb_to_linear(saturate(textureLoad(src_tex, spx, 0).rgb));
+                            let c = scene_linear(spx);
                             let share = f32(countOneBits(fresh)) / f32(SECTORS);
                             radiance += c * (share * n_dot_l);
                         }
@@ -363,8 +391,16 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         visibility += 1.0 - f32(countOneBits(mask)) / f32(SECTORS);
     }
 
+    // The bounce leaves here as a RATIO to the receiver's own brightness, because the composite can
+    // only multiply. What a bounce adds is `albedo · E`, and with no albedo buffer the receiver's
+    // chroma at its brightest channel stands in for one: `albedo ≈ scene / max3(scene)`. Divided
+    // back through the scene the composite multiplies, that is `E / max3(scene)` per channel. Left
+    // un-normalised, the term rode on the receiver's LIT colour and came out `scene · E` — the
+    // scene's exposure counted twice, a few percent of a few percent, invisible at any slider.
+    let recv = scene_linear(px);
+    let recv_peak = max(max(recv.r, max(recv.g, recv.b)), RECEIVER_FLOOR);
     return vec4<f32>(
-        radiance / f32(SLICES) * fade,
+        radiance / f32(SLICES) * fade / recv_peak,
         mix(1.0, visibility / f32(SLICES), fade),
     );
 }
@@ -426,13 +462,12 @@ fn fs_blur_v(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
 // The per-pixel factor the blend multiplies into the main texture:
 //
-//   linear_out = linear_scene · occlusion  +  linear_scene · bounce
-//              = linear_scene · (occlusion + bounce)
+//   linear_out = linear_scene · occlusion  +  albedo · E_indirect
+//              = linear_scene · (occlusion  +  E_indirect / max3(linear_scene))
 //
-// The bounce rides on the receiver's own colour because this renderer never separates an albedo
-// out, and the receiver's colour is the closest thing to one it has. That double-counts the
-// receiver's direct lighting, which is exactly why the GI slider is a taste knob and not a physical
-// unit — and it is also what makes the whole composite expressible as a single multiply.
+// with the albedo stood in for by the receiver's chroma at full brightness — this renderer never
+// separates one out. The gather has already divided the bounce through, so what arrives here is the
+// bracket's second term and the whole composite stays a single multiply.
 
 /// What one unit of the AO slider is worth. Both gains exist so that the sliders' MIDPOINT is the
 /// intended look: the row reads 0–1 and ships at 0.5, so 0.5 has to land on the strength the world
@@ -444,33 +479,50 @@ fn fs_blur_v(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// downstream keeps the over-driven half in range.
 const AO_GAIN: f32 = 2.0;
 
+/// [AO_GAIN] in a modern (linear) frame. The occlusion used to reach a modern frame through the
+/// classic composite's ^(1/2.2) as well, and `AO_DEFAULT` was tuned by eye against that strength;
+/// `(1 − k·d)^(1/2.2) ≈ 1 − (k/2.2)·d` for the shallow darkening that makes up most of the frame,
+/// so dividing the gain by 2.2 keeps the shipped 60% looking as it did. Deep creases come out a
+/// little lighter than the old curve put them.
+const AO_GAIN_LINEAR: f32 = AO_GAIN / 2.2;
+
 /// What one unit of the indirect slider is worth. See [AO_GAIN] for why the gains exist at all.
-/// The gather's own bounce is an honest hemisphere average — occluded fraction × emitter radiance ×
-/// the receiver's cosine — and lands around a couple of percent, which is physically reasonable and
-/// visually nothing. This is the taste-to-physics conversion, and the ONLY place the indirect half
-/// is scaled.
-const GI_GAIN: f32 = 12.0;
+/// The gather's bounce, enclosed on every side by a uniform radiance L, sums to 2/π · L (the slice
+/// average of the receiver's cosine), and the stand-in albedo is a full-brightness one where a real
+/// surface reflects about half — so the honest term is ~0.8 × the gathered ratio. Honest is
+/// invisible: a screen-space gather sees only the near field, and a hut's legs over a sunlit bank
+/// moved by a level or two. Measured on `water-noon`, 4 (the midpoint) warms the shade under the
+/// thatch and 8 (the top of the row) turns the legs and reeds plainly the bank's orange. This is
+/// the ONLY place the indirect half is scaled.
+const GI_GAIN: f32 = 8.0;
 
 /// The ceiling on the composite factor. Occlusion alone can never exceed one; only the bounce can
-/// push past it, and only a degenerate gather could push it far. This bounds the damage.
-const MAX_GAIN: f32 = 3.0;
+/// push past it — at the top of the row, a dark crevice beside a sunlit wall gets near this. It
+/// bounds the damage a degenerate gather could do.
+const MAX_GAIN: f32 = 4.0;
 
 @fragment
 fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let indirect = textureLoad(src_tex, vec2<i32>(in.position.xy), 0);
-    // At `params.x == 0` the mix factor is 0 and this is exactly 1.0, so the off state stays a
+    // At `strength.x == 0` the mix factor is 0 and this is exactly 1.0, so the off state stays a
     // bit-exact no-op no matter what the gain is.
-    let occlusion = saturate(mix(1.0, saturate(indirect.a), params.x * AO_GAIN));
-    let bounce = max(indirect.rgb, vec3<f32>(0.0)) * (params.y * GI_GAIN);
-    // ^(1/2.2) turns a linear-light factor into the gamma-space one that has the same effect on the
-    // buffer. `pow` of exactly 1.0 is exactly 1.0, so an untouched pixel stays untouched. The sum
-    // must NOT be saturated: a bounce is the one thing here that legitimately pushes a factor above
-    // one, and clamping it at one meant the whole colour-bleed half did nothing wherever a surface
-    // was unoccluded — which is most of the frame. The target is float, so a factor over one is
-    // representable; the cap is only there so a pathological gather cannot blow the frame out.
-    let factor = pow(
-        clamp(vec3<f32>(occlusion) + bounce, vec3<f32>(0.0), vec3<f32>(MAX_GAIN)),
-        vec3<f32>(1.0 / 2.2),
+    let ao_gain = select(AO_GAIN, AO_GAIN_LINEAR, frame_is_linear());
+    let occlusion = saturate(mix(1.0, saturate(indirect.a), params.strength.x * ao_gain));
+    let bounce = max(indirect.rgb, vec3<f32>(0.0)) * (params.strength.y * GI_GAIN);
+    // The sum must NOT be saturated: a bounce is the one thing here that legitimately pushes a
+    // factor above one, and clamping it at one meant the whole colour-bleed half did nothing
+    // wherever a surface was unoccluded — which is most of the frame. The target is float, so a
+    // factor over one is representable; the cap is only there so a pathological gather cannot blow
+    // the frame out.
+    //
+    let linear_factor = clamp(vec3<f32>(occlusion) + bounce, vec3<f32>(0.0), vec3<f32>(MAX_GAIN));
+    // A modern frame is linear radiance and takes the factor as it is. A classic frame holds gamma
+    // bytes, and ^(1/2.2) turns the linear-light factor into the gamma-space one with the same
+    // effect. `pow` of exactly 1.0 is exactly 1.0, so an untouched pixel stays untouched either way.
+    let factor = select(
+        pow(linear_factor, vec3<f32>(1.0 / 2.2)),
+        linear_factor,
+        frame_is_linear(),
     );
     // Alpha is pinned by the blend state (Zero/One), not by what is returned here.
     return vec4<f32>(factor, 1.0);

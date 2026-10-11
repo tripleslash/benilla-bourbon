@@ -147,6 +147,10 @@ fn env_f32(key: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
         .map_or(fallback, |v| v.clamp(lo, hi))
 }
 
+/// The params uniform: `strength` (AO, indirect, radius, thickness) and `frame` (x = the buffer is
+/// linear), two `vec4<f32>` — `SsilvbParams` in `shaders/ssilvb.wgsl`.
+const PARAMS_SIZE: u64 = 32;
+
 /// Marks the ONE view this pass runs on — the world camera.
 ///
 /// Same reason `static_gx` carries its own marker: without it the node would run for every `Core3d`
@@ -260,7 +264,7 @@ fn build_variant(
     samples: u32,
 ) -> SsilvbVariant {
     let ms = samples > 1;
-    let params = || uniform_buffer_sized(false, Some(std::num::NonZero::new(16).unwrap()));
+    let params = || uniform_buffer_sized(false, Some(std::num::NonZero::new(PARAMS_SIZE).unwrap()));
     let term = || texture_2d(TextureSampleType::Float { filterable: true });
     let layout_pass = BindGroupLayoutDescriptor::new(
         "ssilvb_pass_layout",
@@ -376,7 +380,7 @@ fn build_variant(
     }
 }
 
-/// The gather target and its blur ping-pong, plus the 16-byte params uniform.
+/// The gather target and its blur ping-pong, plus the params uniform.
 #[derive(Component)]
 pub(crate) struct SsilvbTextures {
     /// The gather writes here, and the vertical blur writes back into it — so this is what the
@@ -436,7 +440,7 @@ fn prepare_textures(
         }
         let params = render_device.create_buffer(&BufferDescriptor {
             label: Some("ssilvb_params"),
-            size: 16,
+            size: PARAMS_SIZE,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -500,6 +504,9 @@ pub(crate) fn ssilvb_pass(
         let Some(view_binding) = world.resource::<ViewUniforms>().uniforms.binding() else {
             return;
         };
+        let modern_frame = world
+            .get_resource::<crate::modern::ActiveLighting>()
+            .is_some_and(|active| active.is_modern());
         world.resource::<RenderQueue>().write_buffer(
             &textures.params,
             0,
@@ -508,6 +515,12 @@ pub(crate) fn ssilvb_pass(
                 lighting.gi,
                 sample_radius(),
                 occluder_thickness(),
+                // fork: the frame's encoding — a modern frame is linear HDR radiance where a
+                // classic one holds gamma bytes, and the gather and the composite read it both ways.
+                if modern_frame { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+                0.0,
             ]),
         );
 
