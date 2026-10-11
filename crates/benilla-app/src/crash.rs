@@ -129,6 +129,22 @@ fn write(dir: &Path, text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// The client's fallback error handler: a command that fails is logged at `error` and the session
+/// goes on, where Bevy panics on any error that carries no severity. A command on an entity
+/// despawned between its queue and its apply is one, and a streamed unit can leave in that gap.
+/// A system, observer or run-condition failure keeps Bevy's own severity.
+pub(crate) fn failed_command_is_logged(
+    err: bevy::ecs::error::BevyError,
+    ctx: bevy::ecs::error::ErrorContext,
+) {
+    use bevy::ecs::error::{error, match_severity, ErrorContext, Severity};
+    if matches!(ctx, ErrorContext::Command { .. }) && err.severity() == Severity::Panic {
+        error(err, ctx);
+    } else {
+        match_severity(err, ctx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +159,28 @@ mod tests {
         project_dir: "",
         extended: false,
     };
+
+    /// A component queued for a unit that is gone by the apply: logged, the frame completes.
+    #[test]
+    fn a_command_on_a_despawned_entity_does_not_end_the_session() {
+        use bevy::prelude::*;
+
+        #[derive(Component)]
+        struct Late;
+
+        let mut app = App::new();
+        app.set_error_handler(failed_command_is_logged);
+        let gone = app.world_mut().spawn_empty().id();
+        let kept = app.world_mut().spawn_empty().id();
+        app.add_systems(Update, move |mut commands: Commands| {
+            commands.entity(gone).despawn();
+            commands.entity(gone).insert(Late);
+            commands.entity(kept).insert(Late);
+        });
+        app.update();
+        assert!(app.world().get_entity(gone).is_err());
+        assert!(app.world().entity(kept).contains::<Late>());
+    }
 
     #[test]
     fn a_report_carries_the_build_the_place_the_payload_and_the_log() {

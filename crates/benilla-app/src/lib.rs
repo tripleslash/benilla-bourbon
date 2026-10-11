@@ -475,6 +475,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     let mut app = App::new();
     // The panel footer and the build banner read the stamp back.
     app.insert_resource(build);
+    // A failed command is an error line, not a panic (`crash::failed_command_is_logged`).
+    app.set_error_handler(crash::failed_command_is_logged);
     // Static-scene transform tracking pinned on: the default threshold re-decides every frame with
     // two full scans of the rows the tracking exists to skip, and this scene is static-heavy. It
     // costs more only when most rows move in one frame (a load burst into a near-empty world).
