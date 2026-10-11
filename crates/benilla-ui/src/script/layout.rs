@@ -515,7 +515,7 @@ fn queue_size_changes(
 
 impl UiScript {
     /// [`UiScript::resolve`]'s body on a bare `Model`, so a Lua binding can force a fresh resolve,
-    /// as `UpdateScrollChildRect` must report a range reflecting a same-tick `SetHeight`.
+    /// as a scroll frame's range recompute must reflect a same-tick `SetHeight`.
     pub(super) fn resolve_layout(model: &mut Model) {
         Self::name_landed_art(model);
         let solves = model.layout_solves;
