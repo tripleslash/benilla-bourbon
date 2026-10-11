@@ -26,7 +26,7 @@ use mlua::{FromLua, Lua, MultiValue, Table, Value};
 use super::object::frame_handle_of;
 use super::{FontObject, FontShadow, Model, Outline, RegionData};
 use crate::justify::{self, Justify};
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, RegionHandle, RegionKind};
 
@@ -234,7 +234,12 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                 };
                 let id = model.region_id(rh);
                 let mut d = RegionData {
-                    anchors: vec![anchor_for(prev_block, frame_id, Point::TopLeft, next_y)],
+                    anchors: Anchors::from([anchor_for(
+                        prev_block,
+                        frame_id,
+                        Point::TopLeft,
+                        next_y,
+                    )]),
                     // No height: the rect takes the wrapped text's height from the measure round
                     // trip, as the client's font engine gives it (`0x7729b0`, `0x5c2070`).
                     size: Some((width, 0.0)),
@@ -286,7 +291,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                     _ => None,
                 };
                 let anchors = point
-                    .map(|p| vec![anchor_for(prev_block, frame_id, p, next_y)])
+                    .map(|p| Anchors::from([anchor_for(prev_block, frame_id, p, next_y)]))
                     .unwrap_or_default();
                 model.region_data.insert(
                     rh,
@@ -318,8 +323,11 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
         }
     }
 
+    // Each new block joins the graph; the old ones' frees named theirs.
+    for &rh in &made {
+        model.touch_layout_region(rh);
+    }
     model.simple_html.entry(fh).or_default().blocks = made;
-    model.touch_layout();
 }
 
 /// A block's anchor (`SetPoint` `0x767c70`): block 0 to the frame, block N to the previous text

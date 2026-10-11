@@ -561,15 +561,6 @@ impl WorldAssets {
         made
     }
 
-    /// A UI sprite repeating on both axes, for a frame `Backdrop`'s tiled pieces (`0x77f0c0`).
-    pub fn sprite_texture_tiled(
-        &mut self,
-        path: &str,
-        images: &mut Assets<Image>,
-    ) -> Option<Handle<Image>> {
-        self.sprite_texture_wrapped(path, (true, true), images)
-    }
-
     /// A UI sprite repeating on the axes `wrap` names ([`sprite_image_wrapped`]).
     pub fn sprite_texture_wrapped(
         &mut self,
@@ -609,7 +600,7 @@ impl WorldAssets {
 
     /// [`Self::sprite_texture`] for a one-shot warmer, a caller that resolves its art once and
     /// keeps the handle, so it cannot take a placeholder ([`ReadMode::Block`]): the glue screens'
-    /// art table, the chat-bubble and V-plate boot sets, and the loading-screen backdrop, all on a
+    /// art table, the V-plate boot set, and the loading-screen backdrop, all on a
     /// boot or loading frame.
     pub fn sprite_texture_blocking(
         &mut self,
@@ -631,30 +622,6 @@ impl WorldAssets {
             SpriteLoad::Pending | SpriteLoad::Missing => None,
         };
         self.sprites.insert(key, loaded.clone());
-        loaded
-    }
-
-    /// [`Self::sprite_texture_tiled`]'s blocking twin, for the chat bubble's tiled edge strip,
-    /// whose texel size is baked at load. Both axes wrap, so it shares the deferred lane's cache.
-    pub fn sprite_texture_tiled_blocking(
-        &mut self,
-        path: &str,
-        images: &mut Assets<Image>,
-    ) -> Option<Handle<Image>> {
-        let key = (sprite_key(path), true, true);
-        if let Some(cached) = self.tiled_sprites.get(&key) {
-            return cached.clone();
-        }
-        let loaded = match decode_sprite(
-            &self.chain,
-            self.loose_root.as_deref(),
-            path,
-            ReadMode::Block,
-        ) {
-            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image_tiled(w, h, rgba))),
-            SpriteLoad::Pending | SpriteLoad::Missing => None,
-        };
-        self.tiled_sprites.insert(key, loaded.clone());
         loaded
     }
 

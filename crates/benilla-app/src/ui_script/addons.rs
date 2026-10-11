@@ -92,6 +92,11 @@ impl Addon {
         }
     }
 
+    /// Whether the files come off the player's patch chain.
+    fn is_chain(&self) -> bool {
+        matches!(self.source, Source::Chain)
+    }
+
     /// The base this addon's manifest entries resolve against: `Interface/AddOns/<Folder>` for a
     /// `Dir`, empty for the shipped flat tree and the chain's full paths.
     fn prefix(&self) -> String {
@@ -471,22 +476,38 @@ fn manifest_in(dir: &Path, name: &str) -> Option<String> {
 
 /// The AddOn API's registry row for one discovered addon.
 fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
-    let mut info = info_from_toc(&addon.name, &addon.toc);
-    // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths.
+    let mut info = info_from_toc(&addon.name, &addon.toc, addon.is_chain());
+    // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths;
+    // it stays INSECURE, since only the player's own chain carries Blizzard's `.sig` files.
     info.chain = matches!(addon.source, Source::Chain | Source::Bundled);
     info
 }
 
+/// The `## Secure: 1` directive. It grants nothing by itself: the client sends every such addon
+/// in `CMSG_AUTH_SESSION`'s addon block, and only [`secure`] makes one SECURE.
+pub(crate) fn toc_secure(toc: &Toc) -> bool {
+    toc.directive("Secure").map(str::trim) == Some("1")
+}
+
+/// Whether an addon is SECURE, the security state `[rec+0x24] == 0`: `GetAddOnInfo`'s security
+/// answer and the context it loads under ([`benilla_ui::script::addon_load_context`]). The
+/// reference sets it only when the `SMSG_ADDON_INFO` handler's `%s.sig` check `0x6f10f0` answers 3
+/// (`0x51dbfb`); the state starts INSECURE (`0x5205b6`). benilla verifies no signature, and the
+/// `.sig` files ship only with Blizzard's own addons in the player's patch chain, so this stands in
+/// for the check: off the chain and `## Secure: 1`. A folder addon claiming it stays INSECURE.
+pub(crate) fn secure(chain: bool, toc: &Toc) -> bool {
+    chain && toc_secure(toc)
+}
+
 /// [`info_for`]'s body, shared with `addon_harness` so its survey seats the registry row
-/// production does.
-pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnInfo {
+/// production does. `chain` is whether the addon comes off the player's patch chain.
+pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::script::AddOnInfo {
     benilla_ui::script::AddOnInfo {
         name: name.to_owned(),
         title: toc.directive("Title").map(str::to_owned),
         notes: toc.directive("Notes").map(str::to_owned),
         url: toc.directive("URL").map(str::to_owned),
-        // `## Secure: 1` grants nothing; it only sets `GetAddOnInfo`'s security answer.
-        secure: toc.directive("Secure").map(str::trim) == Some("1"),
+        secure: secure(chain, toc),
         load_on_demand: toc.load_on_demand(),
         dependencies: toc.dependencies().into_iter().map(str::to_owned).collect(),
         directives: toc.directives.clone(),
@@ -509,7 +530,7 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnI
         loaded: false,
         // The version gate's dword: the leading integer, 0 when absent (out of date, not unknown).
         interface: toc.interface_version(),
-        chain: false, // `info_for` stamps the chain rows; the harness's rows are folder addons
+        chain,
     }
 }
 
@@ -1040,6 +1061,11 @@ impl Walk {
         // (`0x51f464`), merged into the UI load's.
         let debug = script.framexml_debug();
         let mut toc = Status::default();
+        // The files, `Bindings.xml` and the saved variables run under the addon's context.
+        let outer = script.swap_exec_context(benilla_ui::script::addon_load_context(
+            &addon.name,
+            secure(addon.is_chain(), &addon.toc),
+        ));
         self.failures.extend(addon.load(script, &mut toc));
         let mut own = Status::default();
         let toc_path = status::addon_toc_path(&addon.name);
@@ -1064,6 +1090,7 @@ impl Walk {
         // The saved variables, account then per-character (`0x51f4b5`, `0x51f53b`): after the
         // files set their defaults, before `ADDON_LOADED`.
         script.load_addon_saved_variables(&addon.name);
+        script.swap_exec_context(outer);
         self.loaded.insert(addon.name.clone());
         script.mark_addon_loaded(&addon.name);
         // `arg1` is the addon's own folder name, whatever case a dependent used. Marked loaded
@@ -2172,6 +2199,60 @@ mod tests {
             .map(|a| a.name.to_string())
             .collect();
         script.note_addon_info_reply(&hidden);
+    }
+
+    /// A folder addon that writes `## Secure: 1` has no signature behind it, so it stays INSECURE
+    /// (`[rec+0x24]` starts 1 at `0x5205b6`; only the `.sig` check `0x6f10f0` answering 3 clears it,
+    /// `0x51dbfb`): it loads under its own context, so it cannot take a name an insecure addon
+    /// registered, and a later context-0 registration replaces its template.
+    #[test]
+    fn a_folder_addon_claiming_secure_loads_insecure() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("claimsecure");
+        let tmpl = |width: u32| {
+            format!(
+                r#"<Ui><Frame name="ClaimTemplate" virtual="true">
+                    <Size><AbsDimension x="{width}" y="5"/></Size>
+                </Frame></Ui>"#
+            )
+        };
+        let (plain, claim) = (tmpl(10), tmpl(20));
+        write_addon(
+            &home,
+            "Plain",
+            "## Interface: 11200\nPlain.xml\n",
+            &[("Plain.xml", &plain)],
+        );
+        write_addon(
+            &home,
+            "Zclaim",
+            "## Interface: 11200\n## Secure: 1\nZclaim.xml\n",
+            &[("Zclaim.xml", &claim)],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, None, &[], true);
+        seat_stock_addon_reply(&mut script);
+        let width = |s: &UiScript| {
+            s.eval::<f64>("return CreateFrame('Frame', nil, nil, 'ClaimTemplate'):GetWidth()")
+                .unwrap()
+        };
+        assert_eq!(
+            script
+                .eval::<String>("local _, _, _, _, _, _, s = GetAddOnInfo('Zclaim') return s")
+                .ok(),
+            Some("INSECURE".to_string())
+        );
+        assert_eq!(width(&script), 10.0, "the claim replaced Plain's template");
+        // A context-0 registration replaces it, which a SECURE entry would refuse.
+        let doc = benilla_ui::framexml::parse(&tmpl(30)).unwrap();
+        let report = benilla_ui::loader::load(&script, &doc, &|_| None);
+        assert!(report.status.is_empty(), "{:?}", report.status.lines());
+        assert_eq!(width(&script), 30.0);
+        let _ = home;
     }
 
     /// The in-game `GetAddOnInfo` (`0x48e390`) answers seven values, `name, title, notes, enabled,

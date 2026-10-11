@@ -24,7 +24,6 @@ mod layout_methods;
 pub(crate) use layout_methods::eff_scale;
 pub(crate) mod movable;
 pub(crate) mod toplevel;
-pub(crate) use layout_methods::{anchor_bits_eq, anchor_retarget_is_structural};
 pub(crate) use movable::{advance_move, advance_size, FrameMove, FrameSizing};
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -555,12 +554,13 @@ pub(super) fn create_frame(
     // leaves no partial widget and no global. The raise never returns and `pcall` catches it, as
     // the widget dispatcher (`0x704f10`) does for every handler.
     if let Some(t) = template.as_deref().filter(|t| !t.is_empty()) {
-        let known = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let templates = model.framexml_templates.borrow();
-            // One name, verbatim, case-folded, as `framexml::expand` resolves it.
-            templates.contains_key(t) || templates.keys().any(|k| k.eq_ignore_ascii_case(t))
-        };
+        // One name, verbatim, case-folded, as `framexml::expand` resolves it.
+        let known = lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .framexml_templates
+            .borrow()
+            .contains(t);
         if !known {
             return Err(mlua::Error::runtime(format!(
                 "CreateFrame(): Couldn't find inherited node \"{t}\""

@@ -16,11 +16,14 @@ use std::collections::VecDeque;
 const UNSET: f64 = f64::INFINITY;
 
 /// The least width or height change that fires `OnSizeChanged`: 2^-22, bits `0x34800000` at
-/// `0x8029d4`, tested in `ApplyRect` (`0x76b580`).
+/// `0x8029d4`, tested in `ApplyRect` (`0x76b5e7`, `0x76b602`) in the reference's layout units, the
+/// screen diagonal as 1; in benilla's units that is this times the layout unit
+/// (`Model::size_eps`).
 pub const SIZE_EPS: f64 = 2.384_185_791_015_625e-7;
 
-/// The least edge move against the cached rect for the client to re-store it and `ApplyRect`, 1e-5
-/// (`0x80c5c8`, in `0x768d20`). Recorded, not applied: the caller's own dirty gate decides.
+/// The least edge move against the cached rect for the drain's resolve to store the new rect and
+/// `ApplyRect`, 1e-5 (`0x3727c5ac` at `0x80c5c8`, tested in `0x768d20`), in the reference's layout
+/// units; in benilla's, this times the layout unit (`Model::resolve_eps`). See [`keeps_rect`].
 pub const RESOLVE_EPS: f64 = f32::from_bits(0x3727_c5ac) as f64;
 
 /// Point id to X column: left 0, center 1, right 2.
@@ -138,6 +141,170 @@ impl Anchor {
             y_off,
         }
     }
+
+    /// Bit-exact equality, as the layout gate's fingerprint compares, so the two always agree.
+    pub fn bits_eq(&self, other: &Anchor) -> bool {
+        self.point == other.point
+            && self.relative_to == other.relative_to
+            && self.relative_point == other.relative_point
+            && self.x_off.to_bits() == other.x_off.to_bits()
+            && self.y_off.to_bits() == other.y_off.to_bits()
+    }
+}
+
+/// The client's aspect globals, both written only by `0x41ad10(a)`: `[0x832a4c] = f32(a · 0.75)`
+/// (`0x41ad24`) and `[0x832a44] = f32(a / √(a² + 1))`, the quotient kept unrounded before its
+/// multiply (`0x41ad3e` `fst`, `0x41ad44`, `0x41ad47`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutUnits {
+    g3: f32,
+    g44: f32,
+}
+
+impl LayoutUnits {
+    /// From the screen aspect `a`, width over height.
+    pub fn from_aspect(a: f32) -> LayoutUnits {
+        let a64 = f64::from(a);
+        LayoutUnits {
+            g3: (a64 * 0.75) as f32,
+            g44: ((1.0 / (a64 * a64 + 1.0).sqrt()) * a64) as f32,
+        }
+    }
+
+    /// A Lua offset as `SetPoint`'s binding stores it, in layout units (`0x7a28a3`..`0x7a28e3`):
+    /// `f32(f32(v / ([0x832a4c] · 1024)) · [0x832a44])`.
+    pub fn store(self, v: f32) -> f32 {
+        let q = (f64::from(v) / (f64::from(self.g3) * 1024.0)) as f32;
+        (f64::from(self.g44) * f64::from(q)) as f32
+    }
+}
+
+/// A region's anchors, one slot per point: the client's `anchorPoints[9]` (`G+0x4`, a frame's
+/// `+0x28`), indexed by point id. Setting a point replaces its slot (`SetPoint` stores at
+/// `0x767d33`), so the order anchors were set in is not kept, and every walk runs in point order,
+/// TOPLEFT to BOTTOMRIGHT, as `GetPoint` (`0x7a23f5`) and `GetNumPoints` (`0x7a2311`) walk them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Anchors([Option<Anchor>; 9]);
+
+impl Anchors {
+    pub const fn new() -> Anchors {
+        Anchors([None; 9])
+    }
+
+    /// The anchor held for `point`.
+    #[inline]
+    pub fn get(&self, point: Point) -> Option<&Anchor> {
+        self.0[point.id() as usize].as_ref()
+    }
+
+    /// Store `a` in its point's slot, returning the anchor it replaces.
+    #[inline]
+    pub fn insert(&mut self, a: Anchor) -> Option<Anchor> {
+        self.0[a.point.id() as usize].replace(a)
+    }
+
+    /// `SetPoint`'s store (`0x767c70`): the anchor held for `a.point` stands when it has the same
+    /// target (`0x767ca9`) and relative point (`0x767cb1`) and both offsets, as the client stores
+    /// them ([`LayoutUnits::store`]), differ by less than 2⁻²² (`0x767cb6`..`0x767cde`), and the
+    /// call then stores nothing; else `a` replaces it. Returns whether it stored. A NaN offset
+    /// never matches, as the client's unordered compare.
+    pub fn set(&mut self, a: Anchor, units: LayoutUnits) -> bool {
+        let near = |p: f32, q: f32| {
+            (f64::from(units.store(p)) - f64::from(units.store(q))).abs() < SIZE_EPS
+        };
+        let unchanged = self.get(a.point).is_some_and(|h| {
+            h.relative_to == a.relative_to
+                && h.relative_point == a.relative_point
+                && near(h.x_off, a.x_off)
+                && near(h.y_off, a.y_off)
+        });
+        if !unchanged {
+            self.insert(a);
+        }
+        !unchanged
+    }
+
+    /// Empty every slot, returning whether any was held (`ClearAllPoints`, `0x767620`).
+    #[inline]
+    pub fn clear(&mut self) -> bool {
+        let held = !self.is_empty();
+        self.0 = [None; 9];
+        held
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    /// The occupied slots, `GetNumPoints`'s count.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// The held anchors in point order.
+    #[inline]
+    pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Option<Anchor>>> {
+        self.0.iter().flatten()
+    }
+
+    /// Each held anchor's offsets in point order; the point is not writable here, so an anchor
+    /// never leaves its slot.
+    #[inline]
+    pub fn offsets_mut(&mut self) -> impl Iterator<Item = (&mut f32, &mut f32)> {
+        self.0
+            .iter_mut()
+            .flatten()
+            .map(|a| (&mut a.x_off, &mut a.y_off))
+    }
+
+    /// The `n`-th held anchor in point order, from 0.
+    #[inline]
+    pub fn nth(&self, n: usize) -> Option<&Anchor> {
+        self.iter().nth(n)
+    }
+
+    /// The first held anchor in point order.
+    #[inline]
+    pub fn first(&self) -> Option<&Anchor> {
+        self.iter().next()
+    }
+
+    /// Slot-for-slot [`Anchor::bits_eq`].
+    pub fn bits_eq(&self, other: &Anchors) -> bool {
+        self.0.iter().zip(&other.0).all(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => a.bits_eq(b),
+            (None, None) => true,
+            _ => false,
+        })
+    }
+}
+
+/// Each anchor into its point's slot, a later one on the same point replacing an earlier one.
+impl FromIterator<Anchor> for Anchors {
+    fn from_iter<I: IntoIterator<Item = Anchor>>(iter: I) -> Anchors {
+        let mut out = Anchors::new();
+        for a in iter {
+            out.insert(a);
+        }
+        out
+    }
+}
+
+impl<const N: usize> From<[Anchor; N]> for Anchors {
+    fn from(a: [Anchor; N]) -> Anchors {
+        a.into_iter().collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a Anchors {
+    type Item = &'a Anchor;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Option<Anchor>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 /// A frame's layout input, the geometry fields the client's resolver reads: `anchorPoints[9]`
@@ -145,8 +312,7 @@ impl Anchor {
 /// (bit 4 of `G+0x3c`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutInput {
-    /// Slotted by `point`, the later of two on one point winning (`SetPoint`, `0x767c70`).
-    pub anchors: Vec<Anchor>,
+    pub anchors: Anchors,
     /// `0.0` is the no-size sentinel (`0x7ffd74`): the axis derives from the anchors.
     pub width: f32,
     pub height: f32,
@@ -164,7 +330,7 @@ pub struct LayoutInput {
 impl Default for LayoutInput {
     fn default() -> LayoutInput {
         LayoutInput {
-            anchors: Vec::new(),
+            anchors: Anchors::new(),
             width: 0.0,
             height: 0.0,
             scale: 1.0,
@@ -177,9 +343,13 @@ impl Default for LayoutInput {
 
 impl LayoutInput {
     /// A frame with the given anchors and explicit size, scale `1.0`, no clamp.
-    pub fn sized(anchors: Vec<Anchor>, width: f32, height: f32) -> LayoutInput {
+    pub fn sized(
+        anchors: impl IntoIterator<Item = Anchor>,
+        width: f32,
+        height: f32,
+    ) -> LayoutInput {
         LayoutInput {
-            anchors,
+            anchors: anchors.into_iter().collect(),
             width,
             height,
             ..LayoutInput::default()
@@ -336,14 +506,26 @@ pub fn assemble_rect(edges: [f32; 4], clamp: bool, extent_x: f32, extent_y: f32)
     }
 }
 
-/// `ApplyRect`'s `OnSizeChanged` test (`0x76b580`): width or height moved by at least
-/// [`SIZE_EPS`], the deltas taken in `f64` from the `f32` edges.
-pub fn size_changed(old: Rect, new: Rect) -> bool {
+/// `ApplyRect`'s `OnSizeChanged` test (`0x76b580`): width or height moved by at least `eps`,
+/// [`SIZE_EPS`] in the units the rects are in, the deltas taken in `f64` from the `f32` edges.
+pub fn size_changed(old: Rect, new: Rect, eps: f64) -> bool {
     let dw =
         (f64::from(new.right) - f64::from(new.left)) - (f64::from(old.right) - f64::from(old.left));
     let dh =
         (f64::from(new.top) - f64::from(new.bottom)) - (f64::from(old.top) - f64::from(old.bottom));
-    dw.abs() >= SIZE_EPS || dh.abs() >= SIZE_EPS
+    dw.abs() >= eps || dh.abs() >= eps
+}
+
+/// The drain's keep test (`0x768d20`, `0x768d6e`–`0x768dc0`): every edge of `new` moved less than
+/// `eps` from the cached rect `old`, the deltas taken in `f64` from the `f32` edges. A kept rect is
+/// not stored and `ApplyRect` does not run (the return at `0x768dc2`); an edge at `eps` or past it,
+/// or a NaN, applies.
+pub fn keeps_rect(old: Rect, new: Rect, eps: f64) -> bool {
+    let near = |a: f32, b: f32| (f64::from(a) - f64::from(b)).abs() < eps;
+    near(new.left, old.left)
+        && near(new.right, old.right)
+        && near(new.bottom, old.bottom)
+        && near(new.top, old.top)
 }
 
 // ── The composed resolver: `assemble` over six recursion-guarded edge resolvers ──────────────
@@ -622,11 +804,16 @@ pub fn resolve_rect_edges(
 /// [`set_external`](Self::set_external) and [`set_frame`](Self::set_frame), [`solve`](Self::solve).
 #[derive(Clone, Debug, Default)]
 pub struct LayoutSolver {
-    /// Overwritten in place, so each anchors `Vec` keeps its allocation.
+    /// Overwritten in place, so a steady round allocates nothing.
     input: Vec<LayoutInput>,
     is_frame: Vec<bool>,
     /// Externals as seeded, frames as they resolve.
     rect: Vec<Option<Rect>>,
+    /// Per frame, the rect it held before this round, which [`keeps_rect`] holds a new one against;
+    /// `None` stores the new rect whole, as the reference does while the resolved bit is clear.
+    cached: Vec<Option<Rect>>,
+    /// The keep test's threshold in the rects' units; 0 keeps nothing.
+    keep_eps: f64,
     /// Kahn in-degree and reverse edges; each inner `Vec` is cleared, never freed.
     indeg: Vec<u32>,
     dependents: Vec<Vec<Handle>>,
@@ -653,6 +840,7 @@ impl LayoutSolver {
             self.input.resize_with(need, LayoutInput::default);
             self.is_frame.resize(need, false);
             self.rect.resize(need, None);
+            self.cached.resize(need, None);
             self.indeg.resize(need, 0);
             self.dependents.resize_with(need, Vec::new);
             self.marked.resize(need, false);
@@ -675,6 +863,7 @@ impl LayoutSolver {
             let i = h as usize;
             self.is_frame[i] = false;
             self.rect[i] = None;
+            self.cached[i] = None;
             self.indeg[i] = 0;
             self.dependents[i].clear();
             self.marked[i] = false;
@@ -701,8 +890,7 @@ impl LayoutSolver {
         self.ensure(h);
         self.touch(h);
         let dst = &mut self.input[h as usize];
-        dst.anchors.clear();
-        dst.anchors.extend_from_slice(&src.anchors);
+        dst.anchors = src.anchors;
         Self::copy_fields(dst, src);
         self.is_frame[h as usize] = true;
         self.live.push(h);
@@ -713,11 +901,23 @@ impl LayoutSolver {
         self.ensure(h);
         self.touch(h);
         let dst = &mut self.input[h as usize];
-        dst.anchors.clear();
-        dst.anchors.push(anchor);
+        dst.anchors = Anchors::from([anchor]);
         Self::copy_fields(dst, src);
         self.is_frame[h as usize] = true;
         self.live.push(h);
+    }
+
+    /// Give registered frame `h` the rect it holds, so a new one within the keep threshold
+    /// ([`set_keep_eps`](Self::set_keep_eps)) leaves it standing, for `h` and its dependents alike.
+    pub fn set_cached(&mut self, h: Handle, rect: Rect) {
+        self.ensure(h);
+        self.touch(h);
+        self.cached[h as usize] = Some(rect);
+    }
+
+    /// The keep test's threshold, [`RESOLVE_EPS`] in the rects' units; kept across rounds.
+    pub fn set_keep_eps(&mut self, eps: f64) {
+        self.keep_eps = eps;
     }
 
     fn copy_fields(dst: &mut LayoutInput, src: &LayoutInput) {
@@ -740,8 +940,8 @@ impl LayoutSolver {
             let h = self.live[idx];
             let mut seen: [Handle; 9] = [0; 9];
             let mut n_seen = 0usize;
-            for a_idx in 0..self.input[h as usize].anchors.len() {
-                let d = self.input[h as usize].anchors[a_idx].relative_to;
+            let anchors = self.input[h as usize].anchors;
+            for d in anchors.iter().map(|a| a.relative_to) {
                 if !self.is_frame.get(d as usize).copied().unwrap_or(false) {
                     continue;
                 }
@@ -797,7 +997,10 @@ impl LayoutSolver {
             resolve_rect(input, |t| rects.get(t as usize).copied().flatten())
         };
         match outcome {
-            ResolveOutcome::Resolved(r) => self.rect[h as usize] = Some(r),
+            ResolveOutcome::Resolved(r) => {
+                let kept = self.cached[h as usize].filter(|&c| keeps_rect(c, r, self.keep_eps));
+                self.rect[h as usize] = Some(kept.unwrap_or(r));
+            }
             ResolveOutcome::Unresolvable => self.unresolvable.push(h),
         }
     }
@@ -828,6 +1031,15 @@ mod tests {
         Rect::new(0.0, 0.0, 600.0, 800.0)
     }
 
+    /// `0x41ad10` at 4:3: `[0x832a4c] = 1.0` and `[0x832a44] = 0.8` (as `f32`), so an offset
+    /// stores as `f32(f32(v / 1024) · 0.8)`.
+    #[test]
+    fn layout_units_at_four_thirds() {
+        let u = LayoutUnits::from_aspect(4.0 / 3.0);
+        assert_eq!(u, LayoutUnits { g3: 1.0, g44: 0.8 });
+        assert_eq!(u.store(1280.0), (1.25_f64 * f64::from(0.8_f32)) as f32);
+    }
+
     fn bits(r: Rect) -> [u32; 4] {
         [
             r.bottom.to_bits(),
@@ -835,6 +1047,53 @@ mod tests {
             r.top.to_bits(),
             r.right.to_bits(),
         ]
+    }
+
+    /// One slot per point, walked in point order whatever order the points were set in.
+    #[test]
+    fn anchors_keep_one_slot_per_point_in_point_order() {
+        let br = Anchor::new(Point::BottomRight, SCREEN, Point::BottomRight, -1.0, 1.0);
+        let tl = Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 1.0, -1.0);
+        let tl2 = Anchor::new(Point::TopLeft, 7, Point::Center, 2.0, -2.0);
+        let a = Anchors::from([br, tl, tl2]);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![tl2, br]);
+        assert_eq!(a.nth(1), Some(&br));
+        assert_eq!(a.nth(2), None);
+    }
+
+    /// `SetPoint`'s compare (`0x767cb6`..`0x767cde`): under the threshold on both axes with the
+    /// same target and relative point stands; past it, NaN, or another target or relative point
+    /// replaces. At 4:3 a layout unit is 1280 FrameXML units, so 2⁻²² is about 3.05e-4.
+    #[test]
+    fn anchors_set_keeps_an_anchor_within_the_threshold() {
+        let eps = LayoutUnits::from_aspect(4.0 / 3.0);
+        let held = Anchor::new(Point::Center, SCREEN, Point::Center, 10.0, 20.0);
+        let mut a = Anchors::from([held]);
+        let with = |x: f32, y: f32| Anchor::new(Point::Center, SCREEN, Point::Center, x, y);
+        assert!(!a.set(with(10.0001, 19.9999), eps));
+        assert_eq!(a.get(Point::Center), Some(&held), "nothing is stored");
+        for (x, y) in [(10.001, 20.0), (10.0, 19.999), (f32::NAN, 20.0)] {
+            let mut b = a;
+            assert!(b.set(with(x, y), eps), "({x}, {y})");
+            assert!(b.get(Point::Center).unwrap().x_off.to_bits() == x.to_bits());
+        }
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Center, 3, Point::Center, 10.0, 20.0),
+            eps
+        ));
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Center, SCREEN, Point::Top, 10.0, 20.0),
+            eps
+        ));
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Top, SCREEN, Point::Center, 10.0, 20.0),
+            eps
+        ));
+        assert_eq!(b.len(), 2);
     }
     fn assert_rect(got: ResolveOutcome, want: Rect) {
         match got {
@@ -1024,13 +1283,13 @@ mod tests {
     #[test]
     fn scale_interaction() {
         let f = LayoutInput {
-            anchors: vec![Anchor::new(
+            anchors: Anchors::from([Anchor::new(
                 Point::TopLeft,
                 SCREEN,
                 Point::TopLeft,
                 10.0,
                 -5.0,
-            )],
+            )]),
             width: 200.0,
             height: 50.0,
             scale: 2.0,
@@ -1182,14 +1441,86 @@ mod tests {
         assert!(s.cycle().contains(&A));
     }
 
+    /// `0x768d20`'s four strict `<` tests: every edge under `eps` keeps, one at `eps` applies.
+    #[test]
+    fn keeps_rect_is_strict_on_every_edge() {
+        let old = Rect::new(0.0, 0.0, 40.0, 100.0);
+        let eps = 0.5;
+        assert!(keeps_rect(old, Rect::new(0.25, -0.25, 40.25, 99.75), eps));
+        for moved in [
+            Rect::new(0.5, 0.0, 40.0, 100.0),
+            Rect::new(0.0, -0.5, 40.0, 100.0),
+            Rect::new(0.0, 0.0, 40.5, 100.0),
+            Rect::new(0.0, 0.0, 40.0, 100.5),
+            Rect::new(f32::NAN, 0.0, 40.0, 100.0),
+        ] {
+            assert!(!keeps_rect(old, moved, eps), "{moved:?}");
+        }
+        assert!(!keeps_rect(old, old, 0.0), "a zero threshold keeps nothing");
+    }
+
+    /// A frame whose new rect is within the threshold of its cached one resolves to the cached
+    /// rect, and its dependents read that; past it, the new rect stands.
+    #[test]
+    fn the_solver_keeps_a_cached_rect_under_the_threshold() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        let solve = |x: f32| {
+            let mut s = LayoutSolver::new();
+            s.begin();
+            s.set_keep_eps(0.0128);
+            s.set_external(SCREEN, screen_rect());
+            s.set_frame(
+                A,
+                &LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        SCREEN,
+                        Point::BottomLeft,
+                        x,
+                        0.0,
+                    )],
+                    20.0,
+                    20.0,
+                ),
+            );
+            s.set_cached(A, Rect::new(0.0, 10.0, 20.0, 30.0));
+            s.set_frame(
+                B,
+                &LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        A,
+                        Point::BottomRight,
+                        0.0,
+                        0.0,
+                    )],
+                    5.0,
+                    5.0,
+                ),
+            );
+            s.solve();
+            (s.rect(A).unwrap(), s.rect(B).unwrap())
+        };
+        let (a, b) = solve(10.01);
+        assert_eq!(a, Rect::new(0.0, 10.0, 20.0, 30.0));
+        assert_eq!(b.left, 30.0);
+        let (a, b) = solve(10.02);
+        assert_eq!(a.left, 10.02);
+        assert_eq!(b.left, a.right);
+    }
+
     #[test]
     fn size_changed_epsilon() {
         let r = Rect::new(0.0, 0.0, 40.0, 100.0);
         // 1e-7 is under SIZE_EPS.
         let tiny = Rect::new(0.0, 0.0, 40.0, 100.0 + 1e-7);
-        assert!(!size_changed(r, tiny));
+        assert!(!size_changed(r, tiny, SIZE_EPS));
         let big = Rect::new(0.0, 0.0, 40.0, 100.001);
-        assert!(size_changed(r, big));
+        assert!(size_changed(r, big, SIZE_EPS));
+        // In units of 1280 to the reference's one, 1e-4 is under the threshold.
+        let jitter = Rect::new(0.0, 0.0, 40.0, 100.0001);
+        assert!(!size_changed(r, jitter, SIZE_EPS * 1280.0));
     }
 
     /// The buffers live across rounds, so `begin` must leave nothing behind: round 2 anchors to a
@@ -1285,7 +1616,7 @@ mod tests {
         assert!(s.unresolvable().is_empty());
     }
 
-    /// The override keeps the size and scale but replaces the anchors, and the reused anchors `Vec`
+    /// The override keeps the size and scale but replaces the anchors, and the reused input slot
     /// must not leak the last round's.
     #[test]
     fn set_frame_anchored_replaces_only_the_anchors() {

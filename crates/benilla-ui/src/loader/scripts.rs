@@ -129,6 +129,25 @@ impl Loader<'_> {
         }
     }
 
+    /// Install the texture a widget element's child (`<BarTexture>`, `<ThumbTexture>`, a ColorSelect
+    /// texture) built as the widget's object, through the engine's own install, recording (not
+    /// propagating) any error: the Lua setters take the object too, but the loader needs no Lua
+    /// call to say it.
+    pub(super) fn install_texture(
+        &mut self,
+        wrapper: &Table,
+        tag: &str,
+        texture: &Table,
+        layer: Option<&str>,
+        dbg: &str,
+    ) {
+        if let Err(e) =
+            crate::script::install_loaded_texture(self.lua, wrapper, tag, texture, layer)
+        {
+            self.report.fault(format!("{dbg}: <{tag}>: {e}"));
+        }
+    }
+
     /// Call a region-wrapper method, recording (not propagating) any error.
     pub(super) fn call_region(
         &mut self,

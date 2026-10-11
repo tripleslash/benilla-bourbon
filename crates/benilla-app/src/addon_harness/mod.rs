@@ -162,7 +162,7 @@ fn corpus(
             let toc = Toc::parse(&benilla_ui::source::decode(
                 &std::fs::read(manifest_path(root, n)?).unwrap_or_default(),
             ));
-            Some(crate::ui_script::addons::info_from_toc(n, &toc))
+            Some(crate::ui_script::addons::info_from_toc(n, &toc, false))
         })
         .collect();
 
@@ -1397,6 +1397,19 @@ struct FileLoad {
 /// FrameXML, in the install-relative path space (`Interface/AddOns/<Folder>`, as
 /// `ui_script::addons::Addon::prefix`), so chunk names match a live session's.
 fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> FileLoad {
+    // Under the addon's own context, as the live walk loads it.
+    let outer = script.swap_exec_context(benilla_ui::script::addon_load_context(
+        name,
+        // The corpus is folder addons, never the chain.
+        crate::ui_script::addons::secure(false, toc),
+    ));
+    let load = load_addon_files_in_context(script, root, name, toc);
+    script.swap_exec_context(outer);
+    load
+}
+
+/// [`load_addon_files`]' body.
+fn load_addon_files_in_context(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> FileLoad {
     let provider = |req: &str| -> Option<Vec<u8>> { read_under(root, req) };
     let base = addon_base(name);
     let mut errors = Vec::new();

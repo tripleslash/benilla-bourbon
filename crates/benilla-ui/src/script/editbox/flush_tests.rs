@@ -471,6 +471,9 @@ fn up_and_down_move_a_multi_line_boxs_caret_by_rows() {
     "#,
     )
     .unwrap();
+    // The flush sizes the box to its two rows; the drain after the walk resizes it, and the
+    // re-seat that runs fires once more at the next flush (`0x77a8d0` → `0x77b8c0`).
+    s.tick(0.016);
     s.tick(0.016);
     take_log(&s);
     let row = |back| EditAction::Move {
@@ -566,5 +569,32 @@ fn on_cursor_changed_answers_in_the_boxs_own_units() {
         "early update cursor@7,-14,14 text:abc\nd late",
         "one glyph along the second row, a row pitch down, one pitch tall"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A box created and anchored between frames, as an event handler does: the pump's drain before
+/// the walk (`0x7656ba`) gives it its first rect, whose resize runs the box's `OnSizeChanged`
+/// override (`0x76b63e` → `0x77a8d0`); the re-seat ORs its bits into the ctor's (`0x77ba7f`), so the
+/// walk's flush (`0x77a7a1`) fires `OnTextChanged` once, and the frames after it fire nothing.
+#[test]
+fn a_box_anchored_between_frames_fires_on_text_changed_once() {
+    let mut s = script();
+    s.run(
+        r#"
+        N = 0
+        local e = CreateFrame("EditBox", "Fresh")
+        e:SetAutoFocus(false)
+        e:SetPoint("BOTTOMLEFT", 100, 50)
+        e:SetWidth(200); e:SetHeight(32)
+        e:SetScript("OnTextChanged", function() N = N + 1 end)
+    "#,
+    )
+    .unwrap();
+    // The host's frame: the tick, then its own resolve for the draw.
+    for _ in 0..3 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert_eq!(s.eval::<i64>("return N").unwrap(), 1);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

@@ -1,6 +1,6 @@
 use mlua::{Lua, Value};
 
-use crate::layout::{Anchor, Rect};
+use crate::layout::{Anchors, Rect};
 use crate::order::ZTarget;
 
 /// A value the host passes into Lua, such as a `fire_event` argument, without an mlua handle.
@@ -370,7 +370,7 @@ pub(crate) struct RegionData {
     /// extent, never the owner's rect; one still unset leaves the region unresolved (`0x767a20`).
     /// Empty is a Lua region nobody anchored, which never draws: every other has an authored or
     /// creation-time anchor ([`super::region::implicit_creation_anchor`]).
-    pub(crate) anchors: Vec<Anchor>,
+    pub(crate) anchors: Anchors,
     /// `SetDesaturated` (`0x79c1e0`): the renderer greys the texel, so the binding reports support.
     pub(crate) desaturated: bool,
     /// `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`), `None` on. Stored, not applied:
@@ -381,9 +381,10 @@ pub(crate) struct RegionData {
     pub(crate) justify: crate::justify::Justify,
     /// The `<TexCoords>`/`SetTexCoord` mapping; `None` is the full texture.
     pub(crate) tex_coords: Option<TexCoords>,
-    /// `SetTexCoordModifiesRect`, the reference's `+0x124` (written only at `0x79c113`, in
-    /// `0x79c080`). Stored, not applied: there a set flag makes `SetTexCoord` re-derive the rect
-    /// from the UV quad (`0x770462`); no stock or corpus code sets it.
+    /// The reference's `+0x124`: `SetTexCoordModifiesRect` writes it (`0x79c113`, in `0x79c080`)
+    /// and installing the texture as a StatusBar's bar sets it (`0x783220`, in `0x7831f0`). Stored,
+    /// not applied: there a set flag makes `SetTexCoord` re-derive the rect from the UV quad
+    /// (`0x770462`); no stock or corpus code sets it.
     pub(crate) tex_coord_modifies_rect: bool,
     /// Rotation about the centre, radians counterclockwise; always 0: 1.12 has no Texture setter.
     pub(crate) rotation: f32,

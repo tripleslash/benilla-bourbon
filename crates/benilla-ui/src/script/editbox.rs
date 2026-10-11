@@ -376,8 +376,11 @@ fn sync_text_region(lua: &Lua, h: FrameHandle) {
     });
     if let Some(display) = display {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        model.region_data.entry(rh).or_default().text = Some(display);
+        let data = model.region_data.entry(rh).or_default();
+        let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
+        data.text = Some(display);
         model.touch_measure(rh);
+        model.touch_layout_text(rh, was_shown);
     }
 }
 
@@ -461,7 +464,7 @@ fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option<RegionHand
         };
         apply_text_region_justify(&mut data, multi_line);
         slot.insert(data);
-        model.touch_layout(); // a region entered the layout gate's read set
+        model.touch_layout_region(rh);
     }
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         eb.text_region = Some(rh);

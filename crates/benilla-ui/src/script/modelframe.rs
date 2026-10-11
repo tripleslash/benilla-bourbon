@@ -35,6 +35,26 @@ impl Model {
         768.0 * (a * a + 1.0).sqrt()
     }
 
+    /// `ApplyRect`'s size threshold, 2⁻²² in the reference's layout units (`0x76b5e7`,
+    /// `0x76b602`, `[0x8029d4]`), in ours: [`crate::layout::SIZE_EPS`] times the layout unit.
+    pub(crate) fn size_eps(&self) -> f64 {
+        crate::layout::SIZE_EPS * f64::from(self.layout_unit())
+    }
+
+    /// The aspect globals `SetPoint`'s unchanged-anchor test quantizes offsets by
+    /// ([`crate::layout::Anchors::set`]), for the screen aspect [`Self::layout_unit`] reads.
+    pub(crate) fn layout_units(&self) -> crate::layout::LayoutUnits {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        crate::layout::LayoutUnits::from_aspect(a)
+    }
+
+    /// The drain's keep threshold, 1e-5 in the reference's layout units (`[0x80c5c8]`, tested in
+    /// `0x768d20`), in ours: [`crate::layout::RESOLVE_EPS`] times the layout unit.
+    pub(crate) fn resolve_eps(&self) -> f64 {
+        crate::layout::RESOLVE_EPS * f64::from(self.layout_unit())
+    }
+
     /// The implicit rect: a pane with no authored size takes its file's bounding-box extent, in
     /// layout units, as the reference's geometry overrides answer it (`0x76d080`, `0x76d0d0`).
     pub(crate) fn apply_implicit_rect(&mut self, h: FrameHandle) {

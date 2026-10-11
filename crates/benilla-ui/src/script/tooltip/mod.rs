@@ -17,7 +17,7 @@ use super::object::{frame_handle_of, publish_global};
 use super::region::region_wrapper;
 use super::visibility;
 use super::{FontObject, Model, RegionData};
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::order::DrawLayer;
 use crate::widget::{
     FrameHandle, KindState, RegionKind, TooltipAnchor, TooltipState, TOOLTIP_DOUBLE_GAP,
@@ -168,7 +168,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 d.hidden = true;
                 // Left-justified as in the template; it shows once a wrap line pins its width.
                 d.justify.set_h(super::JustifyH::Left);
-                d.anchors = vec![match prev_left {
+                d.anchors = Anchors::from([match prev_left {
                     None => Anchor::new(
                         Point::TopLeft,
                         frame_id,
@@ -186,10 +186,10 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                             -TOOLTIP_LINE_GAP,
                         )
                     }
-                }];
+                }]);
                 model.region_data.insert(left, d);
                 model.touch_measure(left); // an adopted cell can arrive text-in-hand
-                model.touch_layout(); // a line row entered the layout graph
+                model.touch_layout_region(left); // a line row entered the layout graph
             }
             let left_id = model.region_id(left);
 
@@ -214,10 +214,13 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 };
                 d.hidden = true;
                 d.justify.set_h(super::JustifyH::Right);
-                d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
+                // RIGHT on the left cell's LEFT, the point the layout re-sets with the plate
+                // width as x (`0x53094f`), as the template's `$parentTextRight1` declares it.
+                d.anchors =
+                    Anchors::from([Anchor::new(Point::Right, left_id, Point::Left, 0.0, 0.0)]);
                 model.region_data.insert(right, d);
                 model.touch_measure(right); // an adopted cell can arrive text-in-hand
-                model.touch_layout(); // a line row entered the layout graph
+                model.touch_layout_region(right); // a line row entered the layout graph
             }
             let right_id = model.region_id(right);
 
@@ -258,6 +261,7 @@ pub(super) fn write_cell(
     color: [f32; 4],
 ) {
     let d = model.region_data.entry(rh).or_default();
+    let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
     d.text = Some(text.to_string());
     d.vertex_color = Some(color);
     // The line's own colour, as if set by `SetTextColor`: a later
@@ -265,6 +269,7 @@ pub(super) fn write_cell(
     d.font_explicit.color = true;
     d.hidden = false;
     model.touch_measure(rh);
+    model.touch_layout_text(rh, was_shown);
 }
 
 /// Blanks every line cell and resets the counters and the subject: the model half of the clear
@@ -276,12 +281,14 @@ fn clear_content(model: &mut Model, h: FrameHandle) {
     };
     for rh in lefts.into_iter().chain(rights) {
         if let Some(d) = model.region_data.get_mut(&rh) {
+            let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
             d.text = None;
             d.hidden = true;
             // `measured` and the wrap pin (`size`) stay: the measure cache is keyed by content
             // ([`RegionData::measure_key`]) and `append_line` rewrites the pin, so the hover
             // loop's per-frame clear and rebuild (`ContainerFrameItemButton_OnUpdate`) re-measures
-            // and re-lays out nothing.
+            // nothing, and its lines' layout re-hashes to the converged node and solves nothing.
+            model.touch_layout_text(rh, was_shown);
         }
     }
     if let Ok(t) = tip_mut(model, h) {
@@ -417,8 +424,6 @@ pub(in crate::script) fn set_owner_core(
     };
     t.owner = owner;
     t.anchor = TooltipAnchor::None;
-    // A re-own, or the hide's un-own, ends the world plate; a content re-set alone does not.
-    t.world_owned = false;
     if let Some(owner) = owner {
         t.anchor = anchor;
         apply_anchor(&mut model, h, owner, anchor, x, y);
@@ -447,31 +452,23 @@ fn apply_anchor(
         TooltipAnchor::BottomLeft => Some((Point::TopRight, Point::BottomLeft)),
         TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => None,
     };
-    // The drop is a named retarget to no targets, not a conservative touch.
     if matches!(anchor, TooltipAnchor::Cursor | TooltipAnchor::None) {
-        let dropped: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
-            Some(input) if !input.anchors.is_empty() => {
-                Some(input.anchors.drain(..).map(|a| a.relative_to).collect())
-            }
-            _ => None,
-        };
-        if let Some(old_targets) = dropped {
-            model.touch_layout_retarget_frame(h, &old_targets, &[]);
+        let dropped = model
+            .layout_inputs
+            .get_mut(&h)
+            .is_some_and(|input| input.anchors.clear());
+        if dropped {
+            model.touch_layout_frame(h);
         }
     }
     if let Some((own, rel)) = pts {
         let owner_id = model.frame_id(owner);
-        let new = Anchor::new(own, owner_id, rel, x, y);
+        let new = Anchors::from([Anchor::new(own, owner_id, rel, x, y)]);
         let input = model.layout_inputs.entry(h).or_default();
         // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout.
-        let same = input.anchors.len() == 1
-            && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-        if !same {
-            // A named retarget: the cached layout graph re-points this edge instead of being
-            // rebuilt.
-            let old_targets: Vec<u32> = input.anchors.iter().map(|a| a.relative_to).collect();
-            input.anchors = vec![new];
-            model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
+        if !input.anchors.bits_eq(&new) {
+            input.anchors = new;
+            model.touch_layout_frame(h);
         }
     }
 }
@@ -709,16 +706,12 @@ fn cursor_anchor(model: &mut Model, h: FrameHandle) {
         cx / scale,
         cy / scale,
     );
+    let units = model.layout_units();
     let input = model.layout_inputs.entry(h).or_default();
-    // `0x767c70`'s change detect: the one slot is replaced only on a real change.
-    let same =
-        input.anchors.len() == 1 && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-    if same {
-        return;
+    // `0x767c70`'s change detect: the BOTTOM slot is replaced only on a real change.
+    if input.anchors.set(new, units) {
+        model.touch_layout_frame(h);
     }
-    let old_targets: Vec<u32> = input.anchors.iter().map(|a| a.relative_to).collect();
-    input.anchors = vec![new];
-    model.touch_layout_retarget_frame(h, &old_targets, &[super::SCREEN]);
 }
 
 pub(super) fn layout_tooltips(model: &mut Model) {
@@ -787,20 +780,22 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         // Inside the resolve, so a note and not a touch; the incremental pass still has to hear
         // that these inputs changed.
         model.note_layout_frame_write(h);
-        // Right-flush each double line: left.right + (maxw - left.width) is the text inset.
-        for (i, (l, r)) in rows.iter().enumerate() {
+        // Right-flush each shown right cell: one `SetPoint(RIGHT, leftCell, LEFT, width, 0)`
+        // (`0x530910`..`0x53094f`), which leaves any other point the cell holds alone.
+        let units = model.layout_units();
+        for (i, (_, r)) in rows.iter().enumerate() {
             if r.is_none() {
                 continue;
             }
-            let lw = l.map_or(0.0, |(w, _)| w);
-            let mut wrote = false;
-            if let Some(d) = model.region_data.get_mut(&rights[i]) {
-                if let Some(a) = d.anchors.first_mut() {
-                    a.x_off = maxw - lw;
-                    wrote = true;
-                }
-            }
-            if wrote {
+            let Some(&left_id) = model.region_to_id.get(&lefts[i]) else {
+                continue;
+            };
+            let new = Anchor::new(Point::Right, left_id, Point::Left, maxw, 0.0);
+            let stored = model
+                .region_data
+                .get_mut(&rights[i])
+                .is_some_and(|d| d.anchors.set(new, units));
+            if stored {
                 model.note_layout_region_write(rights[i]);
             }
         }

@@ -2,6 +2,7 @@
 //! `0x77e5f0`, and its pieces, `0x77e8d0`).
 
 use super::common::script;
+use crate::script::backdrop::pieces;
 use crate::script::*;
 
 // SetBackdropColor tints only the bg, SetBackdropBorderColor the 8 border pieces.
@@ -838,18 +839,6 @@ fn a_teardown_re_resolves_what_anchored_to_a_piece() {
     assert!(
         incremental == full,
         "the dirty-scope solve matches a full one"
-    );
-    eprintln!(
-        "DBG {:?}",
-        s.eval::<(Option<f32>, Option<f32>, i64)>(
-            "return dep:GetLeft(), dep:GetTop(), dep:GetNumPoints()"
-        )
-    );
-    eprintln!(
-        "DBG2 {:?}",
-        s.eval::<(Option<String>, Option<String>)>(
-            "local p, r = dep:GetPoint(1) return p, r and r:GetObjectType()"
-        )
     );
     assert!(!drawn(&s), "its anchor target is gone");
 }

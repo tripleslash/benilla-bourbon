@@ -4,15 +4,13 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::anchor_args::{parse_set_point, resolve_rel_target, UNNAMED};
-use super::object::{
-    anchor_bits_eq, anchor_retarget_is_structural, decode_id, id_to_lud, NamedTarget,
-};
+use super::object::{decode_id, id_to_lud, NamedTarget};
 use super::region_map::{set_shared, Side};
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
     REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
 };
-use crate::layout::Anchor;
+use crate::layout::{Anchor, Anchors};
 use crate::widget::{RegionHandle, RegionKind};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
@@ -65,40 +63,53 @@ pub(super) fn texture_object_arg(
 /// out of the old parent (its region-removed hook runs, `0x77fd55`) and into `owner` on `layer`,
 /// the layer set whether or not the parent changed (`0x77fd9a`).
 ///
-/// The third argument is the region's own shown bit (`+0xc4`, what `IsShown` reads): leaving the
-/// old parent clears it (`0x77fd3d`) and `shown` writes it back (`0x77fd85`, `0x77fdc8`). Every
-/// widget that takes a texture calls with 1 (the bar, thumb, highlight, ColorSelect slots, the
-/// label) except a Button's state and checked slots, whose 0 is followed by the state switch
-/// writing the bit for the texture that shows (`0x779037`, `0x7797ea`, `0x785538`). benilla keeps
-/// that state side in [`crate::widget::ButtonState::region_visible`], so those too end with the
-/// script-side bit shown, and `IsShown` reads the state side beside it.
+/// The third argument is the region's own shown bit (`+0xc4`, what `Show`/`Hide` write and
+/// `IsShown` reads): leaving the old parent clears it (`0x77fd3d`) and `shown` writes it back
+/// (`0x77fd85`, `0x77fdc8`, and `0x77fdd9` clears it when the parent and layer stand). Every widget
+/// that takes a texture calls with 1 (the bar, thumb, highlight, ColorSelect slots, the label)
+/// except a Button's state and checked slots, whose 0 is followed by the state switch writing the
+/// bit for the texture that shows (`0x779037`, `0x7797ea`, `0x785538`): the caller applies those
+/// writes after the link.
 pub(super) fn link_region(
     model: &mut Model,
     rh: RegionHandle,
     owner: crate::widget::FrameHandle,
     layer: crate::order::DrawLayer,
+    shown: bool,
 ) {
     if model.arena.set_region_owner(rh, Some(owner)) {
         // The owner supplies the region's scale to layout, so a re-link is a layout change.
-        model.touch_layout();
+        model.touch_layout_region(rh);
     }
     if let Some(r) = model.arena.region_mut(rh) {
         r.draw_layer = layer;
     }
-    model.region_data.entry(rh).or_default().hidden = false;
+    model.region_data.entry(rh).or_default().hidden = !shown;
+}
+
+/// Apply a Button state machine's writes to the regions' shown bit, the one `Show`/`Hide` write.
+/// A region the machine names that has since been freed is skipped.
+pub(super) fn apply_shown_writes(model: &mut Model, writes: crate::widget::ShownWrites) {
+    for (rh, shown) in writes.0 {
+        if model.arena.region(rh).is_some() {
+            model.region_data.entry(rh).or_default().hidden = !shown;
+        }
+    }
 }
 
 /// A widget's one-texture slot taking `incoming` (a Texture object, or nothing to clear), as every
 /// slot setter does (`0x778fd0`, `0x7831f0`, `0x789860`, `0x785330`, `0x78b580`..): the same
 /// texture is a no-op, the displaced one is deleted, the incoming one is linked in on `layer`
 /// (a thumb marker then loses its anchors, `0x767ed0`, since the widget places it), then it is
-/// stored. `get` and `set` read and write the slot in the widget's own state. Answers whether the
-/// slot changed, for a caller whose hook does more once it has.
+/// stored. `shown` is the link's third argument (see [`link_region`]). `get` and `set` read and
+/// write the slot in the widget's own state. Answers whether the slot changed, for a caller whose
+/// hook does more once it has.
 pub(super) fn install_into_slot(
     model: &mut Model,
     owner: crate::widget::FrameHandle,
     incoming: Option<RegionHandle>,
     layer: crate::order::DrawLayer,
+    shown: bool,
     clear_points: bool,
     get: impl Fn(&crate::widget::KindState) -> Option<RegionHandle>,
     set: impl Fn(&mut crate::widget::KindState, Option<RegionHandle>),
@@ -115,7 +126,7 @@ pub(super) fn install_into_slot(
         free_region(model, old);
     }
     if let Some(rh) = incoming {
-        link_region(model, rh, owner, layer);
+        link_region(model, rh, owner, layer, shown);
         if clear_points {
             layout::clear_points(model, rh);
         }
@@ -123,25 +134,107 @@ pub(super) fn install_into_slot(
     if let Some(f) = model.arena.frame_mut(owner) {
         set(&mut f.kind_state, incoming);
     }
-    model.touch_layout();
+    // The displaced region's free named its node; the incoming one re-derives with its new owner
+    // and points.
+    if let Some(rh) = incoming {
+        model.touch_layout_region(rh);
+    }
     Ok(true)
 }
 
-/// The region's shown bit as `IsShown` reads it (`0x79b9b0`, `[+0xc4]`): its own `Show`/`Hide`,
-/// and for a Button's state and checked textures also the state side that writes the bit for the
-/// one that shows.
+/// What a widget's texture setter was handed (`SetStatusBarTexture` `0x78f870`, `SetThumbTexture`
+/// `0x7902b0`, `SetNormalTexture` `0x781970`, the ColorSelect four): a Texture object, a path, or
+/// nil to clear.
+pub(super) enum SlotArg {
+    Object(RegionHandle),
+    Path(String),
+    Clear,
+}
+
+/// The setter's fork on its first argument. A table is a Texture object (`lua_type` 5), a string
+/// or a number a path where the setter has a path leg (`lua_isstring` `0x6f3510`, then
+/// `lua_tostring` `0x6f3690`, so `1` is the file `"1"`), nil (type 0) clears; anything else, no
+/// argument included (type -1), raises `Usage: <name>:<usage>`. `object_method` names the setter in
+/// the object leg's two raises, as each setter's own format string prints it.
+pub(super) fn slot_arg(
+    lua: &Lua,
+    this: &Table,
+    args: &MultiValue,
+    usage: &str,
+    object_method: &str,
+    path_leg: bool,
+) -> mlua::Result<SlotArg> {
+    match args.front() {
+        Some(Value::Table(t)) => {
+            return texture_object_arg(lua, this, t, object_method).map(SlotArg::Object)
+        }
+        Some(Value::Nil) => return Ok(SlotArg::Clear),
+        Some(v @ (Value::String(_) | Value::Number(_) | Value::Integer(_))) if path_leg => {
+            if let Some(path) = lua.coerce_string(v.clone())? {
+                return Ok(SlotArg::Path(path.to_string_lossy()));
+            }
+        }
+        _ => {}
+    }
+    let who = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        super::object::frame_handle_of(lua, this)
+            .ok()
+            .and_then(|h| model.arena.frame(h).and_then(|f| f.name.clone()))
+            .unwrap_or_else(|| "<unnamed>".to_string())
+    };
+    Err(mlua::Error::runtime(format!("Usage: {who}:{usage}")))
+}
+
+/// A fresh anchorless Texture region of `owner` on `layer`, as the client builds the texture a
+/// path leg loads (`0x76fc40`) before it installs it as an object.
+pub(super) fn new_texture_region(
+    model: &mut Model,
+    owner: crate::widget::FrameHandle,
+    layer: crate::order::DrawLayer,
+) -> Option<RegionHandle> {
+    let rh = model
+        .arena
+        .create_region(owner, RegionKind::Texture, layer, 0)?;
+    model.region_data.insert(rh, super::RegionData::default());
+    model.touch_layout_region(rh);
+    Some(rh)
+}
+
+/// `CSimpleTexture::SetTexture(path)` (`0x770200`) on a region: the file replaces a solid fill, and
+/// `""` clears the texture, which `QuestLogFrame.lua:165` relies on.
+pub(super) fn set_texture_path(model: &mut Model, rh: RegionHandle, path: &str) {
+    let data = model.region_data.entry(rh).or_default();
+    data.texture = (!path.is_empty()).then(|| path.to_string());
+    data.fill = None;
+    model.touch_layout_art(rh);
+}
+
+/// The loader's install of the texture a `<BarTexture>`, `<ThumbTexture>` or ColorSelect texture
+/// element (`tag`) built, as the widget's object, never through a Lua setter. `layer` is the
+/// element's `drawLayer` for the bar and the thumb.
+pub(crate) fn install_loaded_texture(
+    lua: &Lua,
+    this: &Table,
+    tag: &str,
+    texture: &Table,
+    layer: Option<&str>,
+) -> mlua::Result<()> {
+    let h = super::object::frame_handle_of(lua, this)?;
+    let rh = texture_object_arg(lua, this, texture, "SetStatusBarTexture")?;
+    let layer = layer.and_then(super::object::draw_layer_from_str);
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    match tag {
+        "BarTexture" => super::statusbar::install_loaded(&mut model, h, rh, layer),
+        "ThumbTexture" => super::slider::install_loaded(&mut model, h, rh, layer),
+        _ => super::colorselect::install_loaded(&mut model, h, tag, rh),
+    }
+}
+
+/// The region's shown bit (`+0xc4`) as `IsShown` reads it (`0x79b9b0`): the one bit `Show`/`Hide`
+/// write, and a Button's state switch writes for its state and checked textures.
 fn region_shown(model: &Model, rh: RegionHandle) -> bool {
-    if model.region_data.get(&rh).is_some_and(|d| d.hidden) {
-        return false;
-    }
-    let owner = model.arena.region(rh).map(|r| r.owner);
-    match owner
-        .and_then(|o| model.arena.frame(o))
-        .map(|f| &f.kind_state)
-    {
-        Some(crate::widget::KindState::Button(bs)) => bs.state_region_shown(rh).unwrap_or(true),
-        _ => true,
-    }
+    !model.region_data.get(&rh).is_some_and(|d| d.hidden)
 }
 
 /// Argument 1 of a global that takes a Texture as its `this` (`SetLootPortrait` `0x4c2b40`,
@@ -175,6 +268,7 @@ pub(super) fn clear_texture(model: &mut Model, rh: RegionHandle) {
     data.texture = None;
     data.fill = None;
     data.portrait_unit = None;
+    model.touch_layout_art(rh);
 }
 
 /// Apply the font parts an XML element supplies (`font=`, `<FontHeight>`, `outline=`), any of
@@ -265,6 +359,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             data.texture = None;
             data.fill = None;
             data.circular = true;
+            model.touch_layout_art(rh);
             Ok(())
         })?,
     )?;
@@ -287,6 +382,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             data.texture = Some(path);
             data.circular = true;
             data.portrait_unit = None;
+            model.touch_layout_art(rh);
             Ok(())
         })?,
     )?;
@@ -421,7 +517,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             };
             if model.arena.set_region_owner(rh, new_owner) {
                 // The owner supplies the region's scale to layout, so a re-link is a layout change.
-                model.touch_layout();
+                model.touch_layout_region(rh);
             }
             Ok(())
         },
@@ -566,18 +662,14 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
 /// wrapper raises as stale; the reference frees too, as `CSimpleButton::SetFontString 0x778d20`
 /// deletes the label it replaces.
 pub(crate) fn free_region(model: &mut Model, rh: RegionHandle) {
-    release_region(model, rh);
-    // A removed node takes its edges with it: a structural change, so the full touch.
-    model.touch_layout();
-}
-
-/// [`free_region`] without its layout touch, for a caller that frees several and touches once.
-pub(crate) fn release_region(model: &mut Model, rh: RegionHandle) {
     model.region_data.remove(&rh);
     model.region_resolved.remove(&rh);
     if let Some(id) = model.region_to_id.remove(&rh) {
         model.id_to_region.remove(&id);
         model.region_names.retain(|_, v| *v != id);
+        // Its node leaves the cached graph with its edges at the next resolve, and whatever
+        // anchored to it re-resolves without it.
+        model.name_layout_node(id);
     }
     model.arena.destroy_region(rh);
 }
@@ -607,18 +699,18 @@ pub(crate) fn implicit_creation_anchor(model: &mut Model, rh: RegionHandle) {
     use crate::layout::Point;
     match kind {
         RegionKind::Texture => {
-            data.anchors = vec![
+            data.anchors = Anchors::from([
                 Anchor::new(Point::TopLeft, owner_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, owner_id, Point::BottomRight, 0.0, 0.0),
-            ];
+            ]);
         }
         RegionKind::FontString => {
             let point = justify_anchor_point(data.justify.0);
-            data.anchors = vec![Anchor::new(point, owner_id, point, 0.0, 0.0)];
+            data.anchors = Anchors::from([Anchor::new(point, owner_id, point, 0.0, 0.0)]);
         }
         RegionKind::Title => return,
     }
-    model.touch_layout();
+    model.touch_layout_region(rh);
 }
 
 /// The middle-row point a justify word selects, as the FontString post-step (`0x771480`) and the
@@ -646,8 +738,8 @@ pub(crate) fn anchor_unanchored_at(
     if !data.anchors.is_empty() {
         return;
     }
-    data.anchors = vec![Anchor::new(point, owner_id, point, 0.0, 0.0)];
-    model.touch_layout();
+    data.anchors = Anchors::from([Anchor::new(point, owner_id, point, 0.0, 0.0)]);
+    model.touch_layout_region(rh);
 }
 
 /// [`implicit_creation_anchor`] for the loader, which holds region wrappers.
@@ -699,32 +791,14 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
+    // The frame's store and its unchanged-anchor test (`0x767c70`).
+    let units = model.layout_units();
     let data = model.region_data.entry(rh).or_default();
-    let new = Anchor::new(point, rel_to_id, rel_point, x, y);
-    // A no-op only when the bit-identical anchor is already the tail and no earlier entry has
-    // this point, as for frames.
-    let same_at_tail = data.anchors.last().is_some_and(|a| anchor_bits_eq(a, &new))
-        && !data.anchors[..data.anchors.len() - 1]
-            .iter()
-            .any(|a| a.point == point);
-    if !same_at_tail {
-        // The same targets are a value change on this node; a moved target set is a retarget.
-        let structural = anchor_retarget_is_structural(&data.anchors, &new);
-        let old_targets: Option<Vec<u32>> =
-            structural.then(|| data.anchors.iter().map(|a| a.relative_to).collect());
-        data.anchors.retain(|a| a.point != point);
-        data.anchors.push(new);
-        match old_targets {
-            None => model.touch_layout_region(rh),
-            Some(old) => {
-                let new_targets: Vec<u32> = model.region_data[&rh]
-                    .anchors
-                    .iter()
-                    .map(|a| a.relative_to)
-                    .collect();
-                model.touch_layout_retarget_region(rh, &old, &new_targets);
-            }
-        }
+    if data
+        .anchors
+        .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
+    {
+        model.touch_layout_region(rh);
     }
     Ok(())
 }

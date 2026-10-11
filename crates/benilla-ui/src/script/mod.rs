@@ -34,6 +34,8 @@ mod calls;
 mod camera_view;
 mod channel;
 mod char_stats;
+pub mod chat_bubble;
+pub use chat_bubble::{BubbleGeometry, BubbleState};
 mod chat_misc;
 mod chat_send;
 mod chat_types;
@@ -94,6 +96,7 @@ pub mod nameplate;
 pub use nameplate::{PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
 mod model;
 mod modelframe;
+mod mouseover;
 mod net_stats;
 pub(crate) mod object;
 pub use object::frame_kind_from_tag;
@@ -150,7 +153,7 @@ mod worn_display;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
-pub use addon::AddOnInfo;
+pub use addon::{addon_load_context, AddOnInfo};
 pub use addon_enable::EnableHash;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
@@ -158,7 +161,7 @@ pub use auction::{
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
 pub use aura::{AuraState, TrackingState};
-pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
+pub use backdrop::{Backdrop, Insets};
 pub use bank::BankState;
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
@@ -238,7 +241,7 @@ pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
-pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua};
+pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua, install_loaded_texture};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
@@ -907,7 +910,8 @@ impl UiScript {
             .map(|(_, f)| f.effective_alpha)
     }
 
-    /// Resolve and cache every frame's rect, which `GetWidth`/`GetHeight`/`extract` read, then fire
+    /// The layout drain (`0x768ed0`), which [`Self::tick`] runs before and after its walk: resolve
+    /// and cache every frame's rect, which `GetWidth`/`GetHeight`/`extract` read, then fire
     /// `OnSizeChanged` for frames whose size moved ([`event::fire_size_changes`]) and re-seat the
     /// text of every resized EditBox.
     pub fn resolve(&mut self) {
@@ -957,8 +961,10 @@ impl UiScript {
                 d.measured = Some(new);
             }
             if moved {
-                // Touched per region, so the layout gate need not re-walk the whole roster.
+                // Touched per region, so the layout gate need not re-walk the whole roster; stored
+                // whole, as the reference's `SetText` clears the resolved bit (`0x771ea4`).
                 model.touch_layout_region(rh);
+                model.layout_force.push(id);
             }
         }
     }
@@ -1146,9 +1152,7 @@ impl UiScript {
     /// Whether `name` is a registered FrameXML template, case-folded as the loader resolves it, for
     /// the corpus harness: an addon naming a missing template gets a bare frame and no load error.
     pub fn has_framexml_template(&self, name: &str) -> bool {
-        let model = self.model_ref();
-        let templates = model.framexml_templates.borrow();
-        templates.contains_key(name) || templates.keys().any(|k| k.eq_ignore_ascii_case(name))
+        self.model_ref().framexml_templates.borrow().contains(name)
     }
 
     /// Whether `name` is a registered font object, the other namespace an `inherits=` may name

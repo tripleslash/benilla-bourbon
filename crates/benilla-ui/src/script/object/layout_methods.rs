@@ -2,13 +2,16 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::script::region_map::{set_shared, Side};
 use crate::script::{Model, SCREEN};
 use crate::widget::FrameHandle;
 
-use super::anchor_args::{parse_set_all_points, parse_set_point, resolve_rel_target, UNNAMED};
-use super::{frame_handle_of, frame_parent_token_base, frame_wrapper, point_name};
+use super::anchor_args::{
+    get_point_index, get_point_values, parse_set_all_points, parse_set_point, resolve_rel_target,
+    UNNAMED,
+};
+use super::{frame_handle_of, frame_parent_token_base, frame_wrapper};
 
 /// The receiver's name for the error strings and its `$parent` base, read under one short `Model`
 /// borrow that ends before the ladder's `_G` read.
@@ -36,53 +39,41 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         let h = frame_handle_of(lua, &this)?;
         let mut model = lua.app_data_mut::<Model>().expect("model");
         // Every layout setter mutates only on a real change, so a per-frame caller setting the
-        // same value never reopens the layout gate. Clearing is a retarget to no targets.
-        let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
-            Some(input) if !input.anchors.is_empty() => {
-                let old = input.anchors.iter().map(|a| a.relative_to).collect();
-                input.anchors.clear();
-                Some(old)
-            }
-            _ => None,
-        };
-        if let Some(old) = old {
-            model.touch_layout_retarget_frame(h, &old, &[]);
+        // same value never reopens the layout gate.
+        let cleared = model
+            .layout_inputs
+            .get_mut(&h)
+            .is_some_and(|input| input.anchors.clear());
+        if cleared {
+            model.touch_layout_frame(h);
         }
         Ok(())
     })?;
-    // GetPoint([n]) → point, relativeTo, relativePoint, x, y of the n-th anchor (default 1);
-    // relativeTo is nil for a screen-root anchor, since `SCREEN` has no wrapper.
+    // GetPoint([n]) → point, relativeTo, relativePoint, x, y of the n-th anchor in point order
+    // (`0x7a2340`); relativeTo is nil for a screen-root anchor, since `SCREEN` has no wrapper.
     set_shared(
         lua,
         m,
         Side::Frame,
         "GetPoint",
-        |lua, (this, n): (Table, Option<i64>)| {
+        |lua, (this, n): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            let idx = get_point_index(lua, n)?;
             let anchor = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                let idx = (n.unwrap_or(1).max(1) - 1) as usize;
                 model
                     .layout_inputs
                     .get(&h)
-                    .and_then(|i| i.anchors.get(idx))
-                    .cloned()
+                    .and_then(|i| i.anchors.nth(idx))
+                    .copied()
             };
-            let Some(a) = anchor else {
-                return Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil));
-            };
-            let rel = if a.relative_to == SCREEN {
-                Value::Nil
-            } else {
-                Value::Table(frame_wrapper(lua, a.relative_to)?)
-            };
-            Ok((
-                Value::String(lua.create_string(point_name(a.point))?),
-                rel,
-                Value::String(lua.create_string(point_name(a.relative_point))?),
-                Value::Number(f64::from(a.x_off)),
-                Value::Number(f64::from(a.y_off)),
-            ))
+            get_point_values(lua, anchor, |rel| {
+                Ok(if rel == SCREEN {
+                    Value::Nil
+                } else {
+                    Value::Table(frame_wrapper(lua, rel)?)
+                })
+            })
         },
     )?;
     // GetNumPoints(): on the Region method table (`0x87c9b8`), so every widget answers it.
@@ -116,16 +107,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
             ];
             let input = model.layout_inputs.entry(h).or_default();
-            let same = input.anchors.len() == 2
-                && input
-                    .anchors
-                    .iter()
-                    .zip(&pair)
-                    .all(|(a, b)| anchor_bits_eq(a, b));
-            if !same {
-                input.anchors.clear();
-                input.anchors.extend_from_slice(&pair);
-                model.touch_layout();
+            // The reference clears and sets both (`0x767db0`); only a bit-identical pair skips.
+            let pair = Anchors::from(pair);
+            if !input.anchors.bits_eq(&pair) {
+                input.anchors = pair;
+                model.touch_layout_frame(h);
             }
             Ok(())
         },
@@ -237,8 +223,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
 /// Resolve the layout now if anything moved, as the reference answers a geometry query against
 /// current layout; a settled tree costs one epoch compare. Deviation: `OnSizeChanged` fires at the
-/// next `UiScript::resolve`, a tick after the reference's (`ApplyRect 0x76b580`), because running
-/// Lua handlers inside a binding risks a borrow panic or unbounded recursion.
+/// next layout drain (`UiScript::resolve`), not inside the getter as the reference's forced
+/// `ApplyRect 0x76b580` does, because running Lua handlers inside a binding risks a borrow panic
+/// or unbounded recursion.
 fn settle(lua: &Lua) {
     let mut model = lua.app_data_mut::<Model>().expect("model");
     crate::script::UiScript::resolve_layout(&mut model);
@@ -286,57 +273,15 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, parent)?;
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
+    let units = model.layout_units();
     let input = model.layout_inputs.entry(h).or_default();
-    let new = Anchor::new(point, rel_to_id, rel_point, x, y);
-    // A no-op only when the identical anchor is already last and no earlier one has this point,
-    // mirroring the retain and push below; bits compared, as the fingerprint tells -0.0 from 0.0.
-    let same_at_tail = input
+    if input
         .anchors
-        .last()
-        .is_some_and(|a| anchor_bits_eq(a, &new))
-        && !input.anchors[..input.anchors.len() - 1]
-            .iter()
-            .any(|a| a.point == point);
-    if !same_at_tail {
-        // Target lists are collected only for a retarget: the value-only change is the per-frame
-        // idiom (a dragged window) and must stay allocation-free.
-        let structural = anchor_retarget_is_structural(&input.anchors, &new);
-        let old_targets: Option<Vec<u32>> =
-            structural.then(|| input.anchors.iter().map(|a| a.relative_to).collect());
-        input.anchors.retain(|a| a.point != point);
-        input.anchors.push(new);
-        match old_targets {
-            None => model.touch_layout_frame(h),
-            Some(old) => {
-                let new_targets: Vec<u32> = model.layout_inputs[&h]
-                    .anchors
-                    .iter()
-                    .map(|a| a.relative_to)
-                    .collect();
-                model.touch_layout_retarget_frame(h, &old, &new_targets);
-            }
-        }
+        .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
+    {
+        model.touch_layout_frame(h);
     }
     Ok(())
-}
-
-/// Whether this `SetPoint` changes the node's anchor targets, mirroring the setters' retain and
-/// push: value-only exactly when one existing anchor has this point and keeps its target.
-pub(crate) fn anchor_retarget_is_structural(anchors: &[Anchor], new: &Anchor) -> bool {
-    let mut same_point = anchors.iter().filter(|a| a.point == new.point);
-    match (same_point.next(), same_point.next()) {
-        (Some(old), None) => old.relative_to != new.relative_to,
-        _ => true,
-    }
-}
-
-/// Bit-exact anchor equality, as the layout gate's fingerprint compares, so the two always agree.
-pub(crate) fn anchor_bits_eq(a: &Anchor, b: &Anchor) -> bool {
-    a.point == b.point
-        && a.relative_to == b.relative_to
-        && a.relative_point == b.relative_point
-        && a.x_off.to_bits() == b.x_off.to_bits()
-        && a.y_off.to_bits() == b.y_off.to_bits()
 }
 
 /// The default `relativeTo`: the parent, or [`SCREEN`] for a top-level frame (`0x76c6e0`).

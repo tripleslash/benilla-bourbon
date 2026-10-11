@@ -10,7 +10,7 @@
 
 use mlua::Lua;
 
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle, RegionKind};
 
@@ -138,6 +138,11 @@ pub(crate) struct NamePlates {
 }
 
 impl NamePlates {
+    /// Whether `frame` is a plate, whose leave publishes the empty mouseover (`0x7cb8b0`).
+    pub(crate) fn is_plate(&self, frame: FrameHandle) -> bool {
+        self.by_frame.contains_key(&frame)
+    }
+
     /// Whether the `0x7cba30` veto refuses `frame`: only a plate, only while the veto stands.
     pub(crate) fn vetoes(&self, frame: FrameHandle) -> bool {
         self.hit_test_vetoed && self.by_frame.contains_key(&frame)
@@ -272,13 +277,17 @@ impl UiScript {
     }
 
     /// The freelook toggle (`0x60f830`): entering camera freelook disables mouse input on every
-    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`).
+    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`). The disable is
+    /// `EnableMouse(false)`'s (`0x76af50(2)`), whose removal tail (`0x764ba0`, flag 0, `0x76af7f`)
+    /// ends a hovered plate's hover through its leave (`0x7cb8b0`).
     pub fn set_nameplate_mouse(&mut self, enabled: bool) {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let frames: Vec<FrameHandle> = model.nameplates.plates.iter().map(|p| p.frame).collect();
+        let frames: Vec<FrameHandle> = {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            model.nameplates.plates.iter().map(|p| p.frame).collect()
+        };
         for frame in frames {
-            model.arena.set_mouse_enabled(frame, enabled);
+            super::visibility::set_mouse_enabled(lua, frame, enabled);
         }
     }
 
@@ -525,32 +534,32 @@ impl Plate {
         input.height = g.height;
 
         for rh in [border, glow] {
-            model.region_data.entry(rh).or_default().anchors = vec![
+            model.region_data.entry(rh).or_default().anchors = Anchors::from([
                 Anchor::new(Point::TopLeft, plate_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, plate_id, Point::BottomRight, 0.0, 0.0),
-            ];
+            ]);
         }
 
         let bar_input = model.layout_inputs.entry(bar).or_default();
-        bar_input.anchors = vec![Anchor::new(
+        bar_input.anchors = Anchors::from([Anchor::new(
             Point::BottomLeft,
             plate_id,
             Point::BottomLeft,
             g.bar_off_x,
             g.bar_off_y,
-        )];
+        )]);
         bar_input.width = g.bar_width;
         bar_input.height = g.bar_height;
 
         // The name's (`0x7cb456`) and level's (`0x7cb7f5`) anchors, which `_Nameplates` checks.
         let name_data = model.region_data.entry(name).or_default();
-        name_data.anchors = vec![Anchor::new(
+        name_data.anchors = Anchors::from([Anchor::new(
             Point::Bottom,
             plate_id,
             Point::Center,
             0.0,
             0.0,
-        )];
+        )]);
         name_data.font_height = Some(g.name_height);
 
         for rh in [name, level] {
@@ -561,33 +570,38 @@ impl Plate {
         }
 
         let level_data = model.region_data.entry(level).or_default();
-        level_data.anchors = vec![Anchor::new(
+        level_data.anchors = Anchors::from([Anchor::new(
             Point::Center,
             plate_id,
             Point::BottomRight,
             -g.level_off_x,
             g.level_off_y,
-        )];
+        )]);
         level_data.font_height = Some(g.level_height);
         level_data.font_explicit.height = true;
         model.touch_measure(level);
 
         let skull_data = model.region_data.entry(skull).or_default();
-        skull_data.anchors = vec![Anchor::new(
+        skull_data.anchors = Anchors::from([Anchor::new(
             Point::Center,
             plate_id,
             Point::BottomRight,
             -g.level_off_x,
             g.level_off_y,
-        )];
+        )]);
         skull_data.size = Some((g.skull_size, g.skull_size));
 
         let raid_data = model.region_data.entry(raid).or_default();
-        raid_data.anchors = vec![Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)];
+        raid_data.anchors =
+            Anchors::from([Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)]);
         raid_data.size = Some((g.raid_size, g.raid_size));
 
-        // The first lay-out adds anchor targets, so the full touch; once per geometry change.
-        model.touch_layout();
+        // Once per geometry change: each node it wrote re-derives.
+        model.touch_layout_frame(frame);
+        model.touch_layout_frame(bar);
+        for rh in [border, glow, name, level, skull, raid] {
+            model.touch_layout_region(rh);
+        }
         model.nameplates.plates[i].laid_out = Some(g);
     }
 
@@ -606,29 +620,20 @@ impl Plate {
         let last = p.last.clone();
         let world_id = model.frame_id(world);
 
-        // Re-seated whenever it moves, as the reference does (`0x509ec0`). A moved offset keeps
-        // the graph's edges, so the precise touch; the first seat adds an edge, so the retarget.
+        // Re-seated whenever it moves, as the reference does (`0x509ec0`).
         if last
             .as_ref()
             .is_none_or(|l| l.top_centre != state.top_centre)
         {
-            let fresh = model
-                .layout_inputs
-                .get(&frame)
-                .is_none_or(|i| i.anchors.is_empty());
             let input = model.layout_inputs.entry(frame).or_default();
-            input.anchors = vec![Anchor::new(
+            input.anchors = Anchors::from([Anchor::new(
                 Point::Top,
                 world_id,
                 Point::BottomLeft,
                 state.top_centre.0,
                 state.top_centre.1,
-            )];
-            if fresh {
-                model.touch_layout_retarget_frame(frame, &[], &[world_id]);
-            } else {
-                model.touch_layout_frame(frame);
-            }
+            )]);
+            model.touch_layout_frame(frame);
         }
 
         if last.is_none() {
@@ -765,11 +770,11 @@ fn font_string(model: &mut Model, frame: FrameHandle, justify_v: JustifyV) -> Re
     rh
 }
 
-/// Whether a text's owner is a plate. A plate's rect snaps to device pixels as it slides, and its
-/// text must follow that rect, not the UI's coarser grid, or it jumps. Asked of the frame so an
-/// addon's strings on the plate get it too; a string on the plate's health bar does not.
+/// Whether a text's owner is a plate or a chat bubble. Their rects snap to device pixels as they
+/// slide, and their text must follow that rect, not the UI's coarser grid, or it jumps. Asked of
+/// the frame so an addon's strings on one get it too; a string on the plate's health bar does not.
 pub(super) fn is_world_seated(model: &Model, frame: FrameHandle) -> bool {
-    model.nameplates.by_frame.contains_key(&frame)
+    model.nameplates.by_frame.contains_key(&frame) || super::chat_bubble::is_bubble(model, frame)
 }
 
 /// Whether this is the plate's own glow art on its ADD mode, which the quad walk

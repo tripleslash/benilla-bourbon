@@ -39,16 +39,19 @@ impl InputFingerprint {
         self.feed(u64::from(v.to_bits()));
     }
 
+    /// The anchors in point order, then their count.
     #[inline]
-    fn anchors(&mut self, anchors: &[Anchor]) {
-        self.feed(anchors.len() as u64);
+    fn anchors<'a>(&mut self, anchors: impl IntoIterator<Item = &'a Anchor>) {
+        let mut n = 0u64;
         for a in anchors {
             self.feed(u64::from(a.point.id()));
             self.feed(u64::from(a.relative_to));
             self.feed(u64::from(a.relative_point.id()));
             self.f32(a.x_off);
             self.f32(a.y_off);
+            n += 1;
         }
+        self.feed(n);
     }
 
     #[inline]
@@ -97,11 +100,28 @@ fn frame_node_hash(input: &LayoutInput, over: Option<Anchor>) -> u64 {
     node.finish()
 }
 
-/// A region's per-node input hash: its anchors, explicit size, measured text extent and art span.
+/// The measured extent the region sweep sizes a FontString by: the stored measure while the text
+/// is non-empty, used without a key check, so changed text keeps its last box while the
+/// re-measure is in flight; empty text is never measured, so it has none, never a stale box.
 #[inline]
-fn region_node_hash(data: &RegionData, probe: Option<&crate::script::TextureSizeProbe>) -> u64 {
+pub(super) fn effective_measure(data: &RegionData) -> Option<super::MeasuredText> {
+    data.measured
+        .filter(|_| data.text.as_deref().is_some_and(|t| !t.is_empty()))
+}
+
+/// A region's per-node input hash: its anchors, explicit size, owner, whose effective scale the
+/// sweep reads (`None` for an owner with no layout id), and, where an axis authored 0 takes its
+/// span from them, its effective measure, its art and the probe's size for it: exactly what the
+/// sweep reads.
+#[inline]
+pub(super) fn region_node_hash(
+    data: &RegionData,
+    owner: Option<u32>,
+    probe: Option<&crate::script::TextureSizeProbe>,
+) -> u64 {
     let mut node = InputFingerprint::default();
     node.anchors(&data.anchors);
+    node.feed(owner.map_or(u64::MAX, u64::from));
     match data.size {
         Some((w, h)) => {
             node.f32(w);
@@ -109,7 +129,8 @@ fn region_node_hash(data: &RegionData, probe: Option<&crate::script::TextureSize
         }
         None => node.feed(u64::MAX),
     }
-    match data.measured {
+    let unsized_axis = data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0);
+    match effective_measure(data).filter(|_| unsized_axis) {
         Some(m) => {
             node.f32(m.w);
             node.f32(m.h);
@@ -190,6 +211,11 @@ const REGION_TAG: u32 = 0x8000_0000;
 
 /// Per-node layout scope, so a resolve touches only what moved. Indexed densely by layout id, as
 /// frames and regions share one counter (`Model::next_id`); nothing allocates on a steady frame.
+///
+/// The graph is derived in full once, then kept: a write names the ids it touched
+/// ([`Model::touch_layout_frame`]), and the next resolve re-derives just those nodes against the
+/// model ([`UiScript::rederive_named`]), joining, leaving or re-pointing them in place, the way a
+/// retained layout tree marks a node dirty rather than rebuilding itself.
 #[derive(Default)]
 pub(crate) struct LayoutScope {
     /// Per id: the hash the last converged resolve saw, or [`NO_NODE`]; a mismatch seeds dirty.
@@ -204,8 +230,10 @@ pub(crate) struct LayoutScope {
     dep_head: Vec<u32>,
     dep_to: Vec<u32>,
     dep_next: Vec<u32>,
-    /// Edge slots [`Self::retarget`] freed, for [`Self::edge`] to reuse rather than grow `dep_to`.
+    /// Edge slots [`Self::unlink_edge`] freed, for [`Self::edge`] to reuse rather than grow `dep_to`.
     dep_free: Vec<u32>,
+    /// Per id: the targets of the edges it recorded, in order, so a re-derive unlinks exactly those.
+    out: Vec<Vec<u32>>,
     /// Per id: in the dirty closure.
     dirty: Vec<bool>,
     /// The closure's worklist.
@@ -214,12 +242,20 @@ pub(crate) struct LayoutScope {
     plan: Vec<(FrameHandle, u32, Option<Anchor>)>,
     /// The cached roster of live, anchored regions.
     regions: Vec<RegionRow>,
+    /// Per ScrollFrame id, the live child it held when last derived: the one frame whose anchors
+    /// its override replaces.
+    scroll_child: HashMap<u32, FrameHandle>,
+    /// Per child, the ScrollFrames holding it, `(handle, id)`: [`Self::scroll_child`] inverted, so
+    /// a re-derived frame finds its override without a scan.
+    claims: HashMap<FrameHandle, Vec<(FrameHandle, u32)>>,
     /// An incremental pass's `(id, hash)` writes to [`Self::last`], applied only on convergence.
     staged: Vec<(u32, u64)>,
+    /// A re-derive's target list, reused.
+    targets: Vec<u32>,
 }
 
-/// One live, anchored region as the round loop consumes it, built once per derivation.
-#[derive(Clone, Copy)]
+/// One live, anchored region as the round loop consumes it, a row of the cached roster.
+#[derive(Clone, Copy, PartialEq)]
 struct RegionRow {
     rh: RegionHandle,
     /// The layout id: the solver's array index and the scope's node key.
@@ -243,6 +279,9 @@ impl LayoutScope {
         self.node_of.resize(n, u32::MAX);
         self.dep_head.clear();
         self.dep_head.resize(n, u32::MAX);
+        // Cleared in place, so a re-derivation reuses each list's allocation.
+        self.out.iter_mut().for_each(Vec::clear);
+        self.out.resize_with(n, Vec::new);
         self.dirty.clear();
         self.dirty.resize(n, false);
         self.dep_to.clear();
@@ -251,22 +290,26 @@ impl LayoutScope {
         self.stack.clear();
         self.plan.clear();
         self.regions.clear();
+        self.scroll_child.clear();
+        self.claims.clear();
         self.staged.clear();
     }
 
-    /// The incremental entry: the cached graph survives, and only the dirty marks reset.
-    fn begin_incremental(&mut self) {
+    /// The incremental entry: the cached graph survives, grown to `n` ids, and only the dirty
+    /// marks reset.
+    fn begin_incremental(&mut self, n: usize) {
+        if self.node_of.len() < n {
+            self.node_of.resize(n, u32::MAX);
+            self.dep_head.resize(n, u32::MAX);
+            self.out.resize_with(n, Vec::new);
+        }
+        if self.last.len() < self.node_of.len() {
+            self.last.resize(self.node_of.len(), NO_NODE);
+        }
         self.dirty.clear();
         self.dirty.resize(self.node_of.len(), false);
         self.stack.clear();
         self.staged.clear();
-    }
-
-    /// Whether `id` is a node of the cached graph, the only kind a precise touch may name.
-    pub(crate) fn has_node(&self, id: u32) -> bool {
-        self.node_of
-            .get(id as usize)
-            .is_some_and(|&n| n != u32::MAX)
     }
 
     /// Record that node `from` reads `to`'s rect, so a change at `to` reaches `from`.
@@ -291,23 +334,33 @@ impl LayoutScope {
         *head = e;
     }
 
-    /// Re-point node `id`'s outgoing edges after an anchor retarget. `old` and `new` are its full
-    /// anchor-target lists, so duplicate anchors stay exact. `false` means a conservative touch:
-    /// `id` has no node, or a ScrollFrame override, not its anchors, supplies its edges.
-    pub(crate) fn retarget(&mut self, id: u32, old: &[u32], new: &[u32]) -> bool {
-        let Some(&n) = self.node_of.get(id as usize) else {
+    /// [`Self::edge`], remembered as one of `from`'s own, for a later [`Self::relink`].
+    #[inline]
+    fn link(&mut self, from: u32, to: u32) {
+        self.edge(from, to);
+        if let Some(out) = self.out.get_mut(from as usize) {
+            out.push(to);
+        }
+    }
+
+    /// Point node `id`'s edges at `targets`, unlinking the ones it recorded; `true` when they
+    /// differed, which the caller seeds, as the node now reads other rects.
+    fn relink(&mut self, id: u32, targets: &[u32]) -> bool {
+        let Some(out) = self.out.get_mut(id as usize) else {
             return false;
         };
-        if n == u32::MAX {
+        if out.as_slice() == targets {
             return false;
         }
-        if n & REGION_TAG == 0 && self.plan[n as usize].2.is_some() {
-            return false; // a ScrollFrame override owns this frame's edges, not its anchors
-        }
-        for &t in old {
+        let old = std::mem::take(out);
+        for &t in &old {
             self.unlink_edge(t, id);
         }
-        for &t in new {
+        let mut old = old;
+        old.clear();
+        old.extend_from_slice(targets);
+        self.out[id as usize] = old;
+        for &t in targets {
             self.edge(id, t);
         }
         true
@@ -347,6 +400,73 @@ impl LayoutScope {
         }
     }
 
+    /// A re-derived node's verdict: stage and seed it when its hash or its edges moved. Every edge
+    /// source (anchor targets, the owner, the override) is in the hash, so `relinked` only guards
+    /// against a hash that stops covering one.
+    #[inline]
+    fn note(&mut self, id: u32, hash: u64, relinked: bool) {
+        if relinked || hash != self.last.get(id as usize).copied().unwrap_or(NO_NODE) {
+            self.staged.push((id, hash));
+            self.seed(id);
+        }
+    }
+
+    /// Record that ScrollFrame `sid` (`sh`) now holds `child`; the child it held before, if it
+    /// changed, so the caller re-derives both.
+    fn hold(
+        &mut self,
+        sh: FrameHandle,
+        sid: u32,
+        child: Option<FrameHandle>,
+    ) -> Option<FrameHandle> {
+        let before = match child {
+            Some(c) => self.scroll_child.insert(sid, c),
+            None => self.scroll_child.remove(&sid),
+        };
+        if before == child {
+            return None;
+        }
+        if let Some(old) = before {
+            if let Some(v) = self.claims.get_mut(&old) {
+                v.retain(|&(_, s)| s != sid);
+                if v.is_empty() {
+                    self.claims.remove(&old);
+                }
+            }
+        }
+        if let Some(c) = child {
+            self.claims.entry(c).or_default().push((sh, sid));
+        }
+        before
+    }
+
+    /// Whether `id` is a node whose converged hash is `hash`: a write that leaves it there moved
+    /// nothing the resolve reads.
+    pub(crate) fn holds(&self, id: u32, hash: u64) -> bool {
+        self.node_of
+            .get(id as usize)
+            .is_some_and(|&n| n != u32::MAX)
+            && self.last.get(id as usize) == Some(&hash)
+    }
+
+    /// Drop region node `id` from the roster with its edges, seeding it so what read its rect
+    /// re-resolves without it. Returns the row it held.
+    fn remove_region(&mut self, id: u32, n: u32) -> RegionRow {
+        let idx = (n & !REGION_TAG) as usize;
+        let row = self.regions.swap_remove(idx);
+        if let Some(moved) = self.regions.get(idx) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                self.node_of[moved.id as usize] = idx as u32 | REGION_TAG;
+            }
+        }
+        self.node_of[id as usize] = u32::MAX;
+        self.relink(id, &[]);
+        self.staged.push((id, NO_NODE));
+        self.seed(id);
+        row
+    }
+
     /// Close the dirty set under "depends on": whatever reads a dirty rect, transitively.
     fn close(&mut self) {
         while let Some(id) = self.stack.pop() {
@@ -375,7 +495,7 @@ impl LayoutScope {
     }
 
     /// [`Self::commit`] for an incremental pass: only the re-hashed slots. `last_screen` stays,
-    /// since a structural change always takes the derivation.
+    /// since a screen move always takes the derivation.
     fn commit_incremental(&mut self) {
         for &(id, h) in &self.staged {
             self.last[id as usize] = h;
@@ -387,11 +507,195 @@ impl LayoutScope {
     pub(crate) fn invalidate(&mut self) {
         self.last_screen = None;
         self.last.clear();
-        // The roster and `node_of` too: `has_node` must not vouch for a node the memory forgot.
         self.plan.clear();
         self.regions.clear();
         self.node_of.clear();
         self.staged.clear();
+    }
+
+    /// `WOW_LAYOUT_VERIFY`'s graph check: where this cached graph differs from `fresh`, derived
+    /// from scratch on the same model, in roster, per-node hash, edges or ScrollFrames.
+    fn diverges_from(&self, fresh: &LayoutScope) -> Option<(u32, String)> {
+        let at = |v: &[u32], id: usize| v.get(id).copied().unwrap_or(u32::MAX);
+        let hash = |s: &LayoutScope, id: usize| s.last.get(id).copied().unwrap_or(NO_NODE);
+        let sorted = |v: Option<&Vec<u32>>| {
+            let mut v = v.cloned().unwrap_or_default();
+            v.sort_unstable();
+            v
+        };
+        let incoming = |s: &LayoutScope, id: usize| {
+            let mut v = Vec::new();
+            let mut e = at(&s.dep_head, id);
+            while e != u32::MAX {
+                v.push(s.dep_to[e as usize]);
+                e = s.dep_next[e as usize];
+            }
+            v.sort_unstable();
+            v
+        };
+        let over_eq = |a: Option<Anchor>, b: Option<Anchor>| match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.bits_eq(&b),
+            _ => false,
+        };
+        let n = self
+            .node_of
+            .len()
+            .max(fresh.node_of.len())
+            .max(self.last.len())
+            .max(fresh.last.len());
+        for id in 0..n {
+            let (a, b) = (at(&self.node_of, id), at(&fresh.node_of, id));
+            let row = |s: &LayoutScope, n: u32| -> String {
+                match n {
+                    u32::MAX => "absent".into(),
+                    n if n & REGION_TAG != 0 => {
+                        let r = s.regions[(n & !REGION_TAG) as usize];
+                        format!("region {:?} owner {:?}", r.rh, r.owner)
+                    }
+                    n => format!(
+                        "frame {:?} override {:?}",
+                        s.plan[n as usize].0, s.plan[n as usize].2
+                    ),
+                }
+            };
+            let same_node = match (a, b) {
+                (u32::MAX, u32::MAX) => true,
+                (u32::MAX, _) | (_, u32::MAX) => false,
+                (a, b) if (a ^ b) & REGION_TAG != 0 => false,
+                (a, b) if a & REGION_TAG != 0 => {
+                    self.regions[(a & !REGION_TAG) as usize]
+                        == fresh.regions[(b & !REGION_TAG) as usize]
+                }
+                (a, b) => {
+                    let (x, y) = (self.plan[a as usize], fresh.plan[b as usize]);
+                    x.0 == y.0 && x.1 == y.1 && over_eq(x.2, y.2)
+                }
+            };
+            if !same_node {
+                return Some((
+                    id as u32,
+                    format!(
+                        "id {id}: the cached graph holds {}, a fresh derivation {}",
+                        row(self, a),
+                        row(fresh, b)
+                    ),
+                ));
+            }
+            if hash(self, id) != hash(fresh, id) {
+                return Some((
+                    id as u32,
+                    format!(
+                        "id {id} ({}): the cached hash is stale against a fresh derivation",
+                        row(self, a)
+                    ),
+                ));
+            }
+            let (oa, ob) = (sorted(self.out.get(id)), sorted(fresh.out.get(id)));
+            if a != u32::MAX && oa != ob {
+                return Some((
+                    id as u32,
+                    format!(
+                        "id {id} ({}): reads {oa:?} in the cached graph, {ob:?} fresh",
+                        row(self, a)
+                    ),
+                ));
+            }
+            let (ia, ib) = (incoming(self, id), incoming(fresh, id));
+            if ia != ib {
+                return Some((
+                    id as u32,
+                    format!("id {id}: read by {ia:?} in the cached graph, {ib:?} fresh"),
+                ));
+            }
+        }
+        let held = |s: &LayoutScope| {
+            let mut v: Vec<(u32, FrameHandle)> =
+                s.scroll_child.iter().map(|(&id, &c)| (id, c)).collect();
+            v.sort_unstable_by_key(|e| e.0);
+            v
+        };
+        let (sa, sb) = (held(self), held(fresh));
+        if sa != sb {
+            return Some((0, format!("ScrollFrames hold {sa:?} cached, {sb:?} fresh")));
+        }
+        // The inverse must agree with its source, entry for entry.
+        let claimed: usize = self.claims.values().map(Vec::len).sum();
+        let inverse_ok = claimed == sa.len()
+            && sa.iter().all(|&(id, c)| {
+                self.claims
+                    .get(&c)
+                    .is_some_and(|v| v.iter().any(|&(_, s)| s == id))
+            });
+        (!inverse_ok).then(|| {
+            (
+                0,
+                format!("ScrollFrame claims {:?} disagree with {sa:?}", self.claims),
+            )
+        })
+    }
+}
+
+/// The layout id of the first frame or region whose rect differs between the model and `frames`
+/// and `regions`, in id order.
+fn first_rect_diff(
+    model: &Model,
+    frames: &HashMap<FrameHandle, Rect>,
+    regions: &HashMap<RegionHandle, Rect>,
+) -> Option<u32> {
+    let mut ids: Vec<u32> = Vec::new();
+    for (h, r) in &model.resolved {
+        if frames.get(h) != Some(r) {
+            ids.extend(model.frame_to_id.get(h));
+        }
+    }
+    for h in frames.keys().filter(|h| !model.resolved.contains_key(h)) {
+        ids.extend(model.frame_to_id.get(h));
+    }
+    for (h, r) in &model.region_resolved {
+        if regions.get(h) != Some(r) {
+            ids.extend(model.region_to_id.get(h));
+        }
+    }
+    for h in regions
+        .keys()
+        .filter(|h| !model.region_resolved.contains_key(h))
+    {
+        ids.extend(model.region_to_id.get(h));
+    }
+    let differs = frames != &model.resolved || regions != &model.region_resolved;
+    ids.into_iter().min().or(differs.then_some(u32::MAX))
+}
+
+/// A node's layout inputs as the model holds them, for `WOW_LAYOUT_VERIFY`'s graph report.
+fn node_inputs(model: &Model, id: u32) -> String {
+    if let Some(h) = model.id_to_frame.get(&id) {
+        let f = model.arena.frame(*h);
+        return format!(
+            "frame {:?} {:?}, effective scale {:?}, clamped {:?}",
+            f.and_then(|f| f.name.clone()),
+            model.layout_inputs.get(h),
+            f.map(|f| f.effective_scale),
+            f.map(|f| f.clamped_to_screen),
+        );
+    }
+    let Some(rh) = model.id_to_region.get(&id) else {
+        return "no live frame or region".into();
+    };
+    let owner = model.arena.region(*rh).map(|r| r.owner);
+    let owner_id = owner.and_then(|o| model.frame_to_id.get(&o));
+    match model.region_data.get(rh) {
+        Some(d) => format!(
+            "region owner {owner:?} (id {owner_id:?}), anchors {:?}, size {:?}, measured {:?} \
+             (text {} bytes), texture {:?}, fill {}",
+            d.anchors,
+            d.size,
+            d.measured.map(|m| (m.w, m.h)),
+            d.text.as_deref().map_or(0, str::len),
+            d.texture,
+            d.fill.is_some()
+        ),
+        None => format!("region owner {owner:?} with no data"),
     }
 }
 
@@ -489,13 +793,14 @@ impl PreambleProf {
 }
 
 /// `OnSizeChanged`'s "after": queue `(id, width, height)` for each watched frame whose size moved
-/// by the `ApplyRect 0x76b580` test ([`crate::layout::size_changed`], `ε = _DAT_008029d4`), so a
+/// by the `ApplyRect 0x76b580` test ([`crate::layout::size_changed`] at [`Model::size_eps`]), so a
 /// pure move never fires. A frame with no rect at entry compares against the zero rect
 /// `CSimpleFrame`'s ctor leaves; one that loses its rect had no `ApplyRect` and fires nothing.
 fn queue_size_changes(
     watched: &[(FrameHandle, Option<Rect>)],
     resolved: &HashMap<FrameHandle, Rect>,
     frame_to_id: &HashMap<FrameHandle, u32>,
+    eps: f64,
     out: &mut Vec<(u32, f32, f32)>,
 ) {
     for &(h, before) in watched {
@@ -503,7 +808,7 @@ fn queue_size_changes(
             continue;
         };
         let before = before.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
-        if !layout::size_changed(before, now) {
+        if !layout::size_changed(before, now, eps) {
             continue;
         }
         let Some(&id) = frame_to_id.get(&h) else {
@@ -528,11 +833,20 @@ impl UiScript {
             return;
         }
         // ── `WOW_LAYOUT_VERIFY`: the incremental pass's falsifier ─────────────
-        // Re-run the frame from scratch and require identical rects: this catches a write that
-        // moved a node without naming it, or changed an anchor's target as if value-only.
         model.layout_verify_recheck = false;
+        if let Some(why) = Self::scratch_divergence(model) {
+            panic!("WOW_LAYOUT_VERIFY: {why}");
+        }
+    }
+
+    /// Re-solve the model from scratch on a fresh graph and compare it with the converged cached
+    /// one: the rects, then the graph itself (roster, per-node hashes, edges). This catches a write
+    /// that moved a node without naming it, and a re-derive that joined, dropped or re-pointed one
+    /// wrong. The cached graph is put back after, so a run of incremental passes is checked step
+    /// by step, not reset at each; the meters keep the incremental pass's values.
+    pub(super) fn scratch_divergence(model: &mut Model) -> Option<String> {
+        let cached = std::mem::take(&mut model.layout_scope);
         let before = (model.resolved.clone(), model.region_resolved.clone());
-        // The meters keep the incremental pass's values, which tests assert on, not the re-run's.
         let meters = (
             model.layout_solves,
             model.layout_rounds,
@@ -544,8 +858,9 @@ impl UiScript {
         model.layout_touched = None; // no ledger: derive the graph
         model.layout_epoch_resolved = None; // past tier 1
         model.layout_fingerprint = None; // past tier 2
-        model.layout_scope.invalidate(); // full scope
-        Self::resolve_layout_inner(model);
+        Self::resolve_layout_inner(model); // a fresh scope: full scope
+        let graph = cached.diverges_from(&model.layout_scope);
+        model.layout_scope = cached;
         model.pending_size_changed.truncate(queued);
         model.warnings.truncate(warned);
         (
@@ -555,17 +870,36 @@ impl UiScript {
             model.layout_gate_walks,
             model.layout_derives,
         ) = meters;
-        assert!(
-            before.0 == model.resolved && before.1 == model.region_resolved,
-            "WOW_LAYOUT_VERIFY: an INCREMENTAL layout pass disagreed with a full derivation of \
-             the same frame — a write site named the wrong node, named one while changing an \
-             anchor's target, or moved layout inputs without naming any. \
-             frames {} -> {}, regions {} -> {}",
-            before.0.len(),
-            model.resolved.len(),
-            before.1.len(),
-            model.region_resolved.len(),
-        );
+        // The first node whose rect differs, with its inputs; the graph's divergence, if any,
+        // usually names the cause.
+        let report = |id: u32| format!("id {id}, inputs now: {}", node_inputs(model, id));
+        let graph = graph.map(|(id, why)| format!("{why} ({})", report(id)));
+        if let Some(id) = first_rect_diff(model, &before.0, &before.1) {
+            let rect = |frames: &HashMap<FrameHandle, Rect>,
+                        regions: &HashMap<RegionHandle, Rect>| {
+                match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
+                    (Some(h), _) => frames.get(h).copied(),
+                    (_, Some(rh)) => regions.get(rh).copied(),
+                    _ => None,
+                }
+            };
+            return Some(format!(
+                "an INCREMENTAL layout pass disagreed with a full derivation of the same frame — \
+                 a write site named the wrong node or moved layout inputs without naming any. \
+                 First rect to differ: {}, incremental {:?}, fresh {:?}. Graph: {}",
+                report(id),
+                rect(&before.0, &before.1),
+                rect(&model.resolved, &model.region_resolved),
+                graph.as_deref().unwrap_or("same as fresh"),
+            ));
+        }
+        graph.map(|why| {
+            format!(
+                "the cached layout graph diverged from a fresh derivation after an INCREMENTAL \
+                 pass — a write changed a node's roster, edges or inputs without naming it, or \
+                 the re-derive mis-applied one. {why}"
+            )
+        })
     }
 
     /// Names every region whose art had no size at its last sweep and has one now, so its hash
@@ -600,6 +934,13 @@ impl UiScript {
     }
 
     fn resolve_layout_inner(model: &mut Model) {
+        // Text that emptied or filled since the last resolve: named now where its node's hash
+        // moved, ahead of the epoch's read, as if named at the write.
+        if !model.text_flips.is_empty() {
+            for rh in std::mem::take(&mut model.text_flips) {
+                model.touch_layout_content(rh);
+            }
+        }
         // ── Tier 1: the mutation epoch ────────────────────────────────────────────────────────
         // No layout touch since the last converged resolve: nothing the fingerprint reads moved,
         // so skip everything. Under verify, fall through so tier 2 checks the claim.
@@ -624,14 +965,18 @@ impl UiScript {
             .iter()
             .map(|&h| (h, model.resolved.get(&h).copied()))
             .collect();
+        let size_eps = model.size_eps();
+        let resolve_eps = model.resolve_eps();
         pre.watched = pre.lap();
         // ── The graph: the ledger's cache, or a fresh derivation ─────────────────────────────
         // A `Some` ledger claims every write since the graph was built named its node and kept
         // the graph's shape, so the cached roster, edges and hashes stand; `None` derives.
-        let touched = model.layout_touched.take();
-        let fp = touched
-            .is_none()
-            .then(|| Self::derive_layout_graph(model, &mut pre));
+        // The named nodes re-derive in place; a change the cached graph cannot take derives.
+        let incremental = match model.layout_touched.take() {
+            Some(named) => Self::rederive_named(model, named, &mut pre),
+            None => false,
+        };
+        let fp = (!incremental).then(|| Self::derive_layout_graph(model, &mut pre));
 
         let Model {
             arena,
@@ -655,49 +1000,26 @@ impl UiScript {
             pending_size_changed,
             layout_art_waiting,
             texture_size_probe,
+            layout_force,
             ..
         } = model;
-        // ── The incremental seed ─────────────────────────────────────────────
-        // Re-hash only the named nodes and seed those whose hash moved. It runs before the gate
-        // because on this path it is the verdict: an empty seed set means nothing moved.
         let mut full_scope = false;
-        if let Some(touched) = &touched {
-            scope.begin_incremental();
-            for &id in touched {
-                let Some(&n) = scope.node_of.get(id as usize) else {
-                    continue;
-                };
-                if n == u32::MAX {
-                    continue;
-                }
-                let now = if n & REGION_TAG != 0 {
-                    let rh = scope.regions[(n & !REGION_TAG) as usize].rh;
-                    match region_data.get(&rh) {
-                        Some(d) => region_node_hash(d, texture_size_probe.as_ref()),
-                        None => continue,
-                    }
-                } else {
-                    let (h, _, over) = scope.plan[n as usize];
-                    match layout_inputs.get(&h) {
-                        Some(i) => frame_node_hash(i, over),
-                        None => continue,
-                    }
-                };
-                // A named write that did not move the hash (a same-value `SetPoint`) seeds nothing.
-                if now != scope.last.get(id as usize).copied().unwrap_or(NO_NODE) {
-                    scope.staged.push((id, now));
-                    scope.seed(id);
-                }
-            }
-            scope.close();
-            pre.seed = pre.lap();
-            pre.incremental = true;
-        }
+        // The nodes this resolve stores without the keep test; a write that cleared the resolved
+        // bit of no node (an unanchored region's measure) leaves nothing to store.
+        let mut forced = std::mem::take(layout_force);
+        forced.retain(|&id| {
+            scope
+                .node_of
+                .get(id as usize)
+                .is_some_and(|&n| n != u32::MAX)
+        });
         // An incremental pass has no fingerprint; its verdict is `staged`, exactly the seed set.
-        let gate_skips = match fp {
-            Some(_) => *layout_fingerprint == fp,
-            None => scope.staged.is_empty(),
-        };
+        // A forced node is solved even with its inputs unmoved.
+        let gate_skips = forced.is_empty()
+            && match fp {
+                Some(_) => *layout_fingerprint == fp,
+                None => scope.staged.is_empty(),
+            };
         pre.report(gate_skips, scope.plan.len(), scope.regions.len());
         // Under verify, a frame tier 1 judged quiet must pass tier 2 too; a divergence is a write
         // path missing its `touch_layout()`.
@@ -728,11 +1050,12 @@ impl UiScript {
             *layout_solves += 1;
         }
         // ── The scope: which nodes this solve may touch ────
-        // A node with unchanged inputs and no moved dependency recomputes to the rect it holds, so
+        // A node with unchanged inputs and no moved dependency recomputes to the rect it holds (the
+        // keep test holds a recompute against the rect it kept, so a re-run is a no-op), so
         // the solve runs over the dirty closure and feeds other rects in as externals. Full scope
-        // when there is no memory yet, the screen moved, or under verify. The incremental pass
-        // seeded its closure above.
-        if touched.is_none() {
+        // when there is no memory yet, the screen moved, or under verify. An incremental pass
+        // seeded its closure in `rederive_named`.
+        if !incremental {
             // A node that died past the new id count has no edges recorded (the derivation sized
             // them to the count), so only a full scope reaches what anchored to it.
             let died_past_end = scope
@@ -768,6 +1091,19 @@ impl UiScript {
                 scope.close();
             }
         }
+        // A forced node, and whatever reads it, is solved: the store it owes moves its rect.
+        for &id in &forced {
+            scope.seed(id);
+        }
+        scope.close();
+        let mut force_mask: Vec<bool> = Vec::new();
+        if !forced.is_empty() {
+            force_mask.resize(scope.node_of.len(), false);
+            for &id in &forced {
+                force_mask[id as usize] = true;
+            }
+        }
+        let is_forced = |id: u32| force_mask.get(id as usize).copied().unwrap_or(false);
         // A dirty frame is solved, a dirty region swept, and whatever they read is seeded at its
         // cached rect. A dirty region is seeded too, since the frame pass runs before the sweep.
         let mut solve_frames: Vec<u32> = Vec::new();
@@ -808,6 +1144,32 @@ impl UiScript {
         }
         // This solve's width, beside `layout_solves` (how often) and `layout_rounds` (how deep).
         *layout_last_scope = (solve_frames.len(), sweep_regions.len());
+        // ── The keep test's cached rects ──────────────────────────────────────────────────────
+        // `0x768d20` holds each new rect against the one its last store left (`[+0x40..+0x4c]`)
+        // and keeps that one when every edge moved less than 1e-5 layout units, so a slow drift
+        // builds until it crosses. The cache is the rect at this resolve's entry: a mid-pass round
+        // is our fixpoint's, not a store. A forced node, a frame with no rect, a region whose
+        // owner's scale moved (the cascade reaches its regions, `0x76ad06`), has no cache.
+        let entry_frames: Vec<Option<Rect>> = solve_frames
+            .iter()
+            .map(|&i| {
+                let (h, id, _) = scope.plan[i as usize];
+                (!is_forced(id))
+                    .then(|| resolved.get(&h).copied())
+                    .flatten()
+            })
+            .collect();
+        let entry_regions: Vec<Option<Rect>> = sweep_regions
+            .iter()
+            .map(|&i| {
+                let row = scope.regions[i as usize];
+                let owner_forced = frame_to_id.get(&row.owner).is_some_and(|&o| is_forced(o));
+                (!is_forced(row.id) && !owner_forced)
+                    .then(|| region_resolved.get(&row.rh).copied())
+                    .flatten()
+            })
+            .collect();
+        solver.set_keep_eps(resolve_eps);
         let round_cap = scope.plan.len() + region_data.len() + 2;
         // `WOW_LAYOUT_PROF=1`: rounds, graph size, and the frame-solve and region-sweep split.
         let prof = layout_prof_enabled();
@@ -834,7 +1196,7 @@ impl UiScript {
                     solver.set_external(id, *r);
                 }
             }
-            for &i in &solve_frames {
+            for (&i, &cached) in solve_frames.iter().zip(&entry_frames) {
                 let (h, id, over) = scope.plan[i as usize];
                 let Some(input) = layout_inputs.get(&h) else {
                     continue;
@@ -842,6 +1204,9 @@ impl UiScript {
                 match over {
                     Some(a) => solver.set_frame_anchored(id, input, a),
                     None => solver.set_frame(id, input),
+                }
+                if let Some(c) = cached {
+                    solver.set_cached(id, c);
                 }
             }
             solver.solve();
@@ -870,7 +1235,7 @@ impl UiScript {
             }
             let t_reg = prof.then(std::time::Instant::now);
             let mut scratch = LayoutInput::default();
-            for &ri in &sweep_regions {
+            for (&ri, &cached) in sweep_regions.iter().zip(&entry_regions) {
                 let RegionRow {
                     rh,
                     id: region_id,
@@ -887,12 +1252,8 @@ impl UiScript {
                 // The owner supplies the region's scale and nothing else: no fallback edges.
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
                 // An axis authored 0, width or height, takes the host-measured extent: the
-                // reference sizes a zero width to the unwrapped line. The measure is used without
-                // a key check, so changed text keeps its last box while the re-measure is in
-                // flight; empty text is never measured, so it counts as zero, never a stale box.
-                let measured = data
-                    .measured
-                    .filter(|_| data.text.as_deref().is_some_and(|t| !t.is_empty()));
+                // reference sizes a zero width to the unwrapped line.
+                let measured = effective_measure(data);
                 let mut height = data.size.map_or(0.0, |s| s.1);
                 let mut width = data.size.map_or(0.0, |s| s.0);
                 if let Some(m) = &measured {
@@ -926,8 +1287,7 @@ impl UiScript {
                         layout_art_waiting.insert(rh);
                     }
                 }
-                scratch.anchors.clear();
-                scratch.anchors.extend_from_slice(&data.anchors);
+                scratch.anchors = data.anchors;
                 scratch.width = width;
                 scratch.height = height;
                 scratch.scale = scale;
@@ -958,6 +1318,10 @@ impl UiScript {
                     continue;
                 };
                 let rect = Rect::new(bottom, left, top, right);
+                // The keep test, as for a frame: the same `0x768d20` resolves regions.
+                let rect = cached
+                    .filter(|&c| layout::keeps_rect(c, rect, resolve_eps))
+                    .unwrap_or(rect);
                 // Into the solver too: a later region in this sweep that anchors here needs it.
                 solver.set_external(region_id, rect);
                 if region_resolved.get(&rh) != Some(&rect) {
@@ -1001,7 +1365,7 @@ impl UiScript {
                 }
                 *layout_fingerprint = fp;
                 // Adopted only on convergence; an incremental pass adopts only what it re-hashed.
-                if touched.is_some() {
+                if incremental {
                     scope.commit_incremental();
                 } else {
                     scope.commit(*screen);
@@ -1011,12 +1375,18 @@ impl UiScript {
                 // Only here: the cycle bail below leaves it `None`.
                 *layout_touched = Some(Vec::new());
                 // Under verify, `resolve_layout` re-derives this frame from scratch and compares.
-                *layout_verify_recheck = touched.is_some() && verify;
+                *layout_verify_recheck = incremental && verify;
                 // A converged solve closes tier 1, at `epoch_at_entry` rather than the live epoch,
                 // so a touch during this pass (the tooltip pre-pass, a minted id) re-opens it. The
                 // fingerprint hashes inputs only, so the next unmutated resolve would match it.
                 *layout_epoch_resolved = Some(epoch_at_entry);
-                queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
+                queue_size_changes(
+                    &watched,
+                    resolved,
+                    frame_to_id,
+                    size_eps,
+                    pending_size_changed,
+                );
                 return;
             }
             if round + 1 == round_cap {
@@ -1033,7 +1403,13 @@ impl UiScript {
         // The cycle bail: its rects are this frame's, so their size changes still fire, and the
         // scope forgets a graph that never settled.
         scope.invalidate();
-        queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
+        queue_size_changes(
+            &watched,
+            resolved,
+            frame_to_id,
+            size_eps,
+            pending_size_changed,
+        );
     }
 
     /// Derive the layout graph from scratch: the roster, the reverse edges, the per-node hashes and
@@ -1052,6 +1428,7 @@ impl UiScript {
             screen,
             layout_scope: scope,
             texture_size_probe,
+            layout_force,
             ..
         } = model;
         let probe = texture_size_probe.as_ref();
@@ -1063,12 +1440,16 @@ impl UiScript {
                 ids.push((h, id));
             }
         }
-        for &(h, _) in &ids {
+        for &(h, id) in &ids {
             let (scale, clamp) = arena
                 .frame(h)
                 .map(|f| (f.effective_scale, f.clamped_to_screen))
                 .unwrap_or((1.0, false));
             let input = layout_inputs.entry(h).or_default();
+            // A moved effective scale clears the resolved bit (`0x768360` from `0x76acd5`).
+            if input.scale.to_bits() != scale.to_bits() {
+                layout_force.push(id);
+            }
             input.scale = scale;
             // Clamp-to-screen is a frame property (geometry flags bit 4), so every placement path
             // clamps alike, against the live window size.
@@ -1085,6 +1466,7 @@ impl UiScript {
         // `0x787100` passes them to `SetPoint`: y up, so a positive vertical lifts the child. Its
         // authored anchors and size are untouched, so `SetScrollChild(nil)` needs no restore.
         let mut scroll_child_anchor: HashMap<FrameHandle, Anchor> = HashMap::new();
+        let mut scroll_holds: Vec<(FrameHandle, u32, FrameHandle)> = Vec::new();
         for &(h, id) in &ids {
             let Some(frame) = arena.frame(h) else {
                 continue;
@@ -1099,6 +1481,7 @@ impl UiScript {
             if arena.frame(child).is_none() {
                 continue; // a stale/destroyed child contributes no override
             }
+            scroll_holds.push((h, id, child));
             scroll_child_anchor.insert(
                 child,
                 Anchor::new(
@@ -1115,8 +1498,9 @@ impl UiScript {
         // The reference resolves one graph in which frames and regions anchor each other; ours
         // alternates a frame solve and a region sweep until a round changes no rect, compared
         // exactly. The round cap is the node count, so only a cycle exhausts it, warned like the
-        // reference's resolving-flag bail. Every rect is recomputed from inputs and externals, so
-        // last frame's rects are a legal seed: only dead or unanchored regions drop.
+        // reference's resolving-flag bail. Every rect is recomputed from inputs and externals and
+        // held against its own cached rect, so last frame's rects are a legal seed: only dead or
+        // unanchored regions drop.
         region_resolved.retain(|rh, _| {
             arena.region(*rh).is_some()
                 && region_data.get(rh).is_some_and(|d| !d.anchors.is_empty())
@@ -1126,11 +1510,16 @@ impl UiScript {
         // ── The change gate ───────────────────────────────────────────────────────────────────
         // Fingerprint what the rounds read, to skip them when nothing moved since the last
         // converged resolve: the screen; each live frame's id, synced `LayoutInput` and
-        // ScrollFrame override; each anchored region's anchors, explicit size, measured extent
-        // and liveness. Seeded rects are outputs, a pure function of these, so they are not hashed.
+        // ScrollFrame override; each anchored region's node hash (anchors, explicit size, measured
+        // extent, the art of an unsized axis, owner) and liveness. Seeded rects are outputs, a
+        // function of these and of the rects the keep test held them against, which a re-run with
+        // the same inputs keeps again, so they are not hashed.
         // The same walk hashes each node alone into `LayoutScope::now` and records its edges.
         // Sized past `next_id` for the ids the region walk below may mint.
         scope.begin_full(*next_id as usize + region_data.len() + 1);
+        for (h, id, child) in scroll_holds {
+            scope.hold(h, id, Some(child));
+        }
         pre.begin = pre.lap();
         let mut fp = InputFingerprint::default();
         fp.rect(*screen);
@@ -1155,10 +1544,10 @@ impl UiScript {
             // A frame reads its anchor targets' rects, or only its ScrollFrame override's target,
             // as the round loop's `set_frame_anchored` does.
             match over {
-                Some(a) => scope.edge(id, a.relative_to),
+                Some(a) => scope.link(id, a.relative_to),
                 None => {
                     for a in &input.anchors {
-                        scope.edge(id, a.relative_to);
+                        scope.link(id, a.relative_to);
                     }
                 }
             }
@@ -1179,23 +1568,12 @@ impl UiScript {
             }
             fed_regions += 1;
             let live = arena.region(rh);
+            let owner_id = live.and_then(|r| frame_to_id.get(&r.owner).copied());
+            // The node hash covers every input the sweep reads (anchors, size, measure, the art
+            // of an unsized axis, the owner), so the two tiers read one set.
+            let node = region_node_hash(data, owner_id, probe);
             fp.feed(rh.fingerprint_bits());
-            fp.anchors(&data.anchors);
-            match data.size {
-                Some((w, h)) => {
-                    fp.f32(w);
-                    fp.f32(h);
-                }
-                None => fp.feed(u64::MAX),
-            }
-            match data.measured {
-                Some(m) => {
-                    fp.f32(m.w);
-                    fp.f32(m.h);
-                }
-                None => fp.feed(u64::MAX),
-            }
-            feed_art(&mut fp, data, probe);
+            fp.feed(node);
             if let Some(r) = live {
                 // Mint an id for a region that never needed one, without `Model::region_id`'s
                 // epoch bump, which would re-dirty the running resolve.
@@ -1212,15 +1590,15 @@ impl UiScript {
                 #[allow(clippy::cast_possible_truncation)]
                 let idx = scope.regions.len() as u32 | REGION_TAG;
                 if let Some(slot) = scope.now.get_mut(id as usize) {
-                    *slot = region_node_hash(data, probe);
+                    *slot = node;
                     scope.node_of[id as usize] = idx;
                 }
                 // A region reads its anchor targets' rects and its owner's scale.
                 for a in &data.anchors {
-                    scope.edge(id, a.relative_to);
+                    scope.link(id, a.relative_to);
                 }
-                if let Some(&owner_id) = frame_to_id.get(&r.owner) {
-                    scope.edge(id, owner_id);
+                if let Some(owner_id) = owner_id {
+                    scope.link(id, owner_id);
                 }
                 scope.regions.push(RegionRow {
                     rh,
@@ -1237,6 +1615,181 @@ impl UiScript {
         fp.feed(fed_regions);
         pre.fp_regions = pre.lap();
         fp
+    }
+
+    /// Re-derive each named node against the model, in the cached graph: a node joins the roster
+    /// with its edges (a frame or region born, a region anchored), leaves it with its edges
+    /// unlinked (a region freed or cleared), or keeps its slot with its edges re-pointed and its
+    /// inputs re-synced, exactly as [`Self::derive_layout_graph`] would build it. Each node whose
+    /// hash or edges moved is seeded, and the closure taken. `false` gives up for the derivation:
+    /// a frame leaving the roster, or a frame two ScrollFrames claim, whose override the
+    /// derivation picks by map order.
+    fn rederive_named(model: &mut Model, mut named: Vec<u32>, pre: &mut PreambleProf) -> bool {
+        let Model {
+            arena,
+            layout_inputs,
+            region_data,
+            region_resolved,
+            frame_to_id,
+            id_to_frame,
+            id_to_region,
+            next_id,
+            screen,
+            layout_scope: scope,
+            layout_force,
+            texture_size_probe,
+            ..
+        } = model;
+        let probe = texture_size_probe.as_ref();
+        scope.begin_incremental(*next_id as usize);
+        // ScrollFrames first, so a child re-derived after them reads the claims they recorded.
+        let is_scroller = |id: u32| {
+            id_to_frame
+                .get(&id)
+                .and_then(|&h| arena.frame(h))
+                .is_some_and(|f| f.kind == FrameKind::ScrollFrame)
+        };
+        named.sort_unstable_by_key(|&id| (!is_scroller(id), id));
+        named.dedup();
+        let mut targets = std::mem::take(&mut scope.targets);
+        let mut at = 0;
+        while at < named.len() {
+            let id = named[at];
+            at += 1;
+            let Some(&n) = scope.node_of.get(id as usize) else {
+                continue; // past every minted id: never a node
+            };
+            let is_region_node = n != u32::MAX && n & REGION_TAG != 0;
+            // A frame: every live frame with an id is a node.
+            if let Some(&h) = id_to_frame.get(&id) {
+                let Some(frame) = arena.frame(h).filter(|_| frame_to_id.get(&h) == Some(&id))
+                else {
+                    if n != u32::MAX {
+                        scope.targets = targets;
+                        return false;
+                    }
+                    continue;
+                };
+                if is_region_node {
+                    scope.targets = targets;
+                    return false;
+                }
+                // A ScrollFrame records the live child it holds, and that child re-derives after
+                // it, as the override is the child's; so does a child it let go.
+                if frame.kind == FrameKind::ScrollFrame {
+                    let child = match &frame.kind_state {
+                        KindState::Scroll(state) => {
+                            state.child.filter(|&c| arena.frame(c).is_some())
+                        }
+                        _ => None,
+                    };
+                    let let_go = scope.hold(h, id, child);
+                    for c in child.into_iter().chain(let_go) {
+                        named.extend(frame_to_id.get(&c));
+                    }
+                }
+                // The override of the one ScrollFrame holding this frame; a child two hold gives
+                // up, as the derivation picks between them by map order.
+                let over = match scope.claims.get(&h).map(Vec::as_slice) {
+                    None | Some([]) => None,
+                    Some(&[(sh, sid)]) => match arena.frame(sh).map(|f| &f.kind_state) {
+                        Some(KindState::Scroll(state)) => Some(Anchor::new(
+                            Point::TopLeft,
+                            sid,
+                            Point::TopLeft,
+                            state.horizontal,
+                            state.vertical,
+                        )),
+                        _ => None,
+                    },
+                    Some(_) => {
+                        scope.targets = targets;
+                        return false;
+                    }
+                };
+                // The derivation's sync of the arena's scale and clamp into the layout input.
+                let (scale, clamp) = (frame.effective_scale, frame.clamped_to_screen);
+                let input = layout_inputs.entry(h).or_default();
+                if input.scale.to_bits() != scale.to_bits() {
+                    layout_force.push(id);
+                }
+                input.scale = scale;
+                input.clamp = clamp;
+                if clamp {
+                    input.extent_x = screen.right;
+                    input.extent_y = screen.top;
+                }
+                targets.clear();
+                match over {
+                    Some(a) => targets.push(a.relative_to),
+                    None => targets.extend(input.anchors.iter().map(|a| a.relative_to)),
+                }
+                let hash = frame_node_hash(input, over);
+                let relinked = if n == u32::MAX {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        scope.node_of[id as usize] = scope.plan.len() as u32;
+                    }
+                    scope.plan.push((h, id, over));
+                    scope.relink(id, &targets);
+                    true
+                } else {
+                    scope.plan[n as usize].2 = over;
+                    scope.relink(id, &targets)
+                };
+                scope.note(id, hash, relinked);
+                continue;
+            }
+            // A region: a node while it lives and has an anchor.
+            let live = id_to_region.get(&id).and_then(|&rh| {
+                let r = arena.region(rh)?;
+                let data = region_data.get(&rh).filter(|d| !d.anchors.is_empty())?;
+                Some((rh, r, data))
+            });
+            let Some((rh, r, data)) = live else {
+                if is_region_node {
+                    let row = scope.remove_region(id, n);
+                    region_resolved.remove(&row.rh);
+                } else if n != u32::MAX {
+                    scope.targets = targets;
+                    return false;
+                }
+                continue;
+            };
+            if n != u32::MAX && !is_region_node {
+                scope.targets = targets;
+                return false;
+            }
+            let owner_id = frame_to_id.get(&r.owner).copied();
+            targets.clear();
+            targets.extend(data.anchors.iter().map(|a| a.relative_to));
+            targets.extend(owner_id);
+            let hash = region_node_hash(data, owner_id, probe);
+            let row = RegionRow {
+                rh,
+                id,
+                owner: r.owner,
+                is_fontstring: matches!(r.kind, crate::widget::RegionKind::FontString),
+            };
+            let relinked = if n == u32::MAX {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    scope.node_of[id as usize] = scope.regions.len() as u32 | REGION_TAG;
+                }
+                scope.regions.push(row);
+                scope.relink(id, &targets);
+                true
+            } else {
+                scope.regions[(n & !REGION_TAG) as usize] = row;
+                scope.relink(id, &targets)
+            };
+            scope.note(id, hash, relinked);
+        }
+        scope.targets = targets;
+        scope.close();
+        pre.seed = pre.lap();
+        pre.incremental = true;
+        true
     }
 
     /// FontStrings with text whose stored measure is stale, for the host to measure: call after
