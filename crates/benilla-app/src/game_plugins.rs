@@ -728,7 +728,17 @@ pub(crate) mod schedule_tests {
     /// motion writers six. Declaring them is fork-side work, with the rest.
     ///
     /// Upstream's own ceiling moved 4,860 -> 4,980 (+120) by 98217654; the fork's +258 sits on it.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_238;
+    ///
+    /// fork: transports and wet surfaces — +52 net (5,238 -> 5,290), read off the dump:
+    /// `player::ride::board_from_create` takes 30 (a `ResMut<Player>` writer and `Commands`, at the
+    /// login edge before `control`, against the other `Player` writers and the portrait and drain
+    /// systems' commands), `loading_screen::ship::paint_ship_route` 24 (`Visibility` on the ship
+    /// layer and its dots alone, the disjoint-lane kind), `transport::drive_ship_props` 2, the wet
+    /// surfaces' `wetness_tick` and `wet_ssr::publish` 2, and upstream's
+    /// `ui_honor::feed_pvp_name_strings` 1, all of the new ones against the exclusive
+    /// `terrain_stream::collider::finish_colliders` among them; 7 fewer elsewhere. Declaring them
+    /// is fork-side work, with the rest.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_290;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
