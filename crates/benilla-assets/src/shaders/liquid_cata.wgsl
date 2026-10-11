@@ -869,6 +869,19 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // The probe sits on this pixel's ray, so its planar depth scales with the distance along it.
         let probe_z = frag_view_z * (1.0 + probe_d / max(view_len, 0.001));
         water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp, probe_z);
+        // Where the ray reaches the bed, the probe lands on world-fixed ground and the shade holds
+        // still. Where it does not, the stopped probe hangs mid-water at a point the VIEW picks, so
+        // orbiting the camera slid the lake's shade across it by up to the probe's length. Deep water
+        // reads straight down instead, `WATER_SHADOW_PROBE` yd under its own surface point — a
+        // point no camera move can shift — fading over from the bed probe across one more probe
+        // length so the hand-over has no edge of its own.
+        let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, ray_len), 0.0, below);
+        if (deep > 0.0) {
+            let wp_deep = in.world_position.xyz - vec3<f32>(0.0, WATER_SHADOW_PROBE - 0.05, 0.0);
+            let deep_z = -(view.view_from_world * vec4<f32>(wp_deep, 1.0)).z;
+            let sun_deep = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp_deep, deep_z);
+            water_sun = mix(water_sun, sun_deep, deep);
+        }
         let wct = sunshadow::cloud_taps(modern_block.fog.cloud, wp);
         water_sun = water_sun * sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
         // The shade keeps some of the light: skylight still reaches open water from every side.
