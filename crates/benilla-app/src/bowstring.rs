@@ -1,8 +1,8 @@
 //! The engine-drawn bowstring: bow M2s have no string geometry. The reference's per-frame callback
 //! (`0x611ff0`) draws a two-segment line between the `$WTT`/`$WTB` limb-tip markers, its middle
 //! vertex at the HandArrow attach while the nock latch (`[+0xd58] & 0x4000`) holds, else the tip
-//! midpoint. Drawn here as gizmo lines; the color and width are inferred, since the reference's
-//! packed vertex color is not decoded.
+//! midpoint. Drawn here as gizmo lines one display pixel wide, as a D3D line rasterizes; the color
+//! is inferred, since the reference's packed vertex color is not decoded.
 //!
 //! The tips are posed: `$BWP` plays BowPull (160) on the prop and `$BWR` returns it to Stand (0),
 //! so the markers ride limb bones that bend through the draw.
@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 use crate::creature_anim::NockLatch;
 use crate::entities::BoneAttach;
+use crate::fishing_line::EngineLineGizmos;
 
 /// The HandArrow attach id (35, `0x6121b8`): the string's middle point while nocked.
 const HAND_ARROW: u16 = 0x23;
@@ -40,7 +41,7 @@ fn draw_bowstrings(
         Has<NockLatch>,
     )>,
     joints: Query<&GlobalTransform>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<EngineLineGizmos>,
 ) {
     // Inferred: the reference's packed vertex color is not decoded.
     const STRING_COLOR: Color = Color::srgb(0.12, 0.10, 0.08);

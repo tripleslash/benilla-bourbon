@@ -428,8 +428,8 @@ fn run_warm_pass(
     if warm.done {
         return;
     }
-    // Gizmos are immediate-mode, so each frame draws one tiny line in the default config group,
-    // the bowstring's, to compile the `LineGizmo` pipeline.
+    // Gizmos are immediate-mode, so each frame draws one tiny line in the default config group to
+    // compile the bowstring's `LineGizmo` pipeline; a group's width is a uniform, not a key.
     gizmos.line(
         Vec3::new(0.0, 0.0, -0.5),
         Vec3::new(0.001, 0.0, -0.5),

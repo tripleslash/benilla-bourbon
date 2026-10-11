@@ -39,9 +39,10 @@ const SEGMENTS: usize = 64;
 /// The half-sine sag amplitude (const `0x80c9a8` = -0.5, applied to `sin(pi * t)`).
 const SAG: f32 = 0.5;
 
-/// The line's gizmo group: its width is one display pixel, not Bevy's default two.
+/// The engine-drawn lines' gizmo group, this line's and the bowstring's: one display pixel wide,
+/// not Bevy's default two.
 #[derive(Default, Reflect, GizmoConfigGroup)]
-struct FishingLineGizmos;
+pub(crate) struct EngineLineGizmos;
 
 /// One display pixel in the world target's pixels, the unit a gizmo width is measured in. Below
 /// 1.0 the gizmo shader draws one pixel at that coverage, which the upscale spreads back to one.
@@ -49,8 +50,8 @@ fn display_pixel(render_width: u32, window_width: u32) -> f32 {
     render_width.max(1) as f32 / window_width.max(1) as f32
 }
 
-/// Holds the line at one display pixel as the render scale or the window moves.
-fn size_fishing_line(
+/// Holds the engine lines at one display pixel as the render scale or the window moves.
+fn size_engine_lines(
     backdrop: Option<Res<WorldBackdrop>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut store: ResMut<GizmoConfigStore>,
@@ -59,7 +60,7 @@ fn size_fishing_line(
         return;
     };
     let width = display_pixel(backdrop.render_size().x, window.physical_width());
-    let (config, _) = store.config_mut::<FishingLineGizmos>();
+    let (config, _) = store.config_mut::<EngineLineGizmos>();
     if config.line.width != width {
         config.line.width = width;
     }
@@ -77,7 +78,7 @@ fn draw_fishing_lines(
         Option<&OverheadFallback>,
     )>,
     lighting: Option<Res<benilla_world::lighting::WowLighting>>,
-    mut gizmos: Gizmos<FishingLineGizmos>,
+    mut gizmos: Gizmos<EngineLineGizmos>,
 ) {
     for (pole, prop, vis) in &poles {
         if !vis.get() {
@@ -131,10 +132,10 @@ pub(crate) struct FishingLinePlugin;
 
 impl Plugin for FishingLinePlugin {
     fn build(&self, app: &mut App) {
-        app.init_gizmo_group::<FishingLineGizmos>().add_systems(
+        app.init_gizmo_group::<EngineLineGizmos>().add_systems(
             PostUpdate,
             (
-                size_fishing_line,
+                size_engine_lines,
                 draw_fishing_lines.in_set(benilla_world::billboard::BillboardPlace),
             ),
         );
