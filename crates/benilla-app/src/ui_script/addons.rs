@@ -164,11 +164,11 @@ impl Addon {
                 // order, as `AddOn_Load 0x51f240` hands every listed file to `0x6edb90`.
                 match script.run_chunk_named(&bytes, &self.chunk_name(file, &path)) {
                     Ok(()) => info!("ui_script: {}/{file} ran", self.name),
-                    Err(e) => {
-                        let e = format!("{}/{file}: {e}", self.name);
+                    Err(err) => {
+                        let e = format!("{}/{file}: {err}", self.name);
                         error!("ui_script: {e}");
                         // A script error: it reaches the player through the Lua error handler.
-                        script.report_script_error(&e);
+                        script.report_script_error(&e, &benilla_ui::script::lua_message(&err));
                         failures.push(e);
                     }
                 }
@@ -216,11 +216,11 @@ impl Addon {
                 script.report_load_failure(&e);
                 failures.push(e);
             }
-            for e in &report.errors {
+            for (e, heard) in report.raised() {
                 error!("ui_script({}/{file}): {e}", self.name);
                 // A script error, as in the Lua arm; `_ERRORMESSAGE`'s IsVisible guard shows only
                 // a burst's first, as in the reference.
-                script.report_script_error(&format!("{}/{file}: {e}", self.name));
+                script.report_script_error(&format!("{}/{file}: {e}", self.name), heard);
                 failures.push(format!("{}/{file}: {e}", self.name));
             }
             info!(
@@ -243,37 +243,16 @@ fn is_lua(entry: &str) -> bool {
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("lua"))
 }
 
-/// `root/rel`, refusing to escape `root`. `rel` is already resolved by
-/// [`benilla_ui::loader::join_ref`], so an escape shows as a leading `..`, refused with anything
-/// absolute before any filesystem call; a symlinked addon folder still works.
-fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    let rel = Path::new(rel);
-    if rel
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return None;
-    }
-    std::fs::read(root.join(rel)).ok()
-}
-
 /// The one file namespace, install-relative, as in the reference: `0x647e60` answers a name from
 /// the install tree's hash index, then the archive chain, after `0x6ede10` collapses `..`. So an
 /// addon's `..\Blizzard_AuctionUI\…` reaches the archive behind a `.pub`-only folder. Only a path
-/// under `Interface/AddOns/` touches the filesystem, and never above the AddOns root.
+/// under `Interface/AddOns/` touches the filesystem, never above the AddOns root, and each of its
+/// components matches case-insensitively, as on the reference's Windows filesystem: the resolver
+/// addon art and sound use ([`benilla_assets::loose_addon_file`]).
 pub(crate) fn read_addon_file(root: &Path, req: &str) -> Option<Vec<u8>> {
-    under_addons(req)
-        .and_then(|rel| read_under(root, rel))
+    benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(req))
+        .and_then(|file| std::fs::read(file).ok())
         .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
-}
-
-/// `req` with the `Interface/AddOns/` prefix stripped, or `None` without it; matched
-/// case-insensitively, as the reference is a Windows client (`Interface\Addons\` is the same path).
-fn under_addons(req: &str) -> Option<&str> {
-    let rest = req.get(ADDONS_PREFIX.len()..)?;
-    req.get(..ADDONS_PREFIX.len())
-        .filter(|p| p.eq_ignore_ascii_case(ADDONS_PREFIX))
-        .map(|_| rest)
 }
 
 /// A `Dir` addon's base before its folder name ([`Addon::prefix`]), `/`-separated as `join_ref` is.
@@ -1446,6 +1425,44 @@ mod tests {
         // chain lookup that misses.
         assert_eq!(join_ref("", "/etc/hosts"), "etc/hosts");
         assert!(addon.read(&join_ref("", "/etc/hosts")).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A manifest entry names its file in whatever case its author typed on Windows: Questie's
+    /// `.toc` lists `Astrolabe\Astrolabe.lua` from a folder shipped as `astrolabe`. Every
+    /// component matches case-insensitively, the folder and the file alike, on any filesystem.
+    #[test]
+    fn an_addon_file_is_found_whatever_the_case_of_its_path() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-addon-case-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("AddOns");
+        std::fs::create_dir_all(root.join("!Probe/astrolabe")).unwrap();
+        std::fs::write(
+            root.join("!Probe/astrolabe/astrolabe.lua"),
+            "Astrolabe = {}",
+        )
+        .unwrap();
+        let addon = Addon {
+            name: "!Probe".into(),
+            toc: Toc::default(),
+            source: Source::Dir(root),
+        };
+
+        for req in [
+            "Interface/AddOns/!Probe/Astrolabe/Astrolabe.lua",
+            "Interface/AddOns/!PROBE/ASTROLABE/ASTROLABE.LUA",
+            "interface/addons/!probe/astrolabe/astrolabe.lua",
+        ] {
+            assert_eq!(
+                addon.read(req).as_deref(),
+                Some(&b"Astrolabe = {}"[..]),
+                "{req} names the file on disk as the reference's filesystem would"
+            );
+        }
+        assert!(addon
+            .read("Interface/AddOns/!Probe/astrolabe/missing.lua")
+            .is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -3078,5 +3095,75 @@ mod tests {
             "inside a cycle an addon is flagged loaded before its own files run"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The error handler hears what 1.12's `lua_pcall` error function hands it (`0x703b40`, from
+    /// `FS_DoBuffer 0x704ae0` for a file's top level and its syntax error, `0x704f10` for a
+    /// handler): the bare Lua message, with no frame, `OnLoad: `, addon or file word and no
+    /// traceback. The decorated text stays on the failures list and the host log.
+    #[test]
+    fn the_error_handler_hears_the_bare_message_of_every_load_failure() {
+        let tmp = std::env::temp_dir().join(format!("benilla-addon-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let addon = dir_addon(
+            &tmp,
+            "Bare",
+            "## Interface: 11200\ntop.lua\nsyntax.lua\nframe.xml\n",
+        );
+        std::fs::write(tmp.join("Bare/top.lua"), "local t = nil\nt.x = 1\n").unwrap();
+        std::fs::write(tmp.join("Bare/syntax.lua"), "x = = 1\n").unwrap();
+        std::fs::write(
+            tmp.join("Bare/frame.xml"),
+            r#"<Ui><Frame name="BareFrame"><Scripts><OnLoad>this:NoSuchMethod()</OnLoad></Scripts></Frame>
+<Script>local u = nil; u.y = 2</Script></Ui>"#,
+        )
+        .unwrap();
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        script
+            .run("Heard = {} seterrorhandler(function(m) table.insert(Heard, m) end)")
+            .unwrap();
+        let failures = addon.load(&script, &mut Status::default());
+        assert_eq!(failures.len(), 4, "{failures:#?}");
+        script.dispatch_script_errors_to_handler();
+        let heard: Vec<String> = script.eval("return Heard").unwrap();
+        assert_eq!(heard.len(), 4, "{heard:#?}");
+        for m in &heard {
+            assert!(
+                !m.contains("runtime error")
+                    && !m.contains("syntax error")
+                    && !m.contains("stack traceback")
+                    && !m.contains("OnLoad: ")
+                    && !m.contains("Bare/")
+                    && !m.contains('\n'),
+                "{m:?}"
+            );
+        }
+        assert!(
+            heard[0].ends_with("top.lua:2: attempt to index local `t' (a nil value)"),
+            "{:?}",
+            heard[0]
+        );
+        assert!(
+            heard[0].starts_with("Interface\\AddOns\\Bare\\top.lua"),
+            "{:?}",
+            heard[0]
+        );
+        assert!(
+            heard[1].contains("syntax.lua:1:") && heard[1].contains("unexpected symbol"),
+            "{:?}",
+            heard[1]
+        );
+        assert!(
+            heard[2].ends_with("attempt to call method `NoSuchMethod' (a nil value)"),
+            "{:?}",
+            heard[2]
+        );
+        assert!(
+            heard[3].ends_with("attempt to index local `u' (a nil value)"),
+            "{:?}",
+            heard[3]
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

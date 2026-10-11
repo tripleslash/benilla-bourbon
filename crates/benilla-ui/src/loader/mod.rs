@@ -22,6 +22,33 @@ mod regions;
 mod scripts;
 mod widgets;
 
+impl LoadReport {
+    /// A load fault that is no script raise: the handler hears the row's own text.
+    pub(super) fn fault(&mut self, text: String) {
+        self.handler_errors.push(text.clone());
+        self.errors.push(text);
+    }
+
+    /// A script raise: the row is `text`, the handler hears the bare Lua message of `e`.
+    pub(super) fn raise(&mut self, text: String, e: &mlua::Error) {
+        self.handler_errors.push(crate::script::lua_message(e));
+        self.errors.push(text);
+    }
+
+    /// Each of [`Self::errors`] with what the Lua error handler is called with for it.
+    pub fn raised(&self) -> impl Iterator<Item = (&str, &str)> {
+        debug_assert_eq!(
+            self.errors.len(),
+            self.handler_errors.len(),
+            "every error row is written through `fault` or `raise`"
+        );
+        self.errors
+            .iter()
+            .map(String::as_str)
+            .zip(self.handler_errors.iter().map(String::as_str))
+    }
+}
+
 /// The outcome of a [`load`]; nothing aborts a load, as the reference logs and continues.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadReport {
@@ -31,6 +58,11 @@ pub struct LoadReport {
     /// Failures the reference raises on: a handler that fails to compile, a method call that
     /// errors, a malformed included document.
     pub errors: Vec<String>,
+    /// What the Lua error handler is called with for each of [`Self::errors`], row for row
+    /// ([`Self::raised`]): the bare Lua message of a raise, as `lua_pcall` leaves it for the
+    /// reference's error function (`0x703b40`), and the row's own text for a fault that is no
+    /// script raise.
+    handler_errors: Vec<String>,
     /// `<Include file=>` and `<Script file=>` paths the provider lacks. The reference logs
     /// `"Couldn't open %s"` (`0x6edaa0`, `0x846ff4`) or `"Error loading %s"` (`0x872e50`) and goes
     /// on (`0x6ee00d`); kept apart from `warnings` so a load that resolved nothing is not clean.
@@ -101,15 +133,17 @@ pub fn load_into_under(
     loader.report
 }
 
-/// Apply a template to an existing frame, `CreateFrame`'s fourth argument. Returns the warnings,
-/// then the errors. The frame always survives: an unknown name leaves it bare, as in the
-/// reference, and only virtual elements are registered. The frame's own name is the `$parent`
+/// Apply a template to an existing frame, `CreateFrame`'s fourth argument. Returns the report:
+/// its errors are script errors for the error handler, as the reference's `CreateFrame` builds the
+/// template through the XML instantiator `0x6ee280`, whose OnLoad runs under the error function
+/// (`0x704d50`). The frame always survives an error, and only virtual elements are registered; an
+/// unknown name never gets here, since the binding raises first. The frame's own name is the `$parent`
 /// base (`MyButton` makes `$parentText` `MyButtonText`). Runs inside the `CreateFrame` binding, so
 /// it enters at [`Loader::decorate`]: [`Loader::materialize`] would recurse.
-pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &str) -> Vec<String> {
+pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &str) -> LoadReport {
     let template = template.trim();
     if template.is_empty() {
-        return Vec::new();
+        return LoadReport::default();
     }
     // A template never reads a file: `<Include>` and `<Script file=>` are top-level only.
     let no_files = |_: &str| -> Option<Vec<u8>> { None };
@@ -179,9 +213,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
 
     loader.decorate(&expanded, wrapper, &self_name, &parent_name, &dbg);
 
-    let mut out = loader.report.warnings;
-    out.extend(loader.report.errors);
-    out
+    loader.report
 }
 
 /// Join a FrameXML reference to its file's directory, lexically: `\` and `/` both separate, `..`
@@ -352,8 +384,7 @@ impl Loader<'_> {
                         Some(bytes) => {
                             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
                                 self.report
-                                    .errors
-                                    .push(format!("<Script file=\"{path}\">: {e}"));
+                                    .raise(format!("<Script file=\"{path}\">: {e}"), &e);
                             }
                         }
                         None => {
@@ -377,7 +408,7 @@ impl Loader<'_> {
                     // `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a file path.
                     let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
                     if let Err(e) = self.run_named(&chunk, &name) {
-                        self.report.errors.push(format!("inline <Script>: {e}"));
+                        self.report.raise(format!("inline <Script>: {e}"), &e);
                     }
                 }
                 TopLevel::Font(el) => self.do_font(el),
@@ -418,8 +449,7 @@ impl Loader<'_> {
         if status::runs_as_lua(&joined) {
             if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
                 self.report
-                    .errors
-                    .push(format!("<Include file=\"{path}\">: {e}"));
+                    .raise(format!("<Include file=\"{path}\">: {e}"), &e);
             }
             return;
         }
@@ -441,9 +471,7 @@ impl Loader<'_> {
             Err(e) => {
                 let line = status::unparsed(&self.status_path(&joined));
                 self.report.status.report(status::FAILURE, line);
-                self.report
-                    .errors
-                    .push(format!("<Include file=\"{path}\">: {e}"))
+                self.report.fault(format!("<Include file=\"{path}\">: {e}"))
             }
         }
     }
@@ -600,8 +628,7 @@ impl Loader<'_> {
             Ok(f) => f,
             Err(e) => {
                 self.report
-                    .errors
-                    .push(format!("CreateFrame global missing: {e}"));
+                    .fault(format!("CreateFrame global missing: {e}"));
                 return None;
             }
         };
@@ -609,7 +636,7 @@ impl Loader<'_> {
             match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
-                    self.report.errors.push(format!(
+                    self.report.fault(format!(
                         "CreateFrame(<{}>{}): {e}",
                         el.tag,
                         resolved_name
@@ -699,7 +726,7 @@ impl Loader<'_> {
         //      and gives the ScrollFrame its scroll range. An empty one errors in the reference.
         for sc in children_named(el, "ScrollChild") {
             let Some(child) = sc.children.first() else {
-                self.report.errors.push(format!(
+                self.report.fault(format!(
                     "{dbg_name}: <ScrollChild> is empty — the reference errors here, and a \
                      ScrollFrame with no child has no scroll range at all"
                 ));
@@ -710,9 +737,7 @@ impl Loader<'_> {
                 continue; // materialize already reported why
             };
             if let Err(e) = wrapper.call_method::<()>("SetScrollChild", child_wrapper) {
-                self.report
-                    .errors
-                    .push(format!("{dbg_name}: <ScrollChild>: {e}"));
+                self.report.fault(format!("{dbg_name}: <ScrollChild>: {e}"));
             }
         }
 

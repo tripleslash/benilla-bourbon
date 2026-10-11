@@ -152,9 +152,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .set_mode(mlua::ChunkMode::Text)
                 .exec()
             {
+                let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::Model>()
                     .expect("model")
-                    .record_script_error(super::stdlib::lua_message(&e));
+                    .record_script_error(bare.clone(), bare);
             }
             Ok(())
         })?,
