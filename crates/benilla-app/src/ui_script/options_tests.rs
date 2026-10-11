@@ -2701,6 +2701,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_LIGHTING_QUALITY",
                 "GraphicsRowLightingQuality",
             ),
+            ("BENILLA_TOOLTIP_AUTO_EXPOSURE", "GraphicsRowAutoExposure"),
             // fork: fsr (FORK.md)
             (
                 "BENILLA_TOOLTIP_FRAME_GENERATION",
@@ -2750,7 +2751,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // Detail, Lighting, Lighting Quality) and the Everwood port's four (Graphics Preset, Foliage
     // Wind and its strength, Wet Surfaces in Rain); a dropdown row is checked on the key it wears
     // at rest.
-    assert_eq!(checked, 92, "every tipped row carries a live key");
+    assert_eq!(checked, 94, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2846,8 +2847,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 92 the key census counts.
-    assert_eq!(raised, 92, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 94 the key census counts.
+    assert_eq!(raised, 94, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
@@ -5001,6 +5002,7 @@ fn turtle_options_carry_every_graphics_row() {
     for cvar in [
         "lightingModel",
         "lightingQuality",
+        "autoExposure",
         "ssaoStrength",
         "ssgiStrength",
         "waterDetail",
@@ -5026,7 +5028,7 @@ fn turtle_options_carry_every_graphics_row() {
             r#"
             for _, category in ipairs(GameOptions) do
                 if ( category.name == PIXEL_SHADERS ) then
-                    return getn(category.options) == 5
+                    return getn(category.options) == 6
                 end
             end
             return false

@@ -803,6 +803,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "4",
         "the fork's own — the modern model's quality tier",
     ),
+    // `autoExposure` — the modern model's light auto-exposure: very dark light (night, a dark
+    // zone) is lifted toward visible, at most ~0.8 stop. 0 holds the exposure fixed. Applies to the
+    // next frame; a classic frame has no exposure and ignores it.
+    ours(
+        "autoExposure",
+        "1",
+        "the fork's own — the reference's exposure never moves",
+    ),
     // ── end fork-owned block ──
     // ── fork-owned block: fsr (FORK.md) ──
     // fork: fsr (FORK.md)

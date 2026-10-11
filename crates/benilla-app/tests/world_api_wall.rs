@@ -163,6 +163,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("modern::lights::SynthesizedLight", "wall"),
     ("modern::lights::emissive::combine", "wall"),
     ("modern::lights::emissive::glow_of_geometry", "wall"),
+    ("modern::look::AutoExposure", "wall"),
     ("modkeys::SyntheticHold", "wall"),
     ("particles::ParticleTuning", "record"),
     ("particles::ViewThrottled", "record"),

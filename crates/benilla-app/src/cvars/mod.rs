@@ -935,6 +935,7 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "waterDetail",
     "lightingModel",
     "lightingQuality",
+    "autoExposure",
     "renderScale",
     // fork: fsr (FORK.md)
     "frameGeneration",
@@ -1573,6 +1574,10 @@ mod tests {
         assert_eq!(
             d["rainSurfaces"] != 0.0,
             benilla_world::weather::wetness::RainSurfaces::default().0
+        );
+        assert_eq!(
+            d["autoExposure"] != 0.0,
+            benilla_world::modern::look::AutoExposure::default().0
         );
         assert_eq!(
             d["lavaLight"],

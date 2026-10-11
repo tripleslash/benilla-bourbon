@@ -27,7 +27,7 @@ use benilla_assets::{AdtTile, LockRecover, WorldAssets};
 use benilla_formats::AreaTableCatalog;
 
 use super::{srgb_to_linear, ActiveLighting};
-use crate::lighting::GameClock;
+use crate::lighting::{GameClock, WowLighting};
 use crate::terrain_stream::{area_id_under, CurrentArea, TerrainStreamer};
 use crate::view::WorldCamera;
 
@@ -422,11 +422,61 @@ pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
-fn publish(look: ZoneLook) {
+/// **The light auto-exposure**: subtle on purpose — it exists to lift the very dark into visible
+/// brightness and nothing else. Below a deep-dusk light ([`AUTO_EXPOSURE_DARK`]) it makes up half
+/// the shortfall; at and above it — every day and every dusk — it is exactly 1. It meters the
+/// AUTHORED rows (the ambient with its night floor, and the sun or moon diffuse at a typical
+/// incidence) rather than the screen, so a camera turn never moves it, and it leaves the zone
+/// look's key and fill alone: those darken a canopy on purpose. It only ever brightens, by at most
+/// [`AUTO_EXPOSURE_MAX`]: a night still reads as night.
+const AUTO_EXPOSURE_STRENGTH: f32 = 0.5;
+/// The light rows (sRGB ambient, diffuse) below which the lift begins: a deep dusk, about a seventh
+/// of a forest noon's key.
+const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.25; 3], [0.3; 3]);
+/// The ceiling on the auto-exposure's lift, ~0.8 stop: a moonless night under the night floor
+/// sits at it.
+const AUTO_EXPOSURE_MAX: f32 = 1.75;
+/// The auto-exposure's time constant, in seconds — an eye adapting, not a meter snapping.
+const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
+
+/// The linear luminance a pair of sRGB light rows lights a surface with: the ambient whole, the
+/// diffuse at half (a typical N·L).
+fn light_key(ambient: [f32; 3], diffuse: [f32; 3]) -> f32 {
+    let lum = |c: [f32; 3]| {
+        0.2126 * srgb_to_linear(c[0])
+            + 0.7152 * srgb_to_linear(c[1])
+            + 0.0722 * srgb_to_linear(c[2])
+    };
+    lum(ambient) + 0.5 * lum(diffuse)
+}
+
+/// The `autoExposure` cvar: the light auto-exposure on (the default) or off. benilla-app's
+/// `video::on_cvar` writes it; `$WOW_AUTO_EXPOSURE=0` boots it off for a session. A modern frame's
+/// only — a classic one has no exposure to lift.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoExposure(pub bool);
+
+impl Default for AutoExposure {
+    fn default() -> Self {
+        Self(crate::launch_env::var("WOW_AUTO_EXPOSURE").is_none_or(|v| v.trim() != "0"))
+    }
+}
+
+/// The exposure lift this frame's light asks for: 1 at [`AUTO_EXPOSURE_DARK`] and above, rising
+/// toward [`AUTO_EXPOSURE_MAX`] as the light falls.
+fn auto_exposure(l: &WowLighting) -> f32 {
+    let reference = light_key(AUTO_EXPOSURE_DARK.0, AUTO_EXPOSURE_DARK.1);
+    let key = light_key(super::night_floor(l.ambient, l.sidn_night), l.diffuse);
+    (reference / key.max(1e-4))
+        .powf(AUTO_EXPOSURE_STRENGTH)
+        .clamp(1.0, AUTO_EXPOSURE_MAX)
+}
+
+fn publish(look: ZoneLook, auto_exposure: f32) {
     KEY.store(look.key.to_bits(), Ordering::Relaxed);
     FILL.store(look.fill.to_bits(), Ordering::Relaxed);
     EXPOSURE.store(
-        (super::MODERN_EXPOSURE * look.exposure).to_bits(),
+        (super::MODERN_EXPOSURE * look.exposure * auto_exposure).to_bits(),
         Ordering::Relaxed,
     );
     SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
@@ -445,6 +495,7 @@ fn publish(look: ZoneLook) {
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ActiveLook>()
+        .init_resource::<AutoExposure>()
         .add_data_loaders(load_zone_catalog)
         .add_systems(Last, update_look);
 }
@@ -547,14 +598,18 @@ fn update_look(
     cameras: Query<&GlobalTransform, With<WorldCamera>>,
     time: Res<Time>,
     clock: Option<Res<GameClock>>,
+    lighting: Option<Res<WowLighting>>,
+    auto: Option<Res<AutoExposure>>,
     mut look: ResMut<ActiveLook>,
     mut probe: Local<(f32, Option<u32>)>,
+    mut adapted: Local<Option<f32>>,
 ) {
     if !active.is_modern() {
         if look.0 != ZoneLook::NEUTRAL {
             look.0 = ZoneLook::NEUTRAL;
         }
-        publish(ZoneLook::NEUTRAL);
+        *adapted = None;
+        publish(ZoneLook::NEUTRAL, 1.0);
         return;
     }
     let from_avatar = area.and_then(|a| a.0);
@@ -584,7 +639,15 @@ fn update_look(
     if next != look.0 {
         look.0 = next;
     }
-    publish(look.0);
+    // The first modern frame takes the lift whole — entering the world at night should not open on
+    // a second and a half of the eye adjusting.
+    let lift = match (lighting.as_deref(), auto.is_none_or(|a| a.0)) {
+        (Some(l), true) => auto_exposure(l),
+        _ => 1.0,
+    };
+    let eye = adapted.get_or_insert(lift);
+    *eye += (lift - *eye) * (1.0 - (-time.delta_secs() / AUTO_EXPOSURE_SECONDS).exp());
+    publish(look.0, *eye);
 }
 
 #[cfg(test)]

@@ -543,6 +543,13 @@
             .. "and enchanted weapons. Cinematic also gives a dozen of those lights faint shadows.\n\n"
             .. "Has no effect on Classic lighting. Applies when you click Apply."
 
+        -- fork: `autoExposure`, the modern model's light auto-exposure.
+        BENILLA_TOOLTIP_AUTO_EXPOSURE =
+            "Brightens the picture a little when the light is very dark - at night, or in a "
+            .. "gloomy zone - so the world stays visible. Daylight and dusk are left as they are, "
+            .. "and a night still reads as night.\n\n"
+            .. "Has no effect on Classic lighting. Applies when you click Apply."
+
         -- 1.12's GAMMA text points at gray-bar art this page does not have.
         BENILLA_TOOLTIP_GAMMA =
             "Bends the midtones of the whole picture while black stays black and white stays "
@@ -599,7 +606,7 @@
                 -- drawn, and Render Scale keeps the last seat its own note below claims.
                 "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
                 -- fork: the modern lighting model and its tier (FORK.md).
-                "RowLightingModel", "RowLightingQuality",
+                "RowLightingModel", "RowLightingQuality", "RowAutoExposure",
                 -- fork: the Everwood port (FORK.md) -- what moves in the world.
                 "RowFoliageWind", "RowFoliageWindStrength", "RowRainSurfaces",
                 -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
@@ -2451,10 +2458,22 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowAutoExposure" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Auto Exposure -- `autoExposure`, the modern
+                                                -- model's light auto-exposure.
+                                                BenillaOptionsRow_OnLoad(this, "autoExposure", "Auto Exposure",
+                                                    "BENILLA_TOOLTIP_AUTO_EXPOSURE")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: Foliage Wind -- `foliageWind`, 0 off /
@@ -3669,6 +3688,7 @@
                 hideOnEscape = 1,
             }
             BENILLA_LIGHTING_QUALITY = "Lighting Quality"
+            BENILLA_AUTO_EXPOSURE = "Auto Exposure"
             BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
             BENILLA_WATER_DETAIL = "Water Detail"
@@ -3844,6 +3864,9 @@
                     name = "BENILLA_LIGHTING_QUALITY", desc = BENILLA_TOOLTIP_LIGHTING_QUALITY,
                     type = "dropdown", identifier = "BenillaLightingQuality",
                     cvar = "lightingQuality" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_AUTO_EXPOSURE", desc = BENILLA_TOOLTIP_AUTO_EXPOSURE,
+                    type = "checkbutton", cvar = "autoExposure" } },
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_AMBIENT_OCCLUSION", desc = BENILLA_TOOLTIP_AMBIENT_OCCLUSION,
                     type = "slider", cvar = "ssaoStrength", minval = 0, maxval = 1.0, step = 0.05 } },

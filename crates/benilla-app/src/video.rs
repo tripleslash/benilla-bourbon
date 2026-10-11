@@ -205,6 +205,8 @@ pub(crate) fn on_cvar(
         Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
         Option<ResMut<benilla_world::weather::wetness::RainSurfaces>>,
         Option<ResMut<benilla_world::lighting::LavaLightGain>>,
+        // fork: the modern model's light auto-exposure.
+        Option<ResMut<benilla_world::modern::look::AutoExposure>>,
     ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -332,6 +334,12 @@ pub(crate) fn on_cvar(
                 if !pinned {
                     wind.0 = v.clamp(0.0, 2.0) as u8;
                 }
+            }
+        }
+        // fork: the light auto-exposure; the look reads the knob each frame.
+        "autoexposure" => {
+            if let Some(auto) = fork.7.as_deref_mut() {
+                auto.0 = ev.flag();
             }
         }
         // fork: rain on surfaces; the wetness tick reads the knob each frame.
