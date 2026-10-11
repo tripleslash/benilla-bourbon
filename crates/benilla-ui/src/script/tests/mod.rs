@@ -4,6 +4,7 @@
 mod addon_argument_abi;
 mod addon_index_space;
 mod addon_saved_reader;
+mod adopt;
 mod anchors;
 mod backdrop;
 mod button;

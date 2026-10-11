@@ -283,21 +283,7 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
                 .arena
                 .create_region(h, kind, layer, 0)
                 .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
-            // A new highlight blends ADD, `SetHighlightTexture`'s default (`0x781d92`). The
-            // reference applies that mode, or a third argument's, on every call and to a handed-in
-            // Texture too (`0x7703f0` from `0x779050` and `0x779110`); here only a new region
-            // takes it.
-            model.region_data.insert(
-                rh,
-                RegionData {
-                    blend: if slot == Slot::Highlight {
-                        crate::script::BlendMode::Add
-                    } else {
-                        crate::script::BlendMode::default()
-                    },
-                    ..Default::default()
-                },
-            );
+            model.region_data.insert(rh, RegionData::default());
             model.touch_layout(); // a region entered the layout gate's read set
             if let Some(frame) = model.arena.frame_mut(h) {
                 if let KindState::Button(bs) = &mut frame.kind_state {
@@ -316,35 +302,40 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
     Ok(model.region_id(rh))
 }
 
-/// Point `slot` at `rh` or at nothing, returning the different region it held for the caller to
-/// free, as the slot store `0x778fd0` destroys the outgoing object.
-fn swap_slot(
-    model: &mut Model,
-    h: FrameHandle,
+/// Install `incoming` (a Texture object) into `slot`, or clear it, as the slot store `0x778fd0`
+/// does: the same texture is a no-op (`0x778fe7`), the displaced one is destroyed (`0x77900a`), and
+/// the incoming one moves into the button on the slot's own draw layer (`0x779017`, `0x779139`
+/// for the highlight) before it is stored.
+fn install_slot(
+    lua: &Lua,
+    this: &Table,
     slot: Slot,
-    rh: Option<RegionHandle>,
-) -> mlua::Result<Option<RegionHandle>> {
-    let frame = model
-        .arena
-        .frame_mut(h)
-        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
-    let KindState::Button(bs) = &mut frame.kind_state else {
+    incoming: Option<RegionHandle>,
+) -> mlua::Result<bool> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if !matches!(
+        model.arena.frame(h).map(|f| &f.kind_state),
+        Some(KindState::Button(_))
+    ) {
         return Err(mlua::Error::runtime("not a Button"));
-    };
-    let outgoing = slot.get(bs).filter(|old| Some(*old) != rh);
-    slot.set(bs, rh);
-    model.touch_layout();
-    Ok(outgoing)
-}
-
-/// Free the region a slot gave up, never the one that moved in.
-fn free_outgoing(lua: &Lua, outgoing: Option<RegionHandle>, incoming: RegionHandle) {
-    if let Some(old) = outgoing.filter(|old| *old != incoming) {
-        super::region::free_region(
-            &mut lua.app_data_mut::<Model>().expect("model app_data"),
-            old,
-        );
     }
+    super::region::install_into_slot(
+        &mut model,
+        h,
+        incoming,
+        slot.shape().1,
+        false,
+        |ks| match ks {
+            KindState::Button(bs) => slot.get(bs),
+            _ => None,
+        },
+        |ks, rh| {
+            if let KindState::Button(bs) = ks {
+                slot.set(bs, rh);
+            }
+        },
+    )
 }
 
 /// `Set<State>Texture(texture | "path" | nil)`, forked on the argument's type (`0x781970`). The
@@ -359,37 +350,40 @@ fn set_slot_texture(
     usage: &str,
     args: &MultiValue,
 ) -> mlua::Result<()> {
+    // The highlight's third argument names its blend, ADD without one or on a name that does not
+    // parse (`0x781d92`, `0x781db3` → `0x6f1920`); every other state has none.
+    let blend = (slot == Slot::Highlight).then(|| match args.get(1) {
+        Some(Value::String(n)) => n
+            .to_str()
+            .ok()
+            .and_then(|n| crate::script::BlendMode::parse(&n))
+            .unwrap_or(crate::script::BlendMode::Add),
+        _ => crate::script::BlendMode::Add,
+    });
     match args.front() {
-        // A Texture object is itself installed into the slot (`0x781b0b` → `0x778fd0`).
+        // A Texture object is itself installed into the slot (`0x781b0b` → `0x778fd0`; the
+        // highlight's `0x781eb7` → `0x779110`, which also sets its blend, `0x779144`, unless it
+        // is the same texture, `0x779122`). Any other widget raises (`0x781ab1`, message
+        // `0x87a1e0`; the highlight's `0x87a28c`).
         Some(Value::Table(t)) => {
-            let rh = super::region::region_handle_of(lua, t)?;
-            let h = frame_handle_of(lua, this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // Any other widget raises (`0x781ab1`, message `0x87a1e0`).
-            if model.arena.region(rh).map(|r| r.kind) != Some(RegionKind::Texture) {
-                return Err(mlua::Error::runtime("Wrong object type, expected texture"));
+            let method = usage.split('(').next().unwrap_or(usage);
+            let rh = super::region::texture_object_arg(lua, this, t, method)?;
+            if install_slot(lua, this, slot, Some(rh))? {
+                if let Some(blend) = blend {
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data")
+                        .region_data
+                        .entry(rh)
+                        .or_default()
+                        .blend = blend;
+                }
             }
-            let outgoing = swap_slot(&mut model, h, slot, Some(rh))?;
-            drop(model);
-            free_outgoing(lua, outgoing, rh);
             return Ok(());
         }
         // nil clears the slot and destroys the old region (`0x781b5a` → `0x778fd0`): unhooked but
         // alive, it would draw in every state. No argument is not nil (`0x781b4f`) and clears
         // nothing.
-        Some(Value::Nil) => {
-            let h = frame_handle_of(lua, this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let outgoing = swap_slot(&mut model, h, slot, None)?;
-            drop(model);
-            if let Some(old) = outgoing {
-                super::region::free_region(
-                    &mut lua.app_data_mut::<Model>().expect("model app_data"),
-                    old,
-                );
-            }
-            return Ok(());
-        }
+        Some(Value::Nil) => return install_slot(lua, this, slot, None).map(|_| ()),
         _ => {}
     }
 
@@ -419,6 +413,11 @@ fn set_slot_texture(
     // `""` clears the texture, which `QuestLogFrame.lua:165` relies on.
     data.texture = (!path.is_empty()).then_some(path);
     data.fill = None;
+    // The highlight applies its blend on every path call, to the old region as to a new one
+    // (`0x779082`, `0x7790e6`).
+    if let Some(blend) = blend {
+        data.blend = blend;
+    }
     Ok(())
 }
 
@@ -570,10 +569,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // Destroyed, not orphaned (`0x778d3c`).
                 super::region::free_region(&mut model, dead);
             }
-            model.arena.set_region_owner(rh, Some(owner));
-            if let Some(r) = model.arena.region_mut(rh) {
-                r.draw_layer = DrawLayer::Artwork;
-            }
+            super::region::link_region(&mut model, rh, owner, DrawLayer::Artwork);
             adopt_label(&mut model, owner, rh);
             // The layout's read set moved, and `GetTextWidth` reads the new label's extents.
             model.touch_layout();
