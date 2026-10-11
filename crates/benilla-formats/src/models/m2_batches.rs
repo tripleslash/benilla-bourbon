@@ -508,10 +508,28 @@ pub fn parse_m2_render_submeshes(
         // can hold cards on several bones (a candelabra's glows): one submesh per billboard bone.
         let make_billboard = |bone_idx: usize| -> Option<Billboard> {
             let bone = model.bones.get(bone_idx)?;
+            // The billboard bones above, walked up from the parent; the bone count bounds a
+            // malformed parent cycle.
+            let mut carriers = Vec::new();
+            let mut parent = bone.parent;
+            for _ in 0..model.bones.len() {
+                let Some(p) = usize::try_from(parent)
+                    .ok()
+                    .and_then(|p| model.bones.get(p))
+                else {
+                    break;
+                };
+                if let Some(kind) = BillboardKind::from_bone_flags(p.flags.bits()) {
+                    carriers.push(([p.pivot.x, p.pivot.y, p.pivot.z], kind));
+                }
+                parent = p.parent;
+            }
+            carriers.reverse();
             Some(Billboard {
                 pivot: [bone.pivot.x, bone.pivot.y, bone.pivot.z],
                 bone: bone_idx as u16,
                 kind: BillboardKind::from_bone_flags(bone.flags.bits())?,
+                carriers,
                 // The glow-card pulse: the bone's global-sequence scale track.
                 scale_anim: parse_bone_scale_anim(bytes, bone_idx),
                 // Per-sequence translation loops (the questgiver bob: anim 0 low, 190 raised).

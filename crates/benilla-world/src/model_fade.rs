@@ -1368,6 +1368,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         };
         let mine = app

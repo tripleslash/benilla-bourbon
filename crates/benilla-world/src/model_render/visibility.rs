@@ -425,6 +425,7 @@ mod tests {
             pivot: Vec3::ZERO,
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let card = app

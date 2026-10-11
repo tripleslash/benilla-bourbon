@@ -2266,6 +2266,7 @@ mod tests {
             pivot: Vec3::new(0.0, 2.14, 0.0), // the eye-glow bone, head height
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let mut app = App::new();

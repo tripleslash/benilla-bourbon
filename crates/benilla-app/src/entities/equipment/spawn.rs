@@ -1277,6 +1277,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         dm.parts = Some(vec![part(false), card]);
@@ -1379,6 +1380,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         dm.parts = Some(vec![card]);

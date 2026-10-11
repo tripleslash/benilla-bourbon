@@ -340,7 +340,7 @@ fn build_markers(
                             Transform::IDENTITY,
                             BillboardCard::new(info, Transform::IDENTITY)
                                 .with_seq_translation(seq_loop(info, ANIM_MARKER_LOW), arm_ms),
-                            MarkerCardPivot(info.pivot),
+                            MarkerCardPivot(BillboardCard::seat(info)),
                         ))
                         .id();
                     commands.entity(root).add_child(child);

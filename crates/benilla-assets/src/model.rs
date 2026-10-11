@@ -27,6 +27,9 @@ pub struct BillboardInfo {
     /// The billboard bone, the joint the card rides on an animated host.
     pub bone: u16,
     pub kind: BillboardKind,
+    /// The billboard bones above this one, outermost first, as `(pivot, kind)`: each swings the
+    /// pivot below it about its own, as its children multiply onto its replaced matrix.
+    pub carriers: Vec<(Vec3, BillboardKind)>,
     /// The bone's global-sequence scale loop (a glow card's pulse), folded into the card's scale.
     pub scale_anim: Option<BoneScaleAnim>,
     /// The bone's per-sequence translation loops `(anim id, loop)`, keys in Bevy axes: the quest
@@ -542,6 +545,11 @@ pub(crate) fn billboard_info(sub: &RenderSubmesh) -> Option<BillboardInfo> {
         pivot: wow_to_bevy(bb.pivot),
         bone: bb.bone,
         kind: bb.kind,
+        carriers: bb
+            .carriers
+            .iter()
+            .map(|&(pivot, kind)| (wow_to_bevy(pivot), kind))
+            .collect(),
         scale_anim: bb.scale_anim.clone(),
         // Translation keys are vectors and take Bevy axes; the scale keys stay per-axis factors.
         seq_translations: bb

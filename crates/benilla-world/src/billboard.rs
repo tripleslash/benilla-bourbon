@@ -8,7 +8,9 @@
 //! is one shared orientation for every billboard, never a per-pivot aim or a facet normal.
 //!
 //! A card's mesh is centred at its bone pivot in model-local Bevy axes (WoW X→−Z, Y→−X, Z→+Y), so
-//! the entity sits at the pivot with the rebuilt basis as its rotation.
+//! the entity sits at the pivot with the rebuilt basis as its rotation. A billboard bone above the
+//! card's own swings that pivot about its own: children multiply onto the replaced matrix
+//! (`0x7151ba`), which is how a lamp's glow card stays behind its lantern from every side.
 
 use benilla_assets::BillboardInfo;
 use benilla_formats::{BillboardKind, BoneScaleAnim};
@@ -47,16 +49,29 @@ pub struct BillboardCard {
     /// The entity this card follows, re-seated from it every frame and despawned with it (a unit
     /// or GameObject anchor, a held-item root); `None` for a fixed placement.
     follow: Option<Entity>,
-    /// The pivot in the model's local Bevy frame (re-applied each frame when `follow` is set).
+    /// The card's fixed seat in the model's local Bevy frame (re-applied each frame when `follow`
+    /// is set): its outermost carrier's pivot, else its own.
     local_pivot: Vec3,
+    /// The billboard bones above the card's own, outermost first: each one's kind and the offset
+    /// to the pivot below it, which it turns by its own replaced basis. Empty on a joint, whose
+    /// rig composes the chain.
+    carried: Vec<(BillboardKind, Vec3)>,
 }
 
 impl BillboardCard {
     /// A card for a submesh's [`BillboardInfo`] at a fixed instance `placement`.
     pub fn new(info: &BillboardInfo, placement: Transform) -> Self {
-        let world_pivot = placement.transform_point(info.pivot);
+        let seat = Self::seat(info);
+        // The pivot below each carrier: the next carrier's, and at last the card's own.
+        let below = info.carriers.iter().skip(1).map(|c| c.0);
+        let carried = info
+            .carriers
+            .iter()
+            .zip(below.chain([info.pivot]))
+            .map(|(&(pivot, kind), below)| (kind, below - pivot))
+            .collect();
         Self {
-            world_pivot,
+            world_pivot: placement.transform_point(seat),
             scale: placement.scale,
             kind: info.kind,
             scale_anim: info.scale_anim.clone(),
@@ -65,8 +80,15 @@ impl BillboardCard {
             seq_translation: None,
             placement_rot: placement.rotation,
             follow: None,
-            local_pivot: info.pivot,
+            local_pivot: seat,
+            carried,
         }
+    }
+
+    /// Where a card of `info` is fixed in its model (local Bevy frame), [`Self::re_place`]'s
+    /// pivot: the outermost billboard bone above it, which nothing swings, else its own pivot.
+    pub fn seat(info: &BillboardInfo) -> Vec3 {
+        info.carriers.first().map_or(info.pivot, |c| c.0)
     }
 
     /// A card following `owner` (a creature, GameObject, held item, missile or spell effect).
@@ -82,6 +104,7 @@ impl BillboardCard {
     pub fn following_joint(info: &BillboardInfo, joint: Entity) -> Self {
         let mut card = Self::following(info, joint);
         card.local_pivot = Vec3::ZERO;
+        card.carried.clear();
         card.scale_anim = None;
         card
     }
@@ -101,6 +124,7 @@ impl BillboardCard {
             placement_rot: Quat::IDENTITY,
             follow: Some(owner),
             local_pivot: pivot,
+            carried: Vec::new(),
         }
     }
 
@@ -473,7 +497,15 @@ pub(crate) fn face_billboards(
             // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`).
             let attach_ms = *card.gseq_attach_ms.get_or_insert(elapsed_ms);
             let card = &*card;
-            let rotation = billboard_basis(card.kind, card.placement_rot, fwd, right, up);
+            // Each carrier turns the offset to the pivot below it by its own replaced basis, which
+            // is also the rotation the next arm keeps its axis from.
+            let mut kept = card.placement_rot;
+            let mut carried = Vec3::ZERO;
+            for &(kind, offset) in &card.carried {
+                kept = billboard_basis(kind, kept, fwd, right, up);
+                carried += kept * (offset * card.scale);
+            }
+            let rotation = billboard_basis(card.kind, kept, fwd, right, up);
             // The global-sequence scale pulse on the instance's anchored cursor, `sceneNow − attach`.
             let pulse = card.scale_anim.as_ref().map_or(Vec3::ONE, |a| {
                 Vec3::from_array(a.sample(elapsed_ms.wrapping_sub(attach_ms)))
@@ -485,7 +517,7 @@ pub(crate) fn face_billboards(
                         * card.scale)
             });
             let placed = Transform {
-                translation: card.world_pivot + bob,
+                translation: card.world_pivot + carried + bob,
                 rotation,
                 scale: card.scale * pulse,
             };
@@ -588,6 +620,7 @@ mod tests {
             pivot: Vec3::new(0.0, 1.7, 0.0), // the brazier-bowl height, model-local Bevy frame
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let card = app
@@ -628,6 +661,7 @@ mod tests {
                 interp: false,
                 keys: vec![(0, [2.0, 2.0, 2.0])],
             }),
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         // The joint as the rig composes it: twinkle ×2 × parent flare ×3 = 6; sampling the
@@ -687,6 +721,7 @@ mod tests {
             pivot: Vec3::ZERO,
             kind: BillboardKind::LockZ,
             scale_anim: None, // a sequence track: the joint is its only carrier
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let joint = app
@@ -820,6 +855,77 @@ mod tests {
         );
     }
 
+    /// `Misc_1H_Lantern_B_01.m2`: the glow card's bone 4 hangs under billboard bone 1, both
+    /// spherical, 0.062 yd down the parent's −X (pivots in raw WoW axes). The parent's X turns to
+    /// the viewer, so the glow sits that far behind the lantern's centre from every camera, never
+    /// to one side of it; both a fixed placement and a held item's card take it.
+    #[test]
+    fn a_card_under_a_billboard_bone_rides_behind_its_pivot_from_every_side() {
+        use benilla_assets::coords::wow_to_bevy;
+        const CARRIER: [f32; 3] = [-0.000_631_781, 0.0, -0.328_096_8];
+        const CARD: [f32; 3] = [-0.062_745_07, 0.004_187_5, -0.320_194_15];
+        let info = BillboardInfo {
+            bone: 4,
+            pivot: wow_to_bevy(CARD),
+            kind: BillboardKind::Spherical,
+            carriers: vec![(wow_to_bevy(CARRIER), BillboardKind::Spherical)],
+            scale_anim: None,
+            seq_translations: vec![],
+        };
+        // A placement that turns and doubles the model: the offset scales, its direction does not
+        // follow the yaw.
+        let placement = Transform {
+            translation: Vec3::new(3.0, 1.5, -2.0),
+            rotation: Quat::from_rotation_y(1.1),
+            scale: Vec3::splat(2.0),
+        };
+        let reach = (wow_to_bevy(CARD) - wow_to_bevy(CARRIER)).length() * 2.0;
+        let depth = (CARRIER[0] - CARD[0]) * 2.0;
+
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        let cam = app
+            .world_mut()
+            .spawn((crate::view::WorldCamera, GlobalTransform::IDENTITY))
+            .id();
+        let fixed = app
+            .world_mut()
+            .spawn((BillboardCard::new(&info, placement), Transform::IDENTITY))
+            .id();
+        let owner = app.world_mut().spawn(GlobalTransform::from(placement)).id();
+        let held = app
+            .world_mut()
+            .spawn((BillboardCard::following(&info, owner), Transform::IDENTITY))
+            .id();
+        let seat = placement.transform_point(wow_to_bevy(CARRIER));
+        for (yaw, pitch) in [(0.0, 0.0), (1.9, 0.0), (-2.6, 0.4), (0.7, -0.9)] {
+            let cam_tf =
+                Transform::from_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch));
+            app.world_mut()
+                .entity_mut(cam)
+                .insert(GlobalTransform::from(cam_tf));
+            app.update();
+            for card in [fixed, held] {
+                let tf = *app.world().entity(card).get::<Transform>().unwrap();
+                let off = tf.translation - seat;
+                assert!(
+                    (off.length() - reach).abs() < 1e-5,
+                    "the bone keeps its reach from the carrier at the placement's scale: {off:?}"
+                );
+                let behind = off.dot(*cam_tf.forward());
+                assert!(
+                    (behind - depth).abs() < 1e-5,
+                    "the parent's −X runs away from the viewer (yaw {yaw}, pitch {pitch}):                      {behind} of {depth}"
+                );
+                assert!(
+                    (off - *cam_tf.forward() * behind).length() < 0.02,
+                    "…so the glow stays over the lantern on screen, not beside it: {off:?}"
+                );
+            }
+        }
+    }
+
     /// A card tagged `ExteriorScene` keeps the cull's `Hidden`, and is still placed.
     #[test]
     fn the_exterior_cull_owns_a_tagged_cards_visibility() {
@@ -843,6 +949,7 @@ mod tests {
             pivot: Vec3::new(0.0, 1.7, 0.0),
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let card = app
@@ -1260,6 +1367,7 @@ mod tests {
             pivot: Vec3::ZERO,
             kind: BillboardKind::LockZ,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![], // doodad default: `new` never arms one
         };
         let card = app

@@ -938,6 +938,7 @@ mod tests {
             bone: 0,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         let mesh = PickMesh(std::sync::Arc::new(sub));

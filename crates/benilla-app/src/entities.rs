@@ -1393,6 +1393,7 @@ mod display_mirror_tests {
                 bone,
                 kind: benilla_formats::BillboardKind::Spherical,
                 scale_anim: None,
+                carriers: Vec::new(),
                 seq_translations: Vec::new(),
             }),
             alpha_anim: None,

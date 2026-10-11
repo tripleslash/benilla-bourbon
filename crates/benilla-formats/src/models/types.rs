@@ -233,6 +233,11 @@ pub struct Billboard {
     /// The joint the card rides on an animated host (a swinging lamp).
     pub bone: u16,
     pub kind: BillboardKind,
+    /// The billboard bones above this one, outermost first, as `(pivot, kind)`. A child multiplies
+    /// onto its parent's replaced matrix (`0x7151ba`), so each swings the pivot below it about its
+    /// own: `Misc_1H_Lantern_B_01.m2`'s glow bone sits 0.06 yd down its parent's −X, behind the
+    /// lantern from every side.
+    pub carriers: Vec<([f32; 3], BillboardKind)>,
     pub scale_anim: Option<BoneScaleAnim>,
     /// Translation loops `(anim id, band keys)`: anim 0 the questgiver bob, 190 its raised form
     /// under an overhead name (`0x6076c0`). Only the marker spawn site arms them.

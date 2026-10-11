@@ -816,6 +816,7 @@ mod tests {
             bone,
             kind: benilla_formats::BillboardKind::LockZ,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         BillboardCard::following(&info, owner)
