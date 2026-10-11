@@ -345,6 +345,9 @@ fn build_chunk_clutter(
                 (lo.min(p[2]), hi.max(p[2]))
             });
         let height_span = (max_z - min_z).max(1.0e-4);
+        // A rock, bones or a shell carries no bend weight: the wind and the parting field both
+        // scale by it.
+        let bends = !rigid_detail(model_path);
         for sub in subs.iter() {
             let vcount = sub.positions.len() * placements.len();
             let mut positions = Vec::with_capacity(vcount);
@@ -370,7 +373,12 @@ fn build_chunk_clutter(
                 for (i, p) in sub.positions.iter().enumerate() {
                     positions.push((rot * (wow_to_bevy(*p) * inst_scale) + origin).to_array());
                     uvs.push(sub.uvs[i]);
-                    wind.push([((p[2] - min_z) / height_span).clamp(0.0, 1.0), phase]);
+                    let bend = if bends {
+                        ((p[2] - min_z) / height_span).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    wind.push([bend, phase]);
                     normals.push(sp.ground_normal);
                     colors.push(tint);
                 }
@@ -431,6 +439,18 @@ fn build_chunk_clutter(
         );
     }
     out
+}
+
+/// fork: whether a detail doodad is rigid, by the kind its file name ends in ahead of the number:
+/// rocks (`ElwRoc01`, `DurIRo01`, `ElwynnRock1`), bones (`DslBon03`) and shells (`TifShl02`,
+/// `AzhShel01`). Grass, bushes, flowers and every other kind bend.
+fn rigid_detail(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    let kind = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
+    ["roc", "rock", "iro", "bon", "shl", "shel"]
+        .iter()
+        .any(|k| kind.ends_with(k))
 }
 
 /// fork: a tuft's wind phase from its world-space origin: an identity hash, so rebuild order and
@@ -569,6 +589,31 @@ pub(crate) fn stream_chunk_clutter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rocks_bones_and_shells_are_rigid_detail_and_plants_are_not() {
+        for path in [
+            "World\\NoDXT\\Detail\\ElwRoc01.m2",
+            "World\\NoDXT\\Detail\\DurIRo02.m2",
+            "World\\NoDXT\\Detail\\PlaguelandsRoc01.m2",
+            "World/NoDXT/Detail/DslBon03.mdx",
+            "World\\NoDXT\\Detail\\TifShl02.m2",
+            "World\\NoDXT\\Detail\\AzhShel01.m2",
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Detail\\ElwynnRock1\\ElwynnRock1.m2",
+        ] {
+            assert!(rigid_detail(path), "{path}");
+        }
+        for path in [
+            "World\\NoDXT\\Detail\\ElwGra01.m2",
+            "World\\NoDXT\\Detail\\ElwBus02.m2",
+            "World\\NoDXT\\Detail\\DskFlo01.m2",
+            "World\\NoDXT\\Detail\\DurIGr03.m2",
+            "World\\NoDXT\\Detail\\UnwCor04.m2",
+            "World\\NoDXT\\Detail\\WesShe01.m2",
+        ] {
+            assert!(!rigid_detail(path), "{path}");
+        }
+    }
 
     /// The fade ramp `wow_model.wgsl` evaluates, mirrored as a pin on its constants.
     fn ramp(z: f32, far: f32) -> f32 {

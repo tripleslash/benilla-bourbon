@@ -683,6 +683,17 @@ impl StaticGx {
     }
 }
 
+/// The name terms of vanilla's tree, bush and plant families.
+const PLANT_TERMS: [&str; 15] = [
+    "tree", "bush", "shrub", "foliage", "fern", "palm", "plant", "willow", "canopy", "hedge",
+    "thorn", "cactus", "vine", "reed", "kelp",
+];
+
+/// File names of what stands rigid in a plant folder: a rock, a cage.
+const RIGID_TERMS: [&str; 8] = [
+    "rock", "stone", "boulder", "pebble", "gravel", "rubble", "cage", "prison",
+];
+
 /// fork: the foliage-wind leaf classification, conservative. Alpha test excludes trunks and rocks
 /// even when the model path says tree; the name terms cover vanilla's tree, bush and plant
 /// families. Animated doodads never reach this: `assemble.rs` excludes them before the divert.
@@ -690,7 +701,9 @@ pub(crate) fn foliage_wind_batch(path: &str, blend: ModelBlend, wmo_geometry: bo
     if wmo_geometry || blend != ModelBlend::AlphaTest {
         return false;
     }
-    let p = path.to_ascii_lowercase();
+    // A zone's name is no plant: the "thorn" in Stranglethorn's folder named 77 stock models that
+    // carry no plant term of their own (ruins, pottery, bridges, cages, mine cars).
+    let p = path.to_ascii_lowercase().replace("stranglethorn", "");
     // Substrings alone otherwise catch StreetLamp, tree huts, dead stumps and logs and painted
     // tree facades: those can carry alpha-tested cards, but moving the whole card is not sway.
     if ["street", "treehut", "stump", "log", "facade", "fallen"]
@@ -699,12 +712,14 @@ pub(crate) fn foliage_wind_batch(path: &str, blend: ModelBlend, wmo_geometry: bo
     {
         return false;
     }
-    [
-        "tree", "bush", "shrub", "foliage", "fern", "palm", "plant", "willow", "canopy", "hedge",
-        "thorn", "cactus", "vine", "reed", "kelp",
-    ]
-    .iter()
-    .any(|term| p.contains(term))
+    let plant = |s: &str| PLANT_TERMS.iter().any(|term| s.contains(term));
+    // A rigid file name in a plant folder stays put (Azshara's `SeaPlants\BarnacleRock`); a
+    // plant's own name wins, so Stonetalon's `StoneTree` and Deadwind's `RockTree` still sway.
+    let name = p.rsplit(['/', '\\']).next().unwrap_or(&p);
+    if !plant(name) && RIGID_TERMS.iter().any(|term| name.contains(term)) {
+        return false;
+    }
+    plant(&p)
 }
 
 pub struct StaticGxPlugin;
@@ -886,6 +901,37 @@ mod tests {
             "World\\Wmo\\TreeHouse.wmo",
             ModelBlend::AlphaTest,
             true,
+        ));
+    }
+
+    #[test]
+    fn foliage_classifier_reads_no_plant_into_a_zone_name_or_a_rigid_file() {
+        let leaf = |path: &str| foliage_wind_batch(path, ModelBlend::AlphaTest, false);
+        // "thorn" in the zone folder is not a plant term.
+        for path in [
+            "World\\Azeroth\\Stranglethorn\\ActiveDoodads\\Cages\\Cage01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Ruins\\TrollRuins01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Rocks\\StranglethornCliffRock01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\GemMineCar01\\GemMineCar01.m2",
+        ] {
+            assert!(!leaf(path), "{path}");
+        }
+        // The zone's own plants keep their names.
+        for path in [
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Trees\\StranglethornTree01.m2",
+            "World/Azeroth/Stranglethorn/PassiveDoodads/Fern/StranglethornFern01.m2",
+        ] {
+            assert!(leaf(path), "{path}");
+        }
+        // A rigid file name in a plant folder; a plant's own name wins over a rigid term in it.
+        assert!(!leaf(
+            "World\\Kalimdor\\Azshara\\SeaPlants\\BarnacleRock01_04\\BarnacleRock01_04.m2"
+        ));
+        assert!(leaf(
+            "World\\Kalimdor\\Stonetalon\\PassiveDoodads\\Trees\\StoneTree01.m2"
+        ));
+        assert!(leaf(
+            "World\\Azeroth\\DeadwindPass\\PassiveDoodads\\RockTrees\\DeadwindPassRockTree02.m2"
         ));
     }
 
