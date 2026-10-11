@@ -760,10 +760,13 @@ pub(super) fn register(app: &mut App) {
         .add_plugins(ExtractResourcePlugin::<RippleBuffer>::default())
         // Strictly ordered: the clock decides whether a step is due, the collector fills only when
         // one is, and the packer publishes what it collected. See `collect_stamps` for what the
-        // wrong order costs.
+        // wrong order costs. Only once `surface::setup_liquid` has built the field: with no client
+        // data it bails before that, and there is no water to ripple.
         .add_systems(
             Update,
-            (advance_clock, collect_stamps, pack_ripple_data).chain(),
+            (advance_clock, collect_stamps, pack_ripple_data)
+                .chain()
+                .run_if(resource_exists::<RippleField>),
         )
         .add_systems(
             Update,
