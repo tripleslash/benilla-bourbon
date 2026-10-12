@@ -196,7 +196,7 @@ fn arm_sequence_clock(
             commands
                 .entity(entity)
                 .try_insert(AnimationTransitions::new())
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
         _ => {
             commands
@@ -208,7 +208,7 @@ fn arm_sequence_clock(
                 ))
                 // A rebuilt rig is born live: a stale park marker would desync the LOD gate's
                 // edge-triggered bookkeeping.
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
     }
 }
@@ -424,7 +424,7 @@ pub(super) fn attach_entity_visuals(
             } else if let Some(&super::mount::MountChild(child)) = mount_child {
                 // Dismounted while pending: drop the mount it ordered.
                 if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
                 commands.entity(entity).remove::<super::mount::MountChild>();
             }
@@ -486,8 +486,11 @@ pub(super) fn attach_entity_visuals(
                     // dispatches on the mount's model (`0x7106c0`) and tilts through its node.
                     let mut joints_root = rider_root;
                     if d.terrain_tilt != 0 && rider_root == entity {
+                        // Child-side `ChildOf`, not `add_child`: a parent-side add panics against a
+                        // unit that a same-frame teardown despawned mid-build.
                         let node = commands
                             .spawn((
+                                ChildOf(entity),
                                 super::conform::ConformNode {
                                     // The ground and yaw source: the unit, or a mount child's
                                     // host.
@@ -498,7 +501,6 @@ pub(super) fn attach_entity_visuals(
                                 Visibility::default(),
                             ))
                             .id();
-                        commands.entity(entity).add_child(node);
                         joints_root = node;
                     }
                     setup_skinned_instance(
@@ -722,7 +724,7 @@ pub(super) fn attach_entity_visuals(
             } else if reattached {
                 commands
                     .entity(entity)
-                    .remove::<benilla_world::model_fade::UnitAppearFade>();
+                    .try_remove::<benilla_world::model_fade::UnitAppearFade>();
             }
             // Size is `OBJECT_FIELD_SCALE_X` alone: the server already folds the DBC scale into
             // it (vmangos `Unit::GetScaleForDisplayId`, `Unit.cpp:9579`), and the reference
@@ -1002,19 +1004,21 @@ pub(super) fn attach_entity_visuals(
                     id: net.display_id.unwrap_or(0),
                     detail: String::new(),
                 };
-                commands.entity(entity).with_children(|parent| {
-                    parent.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(Vec3::Y * lift),
-                        object,
-                        benilla_world::interact::CreaturePickPart,
-                        // No `RenderSubmesh`: the picker casts against the cube's box.
-                        benilla_world::interact::PickBox,
-                        // Counted by `WOW_UNIT_VISUALS`.
-                        super::FallbackCube,
-                    ));
-                });
+                // Child-side `ChildOf`, like every model part in `dress`: the parent-side
+                // `with_children` would `add_related` against a unit that a same-frame teardown
+                // already despawned, and panic where the child spawn only warns.
+                commands.spawn((
+                    ChildOf(entity),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(Vec3::Y * lift),
+                    object,
+                    benilla_world::interact::CreaturePickPart,
+                    // No `RenderSubmesh`: the picker casts against the cube's box.
+                    benilla_world::interact::PickBox,
+                    // Counted by `WOW_UNIT_VISUALS`.
+                    super::FallbackCube,
+                ));
             }
         }
         // The mount the visual was built on, for `reseat_mounts` to diff; stamped on a cube too,
@@ -1031,8 +1035,8 @@ pub(super) fn attach_entity_visuals(
             .entity(entity)
             .try_insert(VisualAttached)
             // The display the visual was built with, for `refresh_live_display` to diff.
-            .insert(super::live_display::AppliedDisplay(net.display_id))
-            .remove::<(
+            .try_insert(super::live_display::AppliedDisplay(net.display_id))
+            .try_remove::<(
                 super::equipment::Reattached,
                 super::live_display::ShownRebuild,
             )>();

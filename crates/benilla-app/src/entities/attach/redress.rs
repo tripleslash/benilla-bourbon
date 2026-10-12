@@ -211,10 +211,10 @@ pub(in crate::entities) fn redress_player_looks(
                 // A billboard card is a world root, so it is reaped by name.
                 if let Some(card) = dp.card {
                     if let Ok(mut ec) = commands.get_entity(card) {
-                        ec.despawn();
+                        ec.try_despawn();
                     }
                 }
-                commands.entity(child).despawn();
+                commands.entity(child).try_despawn();
                 hidden += 1;
                 continue;
             }
