@@ -2,6 +2,7 @@
 //! [`publish_view_focus`] says where to stream from, ahead of the stream stage, and
 //! [`release_post_snap_hold`] ends the mover's settle hold on the residency the world publishes.
 //! The hold ends on residency, never on ground contact, the same way for every mover mode.
+//! [`hold_unsupported_body`] arms the same hold mid-run, over ground whose collision is arriving.
 
 use bevy::prelude::*;
 
@@ -135,11 +136,7 @@ pub(super) fn release_post_snap_hold(
             .is_none_or(|r| decks.contains(r.entity));
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
     // a free-fly eye) the release and the stale-clear are refused and only the backstop runs.
-    let focus_matches = p.focus_tile.is_some_and(|t| {
-        let wow = benilla_assets::coords::bevy_to_wow(player.pos);
-        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
-        t == (tx as i32, ty as i32)
-    });
+    let focus_matches = focus_on_body(&p, player.pos);
     // Residency means this map's own tile (a WMO-only map's one building) is spawned, which a
     // swap reaches only after draining every tile of the map we left.
     if p.focus_resident && p.total > 0 && focus_matches {
@@ -163,7 +160,12 @@ pub(super) fn release_post_snap_hold(
     // the deadline is pushed while the resident world is still the map we left and while the
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
-    let world_ready = p.presentable() && !player.world_stale && focus_matches;
+    // A ground hold also waits for the support it caught the body over: the scene terms can still
+    // read a latched ready on the frame it is armed.
+    let world_ready = p.presentable()
+        && !player.world_stale
+        && focus_matches
+        && !(player.ground_hold && p.support_pending);
     // The ack goes once the world has loaded, as the reference's post-load `0xDC`; the create
     // block the hold may still wait for comes only after it.
     if world_ready && player.owes_worldport_ack {
@@ -199,6 +201,86 @@ pub(super) fn release_post_snap_hold(
             info!("worldport: ack sent at settle release");
         }
     }
+}
+
+/// Whether the world's published residency is about the tile the body stands on.
+fn focus_on_body(p: &WorldLoadProgress, pos: Vec3) -> bool {
+    p.focus_tile.is_some_and(|t| {
+        let wow = benilla_assets::coords::bevy_to_wow(pos);
+        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+        t == (tx as i32, ty as i32)
+    })
+}
+
+/// How far under the feet a floor still ends a fall, in yards: a body with real collision within
+/// this reach lands on it, and only one with nothing under it is held.
+const FLOOR_REACH: f32 = 20.0;
+
+/// Puts a body that walked off onto ground whose collision is still arriving on the settle hold,
+/// with the loading cover, until that ground is in: the WMO it stands in has not attached its
+/// collider, or is not registered yet. A stand-in floor already holds a body on unloaded terrain;
+/// this catches what no stand-in describes. Runs after the stream stage, before the release.
+pub(super) fn hold_unsupported_body(
+    mut player: ResMut<Player>,
+    progress: Option<Res<WorldLoadProgress>>,
+    world: benilla_world::collision::WorldCollision,
+    time: Res<Time>,
+    // Armed for the current unsupported stretch: a hold the stall backstop ended is not re-armed
+    // until the body has support again.
+    mut caught: Local<bool>,
+) {
+    let Some(p) = progress else { return };
+    let floor_below = |pos: Vec3| {
+        world
+            .ray_body(pos + Vec3::Y * 0.5, Dir3::NEG_Y, FLOOR_REACH + 0.5)
+            .is_some()
+    };
+    let unsupported = falls_unsupported(&player, &p) && !floor_below(player.pos);
+    if !catch_edge(unsupported, player.settling, &mut caught) {
+        return;
+    }
+    let now = time.elapsed_secs();
+    player.settling = true;
+    player.ground_hold = true;
+    player.settle_since = now;
+    player.settle_deadline = now + SETTLE_TIMEOUT;
+    let wow = benilla_assets::coords::bevy_to_wow(player.pos);
+    info!(
+        "ground hold: the body left its floor at ({:.1}, {:.1}, {:.1}) over collision still \
+         arriving",
+        wow[0], wow[1], wow[2]
+    );
+}
+
+/// The body is our own walker in the air, over ground the world says is still arriving: the case
+/// [`hold_unsupported_body`] holds once nothing solid is found below it. A server ride, a deck, a
+/// swim and GM flight have no floor to wait for.
+fn falls_unsupported(player: &Player, p: &WorldLoadProgress) -> bool {
+    player.active
+        && !player.detached
+        && !player.server_riding
+        && player.ride.is_none()
+        && player.pending_board.is_none()
+        && player.foreign_mover.is_none()
+        && !player.swimming
+        && !player.modes.levitating
+        && player.airborne_since.is_some()
+        && p.support_pending
+        && focus_on_body(p, player.pos)
+}
+
+/// Whether to arm the hold this frame: on the edge into an unsupported stretch, not under another
+/// hold, and once per stretch.
+fn catch_edge(unsupported: bool, settling: bool, caught: &mut bool) -> bool {
+    if !unsupported {
+        *caught = false;
+        return false;
+    }
+    if *caught || settling {
+        return false;
+    }
+    *caught = true;
+    true
 }
 
 #[cfg(test)]
@@ -687,5 +769,95 @@ mod tests {
             matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
             "the timeout release must still ack the transfer, got {sent:?}"
         );
+    }
+
+    /// A body airborne over the tunnel whose WMO has not landed: our own walker, off its floor.
+    fn walked_off() -> (Player, WorldLoadProgress) {
+        let player = Player {
+            active: true,
+            airborne_since: Some(0.0),
+            ..Player::default()
+        };
+        let progress = WorldLoadProgress {
+            focus_tile: Some(own_tile()),
+            focus_collidable: true,
+            support_pending: true,
+            ..WorldLoadProgress::default()
+        };
+        (player, progress)
+    }
+
+    /// **The tunnel ended and the body fell into the void**: it ran off the end of Ironforge's
+    /// floor into a tunnel WMO still arriving, over terrain whose collider was in, and nothing held
+    /// it. Off its floor over pending support, it is held, once.
+    #[test]
+    fn a_body_walking_off_into_a_wmo_still_arriving_is_held_not_dropped() {
+        let (player, progress) = walked_off();
+        assert!(falls_unsupported(&player, &progress));
+        let mut caught = false;
+        assert!(
+            catch_edge(true, false, &mut caught),
+            "the body was left to fall"
+        );
+        assert!(
+            !catch_edge(true, false, &mut caught),
+            "a stretch the backstop released was re-armed"
+        );
+        assert!(!catch_edge(false, false, &mut caught));
+        assert!(
+            catch_edge(true, false, &mut caught),
+            "a new stretch after support came back was not caught"
+        );
+    }
+
+    /// Only our own walker in the air over pending support: standing, riding, swimming and
+    /// flying have no floor to wait for, and ground that is all in holds nothing.
+    #[test]
+    fn only_an_airborne_walker_over_pending_support_is_caught() {
+        type Tweak = fn(&mut Player, &mut WorldLoadProgress);
+        let cases: [(&str, Tweak); 6] = [
+            ("standing", |pl, _| pl.airborne_since = None),
+            ("on a server ride", |pl, _| pl.server_riding = true),
+            ("swimming", |pl, _| pl.swimming = true),
+            ("GM flight", |pl, _| pl.modes.levitating = true),
+            ("support all in", |_, p| p.support_pending = false),
+            ("residency for another tile", |_, p| {
+                p.focus_tile = Some((own_tile().0 + 1, own_tile().1));
+            }),
+        ];
+        for (name, tweak) in cases {
+            let (mut player, mut progress) = walked_off();
+            tweak(&mut player, &mut progress);
+            assert!(!falls_unsupported(&player, &progress), "{name} was caught");
+        }
+    }
+
+    /// A ground hold waits for the support it caught the body over, even through a scene that
+    /// still reads ready from before, then releases and drops the cover's mark with it.
+    #[test]
+    fn a_ground_hold_releases_only_once_its_support_is_in() {
+        let mut app = app();
+        {
+            let mut player = app.world_mut().resource_mut::<Player>();
+            player.world_stale = false;
+            player.ground_hold = true;
+        }
+        let ready = |p: &mut WorldLoadProgress| {
+            p.total = 2000;
+            p.ready = 2000;
+            p.scene_ready = true;
+            p.focus_resident = true;
+        };
+        step(&mut app, 0.1, |p| {
+            ready(p);
+            p.support_pending = true;
+        });
+        assert!(settling(&mut app), "released over a tunnel still arriving");
+        step(&mut app, 0.1, |p| {
+            ready(p);
+            p.support_pending = false;
+        });
+        let player = app.world().resource::<Player>();
+        assert!(!player.settling && !player.ground_hold);
     }
 }

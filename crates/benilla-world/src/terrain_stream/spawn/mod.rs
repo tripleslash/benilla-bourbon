@@ -38,6 +38,7 @@ use super::collider::{
     PendingCollider,
 };
 use super::merge::{MergeSite, StaticMerge};
+use super::provisional::{wmo_box_within, URGENT_REACH};
 use super::weld::{hull_weld_disabled, HullWelds};
 use super::{
     doodad_ground_shade, ModelHandle, Placements, ShadeResolve, TerrainStreamer, SPAWN_BUDGET,
@@ -151,7 +152,33 @@ pub(super) fn spawn_loaded_placements(
     // follows the work, so every frame spawns at least one.
     let deadline = Instant::now() + SPAWN_BUDGET;
 
-    'placements: for (&unique_id, p) in by_id.iter_mut() {
+    // The buildings the body is in or about to be in go first, their forms ahead of the focus
+    // tile's: their collider is built at spawn, and until it attaches the body has no floor there.
+    let body = focus.body.map(wow_to_bevy);
+    let (mut urgent, mut rest) = (Vec::new(), Vec::with_capacity(by_id.len()));
+    for (&key, p) in by_id.iter() {
+        if p.spawned && p.doodads.iter().all(|d| d.spawned) {
+            continue;
+        }
+        if body.is_some_and(|b| wmo_box_within(p, b, URGENT_REACH)) {
+            // The web warm queue fetches the root's group files at the server entities' rank.
+            if !p.spawned && p.model.is_loading(&asset_server) {
+                if let ModelHandle::Wmo(h) = &p.model {
+                    benilla_formats::web::mark_urgent_model(&handle_label(h));
+                }
+            }
+            urgent.push(key);
+        } else {
+            rest.push(key);
+        }
+    }
+    let urgent_n = urgent.len();
+
+    'placements: for (order, unique_id) in urgent.into_iter().chain(rest).enumerate() {
+        let Some(p) = by_id.get_mut(&unique_id) else {
+            continue;
+        };
+        let urgent = order < urgent_n;
         // 1. The model's own geometry, once; a WMO also resolves its doodad props for step 2.
         if !p.spawned {
             let entities = match &p.model {
@@ -316,7 +343,11 @@ pub(super) fn spawn_loaded_placements(
                     };
                     // Static forms only: WMO group geometry never skins.
                     let key = ModelKey::from(h);
-                    let prio = placement_priority(&streamer, p.transform.translation);
+                    let prio = if urgent {
+                        URGENT_PRIORITY
+                    } else {
+                        placement_priority(&streamer, p.transform.translation)
+                    };
                     if !forms.require(key, &m.submeshes, WANT_STATIC, prio) {
                         continue;
                     }
@@ -900,6 +931,10 @@ fn log_fade_near(
         pos.z,
     );
 }
+
+/// The render-forms priority of a building the body is in or near: behind the entity lane's 0,
+/// ahead of every scenery placement's 16 and up.
+const URGENT_PRIORITY: i32 = 8;
 
 /// A placement's render-forms priority, lower sooner: its Chebyshev tile distance to the focus,
 /// above the entity lane's band so a unit coming into view never queues behind scenery.

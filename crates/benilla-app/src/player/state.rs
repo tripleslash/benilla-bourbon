@@ -342,6 +342,9 @@ pub(crate) struct Player {
     /// destination's colliders stream in. Released by the terrain streamer on residency or at
     /// [`SETTLE_TIMEOUT`], never by ground contact, which a flyer or a swimmer never makes.
     pub(crate) settling: bool,
+    /// This hold caught a body walking off onto ground whose collision is still arriving
+    /// ([`super::world_focus::hold_unsupported_body`]), not a snap: it raises the loading cover.
+    pub(crate) ground_hold: bool,
     /// When to give up settling (`Time::elapsed_secs`), pushed on while the world is stale or
     /// still loading.
     pub(crate) settle_deadline: f32,
@@ -575,6 +578,7 @@ impl Player {
     /// [`SETTLE_TIMEOUT`] fired first, which the `sett` trace records.
     pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
         self.settling = false;
+        self.ground_hold = false;
         let waited = now - self.settle_since;
         super::move_trace::settle(resident, waited, self.pos);
     }

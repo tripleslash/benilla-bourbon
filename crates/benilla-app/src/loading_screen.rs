@@ -636,6 +636,14 @@ fn drive_loading_screen(
         // Same map by construction: the ground under the body.
         screen.raise("focus not resident", false, map_id, now);
     }
+    // The body walked off onto a building's ground that is still arriving and is held there: the
+    // same cover, cleared by the same rule, once the hold has ended.
+    if !screen.active
+        && player.as_ref().is_some_and(|p| p.ground_hold)
+        && *state.get() == crate::char_select::ClientState::InWorld
+    {
+        screen.raise("ground under the body still arriving", false, map_id, now);
+    }
 
     // --- At a snap, the same test against the clear's own predicate: a teleport inside the keep
     // band lands on resident terrain while the destination's buildings may still be arriving. ---

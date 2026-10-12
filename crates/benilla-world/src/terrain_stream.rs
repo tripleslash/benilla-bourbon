@@ -314,7 +314,18 @@ pub struct WorldLoadProgress {
     /// Vacuously true where the map authors no tile under the focus (open ocean, a map edge, a
     /// WMO-only map), for the same reason `focus_resident` is: waiting there would hang forever on
     /// terrain that cannot exist.
+    ///
+    /// False while the body stands inside the MODF box of a WMO whose real collision has not
+    /// attached: no stand-in boxes in a body already inside one, so nothing else holds it up.
     pub focus_collidable: bool,
+    /// **The ground that should hold the body may still be arriving**: the body is inside the MODF
+    /// box of a WMO whose collision has not attached, its own tile has no real collider yet, or it
+    /// is under its tile's terrain while a neighbouring tile, whose WMOs are not registered until
+    /// it lands, is still loading. Published every frame by the stand-in lane, never latched.
+    ///
+    /// The game reads it with the body's own state: airborne with no floor below and this set, the
+    /// body is held rather than falling through ground that has not landed.
+    pub support_pending: bool,
     /// Streamed assets the AssetServer says are **still arriving** — desired tiles and unspawned
     /// placements whose fetch/decode has not finished. Published by the stand-in lane beside
     /// [`Self::focus_collidable`].

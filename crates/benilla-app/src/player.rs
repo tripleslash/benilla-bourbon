@@ -215,9 +215,9 @@ impl Plugin for PlayerPlugin {
         camera_saved::plugin(app);
         camera_view::plugin(app);
         // The stream focus is published after `control`'s teleport snap and before the stream
-        // stage, and the post-snap hold released after it. Both edges are needed: without
-        // `.after(Input)` the focus can precede the snap, the world streams around the departure,
-        // and the hold releases at once.
+        // stage, and the settle hold armed mid-run and released after it. Both edges are needed:
+        // without `.after(Input)` the focus can precede the snap, the world streams around the
+        // departure, and the hold releases at once.
         app.add_systems(
             Update,
             (world_focus::publish_viewer, world_focus::publish_view_focus)
@@ -226,7 +226,12 @@ impl Plugin for PlayerPlugin {
         )
         .add_systems(
             Update,
-            world_focus::release_post_snap_hold.after(benilla_world::schedule::WorldStage::Stream),
+            (
+                world_focus::hold_unsupported_body,
+                world_focus::release_post_snap_hold,
+            )
+                .chain()
+                .after(benilla_world::schedule::WorldStage::Stream),
         );
         app.add_observer(camera::on_cvar);
         app.add_observer(camera_dynamics::on_cvar);

@@ -71,8 +71,8 @@ use avian3d::prelude::{Collider, RigidBody};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use benilla_assets::coords::wow_to_bevy;
-use benilla_assets::WmoModel;
+use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+use benilla_assets::{AdtTile, WmoModel};
 
 use super::collider::PendingCollider;
 use super::{ModelHandle, Placements, StreamActivity, TerrainStreamer, WorldLoadProgress};
@@ -97,9 +97,17 @@ const GROUND_RADIUS: i32 = 1;
 /// nothing outside 300 yards is reachable inside the time a placement takes to spawn.
 const HULL_RADIUS: f32 = 300.0;
 
+/// How near the body a WMO's MODF box must be, in yards, for the building to spawn ahead of the
+/// rest of the window: about 14 s at the 7 yd/s run speed.
+pub(super) const URGENT_REACH: f32 = 100.0;
+
 /// How far a stand-in box is inflated when testing whether it already contains the body — see the
 /// occupancy guard in [`retire_and_raise_hulls`].
 const HULL_CLEARANCE: f32 = 2.0;
+
+/// How far under its tile's terrain surface a body must be, in yards, to count as underground: a
+/// body on the ground stands at the surface, so a slope's interpolation never reads as buried.
+const UNDERGROUND_DEPTH: f32 = 2.0;
 
 /// The floor a degenerate box gets, in yards. `benilla_formats` already refuses a zero-volume MODF
 /// entry, so this is the second line rather than the first: a zero-extent cuboid is a shape parry
@@ -204,6 +212,8 @@ pub(super) fn maintain_provisional_collision(
     // Colliders still building or waiting for their attach budget — the query that answers "has the
     // real thing landed", for a tile root and for a placement's own collider entities alike.
     building: Query<(), With<PendingCollider>>,
+    // The decoded tiles, for the terrain height over the body — read, never waited on.
+    adt_tiles: Res<Assets<AdtTile>>,
 ) {
     let t0 = Instant::now();
     let mut changed = 0usize;
@@ -238,9 +248,19 @@ pub(super) fn maintain_provisional_collision(
         epoch.bump();
     }
 
-    // **The two facts the settle release reads**, published here because this is the one system
-    // that has both the focus tile and the query that says whether its collider attached.
-    progress.focus_collidable = focus_is_collidable(&streamer, &prov, &progress, &building);
+    // **The facts the settle release reads**, published here because this is the one system that
+    // has the focus tile, the body and the query that says whether a collider attached.
+    let in_unsolid_wmo = viewer.at.is_some_and(|body| {
+        // Nothing waiting to spawn and no collider in the attach queue: every building is solid.
+        (placements.pending_spawns > 0 || progress.colliders_pending > 0)
+            && inside_unsolid_wmo(&placements, body, |e| building.contains(e))
+    });
+    progress.focus_collidable =
+        focus_is_collidable(&streamer, &prov, &progress, &building) && !in_unsolid_wmo;
+    progress.support_pending = in_unsolid_wmo
+        || viewer
+            .at
+            .is_some_and(|body| ground_pending(&streamer, &server, &adt_tiles, body, &building));
     progress.loads_in_flight = placements_loading + tiles_loading(&streamer, &server);
 
     activity.provisional_live = (prov.ground.len() + prov.hulls.len()) as u32;
@@ -276,6 +296,86 @@ fn focus_is_collidable(
         // WDT gate and the global WMO's spawn all folded in.
         false => progress.focus_resident,
     }
+}
+
+/// Is `body` inside the MODF box of a WMO placement whose real collision has not attached — not
+/// spawned yet, or a collider of its still building?
+///
+/// The box is the [`HULL_CLEARANCE`]-inflated one the stand-in's occupancy guard tests: the guard
+/// puts up no stand-in around a body already inside, so this is what keeps that body from being
+/// taken for one standing on something.
+fn inside_unsolid_wmo(
+    placements: &Placements,
+    body: Vec3,
+    building: impl Fn(Entity) -> bool,
+) -> bool {
+    placements.by_id.values().any(|p| {
+        wmo_box_within(p, body, HULL_CLEARANCE)
+            && (!p.spawned || p.entities.iter().any(|e| building(*e)))
+    })
+}
+
+/// Is `body` within `reach` yards of a WMO placement's MODF box (inside it is 0)? `false` for an
+/// M2 doodad, whose MDDF authors no box.
+pub(super) fn wmo_box_within(p: &super::Placement, body: Vec3, reach: f32) -> bool {
+    let Some(bounds) = p.bounds.filter(|_| matches!(p.model, ModelHandle::Wmo(_))) else {
+        return false;
+    };
+    let (min, max) = bevy_aabb(&bounds);
+    (min - body).max(body - max).max(Vec3::ZERO).length() <= reach
+}
+
+/// Is the terrain-side ground under `body` still arriving: its own tile has no real collider yet,
+/// or the body is under that tile's terrain while a neighbouring tile is still loading?
+///
+/// The second arm covers a WMO no registered placement describes yet. A tile lists the buildings it
+/// authors, and Turtle WoW's Ironforge Airfields tunnel lies in `Azeroth_34_41` but is listed by
+/// `Azeroth_35_41` alone, so until that tile lands the tunnel is not a placement at all. A body
+/// under the terrain is inside some building, and it may be the one still coming.
+fn ground_pending(
+    streamer: &TerrainStreamer,
+    server: &AssetServer,
+    adt_tiles: &Assets<AdtTile>,
+    body: Vec3,
+    building: &Query<(), With<PendingCollider>>,
+) -> bool {
+    let wow = bevy_to_wow(body);
+    let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+    let tile = (tx as i32, ty as i32);
+    let arriving = streamer
+        .tiles
+        .get(&tile)
+        .is_some_and(|s| !server.load_state(&s.handle).is_failed());
+    if arriving && !tile_is_collidable(streamer, tile, building) {
+        return true;
+    }
+    buried(
+        body.y,
+        super::terrain_height_under(streamer, adt_tiles, body),
+    ) && neighbour_tile_unspawned(streamer, server, tile)
+}
+
+/// A body at height `y` is under the terrain `surface` of its column; `None` is a hole or a tile
+/// not decoded, and neither says the body is buried.
+fn buried(y: f32, surface: Option<f32>) -> bool {
+    surface.is_some_and(|s| y < s - UNDERGROUND_DEPTH)
+}
+
+/// Is a tile of `tile`'s 3x3 neighbourhood requested and not spawned, its placements (registered at
+/// spawn) still unknown? A failed load is not coming.
+fn neighbour_tile_unspawned(
+    streamer: &TerrainStreamer,
+    server: &AssetServer,
+    tile: (i32, i32),
+) -> bool {
+    (-1..=1).any(|dx| {
+        (-1..=1).any(|dy| {
+            streamer
+                .tiles
+                .get(&(tile.0 + dx, tile.1 + dy))
+                .is_some_and(|s| s.entity.is_none() && !server.load_state(&s.handle).is_failed())
+        })
+    })
 }
 
 /// Desired tiles whose `AdtTile` is still on the wire — half of
@@ -477,7 +577,8 @@ fn retire_and_raise_hulls(
         // wall the box swallows — would be inside a solid the mover has to be pushed out of, and
         // being shoved through the world is a worse bug than the one this prevents. The box is a
         // barrier for something approaching from outside; if we are already inside it, waiting is
-        // the right answer. Re-tested every frame, so stepping clear puts the box up.
+        // the right answer, and [`inside_unsolid_wmo`] is what makes the body wait. Re-tested
+        // every frame, so stepping clear puts the box up.
         //
         // The MODF box is the test either way, including for a `Groups` stand-in: the question is
         // whether the body is somewhere inside this building's footprint, and the per-group answer
@@ -609,5 +710,149 @@ mod tests {
         let size = max - min;
         assert_eq!(size.max(Vec3::splat(MIN_HULL_EXTENT)), size);
         assert!(size.min_element() >= 10.0, "unexpected extents {size:?}");
+    }
+
+    /// Turtle WoW's Ironforge Airfields tunnel (`MediumTunnel.wmo` #881972, listed by
+    /// `Azeroth_35_41` only): its MODF box in WoW coords, and a point on its floor 14 yd in from
+    /// the Ironforge end, 141 yd under the mountain's terrain (672 there).
+    const TUNNEL_BOX: [[f32; 3]; 2] = [[-4888.0, -1630.0, 471.0], [-4846.0, -1426.0, 578.0]];
+    const IN_TUNNEL: [f32; 3] = [-4866.0, -1440.0, 531.0];
+
+    /// The streamer chain's tail alone, around a body at `body` (WoW coords) whose own tile has
+    /// collidable ground and whose neighbourhood reads fully ready, the latched state of a world
+    /// a body is running through.
+    fn tail_app(body: [f32; 3]) -> App {
+        let (tx, ty) = benilla_formats::world_to_tile(body[0], body[1]);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WmoModel>()
+            .init_asset::<benilla_assets::AdtTile>()
+            .init_resource::<ProvisionalCollision>()
+            .init_resource::<TerrainStreamer>()
+            .init_resource::<Placements>()
+            .init_resource::<ColliderEpoch>()
+            .init_resource::<StreamActivity>()
+            .insert_resource(Viewer {
+                at: Some(wow_to_bevy(body)),
+                ..Viewer::default()
+            })
+            .insert_resource(WorldLoadProgress {
+                focus_tile: Some((tx as i32, ty as i32)),
+                focus_resident: true,
+                scene_ready: true,
+                total: 1,
+                ready: 1,
+                complete: true,
+                ..WorldLoadProgress::default()
+            })
+            .add_systems(Update, maintain_provisional_collision);
+        app
+    }
+
+    /// The tunnel as a registered WMO placement whose model is still on the wire.
+    fn tunnel() -> super::super::Placement {
+        super::super::Placement {
+            uid: 881_972,
+            ident: super::super::PlacementIdent::new(
+                "World\\wmo\\Dungeon\\MD_Dwarven Tunnels\\MediumTunnel.wmo",
+                [-4868.0, -1629.0, 505.0],
+                [-0.33, 179.5, -8.67],
+                1.0,
+                0,
+            ),
+            model: ModelHandle::Wmo(Handle::default()),
+            transform: Transform::IDENTITY,
+            entities: Vec::new(),
+            spawned: false,
+            doodad_set: 0,
+            name_set: 0,
+            doodads: Vec::new(),
+            portal_instance: None,
+            refs: 1,
+            owner: (0, 0),
+            bounds: Some(TUNNEL_BOX),
+        }
+    }
+
+    fn file(app: &mut App, placement: super::super::Placement) {
+        let mut pl = app.world_mut().resource_mut::<Placements>();
+        pl.pending_spawns = usize::from(!placement.spawned);
+        pl.by_id.insert(placement.uid, placement);
+    }
+
+    fn presentable(app: &App) -> bool {
+        app.world().resource::<WorldLoadProgress>().presentable()
+    }
+
+    /// A body inside a tunnel whose WMO has not landed stands on nothing: the terrain above it is
+    /// collidable, the tunnel floor is not there, and no stand-in boxes in a body already inside.
+    /// The world must not read as safe to release a body into.
+    #[test]
+    fn a_body_inside_a_wmo_still_on_the_wire_is_not_supported() {
+        let mut app = tail_app(IN_TUNNEL);
+        file(&mut app, tunnel());
+        app.update();
+        assert!(
+            !presentable(&app),
+            "the body inside the unloaded tunnel read as presentable: it would fall"
+        );
+        assert!(app.world().resource::<WorldLoadProgress>().support_pending);
+    }
+
+    /// Spawned is not solid: until the tunnel's collider attaches, the body still has nothing.
+    #[test]
+    fn a_wmo_whose_collider_is_building_still_holds_nothing_up() {
+        let mut app = tail_app(IN_TUNNEL);
+        let task = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new)
+            .spawn(async { Collider::sphere(1.0) });
+        let collider = app
+            .world_mut()
+            .spawn(PendingCollider::new(task, Some(walk_layers()), true))
+            .id();
+        let mut solid_later = tunnel();
+        solid_later.spawned = true;
+        solid_later.entities = vec![collider];
+        file(&mut app, solid_later);
+        app.world_mut()
+            .resource_mut::<WorldLoadProgress>()
+            .colliders_pending = 1;
+        app.update();
+        let progress = app.world().resource::<WorldLoadProgress>();
+        assert!(!progress.focus_collidable && progress.support_pending);
+
+        // The collider attaches: the tunnel floor is real and nothing is pending.
+        app.world_mut()
+            .entity_mut(collider)
+            .remove::<PendingCollider>();
+        app.world_mut()
+            .resource_mut::<WorldLoadProgress>()
+            .colliders_pending = 0;
+        app.update();
+        assert!(presentable(&app));
+        assert!(!app.world().resource::<WorldLoadProgress>().support_pending);
+    }
+
+    /// Outside the box the stand-in hull is the answer, so a body walking past an unloaded
+    /// building is neither unsupported nor held.
+    #[test]
+    fn a_body_outside_the_unloaded_wmo_is_not_held_for_it() {
+        let mut app = tail_app([-4866.0, -1380.0, 505.0]);
+        file(&mut app, tunnel());
+        app.update();
+        assert!(presentable(&app));
+        assert!(!app.world().resource::<WorldLoadProgress>().support_pending);
+    }
+
+    /// Buried is under the surface by more than a slope's error; a hole or an undecoded tile is no
+    /// surface at all.
+    #[test]
+    fn only_a_body_well_under_the_terrain_is_buried() {
+        assert!(
+            buried(531.0, Some(672.0)),
+            "the tunnel floor under the mountain"
+        );
+        assert!(!buried(683.0, Some(683.0)), "standing on the ground");
+        assert!(!buried(682.0, Some(683.0)), "a slope's interpolation");
+        assert!(!buried(505.0, None), "a cave mouth's hole");
     }
 }
