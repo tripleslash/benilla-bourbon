@@ -87,14 +87,15 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 /// fork: **0.6 since 2026-10-03** (the director's call) — the modern look wants the contact darkening on
 /// by default. **0.3 since 2026-10-11** (the director's call): a modern frame now takes the
 /// occlusion in linear light rather than through the gamma lane's ^(1/2.2), which roughly doubled
-/// its strength at any one setting; 0.3 matches the old 0.6 to first order.
-pub const AO_DEFAULT: f32 = 0.3;
+/// its strength at any one setting; 0.3 matches the old 0.6 to first order. **0.4 since 2026-10-12**
+/// (the director's call).
+pub const AO_DEFAULT: f32 = 0.4;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
 ///
-/// fork: **0.4 since 2026-10-12** (the director's call) — the modern look ships with the colour
+/// fork: **0.3 since 2026-10-12** (the director's call) — the modern look ships with the colour
 /// bleed on. It rides the gather the AO default already runs, so it adds no pass.
-pub const GI_DEFAULT: f32 = 0.4;
+pub const GI_DEFAULT: f32 = 0.3;
 
 impl Default for IndirectLighting {
     /// `$WOW_SSAO` / `$WOW_SSGI` override the shipped defaults, **session-only** — the A/B levers,
@@ -682,8 +683,8 @@ mod tests {
     fn the_shipped_defaults_are_the_ones_the_cvars_register() {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
-        assert_eq!(AO_DEFAULT, 0.3); // fork: 0.3 since 2026-10-11
-        assert_eq!(GI_DEFAULT, 0.4); // fork: 0.4 since 2026-10-12
+        assert_eq!(AO_DEFAULT, 0.4); // fork: 0.4 since 2026-10-12
+        assert_eq!(GI_DEFAULT, 0.3); // fork: 0.3 since 2026-10-12
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
         // The row offers 0–1; the clamp leaves headroom above it for a hand-typed CVar.

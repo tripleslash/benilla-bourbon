@@ -40,8 +40,8 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("WorldDetail",       ["1",    "1",    "2",    "2",   "2",    "2"]),
     ("weatherDensity",    ["2",    "3",    "3",    "3",   "3",    "3"]),
     ("worldShadows",      ["0",    "1",    "1",    "1",   "1",    "1"]),
-    ("ssaoStrength",      ["0",    "0",    "0.3",  "0.3", "0.3",  "0.3"]),
-    ("ssgiStrength",      ["0",    "0",    "0.4",  "0.4", "0.4",  "0.4"]),
+    ("ssaoStrength",      ["0",    "0",    "0.4",  "0.4", "0.4",  "0.4"]),
+    ("ssgiStrength",      ["0",    "0",    "0.3",  "0.3", "0.3",  "0.3"]),
     ("waterDetail",       ["0",    "1",    "2",    "3",   "3",    "3"]),
     ("hdCharacterModels", ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("reforgedModels",    ["0",    "1",    "1",    "1",   "1",    "1"]),
@@ -259,7 +259,7 @@ mod tests {
         let mut cvars = Cvars::default();
         cvars.set(GRAPHICS_QUALITY, "High");
         cvars.set("renderScale", "1.00");
-        cvars.set("ssaoStrength", "0.30");
+        cvars.set("ssaoStrength", "0.40");
         assert_eq!(derive_graphics_quality(&cvars), "High");
     }
 
