@@ -79,7 +79,7 @@ pub(super) struct LinkFacts {
     /// vmangos sends it once per connection, after the authentication
     /// (`WorldSocket.cpp:446-448`), and the reference applies it to add-on records that outlive
     /// the world session (`0x5b4260` → `0x51da70`), so every login on the link reads it.
-    addon_info: Option<Vec<u8>>,
+    addon_info: Option<Vec<messages::AddonRecord>>,
 }
 
 /// What a world connect reports on its way to `SMSG_AUTH_RESPONSE`.
@@ -272,9 +272,9 @@ impl WorldSession {
         }
     }
 
-    /// The `SMSG_ADDON_INFO` statuses this connection received, for every login on it; `None` is
+    /// The `SMSG_ADDON_INFO` records this connection received, for every login on it; `None` is
     /// real, as vmangos stays silent when it rejects the addon block (`WorldSocket.cpp:447`).
-    pub fn addon_info(&self) -> Option<&[u8]> {
+    pub fn addon_info(&self) -> Option<&[messages::AddonRecord]> {
         self.link.addon_info.as_deref()
     }
 
@@ -290,8 +290,8 @@ impl WorldSession {
         // it is `#[cfg(not(wasm32))]` and blocks on this. Upstream's capture sits in its blocking
         // `recv`, which is the one read path it has; ours is this, and putting it in the native
         // twin would have left the browser session silently without an addon verdict.
-        if let ServerPacket::AddonInfo { statuses } = &packet {
-            self.link.addon_info = Some(statuses.clone());
+        if let ServerPacket::AddonInfo { records } = &packet {
+            self.link.addon_info = Some(records.clone());
         }
         Ok(packet)
     }
@@ -363,6 +363,32 @@ impl WorldSession {
         loop {
             if let Some(ServerPacket::CharDelete { result }) = self.recv_parsed().await? {
                 return Ok(result);
+            }
+        }
+    }
+
+    /// Rename a character the server flagged for it, at character select; returns the
+    /// `SMSG_CHAR_RENAME` result byte and the renamed guid and name a success carries. The server
+    /// answers from a query callback (`CharacterHandler.cpp:763-835`), so the reply can trail.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rename_character(
+        &mut self,
+        guid: u64,
+        name: &str,
+    ) -> Result<(u8, Option<(u64, String)>)> {
+        futures_lite::future::block_on(self.rename_character_async(guid, name))
+    }
+
+    /// Rename a character — the awaited twin of [`Self::rename_character`].
+    pub async fn rename_character_async(
+        &mut self,
+        guid: u64,
+        name: &str,
+    ) -> Result<(u8, Option<(u64, String)>)> {
+        self.send(opcode::CMSG_CHAR_RENAME, &messages::char_rename(guid, name))?;
+        loop {
+            if let Some(ServerPacket::CharRename { result, renamed }) = self.recv_parsed().await? {
+                return Ok((result, renamed));
             }
         }
     }

@@ -125,6 +125,113 @@ pub enum GlueRequest {
     /// `LaunchURL(url)` (`0x46cf60` → `0x5abd00`) for a URL that passed `launch_url_allowed`
     /// (`0x5abd00` tests `0x5abc10` first): the player's browser opens it (`0x429ff0`).
     LaunchUrl(String),
+    /// `LaunchAddOnURL(index)` (`0x46d5e0` → `0x429ff0`, no whitelist) for a URL that passed
+    /// [`launch_addon_url`]: already decoded, ready for the player's browser.
+    LaunchAddonUrl(String),
+    /// `DeleteCharacter(index)` (`0x4734c0` → `0x46b2e0`) for a record with a guid: the host takes
+    /// screen state 6, the `CHAR_DELETE_IN_PROGRESS` dialog and the `CMSG_CHAR_DELETE`.
+    DeleteCharacter(u64),
+    /// `RenameCharacter(index, name)` past its checks and the name check (`0x46b340` at
+    /// `0x46b39b`): the host takes screen state 7, the `CHAR_RENAME_IN_PROGRESS` dialog and the
+    /// `CMSG_CHAR_RENAME`.
+    RenameCharacter { guid: u64, name: String },
+}
+
+/// The `ClientServices` status keys (`0x85cae8`, 83 entries), the `ResponseCodes` the world
+/// server's `SMSG_AUTH_RESPONSE` byte indexes directly, and the `CHAR_NAME_*` block the name check
+/// answers in (`0x45`-`0x52`).
+pub const GLUE_STATUS_KEYS: [&str; 0x53] = [
+    "RESPONSE_SUCCESS",
+    "RESPONSE_FAILURE",
+    "RESPONSE_CANCELLED",
+    "RESPONSE_DISCONNECTED",
+    "RESPONSE_FAILED_TO_CONNECT",
+    "RESPONSE_CONNECTED",
+    "RESPONSE_VERSION_MISMATCH",
+    "CSTATUS_CONNECTING",
+    "CSTATUS_NEGOTIATING_SECURITY",
+    "CSTATUS_NEGOTIATION_COMPLETE",
+    "CSTATUS_NEGOTIATION_FAILED",
+    "CSTATUS_AUTHENTICATING",
+    "AUTH_OK",
+    "AUTH_FAILED",
+    "AUTH_REJECT",
+    "AUTH_BAD_SERVER_PROOF",
+    "AUTH_UNAVAILABLE",
+    "AUTH_SYSTEM_ERROR",
+    "AUTH_BILLING_ERROR",
+    "AUTH_BILLING_EXPIRED",
+    "AUTH_VERSION_MISMATCH",
+    "AUTH_UNKNOWN_ACCOUNT",
+    "AUTH_INCORRECT_PASSWORD",
+    "AUTH_SESSION_EXPIRED",
+    "AUTH_SERVER_SHUTTING_DOWN",
+    "AUTH_ALREADY_LOGGING_IN",
+    "AUTH_LOGIN_SERVER_NOT_FOUND",
+    "AUTH_WAIT_QUEUE",
+    "AUTH_BANNED",
+    "AUTH_ALREADY_ONLINE",
+    "AUTH_NO_TIME",
+    "AUTH_DB_BUSY",
+    "AUTH_SUSPENDED",
+    "AUTH_PARENTAL_CONTROL",
+    "REALM_LIST_IN_PROGRESS",
+    "REALM_LIST_SUCCESS",
+    "REALM_LIST_FAILED",
+    "REALM_LIST_INVALID",
+    "REALM_LIST_REALM_NOT_FOUND",
+    "ACCOUNT_CREATE_IN_PROGRESS",
+    "ACCOUNT_CREATE_SUCCESS",
+    "ACCOUNT_CREATE_FAILED",
+    "CHAR_LIST_RETRIEVING",
+    "CHAR_LIST_RETRIEVED",
+    "CHAR_LIST_FAILED",
+    "CHAR_CREATE_IN_PROGRESS",
+    "CHAR_CREATE_SUCCESS",
+    "CHAR_CREATE_ERROR",
+    "CHAR_CREATE_FAILED",
+    "CHAR_CREATE_NAME_IN_USE",
+    "CHAR_CREATE_DISABLED",
+    "CHAR_CREATE_PVP_TEAMS_VIOLATION",
+    "CHAR_CREATE_SERVER_LIMIT",
+    "CHAR_CREATE_ACCOUNT_LIMIT",
+    "CHAR_CREATE_SERVER_QUEUE",
+    "CHAR_CREATE_ONLY_EXISTING",
+    "CHAR_DELETE_IN_PROGRESS",
+    "CHAR_DELETE_SUCCESS",
+    "CHAR_DELETE_FAILED",
+    "CHAR_DELETE_FAILED_LOCKED_FOR_TRANSFER",
+    "CHAR_LOGIN_IN_PROGRESS",
+    "CHAR_LOGIN_SUCCESS",
+    "CHAR_LOGIN_NO_WORLD",
+    "CHAR_LOGIN_DUPLICATE_CHARACTER",
+    "CHAR_LOGIN_NO_INSTANCES",
+    "CHAR_LOGIN_FAILED",
+    "CHAR_LOGIN_DISABLED",
+    "CHAR_LOGIN_NO_CHARACTER",
+    "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
+    "CHAR_NAME_NO_NAME",
+    "CHAR_NAME_TOO_SHORT",
+    "CHAR_NAME_TOO_LONG",
+    "CHAR_NAME_INVALID_CHARACTER",
+    "CHAR_NAME_MIXED_LANGUAGES",
+    "CHAR_NAME_PROFANE",
+    "CHAR_NAME_RESERVED",
+    "CHAR_NAME_INVALID_APOSTROPHE",
+    "CHAR_NAME_MULTIPLE_APOSTROPHES",
+    "CHAR_NAME_THREE_CONSECUTIVE",
+    "CHAR_NAME_INVALID_SPACE",
+    "CHAR_NAME_CONSECUTIVE_SPACES",
+    "CHAR_NAME_FAILURE",
+    "CHAR_NAME_SUCCESS",
+];
+
+/// `0x5abd20`: a status's key, the empty string (`0x882748`) for 0 and for anything past the table.
+pub fn glue_status_key(code: i32) -> &'static str {
+    match usize::try_from(code) {
+        Ok(i @ 1..0x53) => GLUE_STATUS_KEYS[i],
+        _ => "",
+    }
 }
 
 /// The hosts `LaunchURL` opens, the 10-entry table at `0x85cc34`: a leading `*` stands for one
@@ -187,6 +294,107 @@ pub fn launch_url_allowed(url: &str) -> bool {
         })
 }
 
+/// What the browser is given for an add-on's URL, or `None` for one benilla will not open. The
+/// reference hands the server's string to `0x429ff0` with no whitelist (`0x46d5e0`): a C string of
+/// fewer than 0x400 bytes, each `%XY` replaced by the byte it spells (table `0x801490`: a
+/// non-hex digit reads 0; a `%` with fewer than two bytes after it ends the string), then
+/// `ShellExecute "open"`.
+///
+/// Deviation: benilla keeps that decode and then encodes it again, every byte outside the URL
+/// characters [`URL_SAFE`] as `%XY` (a decoded `%` too), because the opener on some platforms is a
+/// shell script (`xdg-open`) or takes the raw command tail (`rundll32`) and the string comes off
+/// the wire: no space, quote, backtick, `$`, `;`, `<`, `>`, `|`, `^`, `\`, brace or control byte
+/// reaches it. The result must be an `http://` or `https://` (case-folded) address with a host,
+/// and nothing else; the reference would open whatever the server sent, `file:` and program paths
+/// included.
+pub fn launch_addon_url(url: &str) -> Option<String> {
+    if url.is_empty() || url.len() >= 0x400 {
+        return None;
+    }
+    let hex = |b: u8| -> u8 {
+        match b {
+            b'1'..=b'9' => b - b'0',
+            b'A'..=b'F' => b - b'A' + 10,
+            b'a'..=b'f' => b - b'a' + 10,
+            _ => 0,
+        }
+    };
+    let bytes = url.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] != 0 {
+        let c = bytes[i];
+        i += 1;
+        if c != b'%' {
+            decoded.push(c);
+            continue;
+        }
+        let (Some(&hi), Some(&lo)) = (bytes.get(i), bytes.get(i + 1)) else {
+            break;
+        };
+        if hi == 0 || lo == 0 {
+            break;
+        }
+        i += 2;
+        decoded.push(hex(hi) << 4 | hex(lo));
+    }
+    // The C string ends at a NUL, a decoded `%00` included.
+    let end = decoded
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(decoded.len());
+    let mut out = String::with_capacity(end);
+    for &b in &decoded[..end] {
+        if b != b'%' && URL_SAFE.contains(&b) || b.is_ascii_alphanumeric() {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    launch_addon_url_allowed(&out).then_some(out)
+}
+
+/// The bytes a URL may carry besides letters and digits when it is handed to the opener, the
+/// unreserved set and the reserved ones no shell reads as syntax.
+const URL_SAFE: &[u8] = b"-._~:/?#[]@!&()*+,=";
+
+/// The host's own check of what [`launch_addon_url`] returned, and the whole of its gate: an
+/// `http://` or `https://` address (case-folded) with a host that begins with a letter or digit,
+/// and only letters, digits, [`URL_SAFE`] bytes and well-formed `%XY` escapes.
+pub fn launch_addon_url_allowed(url: &str) -> bool {
+    let bytes = url.as_bytes();
+    let rest = [&b"http://"[..], &b"https://"[..]]
+        .iter()
+        .find_map(|scheme| {
+            bytes
+                .get(..scheme.len())
+                .filter(|head| head.eq_ignore_ascii_case(scheme))
+                .map(|_| &bytes[scheme.len()..])
+        });
+    let Some(rest) = rest else {
+        return false;
+    };
+    if !rest.first().is_some_and(u8::is_ascii_alphanumeric) {
+        return false;
+    }
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        i += 1;
+        if b == b'%' {
+            let (Some(hi), Some(lo)) = (bytes.get(i), bytes.get(i + 1)) else {
+                return false;
+            };
+            if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+                return false;
+            }
+            i += 2;
+        } else if !(b.is_ascii_alphanumeric() || URL_SAFE.contains(&b)) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The realm `GetServerName` (`0x46d280`) answers: the `realmName` CVar's text, and the
 /// selected realm's PvP and RP flags off its `Cfg_Configs` row, nil without a selected realm.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -206,7 +414,7 @@ pub(crate) struct GlueCore {
     /// ClientServices' world-connection flag (`[svc+0x1b00]`), which `IsConnectedToServer`
     /// (`0x46d380`) reads.
     connected: bool,
-    server: GlueServer,
+    pub(super) server: GlueServer,
     /// The current glue screen's name (`[0xb41478]`), which `SetCurrentScreen` (`0x46ce60` →
     /// `0x46b860`) copies into a 0x40-byte buffer.
     pub(super) screen: String,
@@ -218,6 +426,19 @@ pub(crate) struct GlueCore {
     pub(super) realms: super::glue_realm::GlueRealmList,
     /// The character roster and the select verbs' cells ([`super::glue_select`]).
     pub(super) roster: super::glue_select::GlueRoster,
+    /// The AddOns screen's enable nodes ([`super::glue_addons`]).
+    pub(super) addons: super::glue_addons::GlueAddons,
+    /// The character name check's lists ([`super::char_name`]), as the host seated them.
+    name_lists: Option<std::rc::Rc<dyn super::NameLists>>,
+}
+
+impl GlueCore {
+    /// The name check's lists; with none seated, nothing is reserved.
+    pub(super) fn name_lists(&self) -> std::rc::Rc<dyn super::NameLists> {
+        self.name_lists
+            .clone()
+            .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
+    }
 }
 
 /// `SetCurrentScreen`'s buffer, 0x40 bytes with its terminator (`0x46b860`, `SStrCopy`).
@@ -227,6 +448,11 @@ impl super::UiScript {
     /// Drain the glue verbs' requests since the last call.
     pub fn take_glue_requests(&mut self) -> Vec<GlueRequest> {
         std::mem::take(&mut self.model_mut().glue.requests)
+    }
+
+    /// Seat the lists the character name check searches (`0x6c91a0` compiles them at startup).
+    pub fn set_glue_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
+        self.model_mut().glue.name_lists = Some(lists);
     }
 
     /// Seed the saved account name `GetSavedAccountName` answers.
@@ -800,5 +1026,74 @@ mod tests {
         s.run("ShowCursor()").unwrap();
         assert!(!s.glue_cursor_hidden());
         assert!(s.take_errors().is_empty());
+    }
+
+    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex digit reads 0, a `%` with fewer
+    /// than two bytes after it ends the string, a decoded NUL ends it too; then the web-address
+    /// rule on the result.
+    #[test]
+    fn the_addon_url_is_decoded_as_the_launcher_decodes_it_and_must_be_a_web_address() {
+        for (url, want) in [
+            ("http://a.example/x", Some("http://a.example/x")),
+            ("HTTPS://a.example/%7Euser", Some("HTTPS://a.example/~user")),
+            ("http://a.example/a%20b", Some("http://a.example/a%20b")),
+            ("http://a.example/%2f%2F", Some("http://a.example///")),
+            ("http://a.example/x%", Some("http://a.example/x")),
+            ("http://a.example/x%4", Some("http://a.example/x")),
+            ("http://a.example/x%00y", Some("http://a.example/x")),
+            ("http://a.example/x%zzy", Some("http://a.example/x")),
+            (
+                "http://a.example/x?a=1&b=2#f",
+                Some("http://a.example/x?a=1&b=2#f"),
+            ),
+            ("%68ttp://a.example/", Some("http://a.example/")),
+            // A decoded `%` is encoded again, so the opener decodes it no further.
+            ("http://a.example/%2541", Some("http://a.example/%2541")),
+            ("http://a.example/50%25", Some("http://a.example/50%25")),
+            // The bytes a shell or a raw command tail would read are escaped, wherever they came
+            // from: typed, or spelled as an escape.
+            (
+                "http://a.example/a b\"c'd`e$f;g<h>i|j^k\\l{m}n",
+                Some("http://a.example/a%20b%22c%27d%60e%24f%3Bg%3Ch%3Ei%7Cj%5Ek%5Cl%7Bm%7Dn"),
+            ),
+            (
+                "http://a.example/%22%27%60%24%3b%3c%3e%7c%5e%5c%7b%7d%20%0d%0a",
+                Some("http://a.example/%22%27%60%24%3B%3C%3E%7C%5E%5C%7B%7D%20%0D%0A"),
+            ),
+            ("http://a.example/\u{e9}", Some("http://a.example/%C3%A9")),
+            ("file:///etc/passwd", None),
+            ("ftp://a.example/", None),
+            ("javascript:alert(1)", None),
+            ("%66ile:///x", None),
+            // A host is required, and begins with a letter or digit.
+            ("http://", None),
+            ("http:///x", None),
+            ("http://?x", None),
+            ("http://.example/", None),
+            ("http://-/", None),
+            ("", None),
+        ] {
+            assert_eq!(launch_addon_url(url).as_deref(), want, "{url:?}");
+        }
+        let long = format!("http://a.example/{}", "a".repeat(0x400));
+        assert_eq!(
+            launch_addon_url(&long),
+            None,
+            "0x42a01c refuses 0x400 bytes"
+        );
+        // The host's own check takes only what the verb makes.
+        assert!(launch_addon_url_allowed("http://a.example/a%20b"));
+        for bad in [
+            "http://a.example/a b",
+            "http://a.example/a\tb",
+            "http://a.example/a'b",
+            "http://a.example/a$b",
+            "http://a.example/%2",
+            "http://a.example/%zz",
+            "http:// a.example/",
+            "http://",
+        ] {
+            assert!(!launch_addon_url_allowed(bad), "{bad:?}");
+        }
     }
 }

@@ -139,42 +139,23 @@ const NOT_YET: &[(&str, &[&str])] = &[
         &["ReadFile", "DeleteFile", "AppendToFile"],
     ),
     (
-        "the glue core (0x46ddf0, table 0x8373b8): the addon list, the movie's setter, the patch and \
-         survey, the billing, the addon URL and the credits music; each a binding of its own, the \
-         ones with an in-game namesake included",
+        "the glue core (0x46ddf0, table 0x8373b8): the movie's setter, the \
+         patch and survey, the billing and the credits music; each a binding of its own, the ones \
+         with an in-game namesake included",
         &[
-            "DisableAddOn",
-            "DisableAllAddOns",
-            "EnableAddOn",
-            "EnableAllAddOns",
             "EnterWorld",
-            "GetAddOnDependencies",
-            "GetAddOnEnableState",
-            "GetAddOnInfo",
             "GetBillingPlan",
             "GetBillingTimeRemaining",
             "GetBillingTimeRested",
-            "GetNumAddOns",
-            "GetScriptMemory",
-            "IsAddonVersionCheckEnabled",
-            "LaunchAddOnURL",
             "PINEntered",
             "PatchDownloadApply",
             "PatchDownloadCancel",
             "PatchDownloadProgress",
             "PlayCreditsMusic",
-            "ResetAddOns",
-            "SaveAddOns",
             "Screenshot",
-            "SetAddonVersionCheck",
             "SetMovieSubtitles",
-            "SetScriptMemory",
             "SurveyNotificationDone",
         ],
-    ),
-    (
-        "character select (0x4736c0, table 0x838578): the delete and the rename",
-        &["DeleteCharacter", "RenameCharacter"],
     ),
     (
         "character create (0x471a20, table 0x8380f8)",

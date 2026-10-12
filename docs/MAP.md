@@ -187,6 +187,7 @@
 - `WOW_AUDIT_START` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUDIT_WMO` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUTO_EXPOSURE` — benilla-world/src/modern/look.rs
+- `WOW_AUTO_EXPOSURE_TARGET` — benilla-world/src/modern/look.rs
 - `WOW_BARE_DOODAD_COLLIDERS` — benilla-world/src/terrain_stream/collider.rs
 - `WOW_BG` — benilla-world/src/bgwin.rs
 - `WOW_BLOB_VIS` — benilla-world/src/terrain_stream/merge.rs
@@ -345,6 +346,7 @@
 - `WOW_LOGIN_SMOKE` — benilla-app/src/char_select/mod.rs, benilla-app/src/login/mod.rs, benilla-app/src/login/smoke.rs, benilla-world/src/bgwin.rs
 - `WOW_LOGIN_SMOKE_HOLD` — benilla-app/src/login/smoke.rs
 - `WOW_LOGOUT_SMOKE` — benilla-app/src/char_select/mod.rs, benilla-world/src/bgwin.rs
+- `WOW_LOOK_DEBUG` — benilla-world/src/modern/look.rs
 - `WOW_MAP` — benilla-app/src/capture/mod.rs, benilla-app/src/lib.rs, benilla-world/src/world_map.rs
 - `WOW_MATANIM_DUTY` — benilla-world/src/doodad_anim/mat_anim.rs
 - `WOW_MATANIM_LIVE` — benilla-world/src/doodad_anim/mat_anim.rs

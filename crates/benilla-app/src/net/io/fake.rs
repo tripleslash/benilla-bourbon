@@ -320,8 +320,14 @@ pub(crate) fn char_enum_body(characters: &[benilla_protocol::Character]) -> Vec<
     b
 }
 
+/// The accounts' characters by world session.
+type Rosters = Arc<Mutex<Vec<Vec<benilla_protocol::Character>>>>;
+
 /// Packets, by opcode and body, the fake world sends behind `SMSG_LOGOUT_COMPLETE`.
 type Trail = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
+
+/// The `SMSG_ADDON_INFO` body a fake world sends, and whether it trails the authentication answer.
+type AddonReply = Arc<Mutex<Option<(Vec<u8>, bool)>>>;
 
 /// The fake world server's record: every opcode the client sent, and the sessions still open.
 pub(crate) struct World {
@@ -330,9 +336,13 @@ pub(crate) struct World {
     pub(crate) packets: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Every session's packets in the order it sent them, by the order the sessions began.
     pub(crate) session_packets: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
-    /// The `SMSG_CHAR_ENUM` body each session answers its `CMSG_CHAR_ENUM` with, by the order the
-    /// sessions began (the last repeats): no characters until set.
-    rosters: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// The characters each session answers its `CMSG_CHAR_ENUM` with, by the order the sessions
+    /// began (the last repeats): none until set. A delete or a rename the server accepts changes
+    /// every session's.
+    rosters: Rosters,
+    /// The `SMSG_CHAR_DELETE` and `SMSG_CHAR_RENAME` results the server answers with: success
+    /// (`0x39`, 0) until set.
+    results: Arc<Mutex<(u8, u8)>>,
     /// How long a `CMSG_CHAR_ENUM` waits before its answer.
     enum_delay: Arc<Mutex<Duration>>,
     /// Answer `CMSG_CHAR_ENUM` with `SMSG_WARDEN_DATA`, as a server does that wants Warden.
@@ -343,18 +353,43 @@ pub(crate) struct World {
     refuse: Arc<AtomicBool>,
     /// Packets sent right behind `SMSG_LOGOUT_COMPLETE`, as the world session leaves them in flight.
     trail: Trail,
+    /// The `SMSG_ADDON_INFO` body every session is sent, and whether it follows the authentication
+    /// answer (vmangos builds it in the auth handler, so it leads: `WorldSocket.cpp:447`).
+    addon_info: AddonReply,
     open: Arc<AtomicUsize>,
 }
 
 impl World {
     /// The characters the account holds from now on.
     pub(crate) fn set_roster(&self, characters: &[benilla_protocol::Character]) {
-        *self.rosters.lock().unwrap() = vec![char_enum_body(characters)];
+        *self.rosters.lock().unwrap() = vec![characters.to_vec()];
     }
 
     /// The characters each session sees, by the order the sessions begin.
     pub(crate) fn set_rosters(&self, per_session: &[&[benilla_protocol::Character]]) {
-        *self.rosters.lock().unwrap() = per_session.iter().map(|c| char_enum_body(c)).collect();
+        *self.rosters.lock().unwrap() = per_session.iter().map(|c| c.to_vec()).collect();
+    }
+
+    /// Answer every `CMSG_CHAR_DELETE` with `result` from now on; anything but `0x39` deletes
+    /// nothing.
+    pub(crate) fn answer_deletes(&self, result: u8) {
+        self.results.lock().unwrap().0 = result;
+    }
+
+    /// Answer every `CMSG_CHAR_RENAME` with `result` from now on; anything but 0 renames nothing.
+    pub(crate) fn answer_renames(&self, result: u8) {
+        self.results.lock().unwrap().1 = result;
+    }
+
+    /// The bodies of every packet the client sent with opcode `op`, past the header.
+    pub(crate) fn bodies(&self, op: u16) -> Vec<Vec<u8>> {
+        self.packets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p[2..4] == op.to_le_bytes())
+            .map(|p| p[6..].to_vec())
+            .collect()
     }
 
     /// Have the server demand Warden in place of the roster from now on.
@@ -371,6 +406,47 @@ impl World {
     /// vmangos's result 1).
     pub(crate) fn refuse_logins(&self) {
         self.refuse.store(true, Ordering::SeqCst);
+    }
+
+    /// Send `SMSG_ADDON_INFO` with one record per status (`2` hides the addon) to every session
+    /// from now on: ahead of the authentication answer, or behind it with `after`.
+    pub(crate) fn set_addon_info(&self, statuses: &[u8], after: bool) {
+        // `{status, info 1, key 0, u32 revision 0, url 0}`, the shape of a retail reply.
+        let body = statuses
+            .iter()
+            .flat_map(|&s| [s, 1, 0, 0, 0, 0, 0, 0])
+            .collect();
+        *self.addon_info.lock().unwrap() = Some((body, after));
+    }
+
+    /// [`Self::set_addon_info`] with each record's revision and url: `(status, revision, url)`, a
+    /// record with neither carrying no info block and no url.
+    pub(crate) fn set_addon_records(
+        &self,
+        records: &[(u8, Option<u32>, Option<&str>)],
+        after: bool,
+    ) {
+        let mut body = Vec::new();
+        for &(status, revision, url) in records {
+            body.push(status);
+            match revision {
+                Some(r) => {
+                    body.extend([1, 0]); // infoProvided, no key
+                    body.extend(r.to_le_bytes());
+                }
+                None => body.push(0),
+            }
+            match url {
+                Some(u) => {
+                    body.push(1);
+                    // A C string, its NUL included (`0x4191b0`).
+                    body.extend(u.as_bytes());
+                    body.push(0);
+                }
+                None => body.push(0),
+            }
+        }
+        *self.addon_info.lock().unwrap() = Some((body, after));
     }
 
     /// Send these packets right behind every `SMSG_LOGOUT_COMPLETE`.
@@ -420,16 +496,19 @@ impl World {
 
 /// A world server whose account has no characters: it admits each session under the latest key
 /// realmd made, answers every `CMSG_CHAR_ENUM` with its roster (empty until [`World::set_roster`]),
-/// a `CMSG_CHAR_CREATE` with success, a `CMSG_LOGOUT_REQUEST` with `SMSG_LOGOUT_COMPLETE` and a
-/// `CMSG_PLAYER_LOGIN` with nothing (or a refusal, [`World::refuse_logins`]), and logs every opcode
-/// the client sends.
+/// a `CMSG_CHAR_CREATE` with success, a `CMSG_CHAR_DELETE` and a `CMSG_CHAR_RENAME` with success
+/// applied to the roster (or [`World::answer_deletes`]' and [`World::answer_renames`]' results), a
+/// `CMSG_LOGOUT_REQUEST` with `SMSG_LOGOUT_COMPLETE` and a `CMSG_PLAYER_LOGIN` with nothing (or a
+/// refusal, [`World::refuse_logins`]), and logs every opcode the client sends.
 pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let sent = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&sent);
     let packets = Arc::new(Mutex::new(Vec::new()));
     let packet_log = Arc::clone(&packets);
-    let rosters = Arc::new(Mutex::new(vec![vec![0u8]]));
+    let rosters: Rosters = Arc::new(Mutex::new(vec![Vec::new()]));
     let roster_bodies = Arc::clone(&rosters);
+    let results = Arc::new(Mutex::new((messages::CHAR_DELETE_SUCCESS, 0u8)));
+    let answers = Arc::clone(&results);
     let session_packets = Arc::new(Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
     let session_log = Arc::clone(&session_packets);
     let enum_delay = Arc::new(Mutex::new(Duration::ZERO));
@@ -442,6 +521,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let refuse_flag = Arc::clone(&refuse);
     let trail: Trail = Arc::default();
     let trailing = Arc::clone(&trail);
+    let addon_info: AddonReply = Arc::default();
+    let addon_reply = Arc::clone(&addon_info);
     let open = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::clone(&open);
     thread::spawn(move || {
@@ -469,15 +550,23 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                 return;
             };
             let mut crypto = HeaderCrypto::from_session_key(key);
+            let reply = addon_reply.lock().unwrap().clone();
+            if let Some((body, false)) = &reply {
+                send(&mut s, Some(&mut crypto), opcode::SMSG_ADDON_INFO, body);
+            }
             send(
                 &mut s,
                 Some(&mut crypto),
                 opcode::SMSG_AUTH_RESPONSE,
                 &[messages::AUTH_OK],
             );
+            if let Some((body, true)) = &reply {
+                send(&mut s, Some(&mut crypto), opcode::SMSG_ADDON_INFO, body);
+            }
             let log = Arc::clone(&log);
             let packet_log = Arc::clone(&packet_log);
             let roster_bodies = Arc::clone(&roster_bodies);
+            let answers = Arc::clone(&answers);
             let session_log = Arc::clone(&session_log);
             let enum_wait = Arc::clone(&enum_wait);
             let warden_flag = Arc::clone(&warden_flag);
@@ -496,12 +585,12 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                     let op = u16::from_le_bytes([packet[2], packet[3]]);
                     log.lock().unwrap().push(op);
                     session_log.lock().unwrap()[index].push(packet.clone());
-                    packet_log.lock().unwrap().push(packet);
+                    packet_log.lock().unwrap().push(packet.clone());
                     match op {
                         opcode::CMSG_CHAR_ENUM => {
                             let body = {
                                 let all = roster_bodies.lock().unwrap();
-                                all[index.min(all.len() - 1)].clone()
+                                char_enum_body(&all[index.min(all.len() - 1)])
                             };
                             let wait = *enum_wait.lock().unwrap();
                             thread::sleep(wait);
@@ -520,6 +609,42 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                             opcode::SMSG_CHAR_CREATE,
                             &[messages::CHAR_CREATE_SUCCESS],
                         ),
+                        opcode::CMSG_CHAR_DELETE => {
+                            let guid = u64::from_le_bytes(packet[6..14].try_into().unwrap());
+                            let result = answers.lock().unwrap().0;
+                            if result == messages::CHAR_DELETE_SUCCESS {
+                                for roster in roster_bodies.lock().unwrap().iter_mut() {
+                                    roster.retain(|c| c.guid != guid);
+                                }
+                            }
+                            send(
+                                &mut s,
+                                Some(&mut crypto),
+                                opcode::SMSG_CHAR_DELETE,
+                                &[result],
+                            );
+                        }
+                        // vmangos renames a flagged character, clears the flag and answers the
+                        // guid and the name (`CharacterHandler.cpp:802-835`).
+                        opcode::CMSG_CHAR_RENAME => {
+                            let guid = u64::from_le_bytes(packet[6..14].try_into().unwrap());
+                            let name = &packet[14..packet.len() - 1];
+                            let result = answers.lock().unwrap().1;
+                            let mut body = vec![result];
+                            if result == 0 {
+                                let name = String::from_utf8_lossy(name).into_owned();
+                                for roster in roster_bodies.lock().unwrap().iter_mut() {
+                                    for c in roster.iter_mut().filter(|c| c.guid == guid) {
+                                        c.name.clone_from(&name);
+                                        c.flags &= !benilla_protocol::CHARACTER_FLAG_RENAME;
+                                    }
+                                }
+                                body.extend_from_slice(&guid.to_le_bytes());
+                                body.extend_from_slice(name.as_bytes());
+                                body.push(0);
+                            }
+                            send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_RENAME, &body);
+                        }
                         opcode::CMSG_PLAYER_LOGIN if refuse_flag.load(Ordering::SeqCst) => send(
                             &mut s,
                             Some(&mut crypto),
@@ -544,11 +669,13 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
         packets,
         session_packets,
         rosters,
+        results,
         enum_delay,
         warden,
         cut,
         refuse,
         trail,
+        addon_info,
         open,
     }
 }

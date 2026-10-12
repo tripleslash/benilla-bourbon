@@ -186,6 +186,8 @@ enum Parked {
     Play(u64),
     /// A create or delete was serviced in place; its result byte still has to go out.
     Acted(CharAction, u8),
+    /// A rename was serviced in place; its reply still has to go out.
+    Renamed(u8, Option<(u64, String)>),
     /// `CMSG_CHAR_ENUM` was serviced in place; the roster is re-emitted, with no result.
     Listed,
     /// The server refused the roster to a client without Warden: the login fails for good.
@@ -203,6 +205,41 @@ enum Parked {
     Login(LoginRequest),
     /// The app dropped a channel end.
     Exit,
+}
+
+/// The `SMSG_ADDON_INFO` records, once the session has read the reply: `None` is no reply, which
+/// leaves the reference's `GetNumAddOns()` at 0. The reply carries no names, so each record is
+/// paired back with the addon we sent in its place.
+fn addon_records(session: &WorldSession) -> Option<Vec<benilla_protocol::messages::AddonRecord>> {
+    session.addon_info().map(|records| {
+        benilla_protocol::messages::pair_with_sent(
+            records,
+            &benilla_protocol::messages::STOCK_SECURE_ADDONS,
+        )
+    })
+}
+
+/// Whether the world session's `SMSG_ADDON_INFO` has been reported yet. The reference's handler
+/// (`0x5b4260`) runs when the packet is read and its listener fires `ADDON_LIST_UPDATE` then
+/// (`0x5b4290` → `0x5ab2f0`); this thread reads only when it is asked something, so it reports
+/// the reply at the first point after the read.
+#[derive(Default)]
+struct AddonNews {
+    reported: bool,
+}
+
+impl AddonNews {
+    /// Report the reply if it has been read and not yet reported. `false` is the app gone.
+    fn announce(&mut self, session: &WorldSession, events_tx: &Sender<SessionEvent>) -> bool {
+        if self.reported {
+            return true;
+        }
+        let Some(records) = addon_records(session) else {
+            return true;
+        };
+        self.reported = true;
+        events_tx.send(SessionEvent::AddonInfo { records }).is_ok()
+    }
 }
 
 /// How one connection cycle ended; a stream failure is the `Err` of `Result`. A logout and a
@@ -817,6 +854,12 @@ async fn world(
         // its wants.
         while park_rx.try_recv().is_ok() {}
         let epoch = WORLD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        // A server that sends the addon reply in front of the authentication answer (vmangos
+        // builds it in the auth handler, `WorldSocket.cpp:447`) has had it read by now.
+        let mut addon_news = AddonNews::default();
+        if !addon_news.announce(&session, events_tx) {
+            return Ok(WorldEnd::Cycle(Cycle::Exit));
+        }
         if events_tx
             .send(SessionEvent::WorldAuthenticated {
                 realm: realm.clone(),
@@ -893,6 +936,10 @@ async fn world(
                         CharAction::Delete,
                         session.delete_character_async(target).await?,
                     ),
+                    Woke::Pick(CharRequest::Rename { guid, name }) => {
+                        let (result, renamed) = session.rename_character_async(guid, &name).await?;
+                        Parked::Renamed(result, renamed)
+                    }
                     // `GetCharacterListUpdate` (`0x4723d0` → `0x46b880` → `0x5aabb0` →
                     // `0x5b4690`): the reference asks the world server again whenever the glue
                     // screen wants the list. A Warden refusal is the server's answer, as at the
@@ -929,7 +976,29 @@ async fn world(
                     Parked::Leave => return Ok(WorldEnd::Failed),
                     Parked::Refused(reason) => return fail_terminal(reason),
                     Parked::Acted(action, code) => (action, code),
+                    // The reference renames its record in place (`0x4725f0`) and asks for no
+                    // roster; the park's own copy, which names the character at the world entry,
+                    // follows it.
+                    Parked::Renamed(result, renamed) => {
+                        if let Some((guid, name)) = renamed.as_ref().filter(|_| result == 0) {
+                            if let Some(c) = characters.iter_mut().find(|c| c.guid == *guid) {
+                                c.name.clone_from(name);
+                                c.flags &= !benilla_protocol::CHARACTER_FLAG_RENAME;
+                            }
+                        }
+                        if events_tx
+                            .send(SessionEvent::CharRenamed { result, renamed })
+                            .is_err()
+                        {
+                            return Ok(WorldEnd::Cycle(Cycle::Exit));
+                        }
+                        continue;
+                    }
                     Parked::Listed => {
+                        // A reply that trailed the authentication answer was read behind the ask.
+                        if !addon_news.announce(&session, events_tx) {
+                            return Ok(WorldEnd::Cycle(Cycle::Exit));
+                        }
                         if events_tx
                             .send(SessionEvent::CharacterList {
                                 characters: characters.clone(),
@@ -993,20 +1062,14 @@ async fn world(
             // `SMSG_ADDON_INFO` carries no names, so it is paired back against the block we sent.
             // No reply means no AddOn index space at all, carried as `None`. The link's one reply
             // answers every login on it.
-            let statuses = session.addon_info().map(<[u8]>::to_vec);
-            let addon_info = statuses.as_deref().map(|statuses| {
-                benilla_protocol::messages::hidden_from_reply(
-                    statuses,
-                    &benilla_protocol::messages::STOCK_SECURE_ADDONS,
-                )
-            });
-            match (&statuses, &addon_info) {
-                (Some(statuses), Some(hidden)) => bevy::log::info!(
+            let addon_info = addon_records(&session);
+            match &addon_info {
+                Some(records) => bevy::log::info!(
                     "net: SMSG_ADDON_INFO — {} record(s), {} hidden from the AddOn index space",
-                    statuses.len(),
-                    hidden.len()
+                    records.len(),
+                    records.iter().filter(|r| r.status == 2).count()
                 ),
-                _ => bevy::log::warn!(
+                None => bevy::log::warn!(
                     "net: no SMSG_ADDON_INFO — GetNumAddOns() stays 0, as the reference's would"
                 ),
             }

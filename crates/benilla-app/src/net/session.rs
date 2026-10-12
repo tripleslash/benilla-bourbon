@@ -14,7 +14,7 @@ use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
 
 use super::{
-    CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
+    AddonInfoMessage, CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
     CinematicTriggeredMessage, ClientControlMessage, DisconnectedMessage, DroppedOpcodes,
     EnteredWorldMessage, GameTime, GuidIndex, HomeBind, KnockBackMessage, LoggedOutMessage,
     LoginFailedMessage, LoginQueuedMessage, LoginStageMessage, NetCommands, NetHandlerApp,
@@ -29,11 +29,13 @@ pub(super) fn register(app: &mut App) {
     app.net_handler(K::LoginStage, on_login_edge)
         .net_handler(K::WorldAuthenticated, on_login_edge)
         .net_handler(K::RosterFailed, on_login_edge)
+        .net_handler(K::AddonInfo, on_login_edge)
         .net_handler(K::LoginQueued, on_login_edge)
         .net_handler(K::LoginFailed, on_login_edge)
         .net_handler(K::RealmList, on_login_edge)
         .net_handler(K::CharacterList, on_character_list)
         .net_handler(K::CharActionResult, on_login_edge)
+        .net_handler(K::CharRenamed, on_login_edge)
         .net_handler(K::CharacterLoginFailed, on_login_edge)
         .net_handler(K::CinematicTriggered, on_login_edge)
         .net_handler(K::Connected, on_connected)
@@ -64,6 +66,7 @@ pub(crate) struct Edges<'w> {
     char_lists: MessageWriter<'w, CharListMessage>,
     realm_lists: MessageWriter<'w, RealmListMessage>,
     char_actions: MessageWriter<'w, CharActionResultMessage>,
+    char_renames: MessageWriter<'w, super::CharRenameMessage>,
     char_login_failures: MessageWriter<'w, CharacterLoginFailedMessage>,
     entered_world: MessageWriter<'w, EnteredWorldMessage>,
     addon_reply: ResMut<'w, super::AddonInfoReply>,
@@ -73,6 +76,7 @@ pub(crate) struct Edges<'w> {
     login_queued: MessageWriter<'w, LoginQueuedMessage>,
     world_auth: MessageWriter<'w, WorldAuthMessage>,
     roster_failed: MessageWriter<'w, RosterFailedMessage>,
+    addon_info: MessageWriter<'w, AddonInfoMessage>,
     login_failures: MessageWriter<'w, LoginFailedMessage>,
     disconnects: MessageWriter<'w, DisconnectedMessage>,
     client_control: MessageWriter<'w, ClientControlMessage>,
@@ -118,6 +122,11 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         SessionEvent::RosterFailed { epoch } => {
             e.roster_failed.write(RosterFailedMessage { epoch });
         }
+        SessionEvent::AddonInfo { records } => {
+            // Held for the screens built after it, and for the world entry's load.
+            e.addon_reply.0 = Some(records.clone());
+            e.addon_info.write(AddonInfoMessage { records });
+        }
         SessionEvent::LoginQueued { position, realm } => {
             e.login_queued.write(LoginQueuedMessage { position, realm });
         }
@@ -132,6 +141,10 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         }
         SessionEvent::CharActionResult { action, code } => {
             char_action_result(action, code, &mut e.char_actions)
+        }
+        SessionEvent::CharRenamed { result, renamed } => {
+            e.char_renames
+                .write(super::CharRenameMessage { result, renamed });
         }
         SessionEvent::CharacterLoginFailed { result } => {
             character_login_failed(result, &mut e.char_login_failures)
@@ -500,7 +513,7 @@ fn connected(
     name: String,
     billing_time_rested: u32,
     tutorial_flags: Option<Vec<u8>>,
-    addon_info: Option<Vec<String>>,
+    addon_info: Option<Vec<benilla_protocol::messages::AddonRecord>>,
     addon_reply: &mut crate::net::AddonInfoReply,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,

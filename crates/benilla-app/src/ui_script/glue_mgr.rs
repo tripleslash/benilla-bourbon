@@ -81,6 +81,25 @@
 //!    roster down and raises the realm list; another failure opens `OKAY`. The roster is torn
 //!    down on the world connect's failure arm too (`0x46bf1f`).
 //!
+//! The delete and the rename, the select screen's two writes:
+//!
+//! 1. `DeleteCharacter` reaches `0x46b2e0`: state 6, the `CANCEL` dialog `CHAR_DELETE_IN_PROGRESS`
+//!    and the delete (`0x5ab100`: operation 7 at status `0x38`, then `CMSG_CHAR_DELETE`). The reply
+//!    is the status (`0x5b45c0` → `0x5ab0e0`, success on `0x39`). State 6's frame (`0x46c14e`)
+//!    re-texts the dialog and on a success fires `SELECT_FIRST_CHARACTER` and asks for the list
+//!    again (`0x46c19d`-`0x46c1a7`, `0x46b880`); a failure opens `OKAY` with the status's text and
+//!    goes to state 0 (`0x46c173`-`0x46c188`).
+//! 2. `RenameCharacter`'s passing name reaches the send at `0x46b39b`: state 7, the `CANCEL` dialog
+//!    `CHAR_RENAME_IN_PROGRESS` and the `CMSG_CHAR_RENAME`. State 7 has no frame arm; the reply's
+//!    handler (`0x46b440`) closes the dialog and leaves the state as it is. A result of 0 renames
+//!    the record (`0x4725f0`): the character's files move to the new name
+//!    ([`crate::local_state::move_character_state`]), the VM's record takes it and loses the
+//!    rename flag; `0x31` fires `FORCE_RENAME_CHARACTER` with `CHAR_CREATE_NAME_IN_USE`, any other
+//!    result with `CHAR_RENAME_FAILED`.
+//!
+//! The dialog's button in state 6 cancels the operation and goes to state 0 (`0x46b776`), in state
+//! 7 it goes to state 0 alone (`0x46b79d`); neither sends anything.
+//!
 //! The native login reports a logon as one blocking step, so of the logon's states only
 //! `CONNECTING` and `AUTHENTICATED` are seen; its refusals map through the reference's own
 //! byte-to-result table ([`realmd_result`]).
@@ -90,22 +109,22 @@ use bevy::prelude::*;
 use benilla_protocol::{Character, LoginRefusal, LoginStage, RealmInfo, RosterCause};
 use benilla_ui::script::{
     GlueCharacter, GlueNotice, GlueRealm, GlueRealmCells, GlueRequest, GlueSelectCells, GlueServer,
-    NoticeState, ScriptValue, UiScript, VmKind,
+    NoticeState, ScriptValue, UiScript, VmKind, GLUE_STATUS_KEYS,
 };
 
 use crate::login::queue::QueueEstimate;
 use crate::login::GlueLogin;
 use crate::net::{
-    CharListMessage, CharRequest, DisconnectedMessage, LoginFailedMessage, LoginQueuedMessage,
-    LoginStageMessage, ParkRequest, RealmListMessage, RealmRequest, RosterFailedMessage,
-    WorldAuthMessage,
+    AddonInfoMessage, AddonInfoReply, CharActionResultMessage, CharListMessage, CharRenameMessage,
+    CharRequest, DisconnectedMessage, LoginFailedMessage, LoginQueuedMessage, LoginStageMessage,
+    ParkRequest, RealmListMessage, RealmRequest, RosterFailedMessage, WorldAuthMessage,
 };
 
 /// `CGlueMgr`'s `screenState` (`0xb41da0`), named by the functions that set each value: the
-/// states the login, the realm list and the character list reach. The reference's others are
-/// create, delete and rename (5-7, `0x46b29e`, `0x46b2f8`, `0x46b3a4`), `EnterWorld` (8,
-/// `0x46b711`), a refused character login (9, `0x402075`) and the patch and survey downloads (10
-/// and 11, `0x473c40`, `0x473da8`), each set by a verb these screens do not have yet.
+/// states the login, the realm list, the character list, the delete and the rename reach. The
+/// reference's others are create (5, `0x46b29e`), `EnterWorld` (8, `0x46b711`), a refused
+/// character login (9, `0x402075`) and the patch and survey downloads (10 and 11, `0x473c40`,
+/// `0x473da8`), each set by a verb these screens do not have yet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ScreenState {
     /// No operation (`0x46a7ce`, and every terminal arm).
@@ -119,6 +138,10 @@ pub(crate) enum ScreenState {
     CharList = 3,
     /// A realm list query (`RequestRealmList`, `0x46b8d2`).
     RealmList = 4,
+    /// A character delete (`0x46b2f8`).
+    Delete = 6,
+    /// A character rename (`0x46b3a4`).
+    Rename = 7,
 }
 
 /// The logon's `LOGIN_STATE_*` keys by login state (`0x836b40`, 13 entries).
@@ -163,94 +186,6 @@ const LOGIN_RESULT_KEYS: [&str; 21] = [
     "DISCONNECTED",
 ];
 
-/// The `ClientServices` status keys (`0x85cae8`, 83 entries), the `ResponseCodes` the world
-/// server's `SMSG_AUTH_RESPONSE` byte indexes directly.
-const STATUS_KEYS: [&str; 0x53] = [
-    "RESPONSE_SUCCESS",
-    "RESPONSE_FAILURE",
-    "RESPONSE_CANCELLED",
-    "RESPONSE_DISCONNECTED",
-    "RESPONSE_FAILED_TO_CONNECT",
-    "RESPONSE_CONNECTED",
-    "RESPONSE_VERSION_MISMATCH",
-    "CSTATUS_CONNECTING",
-    "CSTATUS_NEGOTIATING_SECURITY",
-    "CSTATUS_NEGOTIATION_COMPLETE",
-    "CSTATUS_NEGOTIATION_FAILED",
-    "CSTATUS_AUTHENTICATING",
-    "AUTH_OK",
-    "AUTH_FAILED",
-    "AUTH_REJECT",
-    "AUTH_BAD_SERVER_PROOF",
-    "AUTH_UNAVAILABLE",
-    "AUTH_SYSTEM_ERROR",
-    "AUTH_BILLING_ERROR",
-    "AUTH_BILLING_EXPIRED",
-    "AUTH_VERSION_MISMATCH",
-    "AUTH_UNKNOWN_ACCOUNT",
-    "AUTH_INCORRECT_PASSWORD",
-    "AUTH_SESSION_EXPIRED",
-    "AUTH_SERVER_SHUTTING_DOWN",
-    "AUTH_ALREADY_LOGGING_IN",
-    "AUTH_LOGIN_SERVER_NOT_FOUND",
-    "AUTH_WAIT_QUEUE",
-    "AUTH_BANNED",
-    "AUTH_ALREADY_ONLINE",
-    "AUTH_NO_TIME",
-    "AUTH_DB_BUSY",
-    "AUTH_SUSPENDED",
-    "AUTH_PARENTAL_CONTROL",
-    "REALM_LIST_IN_PROGRESS",
-    "REALM_LIST_SUCCESS",
-    "REALM_LIST_FAILED",
-    "REALM_LIST_INVALID",
-    "REALM_LIST_REALM_NOT_FOUND",
-    "ACCOUNT_CREATE_IN_PROGRESS",
-    "ACCOUNT_CREATE_SUCCESS",
-    "ACCOUNT_CREATE_FAILED",
-    "CHAR_LIST_RETRIEVING",
-    "CHAR_LIST_RETRIEVED",
-    "CHAR_LIST_FAILED",
-    "CHAR_CREATE_IN_PROGRESS",
-    "CHAR_CREATE_SUCCESS",
-    "CHAR_CREATE_ERROR",
-    "CHAR_CREATE_FAILED",
-    "CHAR_CREATE_NAME_IN_USE",
-    "CHAR_CREATE_DISABLED",
-    "CHAR_CREATE_PVP_TEAMS_VIOLATION",
-    "CHAR_CREATE_SERVER_LIMIT",
-    "CHAR_CREATE_ACCOUNT_LIMIT",
-    "CHAR_CREATE_SERVER_QUEUE",
-    "CHAR_CREATE_ONLY_EXISTING",
-    "CHAR_DELETE_IN_PROGRESS",
-    "CHAR_DELETE_SUCCESS",
-    "CHAR_DELETE_FAILED",
-    "CHAR_DELETE_FAILED_LOCKED_FOR_TRANSFER",
-    "CHAR_LOGIN_IN_PROGRESS",
-    "CHAR_LOGIN_SUCCESS",
-    "CHAR_LOGIN_NO_WORLD",
-    "CHAR_LOGIN_DUPLICATE_CHARACTER",
-    "CHAR_LOGIN_NO_INSTANCES",
-    "CHAR_LOGIN_FAILED",
-    "CHAR_LOGIN_DISABLED",
-    "CHAR_LOGIN_NO_CHARACTER",
-    "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
-    "CHAR_NAME_NO_NAME",
-    "CHAR_NAME_TOO_SHORT",
-    "CHAR_NAME_TOO_LONG",
-    "CHAR_NAME_INVALID_CHARACTER",
-    "CHAR_NAME_MIXED_LANGUAGES",
-    "CHAR_NAME_PROFANE",
-    "CHAR_NAME_RESERVED",
-    "CHAR_NAME_INVALID_APOSTROPHE",
-    "CHAR_NAME_MULTIPLE_APOSTROPHES",
-    "CHAR_NAME_THREE_CONSECUTIVE",
-    "CHAR_NAME_INVALID_SPACE",
-    "CHAR_NAME_CONSECUTIVE_SPACES",
-    "CHAR_NAME_FAILURE",
-    "CHAR_NAME_SUCCESS",
-];
-
 /// The five world statuses whose failure dialog carries a help URL, `{code, urlKey}` records at
 /// `0x803740` (stride 0x24), walked at `0x46bec0`.
 const URL_STATUSES: [(u8, &str); 5] = [
@@ -289,6 +224,11 @@ const STATUS_REALM_LIST_REALM_NOT_FOUND: u8 = 0x26;
 const STATUS_CHAR_LIST_RETRIEVING: u8 = 0x2a;
 const STATUS_CHAR_LIST_RETRIEVED: u8 = 0x2b;
 const STATUS_CHAR_LIST_FAILED: u8 = 0x2c;
+const STATUS_CHAR_DELETE_IN_PROGRESS: u8 = 0x38;
+const STATUS_CHAR_DELETE_SUCCESS: u8 = 0x39;
+
+/// `SMSG_CHAR_RENAME`'s one result the handler tells apart (`0x46b498 cmp al,0x31`).
+const RENAME_NAME_IN_USE: u8 = 0x31;
 
 /// What a realmd result byte becomes, `(login state, result)`: `Logon::OnAuthResult`'s
 /// dispatch (`0x5b2c90`, byte index `0x5b2ea4`, jumps `0x5b2e78`) after the handlers' clamp of a
@@ -332,6 +272,8 @@ enum OpKind {
     GetRealms,
     /// The character list (6, `0x5aabb0`).
     CharList,
+    /// A character delete (7, `0x5ab100`).
+    Delete,
 }
 
 /// The operation record (`BeginOperation` `0x5aa400`, `SetStatus` `0x5aa920`): its status code
@@ -413,6 +355,12 @@ enum Outgoing {
     Roster,
     /// `SHOW_SERVER_ALERT(text)` (event 21, `0x46b964`): the alert's text after its prefix.
     ServerAlert(String),
+    /// `SELECT_FIRST_CHARACTER` (event 13, `0x46c1a2`).
+    SelectFirst,
+    /// `FORCE_RENAME_CHARACTER(key)` (event 23, `0x46b4a8`, `0x46b4cd`): the key, unresolved.
+    ForceRename(&'static str),
+    /// The rename applier (`0x4725f0`) for this guid and name.
+    Renamed { guid: u64, name: String },
 }
 
 /// The logon's notification cells: the latest `(state, result)` (`0x836b28`, `0x836b24`) and the
@@ -594,11 +542,13 @@ impl GlueMgr {
                 self.op.complete(false, STATUS_CANCELLED);
                 self.outbox.push(Outgoing::Teardown);
             }
-            // `0x46b776`: the query cancelled, state 0, nothing sent.
-            ScreenState::RealmList => {
+            // `0x46b776` (states 4 and 6): the operation cancelled, state 0, nothing sent.
+            ScreenState::RealmList | ScreenState::Delete => {
                 self.op.complete(false, STATUS_CANCELLED);
                 self.state = ScreenState::Idle;
             }
+            // `0x46b79d`: state 0 alone; the rename's reply still lands (`0x46b440`).
+            ScreenState::Rename => self.state = ScreenState::Idle,
         }
     }
 
@@ -623,6 +573,64 @@ impl GlueMgr {
             self.op.complete(false, STATUS_FAILED_TO_CONNECT);
         } else {
             self.park_out.push(CharRequest::Enumerate.into());
+        }
+    }
+
+    /// `0x46b2e0`, `DeleteCharacter`'s tail: state 6, the `CHAR_DELETE_IN_PROGRESS` dialog
+    /// (`0x46b31e`) and the delete (`0x5ab100`: operation 7 at status `0x38`, then
+    /// `CMSG_CHAR_DELETE`). With no link it fails `RESPONSE_FAILED_TO_CONNECT` at once
+    /// (`0x5ab11e`).
+    fn delete_character(&mut self, guid: u64) {
+        self.state = ScreenState::Delete;
+        self.open("CANCEL", Some(Text::Key("CHAR_DELETE_IN_PROGRESS")));
+        self.op = Operation::begin(OpKind::Delete, STATUS_CHAR_DELETE_IN_PROGRESS);
+        if !self.connected {
+            self.op.complete(false, STATUS_FAILED_TO_CONNECT);
+        } else {
+            self.park_out.push(CharRequest::Delete(guid).into());
+        }
+    }
+
+    /// `0x46b340` past the name check (`0x46b39b`): state 7, the `CHAR_RENAME_IN_PROGRESS` dialog
+    /// and the `CMSG_CHAR_RENAME`, which `0x5ab630` sends only on a link that is up.
+    fn rename_character(&mut self, guid: u64, name: String) {
+        self.state = ScreenState::Rename;
+        self.open("CANCEL", Some(Text::Key("CHAR_RENAME_IN_PROGRESS")));
+        if self.connected {
+            self.park_out
+                .push(CharRequest::Rename { guid, name }.into());
+        }
+    }
+
+    /// `SMSG_CHAR_DELETE` (`0x5b45c0` → `0x5ab0e0`): the result byte is the delete's status,
+    /// success on `0x39`, whatever the screen state (`SetStatus`, `0x5aa920`).
+    fn on_char_deleted(&mut self, code: u8) {
+        if self.op.kind == OpKind::Delete {
+            self.op.complete(code == STATUS_CHAR_DELETE_SUCCESS, code);
+        }
+    }
+
+    /// `SMSG_CHAR_RENAME` (`0x46b440`), in any screen state, which it leaves as it is:
+    /// `CLOSE_STATUS_DIALOG` (`0x46b48b`), then a result of 0 renames the record by the reply's
+    /// guid (a reply with none has guid 0, which names no record), `0x31` is
+    /// `CHAR_CREATE_NAME_IN_USE` (`0x46b4c0`, `0x5abd20(0x31)`) and any other `CHAR_RENAME_FAILED`
+    /// (`0x83711c`).
+    fn on_char_renamed(&mut self, result: u8, renamed: Option<(u64, String)>) {
+        self.outbox.push(Outgoing::Close);
+        match result {
+            0 => {
+                let (guid, name) = renamed.unwrap_or_default();
+                self.outbox.push(Outgoing::Renamed { guid, name });
+            }
+            RENAME_NAME_IN_USE => {
+                self.outbox
+                    .push(Outgoing::ForceRename(benilla_ui::script::glue_status_key(
+                        i32::from(RENAME_NAME_IN_USE),
+                    )))
+            }
+            _ => self
+                .outbox
+                .push(Outgoing::ForceRename("CHAR_RENAME_FAILED")),
         }
     }
 
@@ -709,7 +717,7 @@ impl GlueMgr {
                     }
                 }
             }
-            OpKind::Auth | OpKind::CharList => {}
+            OpKind::Auth | OpKind::CharList | OpKind::Delete => {}
         }
     }
 
@@ -964,7 +972,30 @@ impl GlueMgr {
             ScreenState::Connect => self.tick_connect(),
             ScreenState::CharList => self.tick_char_list(),
             ScreenState::RealmList => self.tick_realm_list(),
-            ScreenState::Idle => {}
+            ScreenState::Delete => self.tick_delete(),
+            // No arm for state 7: the compares in `[0x46b930, 0x46c2ac)` never take it.
+            ScreenState::Rename | ScreenState::Idle => {}
+        }
+    }
+
+    /// State 6's frame (`0x46c14e`-`0x46c1a7`): the dialog re-texted, then a completed delete's
+    /// arm. A success fires `SELECT_FIRST_CHARACTER` and asks for the list again (`0x46b880`, state
+    /// 3 and its dialog); a failure opens `OKAY` with the status's text and goes to state 0
+    /// (`0x46c173`).
+    fn tick_delete(&mut self) {
+        if let Some(text) = self.op.text() {
+            self.outbox.push(Outgoing::Update { text, button: None });
+        }
+        if !self.op.done {
+            return;
+        }
+        if self.op.ok {
+            self.outbox.push(Outgoing::SelectFirst);
+            self.get_character_list();
+        } else {
+            let text = self.op.text();
+            self.open("OKAY", text);
+            self.state = ScreenState::Idle;
         }
     }
 
@@ -1105,10 +1136,10 @@ fn glue_realm(r: &RealmInfo) -> GlueRealm {
 /// A world status's text and its code for the URL walk; a code past the table reads
 /// `RESPONSE_FAILURE`.
 fn status_text(code: u8) -> (Text, Option<u8>) {
-    match STATUS_KEYS.get(usize::from(code)) {
+    match GLUE_STATUS_KEYS.get(usize::from(code)) {
         Some(key) => (Text::Key(key), Some(code)),
         None => (
-            Text::Key(STATUS_KEYS[usize::from(STATUS_RESPONSE_FAILURE)]),
+            Text::Key(GLUE_STATUS_KEYS[usize::from(STATUS_RESPONSE_FAILURE)]),
             Some(STATUS_RESPONSE_FAILURE),
         ),
     }
@@ -1125,6 +1156,12 @@ pub(crate) struct LoginNews<'w, 's> {
     roster_failures: MessageReader<'w, 's, RosterFailedMessage>,
     realm_lists: MessageReader<'w, 's, RealmListMessage>,
     disconnects: MessageReader<'w, 's, DisconnectedMessage>,
+    addon_infos: MessageReader<'w, 's, AddonInfoMessage>,
+    addon_reply: Option<Res<'w, AddonInfoReply>>,
+    char_actions: MessageReader<'w, 's, CharActionResultMessage>,
+    renames: MessageReader<'w, 's, CharRenameMessage>,
+    /// The name check's lists, which the glue VM is seated with (`0x6c91a0`).
+    names: Option<Res<'w, crate::text_filter::NameFilter>>,
 }
 
 /// What the manager asks of the rest of the app.
@@ -1133,8 +1170,11 @@ pub(crate) struct GlueAsks<'w> {
     login: MessageWriter<'w, GlueLogin>,
     music: MessageWriter<'w, crate::sound::GlueMusicRequest>,
     launch: MessageWriter<'w, super::server_alert::LaunchUrl>,
+    launch_addon: MessageWriter<'w, super::server_alert::LaunchAddonUrl>,
     realm: Option<Res<'w, crate::net::RealmChoice>>,
     abandon: Option<Res<'w, crate::net::LoginAbandon>>,
+    /// The select screen's roster, which names the in-world files: a rename renames it too.
+    roster: Option<ResMut<'w, crate::char_select::Roster>>,
 }
 
 /// The CVars each agreement is read from and written to.
@@ -1213,8 +1253,17 @@ pub(crate) fn drive_glue_mgr(
             s.set_glue_saved_account(&crate::login::load_saved_account());
             s.set_glue_realm_cells(mgr.realm_cells);
             s.set_glue_select_cells(mgr.select_cells);
+            // The AddOn registry and the reply the session has read; the reference's C globals
+            // outlive the glue's Lua state.
+            super::addons::seat_glue_addons(
+                s,
+                news.addon_reply.as_deref().and_then(|r| r.0.as_deref()),
+            );
             mgr.holder_moved = true;
             fresh_vm = true;
+        }
+        if let Some(names) = news.names.as_ref().filter(|n| fresh_vm || n.is_changed()) {
+            s.set_glue_name_lists(std::rc::Rc::new((**names).clone()));
         }
     } else if in_world {
         // In the world the glue is torn down, and the entry's second phase leaves state 0
@@ -1275,6 +1324,10 @@ pub(crate) fn drive_glue_mgr(
                 }
                 GlueRequest::QuitGame => logins.push(GlueLogin::Quit),
                 // `0x5abd00`, past the whitelist the verb applied (`0x5abc10`).
+                GlueRequest::LaunchAddonUrl(url) => {
+                    asks.launch_addon
+                        .write(super::server_alert::LaunchAddonUrl(url));
+                }
                 GlueRequest::LaunchUrl(url) => {
                     asks.launch.write(super::server_alert::LaunchUrl(url));
                 }
@@ -1285,9 +1338,22 @@ pub(crate) fn drive_glue_mgr(
                 GlueRequest::ChangeRealm(name) => mgr.connect_to_realm(&name),
                 // `0x46b880`; the VM cleared the roster in the verb.
                 GlueRequest::GetCharacterList => mgr.get_character_list(),
+                GlueRequest::DeleteCharacter(guid) => mgr.delete_character(guid),
+                GlueRequest::RenameCharacter { guid, name } => mgr.rename_character(guid, name),
             }
         }
         mgr.realm_cells = s.glue_realm_cells();
+    }
+
+    // `SMSG_ADDON_INFO` read (`0x5b4260`): the index rebuilt from the reply (`0x51da70`), then
+    // the listener's `ADDON_LIST_UPDATE` (`0x5b4290`).
+    for msg in news.addon_infos.read() {
+        // Only the glue VM (`script` is filtered to it above); with none up, `AddonInfoReply`
+        // holds the list for the next one.
+        if let Some(s) = script.as_deref_mut() {
+            s.note_addon_info_records(super::addons::addon_replies(&msg.records));
+            s.fire_event("ADDON_LIST_UPDATE", Vec::new());
+        }
     }
 
     // The native login's news.
@@ -1329,6 +1395,14 @@ pub(crate) fn drive_glue_mgr(
     for msg in news.rosters.read() {
         mgr.on_roster(msg.characters.clone(), msg.cause, msg.epoch);
     }
+    for msg in news.char_actions.read() {
+        if msg.action == benilla_protocol::CharAction::Delete {
+            mgr.on_char_deleted(msg.code);
+        }
+    }
+    for msg in news.renames.read() {
+        mgr.on_char_renamed(msg.result, msg.renamed.clone());
+    }
     for msg in news.disconnects.read() {
         mgr.on_disconnected(msg.end, msg.session_over);
     }
@@ -1358,7 +1432,13 @@ pub(crate) fn drive_glue_mgr(
         classes: classes.as_deref().map(|c| &c.0),
         creatures: creatures.as_deref(),
     };
-    flush(&mut mgr, &mut script, now_ms, &names);
+    flush(
+        &mut mgr,
+        &mut script,
+        now_ms,
+        &names,
+        asks.roster.as_deref_mut(),
+    );
     mgr.select_cells = script.glue_select_cells();
     // What the outbox asked in turn (the roster load's realm list).
     send_asks(&mut mgr, Vec::new(), &mut asks, &mut commands);
@@ -1447,24 +1527,27 @@ fn seed(
         script.set_glue_realms(mgr.holder.iter().map(glue_realm).collect());
     }
     script.set_glue_realm_characters(mgr.characters);
-    // `realmName` names the realm the session dials (`0x5ab7b0` writes it on the connect); the
-    // flags come off the connected realm's `Cfg_Configs` row.
-    let (name, pvp, rp) = match &mgr.realm {
-        Some(r) if mgr.connected => {
-            let (pvp, rp) = realms.map_or((false, false), |x| x.pvp_rp(r.realm_type));
-            (r.name.clone(), pvp, rp)
-        }
-        _ => (
-            script
-                .cvar(crate::realm_select::CVAR_REALM_NAME)
-                .unwrap_or_default(),
-            false,
-            false,
-        ),
+    // The flags come off the connected realm's `Cfg_Configs` row.
+    let (pvp, rp) = match &mgr.realm {
+        Some(r) if mgr.connected => realms.map_or((false, false), |x| x.pvp_rp(r.realm_type)),
+        _ => (false, false),
     };
+    let name = server_name(mgr, script);
     script.set_glue_server(GlueServer { name, pvp, rp });
     if let Some(r) = realmlist {
         seed_realmlist(script, r);
+    }
+}
+
+/// The realm `realmName` names, which the session dials (`0x5ab7b0` writes it on the connect): the
+/// connected realm's name, else the CVar's. The per-character files are kept under it, as the
+/// reference's `WTF\Account\<account>\<realmName>\` (`0x5ab7d0`).
+fn server_name(mgr: &GlueMgr, script: &UiScript) -> String {
+    match &mgr.realm {
+        Some(r) if mgr.connected => r.name.clone(),
+        _ => script
+            .cvar(crate::realm_select::CVAR_REALM_NAME)
+            .unwrap_or_default(),
     }
 }
 
@@ -1492,11 +1575,17 @@ fn seed_realmlist(script: &UiScript, realmlist: &crate::realmlist::Realmlist) {
 }
 
 /// Fire the outbox into the glue VM, the texts resolved through its own strings (`0x703bf0`).
-fn flush(mgr: &mut GlueMgr, script: &mut UiScript, now_ms: u32, names: &RosterNames) {
+fn flush(
+    mgr: &mut GlueMgr,
+    script: &mut UiScript,
+    now_ms: u32,
+    names: &RosterNames,
+    mut roster: Option<&mut crate::char_select::Roster>,
+) {
     // The roster load can queue more (the realm list's dialog), which goes out in turn.
     while !mgr.outbox.is_empty() {
         for out in std::mem::take(&mut mgr.outbox) {
-            flush_one(mgr, script, now_ms, names, out);
+            flush_one(mgr, script, now_ms, names, roster.as_deref_mut(), out);
         }
     }
 }
@@ -1506,6 +1595,7 @@ fn flush_one(
     script: &mut UiScript,
     now_ms: u32,
     names: &RosterNames,
+    roster: Option<&mut crate::char_select::Roster>,
     out: Outgoing,
 ) {
     let text = |script: &UiScript, t: &Text| match t {
@@ -1558,6 +1648,29 @@ fn flush_one(
         Outgoing::Teardown => script.teardown_glue_roster(),
         Outgoing::ServerAlert(text) => {
             script.fire_event("SHOW_SERVER_ALERT", vec![ScriptValue::Str(text)]);
+        }
+        Outgoing::SelectFirst => script.fire_event("SELECT_FIRST_CHARACTER", Vec::new()),
+        Outgoing::ForceRename(key) => {
+            script.fire_event(
+                "FORCE_RENAME_CHARACTER",
+                vec![ScriptValue::Str(key.to_string())],
+            );
+        }
+        Outgoing::Renamed { guid, name } => {
+            // `0x4725f0`: the record by guid, else nothing; the files first (`0x47269a`,
+            // `0x4726f0`), so the AddOn carry reads the moved file.
+            let Some(old) = script.glue_character_name(guid) else {
+                return;
+            };
+            crate::local_state::move_character_state(&server_name(mgr, script), &old, &name);
+            if let Some(c) = mgr.roster.iter_mut().find(|c| c.guid == guid) {
+                c.name.clone_from(&name);
+                c.flags &= !benilla_protocol::CHARACTER_FLAG_RENAME;
+            }
+            if let Some(roster) = roster {
+                roster.rename(guid, &name);
+            }
+            script.apply_glue_rename(guid, &name);
         }
         Outgoing::Roster => {
             let roster = mgr

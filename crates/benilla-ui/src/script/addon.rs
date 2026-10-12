@@ -26,6 +26,41 @@ pub type AddonSavedReader = Box<dyn Fn(&std::path::Path) -> std::io::Result<Vec<
 pub(crate) type SharedSavedReader =
     std::rc::Rc<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
 
+/// The security state `[rec+0x24]`, indexing the table at `0x85367c`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AddonSecurity {
+    /// 0: a signature verified (`0x51dbfb`).
+    Secure,
+    /// 1: the constructor's, and every record's start (`0x5205b6`, `0x51db77`).
+    #[default]
+    Insecure,
+    /// 2: the server's status 0 (`0x51dc0a`).
+    Banned,
+}
+
+impl AddonSecurity {
+    /// `GetAddOnInfo`'s security return (`0x51e980`, `0x85367c`).
+    pub fn token(self) -> &'static str {
+        match self {
+            AddonSecurity::Secure => "SECURE",
+            AddonSecurity::Insecure => "INSECURE",
+            AddonSecurity::Banned => "BANNED",
+        }
+    }
+}
+
+/// One record of the server's `SMSG_ADDON_INFO` (`0x51da70`), named for the addon it answers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AddonReply {
+    pub name: String,
+    /// 0 bans, 2 hides, any other leaves the addon listed.
+    pub status: u8,
+    /// The server's revision when the record carried an info block.
+    pub revision: Option<u32>,
+    /// The record's url string.
+    pub url: Option<String>,
+}
+
 /// One addon as the AddOn API sees it, filled by the host at discovery.
 #[derive(Clone, Debug, Default)]
 pub struct AddOnInfo {
@@ -35,10 +70,25 @@ pub struct AddOnInfo {
     pub title: Option<String>,
     pub notes: Option<String>,
     pub url: Option<String>,
-    /// The security state SECURE (`[rec+0x24] == 0`), which the reference sets only for a valid
-    /// `%s.sig` (`0x6f10f0`, `0x51dbfb`); the host stands in for that check. Drives the `security`
-    /// token and the context the addon loads under ([`addon_load_context`]).
-    pub secure: bool,
+    /// `## Secure:` (`[rec+0x28]`): the addon is in the `CMSG_AUTH_SESSION` block and the server's
+    /// reply speaks of it. It grants nothing by itself.
+    pub claims_secure: bool,
+    /// What the signature check `0x6f10f0` answers for this addon, modelled: true is its answer 3
+    /// (`0x51dbfb` makes the addon SECURE), false any other (no `.sig` read, a size mismatch, a
+    /// digest mismatch: `[rec+0x24]` stays 1 and a mismatch sets `[rec+0x2a]`, which the host
+    /// does not model). benilla verifies no signature, having no Blizzard key: the host answers
+    /// true for an addon read from the player's own patch chain that claims `## Secure`.
+    pub signature_ok: bool,
+    /// `## Revision:` (`[rec+0x20]`), which the server's revision is compared against.
+    pub installed_revision: u32,
+    /// The security state `[rec+0x24]`: INSECURE from the constructor (`0x5205b6`), and what
+    /// `SMSG_ADDON_INFO` makes of it (`0x51db77`-`0x51dc0a`). Drives the `security` return, the
+    /// BANNED refusal and the context the addon loads under ([`addon_load_context`]).
+    pub security: AddonSecurity,
+    /// `[rec+0x2a]`, set when the signature check answers 2 (`0x51dc04`): refused as CORRUPT.
+    pub corrupt: bool,
+    /// `[rec+0xc0]`: the server's revision is past the installed one (`0x51db0d`).
+    pub new_version: bool,
     pub load_on_demand: bool,
     /// `## Dependencies` / `## RequiredDeps`.
     pub dependencies: Vec<String>,
@@ -59,6 +109,10 @@ pub struct AddOnInfo {
     pub saved_variables: Vec<String>,
     /// `## SavedVariablesPerCharacter`, loaded after the account file so its values win.
     pub saved_variables_per_character: Vec<String>,
+    /// `## DefaultState:` (`[rec+0x2b]`, 1 unless the manifest says `disabled`): what the enable
+    /// query `0x51e470` falls back to for a character with no row. The glue's AddOns screen asks
+    /// it per character; the in-game verbs ask it once, for the logged-in one, at registration.
+    pub default_state: bool,
     /// Enable state from `AddOns.txt`; an addon never disabled is enabled.
     pub enabled: bool,
     /// The last-saved `enabled`, which `ResetDisabledAddOns` reverts to; set by `register_addons`.
@@ -97,21 +151,26 @@ enum AddonKey {
     Name(String),
 }
 
+/// A Lua index as the verbs resolve it: `_ftol` (`0x40a2b0`) truncates; minus one, compared
+/// unsigned, so 0 raises like count + 1. An index into the sorted, filtered name array, not the
+/// registry (`0x51df00` reads `[[0xbe1b94] + 4*idx]`, bound `[0xbe1b90]`); the message is
+/// `0x837d70`'s.
+pub(super) fn index_row(model: &Model, n: f64) -> mlua::Result<usize> {
+    let index0 = (super::binding_abi::ftol(n)).wrapping_sub(1) as u32 as usize;
+    match model.addon_index.get(index0) {
+        Some(&row) => Ok(row),
+        None => Err(mlua::Error::RuntimeError(format!(
+            "AddOn index must be in the range of 1 to {}",
+            model.addon_index.len()
+        ))),
+    }
+}
+
 /// The prologue; `usage` is the verb's own `.data` string.
 fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua::Result<AddonKey> {
     // `coerce_number` is `lua_isnumber` (`0x6f34d0`), numeric strings included.
     if let Some(n) = lua.coerce_number(key.clone())? {
-        // `_ftol` (`0x40a2b0`) truncates; minus one, compared unsigned, so 0 raises like count + 1.
-        let index0 = (n as i64 as i32).wrapping_sub(1) as u32 as usize;
-        // An index into the sorted, filtered name array, not the registry (`0x51df00` reads
-        // `[[0xbe1b94] + 4*idx]`, bound `[0xbe1b90]`); the message is `0x837d70`'s.
-        return match model.addon_index.get(index0) {
-            Some(&row) => Ok(AddonKey::Index(row)),
-            None => Err(mlua::Error::RuntimeError(format!(
-                "AddOn index must be in the range of 1 to {}",
-                model.addon_index.len()
-            ))),
-        };
+        return index_row(model, n).map(AddonKey::Index);
     }
     // `lua_isstring`, `lua_tostring` (`0x6f3510`, `0x6f3690`); lossy, as a Lua string is bytes.
     match key {
@@ -126,14 +185,12 @@ fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua
 /// `AddOn_GetTitle 0x51df20`, `SStrCmpI`). Empty until the server replies. The reference's
 /// `qsort` (`0x73f727`) is unstable, which a stable sort refines.
 fn rebuild_index(model: &mut Model) {
-    let Some(hidden) = model.addon_info_hidden.as_ref() else {
+    let Some(reply) = model.addon_reply.take() else {
         model.addon_index = Vec::new(); // no reply yet, as in the reference
         return;
     };
-    let hidden: std::collections::HashSet<&str> = hidden.iter().map(String::as_str).collect();
-    for a in &mut model.addons {
-        a.hidden = hidden.contains(a.name.to_ascii_lowercase().as_str());
-    }
+    apply_reply(&mut model.addons, &reply);
+    model.addon_reply = Some(reply);
     let mut index: Vec<usize> = (0..model.addons.len())
         .filter(|&i| !model.addons[i].hidden)
         .collect();
@@ -142,6 +199,41 @@ fn rebuild_index(model: &mut Model) {
         a.title.as_deref().unwrap_or(&a.name).to_ascii_lowercase()
     });
     model.addon_index = index;
+}
+
+/// The reply's records onto the rows they name, as `0x51da70` walks them. Each record sets the
+/// url when it carries one (`0x51db6a`), the new-version byte when its revision is past the
+/// installed one (`0x51db0d`; nothing clears it), then always INSECURE and not corrupt
+/// (`0x51db77`-`0x51db7e`); status 2 hides the row, any other status shows it (`0x51db84`,
+/// `0x51db8c`); status 0 bans it with no signature check (`0x51dc0a`), and any other runs the
+/// check, whose answer 3 makes it SECURE (`0x51dbfb`).
+///
+/// Deviation: the files the handler writes beside the install (`<Name>.pub` with the key,
+/// `<Name>.url`; `0x51dce0`, `0x51dde0`) are not written, as the install is read-only; the key is
+/// never read either, as there is no signature to verify with it.
+fn apply_reply(addons: &mut [AddOnInfo], reply: &[AddonReply]) {
+    for record in reply {
+        let Some(a) = addons
+            .iter_mut()
+            .find(|a| a.name.eq_ignore_ascii_case(&record.name))
+        else {
+            continue;
+        };
+        if let Some(url) = &record.url {
+            a.url = Some(url.clone());
+        }
+        if record.revision.is_some_and(|r| r > a.installed_revision) {
+            a.new_version = true;
+        }
+        a.security = AddonSecurity::Insecure;
+        a.corrupt = false;
+        a.hidden = record.status == 2;
+        if record.status == 0 {
+            a.security = AddonSecurity::Banned;
+        } else if a.signature_ok {
+            a.security = AddonSecurity::Secure;
+        }
+    }
 }
 
 /// A name's registry row, case-insensitive: a `.toc` may spell a name any way.
@@ -181,19 +273,22 @@ fn gate_rows(model: &Model) -> Vec<GateRow<'_>> {
             enabled: a.enabled,
             interface: a.interface,
             load_on_demand: a.load_on_demand,
+            banned: a.security == AddonSecurity::Banned,
+            corrupt: a.corrupt,
             loaded: a.loaded,
             dependencies: a.dependencies.iter().map(String::as_str).collect(),
         })
         .collect()
 }
 
-/// `checkAddonVersion`, read per query as `IsAddonVersionCheckEnabled` (`0x51f180`) does; unset,
-/// it is the registered default `"1"`, check on.
-fn version_check(model: &Model) -> bool {
+/// `checkAddonVersion`, read per query as `IsAddonVersionCheckEnabled` (`0x51f180`) does: the
+/// record's integer (`+0x28`, `SStrToInt` of the value, `0x63e0b0`) is nonzero, so `""`, `"abc"`
+/// and `"false"` read as off; unset, it is the registered default `"1"`, check on.
+pub(super) fn version_check(model: &Model) -> bool {
     model
         .cvars
         .get("checkaddonversion")
-        .is_none_or(|s| s.value != "0")
+        .is_none_or(|s| super::binding_abi::s_str_to_int(&s.value) != 0)
 }
 
 /// [`can_load`] in the in-game flavour (`dl=1`). A loaded addon is loadable before the gate
@@ -270,7 +365,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Some(r) => lua_str(lua, r)?,
                     None => Value::Nil,
                 },
-                lua_str(lua, if a.secure { "SECURE" } else { "INSECURE" })?,
+                lua_str(lua, a.security.token())?,
             ]))
         })?,
     )?;
@@ -602,7 +697,11 @@ impl AddonLoad for DemandLoad<'_> {
         let (name, files, secure) = {
             let model = lua.app_data_ref::<Model>().expect("model");
             let a = &model.addons[i];
-            (a.name.clone(), a.files.clone(), a.secure)
+            (
+                a.name.clone(),
+                a.files.clone(),
+                a.security == AddonSecurity::Secure,
+            )
         };
         // The files, `Bindings.xml` and the saved variables run under the addon's context.
         let outer = swap_exec_context(lua, addon_load_context(&name, secure));
@@ -890,9 +989,34 @@ impl super::UiScript {
     /// pairs the nameless records with `CMSG_AUTH_SESSION`'s order (`0x51da70`). An empty slice
     /// is a reply that hid nothing, unlike no call at all.
     pub fn note_addon_info_reply(&mut self, hidden: &[String]) {
+        let records = hidden
+            .iter()
+            .map(|name| AddonReply {
+                name: name.clone(),
+                status: 2,
+                ..AddonReply::default()
+            })
+            .collect();
+        self.note_addon_info_records(records);
+    }
+
+    /// Record the `SMSG_ADDON_INFO` (`0x2ef`) reply whole: a record per addon the client sent,
+    /// named for it by the caller. An empty list is a reply that changed nothing, unlike no
+    /// call at all.
+    pub fn note_addon_info_records(&mut self, records: Vec<AddonReply>) {
         let mut model = self.model_mut();
-        model.addon_info_hidden = Some(hidden.iter().map(|n| n.to_ascii_lowercase()).collect());
+        model.addon_reply = Some(records);
         rebuild_index(&mut model);
+    }
+
+    /// Whether the registry row named `name` is SECURE (`[rec+0x24] == 0`), the context its files
+    /// load under ([`addon_load_context`]); an unknown name is not.
+    pub fn addon_is_secure(&self, name: &str) -> bool {
+        self.model_ref()
+            .addons
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .is_some_and(|a| a.security == AddonSecurity::Secure)
     }
 
     /// The registry row a folder name answers to, case-insensitively.

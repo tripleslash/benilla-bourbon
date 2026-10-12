@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use super::*;
 use crate::char_select::ClientState;
-use crate::net::{LoginAbandon, LoginRequest, LoginSubmit, RosterFailedMessage, WorldAuthMessage};
+use crate::net::{
+    AddonInfoMessage, AddonInfoReply, LoginAbandon, LoginRequest, LoginSubmit, RosterFailedMessage,
+    WorldAuthMessage,
+};
 use benilla_protocol::{RealmInfo, SessionEnd};
 
 /// The manager with both agreements accepted, the way a returning player's CVars seed it.
@@ -695,6 +698,152 @@ fn status_dialog_click_cancels_by_state() {
     assert!(m.outbox.is_empty(), "a cancelled query reports nothing");
 }
 
+/// `0x46b2e0` and state 6: the dialog and the `CMSG_CHAR_DELETE`, the dialog re-texted while the
+/// reply is out; a success (`0x39`) fires `SELECT_FIRST_CHARACTER` and asks for the list
+/// (`0x46c19d`-`0x46c1a7`), a failure opens `OKAY` with its status's text and goes to state 0
+/// (`0x46c173`).
+#[test]
+fn a_delete_runs_state_6_to_the_list_or_to_okay() {
+    let mut m = accepted();
+    m.connected = true;
+    m.delete_character(0x12);
+    assert_eq!(m.state, ScreenState::Delete);
+    assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_DELETE_IN_PROGRESS"))]);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Delete(0x12))]
+    ));
+    m.park_out.clear();
+    m.outbox.clear();
+    m.tick();
+    assert!(m.outbox.is_empty(), "no text while the reply is out");
+    m.on_char_deleted(0x39);
+    m.tick();
+    assert_eq!(
+        m.outbox,
+        [
+            Outgoing::Update {
+                text: Text::Key("CHAR_DELETE_SUCCESS"),
+                button: None,
+            },
+            Outgoing::SelectFirst,
+            open("CANCEL", Some("CHAR_LIST_RETRIEVING")),
+        ]
+    );
+    assert_eq!(m.state, ScreenState::CharList);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Enumerate)]
+    ));
+
+    // vmangos refuses a guild master's delete with `CHAR_DELETE_FAILED` (0x3a).
+    let mut m = accepted();
+    m.connected = true;
+    m.delete_character(0x12);
+    m.outbox.clear();
+    m.on_char_deleted(0x3a);
+    m.tick();
+    assert_eq!(
+        m.outbox,
+        [
+            Outgoing::Update {
+                text: Text::Key("CHAR_DELETE_FAILED"),
+                button: None,
+            },
+            open("OKAY", Some("CHAR_DELETE_FAILED")),
+        ]
+    );
+    assert_eq!(m.state, ScreenState::Idle);
+}
+
+/// With no link the delete fails `RESPONSE_FAILED_TO_CONNECT` at once (`0x5ab11e`) and sends
+/// nothing; the dialog's button in state 6 cancels it to state 0 (`0x46b776`), and a reply that
+/// lands after shows nothing.
+#[test]
+fn a_delete_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
+    let mut m = accepted();
+    m.delete_character(0x12);
+    assert!(m.park_out.is_empty());
+    m.outbox.clear();
+    m.tick();
+    assert_eq!(
+        m.outbox.last(),
+        Some(&open("OKAY", Some("RESPONSE_FAILED_TO_CONNECT")))
+    );
+    assert_eq!(m.state, ScreenState::Idle);
+
+    let mut m = accepted();
+    m.connected = true;
+    m.delete_character(0x12);
+    m.outbox.clear();
+    m.status_dialog_click(&mut Vec::new());
+    assert_eq!(m.state, ScreenState::Idle);
+    m.on_char_deleted(0x39);
+    m.tick();
+    assert!(m.outbox.is_empty());
+}
+
+/// State 7: the dialog and the `CMSG_CHAR_RENAME` (`0x46b39b`), sent only on a live link; no
+/// frame arm; the button goes to state 0 and sends nothing (`0x46b79d`).
+#[test]
+fn a_rename_takes_state_7_which_only_its_button_leaves() {
+    let mut m = accepted();
+    m.connected = true;
+    m.rename_character(0x12, "Newname".into());
+    assert_eq!(m.state, ScreenState::Rename);
+    assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_RENAME_IN_PROGRESS"))]);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Rename { guid: 0x12, name })] if name == "Newname"
+    ));
+    m.outbox.clear();
+    m.park_out.clear();
+    m.tick();
+    assert!(m.outbox.is_empty() && m.park_out.is_empty());
+    assert_eq!(m.state, ScreenState::Rename);
+    m.status_dialog_click(&mut Vec::new());
+    assert_eq!(m.state, ScreenState::Idle);
+    assert!(m.outbox.is_empty() && m.park_out.is_empty());
+
+    let mut m = accepted();
+    m.rename_character(0x12, "Newname".into());
+    assert!(m.park_out.is_empty(), "no link, nothing sent");
+}
+
+/// `0x46b440`: `CLOSE_STATUS_DIALOG` first, then 0 renames by the reply's guid, `0x31` is
+/// `CHAR_CREATE_NAME_IN_USE`, anything else `CHAR_RENAME_FAILED`; the state stays.
+#[test]
+fn the_rename_reply_closes_the_dialog_then_renames_or_asks_again() {
+    let mut m = accepted();
+    m.state = ScreenState::Rename;
+    for (result, renamed, then) in [
+        (
+            0,
+            Some((0x12, "Newname".to_string())),
+            Outgoing::Renamed {
+                guid: 0x12,
+                name: "Newname".into(),
+            },
+        ),
+        (
+            0,
+            None,
+            Outgoing::Renamed {
+                guid: 0,
+                name: String::new(),
+            },
+        ),
+        (0x31, None, Outgoing::ForceRename("CHAR_CREATE_NAME_IN_USE")),
+        (0x2f, None, Outgoing::ForceRename("CHAR_RENAME_FAILED")),
+        (0x4b, None, Outgoing::ForceRename("CHAR_RENAME_FAILED")),
+    ] {
+        m.outbox.clear();
+        m.on_char_renamed(result, renamed);
+        assert_eq!(m.outbox, [Outgoing::Close, then], "{result:#x}");
+        assert_eq!(m.state, ScreenState::Rename);
+    }
+}
+
 /// A session that is over fires `DISCONNECTED_FROM_SERVER`; an unattended reconnect does not; in
 /// the world connect, a completed failed operation opens `OKAY` with its text instead
 /// (`0x46c671`-`0x46c68f`), and a running one still fires the event.
@@ -763,11 +912,16 @@ fn stock_app() -> (App, async_channel::Receiver<LoginRequest>, Arc<AtomicU64>) {
         .add_message::<CharListMessage>()
         .add_message::<WorldAuthMessage>()
         .add_message::<RosterFailedMessage>()
+        .add_message::<AddonInfoMessage>()
+        .add_message::<crate::net::CharActionResultMessage>()
+        .add_message::<crate::net::CharRenameMessage>()
+        .init_resource::<AddonInfoReply>()
         .add_message::<RealmListMessage>()
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
         .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+        .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
         .add_message::<AppExit>()
         .init_resource::<crate::portrait::GluePreview>()
         .add_systems(
@@ -999,6 +1153,13 @@ struct IoEvents(crossbeam_channel::Receiver<benilla_protocol::SessionEvent>);
 #[derive(Resource, Default)]
 struct WorldDials(usize);
 
+/// The character verbs' replies, as `net::session` publishes them.
+#[derive(bevy::ecs::system::SystemParam)]
+struct CharWrites<'w> {
+    actions: MessageWriter<'w, crate::net::CharActionResultMessage>,
+    renames: MessageWriter<'w, crate::net::CharRenameMessage>,
+}
+
 fn pump(
     events: Res<IoEvents>,
     mut dials: ResMut<WorldDials>,
@@ -1009,6 +1170,9 @@ fn pump(
     mut auths: MessageWriter<WorldAuthMessage>,
     mut failed_rosters: MessageWriter<RosterFailedMessage>,
     mut queued: MessageWriter<LoginQueuedMessage>,
+    mut addon_infos: MessageWriter<AddonInfoMessage>,
+    mut addon_reply: ResMut<AddonInfoReply>,
+    mut char_writes: CharWrites,
 ) {
     use benilla_protocol::SessionEvent as E;
     for ev in events.0.try_iter() {
@@ -1066,6 +1230,20 @@ fn pump(
             }
             E::LoginQueued { position, realm } => {
                 queued.write(LoginQueuedMessage { position, realm });
+            }
+            E::AddonInfo { records } => {
+                addon_reply.0 = Some(records.clone());
+                addon_infos.write(AddonInfoMessage { records });
+            }
+            E::CharActionResult { action, code } => {
+                char_writes
+                    .actions
+                    .write(crate::net::CharActionResultMessage { action, code });
+            }
+            E::CharRenamed { result, renamed } => {
+                char_writes
+                    .renames
+                    .write(crate::net::CharRenameMessage { result, renamed });
             }
             _ => {}
         }
@@ -1126,11 +1304,16 @@ fn live_app_with(
         .add_message::<CharListMessage>()
         .add_message::<WorldAuthMessage>()
         .add_message::<RosterFailedMessage>()
+        .add_message::<AddonInfoMessage>()
+        .add_message::<crate::net::CharActionResultMessage>()
+        .add_message::<crate::net::CharRenameMessage>()
+        .init_resource::<AddonInfoReply>()
         .add_message::<RealmListMessage>()
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
         .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+        .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
         .add_message::<AppExit>()
         .init_resource::<crate::portrait::GluePreview>()
         .add_systems(
@@ -1394,9 +1577,8 @@ fn roster3() -> Vec<benilla_protocol::Character> {
 /// The stock login for `roster`, `lastCharacterIndex` as given, a realm chosen or not, with the
 /// events the roster fires logged into the VM's `EVENTS`.
 ///
-/// `GetNumAddOns` is the add-on list's verb, which this screen's `OnShow` reaches first
-/// (`UpdateAddonButton`, `AddonList.lua:4`) and which the glue VM does not have yet; the test
-/// defines it empty, or the show raises there and never asks for the list.
+/// Nothing is stubbed: the screen's `OnShow` reaches the add-on list's verbs first
+/// (`UpdateAddonButton`, `AddonList.lua:4`) and the glue VM answers them.
 fn char_select_app(
     roster: &[benilla_protocol::Character],
     last: &str,
@@ -1407,19 +1589,25 @@ fn char_select_app(
         &[roster],
         last,
         chosen,
+        None,
     )
 }
 
 /// [`char_select_app`] over `realms`, the account holding `rosters[n]` on the world session
-/// that begins `n`th (the last repeats).
+/// that begins `n`th (the last repeats). `reply` seats the `SMSG_ADDON_INFO` every session is
+/// sent on the fake world, before the login dials; none is no reply at all.
 fn char_select_app_on(
     realms: impl FnOnce(&str) -> Vec<FakeRealm>,
     rosters: &[&[benilla_protocol::Character]],
     last: &str,
     chosen: bool,
+    reply: Option<&dyn Fn(&fake::World)>,
 ) -> (App, fake::Realmd, fake::World) {
     let (mut app, realmd, world) = live_app_with(realms, "Alpha", rosters[0]);
     world.set_rosters(rosters);
+    if let Some(seat) = reply {
+        seat(&world);
+    }
     if chosen {
         app.world_mut().resource_mut::<GlueMgr>().realm_cells.chosen = Some(0);
         // The fresh VM takes the cells on the next frame.
@@ -1430,11 +1618,13 @@ fn char_select_app_on(
         script.set_cvar_engine("lastCharacterIndex", last);
         script
             .run(
-                "function GetNumAddOns() return 0 end \
-                 EVENTS = {} \
+                "EVENTS = {} \
                  local f = CreateFrame('Frame', 'RosterListener') \
                  f:SetScript('OnEvent', function() \
-                   table.insert(EVENTS, event .. ' ' .. tostring(arg1)) end) \
+                   local a = arg1 \
+                   if event == 'ADDON_LIST_UPDATE' then a = GetNumAddOns() end \
+                   table.insert(EVENTS, event .. ' ' .. tostring(a)) end) \
+                 f:RegisterEvent('ADDON_LIST_UPDATE') \
                  f:RegisterEvent('CHARACTER_LIST_UPDATE') \
                  f:RegisterEvent('UPDATE_SELECTED_CHARACTER')",
             )
@@ -1823,6 +2013,7 @@ fn showing_the_screen_then_changing_realm_asks_the_old_link_once() {
             &[&alpha, &bravo],
             "0",
             true,
+            None,
         );
         until(&mut app, "the first roster", |app| {
             seen(app, "CHARACTER_LIST_UPDATE") >= 2
@@ -2039,4 +2230,628 @@ fn launch_url_reaches_the_host_for_a_whitelisted_url() {
         .map(|m| m.0.clone())
         .collect();
     assert_eq!(launched, ["http://www.worldofwarcraft.com/news"]);
+}
+
+// ── The AddOns screen under the stock select (`AddonList.lua`) ──
+
+/// An AddOns folder under a temp `benilla-config`, `BENILLA_HOME` on it while the guard lives.
+fn addon_home(tag: &str) -> (std::path::PathBuf, crate::local_state::test_env::EnvGuard) {
+    let tmp =
+        std::env::temp_dir().join(format!("benilla-glue-addons-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let home = tmp.join("benilla-config");
+    std::fs::create_dir_all(home.join("AddOns")).unwrap();
+    let guard = crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+    (home, guard)
+}
+
+fn write_addon(home: &std::path::Path, name: &str, toc: &str) {
+    let dir = home.join("AddOns").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
+}
+
+/// Three addons by title: Alpha ("Alpha Title"), Beta, and Gamma, which is out of date. The
+/// realm `Alpha`'s characters: Alpha has Alpha on, Bravo has it off, Charlie has no file.
+fn three_addons(home: &std::path::Path) {
+    write_addon(
+        home,
+        "Alpha",
+        "## Interface: 11200\n## Title: Alpha Title\n## Notes: the first\n",
+    );
+    write_addon(
+        home,
+        "Beta",
+        "## Interface: 11200\n## Dependencies: Alpha\n",
+    );
+    write_addon(home, "Gamma", "## Interface: 11100\n");
+    let dir = home.join("addon-state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Alpha-Alpha.txt"), "Alpha: enabled\n").unwrap();
+    std::fs::write(dir.join("Alpha-Bravo.txt"), "Alpha: disabled\n").unwrap();
+}
+
+/// Every enable file under `home/addon-state`, by file name.
+fn enable_files(home: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(home.join("addon-state"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).unwrap(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Up to the loaded roster.
+fn at_the_roster(app: &mut App) {
+    until(app, "the roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+}
+
+/// The stock select over `roster3`'s account on realm `Alpha`, `three_addons`' folder under the
+/// current `BENILLA_HOME`, and `reply` the server's `SMSG_ADDON_INFO`.
+fn three_addon_app(reply: Option<&dyn Fn(&fake::World)>) -> (App, fake::Realmd, fake::World) {
+    char_select_app_on(
+        |world| vec![FakeRealm::new("Alpha", world)],
+        &[&roster3()],
+        "1",
+        false,
+        reply,
+    )
+}
+
+/// The stock select runs end to end with nothing stubbed: its `OnShow` reaches
+/// `GetCharacterListUpdate` past `UpdateAddonButton`, the add-ons button shows for the registry
+/// the server's reply left, and the stock `AddonList` opens, shows each row through the glue
+/// verbs, toggles through its checkboxes, and Okay writes the files the native screen writes.
+#[test]
+fn the_stock_addon_list_opens_toggles_and_saves_like_the_native_screen() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("stock");
+    three_addons(&home);
+
+    let (mut app, _realmd, world) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], false)));
+    at_the_roster(&mut app);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert_eq!(world.enumerations(), 1, "OnShow reached the list ask");
+    assert!(shown(&app, "CharacterSelect"));
+    assert!(
+        shown(&app, "CharacterSelectAddonsButton"),
+        "three addons are installed: UpdateAddonButton shows the button"
+    );
+    assert_eq!(
+        vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(),
+        3.0,
+        "the twelve Blizzard addons are hidden by the reply"
+    );
+
+    // Open the list: the rows are the glue verbs' answers.
+    vm(&app).run("AddonList:Show()").unwrap();
+    app.update();
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    let text = |app: &App, name: &str| {
+        vm(app)
+            .eval::<String>(&format!("return {name}:GetText() or ''"))
+            .unwrap()
+    };
+    assert_eq!(text(&app, "AddonListEntry1Title"), "Alpha Title");
+    assert_eq!(text(&app, "AddonListEntry2Title"), "Beta");
+    assert_eq!(text(&app, "AddonListEntry3Status"), "Out of date");
+    let states = |app: &App| {
+        vm(app)
+            .eval::<Vec<f64>>(
+                "return { AddonListEntry1Enabled.state, AddonListEntry2Enabled.state, \
+                          AddonListEntry3Enabled.state }",
+            )
+            .unwrap()
+    };
+    // Alpha is on for one character, off for another and, with no file for the third, the
+    // others' mixed answer's default: some. Beta and Gamma nobody set: their DefaultState.
+    assert_eq!(states(&app), [1.0, 2.0, 2.0]);
+
+    // The boxes toggle for All (nil): the checked mixed box clears, and so does Beta's.
+    vm(&app)
+        .run("AddonListEntry1Enabled:Click() AddonListEntry2Enabled:Click()")
+        .unwrap();
+    assert_eq!(states(&app), [0.0, 0.0, 2.0]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+
+    // One character's view: its own state, from the dropdown's selection.
+    vm(&app)
+        .run(
+            "GlueDropDownMenu_SetSelectedValue(AddonCharacterDropDown, 'Alpha') AddonList_Update()",
+        )
+        .unwrap();
+    vm(&app).run("AddonListEntry2Enabled:Click()").unwrap();
+    assert_eq!(states(&app), [0.0, 2.0, 2.0], "Alpha alone has Beta on");
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+
+    // Okay: SaveAddOns writes the changed nodes, then the list hides.
+    let before = enable_files(&home);
+    vm(&app).run("AddonList_OnOk()").unwrap();
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert!(!shown(&app, "AddonList"));
+    let stock = enable_files(&home);
+    assert_ne!(before, stock);
+    let text = |name: &str| String::from_utf8(stock[name].clone()).unwrap();
+    assert_eq!(text("Alpha-Alpha.txt"), "Alpha: disabled\nBeta: enabled\n");
+    assert_eq!(text("Alpha-Bravo.txt"), "Alpha: disabled\nBeta: disabled\n");
+    assert_eq!(
+        text("Alpha-Charlie.txt"),
+        "Alpha: disabled\nBeta: disabled\n",
+        "a character with no file gets one, as every node the All view set is dirty"
+    );
+
+    // The native screen, given the same clicks on the same files, writes the same bytes.
+    let (native_home, _native_guard) = addon_home("native");
+    three_addons(&native_home);
+    let chars: Vec<String> = roster3().iter().map(|c| c.name.clone()).collect();
+    // All view: Alpha off and Beta off, then the view on Alpha with Beta on, as above.
+    crate::char_select::okay_after_clicks(
+        "Alpha",
+        &chars,
+        &[(None, 0, false), (None, 1, false), (Some(0), 1, true)],
+    );
+    assert_eq!(
+        stock,
+        enable_files(&native_home),
+        "the stock AddOns screen's files are the native screen's, byte for byte"
+    );
+}
+
+/// `ADDON_LIST_UPDATE` fires where the reference's handler for `SMSG_ADDON_INFO` does
+/// (`0x5b4260`, listener slot `0x5ab2f0`): once, when the reply has been read, with the index it
+/// rebuilt already in place, and ahead of the roster. A reply that trails the authentication
+/// answer fires it when it is read, behind the first list ask; one that never comes fires nothing
+/// and leaves the add-ons button hidden.
+#[test]
+fn addon_list_update_fires_once_when_the_reply_is_read() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("timing");
+    three_addons(&home);
+    let events = |app: &App| {
+        vm(app)
+            .eval::<Vec<String>>("return EVENTS")
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.starts_with("ADDON_LIST_UPDATE") || e.starts_with("CHARACTER_LIST_UPDATE")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Ahead of the authentication answer (vmangos builds it in the auth handler): the count the
+    // event carries is the rebuilt index's, three, and the entry's teardown update and the
+    // roster come after.
+    let (mut app, _r, _w) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], false)));
+    at_the_roster(&mut app);
+    assert_eq!(
+        events(&app)[..3],
+        [
+            "ADDON_LIST_UPDATE 3",
+            "CHARACTER_LIST_UPDATE nil",
+            "CHARACTER_LIST_UPDATE nil"
+        ],
+        "the reply, then the teardown and the roster"
+    );
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 1, "once for the session");
+    // A second list ask on the same link does not read it again.
+    let before = seen(&app, "CHARACTER_LIST_UPDATE");
+    vm(&app).run("GetCharacterListUpdate()").unwrap();
+    until(&mut app, "the second roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > before
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    assert_eq!(
+        seen(&app, "ADDON_LIST_UPDATE"),
+        1,
+        "…and the event does not repeat"
+    );
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    drop(app);
+
+    // Behind the answer: read with the first list ask, so after the entry's teardown update
+    // (`0x472580`) and before the roster's.
+    let (mut app, _r, _w) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], true)));
+    at_the_roster(&mut app);
+    assert_eq!(
+        events(&app)[..3],
+        [
+            "CHARACTER_LIST_UPDATE nil",
+            "ADDON_LIST_UPDATE 3",
+            "CHARACTER_LIST_UPDATE nil"
+        ]
+    );
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 1);
+    drop(app);
+
+    // No reply: no index space (`[0xbe1b90]` stays 0), no event, no button.
+    let (mut app, _r, _w) = three_addon_app(None);
+    at_the_roster(&mut app);
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 0);
+    assert_eq!(vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(), 0.0);
+    assert!(!shown(&app, "CharacterSelectAddonsButton"));
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// The server's `SMSG_ADDON_INFO` records reach the registry the stock list reads (`0x51da70`):
+/// the url and the new-version byte beside a listed addon, BANNED for status 0 (refused, no url),
+/// and SECURE once the reply has run the signature check, which benilla answers 3 for an addon
+/// of the player's own chain that claims `## Secure`. A folder addon the reply never names stays
+/// INSECURE.
+#[test]
+fn the_server_reply_sets_the_security_url_and_new_version() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("reply");
+    three_addons(&home);
+    // The twelve in the order they were sent: the first listed with a url and a revision, the
+    // second banned with a url, the rest hidden.
+    let mut records: Vec<(u8, Option<u32>, Option<&str>)> = vec![(2, Some(0), None); 12];
+    records[0] = (1, Some(9), Some("http://example.com/auc"));
+    records[1] = (0, None, Some("http://example.com/bf"));
+    let (mut app, _realmd, _world) =
+        three_addon_app(Some(&|w| w.set_addon_records(&records, false)));
+    at_the_roster(&mut app);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert_eq!(
+        vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(),
+        5.0,
+        "three folder addons and the two the reply left listed"
+    );
+    type Row = (
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        String,
+        Option<f64>,
+    );
+    let row = |name: &str| -> Row {
+        vm(&app)
+            .eval::<Row>(&format!(
+                "for i = 1, GetNumAddOns() do \
+                   local n, _, _, url, loadable, reason, security, new = GetAddOnInfo(i) \
+                   if n == '{name}' then return url, loadable, reason, security, new end \
+                 end"
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        row("Blizzard_AuctionUI"),
+        (
+            Some("http://example.com/auc".into()),
+            Some(1.0),
+            None,
+            "SECURE".into(),
+            Some(1.0)
+        ),
+        "revision 9 is past the installed, and the chain's signed addon passes the check"
+    );
+    assert_eq!(
+        row("Blizzard_BattlefieldMinimap"),
+        (None, None, Some("BANNED".into()), "BANNED".into(), None),
+        "status 0 bans it without the check, and a banned addon has no url"
+    );
+    assert_eq!(row("Alpha").3, "INSECURE");
+
+    // The stock confirm dialog's `LaunchAddOnURL(AddonList.selectedID)`: the listed addon's url
+    // reaches the host's launcher, the banned one's (nil) nothing.
+    let index = |name: &str| {
+        vm(&app)
+            .eval::<f64>(&format!(
+                "for i = 1, GetNumAddOns() do \
+                   if (GetAddOnInfo(i)) == '{name}' then return i end end"
+            ))
+            .unwrap()
+    };
+    let (auction, minimap) = (
+        index("Blizzard_AuctionUI"),
+        index("Blizzard_BattlefieldMinimap"),
+    );
+    vm(&app)
+        .run(&format!(
+            "LaunchAddOnURL({auction}) LaunchAddOnURL({minimap})"
+        ))
+        .unwrap();
+    app.update();
+    let launched: Vec<String> = app
+        .world()
+        .resource::<Messages<crate::ui_script::server_alert::LaunchAddonUrl>>()
+        .iter_current_update_messages()
+        .map(|m| m.0.clone())
+        .collect();
+    assert_eq!(launched, ["http://example.com/auc"]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// Until the reply runs the handler, a chain addon that claims `## Secure` is INSECURE as the
+/// constructor leaves it (`0x5205b6`), and loads under its own context; the reply's signature
+/// answer makes it SECURE.
+#[test]
+fn a_secure_claim_reads_insecure_until_the_reply_has_run() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_home, _guard) = addon_home("claim");
+    let mut script = UiScript::new_glue().unwrap();
+    crate::ui_script::addons::seat_glue_addons(&mut script, None);
+    assert!(!script.addon_is_secure("Blizzard_TalentUI"));
+    let all: Vec<_> = benilla_protocol::messages::STOCK_SECURE_ADDONS
+        .iter()
+        .map(|a| benilla_protocol::messages::AddonRecord {
+            name: a.name.to_string(),
+            status: 2,
+            ..Default::default()
+        })
+        .collect();
+    crate::ui_script::addons::seat_glue_addons(&mut script, Some(&all));
+    assert!(script.addon_is_secure("Blizzard_TalentUI"));
+    assert!(!script.addon_is_secure("Alpha"));
+}
+
+// ── The delete and the rename under the stock select (`CharacterSelect.xml`) ──
+
+/// The stock select over `roster` on realm `Alpha`, at the loaded roster, with
+/// `SELECT_FIRST_CHARACTER` and `FORCE_RENAME_CHARACTER` logged into `EVENTS` too; `reply` as
+/// [`char_select_app_on`]'s.
+fn select_screen(
+    roster: &[benilla_protocol::Character],
+    reply: Option<&dyn Fn(&fake::World)>,
+) -> (App, fake::Realmd, fake::World) {
+    let (mut app, realmd, world) = char_select_app_on(
+        |world| vec![FakeRealm::new("Alpha", world)],
+        &[roster],
+        "0",
+        false,
+        reply,
+    );
+    at_the_roster(&mut app);
+    vm(&app)
+        .run(
+            "RosterListener:RegisterEvent('SELECT_FIRST_CHARACTER') \
+             RosterListener:RegisterEvent('FORCE_RENAME_CHARACTER')",
+        )
+        .unwrap();
+    (app, realmd, world)
+}
+
+/// The rows' names as the stock list shows them.
+fn row_names(app: &App) -> Vec<String> {
+    vm(app)
+        .eval::<Vec<String>>(
+            "local t = {} for i = 1, GetNumCharacters() do \
+               t[i] = getglobal('CharSelectCharacterButton'..i..'ButtonTextName'):GetText() end \
+             return t",
+        )
+        .unwrap()
+}
+
+/// The stock delete end to end: the confirm dialog's Okay calls `DeleteCharacter`, which shows the
+/// `CHAR_DELETE_IN_PROGRESS` dialog and sends `CMSG_CHAR_DELETE` with the selected guid; the
+/// reply's success fires `SELECT_FIRST_CHARACTER` and asks for the list again, which comes back
+/// without the character, the first row selected.
+#[test]
+fn the_stock_delete_refetches_the_list_and_selects_the_first_row() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = select_screen(&roster3(), None);
+    // The confirm box enables Okay from its `OnTextChanged`, which fires at the frame's flush.
+    vm(&app)
+        .run(
+            "CharacterSelect_SelectCharacter(2) CharacterDeleteDialog:Show() \
+             CharacterDeleteEditBox:SetText(DELETE_CONFIRM_STRING)",
+        )
+        .unwrap();
+    app.world_mut().non_send_mut::<UiScript>().tick(0.01);
+    vm(&app).run("CharacterDeleteButton1:Click()").unwrap();
+    assert!(!shown(&app, "CharacterDeleteDialog"));
+    let lists = seen(&app, "CHARACTER_LIST_UPDATE");
+    app.update();
+    assert_eq!(
+        dialog(&app),
+        Some(("CANCEL".into(), "Deleting character".into()))
+    );
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Delete);
+    until(&mut app, "the list without Bravo", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > lists
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    assert_eq!(
+        world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_DELETE),
+        [0x12u64.to_le_bytes().to_vec()]
+    );
+    assert_eq!(
+        world.enumerations(),
+        2,
+        "the delete's success asked for the list"
+    );
+    assert_eq!(seen(&app, "SELECT_FIRST_CHARACTER"), 1);
+    assert_eq!(row_names(&app), ["Alpha", "Charlie"]);
+    assert_eq!(
+        vm(&app)
+            .eval::<f64>("return CharacterSelect.selectedIndex")
+            .unwrap(),
+        1.0
+    );
+    assert_eq!(vm(&app).glue_selected_guid(), Some(0x11));
+    assert_eq!(dialog(&app), None);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// A refused delete (vmangos's guild master, `CHAR_DELETE_FAILED`) opens `OKAY` with its text and
+/// asks for no list (`0x46c173`).
+#[test]
+fn a_refused_stock_delete_opens_okay_and_keeps_the_list() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = select_screen(&roster3(), None);
+    world.answer_deletes(0x3a);
+    vm(&app).run("DeleteCharacter(2)").unwrap();
+    app.update();
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Delete);
+    until(&mut app, "the refusal", |app| {
+        app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    assert_eq!(
+        dialog(&app),
+        Some(("OKAY".into(), "Character deletion failed".into()))
+    );
+    assert_eq!(world.enumerations(), 1);
+    assert_eq!(seen(&app, "SELECT_FIRST_CHARACTER"), 0);
+    assert_eq!(row_names(&app), ["Alpha", "Bravo", "Charlie"]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// The stock rename end to end, on a character the server flagged: a name the check fails
+/// re-shows the rename dialog with the check's text and sends nothing; a passing one hides it,
+/// shows `CHAR_RENAME_IN_PROGRESS` and sends `CMSG_CHAR_RENAME`; the reply closes the dialog and
+/// renames the row in place, with no list asked, the flag clear and the character's files moved
+/// to the new name.
+#[test]
+fn the_stock_rename_renames_the_row_and_moves_its_files() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("rename");
+    three_addons(&home);
+    let macros = crate::local_state::macros_character_path("Alpha", "Bravo").unwrap();
+    crate::local_state::write_atomic(&macros, "MACRO 1 \"M\" Ability_Ambush\n/say hi\nEND\n")
+        .unwrap();
+    let mut roster = roster3();
+    roster[1].flags |= benilla_protocol::CHARACTER_FLAG_RENAME;
+    let (mut app, _realmd, world) =
+        select_screen(&roster, Some(&|w| w.set_addon_info(&[2; 12], false)));
+    // The select screen's roster, Bravo picked: the in-world files are named from it.
+    app.world_mut()
+        .insert_resource(crate::char_select::Roster::with_pending_pick(roster, 0x12));
+    let enable = |app: &App, who: &str| {
+        vm(app)
+            .eval::<f64>(&format!("return GetAddOnEnableState('{who}', 1)"))
+            .unwrap()
+    };
+    assert_eq!(enable(&app, "Bravo"), 0.0, "Bravo has Alpha off");
+
+    // A name the check fails: the dialog again, with the check's text, nothing sent.
+    vm(&app)
+        .run(
+            "CharacterSelect_SelectCharacter(2) CharacterRenameDialog:Show() \
+             CharacterRenameEditBox:SetText('X') CharacterRenameButton1:Click()",
+        )
+        .unwrap();
+    assert!(shown(&app, "CharacterRenameDialog"));
+    assert_eq!(
+        vm(&app)
+            .eval::<String>("return CharacterRenameText1:GetText()")
+            .unwrap(),
+        "Names must be at least 2 characters"
+    );
+    assert_eq!(seen(&app, "FORCE_RENAME_CHARACTER CHAR_NAME_TOO_SHORT"), 1);
+    app.update();
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+
+    // A passing one.
+    vm(&app)
+        .run("CharacterRenameEditBox:SetText('Newbie') CharacterRenameButton1:Click()")
+        .unwrap();
+    assert!(!shown(&app, "CharacterRenameDialog"));
+    let lists = seen(&app, "CHARACTER_LIST_UPDATE");
+    app.update();
+    assert_eq!(
+        dialog(&app),
+        Some(("CANCEL".into(), "Renaming Character...".into()))
+    );
+    until(&mut app, "the rename's reply", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > lists
+    });
+    let mut sent = 0x12u64.to_le_bytes().to_vec();
+    sent.extend(b"Newbie\0");
+    assert_eq!(
+        world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_RENAME),
+        [sent]
+    );
+    assert_eq!(dialog(&app), None, "the reply closed the dialog");
+    assert_eq!(world.enumerations(), 1, "the record is renamed in place");
+    assert_eq!(row_names(&app), ["Alpha", "Newbie", "Charlie"]);
+    assert_eq!(
+        app.world().resource::<GlueMgr>().state,
+        ScreenState::Rename,
+        "the reply leaves state 7"
+    );
+    // The flag is clear: the verb refuses the record now (`0x4735ab`).
+    assert_eq!(
+        vm(&app)
+            .eval::<f64>(
+                "local function n(...) return arg.n end return n(RenameCharacter(2, 'Other'))"
+            )
+            .unwrap(),
+        0.0
+    );
+    let kept = app
+        .world()
+        .resource::<GlueMgr>()
+        .roster_character(0x12)
+        .map(|c| {
+            (
+                c.name.clone(),
+                c.flags & benilla_protocol::CHARACTER_FLAG_RENAME,
+            )
+        });
+    assert_eq!(kept, Some(("Newbie".to_string(), 0)));
+    // The world entry names its files by the new name.
+    let picked = app.world().resource::<crate::char_select::Roster>();
+    assert_eq!(
+        crate::ui_macro::identity(picked).map(|(_, name)| name),
+        Some("Newbie".to_string())
+    );
+
+    // The files moved, and the AddOn state with them.
+    let moved = crate::local_state::macros_character_path("Alpha", "Newbie").unwrap();
+    assert!(moved.exists() && !macros.exists());
+    assert_eq!(
+        std::fs::read(home.join("addon-state").join("Alpha-Newbie.txt")).unwrap(),
+        b"Alpha: disabled\n"
+    );
+    assert!(!home.join("addon-state").join("Alpha-Bravo.txt").exists());
+    assert_eq!(enable(&app, "Newbie"), 0.0, "the node came with the file");
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// A rename the server refuses re-shows the dialog with `CHAR_RENAME_FAILED` (`0x46b49c`), and
+/// the row keeps its name.
+#[test]
+fn a_refused_stock_rename_asks_again() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let mut roster = roster3();
+    roster[1].flags |= benilla_protocol::CHARACTER_FLAG_RENAME;
+    let (mut app, _realmd, world) = select_screen(&roster, None);
+    world.answer_renames(0x2f);
+    vm(&app).run("RenameCharacter(2, 'Newbie')").unwrap();
+    until(&mut app, "the refusal", |app| {
+        seen(app, "FORCE_RENAME_CHARACTER CHAR_RENAME_FAILED") == 1
+    });
+    assert!(shown(&app, "CharacterRenameDialog"));
+    assert_eq!(
+        vm(&app)
+            .eval::<String>("return CharacterRenameText1:GetText()")
+            .unwrap(),
+        "Character rename failed"
+    );
+    assert_eq!(dialog(&app), None);
+    assert_eq!(row_names(&app), ["Alpha", "Bravo", "Charlie"]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }

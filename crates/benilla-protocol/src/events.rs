@@ -150,6 +150,13 @@ pub enum SessionEvent {
         epoch: u64,
         generation: u64,
     },
+    /// `SMSG_ADDON_INFO` was read (the handler `0x5b4260`, which rebuilds the AddOn index with
+    /// `0x51da70` and then calls the listener slot `0x80a400`, `0x5ab2f0`, whose one effect is
+    /// `ADDON_LIST_UPDATE`): its records, each named for the addon we sent in that place. Emitted
+    /// by the IO thread once per world session, never wire-decoded.
+    AddonInfo {
+        records: Vec<crate::messages::AddonRecord>,
+    },
     /// A roster ask on the parked session failed on the stream (`0x5ab300`'s failure leg,
     /// `SetStatus(0, 0x2c)`, `CHAR_LIST_FAILED`); the session ends after it. Emitted by the IO
     /// thread, never wire-decoded.
@@ -181,6 +188,12 @@ pub enum SessionEvent {
     },
     /// `SMSG_CHAR_CREATE`/`_DELETE`'s raw `WorldResult`; on success a fresh roster comes first.
     CharActionResult { action: CharAction, code: u8 },
+    /// `SMSG_CHAR_RENAME`'s result byte and, on success, the renamed guid and new name; emitted
+    /// by the IO thread at character select, never wire-decoded.
+    CharRenamed {
+        result: u8,
+        renamed: Option<(u64, String)>,
+    },
     /// We are in the world; the IO thread emits this before any object update.
     Connected {
         self_guid: u64,
@@ -189,9 +202,9 @@ pub enum SessionEvent {
         billing_time_rested: u32,
         /// `SMSG_TUTORIAL_FLAGS` if it came during the handshake; `None` if it comes in-world.
         tutorial_flags: Option<Vec<u8>>,
-        /// The addons `SMSG_ADDON_INFO` hid. `None` is no reply at all, where the reference's
+        /// The `SMSG_ADDON_INFO` records. `None` is no reply at all, where the reference's
         /// `GetNumAddOns()` answers 0; an empty list is a reply that hid nothing.
-        addon_info: Option<Vec<String>>,
+        addon_info: Option<Vec<crate::messages::AddonRecord>>,
     },
     /// Our pick was refused (`SMSG_CHARACTER_LOGIN_FAILED`) after [`Self::Connected`] was sent;
     /// `result` is a 1-based index into the reference's six `CHAR_LOGIN_*` strings.

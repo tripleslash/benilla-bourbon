@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{EnableHash, UiFlavor, UiScript};
+use benilla_ui::script::{UiFlavor, UiScript};
 use benilla_ui::status::{self, Status};
 use benilla_ui::toc::Toc;
 
@@ -484,20 +484,29 @@ fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
     info
 }
 
-/// The `## Secure: 1` directive. It grants nothing by itself: the client sends every such addon
-/// in `CMSG_AUTH_SESSION`'s addon block, and only [`secure`] makes one SECURE.
-pub(crate) fn toc_secure(toc: &Toc) -> bool {
-    toc.secure()
+/// What the signature check `0x6f10f0` answers for an addon, modelled: 3 (the addon is SECURE,
+/// `0x51dbfb`) for one that claims `## Secure` and is read from the player's own patch chain,
+/// which is where Blizzard's signed twelve live; any other answer for the rest, whose files sit in
+/// benilla's AddOns folder beside no `.sig`. The reference reads `<Name>.toc.sig` and checks the
+/// digest of the `.toc` and `Bindings.xml` against it with the addon's key; benilla ships no key
+/// and verifies nothing, so provenance stands in for the signature.
+pub(crate) fn signature_ok(chain: bool, toc: &Toc) -> bool {
+    chain && toc.secure()
 }
 
-/// Whether an addon is SECURE, the security state `[rec+0x24] == 0`: `GetAddOnInfo`'s security
-/// answer and the context it loads under ([`benilla_ui::script::addon_load_context`]). The
-/// reference sets it only when the `SMSG_ADDON_INFO` handler's `%s.sig` check `0x6f10f0` answers 3
-/// (`0x51dbfb`); the state starts INSECURE (`0x5205b6`). benilla verifies no signature, and the
-/// `.sig` files ship only with Blizzard's own addons in the player's patch chain, so this stands in
-/// for the check: off the chain and `## Secure: 1`. A folder addon claiming it stays INSECURE.
-pub(crate) fn secure(chain: bool, toc: &Toc) -> bool {
-    chain && toc_secure(toc)
+/// The reply's records as the registry takes them.
+pub(crate) fn addon_replies(
+    records: &[benilla_protocol::messages::AddonRecord],
+) -> Vec<benilla_ui::script::AddonReply> {
+    records
+        .iter()
+        .map(|r| benilla_ui::script::AddonReply {
+            name: r.name.clone(),
+            status: r.status,
+            revision: r.revision,
+            url: r.url.clone(),
+        })
+        .collect()
 }
 
 /// [`info_for`]'s body, shared with `addon_harness` so its survey seats the registry row
@@ -511,7 +520,14 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::s
         // The `.toc` has no URL: `0x51e180` answers `[rec+0x30]`, which only the server's
         // `SMSG_ADDON_INFO` writes (`0x51db6a`).
         url: None,
-        secure: secure(chain, toc),
+        claims_secure: toc.secure(),
+        signature_ok: signature_ok(chain, toc),
+        installed_revision: toc.revision(),
+        // INSECURE until the server's reply and the signature check say otherwise (`0x5205b6`).
+        security: benilla_ui::script::AddonSecurity::Insecure,
+        corrupt: false,
+        new_version: false,
+        default_state: toc.default_state(),
         load_on_demand: toc.load_on_demand(),
         dependencies: toc.dependencies().into_iter().map(str::to_owned).collect(),
         optional_dependencies: toc
@@ -650,120 +666,46 @@ pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
 
 // ── The enable store: the reference's `ADDONSTATELIST` ──
 
-/// The reference's `ADDONSTATELIST` (`0xbe1bd0`): a node per character in `SMSG_CHAR_ENUM` order,
-/// rebuilt whole (`0x51f0b0` clears it, then callback `0x472300` fills a node per record through
-/// `AddOnList_LoadCharacter 0x51ebe0`), each holding that character's enable hash. A character
-/// with no file is an empty node, whose enable bit is answered from the others.
-#[derive(Default)]
-pub(crate) struct EnableStore {
-    /// The realm half of every node's file.
-    realm: String,
-    /// `(character, enable hash)` in character-list order.
-    nodes: Vec<(String, EnableHash)>,
+pub(crate) use benilla_ui::script::EnableStore;
+
+/// The enable files as this host keeps them, `benilla-config/addon-state/<Realm>-<Char>.txt`, in the
+/// reference's `AddOns.txt` format.
+pub(crate) struct AppAddonFiles;
+
+impl benilla_ui::script::AddonStateFiles for AppAddonFiles {
+    fn read(&self, realm: &str, character: &str) -> Option<Vec<(String, bool)>> {
+        let id = (realm.to_string(), character.to_string());
+        // Through `local_state`, not `std::fs`: on the page the state folder is localStorage, and
+        // these files are settings that must survive a reload there.
+        let bytes = crate::local_state::read(&enable_state_path(Some(&id))?).ok()?;
+        Some(parse_enable_state(&benilla_ui::source::decode(&bytes)))
+    }
+
+    fn write(&self, realm: &str, character: &str, rows: &[(String, bool)]) {
+        write_enable_state(Some(&(realm.to_string(), character.to_string())), rows);
+    }
 }
 
-impl EnableStore {
-    /// A node per character, each from its own `AddOns.txt`
-    /// (`benilla-config/addons/<Realm>-<Char>.txt`); a character with no file still gets one.
-    pub(crate) fn load(realm: &str, characters: &[String]) -> Self {
-        let nodes = characters
-            .iter()
-            .map(|character| {
-                let id = (realm.to_string(), character.clone());
-                let rows = enable_state_path(Some(&id))
-                    .and_then(|p| crate::local_state::read(&p).ok())
-                    .map(|b| parse_enable_state(&benilla_ui::source::decode(&b)))
-                    .unwrap_or_default();
-                (character.clone(), EnableHash::from_rows(rows))
-            })
-            .collect();
-        Self {
-            realm: realm.to_string(),
-            nodes,
-        }
+/// The AddOn registry the glue's verbs answer from, as the reference's startup scan leaves it
+/// (`0x51c760`, before the first screen): every discovered addon, the archive's own twelve
+/// included, and the server's reply when the session has read one (`0x51da70`). Without a reply
+/// the Lua index space is empty, as in the reference. The enable files are the glue's nodes' to
+/// read and write.
+pub(crate) fn seat_glue_addons(
+    script: &mut UiScript,
+    reply: Option<&[benilla_protocol::messages::AddonRecord]>,
+) {
+    let infos = discover(script.flavor()).iter().map(info_for).collect();
+    script.register_addons(infos, None, None, None);
+    if let Some(records) = reply {
+        script.note_addon_info_records(addon_replies(records));
     }
+    script.set_addon_state_files(Box::new(AppAddonFiles));
+}
 
-    /// A node per character, none with a row, as for characters with no file; for tests that
-    /// must not read the state folder.
-    #[cfg(test)]
-    pub(crate) fn blank(realm: &str, characters: &[String]) -> Self {
-        Self {
-            realm: realm.to_string(),
-            nodes: characters
-                .iter()
-                .map(|c| (c.clone(), EnableHash::default()))
-                .collect(),
-        }
-    }
-
-    /// `0x51e470(addon, NULL, useDefault = 0)`, the explicit-only aggregate over the nodes with a
-    /// row (`0x51e5df je 0x51e60a`): `Some(v)` when all say `v` (the reference's 2 or 0), `None`
-    /// when they are mixed or there are none.
-    fn aggregate(&self, addon: &str) -> Option<bool> {
-        let mut total = 0usize;
-        let mut on = 0usize;
-        for (_, hash) in &self.nodes {
-            if let Some(v) = hash.get(addon) {
-                total += 1;
-                on += usize::from(v);
-            }
-        }
-        match (total, on) {
-            (0, _) => None,
-            (_, 0) => Some(false),
-            (t, o) if o == t => Some(true),
-            _ => None,
-        }
-    }
-
-    /// The bit a character gets, `0x51e470(addon, character, useDefault = 1)` (0 or 2 as a bool):
-    /// * an explicit row in their hash wins;
-    /// * a node with no row takes [`Self::aggregate`] (`0x51e5f0`'s self-recursion), then
-    ///   `## DefaultState` where that is undecided;
-    /// * no node at all, or no character, takes `## DefaultState`: the walk passes each
-    ///   mismatching node (`0x51e55a jne 0x51e611`) and ends with `total == 0`. From our callers a
-    ///   named character always has a node ([`store_nodes`]).
-    pub(crate) fn enabled_for(
-        &self,
-        addon: &str,
-        default_state: bool,
-        character: Option<&str>,
-    ) -> bool {
-        let Some(node) = character.and_then(|c| self.node(c)) else {
-            return default_state;
-        };
-        match node.get(addon) {
-            Some(explicit) => explicit,
-            None => self.aggregate(addon).unwrap_or(default_state),
-        }
-    }
-
-    /// The setter `0x51ea20`: `None` is every node (the glue's All), a name its one node; a name
-    /// with no node is a no-op, as the setter never creates one.
-    pub(crate) fn set(&mut self, addon: &str, character: Option<&str>, on: bool) {
-        for (name, hash) in &mut self.nodes {
-            if character.is_none_or(|c| name.eq_ignore_ascii_case(c)) {
-                hash.set(addon, on);
-            }
-        }
-    }
-
-    /// The writer `0x51ef20`, glue `SaveAddOns` (`0x46d990`): each dirty node's file, rewritten
-    /// from its hash; a clean node is skipped (`0x51ef59`) and its file left as it is.
-    pub(crate) fn save(&mut self) {
-        for (name, hash) in &mut self.nodes {
-            if let Some(rows) = hash.take_dirty() {
-                write_enable_state(Some(&(self.realm.clone(), name.clone())), &rows);
-            }
-        }
-    }
-
-    pub(crate) fn node(&self, character: &str) -> Option<&EnableHash> {
-        self.nodes
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(character))
-            .map(|(_, hash)| hash)
-    }
+/// A node per character, each from its own file; a character with no file still gets one.
+pub(crate) fn load_store(realm: &str, characters: &[String]) -> EnableStore {
+    EnableStore::load(realm, characters, &AppAddonFiles)
 }
 
 /// The store's nodes for a load: the realm's character list, plus the loading character when the
@@ -895,10 +837,7 @@ pub(super) fn open_third_party(
     script.set_addon_saved_reader(Box::new(crate::local_state::read));
     // Each enable bit through the reference's query: the character's explicit row, else what the
     // realm's other characters agree on, else the manifest's `## DefaultState`.
-    //
-    // Every node reads through `local_state`, not `std::fs`: on the page the state folder is
-    // localStorage, and these files are settings that must survive a reload there.
-    let store = EnableStore::load(
+    let store = load_store(
         identity
             .map(|(realm, _)| realm.as_str())
             .unwrap_or_default(),
@@ -1035,7 +974,7 @@ impl benilla_ui::script::AddonLoad for Walk<'_> {
         // The files, `Bindings.xml` and the saved variables run under the addon's context.
         let outer = script.swap_exec_context(benilla_ui::script::addon_load_context(
             &addon.name,
-            secure(addon.is_chain(), &addon.toc),
+            script.addon_is_secure(&addon.name),
         ));
         self.failures.extend(addon.load(script, &mut toc));
         let mut own = Status::default();
@@ -2152,10 +2091,10 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "Gone: disabled\nStays: enabled\n").unwrap();
 
-        let mut store = EnableStore::load("Realm", &["Char".to_string()]);
+        let mut store = load_store("Realm", &["Char".to_string()]);
         store.set("Stays", Some("char"), false);
         store.set("New", None, true);
-        store.save();
+        store.save(&AppAddonFiles);
 
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -2171,6 +2110,21 @@ mod tests {
             "a new row appended — {written:?}"
         );
         let _ = home;
+    }
+
+    /// The premise of [`signature_ok`]: the player's chain carries the `.toc.sig` of each of the
+    /// twelve, of the 0x114 bytes `0x6f1143` asks of it, so the reference's check reaches its
+    /// digest comparison for them. benilla stands that comparison in with the chain's provenance.
+    #[test]
+    fn the_chain_carries_a_signature_file_for_each_stock_addon() {
+        let _ = benilla_formats::wow_data_or_skip!();
+        for addon in benilla_protocol::messages::STOCK_SECURE_ADDONS {
+            let name = addon.name;
+            let sig = crate::ui_script::reference_ui::read(&format!(
+                "Interface/AddOns/{name}/{name}.toc.sig"
+            ));
+            assert_eq!(sig.map(|b| b.len()), Some(0x114), "{name}");
+        }
     }
 
     /// Seat the `SMSG_ADDON_INFO` reply hiding the secure addons, as world entry does: the Lua
@@ -2497,8 +2451,8 @@ mod tests {
             &[("ran.lua", "OnRan = true")],
         );
         // "On" is absent from the file.
-        std::fs::create_dir_all(home.join("addons")).unwrap();
-        std::fs::write(home.join("addons/Realm-Char.txt"), "Off: disabled\n").unwrap();
+        std::fs::create_dir_all(home.join("addon-state")).unwrap();
+        std::fs::write(home.join("addon-state/Realm-Char.txt"), "Off: disabled\n").unwrap();
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
@@ -2777,8 +2731,8 @@ mod tests {
             "## Interface: 11200\n## LoadOnDemand: 1\n",
             &[],
         );
-        std::fs::create_dir_all(home.join("addons")).unwrap();
-        std::fs::write(home.join("addons/Realm-Char.txt"), "Off: disabled\n").unwrap();
+        std::fs::create_dir_all(home.join("addon-state")).unwrap();
+        std::fs::write(home.join("addon-state/Realm-Char.txt"), "Off: disabled\n").unwrap();
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
@@ -2887,7 +2841,7 @@ mod tests {
             "Onerogue".to_string(),
             "Known".to_string(),
         ];
-        let store = EnableStore::load("Realm", &roster);
+        let store = load_store("Realm", &roster);
 
         // `Known` has a node and no rows: both addons inherit their unanimous aggregate.
         assert!(!store.enabled_for("Shunned", true, Some("Known")));
@@ -2896,9 +2850,14 @@ mod tests {
         // `Stranger` is on no node: each addon answers its own manifest default.
         assert!(store.enabled_for("Shunned", true, Some("Stranger")));
         assert!(!store.enabled_for("OptIn", false, Some("Stranger")));
-        // `None` (nobody picked yet) is the same epilogue.
-        assert!(store.enabled_for("Shunned", true, None));
-        assert!(!store.enabled_for("OptIn", false, None));
+        // The NULL name counts every node (`0x51e547`), so with nodes it is their aggregate: both
+        // rows off for Shunned, on for OptIn, and `Known` inherits each. With no node at all it
+        // is the same epilogue as a stranger's.
+        assert!(!store.enabled_for("Shunned", true, None));
+        assert!(store.enabled_for("OptIn", false, None));
+        let empty = load_store("Realm", &[]);
+        assert!(empty.enabled_for("Shunned", true, None));
+        assert!(!empty.enabled_for("OptIn", false, None));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -2923,7 +2882,7 @@ mod tests {
         script.run("DisableAddOn('Drop')").unwrap();
         save_enable_state(&script, Some(&id));
 
-        let written = std::fs::read_to_string(home.join("addons/Realm-Char.txt")).unwrap();
+        let written = std::fs::read_to_string(home.join("addon-state/Realm-Char.txt")).unwrap();
         assert_eq!(
             written, "Drop: disabled\n",
             "one line per hash entry (`0x51f006`), and the hash holds only the toggled addon: no \
@@ -3453,9 +3412,9 @@ mod tests {
         write_marking_addon(&home, "Host", "## LoadOnDemand: 1\n");
         write_marking_addon(&home, "Plain", "## LoadWith: Host\n");
         write_marking_addon(&home, "OnDemand", "## LoadOnDemand: 1\n## LoadWith: Host\n");
-        std::fs::create_dir_all(home.join("addons")).unwrap();
+        std::fs::create_dir_all(home.join("addon-state")).unwrap();
         std::fs::write(
-            home.join("addons/Realm-Char.txt"),
+            home.join("addon-state/Realm-Char.txt"),
             "Plain: disabled\nOnDemand: disabled\n",
         )
         .unwrap();
