@@ -874,10 +874,13 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // orbiting the camera slid the lake's shade across it by up to the probe's length. Deep water
         // reads straight down instead, `WATER_SHADOW_PROBE` yd under its own surface point — a
         // point no camera move can shift — fading over from the bed probe across one more probe
-        // length so the hand-over has no edge of its own.
-        let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, ray_len), 0.0, below);
+        // length so the hand-over has no edge of its own. Both the fade and the drop go by the
+        // vertical column, never the ray: a grazing ray is long over a hand-deep shore, and a drop
+        // past the bed lands inside the bank, which shadows it — a dark halo around the waterline.
+        let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 0.0, below);
         if (deep > 0.0) {
-            let wp_deep = in.world_position.xyz - vec3<f32>(0.0, WATER_SHADOW_PROBE - 0.05, 0.0);
+            let drop = min(WATER_SHADOW_PROBE, column_v - WATER_SHADOW_BED_LIFT);
+            let wp_deep = in.world_position.xyz - vec3<f32>(0.0, drop - 0.05, 0.0);
             let deep_z = -(view.view_from_world * vec4<f32>(wp_deep, 1.0)).z;
             let sun_deep = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp_deep, deep_z);
             water_sun = mix(water_sun, sun_deep, deep);
