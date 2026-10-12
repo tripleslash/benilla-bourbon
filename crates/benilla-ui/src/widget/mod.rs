@@ -185,10 +185,21 @@ pub struct Frame {
     /// `EnableMouseWheel`, or an `<OnMouseWheel>` script at XML load: the mask's wheel bit (3).
     /// A frame with the script but not the bit is transparent to the wheel.
     pub mouse_wheel_enabled: bool,
-    /// `EnableKeyboard` (`0x776ec0`), XML `enableKeyboard` or a key script at XML load: the
-    /// mask's char and key bits (`0x76af00`), which key delivery walks
-    /// ([`crate::script::keyboard`]); a script-less frame there declines.
-    pub keyboard_enabled: bool,
+    /// The input mask's char bit (0): membership in the char walk ([`crate::script::keyboard`]),
+    /// `0x76af00(0)`. `EnableKeyboard` (`0x776ec0`), XML `enableKeyboard` or a key script at XML
+    /// load set it with [`Self::key_enabled`]; the EditBox ctor sets it (`0x779ced`); a script-less
+    /// frame in the walk declines.
+    pub char_enabled: bool,
+    /// The mask's key bit (1): membership in the key-down walk, `0x76af00(1)`. The EditBox ctor
+    /// (`0x779cf8`) and the WorldFrame's (`0x481b09`, which has no char bit) set it.
+    pub key_enabled: bool,
+    /// When the frame last joined the char bucket (`0x764aa0`, kind 0): at its link (creation
+    /// visible, show, a strata or level change) or, on a linked frame, at the bit's own enable
+    /// (`0x76af00`). Equal-level frames walk in this order, oldest first. A [`WidgetArena`]
+    /// counter, apart from [`Self::insertion_seq`], whose draw order an enable does not touch.
+    pub char_stamp: u64,
+    /// The same for the key bucket (kind 1).
+    pub key_stamp: u64,
     /// `SetClampedToScreen`, geometry flags `0x10`: `0x767a20` shifts the rect back on screen.
     /// Every GameTooltip is born with it here; the stock tooltips get it from their template,
     /// `GameTooltipTemplate.xml:3`.
@@ -282,6 +293,8 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
+    /// The next [`Frame::char_stamp`] / [`Frame::key_stamp`].
+    next_kb_stamp: u64,
     /// Each stratum's level bound, the reference's `bucket+0x8`: one above the highest level a
     /// visible frame has linked at since the last compaction set it. It starts at 0 and only a
     /// visible link grows it ([`Self::link_bound`]); nothing else lowers it but the compaction.
@@ -348,6 +361,7 @@ impl WidgetArena {
             regions: Arena::new(),
             names: HashMap::new(),
             next_insertion: 0,
+            next_kb_stamp: 0,
             level_bound: [0; Strata::ALL.len()],
             next_created: 0,
             renumbers: 0,
@@ -441,9 +455,13 @@ impl WidgetArena {
             self.renumbers += 1;
         }
         let seq = self.next_insertion;
+        let stamp = self.next_kb_stamp;
+        self.next_kb_stamp += 1;
         let mut linked = None;
         if let Some(f) = self.frame_mut(h) {
             f.insertion_seq = seq;
+            f.char_stamp = stamp;
+            f.key_stamp = stamp;
             linked = Some((f.strata, f.level));
             self.next_insertion += 1;
             if let Some(log) = &mut self.link_log {
@@ -508,6 +526,8 @@ impl WidgetArena {
 
         let insertion_seq = self.next_insertion;
         self.next_insertion += 1;
+        let kb_stamp = self.next_kb_stamp;
+        self.next_kb_stamp += 1;
         let created = self.next_created;
         self.next_created += 1;
 
@@ -546,9 +566,12 @@ impl WidgetArena {
                 kind,
                 FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame | FrameKind::WorldFrame
             ),
-            // No kind is keyboard-enabled at creation here; the reference's EditBox
-            // (`0x779ced`/`0x779cf8`) and WorldFrame (`0x481b09`) ctors enable key input.
-            keyboard_enabled: false,
+            // The EditBox ctor enables char and key input (`0x779ced`, `0x779cf8`), the
+            // WorldFrame's key input alone (`0x481b09`); every other kind is born inert.
+            char_enabled: kind == FrameKind::EditBox,
+            key_enabled: matches!(kind, FrameKind::EditBox | FrameKind::WorldFrame),
+            char_stamp: kb_stamp,
+            key_stamp: kb_stamp,
             clamped_to_screen: matches!(kind, FrameKind::GameTooltip),
             hit_rect_insets: [0.0; 4],
             movable: false,

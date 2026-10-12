@@ -290,6 +290,12 @@ pub(crate) struct Model {
 
     /// The focused edit box (`0xcf4dc8`), taking all keys while visible; `None` admits `autoFocus`.
     pub(crate) focused_editbox: Option<FrameHandle>,
+    /// ALT is held (`0x41f8f0(2)`), as the host reads it: an alt-arrow EditBox takes the arrows
+    /// only then.
+    pub(crate) alt_down: bool,
+    /// Per key name, the frame that consumed its last key-down: where its key-up and repeats go
+    /// (`[root+code*4+0x84]`, `0x765fa2`; [`super::keyboard`]).
+    pub(crate) key_consumers: HashMap<String, FrameHandle>,
 
     /// The mouse-enabled frame under the cursor, for the next move's `OnLeave`/`OnEnter`.
     pub(crate) mouseover: Option<FrameHandle>,
@@ -1232,6 +1238,8 @@ impl Model {
             frame_events: HashMap::new(),
             all_event_frames: Vec::new(),
             focused_editbox: None,
+            alt_down: false,
+            key_consumers: HashMap::new(),
             mouseover: None,
             hover_repick: false,
             world_mouseover: None,

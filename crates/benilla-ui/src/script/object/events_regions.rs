@@ -221,9 +221,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 }
 
 /// `SetScript(name, func)`: stores the closure under a kind the VM takes ([`script_kind`]), else
-/// raises. Deviation: real 1.12 kinds nothing fires yet raise too (`OnMessageScrollChanged`, the
-/// movie frame's, and `OnInputLanguageChanged` outside a Turtle WoW VM), because an accepted
-/// handler that never runs fails silently. `OnAttributeChanged` is 2.0's, with no 1.12 slot.
+/// raises. Deviation: real 1.12 kinds nothing fires yet raise too (`OnMessageScrollChanged`, and
+/// `OnInputLanguageChanged` outside a Turtle WoW VM), because an accepted handler that never runs
+/// fails silently. The movie frame's three are accepted all the same: the stock XML sets them, and
+/// its player ([`super::super::movieframe`]) is the one thing that fires them. `OnAttributeChanged`
+/// is 2.0's, with no 1.12 slot.
 fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> mlua::Result<()> {
     let flavor = lua.app_data_ref::<Model>().expect("model").flavor;
     let kind = script_kind(flavor, name)

@@ -93,6 +93,8 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+pub(crate) use keyboard::enable_for_script;
+pub use keyboard::{KeyUp, KeyWalk};
 mod layout;
 mod layout_cache;
 mod loot;
@@ -105,6 +107,7 @@ mod measure;
 mod merchant;
 mod messageframe;
 mod minimap;
+mod movieframe;
 pub mod nameplate;
 pub use nameplate::{PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
 mod model;
@@ -424,7 +427,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 41] = [
+const SCRIPT_KINDS: [&str; 44] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -478,9 +481,15 @@ const SCRIPT_KINDS: [&str; 41] = [
     "OnDoubleClick",
     // The layout event (base map `0x76a0d0`, `+0x120`), fired by the resolve pass on a size change.
     "OnSizeChanged",
-    // The key channels, fired by [`keyboard`]'s walk (`0x765f10`). `OnKeyUp` never fires, as the
-    // host feeds no key-up, but a frame carrying only `OnKeyUp` still consumes every key-down and
-    // runs nothing, the reference's own asymmetry.
+    // The movie frame's three (script map `0x78c2e0`): fired by its player alone, which does not
+    // exist here ([`movieframe`]), so they are stored and never run.
+    "OnMovieFinished",
+    "OnMovieShowSubtitle",
+    "OnMovieHideSubtitle",
+    // The key channels: `OnChar` and `OnKeyDown` fired by [`keyboard`]'s walks (`0x765df0`,
+    // `0x765f10`), `OnKeyUp` by the key-up dispatcher (`0x765fd0`) on the frame that took the
+    // key's down. A frame carrying only `OnKeyUp` still consumes every key-down and runs nothing
+    // on it, the reference's own asymmetry.
     "OnChar",
     "OnKeyDown",
     "OnKeyUp",
@@ -571,6 +580,7 @@ fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
     simplehtml::install(&lua)?;
     slider::install(&lua)?;
     colorselect::install(&lua)?;
+    movieframe::install(&lua)?;
     modelframe::install(&lua)?;
 
     // `0x4587f0` (table `0x835a50`): `PlaySound`, `PlayMusic`, `PlaySoundFile`, `StopMusic`.
@@ -1146,16 +1156,17 @@ impl UiScript {
 
     // ── Keyboard entry ───────────────────────────────────────────────────────────────────────────
     //
-    // Keys arrive by name; the host maps its keycodes. The box routing: a focused box consumes
-    // every event; with none focused, the topmost visible `autoFocus` box takes focus and
+    // Keys arrive by name; the host maps its keycodes. Every EditBox is a frame in the key and
+    // char walks ([`keyboard`]): the focused box consumes every event at its own strata and level;
+    // with none focused, the first visible `autoFocus` box in walk order takes focus and
     // processes that same event; otherwise nothing is consumed.
 
     /// A typed character (UTF-8) from the host: a focused box inserts it (numeric, cap and
     /// password rules apply) or, for Ctrl+A's control code, selects all. `true` if consumed.
     pub fn char_input(&mut self, text: &str) -> bool {
-        // The frame walk first ([`keyboard`]), the focused box a participant at its own strata and
-        // level, as in the reference's one dispatcher; an unconsumed event goes to the box routing.
-        keyboard::char_input(&self.lua, text) || editbox::char_input(&self.lua, text)
+        // The one dispatcher (`0x765df0`): the boxes are frames in the walk, at their own strata
+        // and level.
+        keyboard::char_input(&self.lua, text)
     }
 
     /// Paste host clipboard text into the focused EditBox as one edit: newlines survive only in a
@@ -1164,18 +1175,45 @@ impl UiScript {
         editbox::paste(&self.lua, text)
     }
 
-    /// A non-character key by name (`"ENTER"`, `"ESCAPE"`, `"TAB"`); editing keys come through
-    /// [`Self::editbox_action`]. A focused box consumes a key even when it does nothing with it.
-    pub fn key_input(&mut self, key: &str) -> bool {
-        // The same two stages as `char_input`.
-        keyboard::key_input(&self.lua, key) || editbox::key_input(&self.lua, key)
+    /// A key pressed, by name (`"ENTER"`, `"A"`, `"SHIFT"`, `"UNKNOWN"`): the key-down walk
+    /// (`0x765f10`), which an EditBox joins at its own place. `Box` means the walk reached a box
+    /// that took the key, and the host then runs the key's editing action on it
+    /// ([`Self::editbox_action`], [`Self::paste`]); `Frame`, a frame that took it, and the host
+    /// runs neither the action nor the key's binding (`0x76b7d0`).
+    pub fn key_down(&mut self, key: &str) -> KeyWalk {
+        keyboard::key_down(&self.lua, key)
     }
 
-    /// An editing key (BACKSPACE, DELETE, the arrows, HOME, END) offered to the keyboard frames
-    /// before the focused box gets it as an [`EditAction`]. On `true` the caller dispatches neither
-    /// the action nor the key's binding (consumption suppresses it, `0x76b7d0`).
+    /// A key held down and repeating, by name: the auto-repeat dispatcher (`0x766070`) hands it to
+    /// the frame that took the press, a stub on a plain frame and the key-down again on a box.
+    pub fn key_repeat(&mut self, key: &str) -> KeyWalk {
+        keyboard::key_repeat(&self.lua, key)
+    }
+
+    /// A key released, by the name its press went by: the key-up dispatcher (`0x765fd0`) runs
+    /// `OnKeyUp` on the frame that consumed that key's last down.
+    pub fn key_up(&mut self, key: &str) -> KeyUp {
+        keyboard::key_up(&self.lua, key)
+    }
+
+    /// A binding took this key's press: the world frame is its consumer (`0x483b70`).
+    pub fn note_world_key(&mut self, key: &str) {
+        keyboard::note_world_key(&self.lua, key);
+    }
+
+    /// Whether ALT is held, which an alt-arrow EditBox reads for the arrows (`0x77b1b3`).
+    pub fn set_alt_down(&mut self, alt: bool) {
+        self.model_mut().alt_down = alt;
+    }
+
+    /// Whether the key-down walk takes `key`, a frame or a box.
+    pub fn key_input(&mut self, key: &str) -> bool {
+        self.key_down(key) != KeyWalk::Declined
+    }
+
+    /// Whether a frame, not a box, takes `key`.
     pub fn frame_key_input(&mut self, key: &str) -> bool {
-        keyboard::frame_key_input(&self.lua, key)
+        self.key_down(key) == KeyWalk::Frame
     }
 
     /// One text-editing operation on the focused EditBox, from the host's per-OS keymap.

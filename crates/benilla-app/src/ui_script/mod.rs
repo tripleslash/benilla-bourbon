@@ -22,6 +22,8 @@ pub(crate) mod glue;
 pub(crate) mod glue_mgr;
 mod input;
 #[cfg(test)]
+pub(crate) use input::feed_keys;
+#[cfg(test)]
 mod layer_tests;
 mod load_log;
 mod manifest;
@@ -320,7 +322,13 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiClock>()
             .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open`: the VM's first load is the chain's `GlobalStrings.lua`.
-            .add_systems(Startup, setup_script.after(benilla_assets::AssetSet::Open))
+            .add_systems(
+                Startup,
+                // After the CVars load: the glue screens read the agreements as they come up.
+                setup_script
+                    .after(benilla_assets::AssetSet::Open)
+                    .after(crate::cvars::CvarLoad),
+            )
             // The in-game UI loads on world entry, as the reference's does, once the loading cover
             // has presented, so its ~0.5 s never stalls the cover's first frame.
             .add_systems(
@@ -727,6 +735,10 @@ pub(crate) fn load_ui_for_test(script: &benilla_ui::script::UiScript, entry: &st
 
 #[cfg(test)]
 mod cinematic_tests;
+#[cfg(test)]
+mod glue_input_tests;
+#[cfg(test)]
+mod key_walk_tests;
 
 #[cfg(test)]
 mod cast_tests;
