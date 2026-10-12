@@ -974,6 +974,39 @@ fn the_mouseover_token_carries_the_hovered_guid() {
     );
 }
 
+/// `UnitCanAssist` (`0x516bb0` → `CanAssist` `0x6066f0`) answers for `"mouseover"` as for any held
+/// unit, so a macro option's `[@mouseover,help]` holds over a friend: hovering ourselves (friendly
+/// by the self rung, `0x606200`) answers 1, and leaving the hover nil.
+#[test]
+fn the_mouseover_token_answers_can_assist() {
+    let (mut app, _, _) = mouseover_app();
+    let me = app
+        .world_mut()
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(app.world())
+        .unwrap();
+    // A player's `UNIT_FIELD_FLAGS` carries PLAYER_CONTROLLED (`0x8`), `CanAssist`'s passing arm.
+    app.world_mut()
+        .entity_mut(me)
+        .get_mut::<ObjectStore>()
+        .unwrap()
+        .0
+        .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+            benilla_protocol::field::FIELD_UNIT_FLAGS,
+            0x8,
+        )]));
+    let can_assist = r#"return UnitCanAssist("player", "mouseover")"#;
+
+    hover_unit(&mut app, me, ME);
+    assert_eq!(
+        eval(&mut app, can_assist),
+        Some(1),
+        "we can assist ourselves"
+    );
+    hover(&mut app, Hovered::default(), HoveredObject::default());
+    assert_eq!(eval(&mut app, can_assist), None, "no mouseover");
+}
+
 /// `UnitCreatureType("mouseover")` goes through the resolver `0x605570` for a hovered player as
 /// for a creature: a druid in Cat Form is a Beast, and out of form a Humanoid by race. The plate
 /// itself is built for a player from its race and class, whatever type the snapshot carries.

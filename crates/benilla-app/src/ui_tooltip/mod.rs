@@ -107,6 +107,8 @@ fn drive_mouseover_tooltip(
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     rx: crate::target::ReactionInputs,
+    // A unit's owner by guid, for `CanAssist`'s owner leg.
+    index: Option<Res<crate::net::GuidIndex>>,
     // The lock chain's data, shared with the click router (`target::lock`) so hover and click
     // agree on whether a lock can be opened.
     go_inputs: crate::target::lock::GoLockInputs,
@@ -148,6 +150,17 @@ fn drive_mouseover_tooltip(
         // The hovered guid, the pair `0x492890` writes to `0xb4e2c8`/`0xb4e2cc` and the token
         // resolver `0x515970` reads for `"mouseover"`, so `UnitIsUnit` can match it.
         let mut s = snapshot(store, guid, name, reaction, chr, types);
+        // `UnitCanAttack` and `UnitCanAssist` on `"mouseover"` read these, as on any held unit
+        // (`ui_unit::held`).
+        let factions = rx.factions.as_deref();
+        s.can_attack =
+            crate::target::can_attack(Some(store), factions, &rx.reputations, self_store);
+        let owner = |owner: u64| {
+            let entity = index.as_ref()?.0.get(&owner).copied()?;
+            stores.get(entity).ok().cloned()
+        };
+        s.can_assist =
+            crate::target::can_assist(Some(store), factions, &rx.reputations, self_store, owner);
         enrich_unit(
             &mut s,
             guid,
