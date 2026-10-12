@@ -790,6 +790,13 @@ impl WinitAppRunnerState {
 
         if self.app.plugins_state() == PluginsState::Cleaned {
             self.app.update();
+            // benilla fork — fork: fsr (FORK.md): the hook after the update, in the same
+            // task (see `AfterUpdate`).
+            if let Some(crate::AfterUpdate(hook)) =
+                self.app.world().get_resource::<crate::AfterUpdate>().copied()
+            {
+                hook(self.app.world_mut());
+            }
         }
     }
 

@@ -26,6 +26,15 @@ world's last change tick exactly as a fresh `world.query()` did — a `SystemSta
 against its own last run instead. The focus read is read-only and copies `WinitSettings` out of the
 borrow, since `redraw_requested` reads it again after mutating the runner.
 
+## The second delta: a hook after the update
+
+`AfterUpdate(fn(&mut World))` (`src/lib.rs`), a resource the runner looks up after each
+`App::update` in `run_app_update` (`src/state.rs`) and calls with the main world. It runs in the
+same task as the update, which on the web is the same `requestAnimationFrame` callback, after the
+sub-apps have run. Frame generation (`benilla-world/src/fsr/cadence.rs`) uses it in the browser,
+where there is no render thread: a held frame presents and then runs the next game update behind
+that present, so the world frame after it only extracts and renders. Absent, nothing changes.
+
 Search for `benilla fork` to find every hunk.
 
 ## Verifying diff
@@ -34,4 +43,4 @@ Search for `benilla fork` to find every hunk.
 diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
 ```
 
-The diff shows only the `src/state.rs` hunks above, plus this file.
+The diff shows only the `src/state.rs` hunks above, `AfterUpdate` in `src/lib.rs`, plus this file.

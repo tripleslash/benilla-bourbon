@@ -41,6 +41,13 @@ use crate::{
     state::winit_runner,
 };
 
+/// benilla fork — fork: fsr (FORK.md): called by the runner after each `App::update` it
+/// drives, in the same task (on the web, the same `requestAnimationFrame` callback), once the
+/// sub-apps have run and the main world's trackers are cleared. Frame generation's held frame runs
+/// the next game update here, behind its present.
+#[derive(Resource, Clone, Copy)]
+pub struct AfterUpdate(pub fn(&mut World));
+
 pub mod accessibility;
 pub mod converters;
 mod cursor;
