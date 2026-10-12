@@ -19,6 +19,7 @@ mod cloud_bake;
 pub mod gi;
 pub mod lights;
 pub mod look;
+mod meter;
 pub mod shadow;
 mod sky;
 pub mod sun_arc;
@@ -347,6 +348,7 @@ impl Plugin for ModernLightingPlugin {
                 sun_arc::plugin,
                 shadow::plugin,
                 look::plugin,
+                meter::MeterPlugin,
                 sky::plugin,
                 cloud_bake::plugin,
                 volumetrics::plugin,

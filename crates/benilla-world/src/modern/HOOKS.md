@@ -199,3 +199,4 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 - `particles/render.rs`: a `modern` bit in `EffectPipelineKey` (P1)
 - `benilla-app/src/player_shadow.rs`, `blob_shadow.rs`: classic-only gate (P2)
 - `benilla-app/assets/ui/OptionsFrame.xml`: one lighting row block (P7)
+- `ffx_glow.rs`: `FfxGlow`'s state and `ffx_glow_pass` read by `modern/meter.rs`, the auto-exposure's screen meter, which runs before the combine

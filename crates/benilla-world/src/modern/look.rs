@@ -18,7 +18,7 @@
 //! terrain chunk under the camera. `$WOW_MODERN_ZONE` (browser `?modern_zone=`) pins one for A/B.
 //! Looks cross-fade over about two seconds.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use bevy::prelude::*;
 
@@ -422,13 +422,14 @@ pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
-/// **The light auto-exposure**: it lifts a dark light into visible brightness and does nothing
-/// else. Below a dusk light ([`AUTO_EXPOSURE_DARK`]) it makes up about two thirds of the shortfall,
-/// in stops; at and above it, every day, it is exactly 1. It meters the
-/// AUTHORED rows (the ambient with its night floor, and the sun or moon diffuse at a typical
-/// incidence) rather than the screen, so a camera turn never moves it, and it leaves the zone
-/// look's key and fill alone: those darken a canopy on purpose. It only ever brightens, by at most
-/// [`AUTO_EXPOSURE_MAX`]: a night still reads as night.
+/// **The auto-exposure**: it lifts a dark picture into visible brightness and does nothing else.
+/// It meters the screen: the scene's log-average luminance ([`super::meter`]) as the zone look
+/// exposes it, so a dark zone, a night and deep shade all lift as the eye would adapt. Below
+/// [`AUTO_EXPOSURE_TARGET`] it makes up about two thirds of the shortfall, in stops; at and above
+/// it, an open day, it is exactly 1. It only ever brightens, by at most [`AUTO_EXPOSURE_MAX`]: a
+/// night still reads as night. Until the meter has a reading (boot, its pipeline compiling, no
+/// world view) the AUTHORED rows stand in (the ambient with its night floor, and the sun or moon
+/// diffuse at a typical incidence, against [`AUTO_EXPOSURE_DARK`]).
 ///
 /// fork: 0.65 since 2026-10-12 (the director's call), from 0.5, with the threshold and the ceiling
 /// below raised beside it: at the first numbers the lift was too slight to notice.
@@ -441,6 +442,54 @@ const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.3; 3], [0.36; 3]);
 const AUTO_EXPOSURE_MAX: f32 = 2.25;
 /// The auto-exposure's time constant, in seconds — an eye adapting, not a meter snapping.
 const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
+/// The exposed scene key (log-average linear luminance) below which the lift begins: under an
+/// open daytime frame's, so a day is left alone. `$WOW_AUTO_EXPOSURE_TARGET` (browser
+/// `?auto_exposure_target=`) overrides it live, for tuning.
+const AUTO_EXPOSURE_TARGET: f32 = 0.06;
+/// Seconds without a new meter reading before the authored rows stand in again.
+const METER_STALE_SECONDS: f32 = 1.0;
+
+/// The screen meter's last scene key (f32 bits) and how many it has published.
+static SCENE_KEY: AtomicU32 = AtomicU32::new(0);
+static SCENE_KEY_SEQ: AtomicU32 = AtomicU32::new(0);
+/// Whether this frame wants the meter: a modern frame with the auto-exposure on.
+static METER_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// The meter's reading: the scene's log-average linear luminance, before exposure.
+pub(super) fn publish_scene_key(key: f32) {
+    SCENE_KEY.store(key.to_bits(), Ordering::Relaxed);
+    SCENE_KEY_SEQ.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Whether the meter's pass should run this frame.
+pub(super) fn meter_wanted() -> bool {
+    METER_WANTED.load(Ordering::Relaxed)
+}
+
+/// The exposure lift a metered scene asks for under the look's own exposure: 1 at `target` and
+/// above, rising toward [`AUTO_EXPOSURE_MAX`] as the picture darkens.
+fn screen_lift(scene_key: f32, look_exposure: f32, target: f32) -> f32 {
+    (target / (scene_key * look_exposure).max(1e-5))
+        .powf(AUTO_EXPOSURE_STRENGTH)
+        .clamp(1.0, AUTO_EXPOSURE_MAX)
+}
+
+fn exposure_target() -> f32 {
+    crate::launch_env::live_var("WOW_AUTO_EXPOSURE_TARGET")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(AUTO_EXPOSURE_TARGET)
+}
+
+/// The screen meter as [`update_look`] follows it: the last reading's sequence number, seconds
+/// since it moved, and the debug line's clock.
+#[derive(Default)]
+struct MeterWatch {
+    seq: u32,
+    age: f32,
+    seen: bool,
+    log: f32,
+}
 
 /// The linear luminance a pair of sRGB light rows lights a surface with: the ambient whole, the
 /// diffuse at half (a typical N·L).
@@ -606,12 +655,16 @@ fn update_look(
     mut look: ResMut<ActiveLook>,
     mut probe: Local<(f32, Option<u32>)>,
     mut adapted: Local<Option<f32>>,
+    mut watch: Local<MeterWatch>,
 ) {
+    let auto_on = auto.is_none_or(|a| a.0);
+    METER_WANTED.store(active.is_modern() && auto_on, Ordering::Relaxed);
     if !active.is_modern() {
         if look.0 != ZoneLook::NEUTRAL {
             look.0 = ZoneLook::NEUTRAL;
         }
         *adapted = None;
+        *watch = MeterWatch::default();
         publish(ZoneLook::NEUTRAL, 1.0);
         return;
     }
@@ -644,18 +697,57 @@ fn update_look(
     }
     // The first modern frame takes the lift whole — entering the world at night should not open on
     // a second and a half of the eye adjusting.
-    let lift = match (lighting.as_deref(), auto.is_none_or(|a| a.0)) {
-        (Some(l), true) => auto_exposure(l),
-        _ => 1.0,
+    let authored = lighting.as_deref().map_or(1.0, auto_exposure);
+    // The meter's reading while it is fresh; the authored rows until then.
+    let seq = SCENE_KEY_SEQ.load(Ordering::Relaxed);
+    if seq != watch.seq {
+        watch.seq = seq;
+        watch.age = 0.0;
+        watch.seen = true;
+    } else {
+        watch.age += time.delta_secs();
+    }
+    let scene_key = (watch.seen && watch.age < METER_STALE_SECONDS)
+        .then(|| f32::from_bits(SCENE_KEY.load(Ordering::Relaxed)));
+    let lift = match (auto_on, scene_key) {
+        (false, _) => 1.0,
+        (true, Some(key)) => screen_lift(key, look.0.exposure, exposure_target()),
+        (true, None) => authored,
     };
     let eye = adapted.get_or_insert(lift);
     *eye += (lift - *eye) * (1.0 - (-time.delta_secs() / AUTO_EXPOSURE_SECONDS).exp());
+    // `WOW_LOOK_DEBUG=meter` (browser `?look_debug=meter`): the meter and the lift, every 2 s.
+    watch.log += time.delta_secs();
+    if watch.log >= 2.0 {
+        watch.log = 0.0;
+        if crate::launch_env::live_var("WOW_LOOK_DEBUG").is_some_and(|v| v.trim() == "meter") {
+            info!(
+                "LOOK_METER zone={:?} scene_key={:?} look_exposure={:.2} authored_lift={authored:.2} lift={lift:.2} eye={:.2}",
+                zone, scene_key, look.0.exposure, *eye
+            );
+        }
+    }
     publish(look.0, *eye);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen lift leaves an open day alone, rises as the exposed picture darkens, counts the
+    /// look's own exposure, and never passes its ceiling.
+    #[test]
+    fn the_screen_lift_only_brightens_a_dark_picture() {
+        let t = AUTO_EXPOSURE_TARGET;
+        assert_eq!(screen_lift(t, 1.0, t), 1.0);
+        assert_eq!(screen_lift(4.0 * t, 1.0, t), 1.0);
+        let dusk = screen_lift(0.5 * t, 1.0, t);
+        let dark = screen_lift(0.25 * t, 1.0, t);
+        assert!(dusk > 1.0 && dark > dusk, "{dusk} {dark}");
+        // A look that exposes the same scene lower asks for more.
+        assert!(screen_lift(t, ZoneLook::EERIE.exposure, t) > 1.0);
+        assert_eq!(screen_lift(0.0, 1.0, t), AUTO_EXPOSURE_MAX);
+    }
     use crate::modern::srgb_to_linear;
 
     /// Lit-over-shadowed luminance for a typical forest noon (ambient 0.42, diffuse 0.95, gamma): the
