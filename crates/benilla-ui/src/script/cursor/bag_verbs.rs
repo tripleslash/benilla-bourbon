@@ -64,6 +64,10 @@ pub(super) fn put_item_in_bag(model: &mut Model, live: u32) -> bool {
     if !accepts(live) {
         return false;
     }
+    // Player control, and an open bank for a bank bag slot (`0x4c7c32`, `0x4c7c40`-`0x4c7c55`).
+    if !model.player_control || (BANK_BAG_INV_SLOTS.contains(&live) && model.bank.is_none()) {
+        return false;
+    }
     // An empty or non-item cursor answers nil and sends nothing. At an occupied slot the
     // reference clears such a cursor (`0x4c7ce4`, `0x4c7eaf`), buying a held vendor row first
     // (`0x4c7e66`).
@@ -144,21 +148,39 @@ pub(super) fn put_item_in_backpack(model: &mut Model) -> bool {
     true
 }
 
-/// `PickupBagFromSlot(inventorySlot)` (`0x4c7b00`): clears a held payload before it looks at the
-/// slot, where the reference clears only a held item (`0x4c7b70`, `0x4c7b79`); with nothing held it
-/// skips the clear and its `CURSOR_UPDATE`, as the reference does. The clear's events run before
-/// the slot is read, so its `CURSOR_UPDATE` handler sees the empty cursor. Takes only a container
-/// (`0x4c7bb3`), and never places or swaps. The client has no empty-bag rule: the server refuses
-/// with `EQUIP_ERR_CAN_ONLY_DO_WITH_EMPTY_BAGS`.
+/// `PickupBagFromSlot(inventorySlot)` (`0x4c8fa0` into `0x4c7b00`). Past its gates, player
+/// control and an open bank for a bank bag slot (`0x4c7b33`, `0x4c7b40`-`0x4c7b55`), it clears
+/// the cursor only when an item is held (`0x4c7b6a`-`0x4c7b79`), so a spell or coins survive a
+/// pickup that does not happen. An empty slot goes to the paper-doll handler (`0x4c7b9b`); an
+/// occupant that is no container, or is locked, returns (`0x4c7bbf`, `0x4c7bc8`); a container is
+/// picked up, its setter's clear dropping any other payload. It never places or swaps, and the
+/// client has no empty-bag rule: the server refuses with `EQUIP_ERR_CAN_ONLY_DO_WITH_EMPTY_BAGS`.
 pub(super) fn pickup_bag_from_slot(lua: &Lua, live: u32) {
     if !accepts(live) {
         return;
     }
+    let (gated, occupied) = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let gated =
+            !model.player_control || (BANK_BAG_INV_SLOTS.contains(&live) && model.bank.is_none());
+        let occupied = usize::try_from(live)
+            .ok()
+            .and_then(|slot| model.inv_slot("player", slot))
+            .is_some_and(|s| s.item_id != 0);
+        (gated, occupied)
+    };
+    if gated {
+        return;
+    }
     verb(lua, |model| {
-        if model.cursor.is_some() {
+        if matches!(model.cursor, Some(CursorPayload::Item(_))) {
             clear_cursor(model);
         }
     });
+    if !occupied {
+        super::doll::pickup_inventory_item(lua, live);
+        return;
+    }
     let picked = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         grab_bag(&model, live)
@@ -306,6 +328,7 @@ mod tests {
     #[test]
     fn an_empty_bag_slot_equips_the_held_bag_and_still_answers_nil() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(Default::default());
         s.run("PickupContainerItem(0, 1)").unwrap();
@@ -325,14 +348,18 @@ mod tests {
         assert!(s.take_bag_autostores().is_empty(), "an equip, not a store");
     }
 
+    /// An empty slot goes to the doll handler (`0x4c7c00` into `0x4c7300`), where an ordinary item
+    /// misfits a bag slot and is auto-equipped (`0x4c78ef`); the answer stays nil.
     #[test]
-    fn an_empty_bag_slot_refuses_an_ordinary_item() {
+    fn an_empty_bag_slot_auto_equips_an_ordinary_item() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.run("PickupContainerItem(0, 2)").unwrap();
 
         assert!(s.eval::<bool>("return PutItemInBag(64) == nil").unwrap());
-        assert!(s.cursor_item().is_some(), "refused, kept");
+        assert!(s.cursor_item().is_none());
+        assert_eq!(s.take_container_autoequips(), vec![(0, 2)]);
         assert!(s.take_container_moves().is_empty());
         assert!(s.take_bag_autostores().is_empty());
     }
@@ -340,6 +367,7 @@ mod tests {
     #[test]
     fn an_occupied_bag_slot_swaps_with_a_held_bag_and_answers_one() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
         s.run("PickupContainerItem(0, 1)").unwrap();
@@ -361,6 +389,7 @@ mod tests {
     #[test]
     fn an_occupied_bag_slot_auto_stores_an_ordinary_item() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
         s.run("PickupContainerItem(0, 2)").unwrap();
@@ -402,6 +431,7 @@ mod tests {
     #[test]
     fn the_answer_is_the_number_one_not_the_boolean_true() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
         s.run("PickupContainerItem(0, 2)").unwrap();
@@ -429,6 +459,7 @@ mod tests {
     #[test]
     fn pickup_bag_from_slot_takes_the_bag_and_returns_nothing() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_bank_bag_slots(one_bank_bag());
         assert_eq!(
             s.arity("PickupBagFromSlot(64)").unwrap(),
@@ -444,8 +475,9 @@ mod tests {
     }
 
     #[test]
-    fn pickup_bag_from_slot_drops_whatever_was_held_first() {
+    fn pickup_bag_from_slot_drops_a_held_item_first() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(Default::default());
         s.run("PickupContainerItem(0, 1)").unwrap();
@@ -463,6 +495,7 @@ mod tests {
     #[test]
     fn pickup_bag_from_slot_fires_the_clear_before_the_grab() {
         let mut s = UiScript::new().unwrap();
+        s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
         s.run("PickupContainerItem(0, 2)").unwrap();
@@ -517,5 +550,52 @@ mod tests {
         s.set_bank_bag_slots(bags);
         s.run("PickupBagFromSlot(64)").unwrap();
         assert!(s.cursor_item().is_none(), "locked — refused");
+    }
+
+    /// Only a held item is cleared up front (`0x4c7b6a`-`0x4c7b79`): a spell survives an empty
+    /// slot, which goes to the doll handler (`0x4c7b9b`), and is dropped by a real pickup's
+    /// setter. A bank bag slot needs the bank open (`0x4c7b40`-`0x4c7b55`).
+    #[test]
+    fn pickup_bag_from_slot_keeps_another_payload_unless_it_picks_up() {
+        use crate::script::cursor::{CursorPayload, CursorSpell};
+        let mut s = UiScript::new().unwrap();
+        s.set_bank_bag_slots(one_bank_bag());
+        let spell = CursorPayload::Spell(CursorSpell {
+            spell_id: 133,
+            texture: None,
+            passive: false,
+        });
+        s.set_cursor_for_test(spell.clone());
+        s.run("PickupBagFromSlot(64)").unwrap();
+        assert_eq!(
+            s.cursor_payload(),
+            Some(spell.clone()),
+            "the bank is closed"
+        );
+        s.set_bank(Some(Default::default()));
+        s.run("PickupBagFromSlot(65)").unwrap();
+        assert_eq!(s.cursor_payload(), Some(spell), "an empty slot keeps it");
+        s.run("PickupBagFromSlot(64)").unwrap();
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(64));
+    }
+
+    /// A bank bag slot answers nil with the bank closed, in `PutItemInBag` (`0x4c7c40`-`0x4c7c55`)
+    /// and in the doll handler it reaches for an empty slot (`0x4c7366`-`0x4c7386`): the held item
+    /// stays, nothing is sent.
+    #[test]
+    fn a_bank_bag_slot_needs_the_bank_open() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.set_bank_bag_slots(one_bank_bag());
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        for live in [64, 65] {
+            assert!(s
+                .eval::<bool>(&format!("return PutItemInBag({live}) == nil"))
+                .unwrap());
+            s.run(&format!("PickupInventoryItem({live})")).unwrap();
+        }
+        assert!(s.cursor_item().is_some(), "kept");
+        assert!(s.take_container_moves().is_empty());
+        assert!(s.take_container_autoequips().is_empty());
     }
 }

@@ -324,8 +324,6 @@ fn pickup_spell(lua: &Lua, id: u32, book_type: &str) -> bool {
             })
         } else {
             Some(CursorPayload::Spell(CursorSpell {
-                book_slot: id,
-                book_type: book_type.to_string(),
                 spell_id: slot.spell_id,
                 texture: slot.texture.clone(),
                 passive: slot.passive,
@@ -970,7 +968,7 @@ mod tests {
             matches!(
                 s.cursor_payload(),
                 Some(crate::script::CursorPayload::Spell(c))
-                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+                    if c.spell_id == 133
             ),
             "{:?}",
             s.cursor_payload()
@@ -1026,7 +1024,7 @@ mod tests {
         assert!(s.cursor_payload().is_none());
         assert_eq!(
             crate::script::tick::heard::take(&s),
-            ["ACTIONBAR_HIDEGRID nil", "CURSOR_UPDATE nil"]
+            ["ACTIONBAR_HIDEGRID 1", "CURSOR_UPDATE nil"]
         );
         // Another spell held: the clear is all (`0x4b32aa`).
         assert!(pickup_spell(&s.lua, 1, "spell"));

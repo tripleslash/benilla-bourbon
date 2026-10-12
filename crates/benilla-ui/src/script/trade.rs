@@ -70,6 +70,35 @@ impl super::UiScript {
         self.model_mut().trade = state;
     }
 
+    /// `UnlockTradeItems` (`0x4bfcf0`), which the `CANCELED`, `COMPLETE` and `CLOSE_WINDOW` status
+    /// arms run before the window closes (`0x4bf837`, `0x4bf859`, `0x4bf87e`): every item our
+    /// slots held unlocks, one `ITEM_LOCK_CHANGED` each (`0x4bfd03`), fired now. A local
+    /// `CloseTrade` (`0x4bfdc0`) never runs it; the server's `CANCELED` does.
+    pub fn unlock_trade_items(&mut self) {
+        let offered = std::mem::take(&mut self.model_mut().trade_offered);
+        for _ in offered.iter().flatten() {
+            self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
+        }
+    }
+
+    /// `InvalidateTradeSlot` (`0x4bfbd0`) for our 0-based slot, from the `ONLY_CONJURED` arm
+    /// (`0x4bf9fd`) and an own-side `SMSG_TRADE_STATUS_EXTENDED` that empties it (`0x5d4ad3`,
+    /// `0x5d4b33`): the item it held unlocks (`0x4bfc0a`), the slot empties, and
+    /// `TRADE_PLAYER_ITEM_CHANGED(slot)` fires (`0x4bfc3f`), now.
+    pub fn invalidate_trade_slot(&mut self, slot: u8) {
+        let cell = usize::from(slot);
+        if cell >= TRADE_SLOTS {
+            return;
+        }
+        if self.model_mut().trade_offered[cell].take().is_some() {
+            self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
+        }
+        self.fire_event(
+            "TRADE_PLAYER_ITEM_CHANGED",
+            vec![super::ScriptValue::Int(i64::from(slot) + 1)],
+        );
+    }
+
     /// Drain the tokens `InitiateTrade` queued; the app sends `CMSG_INITIATE_TRADE` for each.
     pub fn take_trade_initiates(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().trade_initiates)
@@ -137,42 +166,62 @@ fn gold(model: &Model, pick: impl Fn(&TradeState) -> &TradeSideState) -> u32 {
     model.trade.as_ref().map(pick).map_or(0, |side| side.gold)
 }
 
-/// `ClickTradeButton(id)` on our slot (`TradeFrame.xml:135`): a held bag item is queued for
-/// `CMSG_SET_TRADE_ITEM` and the cursor cleared, the app filling our column itself since vmangos
-/// echoes a placement only to the partner (`TradeData.cpp:81`); an empty cursor on a filled slot
-/// queues a clear. Any other payload stays on the cursor.
-fn click_trade_button(model: &mut Model, id: u32) {
-    // Coins on the cursor go into the offer, the index unread (`0x4bfe34`).
-    if matches!(model.cursor, Some(CursorPayload::Money(_))) {
+/// `ClickTradeButton(id)` on our slot (`TradeFrame.xml:135`, `0x4bfdf0`). Coins on the cursor go
+/// into the offer, the index unread (`0x4bfe34`). Otherwise the held item, or none, is compared
+/// with the slot's (`0x4c0017`): the same, nothing on both sides included, is `ClearCursor(1,1)`
+/// (`0x4c0026`), which drops any other payload. Else the slot takes the held item, a
+/// `CMSG_SET_TRADE_ITEM`, or empties, a `CMSG_CLEAR_TRADE_ITEM` (`0x4bfa70`), and
+/// `SetCursorItem` puts the slot's old item back on the cursor, whole (count 0, `0x4c004e`),
+/// lifting no lock when the send went (`0x4c004a`-`0x4c0064`), so a placed item stays locked in
+/// its bag. The app fills our column
+/// itself, since vmangos echoes a placement only to the partner (`TradeData.cpp:81`).
+fn click_trade_button(lua: &Lua, id: u32) {
+    let money = super::tick::verb(lua, |model| {
+        if !matches!(model.cursor, Some(CursorPayload::Money(_))) {
+            return false;
+        }
         cursor::money::add_trade_money(model);
+        true
+    });
+    if money {
         return;
     }
-    match model.cursor.clone() {
-        Some(CursorPayload::Item(item)) => {
-            let (bag, slot) = (item.bag, item.slot);
-            model.trade_set_items.push((id, bag, slot));
-            // The reference passes `SetCursorItem` the send's failure as its unlock (`0x4c005f`),
-            // so a sent item's clear is `ClearCursor(0,1)`. The lock event reports the engine's
-            // lock lifting with the cursor ([`cursor::client_locked`]), which holds no trade slot.
-            cursor::clear(model, cursor::Clear::KEEP_LOCK);
-            cursor::raise_lock_changed(model);
-        }
-        None => {
-            let filled = matches!(
-                id.checked_sub(1).and_then(|i| {
-                    model
-                        .trade
-                        .as_ref()
-                        .and_then(|t| t.player.slots.get(i as usize))
-                }),
-                Some(Some(_))
-            );
-            if filled {
-                model.trade_clear_items.push(id);
-            }
-        }
-        Some(_) => {}
+    // A slot outside the seven reads as empty (`0x4bffc5`-`0x4c0001`).
+    let index = id
+        .checked_sub(1)
+        .map(|i| i as usize)
+        .filter(|&i| i < TRADE_SLOTS);
+    let (held, old) = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let held = match &model.cursor {
+            Some(CursorPayload::Item(item)) => Some(item.clone()),
+            _ => None,
+        };
+        (held, index.and_then(|i| model.trade_offered[i].clone()))
+    };
+    let key = |item: &Option<cursor::CursorItem>| item.as_ref().map(|i| (i.bag, i.slot));
+    if key(&held) == key(&old) {
+        super::tick::verb(lua, cursor::clear_cursor);
+        return;
     }
+    // `0x4bfa70`: a slot outside the seven sends nothing; the set send fails only on a missing
+    // player or item (`0x5d43af`, `0x5d43da`), which a held item never is here. The table keeps
+    // the item whole: what comes back is the stack.
+    let sent = super::tick::verb(lua, |model| {
+        let Some(i) = index else {
+            return false;
+        };
+        match &held {
+            Some(item) => model.trade_set_items.push((id, item.bag, item.slot)),
+            None => model.trade_clear_items.push(id),
+        }
+        model.trade_offered[i] = held.map(|item| cursor::CursorItem {
+            count: None,
+            ..item
+        });
+        true
+    });
+    cursor::set_cursor(lua, !sent, |_| old.map(CursorPayload::Item));
 }
 
 /// Register the trade globals.
@@ -400,7 +449,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ClickTradeButton",
         lua.create_function(|lua, id: u32| {
-            super::tick::verb(lua, |model| click_trade_button(model, id));
+            click_trade_button(lua, id);
             Ok(())
         })?,
     )?;
@@ -688,78 +737,109 @@ mod tests {
         assert!(s.run("SetTradeMoney(nil)").is_err(), "a non-number raises");
     }
 
+    /// `ClickTradeButton` (`0x4bfdf0`): a held item goes in and the slot's old item comes back on
+    /// the cursor (`0x4c0036`-`0x4c0064`), both items locked while in the slot; an empty hand
+    /// takes the old item back and queues the slot's clear; the same item on both sides, nothing
+    /// included, is `ClearCursor(1,1)` (`0x4c0026`), which drops a spell. The close unlocks.
     #[test]
-    fn click_trade_button_places_clears_and_refuses() {
-        use crate::script::cursor::{CursorItem, CursorPayload};
-
-        let item = |bag: i64, slot: u32| {
-            CursorPayload::Item(CursorItem {
-                bar_placeable: true,
-                bag,
-                slot,
-                item_id: 2589,
-                texture: None,
-                link: None,
-                count: None,
-                quality: None,
-                equip_slots: Vec::new(),
-            })
-        };
+    fn click_trade_button_swaps_the_old_item_onto_the_cursor() {
+        use crate::script::cursor::{bag_lock_probe, two_item_bag, CursorPayload, CursorSpell};
+        use crate::script::tick::heard;
 
         let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        s.set_trade(Some(TradeState::default()));
+        let locked = |s: &UiScript, slot: u32| {
+            s.eval::<bool>(&format!("return {} == 1", bag_lock_probe(slot)))
+                .unwrap()
+        };
 
-        // Empty cursor, no trade → nothing queued.
-        s.run("ClickTradeButton(1)").unwrap();
-        assert!(s.take_trade_set_items().is_empty());
-        assert!(s.take_trade_clear_items().is_empty());
+        s.run("PickupContainerItem(0, 1) ClickTradeButton(2)")
+            .unwrap();
+        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 1)]);
+        assert!(s.cursor_payload().is_none());
+        assert!(locked(&s, 1), "an offered item stays locked");
 
-        // A held backpack item dropped on our slot 2 queues (2, 0, 3) and clears the cursor.
-        s.model_mut().cursor = Some(item(0, 3));
+        heard::listen(
+            &s,
+            &["CURSOR_UPDATE", "ITEM_LOCK_CHANGED"],
+            Some("CursorHasItem()"),
+        );
+        s.run("PickupContainerItem(0, 2)").unwrap();
+        heard::take(&s);
         s.run("ClickTradeButton(2)").unwrap();
-        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 3)]);
-        assert!(
-            s.eval::<bool>("return not CursorHasItem()").unwrap(),
-            "the drop clears the cursor"
+        // `SetCursorItem(0, old)`: its `ClearCursor(0,1)` lifts no lock, then the set.
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE nil", "CURSOR_UPDATE 1"]);
+        assert_eq!(s.take_trade_set_items(), vec![(2, 0, 2)]);
+        assert_eq!(
+            s.cursor_item().map(|i| i.slot),
+            Some(1),
+            "the old item is back"
         );
+        assert!(locked(&s, 1) && locked(&s, 2));
 
-        // An empty cursor clears a filled slot and does nothing on an empty one.
-        let mut st = TradeState::default();
-        st.player.slots[0] = Some(TradeSlotItem {
-            item_id: 2589,
-            count: 1,
-            ..Default::default()
-        });
-        s.set_trade(Some(st));
-        s.run("ClickTradeButton(1)").unwrap();
-        assert_eq!(s.take_trade_clear_items(), vec![1]);
-        s.run("ClickTradeButton(4)").unwrap();
-        assert!(
-            s.take_trade_clear_items().is_empty(),
-            "an empty slot clears nothing"
-        );
+        s.run("ClearCursor() ClickTradeButton(2)").unwrap();
+        assert_eq!(s.take_trade_clear_items(), vec![2]);
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(2));
+        s.run("ClearCursor()").unwrap();
+        heard::take(&s);
 
-        // The partner's column queues nothing and leaves the cursor alone.
-        s.model_mut().cursor = Some(item(0, 3));
-        s.run("ClickTargetTradeButton(1)").unwrap();
-        assert!(s.take_trade_set_items().is_empty());
-        assert!(
-            s.eval::<bool>("return CursorHasItem()").unwrap(),
-            "a partner-side click leaves the cursor untouched"
-        );
-
-        // A spell payload is refused and stays on the cursor.
-        s.model_mut().cursor = Some(CursorPayload::Spell(crate::script::cursor::CursorSpell {
+        // Nothing held and nothing offered: a plain clear, here of a spell.
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
             passive: false,
-            book_slot: 1,
-            book_type: "spell".into(),
             spell_id: 133,
             texture: None,
         }));
-        s.run("ClickTradeButton(1)").unwrap();
+        s.run("ClickTradeButton(4)").unwrap();
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE nil"]);
+        assert!(s.take_trade_clear_items().is_empty());
+
+        // The partner's column queues nothing and leaves the cursor alone.
+        s.run("PickupContainerItem(0, 1) ClickTargetTradeButton(1)")
+            .unwrap();
         assert!(s.take_trade_set_items().is_empty());
-        assert!(
-            s.eval::<bool>("return CursorHasSpell()").unwrap(),
-            "a spell cursor is refused, left in place"
+        assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
+
+        // Closing the window unlocks nothing (`0x4bfdc0`); `UnlockTradeItems` does, one event
+        // each (`0x4bfd03`), and an invalidated slot unlocks with its own event (`0x4bfbd0`).
+        s.run("ClickTradeButton(1)").unwrap();
+        heard::take(&s);
+        s.set_trade(None);
+        assert!(locked(&s, 1));
+        s.unlock_trade_items();
+        assert_eq!(heard::take(&s), ["ITEM_LOCK_CHANGED nil"]);
+        assert!(!locked(&s, 1));
+
+        heard::listen(
+            &s,
+            &["ITEM_LOCK_CHANGED", "TRADE_PLAYER_ITEM_CHANGED"],
+            None,
         );
+        s.run("PickupContainerItem(0, 2) ClickTradeButton(3)")
+            .unwrap();
+        heard::take(&s);
+        s.invalidate_trade_slot(2);
+        assert_eq!(
+            heard::take(&s),
+            ["ITEM_LOCK_CHANGED", "TRADE_PLAYER_ITEM_CHANGED"]
+        );
+        assert!(!locked(&s, 2));
+    }
+
+    /// The put-back passes count 0 (`0x4c004e`), so a split offered comes back as the whole stack.
+    /// The set send tests no trade (`0x4bfa70`, `0x5d4380`), so it goes out with none open.
+    #[test]
+    fn an_offered_split_comes_back_whole() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = crate::script::cursor::two_item_bag();
+        bag.slots.get_mut(&1).unwrap().count = 5;
+        s.set_container(0, Some(bag));
+        s.run("SplitContainerItem(0, 1, 2) ClickTradeButton(1)")
+            .unwrap();
+        assert_eq!(s.take_trade_set_items(), vec![(1, 0, 1)]);
+        s.run("ClickTradeButton(1)").unwrap();
+        let back = s.cursor_item().expect("the item is back");
+        assert_eq!((back.slot, back.count), (1, None));
     }
 }

@@ -42,14 +42,19 @@ pub(super) fn doll_click(model: &mut Model, id: u32) -> DollClick {
     if !(1..=23).contains(&id) && !super::bag_verbs::BANK_BAG_INV_SLOTS.contains(&id) {
         return DollClick::Done(false);
     }
-    // Only a held item (`0x4c769a`) or vendor row (`0x4c76a5`) takes the click first. Past them
-    // an empty slot or a locked item does nothing (`0x4c76af`, `0x4c76d2`), an item-targeting
-    // spell binds the item, so a worn weapon can be poisoned (`0x4c76df`: `0x6e48a0` IsTargeting,
-    // `0x6e6330` TargetingWantsItem, `0x495d60` bind), and repair mode repairs a worn item
-    // (`0x4c7714`), any other payload staying held.
+    // A bank bag slot needs the bank open (`0x4c7366`-`0x4c7386`).
+    if super::bag_verbs::BANK_BAG_INV_SLOTS.contains(&id) && model.bank.is_none() {
+        return DollClick::Done(false);
+    }
+    // Only a held item (`0x4c769a`) or a held row, a vendor's or the bar's (`0x4c76a5`), takes the
+    // click first. Past them an empty slot or a locked item does nothing (`0x4c76af`,
+    // `0x4c76d2`), an item-targeting spell binds the item, so a worn weapon can be poisoned
+    // (`0x4c76df`: `0x6e48a0` IsTargeting, `0x6e6330` TargetingWantsItem, `0x495d60` bind), and
+    // repair mode repairs a worn item (`0x4c7714`), any other payload staying held. Else the item
+    // is picked up (`0x4c7838`), its setter's clear dropping whatever else is held.
     let placing = matches!(
         model.cursor,
-        Some(CursorPayload::Item(_) | CursorPayload::Merchant(_))
+        Some(CursorPayload::Item(_) | CursorPayload::Merchant(_) | CursorPayload::Action(_))
     );
     if !placing && (model.item_pick_armed || model.repair_mode) {
         let usable = model
@@ -64,7 +69,14 @@ pub(super) fn doll_click(model: &mut Model, id: u32) -> DollClick {
         return DollClick::Done(false);
     }
     match model.cursor.clone() {
-        None => {
+        None
+        | Some(
+            CursorPayload::Spell(_)
+            | CursorPayload::Macro(_)
+            | CursorPayload::PetAction(_)
+            | CursorPayload::StablePet(_)
+            | CursorPayload::Money(_),
+        ) => {
             let picked = model
                 .inv_slot("player", id as usize)
                 .filter(|s| s.item_id != 0 && !s.locked)
@@ -91,9 +103,27 @@ pub(super) fn doll_click(model: &mut Model, id: u32) -> DollClick {
             DollClick::Done(true)
         }
         Some(CursorPayload::Item(held)) => {
-            // A split or a misfit stays held, with no event: nothing changed.
-            if held.count.is_some() || !super::bag_verbs::fits_slot(&held, id) {
+            // A locked occupant refuses the drop, the payload kept (`0x4c787b`).
+            if model
+                .inv_slot("player", id as usize)
+                .is_some_and(|s| s.item_id != 0 && s.locked)
+                || client_locked(model, EQUIPMENT_BAG, id)
+            {
                 return DollClick::Done(false);
+            }
+            // A split stays held, with no event: nothing changed.
+            if held.count.is_some() {
+                return DollClick::Done(false);
+            }
+            // A misfit (`0x5ea720` false): an equipped item, the 0-based slot below 0x13, goes back
+            // with `ClearCursor(1,1)` (`0x4c78e9`, `0x4c794d`); anything else is auto-equipped
+            // (`0x4c78ef`, `0x5e1480`).
+            if !super::bag_verbs::fits_slot(&held, id) {
+                if held.bag == EQUIPMENT_BAG && held.slot <= 19 {
+                    clear_cursor(model);
+                    return DollClick::Done(true);
+                }
+                return DollClick::Done(auto_equip_cursor_item(model));
             }
             model.container_moves.push(ContainerMove {
                 src_bag: held.bag,
@@ -109,34 +139,28 @@ pub(super) fn doll_click(model: &mut Model, id: u32) -> DollClick {
             DollClick::Done(true)
         }
         // Mode 5, a buy into this slot: `0x4c78fd` sends `CMSG_BUY_ITEM_IN_SLOT` (`0x1a3`) and the
-        // server equips or refuses. A stale row buys nothing: of the reference's three drop sites
-        // only this one checks it; the other two (`0x4f9f35`, `0x4c7ea5`) dereference it.
+        // server equips or refuses, then `ClearCursor(1,1)` (`0x4c7954`). With no vendor open or
+        // the row out of its list the row stays held (`0x4c7916`-`0x4c7931`); of the reference's
+        // three drop sites only this one checks the row, the other two (`0x4f9f35`, `0x4c7ea5`)
+        // dereference it. A row whose item has changed buys nothing.
         Some(CursorPayload::Merchant(held)) => {
-            let entry = model
+            let Some(row) = model
                 .merchant
                 .as_ref()
                 .and_then(|m| m.items.get(held.row as usize))
-                .filter(|it| it.item_id == held.item_id)
-                .map(|it| it.item_id);
-            if let Some(entry) = entry {
-                model.merchant_slot_buys.push((EQUIPMENT_BAG, id, entry));
+            else {
+                return DollClick::Done(false);
+            };
+            if row.item_id == held.item_id {
+                model
+                    .merchant_slot_buys
+                    .push((EQUIPMENT_BAG, id, row.item_id));
             }
-            // `ClearCursor(1,1)` (`0x4c7954`).
             clear_cursor(model);
             DollClick::Done(true)
         }
-        Some(
-            CursorPayload::Spell(_)
-            | CursorPayload::Action(_)
-            | CursorPayload::Macro(_)
-            | CursorPayload::PetAction(_)
-            // Mode 10: a stabled pet stays held for the stable window.
-            | CursorPayload::StablePet(_)
-            // Mode 2: coins stay held for a money frame's drop. On an occupied slot the reference
-            // picks the item up over either, as it tests only for a held item (`0x4c769a`) or a
-            // preview row (`0x4c76a5`) before the pickup (`0x4c7838`).
-            | CursorPayload::Money(_),
-        ) => DollClick::Done(false),
+        // Mode 7, an item off the bar, is a held row but no vendor's: it stays held (`0x4c78fd`).
+        Some(CursorPayload::Action(_)) => DollClick::Done(false),
     }
 }
 
@@ -156,13 +180,19 @@ pub(super) fn cursor_can_go_in_slot(model: &Model, id: u32) -> bool {
     }
 }
 
-/// `AutoEquipCursorItem()`, a click or drop on the doll's model (`PaperDollFrame.lua:31-35`): a
-/// whole stack from a bag becomes `CMSG_AUTOEQUIP_ITEM`: the server picks the slot and swaps
-/// the displaced piece back (`ItemHandler.cpp:138-228`); an equipped item or a split stays held.
-/// Returns whether to repaint.
+/// `AutoEquipCursorItem()` (`0x48a040` into `0x5e1480`), a click or drop on the doll's model
+/// (`PaperDollFrame.lua:31-35`): an item from an equipment or equipped-bag slot, the 0-based slot
+/// below 0x17, goes back with `ClearCursor(1,1)` (`0x5e155a`, `0x5e1567`); any other whole stack,
+/// from a bag, the backpack, the bank, a bank bag slot or the keyring, becomes
+/// `CMSG_AUTOEQUIP_ITEM` (`0x5e1575`), the server picking the slot and swapping the displaced
+/// piece back (`ItemHandler.cpp:138-228`); a split stays held. Returns whether to repaint.
 pub(super) fn auto_equip_cursor_item(model: &mut Model) -> bool {
     match &model.cursor {
-        Some(CursorPayload::Item(item)) if item.bag >= 0 && item.count.is_none() => {
+        Some(CursorPayload::Item(item)) if item.bag == EQUIPMENT_BAG && item.slot <= 23 => {
+            clear_cursor(model);
+            true
+        }
+        Some(CursorPayload::Item(item)) if item.count.is_none() => {
             model.container_autoequips.push((item.bag, item.slot));
             clear(model, Clear::KEEP_LOCK);
             raise_lock_changed(model);
@@ -449,17 +479,26 @@ mod tests {
         );
     }
 
+    /// A misfit from a bag is auto-equipped (`0x4c78ef`, `0x5e1480`); an equipped misfit goes back
+    /// with `ClearCursor(1,1)` (`0x4c78e9`, `0x4c794d`).
     #[test]
-    fn place_non_fitting_item_is_a_no_op() {
+    fn a_misfit_drop_auto_equips_or_goes_back() {
         let mut s = UiScript::new().unwrap();
         s.set_inventory_slots(doll_slots());
-        // The bag item only fits HeadSlot (1); try placing it on NeckSlot (2).
+        // The bag item only fits HeadSlot (1); place it on NeckSlot (2).
         s.set_container(0, Some(one_fitting_bag_item()));
         s.run("PickupContainerItem(0, 1)").unwrap();
 
-        assert!(!pickup_inventory_item(&s.lua, 2));
-        let held = s.cursor_item().expect("kept — doesn't fit slot 2");
-        assert_eq!(held.item_id, 2000);
+        assert!(pickup_inventory_item(&s.lua, 2));
+        assert!(s.cursor_item().is_none());
+        assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
+        assert!(s.take_container_moves().is_empty());
+
+        // The helm off HeadSlot (1) onto Tabard (19): back to its slot, nothing sent.
+        s.run("PickupInventoryItem(1)").unwrap();
+        assert!(pickup_inventory_item(&s.lua, 19));
+        assert!(s.cursor_item().is_none());
+        assert!(s.take_container_autoequips().is_empty());
         assert!(s.take_container_moves().is_empty());
     }
 
@@ -613,8 +652,6 @@ mod tests {
 
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
             passive: false,
-            book_slot: 1,
-            book_type: "spell".into(),
             spell_id: 1,
             texture: None,
         }));
@@ -639,16 +676,31 @@ mod tests {
         assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
     }
 
+    /// A locked occupant refuses the drop and the payload stays held (`0x4c787b`).
     #[test]
-    fn auto_equip_cursor_item_is_a_no_op_from_the_doll_or_a_split_carry() {
+    fn a_drop_on_a_locked_occupant_is_refused() {
+        let mut s = UiScript::new().unwrap();
+        let mut slots = doll_slots();
+        slots[1].as_mut().unwrap().locked = true;
+        s.set_inventory_slots(slots);
+        s.set_container(0, Some(one_fitting_bag_item()));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(!pickup_inventory_item(&s.lua, 1));
+        assert!(s.cursor_item().is_some(), "kept");
+        assert!(s.take_container_moves().is_empty());
+    }
+
+    /// From the doll, `AutoEquipCursorItem` puts the item back with `ClearCursor(1,1)`
+    /// (`0x5e1567`) and sends nothing; a split carry stays held.
+    #[test]
+    fn auto_equip_cursor_item_puts_a_worn_item_back_and_keeps_a_split_carry() {
         let mut s = UiScript::new().unwrap();
         s.set_inventory_slots(doll_slots());
 
         s.run("PickupInventoryItem(1)").unwrap();
-        assert!(!auto_equip_cursor_item(&mut s.model_mut()));
-        assert!(s.cursor_item().is_some(), "kept");
+        assert!(auto_equip_cursor_item(&mut s.model_mut()));
+        assert!(s.cursor_item().is_none(), "put back");
         assert!(s.take_container_autoequips().is_empty());
-        s.run("ClearCursor()").unwrap();
 
         let mut state = one_fitting_bag_item();
         state.slots.get_mut(&1).unwrap().count = 5;
@@ -833,5 +885,87 @@ mod tests {
             "the doll reports in the ONE bag space; the bag reports its own id"
         );
         assert!(s.cursor_item().is_none(), "a bind never stages a payload");
+    }
+
+    /// A doll click over a spell, macro, pet action, stabled pet or coins picks the worn item up,
+    /// its setter's clear dropping the payload (`0x4c7838`); an empty slot keeps the payload
+    /// (`0x4c76af`); an item off the bar and a vendor row with no vendor open stay held
+    /// (`0x4c78fd`, `0x4c7916`).
+    #[test]
+    fn a_doll_click_over_another_payload_picks_up_or_keeps_it() {
+        use crate::script::cursor::{CursorAction, CursorMacro, CursorMerchantItem};
+        let mut s = UiScript::new().unwrap();
+        s.set_inventory_slots(doll_slots());
+        let macro_payload = CursorPayload::Macro(CursorMacro {
+            index: 1,
+            texture: None,
+        });
+        s.set_cursor_for_test(macro_payload.clone());
+        assert!(!pickup_inventory_item(&s.lua, 2), "an empty slot");
+        assert_eq!(s.cursor_payload(), Some(macro_payload));
+        assert!(pickup_inventory_item(&s.lua, 1));
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(1));
+        s.run("ClearCursor()").unwrap();
+
+        for held in [
+            CursorPayload::Action(CursorAction {
+                src_slot: 1,
+                kind: 0x80,
+                action: 4540,
+                texture: None,
+            }),
+            CursorPayload::Merchant(CursorMerchantItem {
+                item_id: 159,
+                row: 0,
+                texture: None,
+            }),
+        ] {
+            s.set_cursor_for_test(held.clone());
+            assert!(!pickup_inventory_item(&s.lua, 1));
+            assert_eq!(s.cursor_payload(), Some(held));
+        }
+    }
+
+    /// A bank item or a bank bag on its slot auto-equips too: `0x5e1480` sends for any item at
+    /// a 0-based player slot from 0x17 (bank 39-62, bank bags 63-68) or in a bag.
+    #[test]
+    fn auto_equip_sends_a_bank_item_and_a_bank_bag() {
+        let mut s = UiScript::new().unwrap();
+        let mut vault = std::collections::HashMap::new();
+        vault.insert(
+            3,
+            ContainerSlot {
+                item_id: 2000,
+                count: 1,
+                equip_slots: vec![1],
+                ..Default::default()
+            },
+        );
+        s.set_container(
+            -1,
+            Some(ContainerState {
+                name: None,
+                num_slots: 24,
+                slots: vault,
+            }),
+        );
+        s.run("PickupContainerItem(-1, 3)").unwrap();
+        assert!(auto_equip_cursor_item(&mut s.model_mut()));
+        assert_eq!(s.take_container_autoequips(), vec![(-1, 3)]);
+        assert!(s.cursor_item().is_none());
+
+        s.set_cursor_for_test(CursorPayload::Item(crate::script::cursor::CursorItem {
+            bag: EQUIPMENT_BAG,
+            slot: 64,
+            item_id: 4500,
+            texture: None,
+            link: None,
+            count: None,
+            quality: None,
+            bar_placeable: false,
+            equip_slots: vec![20, 21, 22, 23],
+        }));
+        assert!(auto_equip_cursor_item(&mut s.model_mut()));
+        assert_eq!(s.take_container_autoequips(), vec![(EQUIPMENT_BAG, 64)]);
     }
 }

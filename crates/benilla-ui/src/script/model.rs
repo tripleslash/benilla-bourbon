@@ -885,6 +885,10 @@ pub(crate) struct Model {
     /// Items dropped on our slots, `(1-based trade slot, bag, slot)`, and the slots clicks cleared.
     pub(crate) trade_set_items: Vec<(u32, i64, u32)>,
     pub(crate) trade_clear_items: Vec<u32>,
+    /// The item each of our trade slots holds, as the client's own table records it at the click
+    /// (`[0xb716d0]`, written by `0x4bfa70`): the item a later click puts back on the cursor, and
+    /// one the client keeps locked until the trade closes (`0x4bfcf0`).
+    pub(crate) trade_offered: [Option<cursor::CursorItem>; super::trade::TRADE_SLOTS],
 
     /// The open questgiver panel, its greeting-row selects and its button calls.
     pub(crate) quest: Option<quest::QuestState>,
@@ -1044,7 +1048,10 @@ pub(crate) struct Model {
     pub(crate) pending_events: Vec<(String, Vec<ScriptValue>)>,
     /// The events the running [`super::tick::verb`] segment has raised, fired in order once its
     /// model borrow drops; `None` outside a segment, where [`Model::raise`] queues instead.
-    pub(crate) verb_events: Option<Vec<(String, Vec<ScriptValue>)>>,
+    pub(crate) verb_events: Option<Vec<super::tick::Raised>>,
+    /// Set while a clear's own events fire with the payload it is dropping still showing
+    /// ([`super::tick::Raised::CursorView`]): whether that clear lifted a held item's lock.
+    pub(crate) cursor_view_unlocked: Option<bool>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
@@ -1528,6 +1535,7 @@ impl Model {
             trade_set_money: None,
             trade_set_items: Vec::new(),
             trade_clear_items: Vec::new(),
+            trade_offered: Default::default(),
             quest: None,
             quest_selects: Vec::new(),
             quest_actions: Vec::new(),
@@ -1559,6 +1567,7 @@ impl Model {
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             verb_events: None,
+            cursor_view_unlocked: None,
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
             minimap_ping: (0.0, 0.0),
