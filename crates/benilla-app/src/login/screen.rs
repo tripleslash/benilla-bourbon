@@ -2,9 +2,10 @@
 //! `height / 768` (the glue virtual screen), over the `UI_MainMenu` scene. Each control carries
 //! its `AccountLogin.xml` size and anchor at its spawn site.
 //!
-//! Deviation: the Credits, Cinematics and TOS buttons are absent, because the screen keeps only
-//! what logging in needs. Deviation (this fork): so is the Quit button (`AccountLoginExitButton`),
-//! because in a browser tab closing the client is the browser's gesture.
+//! Deviation: the Credits, Cinematics, TOS, Community Site and Manage Account buttons are absent,
+//! because the screen keeps only what logging in needs. Deviation (this fork): so is the Quit
+//! button (`AccountLoginExitButton`), because in a browser tab closing the client is the
+//! browser's gesture.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -373,8 +374,10 @@ fn spawn_screen(
             });
 
         // The realmlist readout, the address this client will dial, in the reference's
-        // `AccountLoginRealmName` seat: 256 wide, right-justified, TOPRIGHT to the Quit button's
-        // BOTTOMRIGHT at (−8,−10), resolved to top 749, right 13; it keeps that seat with the button
+        // `AccountLoginRealmName` seat. It is the TOS button's own string: 256 wide,
+        // right-justified, TOPRIGHT at that button's BOTTOMRIGHT (−8,−10), and the button's
+        // BOTTOM sits at `AccountLoginExitButton`'s TOP + 80, the Quit button 150×38 at
+        // BOTTOMRIGHT (−5,29). Resolved: top 631, right 13; it keeps that seat with both buttons
         // gone. Deviation (this fork): a readout only, with no editor behind it, because the browser
         // client's address comes from `/config.json` alone and a saved copy would outrank the
         // hosted one. Native keeps the `realmList` CVar.
@@ -383,7 +386,7 @@ fn spawn_screen(
             Node {
                 position_type: PositionType::Absolute,
                 right: px(13.0),
-                top: px(749.0),
+                top: px(631.0),
                 ..default()
             },
             (),

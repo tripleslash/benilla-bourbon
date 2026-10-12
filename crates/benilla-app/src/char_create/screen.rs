@@ -227,11 +227,13 @@ fn spawn_screen(
         left_tower(ui, art, &font, s, strings);
 
         // `CharacterCreateWoWLogo` (256×128 at (3,-7)), after the tower, as the reference's
-        // frame order draws it over the border art.
+        // frame order draws it over the border art. Turtle WoW 1.18.1 anchors the frame at (3,7)
+        // and its texture at (0,-8), so its logo stands at y 1.
         if let Some(logo) = &art.logo {
+            let top = if crate::flavor::turtle() { 1.0 } else { 7.0 };
             ui.spawn((
                 ImageNode::new(logo.clone()),
-                abs(s, 3.0, 7.0, 256.0, 128.0),
+                abs(s, 3.0, top, 256.0, 128.0),
                 crate::glue::art::GlueLogo,
             ));
         }

@@ -244,7 +244,8 @@ fn spawn_screen(
 
         rotate_cluster(ui, art, &font, s);
 
-        // `CharacterSelectAddonsButton`, hidden on `GetNumAddOns() == 0` (`UpdateAddonButton`).
+        // `CharacterSelectAddonsButton`, 100×35 at BOTTOMLEFT (30,25), hidden on
+        // `GetNumAddOns() == 0` (`UpdateAddonButton`).
         if super::addons::AddonsPanel::any_installed() {
             ui.spawn((Node {
                 position_type: PositionType::Absolute,
@@ -260,7 +261,7 @@ fn spawn_screen(
                         &font,
                         SelectAction::Addons,
                         strings.text("ADDONS", "AddOns"),
-                        140.0,
+                        100.0,
                         35.0,
                         GlueBtnKind::Small,
                         s,
@@ -370,10 +371,12 @@ fn character_frame(
                 font,
                 s,
             );
+            // `CharSelectChangeRealmButton`, its TOP at the realm name's BOTTOM: the name is
+            // 256×13 at TOP (0,−10), so 23.
             frame
                 .spawn((Node {
                     position_type: PositionType::Absolute,
-                    top: px(26.0),
+                    top: px(23.0),
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::Center,
                     ..default()

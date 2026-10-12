@@ -1,8 +1,9 @@
 //! The login screen, the reference's `AccountLogin` glue: state, the credential policy, input,
-//! dialogs and the saved account; the layout is [`screen`]. Deviation: the Credits, Cinematics
-//! and TOS side of the reference screen is absent, because the screen keeps only what logging in
-//! needs. Deviation (this fork): so is the Quit button, because in a browser tab closing the
-//! client is the browser's gesture; ESC, which the reference binds to that Quit, does nothing.
+//! dialogs and the saved account; the layout is [`screen`]. Deviation: the Credits, Cinematics,
+//! TOS, Community Site and Manage Account side of the reference screen is absent, because the
+//! screen keeps only what logging in needs. Deviation (this fork): so is the Quit button, because
+//! in a browser tab closing the client is the browser's gesture; ESC, which the reference binds
+//! to that Quit, does nothing.
 //! The stock glue screens' own `QuitGame` (a native dev switch, [`crate::ui_script::glue`]) is
 //! heard and ignored for the same reason ([`GlueLogin::Quit`]).
 //!
