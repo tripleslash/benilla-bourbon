@@ -780,9 +780,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // `ssgiStrength` — how much of the single bounce to add back, tinted by what bounced it. `0` is
     // off and is exact, on the same terms. `$WOW_SSGI` overrides session-only.
+    // fork: 0.4 since 2026-10-12 (the director's call), welded to `GI_DEFAULT` below.
     ours(
         "ssgiStrength",
-        "0",
+        "0.4",
         "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
          split across two rows only so a player can move them apart",
     ),
@@ -804,7 +805,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "the fork's own — the modern model's quality tier",
     ),
     // `autoExposure` — the modern model's light auto-exposure: very dark light (night, a dark
-    // zone) is lifted toward visible, at most ~0.8 stop. 0 holds the exposure fixed. Applies to the
+    // zone) is lifted toward visible, at most ~1.2 stop. 0 holds the exposure fixed. Applies to the
     // next frame; a classic frame has no exposure and ignores it.
     ours(
         "autoExposure",

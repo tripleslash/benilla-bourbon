@@ -91,7 +91,10 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 pub const AO_DEFAULT: f32 = 0.3;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
-pub const GI_DEFAULT: f32 = 0.0;
+///
+/// fork: **0.4 since 2026-10-12** (the director's call) — the modern look ships with the colour
+/// bleed on. It rides the gather the AO default already runs, so it adds no pass.
+pub const GI_DEFAULT: f32 = 0.4;
 
 impl Default for IndirectLighting {
     /// `$WOW_SSAO` / `$WOW_SSGI` override the shipped defaults, **session-only** — the A/B levers,
@@ -680,7 +683,7 @@ mod tests {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
         assert_eq!(AO_DEFAULT, 0.3); // fork: 0.3 since 2026-10-11
-        assert_eq!(GI_DEFAULT, 0.0);
+        assert_eq!(GI_DEFAULT, 0.4); // fork: 0.4 since 2026-10-12
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
         // The row offers 0–1; the clamp leaves headroom above it for a hand-typed CVar.

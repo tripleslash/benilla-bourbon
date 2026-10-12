@@ -26,7 +26,7 @@ pub(crate) const GRAPHICS_PRESET_NAMES: [&str; 6] =
 
 /// The one place the ladder is written down: one line per governed row, one column per rung.
 ///
-/// Left out: `ssgiStrength`, `spellEffectLevel` and `foliageWindStrength` (the same on every
+/// Left out: `spellEffectLevel` and `foliageWindStrength` (the same on every
 /// rung) and the rows latched at boot (`anisotropic`, `gxMultisample`, `gxVSync`). With frame
 /// generation on, render scale is capped at 1, which every column respects. A row that lands
 /// later is one line here, once it is registered: an unregistered member never matches, and the
@@ -41,6 +41,7 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("weatherDensity",    ["2",    "3",    "3",    "3",   "3",    "3"]),
     ("worldShadows",      ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("ssaoStrength",      ["0",    "0",    "0.3",  "0.3", "0.3",  "0.3"]),
+    ("ssgiStrength",      ["0",    "0",    "0.4",  "0.4", "0.4",  "0.4"]),
     ("waterDetail",       ["0",    "1",    "2",    "3",   "3",    "3"]),
     ("hdCharacterModels", ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("reforgedModels",    ["0",    "1",    "1",    "1",   "1",    "1"]),

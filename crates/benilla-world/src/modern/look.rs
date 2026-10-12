@@ -422,20 +422,23 @@ pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
-/// **The light auto-exposure**: subtle on purpose — it exists to lift the very dark into visible
-/// brightness and nothing else. Below a deep-dusk light ([`AUTO_EXPOSURE_DARK`]) it makes up half
-/// the shortfall; at and above it — every day and every dusk — it is exactly 1. It meters the
+/// **The light auto-exposure**: it lifts a dark light into visible brightness and does nothing
+/// else. Below a dusk light ([`AUTO_EXPOSURE_DARK`]) it makes up about two thirds of the shortfall,
+/// in stops; at and above it, every day, it is exactly 1. It meters the
 /// AUTHORED rows (the ambient with its night floor, and the sun or moon diffuse at a typical
 /// incidence) rather than the screen, so a camera turn never moves it, and it leaves the zone
 /// look's key and fill alone: those darken a canopy on purpose. It only ever brightens, by at most
 /// [`AUTO_EXPOSURE_MAX`]: a night still reads as night.
-const AUTO_EXPOSURE_STRENGTH: f32 = 0.5;
-/// The light rows (sRGB ambient, diffuse) below which the lift begins: a deep dusk, about a seventh
-/// of a forest noon's key.
-const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.25; 3], [0.3; 3]);
-/// The ceiling on the auto-exposure's lift, ~0.8 stop: a moonless night under the night floor
-/// sits at it.
-const AUTO_EXPOSURE_MAX: f32 = 1.75;
+///
+/// fork: 0.65 since 2026-10-12 (the director's call), from 0.5, with the threshold and the ceiling
+/// below raised beside it: at the first numbers the lift was too slight to notice.
+const AUTO_EXPOSURE_STRENGTH: f32 = 0.65;
+/// The light rows (sRGB ambient, diffuse) below which the lift begins: a dusk, about a fifth of a
+/// forest noon's key (from `[0.25]`, `[0.3]`, a deep dusk).
+const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.3; 3], [0.36; 3]);
+/// The ceiling on the auto-exposure's lift, ~1.2 stop (from 1.75): a moonless night under the
+/// night floor sits at it.
+const AUTO_EXPOSURE_MAX: f32 = 2.25;
 /// The auto-exposure's time constant, in seconds — an eye adapting, not a meter snapping.
 const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
 

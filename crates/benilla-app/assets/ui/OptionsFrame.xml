@@ -555,8 +555,8 @@
 
         -- fork: `autoExposure`, the modern model's light auto-exposure.
         BENILLA_TOOLTIP_AUTO_EXPOSURE =
-            "Brightens the picture a little when the light is very dark - at night, or in a "
-            .. "gloomy zone - so the world stays visible. Daylight and dusk are left as they are, "
+            "Brightens the picture when the light is dark - at dusk, at night, or in a "
+            .. "gloomy zone - so the world stays visible. Daylight is left as it is, "
             .. "and a night still reads as night.\n\n"
             .. "Has no effect on Classic lighting. Applies when you click Apply."
 
