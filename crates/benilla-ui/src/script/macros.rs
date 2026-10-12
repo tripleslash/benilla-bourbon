@@ -9,8 +9,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::cursor::{raise_cursor_update, CursorMacro, CursorPayload};
+use super::cursor::{set_cursor, CursorMacro, CursorPayload};
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// Macros per tab (`Blizzard_MacroUI.lua:1`), and so the character tab's base.
 pub const MAX_MACROS: usize = 18;
@@ -169,9 +170,9 @@ impl super::UiScript {
     }
 }
 
-/// `CreateMacro(name, iconIndex, body, local, perCharacter)` (usage string `0x44cb74`): the new
-/// 1-based index, or `None` on the two failures the client logs (`0x44cbb4`, `0x44cbdc`), an empty
-/// name and a full tab.
+/// `CreateMacro(name, iconIndex, body, local, perCharacter)` (usage string `0x84cb74`): the new
+/// 1-based index, or the error the client raises for the two failures (`0x84cbb4`, `0x84cbdc`), an
+/// empty name and a full tab.
 fn create_macro(
     model: &mut Model,
     name: &str,
@@ -179,18 +180,19 @@ fn create_macro(
     body: &str,
     local_only: bool,
     per_character: bool,
-) -> Option<usize> {
-    let name = clamp_chars(name.trim(), MAX_MACRO_NAME);
+) -> mlua::Result<usize> {
+    // Tested on the first byte (`*name == 0`): a blank name is a name.
     if name.is_empty() {
-        model.record_warning("CreateMacro() failed, no name specified");
-        return None;
+        return Err(mlua::Error::RuntimeError(
+            "CreateMacro() failed, no name specified".into(),
+        ));
     }
+    let name = clamp_chars(name, MAX_MACRO_NAME);
     let list = model.macros.list_mut(per_character);
     if list.len() >= MAX_MACROS {
-        model.record_warning(format!(
+        return Err(mlua::Error::RuntimeError(format!(
             "CreateMacro() failed, already have {MAX_MACROS} macros"
-        ));
-        return None;
+        )));
     }
     list.push(MacroView {
         name,
@@ -201,7 +203,7 @@ fn create_macro(
     let pos = list.len() - 1;
     model.macros_dirty = true;
     model.macros_generation += 1;
-    Some(MacroIndex { per_character, pos }.lua_index())
+    Ok(MacroIndex { per_character, pos }.lua_index())
 }
 
 /// `EditMacro(index, name, icon, body, local)`: an omitted name, icon or body leaves its field
@@ -253,23 +255,23 @@ fn delete_macro(model: &mut Model, index: usize) -> bool {
     true
 }
 
-/// `PickupMacro(index)`: the macro payload (cursor mode 8, `[0xb4e2fc]`), which `PlaceAction`
-/// (`0x4e62e0`) packs as `macroId | 0x40000000`. Refused while the cursor holds anything; the
-/// reference's setter (`0x494f80`) clears the cursor first instead.
-fn pickup_macro(model: &mut Model, index: usize) -> bool {
-    if model.cursor.is_some() {
-        return false;
-    }
-    let Some(entry) = model.macros.get(index) else {
-        return false;
+/// `PickupMacro(index)` (`0x4f1ae0`): the macro payload (cursor mode 8, `[0xb4e2fc]`), which
+/// `PlaceAction` (`0x4e62e0`) packs as `macroId | 0x40000000`. A missing macro does nothing
+/// (`0x4f1b1e`); otherwise the setter (`0x494f80`) clears whatever is held with its inner
+/// `ClearCursor(1,1)`, then sets the macro and shows the action bar's grid. Returns whether a
+/// macro went on.
+fn pickup_macro(lua: &Lua, index: usize) -> bool {
+    let payload = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let Some(entry) = model.macros.get(index) else {
+            return false;
+        };
+        CursorMacro {
+            index: index as u32,
+            texture: entry.texture.clone(),
+        }
     };
-    let payload = CursorMacro {
-        index: index as u32,
-        texture: entry.texture.clone(),
-    };
-    model.cursor = Some(CursorPayload::Macro(payload));
-    raise_cursor_update(model);
-    true
+    set_cursor(lua, true, |_| Some(CursorPayload::Macro(payload)))
 }
 
 fn opt_string(v: Option<&Value>) -> Option<String> {
@@ -303,10 +305,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetMacroInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(m) = model.macros.get(index) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // `0x4f1829`: four nils.
+                return Ok(super::binding_abi::tuple(&[None; 4]));
             };
             let texture = match &m.texture {
                 Some(t) => Value::String(lua.create_string(t)?),
@@ -343,7 +346,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetMacroIconInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let path = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 index
@@ -358,22 +361,41 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CreateMacro stores `iconIndex`, an index into the chooser list, as its path.
+    // CreateMacro(name, iconIndex, body, local, perCharacter) (`0x4f15b0`): the name is a string
+    // or number and the icon a number or numeric string, else the usage text (`0x84cb74`) raises.
+    // `iconIndex` is an index into the chooser list. An empty name raises (`0x84cbb4`, tested on
+    // the first byte, so a blank one is a name), and so does a full tab (`0x84cbdc`); a made macro
+    // answers exactly its new 1-based index (`0x4f16ce`). Not modelled: the script-context gate
+    // `0x494a50(7)` ahead of the body, which has no taint to read here.
     g.set(
         "CreateMacro",
         lua.create_function(|lua, args: MultiValue| {
             let a: Vec<Value> = args.into_iter().collect();
-            let name = opt_string(a.first()).unwrap_or_default();
+            let usage = || {
+                mlua::Error::RuntimeError(
+                    "Usage: CreateMacro(name, iconIndex, body, local, perCharacter)".into(),
+                )
+            };
+            let name = super::binding_abi::string_arg(
+                lua,
+                a.first().cloned().unwrap_or(Value::Nil),
+                "Usage: CreateMacro(name, iconIndex, body, local, perCharacter)",
+            )?;
+            let icon = lua
+                .coerce_number(a.get(1).cloned().unwrap_or(Value::Nil))?
+                .ok_or_else(usage)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let texture = icon_path(&model, a.get(1));
-            let body = opt_string(a.get(2)).unwrap_or_default();
+            // `trunc(n) - 1` against the chooser list, unsigned (`0x4f1632`, `0x4f163c`).
+            let texture = usize::try_from(super::binding_abi::ftol(icon).wrapping_sub(1))
+                .ok()
+                .and_then(|i| model.macro_icons.get(i).cloned());
+            let body = a
+                .get(2)
+                .and_then(|v| super::binding_abi::optional_string(lua, v))
+                .unwrap_or_default();
             let (local_only, per_character) = (flag(a.get(3)), flag(a.get(4)));
-            Ok(
-                match create_macro(&mut model, &name, texture, &body, local_only, per_character) {
-                    Some(i) => Value::Integer(i as i64),
-                    None => Value::Nil,
-                },
-            )
+            create_macro(&mut model, &name, texture, &body, local_only, per_character)
+                .map(|i| Value::Integer(i as i64))
         })?,
     )?;
 
@@ -414,7 +436,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "PickupMacro",
         lua.create_function(|lua, index: usize| {
-            super::tick::verb(lua, |model| pickup_macro(model, index));
+            pickup_macro(lua, index);
             Ok(())
         })?,
     )?;
@@ -545,12 +567,36 @@ mod tests {
     #[test]
     fn create_refuses_a_blank_name_and_a_full_tab_and_clamps_the_caps() {
         let s = seeded();
-        assert!(s
-            .eval::<bool>(r#"return CreateMacro("", 1, "x") == nil"#)
-            .unwrap());
-        assert!(s
-            .eval::<bool>(r#"return CreateMacro("   ", 1, "x") == nil"#)
-            .unwrap());
+        let raised = |s: &UiScript, call: &str| s.run(call).expect_err(call).to_string();
+        assert!(raised(&s, r#"CreateMacro("", 1, "x")"#).contains("failed, no name specified"));
+        // Tested on the first byte, not trimmed: a blank name is a name (`0x4f1610`).
+        assert_eq!(
+            s.eval::<i64>(r#"return CreateMacro("   ", 1, "x")"#)
+                .unwrap(),
+            1
+        );
+        s.run("DeleteMacro(1)").unwrap();
+        // A non-string name, a non-numeric icon and a missing icon raise the usage text.
+        for call in [
+            "CreateMacro()",
+            "CreateMacro({}, 1)",
+            "CreateMacro('a')",
+            "CreateMacro('a', 'x')",
+            "CreateMacro('a', nil, 'b')",
+        ] {
+            assert!(
+                raised(&s, call)
+                    .contains("Usage: CreateMacro(name, iconIndex, body, local, perCharacter)"),
+                "{call}"
+            );
+        }
+        // A number is a name, a numeric string an icon, and exactly one value is pushed.
+        assert_eq!(
+            s.eval::<i64>("return (function(...) return arg.n end)(CreateMacro(12, '1', 'b'))")
+                .unwrap(),
+            1
+        );
+        s.run("DeleteMacro(1)").unwrap();
 
         for i in 1..=MAX_MACROS {
             let made = s
@@ -559,8 +605,8 @@ mod tests {
             assert_eq!(made as usize, i);
         }
         assert!(
-            s.eval::<bool>(r#"return CreateMacro("one too many", 1, "") == nil"#)
-                .unwrap(),
+            raised(&s, r#"CreateMacro("one too many", 1, "")"#)
+                .contains("CreateMacro() failed, already have 18 macros"),
             "the 19th account macro is refused"
         );
         // The character tab is a separate 18.
@@ -614,26 +660,24 @@ mod tests {
     }
 
     #[test]
-    fn pickup_macro_loads_the_cursor_and_refuses_while_holding() {
+    fn pickup_macro_loads_the_cursor_over_whatever_is_held() {
         use crate::script::cursor::CursorPayload;
 
         let s = seeded();
         s.run(r#"CreateMacro("Ambush", 1, "/cast Ambush")"#)
             .unwrap();
 
-        assert!(!pickup_macro(&mut s.model_mut(), 5), "empty slot");
-        assert!(pickup_macro(&mut s.model_mut(), 1));
-        assert_eq!(
-            s.cursor_payload(),
-            Some(CursorPayload::Macro(CursorMacro {
-                index: 1,
-                texture: Some("Interface\\Icons\\Ability_Ambush".into()),
-            }))
-        );
-        assert!(
-            !pickup_macro(&mut s.model_mut(), 1),
-            "a macro button is a source, never a drop target"
-        );
+        assert!(!pickup_macro(&s.lua, 5), "empty slot");
+        assert!(s.cursor_payload().is_none());
+        assert!(pickup_macro(&s.lua, 1));
+        let ambush = Some(CursorPayload::Macro(CursorMacro {
+            index: 1,
+            texture: Some("Interface\\Icons\\Ability_Ambush".into()),
+        }));
+        assert_eq!(s.cursor_payload(), ambush);
+        // The setter's inner clear drops what is held, then sets (`0x494fad`).
+        assert!(pickup_macro(&s.lua, 1));
+        assert_eq!(s.cursor_payload(), ambush);
     }
 
     #[test]
@@ -646,5 +690,34 @@ mod tests {
         );
         assert!(s.eval::<bool>("return GetMacroIconInfo(4) == nil").unwrap());
         assert!(s.eval::<bool>("return GetMacroIconInfo(0) == nil").unwrap());
+    }
+
+    /// The macro setter (`0x494f80`) signals only through its inner clear (`0x494fad`): that
+    /// `CURSOR_UPDATE` reads the empty cursor, and the set ends on the grid (`0x494fd7`).
+    #[test]
+    fn a_macro_pickup_signals_its_clear_then_shows_the_grid() {
+        let s = seeded();
+        s.run(r#"CreateMacro("Ambush", 1, "/cast Ambush")"#)
+            .unwrap();
+        crate::script::cursor::install_kind_probe(&s);
+        crate::script::tick::heard::listen(
+            &s,
+            &["CURSOR_UPDATE", "ACTIONBAR_SHOWGRID", "ACTIONBAR_HIDEGRID"],
+            Some("CursorKind()"),
+        );
+        s.run("PickupMacro(1)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["CURSOR_UPDATE none", "ACTIONBAR_SHOWGRID macro"]
+        );
+        s.run("PickupMacro(1)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            [
+                "ACTIONBAR_HIDEGRID none",
+                "CURSOR_UPDATE none",
+                "ACTIONBAR_SHOWGRID macro"
+            ]
+        );
     }
 }

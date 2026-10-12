@@ -399,10 +399,7 @@ pub(super) fn feed_item_stats(
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     // The caster the `$`-tokens read: its spell modifiers and its skills.
-    (spell_mods, self_q): (
-        Res<crate::spell::SpellModifiers>,
-        Query<&ObjectStore, With<SelfPlayer>>,
-    ),
+    (spell_mods, self_q, locks): CasterReads,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
     home_bind: Option<Res<crate::net::HomeBind>>,
@@ -479,28 +476,47 @@ pub(super) fn feed_item_stats(
                 } else {
                     mod_sensitive.remove(&id);
                 }
-                Some((
-                    id,
-                    template_view(
-                        &t,
-                        spell_res,
-                        Some(&spell_mods),
-                        &skill,
-                        skill_catalog,
-                        home_area,
-                        &|| gender,
-                        factions.as_deref().map(|f| f.catalog()),
-                        sub_classes.as_deref().map(|s| &s.0),
-                        classes.as_deref().map(|c| &c.0),
-                        icons.as_deref(),
-                        &get,
-                    ),
-                ))
+                let mut view = template_view(
+                    &t,
+                    spell_res,
+                    Some(&spell_mods),
+                    &skill,
+                    skill_catalog,
+                    home_area,
+                    &|| gender,
+                    factions.as_deref().map(|f| f.catalog()),
+                    sub_classes.as_deref().map(|s| &s.0),
+                    classes.as_deref().map(|c| &c.0),
+                    icons.as_deref(),
+                    &get,
+                );
+                // A lock id with no `Lock.dbc` row is no lock to the builder (`0x52bd6b`..
+                // `0x52bda9`); with the catalog unloaded the id stands.
+                view.lock_id = known_lock_id(view.lock_id, locks.as_deref().map(|l| &l.0));
+                Some((id, view))
             })
             .collect()
     };
     for (id, view) in views {
         script.set_item_template(id, view);
+    }
+}
+
+/// What the `$`-tokens read of the caster, and the `Lock.dbc` the LOCKED line needs a row from
+/// (`0x52bd6b`).
+type CasterReads<'w, 's> = (
+    Res<'w, crate::spell::SpellModifiers>,
+    Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
+    Option<Res<'w, crate::go_templates::Locks>>,
+);
+
+/// The template's lock id when `Lock.dbc` holds its row, else 0: the builder's LOCKED line starts
+/// from that row (`0x52bd57`..`0x52bd76`), and a missing one is no lock. With the catalog not
+/// loaded the id stands.
+fn known_lock_id(lock_id: u32, locks: Option<&benilla_formats::LockCatalog>) -> u32 {
+    match locks {
+        Some(l) if l.slots(lock_id).is_none() => 0,
+        _ => lock_id,
     }
 }
 
@@ -611,7 +627,8 @@ pub(super) fn feed_player_req(
 }
 
 /// One bag slot from its item guid: instance, template, icon and use-spell cooldown. `None` is an
-/// empty slot; an occupied one not yet resolved is `Some` with empty fields.
+/// empty slot or one whose item object has not streamed; an occupied one whose template is not yet
+/// resolved is `Some` with empty fields.
 fn resolve_slot(
     guid: u64,
     objects: &Objects,
@@ -640,48 +657,47 @@ fn resolve_slot(
     let enchant_ms: [Option<u64>; crate::items::ENCHANT_SLOTS] =
         std::array::from_fn(|s| countdowns.and_then(|c| c.enchant_remaining_display_ms(s as u32)));
     let duration_ms = countdowns.and_then(|c| c.lifetime_remaining_display_ms());
-    let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) =
-        match objects.object(guid) {
-            Some(fields) => (
-                fields.object_entry().unwrap_or(0),
-                fields.item_stack_count().unwrap_or(1),
-                // Max 0 is indestructible: no line.
-                fields
-                    .item_durability()
-                    .zip(fields.item_max_durability())
-                    .filter(|&(_, max)| max > 0),
-                // Letter text on the instance, which the hover magnifier keys off; a template
-                // `PageText` book does not set it.
-                fields.item_text_id().is_some_and(|id| id != 0),
-                // The creator's name for "<Made by %s>" and "Written by %s", `None` until the
-                // name query answers.
-                fields
-                    .item_creator()
-                    .filter(|&g| g != 0)
-                    .and_then(|g| names.resolve(g, commands).map(str::to_string)),
-                // The tooltip's unlocked (0x4) and wrapped (0x8) bits.
-                fields.item_flags().unwrap_or(0),
-                // `0x5da2c0`: soulbound, or carrying a binding enchant, off the raw descriptor.
-                crate::items::already_bound(fields, rolls.enchants),
-                // The roll behind the name's suffix; its enchants are already in slots 2..6.
-                fields.item_random_properties_id(),
-                // All seven enchant slots with charges and countdowns: our own items stream whole,
-                // where others' carry two slots.
-                crate::items::enchant_lines(
-                    (0..7).map(|s| {
-                        (
-                            s,
-                            fields.item_enchant(s).unwrap_or(0),
-                            fields.item_enchant_charges(s),
-                            enchant_ms[usize::from(s)],
-                        )
-                    }),
-                    rolls.enchants,
-                ),
-            ),
-            // A guid whose create has not landed: occupied, unresolved.
-            None => return Some(ContainerSlot::default()),
-        };
+    // A guid whose create has not landed: the reference finds no item object (`0x6228a0` returns
+    // NULL), so `GetContainerItemInfo` pushes nothing (`0x4f96dc`, `0x4f96e0`, `0x4f9810`) and
+    // the slot reads empty.
+    let fields = objects.object(guid)?;
+    let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) = (
+        fields.object_entry().unwrap_or(0),
+        fields.item_stack_count().unwrap_or(1),
+        // Max 0 is indestructible: no line.
+        fields
+            .item_durability()
+            .zip(fields.item_max_durability())
+            .filter(|&(_, max)| max > 0),
+        // Letter text on the instance, which the hover magnifier keys off; a template
+        // `PageText` book does not set it.
+        fields.item_text_id().is_some_and(|id| id != 0),
+        // The creator's name for "<Made by %s>" and "Written by %s", `None` until the
+        // name query answers.
+        fields
+            .item_creator()
+            .filter(|&g| g != 0)
+            .and_then(|g| names.resolve(g, commands).map(str::to_string)),
+        // The tooltip's unlocked (0x4) and wrapped (0x8) bits.
+        fields.item_flags().unwrap_or(0),
+        // `0x5da2c0`: soulbound, or carrying a binding enchant, off the raw descriptor.
+        crate::items::already_bound(fields, rolls.enchants),
+        // The roll behind the name's suffix; its enchants are already in slots 2..6.
+        fields.item_random_properties_id(),
+        // All seven enchant slots with charges and countdowns: our own items stream whole,
+        // where others' carry two slots.
+        crate::items::enchant_lines(
+            (0..7).map(|s| {
+                (
+                    s,
+                    fields.item_enchant(s).unwrap_or(0),
+                    fields.item_enchant_charges(s),
+                    enchant_ms[usize::from(s)],
+                )
+            }),
+            rolls.enchants,
+        ),
+    );
     if entry == 0 {
         return Some(ContainerSlot::default());
     }
@@ -720,6 +736,7 @@ fn resolve_slot(
         count,
         durability,
         quality: Some(t.quality),
+        inventory_type: t.inventory_type,
         item_id: entry,
         // The link carries the roll in `randomPropertyId` and in the suffixed name (`0x5d8b00`);
         // the tooltip reads its name back off it.
@@ -1411,9 +1428,81 @@ fn diff_and_push(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_container_source, charges_count, ContainerSlot, FeedMemory, SlotGuids,
+        apply_container_source, charges_count, resolve_slot, ContainerSlot, FeedMemory, SlotGuids,
         BANK_CONTAINER, BANK_SLOTS,
     };
+
+    /// A lock id with no `Lock.dbc` row is no lock to the item builder (`0x52bd6b`..`0x52bda9`).
+    #[test]
+    fn a_lock_id_without_a_row_is_no_lock() {
+        use benilla_formats::{LockCatalog, LockSlot, LOCK_KEY_ITEM};
+        let mut slots = [LockSlot::default(); benilla_formats::MAX_LOCK_SLOTS];
+        slots[0].key_type = LOCK_KEY_ITEM;
+        let catalog = LockCatalog::from_rows([(7, slots)]);
+        assert_eq!(super::known_lock_id(7, Some(&catalog)), 7);
+        assert_eq!(super::known_lock_id(8, Some(&catalog)), 0);
+        assert_eq!(
+            super::known_lock_id(8, None),
+            8,
+            "no catalog, the id stands"
+        );
+        assert_eq!(super::known_lock_id(0, Some(&catalog)), 0);
+    }
+
+    /// A bag slot carries the template's quality and InventoryType, which `GetContainerItemInfo`
+    /// gates its fourth value on (`0x4f9794`); an unanswered template leaves them empty.
+    #[test]
+    fn a_resolved_slot_carries_the_templates_quality_and_inventory_type() {
+        use crate::items::{test_template, Items, RollCatalogs};
+        use crate::names::NameCache;
+        use crate::net::NetCommands;
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::ObjectFields;
+
+        const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut objs = TestObjects::new();
+        for (guid, entry) in [(0xA1_u64, 1234_u32), (0xA2, 1235), (0xA3, 1236)] {
+            objs.spawn(guid, ObjectFields::from_pairs(&[(ENTRY, entry)]));
+        }
+        let mut items = Items::default();
+        let mut sword = test_template("Sword");
+        sword.quality = 4;
+        sword.inventory_type = 13;
+        items.insert_template(1234, Some(sword));
+        items.insert_template(1235, Some(test_template("Healing Potion")));
+
+        let names = NameCache::default();
+        let cooldowns = crate::spell::Cooldowns::default();
+        let mut petitions = crate::ui_petition::PetitionState::default();
+        let mut slot = |guid: u64| {
+            resolve_slot(
+                guid,
+                &objs.get(),
+                &items,
+                None,
+                RollCatalogs::NONE,
+                &commands,
+                &cooldowns,
+                None,
+                &names,
+                &mut petitions,
+                std::time::Instant::now(),
+                0.0,
+                false,
+            )
+        };
+        // A guid whose item object has not streamed reads as no item at all (`0x6228a0` finds
+        // none), not as an occupied blank.
+        assert!(slot(0xA9).is_none());
+        let sword = slot(0xA1).expect("an occupied slot");
+        assert_eq!((sword.quality, sword.inventory_type), (Some(4), 13));
+        let potion = slot(0xA2).expect("an occupied slot");
+        assert_eq!((potion.quality, potion.inventory_type), (Some(1), 0));
+        let pending = slot(0xA3).expect("an occupied slot");
+        assert_eq!((pending.quality, pending.inventory_type), (None, 0));
+    }
 
     /// No bags and an empty vault.
     const NO_BAGS: SlotGuids = SlotGuids {

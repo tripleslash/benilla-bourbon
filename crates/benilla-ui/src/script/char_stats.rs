@@ -17,6 +17,7 @@ use mlua::{Lua, Value};
 
 use super::binding_abi::flag;
 use super::{binding_abi, Model};
+use crate::script::binding_abi::Idx;
 
 /// The `SkillLine.dbc` id behind weapon subclass `0..=20` (vmangos `Item.cpp:700-707`), `None`
 /// for the obsolete, exotic and misc rows; with no weapon the skill is [`SKILL_UNARMED`]
@@ -406,7 +407,7 @@ pub(super) const KEYRING_INV_SLOTS: std::ops::RangeInclusive<usize> = 82..=113;
 
 /// The keyring's container id (`KEYRING_CONTAINER`, `MainMenuBarBagButtons.lua:1`); must match
 /// `ui_items::KEYRING_CONTAINER` in the app, which feeds the keys as that container.
-const KEYRING_CONTAINER: i64 = -2;
+pub(super) const KEYRING_CONTAINER: i64 = -2;
 
 impl Model {
     /// The item `token` exposes at live-API id `slot`, the one routing the `GetInventoryItem*`
@@ -501,6 +502,9 @@ impl InvSlotView {
             locked: slot.locked,
             creator: slot.creator.clone(),
             enchants: slot.enchants.clone(),
+            // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.
+            flags: slot.flags,
+            duration_ms: slot.duration_ms,
             // Slot 20 (`Bag0Slot`) among `equip_slots` marks a container (`INVTYPE_BAG`). The bank
             // vault is past the `0x16` short-circuit, so only `Some` versus `None` matters.
             contents_count: slot.equip_slots.contains(&20).then_some(0),
@@ -859,7 +863,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // 4 broken.
     g.set(
         "GetInventoryAlertStatus",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_mut::<Model>().expect("model app_data");
             Ok(if (1..=12).contains(&index) {
                 i64::from(model.inventory_alerts[index - 1])

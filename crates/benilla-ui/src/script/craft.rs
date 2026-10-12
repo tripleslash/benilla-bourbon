@@ -12,6 +12,7 @@ use mlua::{Lua, MultiValue, Value, Variadic};
 use super::binding_abi::{self, number_arg};
 use super::item_stats::item_link;
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// One reagent a recipe consumes (`GetCraftReagentInfo`); name and icon are `None` until the item
 /// template answer lands.
@@ -272,14 +273,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetCraftInfo(index) → craftName, craftSubSpellName, craftType, numAvailable, isExpanded,
-    // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); one nil past the end.
+    // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); a miss pushes the seven too.
     // `isExpanded` is always nil; Beast Training's cost and level answer 0, not built.
     g.set(
         "GetCraftInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(r) = recipe(&model, index) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // `0x4f70a4`: nil, nil, nil, 0, nil, 0, 0.
+                return Ok(binding_abi::tuple(&[
+                    None,
+                    None,
+                    None,
+                    Some(0),
+                    None,
+                    Some(0),
+                    Some(0),
+                ]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&r.name)?),
@@ -296,7 +306,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetCraftIcon(index) → the icon path, nil while in flight or past the end.
     g.set(
         "GetCraftIcon",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             opt_str(lua, recipe(&model, index).and_then(|r| r.icon.as_ref()))
         })?,
@@ -306,7 +316,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // painting (`Blizzard_CraftUI.lua:312`).
     g.set(
         "GetCraftDescription",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             opt_str(
                 lua,
@@ -318,21 +328,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetCraftNumReagents(index) → the reagent count, 0 past the end or when closed.
     g.set(
         "GetCraftNumReagents",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(recipe(&model, index).map_or(0, |r| r.reagents.len()) as i64)
         })?,
     )?;
 
-    // GetCraftReagentInfo(index, reagentIndex) → name, icon, need, have; one nil past the end.
+    // GetCraftReagentInfo(index, reagentIndex) → name, icon, need, have; a miss is four nils
+    // (`0x4f759b`).
     g.set(
         "GetCraftReagentInfo",
-        lua.create_function(|lua, (index, reagent_index): (usize, usize)| {
+        lua.create_function(|lua, (Idx(index), Idx(reagent_index)): (Idx, Idx)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(reagent) = recipe(&model, index)
                 .and_then(|r| reagent_index.checked_sub(1).and_then(|n| r.reagents.get(n)))
             else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(binding_abi::tuple(&[None; 4]));
             };
             Ok(MultiValue::from_vec(vec![
                 opt_str(lua, reagent.name.as_ref())?,

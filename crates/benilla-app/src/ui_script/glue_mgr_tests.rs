@@ -767,8 +767,18 @@ fn stock_app() -> (App, async_channel::Receiver<LoginRequest>, Arc<AtomicU64>) {
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
+        .add_message::<crate::ui_script::server_alert::LaunchUrl>()
         .add_message::<AppExit>()
-        .add_systems(Update, (drive_glue_mgr, crate::login::answer_glue).chain());
+        .init_resource::<crate::portrait::GluePreview>()
+        .add_systems(
+            Update,
+            (
+                drive_glue_mgr,
+                super::super::glue_scene::feed_stock_glue_preview,
+                crate::login::answer_glue,
+            )
+                .chain(),
+        );
     let mut s = UiScript::new_glue().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let _ = super::super::glue::load_glue(&mut s);
@@ -1120,10 +1130,18 @@ fn live_app_with(
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
+        .add_message::<crate::ui_script::server_alert::LaunchUrl>()
         .add_message::<AppExit>()
+        .init_resource::<crate::portrait::GluePreview>()
         .add_systems(
             Update,
-            (pump, drive_glue_mgr, crate::login::answer_glue).chain(),
+            (
+                pump,
+                drive_glue_mgr,
+                super::super::glue_scene::feed_stock_glue_preview,
+                crate::login::answer_glue,
+            )
+                .chain(),
         );
     let mut s = UiScript::new_glue().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -1581,6 +1599,130 @@ fn an_empty_roster_asks_for_the_realm_list_only_with_no_realm_chosen() {
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }
 
+// ── The stock screens' scenes through the glue booth ────────────────────────────────────────────
+
+fn preview(app: &App) -> &crate::portrait::GluePreview {
+    app.world().resource::<crate::portrait::GluePreview>()
+}
+
+/// The stock login's `AccountLogin` pane drives the glue booth: `UI_MainMenu` under the pane's
+/// own fog, `AccountLogin.xml`'s `<FogColor>` and `fogFar`, with nobody standing in it.
+#[test]
+fn the_stock_login_stands_the_main_menu_in_the_glue_booth() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (app, _rx, _abandon) = stock_app();
+    let p = preview(&app);
+    assert_eq!(p.scene, Some(crate::portrait::GlueScene::MainMenu));
+    assert!(p.look.is_none());
+    let fog = p.fog.expect("the main menu fogs");
+    assert_eq!((fog.near, fog.far), (0.0, 1200.0));
+    for (got, want) in fog.rgb.iter().zip([0.25, 0.06, 0.015]) {
+        assert!((got - want).abs() < 1.0 / 255.0, "{:?}", fog.rgb);
+    }
+}
+
+/// The selected character stands in the select scene: the roster load's selection, then a
+/// row's `CharacterSelect_SelectCharacter`, which sets its race's stage unfogged; the yaw is the
+/// facing cell `SetCharacterSelectFacing` writes, and the next select squares it.
+#[test]
+fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
+    use crate::portrait::{GlueLook, GlueScene, SelectLook};
+    let _ = benilla_formats::wow_data_or_skip!();
+    let mut roster = roster3();
+    let mut dwarf = crate::char_select::test_character(0x14, "Delta");
+    (dwarf.race, dwarf.zone) = (3, 12);
+    roster.push(dwarf);
+    let (mut app, _realmd, _world) = char_select_app(&roster, "1", false);
+    until(&mut app, "the roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    app.update();
+    let p = preview(&app);
+    assert!(
+        p.look == Some(GlueLook::Select(SelectLook::from(&roster[1]))),
+        "lastCharacterIndex 1 stands Bravo"
+    );
+    assert_eq!((p.scene, p.fog), (Some(GlueScene::Human), None));
+    assert_eq!(p.yaw, 0.0);
+
+    vm(&app).run("CharacterSelect_SelectCharacter(1)").unwrap();
+    app.update();
+    let p = preview(&app);
+    assert!(p.look == Some(GlueLook::Select(SelectLook::from(&roster[0]))));
+    assert_eq!((p.scene, p.fog), (Some(GlueScene::NightElf), None));
+
+    vm(&app).run("SetCharacterSelectFacing(90)").unwrap();
+    app.update();
+    let yaw = preview(&app).yaw;
+    assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{yaw}");
+    vm(&app).run("CharacterSelect_SelectCharacter(3)").unwrap();
+    app.update();
+    let p = preview(&app);
+    assert_eq!(p.yaw, 0.0, "every select zeroes the facing (`0x472a61`)");
+    assert_eq!(
+        p.scene,
+        Some(GlueScene::Dwarf),
+        "a gnome stands in Dwarf's stage"
+    );
+    // The dwarf after the gnome: the same stage, set again by its own file string, is a new
+    // instance (`0x76cce0`), so the scene starts over.
+    let gnome_stage = p.stage;
+    vm(&app).run("CharacterSelect_SelectCharacter(4)").unwrap();
+    app.update();
+    let p = preview(&app);
+    assert_eq!(p.scene, Some(GlueScene::Dwarf));
+    assert_ne!(p.stage, gnome_stage);
+    // The pane is GlueParent's, the whole 4:3 screen.
+    assert_eq!(p.pane, Some([0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// #978: an account with no characters shows `CharacterSelect`'s OnLoad scene, `UI_Orc` under
+/// Orc's fog. Once a character has set its stage the scene stays, unfogged, when the roster
+/// empties: an empty roster sets no background.
+#[test]
+fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
+    use crate::portrait::GlueScene;
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, _world) = char_select_app(&[], "0", true);
+    until(&mut app, "the roster load", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    app.update();
+    let p = preview(&app);
+    assert_eq!(p.scene, Some(GlueScene::Orc));
+    assert!(p.look.is_none());
+    let fog = p.fog.expect("the empty roster's scene is fogged");
+    assert_eq!((fog.near, fog.far), (0.0, 270.0));
+
+    let mut tauren = crate::char_select::test_character(0x41, "Moo");
+    (tauren.race, tauren.zone) = (6, 12);
+    let (mut app, _realmd, world) = char_select_app(&[tauren], "0", true);
+    until(&mut app, "the roster load", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    app.update();
+    let p = preview(&app);
+    assert_eq!((p.scene, p.fog), (Some(GlueScene::Tauren), None));
+    assert!(p.look.is_some());
+
+    world.set_roster(&[]);
+    let before = seen(&app, "CHARACTER_LIST_UPDATE");
+    vm(&app).run("GetCharacterListUpdate()").unwrap();
+    until(&mut app, "the empty roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > before
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    app.update();
+    let p = preview(&app);
+    assert_eq!((p.scene, p.fog), (Some(GlueScene::Tauren), None));
+    assert!(p.look.is_none(), "the records are freed and detached");
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
 /// The roster's race and class names are the DBC rows' `Name_Lang`, the file string the race
 /// row's, and a race or class with no row reads empty (`0x473336`, `0x47336e`); with no catalogs
 /// loaded every row is missing.
@@ -1756,4 +1898,145 @@ fn a_roster_reply_after_the_dialogs_cancel_is_dropped() {
         "and nothing loaded it"
     );
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+// ── The server alert ──
+
+/// A body of the shape the 2007 alert had: the prefix, a dated heading, paragraphs split by blank
+/// lines, a list of realm names one to a line, and a final newline; plain text, about 1 KB.
+fn alert_body() -> String {
+    let mut body = String::from(
+        "SERVERALERT:\n[January 17, 2007 - 5:00PM PST]\n\n\
+         In order to address player queues on highly populated realms, we are offering free \
+         character transfer moves to players on the realms listed below.\n\n\
+         Please note: if the populations of these realms are not reduced by free character \
+         moves, we will be forced to perform realm splits to reduce their population to \
+         acceptable levels.\n\n\
+         For full details, please check the latest forum sticky posts.\n\n",
+    );
+    for realm in [
+        "Alexstrasza",
+        "Aggramar",
+        "Argent Dawn",
+        "Azjol-Nerub",
+        "Blackwater Raiders",
+        "Bloodhoof",
+        "Bronzebeard",
+        "Cenarius",
+        "Doomhammer",
+        "Thunderhorn",
+        "Whisperwind",
+        "Zul'jin",
+    ] {
+        body.push_str(realm);
+        body.push('\n');
+    }
+    body
+}
+
+/// A server that answers the next request with `body` and closes; its URL.
+fn serve_body(body: &str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut raw = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    raw.extend_from_slice(body.as_bytes());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut conn, _)) = listener.accept() {
+            // The whole request head first, then the answer.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && conn.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let _ = conn.write_all(&raw);
+        }
+    });
+    format!("http://127.0.0.1:{port}/alert")
+}
+
+/// A fetched alert reaches the stock login screen: the status dialog's button runs first
+/// (`0x46b947`), so a logon in flight is abandoned, `SHOW_SERVER_ALERT` fires once with the text
+/// after the prefix (`0x46b957`), and the stock handler shows `ServerAlertFrame` with it.
+#[test]
+fn a_fetched_alert_cancels_the_logon_and_shows_the_alert_frame() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let body = alert_body();
+    let url = serve_body(&body);
+    let (mut app, rx, abandon) = stock_app();
+    vm(&app)
+        .run(
+            "probe = CreateFrame('Frame') probe:RegisterEvent('SHOW_SERVER_ALERT') \
+             probe:SetScript('OnEvent', function() ALERT_ARG = arg1 \
+             ALERT_CALLS = (ALERT_CALLS or 0) + 1 end)",
+        )
+        .unwrap();
+    vm(&app).run("AcceptEULA() AcceptTOS()").unwrap();
+    app.update();
+    type_and_login(&mut app);
+    assert!(rx.try_recv().is_ok());
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Logon);
+    assert!(!shown(&app, "ServerAlertFrame"));
+
+    let fetch = crate::ui_script::server_alert::spawn_fetch(url);
+    app.world_mut()
+        .resource_mut::<GlueMgr>()
+        .set_alert_fetch(fetch);
+    until(&mut app, "the alert frame", |app| {
+        shown(app, "ServerAlertFrame")
+    });
+
+    // After the prefix, short of the last byte (`SStrCopy` of the whole body, `0x46a59f`).
+    let want = &body[b"SERVERALERT:".len()..body.len() - 1];
+    assert_eq!(vm(&app).eval::<String>("return ALERT_ARG").unwrap(), want);
+    assert_eq!(abandon.load(Ordering::SeqCst), 1, "the logon was abandoned");
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+
+    // Once: nothing refires it.
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(vm(&app).eval::<f64>("return ALERT_CALLS").unwrap(), 1.0);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// A body without the prefix, or a fetch that finds none, shows nothing and leaves the logon be.
+#[test]
+fn a_body_without_the_prefix_shows_no_alert() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let url = serve_body("<html>Not an alert.</html>\n");
+    let (mut app, rx, abandon) = stock_app();
+    vm(&app).run("AcceptEULA() AcceptTOS()").unwrap();
+    app.update();
+    type_and_login(&mut app);
+    assert!(rx.try_recv().is_ok());
+    let fetch = crate::ui_script::server_alert::spawn_fetch(url);
+    app.world_mut()
+        .resource_mut::<GlueMgr>()
+        .set_alert_fetch(fetch);
+    until(&mut app, "the fetch to end", |app| {
+        app.world().resource::<GlueMgr>().alert_fetch.is_none()
+    });
+    app.update();
+    assert!(!shown(&app, "ServerAlertFrame"));
+    assert_eq!(abandon.load(Ordering::SeqCst), 0);
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Logon);
+}
+
+/// `LaunchURL` reaches the host as a launch message, for a whitelisted URL only.
+#[test]
+fn launch_url_reaches_the_host_for_a_whitelisted_url() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _rx, _abandon) = stock_app();
+    vm(&app)
+        .run("LaunchURL('http://example.com/') LaunchURL('http://www.worldofwarcraft.com/news')")
+        .unwrap();
+    app.update();
+    let launched: Vec<String> = app
+        .world()
+        .resource::<Messages<crate::ui_script::server_alert::LaunchUrl>>()
+        .iter_current_update_messages()
+        .map(|m| m.0.clone())
+        .collect();
+    assert_eq!(launched, ["http://www.worldofwarcraft.com/news"]);
 }

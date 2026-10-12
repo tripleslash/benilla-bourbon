@@ -25,6 +25,9 @@ struct TradeOffer {
     gold: u32,
     /// The spell on this side's enchant slot, 0 for none; stored, not shown yet.
     enchant_spell_id: u32,
+    /// Our side only: each placed item's `ITEM_FIELD_FLAGS`, read off its object when it was
+    /// placed. The slot's tooltip passes that live object to the builder (`0x5342ed`).
+    object_flags: [u32; TRADE_SLOT_COUNT],
 }
 
 /// The trade session [`net`] fills and [`feed_trade`] reads, cleared on a close and on disconnect.
@@ -128,12 +131,13 @@ impl TradeSession {
 
     /// Place our item in trade slot `id_1based` client-side: vmangos sends a placement to the
     /// partner only (`TradeData.cpp:81`), never back to the placer.
-    pub(crate) fn place_own_item(&mut self, id_1based: u32, item: TradeItem) {
+    pub(crate) fn place_own_item(&mut self, id_1based: u32, item: TradeItem, flags: u32) {
         if let Some(slot) = id_1based
             .checked_sub(1)
             .and_then(|i| self.our.slots.get_mut(i as usize))
         {
             *slot = Some(item);
+            self.our.object_flags[id_1based as usize - 1] = flags;
             self.our_offer_changed();
         }
     }
@@ -450,9 +454,16 @@ fn resolve_slot(
     let template = items.template(item.entry, 0, commands);
     let name = template.map(|t| t.name.clone());
     let quality = template.map(|t| t.quality);
-    let texture = icons
-        .and_then(|i| i.catalog.get(item.display_id))
-        .and_then(|d| d.icon.clone());
+    let inventory_type = template.map_or(0, |t| t.inventory_type);
+    // The icon comes from the template's display, not the wire's (`0x5d88b0([rec+0x18])`,
+    // `0x4c01f0`; `0x5d8af0` on our side, `0x4c0529`); a cached template whose display has no
+    // icon falls to the question mark, and an unanswered one leaves it to the getter.
+    let texture = template.map(|t| {
+        icons
+            .and_then(|i| i.catalog.get(t.display_info_id))
+            .and_then(|d| d.icon.clone())
+            .unwrap_or_else(|| crate::ui_action::MISSING_ITEM_ICON.to_string())
+    });
     // Nil until the template answers: the link embeds the name and the quality colour.
     let link = match (name.as_deref(), quality) {
         (Some(n), Some(q)) => Some(crate::ui_items::item_link(item.entry, n, q)),
@@ -464,6 +475,9 @@ fn resolve_slot(
         texture,
         count: item.count.max(1),
         quality,
+        inventory_type,
+        lock_id: item.lock_id,
+        object_flags: None,
         enchantment: None,
         link,
     }
@@ -478,42 +492,53 @@ fn own_item_at(
     objects: &Objects,
     items: &Items,
     commands: &NetCommands,
-) -> Option<TradeItem> {
+) -> Option<(TradeItem, u32)> {
     let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, objects);
     if guid == 0 {
         return None;
     }
-    let entry = objects.object(guid).and_then(|f| f.object_entry())?;
+    let fields = objects.object(guid)?;
+    let entry = fields.object_entry()?;
+    let flags = fields.item_flags().unwrap_or(0);
     let display_id = items
         .template(entry, guid, commands)
         .map(|t| t.display_info_id)
         .unwrap_or(0);
-    Some(TradeItem {
-        entry,
-        display_id,
-        count,
-        wrapped: false,
-        gift_creator: 0,
-        perm_enchant: 0,
-        creator: 0,
-        charges: 0,
-        suffix_factor: 0,
-        random_prop_id: 0,
-        lock_id: 0,
-        max_durability: 0,
-        durability: 0,
-    })
+    Some((
+        TradeItem {
+            entry,
+            display_id,
+            count,
+            wrapped: false,
+            gift_creator: 0,
+            perm_enchant: 0,
+            creator: 0,
+            charges: 0,
+            suffix_factor: 0,
+            random_prop_id: 0,
+            lock_id: 0,
+            max_durability: 0,
+            durability: 0,
+        },
+        flags,
+    ))
 }
 
 fn resolve_side(
     offer: &TradeOffer,
+    ours: bool,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> TradeSideState {
     let mut slots: [Option<TradeSlotItem>; TRADE_SLOT_COUNT] = Default::default();
     for (i, s) in offer.slots.iter().enumerate() {
-        slots[i] = s.map(|it| resolve_slot(&it, items, icons, commands));
+        slots[i] = s.map(|it| {
+            let mut row = resolve_slot(&it, items, icons, commands);
+            // Our items are live objects; the partner's are blocks (`0x5342ed`, `0x53456b`).
+            row.object_flags = ours.then_some(offer.object_flags[i]);
+            row
+        });
     }
     TradeSideState {
         slots,
@@ -531,8 +556,8 @@ fn snapshot(
         return None;
     }
     Some(TradeState {
-        player: resolve_side(&trade.our, items, icons, commands),
-        target: resolve_side(&trade.their, items, icons, commands),
+        player: resolve_side(&trade.our, true, items, icons, commands),
+        target: resolve_side(&trade.their, false, items, icons, commands),
     })
 }
 
@@ -729,8 +754,9 @@ fn drain_trade(
         };
         if let Some(trade_slot) = id.checked_sub(1).and_then(|n| u8::try_from(n).ok()) {
             // vmangos echoes a placement to the partner only, so our column is filled here.
-            if let Some(item) = own_item_at(bag, slot, store, &objects, &items, &commands) {
-                trade.place_own_item(id, item);
+            if let Some((item, flags)) = own_item_at(bag, slot, store, &objects, &items, &commands)
+            {
+                trade.place_own_item(id, item, flags);
             }
             info!(target: "trade", "set item: slot {id} <- bag {bag}/{slot} (wire {wire_bag}/{wire_slot}); sending CMSG_SET_TRADE_ITEM");
             let _ = commands.0.send(ClientCommand::SetTradeItem {
@@ -827,6 +853,37 @@ mod tests {
             max_durability: 0,
             durability: 0,
         }
+    }
+
+    /// The row carries the template's quality and InventoryType, which `GetTradePlayerItemInfo`
+    /// gates its fourth value on; an unanswered template leaves both empty.
+    #[test]
+    fn a_trade_row_carries_the_templates_quality_and_inventory_type() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut items = Items::default();
+        let mut sword = crate::items::test_template("Sword");
+        sword.quality = 4;
+        sword.inventory_type = 13;
+        items.insert_template(1234, Some(sword));
+        items.insert_template(1235, Some(crate::items::test_template("Linen Cloth")));
+
+        let row = resolve_slot(&wire_item(1234), &items, None, &commands);
+        assert_eq!((row.quality, row.inventory_type), (Some(4), 13));
+        // The icon is the template's display's, the question mark when that row is missing, and
+        // left to the getter while the template is unanswered.
+        assert_eq!(
+            row.texture.as_deref(),
+            Some("Interface\\Icons\\INV_Misc_QuestionMark")
+        );
+        assert_eq!(
+            resolve_slot(&wire_item(1236), &items, None, &commands).texture,
+            None
+        );
+        let row = resolve_slot(&wire_item(1235), &items, None, &commands);
+        assert_eq!((row.quality, row.inventory_type), (Some(1), 0));
+        let row = resolve_slot(&wire_item(1236), &items, None, &commands);
+        assert_eq!((row.quality, row.inventory_type), (None, 0));
     }
 
     #[test]
@@ -950,7 +1007,7 @@ mod tests {
         s.partner_accepted();
         assert_eq!((s.our_accept, s.their_accept), (true, true));
 
-        s.place_own_item(2, wire_item(1234));
+        s.place_own_item(2, wire_item(1234), 0);
         assert!(s.our.slots[1].is_some(), "our slot 2 shows the placed item");
         assert_eq!(
             (s.our_accept, s.their_accept),

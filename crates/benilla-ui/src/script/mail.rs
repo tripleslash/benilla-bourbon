@@ -5,8 +5,9 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::flag;
-use super::cursor::{self, CursorPayload};
+use super::cursor;
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// One inbox row, resolved by the app from a wire `MailListEntry`; its 1-based index is its
 /// position in [`MailState::inbox`].
@@ -284,7 +285,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`0x4aeff0`..`0x4af05e`): four nils, 0 for money, COD amount and days left, six nils.
     g.set(
         "GetInboxHeaderInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, index)
@@ -334,7 +335,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`MailFrame.lua:366`), the pair vmangos requires (`MailHandler.cpp:867`).
     g.set(
         "GetInboxText",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let row = row_at(&model, index);
@@ -370,7 +371,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // being three nils and four zeros (`0x4af559`).
     g.set(
         "GetInboxInvoiceInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, index)
@@ -405,7 +406,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the shared item-usable gate, true while the template is in flight.
     g.set(
         "GetInboxItem",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let (row, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let row = row_at(&model, index);
@@ -646,7 +647,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ClickSendMailItemButton",
         lua.create_function(|lua, ()| {
-            super::tick::verb(lua, click_send_mail_item);
+            click_send_mail_item(lua);
             Ok(())
         })?,
     )?;
@@ -797,30 +798,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `ClickSendMailItemButton`: the send slot as a cursor drop target, firing `CURSOR_UPDATE` and
-/// `ITEM_LOCK_CHANGED` like a bag slot.
-fn click_send_mail_item(model: &mut Model) {
-    match model.cursor.take() {
-        // A held bag item attaches; it stays in its bag slot until the send.
-        Some(CursorPayload::Item(item)) => {
-            // An earlier attachment is overwritten, as in the reference; its slot has no lock.
-            model.mail_send_item = Some(item);
-            cursor::raise_cursor_update(model);
-            cursor::raise_lock_changed(model);
-            // `MAIL_SEND_INFO_UPDATE` (`0x4ae0de`): the stock tab re-reads the item and postage.
+/// `ClickSendMailItemButton` (`0x4adef0`): the send slot as a cursor drop target, attaching the
+/// held item and putting an earlier attachment back on the cursor ([`cursor::click_attach_slot`]).
+/// A held item stays in its bag slot, locked, until the send. A changed attachment signals
+/// `MAIL_SEND_INFO_UPDATE` (`0x4ae0de`), whose stock handler re-reads the item and postage.
+fn click_send_mail_item(lua: &Lua) {
+    if cursor::click_attach_slot(lua, |model| &mut model.mail_send_item) {
+        super::tick::verb(lua, |model| {
             model.raise("MAIL_SEND_INFO_UPDATE", Vec::new());
-        }
-        None => {
-            if let Some(item) = model.mail_send_item.take() {
-                model.cursor = Some(CursorPayload::Item(item));
-                cursor::raise_cursor_update(model);
-                cursor::raise_lock_changed(model);
-                model.raise("MAIL_SEND_INFO_UPDATE", Vec::new());
-            }
-        }
-        Some(other) => {
-            model.cursor = Some(other);
-        }
+        });
     }
 }
 
@@ -1379,6 +1365,104 @@ mod tests {
         assert!(s.eval::<bool>("return HasNewMail() == 1").unwrap());
         s.set_has_new_mail(false);
         assert!(s.eval::<bool>("return HasNewMail() == nil").unwrap());
+    }
+
+    /// The attach clears with `SetCursorItem(0, …)` (`0x4ae0d2`): no unlock and no
+    /// `ITEM_LOCK_CHANGED`, so the attached item stays locked in its bag and cannot be picked up
+    /// again, until the compose reset lifts the lock with its event (`0x4acdd6`).
+    #[test]
+    fn an_attached_item_keeps_its_lock_until_it_leaves_the_slot() {
+        use crate::script::cursor::{bag_lock_probe, two_item_bag};
+        use crate::script::tick::heard;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        heard::listen(
+            &s,
+            &["ITEM_LOCK_CHANGED", "CURSOR_UPDATE"],
+            Some(&bag_lock_probe(1)),
+        );
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE 1"]);
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(
+            s.cursor_payload().is_none(),
+            "a locked item is not picked up"
+        );
+        assert!(heard::take(&s).is_empty());
+        s.reset_compose_tab();
+        assert_eq!(heard::take(&s), ["ITEM_LOCK_CHANGED nil"]);
+    }
+
+    /// An occupied attach slot puts the old attachment back on the cursor through
+    /// `SetCursorItem(0, …)` (`0x4ae05a`-`0x4ae0d4`): its inner clear's `CURSOR_UPDATE` reads the
+    /// emptied cursor, the set's the old item, and both items stay locked. An empty hand takes the
+    /// attachment back the same way. With nothing held and nothing attached the click is
+    /// `ClearCursor(1,1)` (`0x4ae08b`), which drops any other payload and signals nothing more.
+    #[test]
+    fn an_attach_onto_an_occupied_slot_puts_the_old_item_on_the_cursor() {
+        use crate::script::cursor::{
+            bag_lock_probe, install_kind_probe, two_item_bag, CursorMacro, CursorPayload,
+        };
+        use crate::script::tick::heard;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        install_kind_probe(&s);
+        s.run("PickupContainerItem(0, 1) ClickSendMailItemButton() PickupContainerItem(0, 2)")
+            .unwrap();
+        heard::listen(
+            &s,
+            &[
+                "ACTIONBAR_HIDEGRID",
+                "ACTIONBAR_SHOWGRID",
+                "CURSOR_UPDATE",
+                "ITEM_LOCK_CHANGED",
+                "MAIL_SEND_INFO_UPDATE",
+            ],
+            Some("CursorKind() .. ' ' .. tostring(GetSendMailItem())"),
+        );
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            [
+                "ACTIONBAR_HIDEGRID none Minor Healing Potion",
+                "CURSOR_UPDATE none Minor Healing Potion",
+                "ACTIONBAR_SHOWGRID item Minor Healing Potion",
+                "CURSOR_UPDATE item Minor Healing Potion",
+                "MAIL_SEND_INFO_UPDATE item Minor Healing Potion"
+            ]
+        );
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(1));
+        for slot in [1, 2] {
+            let probe = bag_lock_probe(slot);
+            assert!(s.eval::<bool>(&format!("return {probe} == 1")).unwrap());
+        }
+
+        // An empty hand takes the attachment back.
+        s.run("ClearCursor()").unwrap();
+        heard::take(&s);
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            [
+                "CURSOR_UPDATE none nil",
+                "ACTIONBAR_SHOWGRID item nil",
+                "CURSOR_UPDATE item nil",
+                "MAIL_SEND_INFO_UPDATE item nil"
+            ]
+        );
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(2));
+
+        // Nothing held and nothing attached: a plain clear, here of a held macro.
+        s.run("ClearCursor()").unwrap();
+        s.set_cursor_for_test(CursorPayload::Macro(CursorMacro {
+            index: 1,
+            texture: None,
+        }));
+        heard::take(&s);
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE none nil"]);
     }
 }
 

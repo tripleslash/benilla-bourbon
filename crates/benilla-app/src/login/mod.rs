@@ -56,8 +56,22 @@ impl Plugin for LoginPlugin {
         app.init_resource::<LoginIntent>()
             .init_resource::<LoginForm>()
             .add_message::<GlueLogin>()
-            .add_systems(OnEnter(ClientState::Login), enter_login)
-            .add_systems(OnExit(ClientState::Login), screen::exit_login)
+            .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+            .add_systems(
+                OnEnter(ClientState::Login),
+                (
+                    enter_login,
+                    // Under the stock glue screens their own feeder drives the booth.
+                    show_main_menu.run_if(crate::ui_script::glue::native_glue),
+                ),
+            )
+            .add_systems(
+                OnExit(ClientState::Login),
+                (
+                    screen::exit_login,
+                    screen::clear_login_scene.run_if(crate::ui_script::glue::native_glue),
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -69,6 +83,14 @@ impl Plugin for LoginPlugin {
                         crate::ui_script::glue_mgr::drive_glue_mgr
                             .after(crate::ui_script::UiInput)
                             .after(crate::realm_select::RealmSelectSet)
+                            .run_if(crate::ui_script::glue::stock_glue),
+                        // Off the roster and the screen the manager and the tick just moved.
+                        crate::ui_script::glue_scene::feed_stock_glue_preview
+                            .run_if(crate::ui_script::glue::stock_glue)
+                            .in_set(crate::portrait::GluePreviewFeed),
+                        crate::ui_script::server_alert::open_launched
+                            // Reads only its message, so no state orders it but the sets.
+                            .after(benilla_world::schedule::WorldStage::Stream)
                             .run_if(crate::ui_script::glue::stock_glue),
                         answer_glue,
                         drive_policy,
@@ -356,9 +378,8 @@ fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
         m::AUTH_ALREADY_LOGGING_IN => ("AUTH_ALREADY_LOGGING_IN", "Already Logging In"),
         m::AUTH_LOGIN_SERVER_NOT_FOUND => ("AUTH_LOGIN_SERVER_NOT_FOUND", "Invalid Login Server"),
         // All but `AUTH_ALREADY_ONLINE` below are the rows of the client's `OKAY_WITH_URL` table
-        // (`0x803740`). Deviation: no URL button, because `LaunchURL` is a shell-out benilla does
-        // not make and its whitelist (`0x85cc34`) names only Blizzard domains that no longer
-        // serve these pages.
+        // (`0x803740`). Deviation: no URL button on the native screen, because `LaunchURL`'s
+        // whitelist (`0x85cc34`) names only Blizzard domains that no longer serve these pages.
         m::AUTH_BANNED => (
             "AUTH_BANNED",
             "This account has been banned for violating the Terms of Use Agreement",
@@ -757,8 +778,8 @@ impl LoginForm {
 }
 
 /// `AccountLogin_OnShow`: prefill the saved account, clear the password, focus the first empty
-/// box, check Remember when a name is saved; then show the `UI_MainMenu` scene.
-fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
+/// box, check Remember when a name is saved.
+fn enter_login(mut form: ResMut<LoginForm>) {
     let saved = load_saved_account();
     form.save = !saved.is_empty();
     form.focus = if saved.is_empty() {
@@ -772,9 +793,16 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     // remembered name is typed over.
     let focus = form.focus;
     form.focus(focus);
+}
+
+/// The native login's scene, `AccountLogin.xml`'s `ModelFFX`: `UI_MainMenu` under its fog.
+fn show_main_menu(mut preview: ResMut<GluePreview>) {
     preview.scene = Some(GlueScene::MainMenu);
     preview.look = None;
     preview.yaw = 0.0;
+    preview.fog = GlueScene::MainMenu.stock_fog();
+    // `AccountLogin`'s OnShow (`0x46fa60`).
+    preview.shown = preview.shown.wrapping_add(1);
 }
 
 /// The screen's input: typing, Tab, Enter submits, Esc does nothing (an open dialog takes it),

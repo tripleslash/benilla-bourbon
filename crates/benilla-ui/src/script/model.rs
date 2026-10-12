@@ -278,6 +278,8 @@ pub(crate) struct Model {
     pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
     /// Model files still waiting for their facts, for the host to load; deduplicated.
     pub(crate) model_facts_wanted: Vec<String>,
+    /// The model instances `SetModel` has made in this state, the last one's number.
+    pub(crate) model_instances: u64,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
     /// dispatches in that order across frames. Re-registering keeps a frame's position.
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
@@ -666,11 +668,10 @@ pub(crate) struct Model {
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
     pub(crate) cursor: Option<cursor::CursorPayload>,
-    /// The action bar's drop grid: shown on the cursor's empty-to-held edge for any payload but a
-    /// pet action or a vendor row (mode 5; the grab setter `0x4950f0` shows it for mode 7 only).
-    pub(crate) cursor_grid_shown: bool,
-    /// The pet bar's grid, lit only by a pet-action pickup (`0x494f28`); never both grids at once.
-    pub(crate) pet_grid_shown: bool,
+    /// The cursor's one grid latch, `[0xb4da24]`: set by a setter that showed a bar's drop grid,
+    /// cleared by `ClearCursor`'s tail, which hides the pet bar's for a held pet action and the
+    /// action bar's otherwise (`0x49529b`).
+    pub(crate) cursor_grid: bool,
     /// The world pick under the cursor (`[this+0x350]`): a world click drops no payload on an
     /// object, only an item on terrain, and anything over nothing.
     pub(crate) world_pick: cursor::WorldPick,
@@ -1234,6 +1235,7 @@ impl Model {
             on_update_model_frames: Vec::new(),
             model_facts: HashMap::new(),
             model_facts_wanted: Vec::new(),
+            model_instances: 0,
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             all_event_frames: Vec::new(),
@@ -1410,8 +1412,7 @@ impl Model {
             container_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
-            cursor_grid_shown: false,
-            pet_grid_shown: false,
+            cursor_grid: false,
             world_pick: cursor::WorldPick::default(),
             container_moves: Vec::new(),
             container_repairs: Vec::new(),

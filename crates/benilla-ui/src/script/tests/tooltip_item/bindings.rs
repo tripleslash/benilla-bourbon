@@ -72,6 +72,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             texture: None,
             count: 1,
             quality: Some(2),
+            inventory_type: 0,
             item_id: 7002,
             link: Some("|cff1eff00|Hitem:7002:0:0:0|h[New Loop]|h|r".into()),
             locked: false,
@@ -757,6 +758,131 @@ fn item_bindings_return_the_pushed_repair_cost() {
     )
     .unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// The LOCKED line is drawn for an item object lacking UNLOCKED `0x4` (`0x52bdb3`..`0x52bdc4`), or
+/// for a block with a lock id of its own (`0x52bdd2`), never for a template source; every lock
+/// path sets the builder's return value (`0x52bfa6`), so the bag setter answers 1 for a locked
+/// item with no cooldown and no expiry.
+#[test]
+fn locked_is_drawn_for_a_locked_object_and_sets_the_builder_flag() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let slot = |flags| ContainerSlot {
+        item_id: 8300,
+        count: 1,
+        quality: Some(1),
+        link: Some("|cffffffff|Hitem:8300:0:0:0|h[Strongbox]|h|r".into()),
+        flags,
+        ..Default::default()
+    };
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 24,
+            slots: HashMap::from([(1, slot(0)), (2, slot(0x4))]),
+        }),
+    );
+    s.set_item_template(
+        8300,
+        ItemTemplateView {
+            name: "Strongbox".into(),
+            quality: 1,
+            lock_id: 7,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        local function locked()
+            for i = 1, tt:NumLines() do
+                if getglobal("TTTextLeft" .. i):GetText() == "[LOCKED]" then return true end
+            end
+            return false
+        end
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        local cd = tt:SetBagItem(0, 1)
+        assert(locked() and cd == 1, "a locked object draws LOCKED and sets the flag")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        cd = tt:SetBagItem(0, 2)
+        assert(not locked() and cd == nil, "UNLOCKED clears both: " .. tostring(cd))
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        SetItemByIdForTest(tt, 8300)
+        assert(not locked(), "a template source has no object and draws none")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
+}
+
+/// A bank vault item seen through `SetInventoryItem` keeps its flags and expiry: a picked lockbox
+/// (UNLOCKED) shows no LOCKED, a locked one does, and a timed item keeps its duration line and
+/// the builder flag.
+#[test]
+fn bank_vault_items_keep_their_flags_and_expiry() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run("ITEM_DURATION_HOURS = '[DURATION %d h]' LOCKED = '[LOCKED]'")
+        .unwrap();
+    let slot = |flags, duration_ms| ContainerSlot {
+        item_id: 8300,
+        count: 1,
+        quality: Some(1),
+        flags,
+        duration_ms,
+        ..Default::default()
+    };
+    s.set_container(
+        -1,
+        Some(ContainerState {
+            name: Some("Bank".into()),
+            num_slots: 24,
+            slots: HashMap::from([
+                (1, slot(0, None)),
+                (2, slot(0x4, None)),
+                (3, slot(0x4, Some(3_600_000))),
+            ]),
+        }),
+    );
+    s.set_item_template(
+        8300,
+        ItemTemplateView {
+            name: "Strongbox".into(),
+            quality: 1,
+            lock_id: 7,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        local function text(needle)
+            for i = 1, tt:NumLines() do
+                if getglobal("TTTextLeft" .. i):GetText() == needle then return true end
+            end
+            return false
+        end
+        local function look(id)
+            tt:SetOwner(a, "ANCHOR_RIGHT")
+            local _, cd = tt:SetInventoryItem("player", id)
+            return cd
+        end
+        local cd = look(40)
+        assert(text("[LOCKED]") and cd == 1, "locked vault item")
+        cd = look(41)
+        assert(not text("[LOCKED]") and cd == nil, "picked: " .. tostring(cd))
+        cd = look(42)
+        assert(not text("[LOCKED]") and text("[DURATION 1 h]") and cd == 1, "timed: " .. tostring(cd))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }
 
 /// `SetInventoryItem` (`0x532ee0`) and `SetBagItem` (`0x534620`) push `hasCooldown` as the number 1

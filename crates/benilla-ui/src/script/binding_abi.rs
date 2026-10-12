@@ -14,7 +14,7 @@
 //!    `xor eax,eax; ret` that skips `0x6f4940` (`GetDefaultLanguage`'s failure edges);
 //! 3. raise.
 
-use mlua::{Lua, Value};
+use mlua::{Lua, MultiValue, Value};
 
 /// `_ftol` (`0x40a2b0`) as the bindings consume it: the x87 rounding control set to chop, a
 /// `fistp` to a qword, and its low dword. What the qword cannot hold (an infinity, NaN, ±2^63 and
@@ -36,6 +36,43 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     match lua.coerce_number(v)? {
         Some(n) => Ok(ftol(n)),
         None => Err(mlua::Error::RuntimeError(usage.into())),
+    }
+}
+
+/// An index argument read as the reference reads one: a number or numeric string (`0x6f34d0`)
+/// truncated by `_ftol` ([`ftol`]) and then decremented and compared unsigned, so a zero or
+/// negative index is a huge one and falls out of range where a Rust integer parameter would raise
+/// in the conversion (`GetCraftInfo` `0x4f6ed8`). The inner value is the 32-bit pattern, the
+/// negative a value no table holds. A non-number raises, as the reference's usage error does.
+pub(crate) struct Idx(pub usize);
+
+/// [`Idx`] as a function, for a binding whose reference raises its own usage text for a
+/// non-number (`usage`); the value is the same 32-bit pattern, widened.
+pub(crate) fn index_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<usize> {
+    number_arg(lua, v, usage).map(|n| n as u32 as usize)
+}
+
+/// [`Idx`] for the parameters the bindings keep as `u32`.
+pub(crate) struct Idx32(pub u32);
+
+fn index_bits(lua: &Lua, v: Value) -> mlua::Result<u32> {
+    match lua.coerce_number(v)? {
+        Some(n) => Ok(ftol(n) as u32),
+        None => Err(mlua::Error::RuntimeError(
+            "bad argument: number expected".into(),
+        )),
+    }
+}
+
+impl mlua::FromLua for Idx {
+    fn from_lua(v: Value, lua: &Lua) -> mlua::Result<Self> {
+        index_bits(lua, v).map(|n| Idx(n as usize))
+    }
+}
+
+impl mlua::FromLua for Idx32 {
+    fn from_lua(v: Value, lua: &Lua) -> mlua::Result<Self> {
+        index_bits(lua, v).map(Idx32)
     }
 }
 
@@ -315,6 +352,18 @@ pub(crate) fn flag(b: bool) -> Value {
     } else {
         Value::Nil
     }
+}
+
+/// A tuple the reference pushes by fixed slots, as an indexed getter's miss does: `None` is a nil
+/// (`0x6f37f0`), `Some(n)` the number `n` (`0x6f3810`). The count is the handler's `mov eax,N`, so
+/// a caller counting the returns (`arg.n`) reads N, never one nil.
+pub(crate) fn tuple(slots: &[Option<i64>]) -> MultiValue {
+    MultiValue::from_vec(
+        slots
+            .iter()
+            .map(|s| s.map_or(Value::Nil, Value::Integer))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

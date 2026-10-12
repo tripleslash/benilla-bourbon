@@ -115,6 +115,25 @@ pub struct PlayerReqState {
     pub honor_rank: u8,
 }
 
+/// The icon an item-texture getter answers while the item's template is unknown or its display
+/// has no icon: `0x5d8af0` looks the template up, finds none and passes display id 0 to `0x5d88b0`,
+/// which falls back to `INV_Misc_QuestionMark` (`0x847fe4`, `0x5d8927`) under the icon directory.
+/// `GetContainerItemInfo` (`0x4f9708`) and `GetTradePlayerItemInfo` (`0x4c0529`) push it, so their
+/// texture is a string on every path.
+pub(super) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The quality an item-info getter answers: the template's quality only when the template is
+/// cached and its InventoryType is nonzero, else -1 (`GetContainerItemInfo` `0x4f9794`..`0x4f97a6`,
+/// `GetTradePlayerItemInfo` `0x4c059c`..`0x4c05af`, `GetTradeTargetItemInfo` `0x4c0241`). A potion,
+/// a reagent or a trade good (InventoryType 0) answers -1 with its template in hand, and the
+/// number is never nil. `inventory_type` is 0 while the template is unresolved.
+pub(super) fn gated_quality(quality: Option<u32>, inventory_type: u32) -> i64 {
+    match quality {
+        Some(q) if inventory_type != 0 => i64::from(q),
+        _ => -1,
+    }
+}
+
 /// [`item_usable`] by item entry: entry 0 and a template not yet answered are usable, as the
 /// merchant getter skips an uncached record (`0x4fb298`).
 pub(super) fn item_usable_by_id(model: &super::Model, item_id: u32) -> bool {
