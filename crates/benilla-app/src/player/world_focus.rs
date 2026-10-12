@@ -99,6 +99,7 @@ pub(super) fn publish_view_focus(
 
 /// Ends the post-snap hold when the destination's world has arrived. Runs after the stream stage,
 /// so `colliders_pending` is this frame's count.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn release_post_snap_hold(
     mut player: ResMut<Player>,
     progress: Option<Res<WorldLoadProgress>>,
