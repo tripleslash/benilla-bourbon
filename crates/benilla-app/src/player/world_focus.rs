@@ -106,8 +106,25 @@ pub(super) fn release_post_snap_hold(
     mut last_counters: Local<Option<[usize; 6]>>,
     net_cmds: Option<Res<crate::net::NetCommands>>,
     decks: Query<(), With<avian3d::prelude::Collider>>,
+    // Our own body as the create path left it: still tagged with a seat `board_from_create` has
+    // not taken up yet, or carried by a server spline on a deck, which keeps the tag.
+    arrived: Query<
+        (
+            Has<crate::transport::TransportRider>,
+            Has<crate::net::Spline>,
+        ),
+        (With<crate::net::SelfPlayer>, With<crate::net::Embodied>),
+    >,
 ) {
     let Some(p) = progress else { return };
+    // Our create block has landed and any seat in it is a pending board or a ride by now.
+    if player.awaiting_arrival
+        && arrived
+            .iter()
+            .any(|(seat_pending, spline)| !seat_pending || spline)
+    {
+        player.awaiting_arrival = false;
+    }
     // A rider's floor is its deck, which the world's residency does not count: it must be in the
     // physics world too, or the release drops the body through it into the sea.
     let deck_ready = player.pending_board.is_none()
@@ -145,7 +162,17 @@ pub(super) fn release_post_snap_hold(
     // the deadline is pushed while the resident world is still the map we left and while the
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
-    if p.presentable() && !player.world_stale && focus_matches && deck_ready {
+    let world_ready = p.presentable() && !player.world_stale && focus_matches;
+    // The ack goes once the world has loaded, as the reference's post-load `0xDC`; the create
+    // block the hold may still wait for comes only after it.
+    if world_ready && player.owes_worldport_ack {
+        if let Some(net) = net_cmds.as_deref() {
+            player.owes_worldport_ack = false;
+            let _ = net.0.send(crate::net::ClientCommand::WorldportAck);
+            info!("worldport: ack sent, the world is resident");
+        }
+    }
+    if world_ready && deck_ready && !player.awaiting_arrival {
         player.end_settle(true, now);
     } else if player.world_stale || progressed || p.loads_in_flight > 0 {
         // **A stream that is fetching is a stream that is arriving.** The two terms before this one
@@ -159,10 +186,11 @@ pub(super) fn release_post_snap_hold(
         // the deadline runs again.
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
+        player.awaiting_arrival = false;
         player.end_settle(false, now);
     }
-    // The worldport ack, the reference's post-load `0xDC`, goes at either end of the hold: the
-    // server keeps an unacked transfer out of world until logout.
+    // A timeout release still pays the ack: the server keeps an unacked transfer out of world
+    // until logout.
     if !player.settling && player.owes_worldport_ack {
         if let Some(net) = net_cmds.as_deref() {
             player.owes_worldport_ack = false;
@@ -559,6 +587,77 @@ mod tests {
             .insert(avian3d::prelude::Collider::sphere(1.0));
         step(&mut app, 0.1, resident);
         assert!(!settling(&mut app), "the deck collides: the hold ends");
+    }
+
+    /// A far teleport back onto a deck (the dungeon finder's way out to a boat): the world pose in
+    /// `SMSG_NEW_WORLD` is where the deck was when the teleport began, and only the create block the
+    /// ack brings seats us. Gravity stays off from the ack through the boarding to the deck's
+    /// collider, or the body falls through the boat.
+    #[test]
+    fn a_far_teleport_is_held_past_its_ack_until_the_seat_it_brings_is_boarded() {
+        let mut app = app();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        {
+            let mut player = app.world_mut().resource_mut::<Player>();
+            player.world_stale = false;
+            player.owes_worldport_ack = true;
+            player.awaiting_arrival = true;
+        }
+        let resident = |p: &mut WorldLoadProgress| {
+            p.total = 2000;
+            p.ready = 2000;
+            p.colliders_pending = 0;
+            p.scene_ready = true;
+            p.focus_resident = true;
+        };
+        step(&mut app, 0.1, resident);
+        let sent: Vec<crate::net::ClientCommand> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
+            "the resident world pays the ack, got {sent:?}"
+        );
+        assert!(settling(&mut app), "but our create block has not come yet");
+
+        // The create block lands with a seat the boarding has not taken up yet.
+        let body = app
+            .world_mut()
+            .spawn((
+                crate::net::SelfPlayer,
+                crate::net::Embodied,
+                crate::transport::TransportRider {
+                    transport_guid: 0x1F1_0000_0000_0001,
+                    local_pos: [1.0, 2.0, 3.0],
+                    local_orientation: 0.0,
+                },
+            ))
+            .id();
+        step(&mut app, 0.1, resident);
+        assert!(settling(&mut app), "the seat is not taken up yet");
+
+        // Taken up as a ride on a deck whose collider is still building.
+        let deck = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(body)
+            .remove::<crate::transport::TransportRider>();
+        app.world_mut().resource_mut::<Player>().ride = Some(super::super::PlayerRide {
+            entity: deck,
+            guid: 0x1F1_0000_0000_0001,
+            local_pos: Vec3::ZERO,
+            boat_yaw: 0.0,
+        });
+        step(&mut app, 0.1, resident);
+        assert!(settling(&mut app), "the deck does not collide yet");
+
+        app.world_mut()
+            .entity_mut(deck)
+            .insert(avian3d::prelude::Collider::sphere(1.0));
+        step(&mut app, 0.1, resident);
+        assert!(
+            !settling(&mut app),
+            "aboard a colliding deck: the hold ends"
+        );
+        assert!(rx.try_recv().is_err(), "the ack was paid twice");
     }
 
     /// vmangos keeps an unacked far teleport out of world, dropping every packet, until logout.

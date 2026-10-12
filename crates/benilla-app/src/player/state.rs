@@ -362,6 +362,11 @@ pub(crate) struct Player {
     /// blocking load returns (`0x401cae`, after `0x66fbe0`), and vmangos has no load timeout. A
     /// riding crossing acks at once and settles on the deck.
     pub(crate) owes_worldport_ack: bool,
+    /// After a far teleport's ack, the hold also waits for our own create block, as the reference
+    /// keeps its load screen until the active player object arrives: vmangos seats a passenger at
+    /// the ack (`Player::LoadFromDB`'s seating, run on arrival) and only that create block carries
+    /// the seat, so releasing before it drops the body where the deck was when the teleport began.
+    pub(crate) awaiting_arrival: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,
     /// Milliseconds of movement the settle hold skipped, sent as `CMSG_MOVE_TIME_SKIPPED` on the

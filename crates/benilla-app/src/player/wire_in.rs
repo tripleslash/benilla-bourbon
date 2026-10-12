@@ -246,8 +246,10 @@ pub(super) fn apply_server_moves(
                 );
             } else {
                 // The ack waits for the settle release: the reference acks after its blocking
-                // load, and vmangos keeps us out of world until the ack, with no timeout.
+                // load, and vmangos keeps us out of world until the ack, with no timeout. Gravity
+                // waits on past it for our create block, which may seat us on a deck.
                 player.owes_worldport_ack = true;
+                player.awaiting_arrival = true;
                 info!(
                     "worldport: mapId {} @ {:?} (world pose, ack deferred to release)",
                     w.map_id, w.position
