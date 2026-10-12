@@ -172,13 +172,14 @@ fn rebind_macro_spells(
     mut bound: ResMut<MacroBoundSpells>,
     mut last_generation: Local<crate::ui_script::VmMemo<Option<u64>>>,
     // Whether a macro reads retail options, whose choice moves with the world (this fork).
-    mut conditional: Local<bool>,
+    mut conditional: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let (Some(mut script), Some(table)) = (script, table) else {
         return;
     };
     // Per VM: a fresh VM restarts its generation at 0, which a bare memo would gate off for good.
     let last_generation = last_generation.get(&script);
+    let conditional = conditional.get(&script);
     let generation = script.macros_generation();
     if *last_generation == Some(generation) && !actions.is_changed() && !*conditional {
         return;

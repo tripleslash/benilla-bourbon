@@ -1122,6 +1122,8 @@ mod tests {
                 .add_message::<LoggedOutMessage>()
                 .add_message::<CharacterLoginFailedMessage>()
                 .add_message::<crate::net::DisconnectedMessage>()
+                // fork: `back_on_entry_failed` is one of the edges.
+                .add_message::<crate::net::LoginFailedMessage>()
                 .add_systems(Update, session_edges());
             app.world_mut().resource_mut::<Roster>().env_read = true;
             if refused {

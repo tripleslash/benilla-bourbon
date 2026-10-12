@@ -931,9 +931,13 @@ mod tests {
             .add_message::<crate::net::LoggedOutMessage>()
             .add_message::<crate::net::DisconnectedMessage>()
             .add_message::<crate::net::CharacterLoginFailedMessage>()
+            // fork: a transport changing leg raises the cover too.
+            .add_message::<crate::transport::TransportLegMessage>()
             .init_resource::<LoadingScreen>()
             .init_resource::<crate::pipe_warm::WarmPass>()
             .init_resource::<Assets<Image>>()
+            // fork: the transfer's route lookup (`ship::ShipLookup`) reads the templates.
+            .init_resource::<crate::go_templates::GameObjectTemplates>()
             .insert_resource(CurrentMap(1))
             .insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, true))
             .insert_resource(WorldLoadProgress {

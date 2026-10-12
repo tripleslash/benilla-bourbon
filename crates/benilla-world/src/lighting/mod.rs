@@ -346,6 +346,7 @@ mod ordering_tests {
             ("weather/precip/mod.rs", "push_precip: PostUpdate"),
             // fork: modern lighting (FORK.md)
             ("modern/shadow.rs", "update_cascades: Last"),
+            ("modern/look.rs", "update_look: Last"),
             (
                 "modern/sun_arc.rs",
                 "apply_sun_arc WRITES WowLighting, .after(LightingResolveSet); the Res< is GameClock's",
