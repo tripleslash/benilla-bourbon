@@ -267,7 +267,8 @@ fn handshake(
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     auth::write_logon_challenge(&mut s, user, BUILD).context("sending logon challenge")?;
     let reply = futures_lite::future::block_on(auth::read_challenge_reply(&mut s))
-        .context("reading logon challenge reply")?;
+        .context("reading logon challenge reply")?
+        .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
 
     // A wrong-shape `B` drops the connection before any proof, so realmd records no failure.
     if want != Want::Any && (reply.server_public_key[31] == 0) != (want == Want::ShortB) {
@@ -280,7 +281,8 @@ fn handshake(
     auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt)
         .context("sending logon proof")?;
     let outcome = match futures_lite::future::block_on(auth::read_proof_reply(&mut s)) {
-        Ok(m2) => Outcome::Accepted {
+        Ok(None) => Outcome::Error("SUCCESS_SURVEY: accepted with no M2".into()),
+        Ok(Some(m2)) => Outcome::Accepted {
             m2_fixed: m2 == attempt.expected_m2(Enc::Fixed),
             m2_minimal: m2 == attempt.expected_m2(Enc::Minimal),
         },

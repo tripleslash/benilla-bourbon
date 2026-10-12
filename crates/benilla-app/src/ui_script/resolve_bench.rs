@@ -140,6 +140,103 @@ fn tooltip_change_costs_a_whole_ui_solve() {
     );
 }
 
+/// What hidden frames cost on the shipped UI, which keeps most of its frames hidden: the load and
+/// settle, a stock panel's first and later shows, and layout writes to hidden frames every frame.
+#[test]
+#[ignore = "bench, run explicitly"]
+fn hidden_frames_cost() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let t = Instant::now();
+    super::load_default_ui(&s);
+    let load = ms(t);
+    let t = Instant::now();
+    for _ in 0..12 {
+        s.resolve();
+        if answer_measures(&mut s) == 0 {
+            break;
+        }
+    }
+    println!(
+        "BOOT       load {load:.1} ms  settle {:.2} ms  solves={} rounds={}",
+        ms(t),
+        s.layout_solves(),
+        s.layout_rounds()
+    );
+
+    let quiet = |s: &mut UiScript| {
+        for _ in 0..4 {
+            app_frame(s);
+        }
+    };
+    quiet(&mut s);
+    for panel in [
+        "CharacterFrame",
+        "SpellBookFrame",
+        "QuestLogFrame",
+        "FriendsFrame",
+        "GameMenuFrame",
+        "OptionsFrame",
+    ] {
+        let t = Instant::now();
+        s.run(&format!("{panel}:Show()")).unwrap();
+        app_frame(&mut s);
+        let first = ms(t);
+        s.run(&format!("{panel}:Hide()")).unwrap();
+        app_frame(&mut s);
+        quiet(&mut s);
+        let n = 20u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            s.run(&format!("{panel}:Show()")).unwrap();
+            app_frame(&mut s);
+            s.run(&format!("{panel}:Hide()")).unwrap();
+            app_frame(&mut s);
+        }
+        println!(
+            "SHOW       {panel:<15} first {first:.3} ms  later {:.3} ms/show+hide",
+            ms(t) / f64::from(n)
+        );
+    }
+
+    // A layout write to each of the spell book's hidden buttons, every frame.
+    s.run(
+        r#"
+        bench_hidden_n = 0
+        function bench_hidden_frame()
+            bench_hidden_n = bench_hidden_n + 1
+            for i = 1, 12 do
+                getglobal("SpellButton" .. i):SetWidth(30 + math.mod(bench_hidden_n, 2))
+            end
+        end
+        "#,
+    )
+    .unwrap();
+    quiet(&mut s);
+    let (s0, r0) = (s.layout_solves(), s.layout_rounds());
+    let n = 100u32;
+    let t = Instant::now();
+    for _ in 0..n {
+        s.run("bench_hidden_frame()").unwrap();
+        app_frame(&mut s);
+    }
+    println!(
+        "HIDDEN     {:.3} ms/frame  solves/frame={:.2} rounds/frame={:.2}",
+        ms(t) / f64::from(n),
+        (s.layout_solves() - s0) as f64 / f64::from(n),
+        (s.layout_rounds() - r0) as f64 / f64::from(n),
+    );
+}
+
 /// Measuring before resolving makes a tooltip content change cost one layout solve; measured
 /// after, the answers would force a second whole-UI solve.
 #[test]
@@ -677,6 +774,11 @@ fn structural_change_costs() {
         r#"
         BenchHost = CreateFrame("Frame", "BenchHost", UIParent)
         BenchHost:SetPoint("CENTER", 0, 0); BenchHost:SetWidth(200); BenchHost:SetHeight(100)
+        BenchText = BenchHost:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        BenchText:SetPoint("TOPLEFT", BenchHost, "TOPLEFT", 4, -4); BenchText:SetText("bench")
+        BenchArt = BenchHost:CreateTexture(nil, "ARTWORK")
+        BenchArt:SetPoint("BOTTOMLEFT", BenchHost, "BOTTOMLEFT", 4, 4)
+        BenchArt:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
         bench_n = 0
         bench_spec = { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16,
@@ -687,8 +789,28 @@ fn structural_change_costs() {
     for _ in 0..4 {
         app_frame(&mut s);
     }
-    let cases: [(&str, &str); 5] = [
+    let cases: [(&str, &str); 9] = [
         ("no-op", "bench_n = bench_n + 1"),
+        // Setters an OnUpdate calls every frame with the value already held: each is a write the
+        // reference invalidates for, and must not re-resolve the world.
+        (
+            "SetWidth same",
+            "bench_n = bench_n + 1; BenchHost:SetWidth(200)",
+        ),
+        (
+            "SetPoint same",
+            "bench_n = bench_n + 1; BenchHost:SetPoint('CENTER', 0, 0)",
+        ),
+        (
+            "SetText same",
+            "bench_n = bench_n + 1; BenchText:SetText('bench')",
+        ),
+        (
+            "SetTexture swap",
+            "bench_n = bench_n + 1; BenchArt:SetTexture(math.mod(bench_n, 2) == 0 and \
+             'Interface\\\\Buttons\\\\UI-CheckBox-Check' or \
+             'Interface\\\\Buttons\\\\UI-CheckBox-Up')",
+        ),
         (
             "SetWidth",
             "bench_n = bench_n + 1; BenchHost:SetWidth(200 + math.mod(bench_n, 2))",
@@ -712,17 +834,23 @@ fn structural_change_costs() {
     ];
     const N: u32 = 200;
     for (name, lua) in cases {
-        let d0 = s.layout_derivations();
+        let (d0, s0, r0) = (s.layout_derivations(), s.layout_solves(), s.layout_rounds());
+        let mut widest = (0, 0);
         let t = Instant::now();
         for _ in 0..N {
             s.run(lua).unwrap();
             app_frame(&mut s);
             std::hint::black_box(s.extract());
+            let (f, r) = s.layout_last_scope();
+            widest = (widest.0.max(f), widest.1.max(r));
         }
         println!(
-            "STRUCT {name:<14} {:.3} ms/iter  derivations/iter={:.2}",
+            "STRUCT {name:<15} {:.3} ms/iter  derivations/iter={:.2}  solves/iter={:.2}  \
+             rounds/iter={:.2}  widest scope={widest:?}",
             ms(t) / f64::from(N),
             (s.layout_derivations() - d0) as f64 / f64::from(N),
+            (s.layout_solves() - s0) as f64 / f64::from(N),
+            (s.layout_rounds() - r0) as f64 / f64::from(N),
         );
     }
 }

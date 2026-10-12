@@ -11,7 +11,7 @@ Read, in this order:
 3. `docs/CONTRIBUTING.md` — what gets in and how a change is judged.
 
 Procedures with steps are skills in `.claude/skills/`: `probe` (an unattended run against the
-local server).
+local server) and `merge-upstream` (bringing upstream benilla into this fork).
 
 The rest of the root is code and data: `crates/` the workspace, `reference/` the 1.12 name
 catalogues the tests check against, `scripts/` the gates and instruments, `third_party/`

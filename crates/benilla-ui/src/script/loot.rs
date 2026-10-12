@@ -134,7 +134,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             data.texture = None;
             data.fill = None;
             data.circular = true;
-            model.touch_layout_art(rh);
+            model.note_art(rh);
             Ok(Value::Integer(1))
         })?,
     )?;
@@ -342,7 +342,7 @@ mod tests {
     /// The region data behind a named texture: its portrait key and file.
     fn portrait_of(s: &UiScript, name: &str) -> (Option<String>, Option<String>) {
         let model = s.model_ref();
-        let id = model.region_names[name];
+        let id = model.region_by_name[name];
         let rh = *model.id_to_region.get(&id).expect("a region");
         let data = &model.region_data[&rh];
         (data.portrait_unit.clone(), data.texture.clone())

@@ -492,12 +492,12 @@ impl Plate {
         }
 
         for rh in [glow, skull, raid] {
-            model.region_data.entry(rh).or_default().hidden = true;
+            model.set_region_hidden(rh, true);
         }
 
         // Born retired and hidden: addons tell a live plate from a pooled one by `IsShown()`.
         // Silent, since nothing can have set a handler on a frame not yet handed out.
-        model.arena.set_shown(frame, false);
+        model.set_shown_silent(frame, false);
 
         model
             .nameplates
@@ -596,11 +596,12 @@ impl Plate {
             Anchors::from([Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)]);
         raid_data.size = Some((g.raid_size, g.raid_size));
 
-        // Once per geometry change: each node it wrote re-derives.
-        model.touch_layout_frame(frame);
-        model.touch_layout_frame(bar);
+        // Once per geometry change: each node it wrote is invalidated, as the plate setup's
+        // `SetPoint`/`SetAllPoints` with the invalidate flag do (`0x7cb456`..`0x7cb806`).
+        model.invalidate_frame(frame, true);
+        model.invalidate_frame(bar, true);
         for rh in [border, glow, name, level, skull, raid] {
-            model.touch_layout_region(rh);
+            model.invalidate_region(rh, true);
         }
         model.nameplates.plates[i].laid_out = Some(g);
     }
@@ -633,7 +634,8 @@ impl Plate {
                 state.top_centre.0,
                 state.top_centre.1,
             )]);
-            model.touch_layout_frame(frame);
+            // `SetPoint` with the invalidate flag (`0x50a044`).
+            model.invalidate_frame(frame, true);
         }
 
         if last.is_none() {
@@ -670,7 +672,8 @@ impl Plate {
         if last.as_ref().is_none_or(|l| l.name != state.name) {
             model.region_data.entry(name).or_default().text = Some(state.name.clone());
             model.touch_measure(name);
-            model.touch_layout_region(name);
+            // A new string clears the valid bit and invalidates (`0x771ea4`).
+            model.clear_region_valid(name);
         }
         if last.as_ref().is_none_or(|l| l.hovered != state.hovered) {
             let c = if state.hovered {
@@ -680,7 +683,7 @@ impl Plate {
             };
             model.region_data.entry(name).or_default().vertex_color = Some(c);
             // The glow really shows, as addons read mouseover from it; it only paints nothing.
-            model.region_data.entry(glow).or_default().hidden = !state.hovered;
+            model.set_region_hidden(glow, !state.hovered);
         }
 
         if last.as_ref().is_none_or(|l| {
@@ -689,23 +692,23 @@ impl Plate {
             match (state.level, state.skull) {
                 // The skull flag wins the seat, whatever the level.
                 (_, true) => {
-                    model.region_data.entry(level).or_default().hidden = true;
-                    model.region_data.entry(skull).or_default().hidden = false;
+                    model.set_region_hidden(level, true);
+                    model.set_region_hidden(skull, false);
                 }
                 (Some(n), false) => {
                     let c = state.level_colour;
                     let data = model.region_data.entry(level).or_default();
                     data.text = Some(n.to_string());
                     data.vertex_color = Some([c[0], c[1], c[2], 1.0]);
-                    data.hidden = false;
-                    model.region_data.entry(skull).or_default().hidden = true;
+                    model.set_region_hidden(level, false);
+                    model.set_region_hidden(skull, true);
                     model.touch_measure(level);
-                    model.touch_layout_region(level);
+                    model.clear_region_valid(level);
                 }
                 // No level yet and no skull: the seat stays empty.
                 (None, false) => {
-                    model.region_data.entry(level).or_default().hidden = true;
-                    model.region_data.entry(skull).or_default().hidden = true;
+                    model.set_region_hidden(level, true);
+                    model.set_region_hidden(skull, true);
                 }
             }
         }
@@ -716,9 +719,9 @@ impl Plate {
                     let (u0, v0) = (f32::from(idx & 3) * 0.25, f32::from(idx >> 2) * 0.25);
                     let data = model.region_data.entry(raid).or_default();
                     data.tex_coords = Some(TexCoords::Rect([u0, u0 + 0.25, v0, v0 + 0.25]));
-                    data.hidden = false;
+                    model.set_region_hidden(raid, false);
                 }
-                None => model.region_data.entry(raid).or_default().hidden = true,
+                None => model.set_region_hidden(raid, true),
             }
         }
 

@@ -3,7 +3,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::script::object::{as_f32, draw_layer_from_str, draw_layer_name};
+use crate::script::object::{draw_layer_from_str, draw_layer_name, tonumber_f32};
 use crate::script::{BlendMode, Model, TexCoords};
 
 use super::region_handle_of;
@@ -36,18 +36,26 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // SetVertexColor (`0x79abd0`) reads r, g and b with a bare `lua_tonumber`, so nil or a table is
-    // 0 and never raises; stock `QuestLogFrame.lua:337` can pass three nils. A missing alpha is 1
-    // here; the reference keeps the region's current alpha (read back at `0x79ac81`, copied over
-    // at `0x79adfe`/`0x79ae0a`), so there a three-argument call cannot restore opacity.
+    // 0 and never raises; stock `QuestLogFrame.lua:337` can pass three nils. The alpha is staged
+    // 1.0 (`0x79ad43`) but re-tested at the end (`0x79adfe`): when it is not a `lua_isnumber` the
+    // colour read back at the start (`0x79ac81`) lends its alpha byte (`0x79ae0a`), so a
+    // three-argument call keeps the region's alpha. Stock `ActionButton_UpdateUsable`
+    // (`ActionButton.lua:274-281`) leans on it: a ring `ActionButton_ShowGrid` dimmed stays dim.
     m.set(
         "SetVertexColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (as_f32(&r), as_f32(&g), as_f32(&b));
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = lua.coerce_number(a).ok().flatten().map(|n| n as f32);
+                let (r, g, b) = (
+                    tonumber_f32(lua, &r),
+                    tonumber_f32(lua, &g),
+                    tonumber_f32(lua, &b),
+                );
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
-                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                let kept = d.vertex_color.map_or(1.0, |c| c[3]);
+                d.vertex_color = Some([r, g, b, a.unwrap_or(kept)]);
                 // The slot `SetTextColor` writes on a FontString, so it overrides the font object.
                 d.font_explicit.color = true;
                 Ok(())
@@ -90,8 +98,21 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 };
                 let n = if with_alpha { 8 } else { 6 };
                 let mut c = [0.0f32; 8];
-                for slot in c.iter_mut().take(n) {
-                    *slot = it.next().as_ref().map(as_f32).unwrap_or(0.0);
+                for (i, slot) in c.iter_mut().take(n).enumerate() {
+                    let v = it.next();
+                    // Every channel is a bare `lua_tonumber` (`0x79aef3`-`0x79b083`, `0x79b242`-
+                    // `0x79b490`) except the two alphas, which are `lua_isnumber`-gated with
+                    // default 1 (`0x79b30d`, `0x79b480`).
+                    *slot = match v {
+                        Some(v) if with_alpha && matches!(i, 3 | 7) => lua
+                            .coerce_number(v)
+                            .ok()
+                            .flatten()
+                            .map_or(1.0, |n| n as f32),
+                        Some(v) => tonumber_f32(lua, &v),
+                        None if with_alpha && matches!(i, 3 | 7) => 1.0,
+                        None => 0.0,
+                    };
                 }
                 let (start, end) = if with_alpha {
                     ([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]])
@@ -121,6 +142,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(
             |lua, (this, arg, g, b, a): (Table, Value, Value, Value, Value)| {
                 let rh = region_handle_of(lua, &this)?;
+                // `lua_isnumber` (`0x79bbd5`) picks the colour form, a numeric string included.
+                let colour_form = lua.coerce_number(arg.clone()).ok().flatten().is_some();
                 // Scoped so the model borrow ends before the layout touch; the path arm drops it
                 // mid-way to call the host probe.
                 let loaded = {
@@ -135,7 +158,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // the colour form (`0x770360`) never writes it.
                     let same_path = matches!((&arg, &data.texture),
                     (Value::String(s), Some(cur)) if s.to_str().is_ok_and(|s| *s == **cur));
-                    let colour_form = matches!(&arg, Value::Number(_) | Value::Integer(_));
                     if !same_path && !colour_form {
                         data.desaturated = false;
                     }
@@ -143,6 +165,24 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // each clears the other; neither touches the vertex colour (`+0xb8`), so a
                     // tint outlives its art.
                     let loaded = match &arg {
+                        // The colour form (`lua_isnumber`, `0x79bbd5`, so a numeric string too): g
+                        // and b are a bare `lua_tonumber`, and alpha is `lua_isnumber`-gated with
+                        // default 1.
+                        _ if colour_form => {
+                            let alpha = lua
+                                .coerce_number(a.clone())
+                                .ok()
+                                .flatten()
+                                .map_or(1.0, |n| n as f32);
+                            data.fill = Some([
+                                tonumber_f32(lua, &arg),
+                                tonumber_f32(lua, &g),
+                                tonumber_f32(lua, &b),
+                                alpha,
+                            ]);
+                            data.texture = None;
+                            true
+                        }
                         // "" clears, as nil does (stock `QuestLogFrame.lua:166`), and answers nil
                         // like a failed load; the reference's answer for "" is untraced.
                         Value::String(s) if s.to_str()?.is_empty() => {
@@ -172,23 +212,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             }
                             resolvable && had_probe
                         }
-                        // The colour form, the only one to read the trailing three; a non-number
-                        // there takes the default a missing one does.
-                        Value::Number(_) | Value::Integer(_) => {
-                            let chan = |v: &Value, dflt: f32| match v {
-                                Value::Number(_) | Value::Integer(_) => as_f32(v),
-                                Value::String(s) => s
-                                    .to_str()
-                                    .ok()
-                                    .and_then(|s| s.parse::<f32>().ok())
-                                    .unwrap_or(dflt),
-                                _ => dflt,
-                            };
-                            data.fill =
-                                Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
-                            data.texture = None;
-                            true
-                        }
                         // nil clears, so the region draws nothing, and answers 1 (`0x79bb40`).
                         Value::Nil => {
                             data.texture = None;
@@ -199,11 +222,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     };
                     loaded
                 };
-                // Only the art-sized shape can move, and only a new art: touching the layout on
-                // every repaint would reopen the resolve's change gate each frame.
-                lua.app_data_mut::<Model>()
-                    .expect("model")
-                    .touch_layout_art(rh);
+                // The draw only (`0x77fdf0`); an art-sized texture now holds a state its next
+                // reaching resolve need not give back.
+                lua.app_data_mut::<Model>().expect("model").note_art(rh);
                 Ok(if loaded {
                     Value::Number(1.0)
                 } else {
@@ -215,10 +236,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // SetDesaturated(flag) (`0x79c1e0`), Texture only, answers shaderSupported, which stock
     // `ItemButtonTemplate.lua:69` reads to fall back to a grey tint; the renderer greys the texel,
-    // so this answers 1. The flag is `GetBoolOrDefault` (`0x6f1c10`, default 1, jump table
-    // `0x6f1ce8`): no argument is on, hence the `MultiValue`, nil is off, a number truncating to 0
-    // is off (`0x6f3620`, `0x40a2b0`), and a table, function or userdata is on. Every string is on
-    // here; the reference's string arm (`0x6f1c51`, against `0x871460` and `0x853758`) is not.
+    // so this answers 1. The flag is `GetBoolOrDefault` (`0x6f1c10`, default 1, `0x79c27e`): no
+    // argument is on, hence the `MultiValue`, nil is off, and a string goes by its first byte.
     m.set(
         "SetDesaturated",
         lua.create_function(|lua, args: MultiValue| {
@@ -227,14 +246,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Some(Value::Table(t)) => t,
                 _ => return Ok(Value::Nil),
             };
-            let on = match args.next() {
-                None => true,
-                Some(Value::Nil) => false,
-                Some(Value::Boolean(b)) => b,
-                Some(Value::Integer(i)) => i != 0,
-                Some(Value::Number(n)) => n.trunc() != 0.0,
-                Some(_) => true,
-            };
+            let on = crate::script::binding_abi::bool_or_default(args.next().as_ref(), true);
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.region_data.entry(rh).or_default().desaturated = on;
@@ -314,11 +326,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // flag makes `SetTexCoord` re-derive the rect from the UV quad (`0x770462`).
     m.set(
         "SetTexCoordModifiesRect",
-        lua.create_function(|lua, (this, arg): (Table, Value)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let rh = region_handle_of(lua, &this)?;
-            // `GetBoolOrDefault` (`0x6f1c10`) with default 1 (`0x79c105`), but a missing argument
-            // arrives here as nil and reads false, where the reference sets the flag.
-            let on = crate::script::binding_abi::bool_or_default(Some(&arg), false);
+            // `GetBoolOrDefault` (`0x6f1c10`) with default 1 (`0x79c10e`): a bare call sets it.
+            let on = crate::script::binding_abi::bool_or_default(args.front(), true);
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model
                 .region_data
@@ -399,7 +410,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         // Each coordinate is a bare `lua_tonumber` (`0x79beb0`), so nil or a table is 0; only the
         // count is gated, 4 or 8 (`0x79bf5d`).
         lua.create_function(|lua, (this, args): (Table, mlua::Variadic<Value>)| {
-            let rest: Vec<f32> = args.iter().map(as_f32).collect();
+            let rest: Vec<f32> = args.iter().map(|v| tonumber_f32(lua, v)).collect();
             let rh = region_handle_of(lua, &this)?;
             let coords = match rest.len() {
                 4 => Some(TexCoords::Rect([rest[0], rest[1], rest[2], rest[3]])),
@@ -485,8 +496,20 @@ impl crate::script::UiScript {
     pub fn set_texture_size_probe(&mut self, probe: crate::script::TextureSizeProbe) {
         let mut model = self.model_mut();
         model.texture_size_probe = Some(probe);
-        // Every art-sized region's span may move, and no per-node hash holds a probe's answer: a
-        // full-scope rebuild, as for a screen move.
+        // The reference has every art's size at hand (`0x44b3b0` loads it), so a probe installed
+        // late re-resolves each texture that takes a span from its art, as if it had been there.
+        let art_sized: Vec<u32> = model
+            .region_data
+            .iter()
+            .filter(|(_, d)| {
+                !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+            })
+            .filter_map(|(rh, _)| model.region_to_id.get(rh).copied())
+            .collect();
+        for id in art_sized {
+            model.queue_invalidate(id);
+        }
+        // No per-node hash holds a probe's answer: a full-scope rebuild, as for a screen move.
         model.layout_scope.invalidate();
         model.touch_layout();
     }

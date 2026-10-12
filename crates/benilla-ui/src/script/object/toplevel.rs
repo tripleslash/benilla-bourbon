@@ -15,7 +15,7 @@
 //! per-tick pass that keeps it (`0x7657d0`). The wired triggers are `Raise` (`0x775b0a`), Show
 //! (`0x76aeec`), drag start (`0x7652d7`) and mouse-down (`0x766392`).
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table};
 
 use crate::layout::Rect;
 use crate::script::{Model, UiScript};
@@ -25,14 +25,12 @@ use super::frame_handle_of;
 
 /// Populate `m`'s toplevel and raise methods.
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // SetToplevel's argument is optional and defaults to true (`0x775440`), unlike `SetMovable`'s.
+    // SetToplevel's argument goes through `GetBoolOrDefault` (`0x6f1c10`) with default 1
+    // (`0x775440`, `0x7754ce`): a bare call sets it, an explicit nil clears it.
     m.set(
         "SetToplevel",
-        lua.create_function(|lua, (this, flag): (Table, Option<Value>)| {
-            let on = match flag {
-                None => true,
-                Some(v) => !matches!(v, Value::Nil | Value::Boolean(false)),
-            };
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let on = crate::script::binding_abi::bool_or_default(args.front(), true);
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<Model>()
                 .expect("model")
@@ -97,8 +95,12 @@ pub(in crate::script) fn raise_on_show(model: &mut Model, h: FrameHandle) {
     }
 }
 
-/// Step 1: the first frame up `+0x9c` with the toplevel bit (`0x7650fb..0x765135`).
-fn nearest_toplevel(model: &Model, frame: FrameHandle) -> Option<FrameHandle> {
+/// Step 1: the first frame up `+0x9c` with the toplevel bit (`0x7650fb..0x765135`), the walk the
+/// layout drag's lift repeats (`0x766fe0`).
+pub(in crate::script) fn nearest_toplevel(
+    model: &Model,
+    frame: FrameHandle,
+) -> Option<FrameHandle> {
     // A chain longer than the frame count is a cycle, which `SetParent` already refuses.
     let bound = model.arena.iter_frames().count();
     let mut cur = Some(frame);

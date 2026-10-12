@@ -25,6 +25,8 @@ pub(super) struct TextStyle {
     pub text_height: Option<f32>,
     pub shadow: Option<FontShadow>,
     pub outline: Outline,
+    /// The gap between lines, frame-local, scaled like the font height.
+    pub spacing: f32,
     pub alpha_gradient: Option<(f32, f32)>,
     /// The V-plate's name and level, seated on the plate's device-snapped overlay, not the UI grid.
     pub world_seat: bool,
@@ -76,6 +78,11 @@ pub(super) fn emit(
             host.scale * host.font_scale,
         ),
         outline: style.outline,
+        spacing: style.spacing * host.scale * host.font_scale,
+        // A set shadow seeds each row's pen at its drawn offset (`0x5cddb1`, `0x7726a4`).
+        shadow_x: style
+            .shadow
+            .map_or(0.0, |sh| sh.offset[0] * host.scale * host.font_scale),
         alpha_gradient: style.alpha_gradient,
     };
     // The focused editbox draws windowed (`0x77da80`): the scroll window's substring from the

@@ -53,9 +53,9 @@ pub(super) fn seat_text_region(model: &mut Model, h: FrameHandle) {
         data.anchors = anchors;
     }
     data.size = size;
-    if !same_anchors || size_moved {
-        model.touch_layout_region(rh);
-    }
+    // The seat's points and size, each set with an invalidate (`0x77b905`, `0x77b91e`/`0x77b940`,
+    // `0x77b96b`).
+    model.invalidate_region(rh, !same_anchors || size_moved);
     if size_moved {
         // The width is the wrap width, which keys the measure.
         model.touch_measure(rh);
@@ -137,10 +137,10 @@ pub(super) fn relayout(lua: &Lua, h: FrameHandle) -> bool {
     // `fld top; fadd bottom; fadd st, st(1)`.
     let height = (top + bottom) + text_h;
     let input = model.layout_inputs.entry(h).or_default();
-    if input.height.to_bits() != height.to_bits() {
-        input.height = height;
-        model.touch_layout_frame(h);
-    }
+    let moved = input.height.to_bits() != height.to_bits();
+    input.height = height;
+    // `SetHeight`, which invalidates (`0x7683f0`).
+    model.invalidate_frame(h, moved);
     true
 }
 
@@ -191,6 +191,9 @@ fn line_height(lua: &Lua, h: FrameHandle, rh: RegionHandle) -> Option<f32> {
             text_height: d.text_height,
             wrap_width: None,
             outline: d.outline,
+            // One line has no gap: `0x5c2070` charges `(N−1)·gap`.
+            spacing: d.line_gap(),
+            shadow_x: d.shadow_x(),
             scale,
             text: ONE_LINE.to_string(),
             key,

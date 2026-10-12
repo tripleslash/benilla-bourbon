@@ -86,10 +86,10 @@ const POINTS: [&str; 9] = [
 
 /// The Lua state the steps act on: `N` every node in creation order, `F` the frames, `R` the
 /// regions, `B` the buttons, `S` the ScrollFrames, `owned[child]` the ScrollFrame that holds it.
-/// `deps[o][point]` mirrors each anchor's target and `held[c]` each scroll override, so `target`
+/// `deps[o][point]` mirrors each anchor's target and `held[c]` each scroll claim, so `target`
 /// picks any node, older or newer, whose rect does not already read `o`'s: the graph stays acyclic.
 const SETUP: &str = r#"
-    N, F, R, B, S, at, owned, deps, held = {}, {}, {}, {}, {}, {}, {}, {}, {}
+    N, F, R, B, S, at, owned, deps, held, pieced = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
     function add(o) table.insert(N, o); at[o] = table.getn(N); deps[o] = {} end
     -- Whether `a`'s rect reads `b`'s, through anchors and scroll overrides.
     function reaches(a, b)
@@ -181,15 +181,25 @@ fn step(rng: &mut Rng) -> Write {
             "local f = F[math.mod({k}, table.getn(F)) + 1]
              if f:GetBackdrop() then f:SetBackdrop(nil) else f:SetBackdrop(spec) end"
         ),
-        // A node anchored to a backdrop piece, so a teardown frees what something reads.
+        // A node, a texture or a frame, anchored to a fresh backdrop piece (the last region the
+        // build links) and, at another point, to any node, so a later teardown frees one of its
+        // anchors and it stays a node.
         5 => format!(
             "local f = F[math.mod({k}, table.getn(F)) + 1]
-             local piece = ({{ f:GetRegions() }})[1]
-             if piece and at[f] and not at[piece] then
-                 deps[piece] = {{ f }}
-                 local t = f:CreateTexture(nil, 'OVERLAY'); add(t); table.insert(R, t)
-                 t:SetWidth(5); t:SetHeight(5); point(t, '{p}', piece, '{rp}', {x}, {y})
-             end"
+             f:SetBackdrop(spec)
+             local rs = {{ f:GetRegions() }}
+             local piece = rs[table.getn(rs)]
+             deps[piece] = {{ f }}
+             local o
+             if {k2} < 600 then
+                 o = f:CreateTexture(nil, 'OVERLAY'); add(o); table.insert(R, o)
+             else
+                 o = CreateFrame('Frame', nil, f); add(o); table.insert(F, o)
+             end
+             o:SetWidth(5); o:SetHeight(5)
+             point(o, '{p}', piece, '{rp}', {x}, {y})
+             if '{p}' ~= '{rp}' then point(o, '{rp}', target(o, {k2}), '{p}', {y}, {x}) end
+             table.insert(pieced, {{ o, o:GetNumPoints() }})"
         ),
         // A button's slot region set, or freed by a nil; or two freed in one pass.
         6 => format!(
@@ -260,6 +270,7 @@ fn step(rng: &mut Rng) -> Write {
                              local old = sf:GetScrollChild()
                              if old then owned[old] = nil; held[old] = nil end
                              sf:SetScrollChild(c); owned[c] = sf; held[c] = sf
+                             deps[c] = {{ TOPLEFT = sf }}
                              break
                          end
                      end
@@ -348,6 +359,22 @@ fn random_structural_writes_resolve_as_a_scratch_solve_would() {
                 "return table.getn(N), raised, table.getn(F), table.getn(R), newer",
             )
             .expect("count");
+        // Dependents of a backdrop piece that a later teardown or rebuild freed: each lost the
+        // anchor to it, and the scratch solve above agreed with every pass in between.
+        let unhooked = s
+            .eval::<i64>(
+                "local n = 0
+                 for _, e in pieced do
+                     local ok, now = pcall(e[1].GetNumPoints, e[1])
+                     if ok and now < e[2] then n = n + 1 end
+                 end
+                 return n",
+            )
+            .expect("unhooked");
+        assert!(
+            unhooked > 10,
+            "seed {seed:#x}: only {unhooked} dependents of a backdrop piece saw it freed"
+        );
         eprintln!(
             "seed {seed:#x}: {writes} writes, {nodes} nodes ({frames} frames, {regions} \
              regions), {raised} raised, {newer} anchors to a newer node"
@@ -372,10 +399,10 @@ fn random_structural_writes_resolve_as_a_scratch_solve_would() {
     }
 }
 
-/// A frame two ScrollFrames claim takes the derivation, whose override the cached graph cannot
-/// name; the result still equals a scratch solve, and a lone claim stays incremental.
+/// A frame two ScrollFrames claim holds the last one's re-anchor (`0x787100`), one real point,
+/// through the cached graph: no derivation.
 #[test]
-fn a_child_two_scrollframes_claim_falls_back_to_the_derivation() {
+fn a_child_two_scrollframes_claim_holds_the_last_re_anchor() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -394,14 +421,13 @@ fn a_child_two_scrollframes_claim_falls_back_to_the_derivation() {
     s.run("a:SetScrollChild(c); a:SetVerticalScroll(5)")
         .expect("one claim");
     resolve_matches_scratch(&mut s, "one claim");
-    assert_eq!(s.layout_derivations(), derived, "one claim is named");
     s.run("b:SetScrollChild(c)").expect("two claims");
     resolve_matches_scratch(&mut s, "two claims");
-    assert_eq!(
-        s.layout_derivations(),
-        derived + 1,
-        "two claims give up for the derivation"
-    );
+    assert_eq!(s.layout_derivations(), derived, "every claim is named");
+    assert!(s
+        .eval::<bool>("local p, r = c:GetPoint(1); return c:GetNumPoints() == 1 and r == b")
+        .unwrap());
+    assert_eq!(s.eval::<f64>("return c:GetLeft()").unwrap(), 200.0);
 }
 
 /// A frame whose id is minted after a region on it joined the graph (the engine builds some

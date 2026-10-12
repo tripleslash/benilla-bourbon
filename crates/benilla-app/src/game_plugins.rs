@@ -664,7 +664,14 @@ pub(crate) mod schedule_tests {
     /// session 3's runtime fixes and the FSR wiring in; the census passed at 375 on the port before
     /// them. Not yet attributed pair by pair: `WOW_AMBIGUITY_DUMP=1` now prints PostUpdate's pairs
     /// too (`post …`), mostly `GlobalTransform` between the camera followers and the effect lanes.
-    const POST_UPDATE_CEILING: usize = 462;
+    ///
+    /// **478 (merge of upstream 1efd9a71)** — sixteen more, read pair by pair. Six are upstream's:
+    /// `glue::hide_native_glue`'s `Visibility` against the world's and the fade cover's writers,
+    /// populations it never shares an entity with (the native glue roots alone). Ten are
+    /// `fishing_line::size_engine_lines` over `GizmoConfigStore` against the two engine-line
+    /// painters and bevy's own eight gizmo painters: it writes one group's line width, which is
+    /// read at extraction, after every painter, so the write commutes with each of them.
+    const POST_UPDATE_CEILING: usize = 478;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may

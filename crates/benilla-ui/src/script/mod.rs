@@ -64,10 +64,20 @@ mod follow;
 pub(crate) mod font;
 mod font_block;
 mod frame_enum;
+mod glue;
+mod glue_core;
+mod glue_realm;
+pub use glue::{VmKind, GLUE_EVENTS};
+pub use glue_core::{GlueCredentials, GlueNotice, GlueRequest, GlueServer, NoticeState};
+pub use glue_realm::{
+    realm_load_classify, realm_load_stats, GlueRealm, GlueRealmCategory, GlueRealmCells,
+    GlueRealmType, RealmSortKey,
+};
 mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
+mod hyperlink;
 mod screenshot;
 mod tabard;
 pub use handler_prof::HandlerRow;
@@ -222,7 +232,7 @@ pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
-pub use layout_cache::{FrameLayout, LayoutPoint};
+pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
@@ -344,9 +354,9 @@ pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
     "GetVertexColor",
 ];
 
-/// FontString-only: the font, text, justify and shadow block and the string metrics.
+/// FontString-only: the font, text, justify, shadow and spacing block and the string metrics.
 /// `GetStringHeight`, `SetFormattedText` and `SetSize` are not 1.12 FontString methods.
-pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 21] = [
+pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 23] = [
     "SetFont",
     "GetFont",
     "SetFontObject",
@@ -357,6 +367,8 @@ pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 21] = [
     "GetShadowColor",
     "SetShadowOffset",
     "GetShadowOffset",
+    "SetSpacing",
+    "GetSpacing",
     "SetJustifyH",
     "GetJustifyH",
     "SetJustifyV",
@@ -408,7 +420,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 39] = [
+const SCRIPT_KINDS: [&str; 41] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -444,9 +456,12 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnDragStart",
     "OnDragStop",
     "OnReceiveDrag",
-    // A release over a message-frame hyperlink span, `OnHyperlinkClick(link, text, button)`;
-    // `ChatFrameTemplate` passes it to `SetItemRef` (`ChatFrame.xml:15`, `ChatFrame.lua:1534`).
+    // A text frame's hyperlink button hands it these ([`hyperlink`]): the click as
+    // `OnHyperlinkClick(link, text, button)`, which `ChatFrameTemplate` passes to `SetItemRef`
+    // (`ChatFrame.xml:15`, `ChatFrame.lua:1534`), and the enter and leave with the link alone.
     "OnHyperlinkClick",
+    "OnHyperlinkEnter",
+    "OnHyperlinkLeave",
     // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
     // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
     "OnTooltipAddMoney",
@@ -514,117 +529,171 @@ pub fn addon_chunk_name(folder: &str, file: &str) -> String {
     format!("@Interface\\AddOns\\{folder}\\{}", file.replace('/', "\\"))
 }
 
+/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
+/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
+/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
+/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
+/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
+/// `0x4587f0` (sound).
+fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+    let lua = Lua::new();
+    let mut model = Model::new();
+    model.vm = vm;
+    lua.set_app_data(model);
+    // Before anything can fire a handler and while no app-data borrow is held, as the
+    // profiler's slot requires.
+    handler_prof::install(&lua);
+
+    // `0x7039e0`: the base array `0x811e28`, the four libraries and the compat chunk `0x8722e8`.
+    stdlib::sandbox(&lua)?;
+    // Before the stdlib layer, so its aliases bind the 5.0-shaped functions.
+    lua50::install(&lua)?;
+    stdlib::install(&lua)?;
+
+    // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
+    // `DeleteFile` and `AppendToFile` are not built.
+    clock::install(&lua)?;
+    chat_misc::install_console_exec(&lua)?;
+
+    // `0x706350`: `CreateFrame`, `CreateFont`, `GetNumFrames`, `EnumerateFrames` (table
+    // `0x872e74`), then the widget method tables `0x7a2e70`..`0x78dc60`.
+    object::install(&lua)?;
+    frame_enum::install(&lua)?;
+    // After `object`, whose `publish_global` it reuses, and before any FrameXML loads:
+    // `Loader::do_font` publishes into the tables this builds.
+    font::install(&lua)?;
+    messageframe::install(&lua)?;
+    scrollframe::install(&lua)?;
+    simplehtml::install(&lua)?;
+    slider::install(&lua)?;
+    colorselect::install(&lua)?;
+    modelframe::install(&lua)?;
+
+    // `0x4587f0` (table `0x835a50`): `PlaySound`, `PlayMusic`, `PlaySoundFile`, `StopMusic`.
+    sound::install(&lua)?;
+    Ok(lua)
+}
+
+/// The in-game surface: everything `UI_Init` registers past the shared registrars (`0x490250` and
+/// the calls around it), the in-game widget types' method tables among it.
+fn install_in_game(lua: &Lua) -> mlua::Result<()> {
+    addon::install(lua)?;
+    addon_message::install(lua)?;
+    chat_send::install(lua)?;
+    chat_types::install(lua)?;
+    chat_misc::install(lua)?;
+    channel::install(lua)?;
+    chat_window::install(lua)?;
+    client::install(lua)?;
+    screenshot::install(lua)?;
+    zone_text::install(lua)?;
+    object::install_in_game(lua)?;
+    region::install_in_game(lua)?;
+    modelframe::install_player_model(lua)?;
+    unit::install(lua)?;
+    party::install(lua)?;
+    social::install(lua)?;
+    guild::install(lua)?;
+    petition::install(lua)?;
+    binder::install(lua)?;
+    summon::install(lua)?;
+    bind_confirm::install(lua)?;
+    instance::install(lua)?;
+    gm_ticket::install(lua)?;
+    duel::install(lua)?;
+    follow::install(lua)?;
+    camera_view::install(lua)?;
+    input_verbs::install(lua)?;
+    session::install(lua)?;
+    pvp::install(lua)?;
+    worn_display::install(lua)?;
+    death::install(lua)?;
+    aura::install(lua)?;
+    cvars::install(lua)?;
+    nameplate::install_verbs(lua)?;
+    saved::install(lua)?;
+    keybind::install(lua)?;
+    ui_errors::install(lua)?;
+    pointer::install(lua)?;
+    action::install(lua)?;
+    action_bar_toggles::install(lua)?;
+    container::install(lua)?;
+    cursor::install(lua)?;
+    spellbook::install(lua)?;
+    macros::install(lua)?;
+    talent::install(lua)?;
+    dialog_verbs::install(lua)?;
+    battlefield_score::install(lua)?;
+    battlefield_queue::install(lua)?;
+    battlefield_positions::install(lua)?;
+    tutorial::install(lua)?;
+    worldmap_arrow::install(lua)?;
+    shapeshift::install(lua)?;
+    pet::install(lua)?;
+    gossip::install(lua)?;
+    merchant::install(lua)?;
+    bank::install(lua)?;
+    stable::install(lua)?;
+    item_text::install(lua)?;
+    mail::install(lua)?;
+    auction::install(lua)?;
+    trainer::install(lua)?;
+    taxi::install(lua)?;
+    trade::install(lua)?;
+    inspect::install(lua)?;
+    dressup::install(lua)?;
+    tabard::install(lua)?;
+    tradeskill::install(lua)?;
+    craft::install(lua)?;
+    reputation::install(lua)?;
+    skills::install(lua)?;
+    item_stats::install(lua)?;
+    char_stats::install(lua)?;
+    inventory_verbs::install(lua)?;
+    weapon_enchant::install(lua)?;
+    loot::install(lua)?;
+    loot_roll::install(lua)?;
+    quest::install(lua)?;
+    quest_log::install(lua)?;
+    minimap::install(lua)?;
+    tooltip::install(lua)?;
+    worldmap::install(lua)?;
+    worldstate::install(lua)?;
+    net_stats::install(lua)?;
+    Ok(())
+}
+
 impl UiScript {
-    /// Build a fully sandboxed, stdlib- and object-model-equipped host.
+    /// The in-game VM: FrameScript's base set and the registrars both states share
+    /// ([`install_framescript`]), then the in-game surface `UI_Init` (`0x48fbf0`) registers.
     pub fn new() -> mlua::Result<UiScript> {
-        let lua = Lua::new();
-        lua.set_app_data(Model::new());
-        // Before anything can fire a handler and while no app-data borrow is held, as the
-        // profiler's slot requires.
-        handler_prof::install(&lua);
+        let lua = install_framescript(VmKind::InGame)?;
+        install_in_game(&lua)?;
+        Ok(Self::host(lua))
+    }
 
-        addon::install(&lua)?;
-        addon_message::install(&lua)?;
-        chat_send::install(&lua)?;
-        chat_types::install(&lua)?;
-        chat_misc::install(&lua)?;
-        channel::install(&lua)?;
-        chat_window::install(&lua)?;
-        client::install(&lua)?;
-        screenshot::install(&lua)?;
-        stdlib::sandbox(&lua)?;
-        // Before the stdlib layer, so its aliases bind the 5.0-shaped functions.
-        lua50::install(&lua)?;
-        stdlib::install(&lua)?;
-        object::install(&lua)?;
-        frame_enum::install(&lua)?;
-        // After `object`, whose `publish_global` it reuses, and before any FrameXML loads:
-        // `Loader::do_font` publishes into the tables this builds.
-        font::install(&lua)?;
-        unit::install(&lua)?;
-        party::install(&lua)?;
-        social::install(&lua)?;
-        guild::install(&lua)?;
-        petition::install(&lua)?;
-        binder::install(&lua)?;
-        summon::install(&lua)?;
-        bind_confirm::install(&lua)?;
-        instance::install(&lua)?;
-        gm_ticket::install(&lua)?;
-        duel::install(&lua)?;
-        follow::install(&lua)?;
-        camera_view::install(&lua)?;
-        input_verbs::install(&lua)?;
-        session::install(&lua)?;
-        pvp::install(&lua)?;
-        worn_display::install(&lua)?;
-        death::install(&lua)?;
-        aura::install(&lua)?;
-        cvars::install(&lua)?;
-        nameplate::install_verbs(&lua)?;
-        saved::install(&lua)?;
-        keybind::install(&lua)?;
-        sound::install(&lua)?;
-        ui_errors::install(&lua)?;
-        pointer::install(&lua)?;
-        action::install(&lua)?;
-        action_bar_toggles::install(&lua)?;
-        container::install(&lua)?;
-        cursor::install(&lua)?;
-        spellbook::install(&lua)?;
-        macros::install(&lua)?;
-        talent::install(&lua)?;
-        dialog_verbs::install(&lua)?;
-        battlefield_score::install(&lua)?;
-        battlefield_queue::install(&lua)?;
-        battlefield_positions::install(&lua)?;
-        tutorial::install(&lua)?;
-        worldmap_arrow::install(&lua)?;
-        shapeshift::install(&lua)?;
-        pet::install(&lua)?;
-        gossip::install(&lua)?;
-        merchant::install(&lua)?;
-        bank::install(&lua)?;
-        stable::install(&lua)?;
-        item_text::install(&lua)?;
-        mail::install(&lua)?;
-        auction::install(&lua)?;
-        trainer::install(&lua)?;
-        taxi::install(&lua)?;
-        trade::install(&lua)?;
-        inspect::install(&lua)?;
-        dressup::install(&lua)?;
-        tabard::install(&lua)?;
-        tradeskill::install(&lua)?;
-        craft::install(&lua)?;
-        reputation::install(&lua)?;
-        skills::install(&lua)?;
-        item_stats::install(&lua)?;
-        char_stats::install(&lua)?;
-        inventory_verbs::install(&lua)?;
-        weapon_enchant::install(&lua)?;
-        loot::install(&lua)?;
-        loot_roll::install(&lua)?;
-        quest::install(&lua)?;
-        quest_log::install(&lua)?;
-        messageframe::install(&lua)?;
-        scrollframe::install(&lua)?;
-        simplehtml::install(&lua)?;
-        slider::install(&lua)?;
-        colorselect::install(&lua)?;
-        minimap::install(&lua)?;
-        modelframe::install(&lua)?;
-        tooltip::install(&lua)?;
-        worldmap::install(&lua)?;
-        worldstate::install(&lua)?;
-        net_stats::install(&lua)?;
+    /// The glue screens' VM, as the glue builder (`0x46a7b0`) leaves its state before GlueXML
+    /// loads: the base set and the shared registrars, with the glue event table and the glue frame
+    /// types ([`glue`]), and none of the in-game surface. Of the glue registrar's own four tables
+    /// (`0x46ddf0`, `0x4736c0`, `0x471a20`, `0x46f480`) the screen verbs and the realm list are
+    /// built ([`glue::install`]).
+    pub fn new_glue() -> mlua::Result<UiScript> {
+        let lua = install_framescript(VmKind::Glue)?;
+        glue::install(&lua)?;
+        Ok(Self::host(lua))
+    }
 
-        let s = UiScript {
+    fn host(lua: Lua) -> UiScript {
+        UiScript {
             lua,
             instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        };
-        Ok(s)
+        }
+    }
+
+    /// Which FrameScript state this VM is.
+    pub fn vm_kind(&self) -> VmKind {
+        self.model_ref().vm
     }
 
     /// The embedded VM, for the app and the loader to add their bindings over this object model.
@@ -862,7 +931,7 @@ impl UiScript {
         ) {
             return false;
         }
-        model.arena.set_shown(h, true);
+        model.set_shown_silent(h, true);
         model.focused_editbox = Some(h);
         true
     }
@@ -879,17 +948,9 @@ impl UiScript {
     }
 
     /// Replace the hyperlink spans `(frame, y-up rect, link, markup)` the app rasterized this
-    /// frame; a release inside one fires `OnHyperlinkClick` on its frame ([`pointer`]).
+    /// frame: each is a hyperlink button over its span, a child of its frame ([`hyperlink`]).
     pub fn set_link_spans(&mut self, spans: Vec<(FrameHandle, Rect, String, String)>) {
-        let mut model = self.model_mut();
-        model.link_spans.clear();
-        for (fh, rect, link, markup) in spans {
-            model
-                .link_spans
-                .entry(fh)
-                .or_default()
-                .push((rect, link, markup));
-        }
+        hyperlink::set_spans(&self.lua, spans);
     }
 
     /// Whether the frame with this global name is shown with every ancestor (`IsVisible()`).
@@ -964,7 +1025,7 @@ impl UiScript {
                 // Touched per region, so the layout gate need not re-walk the whole roster; stored
                 // whole, as the reference's `SetText` clears the resolved bit (`0x771ea4`).
                 model.touch_layout_region(rh);
-                model.layout_force.push(id);
+                model.queue_force(id);
             }
         }
     }
@@ -1219,7 +1280,7 @@ impl UiScript {
             });
         }
         // Region leaves publish into their own name table, not the arena's.
-        let id = *model.region_names.get(name)?;
+        let id = *model.region_by_name.get(name)?;
         let h = *model.id_to_region.get(&id)?;
         model.arena.region(h).map(|r| match r.kind {
             crate::widget::RegionKind::Texture => "Texture",

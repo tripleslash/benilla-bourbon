@@ -110,7 +110,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     return None;
                 }
                 let id = model
-                    .region_names
+                    .region_by_name
                     .get(&format!("{frame_name}Text{cell}{i}"))
                     .copied()?;
                 let rh = model.id_to_region.get(&id).copied()?;
@@ -153,6 +153,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     .create_region(h, RegionKind::FontString, DrawLayer::Artwork, 0)
                     .ok_or_else(|| mlua::Error::runtime("dead tooltip frame"))?,
             };
+            let left_drew = model.region_draws(left);
             {
                 let mut d = if adopted_left.is_some() {
                     // Keep the declared faces; the engine owns justify/visibility/anchors.
@@ -188,8 +189,10 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     }
                 }]);
                 model.region_data.insert(left, d);
+                model.note_region_draw(left, left_drew);
                 model.touch_measure(left); // an adopted cell can arrive text-in-hand
-                model.touch_layout_region(left); // a line row entered the layout graph
+                                           // A line row's points are set with the invalidate flag (`0x530197`).
+                model.invalidate_region(left, true);
             }
             let left_id = model.region_id(left);
 
@@ -201,6 +204,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     .create_region(h, RegionKind::FontString, DrawLayer::Artwork, 0)
                     .ok_or_else(|| mlua::Error::runtime("dead tooltip frame"))?,
             };
+            let right_drew = model.region_draws(right);
             {
                 let mut d = if adopted_right.is_some() {
                     model.region_data.remove(&right).unwrap_or_default()
@@ -219,8 +223,9 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 d.anchors =
                     Anchors::from([Anchor::new(Point::Right, left_id, Point::Left, 0.0, 0.0)]);
                 model.region_data.insert(right, d);
+                model.note_region_draw(right, right_drew);
                 model.touch_measure(right); // an adopted cell can arrive text-in-hand
-                model.touch_layout_region(right); // a line row entered the layout graph
+                model.invalidate_region(right, true);
             }
             let right_id = model.region_id(right);
 
@@ -228,12 +233,12 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 // Adopted pairs are already named and published by the loader.
                 if adopted_left.is_none() {
                     let ln = format!("{frame_name}TextLeft{i}");
-                    model.region_names.entry(ln.clone()).or_insert(left_id);
+                    crate::script::region::set_region_name(&mut model, left, left_id, &ln);
                     publish.push((left_id, ln));
                 }
                 if adopted_right.is_none() {
                     let rn = format!("{frame_name}TextRight{i}");
-                    model.region_names.entry(rn.clone()).or_insert(right_id);
+                    crate::script::region::set_region_name(&mut model, right, right_id, &rn);
                     publish.push((right_id, rn));
                 }
             }
@@ -267,7 +272,7 @@ pub(super) fn write_cell(
     // The line's own colour, as if set by `SetTextColor`: a later
     // `GameTooltipText:SetTextColor` must not repaint it.
     d.font_explicit.color = true;
-    d.hidden = false;
+    model.set_region_hidden(rh, false);
     model.touch_measure(rh);
     model.touch_layout_text(rh, was_shown);
 }
@@ -280,10 +285,12 @@ fn clear_content(model: &mut Model, h: FrameHandle) {
         _ => return,
     };
     for rh in lefts.into_iter().chain(rights) {
+        let drew = model.region_draws(rh);
         if let Some(d) = model.region_data.get_mut(&rh) {
             let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
             d.text = None;
             d.hidden = true;
+            model.note_region_draw(rh, drew);
             // `measured` and the wrap pin (`size`) stay: the measure cache is keyed by content
             // ([`RegionData::measure_key`]) and `append_line` rewrites the pin, so the hover
             // loop's per-frame clear and rebuild (`ContainerFrameItemButton_OnUpdate`) re-measures
@@ -377,6 +384,7 @@ pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
         let live = tip_mut(&mut model, h).is_ok_and(|t| t.owner.is_some() && t.num_lines > 0);
         if live {
             full_alpha(&mut model, h);
+            owe_relayout(&mut model, h);
         }
         live
     };
@@ -465,11 +473,11 @@ fn apply_anchor(
         let owner_id = model.frame_id(owner);
         let new = Anchors::from([Anchor::new(own, owner_id, rel, x, y)]);
         let input = model.layout_inputs.entry(h).or_default();
-        // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout.
-        if !input.anchors.bits_eq(&new) {
-            input.anchors = new;
-            model.touch_layout_frame(h);
-        }
+        // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout;
+        // a real one is `SetPoint` with the invalidate flag (`0x52ff12`..`0x52ffb2`).
+        let changed = !input.anchors.bits_eq(&new);
+        input.anchors = new;
+        model.invalidate_frame(h, changed);
     }
 }
 
@@ -559,39 +567,34 @@ pub(in crate::script) fn plural_template(
     crate::strings::plural(token, Some(n), get)
 }
 
-/// A colour component by `lua_tonumber`'s coercion: a numeric string counts, other strings do not.
-fn color_num(v: Option<&Value>) -> Option<f32> {
-    match v {
-        Some(Value::Number(n)) => Some(*n as f32),
-        Some(Value::Integer(i)) => Some(*i as f32),
-        Some(Value::String(s)) => s.to_str().ok().and_then(|s| s.trim().parse::<f32>().ok()),
-        _ => None,
-    }
+/// A colour component by `lua_tonumber`'s coercion: a number or a string `luaO_str2d` reads as
+/// one, else none.
+fn color_num(lua: &Lua, v: Option<&Value>) -> Option<f32> {
+    lua.coerce_number(v?.clone())
+        .ok()
+        .flatten()
+        .map(|n| n as f32)
 }
 
-/// A wrap flag: nil, false, 0 and the strings "0", "off" and "disabled" are false, anything else
-/// true. The reference reads it with `GetBoolOrDefault` (`0x6f1c10`,
-/// `binding_abi::bool_or_default`), where "false", "no" and 0.5 are false too.
-fn bool_arg(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
-        Some(Value::Integer(i)) => *i != 0,
-        Some(Value::Number(n)) => *n != 0.0,
-        Some(Value::String(s)) => !s.to_str().ok().is_some_and(|s| {
-            s == "0" || s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("disabled")
-        }),
-        _ => true,
-    }
+/// A line's wrap flag, `GetBoolOrDefault` (`0x6f1c10`) with default 0 at `AddLine`'s sixth
+/// argument (`0x53181a`), `SetText`'s seventh (`0x531ddc`) and `AddDoubleLine`'s tenth (`0x531b69`).
+fn wrap_arg(v: Option<&Value>) -> bool {
+    crate::script::binding_abi::bool_or_default(v, false)
 }
 
 /// An `AddLine`-family colour, gated on the r-slot alone (`lua_isnumber`, `0x6f34d0`), else
 /// [`DEFAULT_TEXT_GOLD`]; past the gate a non-number g or b reads 0, and alpha is always opaque.
-fn parse_line_color(r: Option<&Value>, g: Option<&Value>, b: Option<&Value>) -> [f32; 4] {
-    match color_num(r) {
+fn parse_line_color(
+    lua: &Lua,
+    r: Option<&Value>,
+    g: Option<&Value>,
+    b: Option<&Value>,
+) -> [f32; 4] {
+    match color_num(lua, r) {
         Some(r) => [
             r,
-            color_num(g).unwrap_or(0.0),
-            color_num(b).unwrap_or(0.0),
+            color_num(lua, g).unwrap_or(0.0),
+            color_num(lua, b).unwrap_or(0.0),
             1.0,
         ],
         None => DEFAULT_TEXT_GOLD,
@@ -600,10 +603,10 @@ fn parse_line_color(r: Option<&Value>, g: Option<&Value>, b: Option<&Value>) -> 
 
 /// An `AddLine` tail, positional `r, g, b, wrap` (`0x531630`); the wrap flag is read whatever the
 /// colour gate decides.
-fn parse_line_tail(args: &[Value]) -> ([f32; 4], bool) {
+fn parse_line_tail(lua: &Lua, args: &[Value]) -> ([f32; 4], bool) {
     (
-        parse_line_color(args.first(), args.get(1), args.get(2)),
-        bool_arg(args.get(3)),
+        parse_line_color(lua, args.first(), args.get(1), args.get(2)),
+        wrap_arg(args.get(3)),
     )
 }
 
@@ -649,9 +652,9 @@ pub(super) fn append_line(
     if let Some(d) = model.region_data.get_mut(&lh) {
         if d.size != pin {
             d.size = pin;
-            // A size-only write takes the named touch: a conservative one would re-derive the
-            // whole layout graph on every hover that turns a line between wrapped and plain.
-            model.touch_layout_region(lh);
+            // `SetWidth`, which invalidates (`0x7683d0`), named: a conservative touch would
+            // re-derive the whole layout graph on every hover that turns a line wrapped or plain.
+            model.invalidate_region(lh, true);
             // The wrap pin is the measure key's wrap-width input.
             model.touch_measure(lh);
         }
@@ -662,7 +665,19 @@ pub(super) fn append_line(
     if let Ok(t) = tip_mut(&mut model, h) {
         t.num_lines = n;
     }
+    owe_relayout(&mut model, h);
     Ok(())
+}
+
+/// A line writer or the show ran the relayout (`0x530640`, from `0x52ad59`, `0x52b029`,
+/// `0x52e5ae`, `0x52f869`, `0x530615`, `0x530aad`), which does nothing without an owner
+/// (`0x530651`) and else ends in an unconditional invalidate (`0x530a52`).
+pub(super) fn owe_relayout(model: &mut Model, h: FrameHandle) {
+    if let Ok(t) = tip_mut(model, h) {
+        if t.owner.is_some() {
+            t.relayout_owed = true;
+        }
+    }
 }
 
 mod verbs;
@@ -708,9 +723,10 @@ fn cursor_anchor(model: &mut Model, h: FrameHandle) {
     );
     let units = model.layout_units();
     let input = model.layout_inputs.entry(h).or_default();
-    // `0x767c70`'s change detect: the BOTTOM slot is replaced only on a real change.
+    // `0x767c70`'s change detect: the BOTTOM slot is replaced, and the plate invalidated
+    // (`0x530b97`, flag 1), only on a real change.
     if input.anchors.set(new, units) {
-        model.touch_layout_frame(h);
+        model.invalidate_frame(h, true);
     }
 }
 
@@ -732,6 +748,16 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         };
         if cursor_mode {
             cursor_anchor(model, h);
+        }
+        // The relayout's closing invalidate (`0x530a52`), whatever it computed. Its own writes
+        // below push when they move the plate; past those, a re-resolve gives back the rect the
+        // plate holds unless that rect is stale, so only then is the invalidate paid here.
+        let owed = tip_mut(model, h).is_ok_and(|t| std::mem::take(&mut t.relayout_owed));
+        if owed && model.frame_holds_stale(h) {
+            model.note_layout_frame_write(h);
+            if let Some(&id) = model.frame_to_id.get(&h) {
+                model.queue_invalidate(id);
+            }
         }
         let (num, lefts, rights, min_w, pad_w) = match model.arena.frame(h).map(|f| &f.kind_state) {
             Some(KindState::Tooltip(t)) => (
@@ -775,11 +801,21 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         }
         let input = model.layout_inputs.entry(h).or_default();
         // `pad_w` is `SetPadding`'s extra width (ItemRefTooltip's room for its close button).
-        input.width = maxw + 2.0 * TOOLTIP_PAD + pad_w;
-        input.height = totalh + 2.0 * TOOLTIP_PAD;
+        let (w, ht) = (maxw + 2.0 * TOOLTIP_PAD + pad_w, totalh + 2.0 * TOOLTIP_PAD);
+        let moved = input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
+        input.width = w;
+        input.height = ht;
         // Inside the resolve, so a note and not a touch; the incremental pass still has to hear
-        // that these inputs changed.
+        // that these inputs changed. The size goes through `SetWidth`/`SetHeight` (`0x530a2e`,
+        // `0x530a39`), which invalidate the tooltip.
         model.note_layout_frame_write(h);
+        // A size the measures moved since the relayout ran: benilla's measures land a tick after
+        // the line write, where the reference's relayout measured in the call.
+        if moved {
+            if let Some(&id) = model.frame_to_id.get(&h) {
+                model.queue_invalidate(id);
+            }
+        }
         // Right-flush each shown right cell: one `SetPoint(RIGHT, leftCell, LEFT, width, 0)`
         // (`0x530910`..`0x53094f`), which leaves any other point the cell holds alone.
         let units = model.layout_units();
@@ -797,6 +833,9 @@ pub(super) fn layout_tooltips(model: &mut Model) {
                 .is_some_and(|d| d.anchors.set(new, units));
             if stored {
                 model.note_layout_region_write(rights[i]);
+                if let Some(&id) = model.region_to_id.get(&rights[i]) {
+                    model.queue_invalidate(id);
+                }
             }
         }
     }

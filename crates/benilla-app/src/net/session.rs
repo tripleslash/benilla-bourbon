@@ -108,8 +108,8 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
             terminal,
             dial,
         } => login_failed(refusal, reason, terminal, dial, &mut e.login_failures),
-        SessionEvent::RealmList { realms } => {
-            e.realm_lists.write(RealmListMessage { realms });
+        SessionEvent::RealmList { realms, failed } => {
+            e.realm_lists.write(RealmListMessage { realms, failed });
         }
         SessionEvent::CharActionResult { action, code } => {
             char_action_result(action, code, &mut e.char_actions)
@@ -270,17 +270,56 @@ fn on_clock(In(ev): In<SessionEvent>, mut b: Bridge) {
     }
 }
 
-fn on_reputations(In(ev): In<SessionEvent>, mut b: Bridge) {
+fn on_reputations(
+    In(ev): In<SessionEvent>,
+    mut b: Bridge,
+    factions: Option<Res<crate::target::ring::Factions>>,
+    mut chat: ResMut<crate::ui_chat::ChatLog>,
+) {
     match ev {
         SessionEvent::Reputations { standings } => reputations(standings, &mut b.reputations),
         SessionEvent::ReputationVisible { list_id } => {
+            // The chat line names the rank, so it reads the store before the flag lands.
+            if let (Some(f), Some(me)) = (factions.as_deref(), self_facts(&b)) {
+                let line = crate::ui_reputation::visible_line(
+                    list_id,
+                    &b.reputations,
+                    f.catalog(),
+                    me.race,
+                    me.class,
+                );
+                crate::ui_reputation::queue_standing_lines(line, f.catalog(), me.female, &mut chat);
+            }
             reputation_visible(list_id, &mut b.reputations)
         }
         _ => {}
     }
 }
 
-/// The chat line reads the deltas against the store, so it must run before the overwrite.
+/// What the reputation chat lines read of the local player.
+struct SelfFacts {
+    race: u8,
+    class: u8,
+    female: bool,
+}
+
+/// The local player's race, class and gender, `None` before the self object streams in; the
+/// reference's `0x62c670` prints nothing without it (`0x62c6bf`). The gender is the real one
+/// (`UNIT_FIELD_BYTES_0` byte 2), where `0x5ed5b0` reads `PLAYER_BYTES_3` byte 0 whole and so
+/// takes a drunk female on vmangos for a male: that byte carries the drunk bits.
+fn self_facts(b: &Bridge) -> Option<SelfFacts> {
+    let entity = *b.index.0.get(&b.self_guid.0?)?;
+    let store = b.stores.get(entity).ok()?;
+    Some(SelfFacts {
+        race: store.0.unit_race()?,
+        class: store.0.unit_class()?,
+        female: store.0.unit_gender() == Some(1),
+    })
+}
+
+/// The chat lines read the deltas against the store, so they must run before the overwrite. The
+/// "increased by" line comes first, then the rank lines, as the reference's entry loop orders them
+/// (`0x4d57f5`, `0x4d5896`).
 fn on_reputation_delta(
     In(ev): In<SessionEvent>,
     mut b: Bridge,
@@ -295,6 +334,21 @@ fn on_reputation_delta(
             factions.as_deref(),
             &mut chat_log,
         );
+        if let (Some(f), Some(me)) = (factions.as_deref(), self_facts(&b)) {
+            let lines = crate::ui_reputation::delta_lines(
+                &standings,
+                &b.reputations,
+                f.catalog(),
+                me.race,
+                me.class,
+            );
+            crate::ui_reputation::queue_standing_lines(
+                lines,
+                f.catalog(),
+                me.female,
+                &mut chat_log,
+            );
+        }
         reputation_delta(standings, &mut b.reputations, &mut quest);
     }
 }
@@ -708,3 +762,6 @@ fn packet_dropped(opcode: u16, unparseable: bool, dropped: &mut DroppedOpcodes) 
         tally.unknown += 1;
     }
 }
+
+#[cfg(test)]
+mod reputation_tests;

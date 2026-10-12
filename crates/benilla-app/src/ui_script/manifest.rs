@@ -247,6 +247,11 @@ pub(super) fn load_core(script: &UiScript) -> Vec<String> {
 /// severity 2 (`0x6edc3f`) and returns 0, which `UI_Init` never reads (`0x48fff2`), going on to
 /// `Bindings.xml` and the addons. benilla goes on the same way and reports it as a load failure,
 /// an `ERROR` line and a row in `/errors`.
+///
+/// Deviation: no `FrameXML.toc` signature check, where `UI_Init` loads on a failed one and then
+/// quits (`0x401560(0xa)` at `0x48ff90`), because the check verifies Blizzard's signature with a key
+/// carried in the client binary, which benilla does not ship, and a modified interface file is
+/// loaded rather than refused.
 fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
     let Some(core) = core(layer) else {
         let mut failures = vec![report_missing_core(script)];
@@ -637,10 +642,12 @@ mod tests {
         assert_eq!(&layered[3..], &Addon::layer().toc.files[..]);
     }
 
-    /// A shipped `.xml` the layer does not list never loads, with no error to say so.
+    /// A shipped `.xml` the layer does not list never loads, with no error to say so; the one
+    /// glue file loads by name ([`super::super::glue::GLUE_LAYER`]).
     #[test]
     fn the_manifest_lists_every_shipped_file_and_nothing_else() {
         let mut listed = shipped_manifest_files();
+        listed.push(super::super::glue::GLUE_LAYER.to_string());
         let mut shipped: Vec<String> = super::super::content::shipped_files()
             .filter(|f| f.ends_with(".xml"))
             .map(str::to_owned)

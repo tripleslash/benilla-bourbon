@@ -58,9 +58,36 @@ impl<T: Copy> IdMap<T> {
     }
 }
 
+/// [`Model::layout_hold`]: the node is in [`Model::layout_pending`].
+pub(crate) const HOLD_QUEUED: u8 = 1;
+/// The node is in [`Model::layout_force`].
+pub(crate) const HOLD_QUEUED_FORCE: u8 = 2;
+/// The node is pending under its deferral bit, its resolve waiting.
+pub(crate) const HOLD_HELD: u8 = 4;
+/// The held node's resolved bit was cleared, so its resolve stores without the keep test.
+pub(crate) const HOLD_FORCE: u8 = 8;
+
+/// Whether layout node `id`'s deferral bit is set, on its frame or region.
+pub(crate) fn node_deferred(
+    arena: &WidgetArena,
+    id_to_frame: &IdMap<FrameHandle>,
+    id_to_region: &IdMap<RegionHandle>,
+    id: u32,
+) -> bool {
+    match id_to_frame.get(&id) {
+        Some(&h) => arena.frame(h).is_some_and(|f| f.layout_deferred),
+        None => id_to_region
+            .get(&id)
+            .and_then(|&rh| arena.region(rh))
+            .is_some_and(|r| r.layout_deferred),
+    }
+}
+
 /// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no mlua handles, whose
 /// persistent count the vendored `LUAI_MAXCSTACK` caps.
 pub(crate) struct Model {
+    /// Which FrameScript state this VM is: it picks the event table and the frame types.
+    pub(crate) vm: super::glue::VmKind,
     /// Every discovered addon in load order: the AddOn API's registry, filled at world entry.
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
     /// The Lua index space into `addons`, a title-sorted, hidden-filtered list (`0x51da70`).
@@ -150,6 +177,39 @@ pub(crate) struct Model {
     /// measure landed, benilla's moment for `SetText` and `SetFont` (`0x771ea4`, `0x7715e0`). Each
     /// is named on the layout too, so the resolve that drains this list solves it.
     pub(crate) layout_force: Vec<u32>,
+    /// Layout ids invalidated since the last resolve (`0x7680e0` on the node): a write the
+    /// reference queues a resolve for, `SetPoint`, `SetWidth` and the like, but not
+    /// `ClearAllPoints` (`0x767620`). The next resolve solves each one from its inputs, where a
+    /// node nothing invalidated keeps a state a recompute could change
+    /// ([`Model::invalidate_frame`]).
+    pub(crate) layout_pending: Vec<u32>,
+    /// Layout ids whose inputs a write moved without invalidating them since they were last
+    /// invalidated: a dying target's unhook (`0x768e20` → `0x767e70` with a zero flag), new art
+    /// (`SetTexture` `0x770200`), a re-link into another frame (`0x77fd10`). Each holds a state a
+    /// re-resolve need not give back, so a write the reference invalidates for is not skipped as
+    /// a no-op on it ([`Model::invalidate_frame`]).
+    pub(crate) layout_unsettled: HashSet<u32>,
+    /// Per layout id, what its resolve owes beside the deferral bit itself (which the frame and
+    /// region carry, [`crate::widget::Frame::layout_deferred`]): `HOLD_*` bits. A node in
+    /// [`Self::layout_pending`] or [`Self::layout_force`] is queued; a deferred node pending is
+    /// held, the reference's `0x4` under `0x2`, whose resolve waits until its show, a read or a
+    /// reader's anchor read.
+    pub(crate) layout_hold: Vec<u8>,
+    /// Layout ids invalidated while deferred since the last resolve: each passes the invalidate to
+    /// what anchors to it, as the reference does at the write (`0x768178`–`0x76819c`), which the
+    /// next resolve applies.
+    pub(crate) layout_pass: Vec<u32>,
+    /// Layout ids the next resolve takes as undeferred: a show or a load's end cleared the bit of
+    /// a pending one, which resolves at once (`0x7680c4` → `0x7680e0(1)`), or a getter reads a
+    /// pending one, resolving it without clearing the bit (`0x7a1a1d`).
+    pub(crate) layout_pull: Vec<u32>,
+    /// A show's resolve: the ids it resolves as it shows them going in, and the ids resolved for
+    /// them coming out, each pulled by an anchor read of one before it was, in the order their
+    /// `ApplyRect` runs, so the show fires their `OnSizeChanged` ([`super::visibility`]).
+    pub(crate) layout_chain: Option<Vec<u32>>,
+    /// The screen the last converged resolve laid out against: a frame anchored to it is reached
+    /// when it moves, as by any target's new rect.
+    pub(crate) layout_screen: Option<Rect>,
     /// Under `WOW_LAYOUT_VERIFY`, the resolve just taken was incremental and owes a full re-run.
     pub(crate) layout_verify_recheck: bool,
     /// Per-node input hashes and dirty-closure scratch: which nodes a let-through resolve solves.
@@ -170,8 +230,9 @@ pub(crate) struct Model {
     pub(crate) layout_last_scope: (usize, usize),
     /// Fixpoint rounds run across all solves.
     pub(crate) layout_rounds: u64,
-    /// Per frame, rasterized links `(y-up rect, link, full |H…|h markup)` for `OnHyperlinkClick`.
-    pub(crate) link_spans: HashMap<FrameHandle, Vec<(Rect, String, String)>>,
+    /// Per text frame, its pool of hyperlink buttons (`[+0x314]`), the shown ones first
+    /// ([`super::hyperlink`]).
+    pub(crate) link_buttons: HashMap<FrameHandle, Vec<FrameHandle>>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
@@ -182,8 +243,14 @@ pub(crate) struct Model {
     /// Named `<Font>` objects by lowercased name, as 1.12 matches them with `SStrCmpI` (`0x783870`,
     /// `0x7838c7`); read them only through `font_object`, where the fold lives.
     pub(crate) font_objects_by_lower: HashMap<String, FontObject>,
-    /// Anchored regions' owner-relative rects from the last resolve; anchor-less ones are absent.
+    /// Each region's rect while its valid bit is set: what its getters and a FontString's draw
+    /// read (`GetRect 0x768320`, `0x7730b7`). A cleared region keeps its rect until its own next
+    /// invalidate, as `ClearAllPoints` queues no resolve (`0x767620`).
     pub(crate) region_resolved: HashMap<RegionHandle, Rect>,
+    /// A Texture whose resolve failed: the rect its last good resolve placed it at, which it keeps
+    /// drawing, as the failed resolve (`0x768d55`) leaves the quad `0x770670` wrote and its emit
+    /// checks only its texture (`0x7706e0`). Dropped when it resolves again.
+    pub(crate) region_kept: HashMap<RegionHandle, Rect>,
 
     /// The next object id to mint; ids start at 1, since 0 is `SCREEN`.
     pub(crate) next_id: u32,
@@ -191,8 +258,10 @@ pub(crate) struct Model {
     pub(crate) frame_to_id: HashMap<FrameHandle, u32>,
     pub(crate) id_to_region: IdMap<RegionHandle>,
     pub(crate) region_to_id: HashMap<RegionHandle, u32>,
-    /// Region name to id, first wins: `SetPoint` anchors to a sibling region by name, after frames.
-    pub(crate) region_names: HashMap<String, u32>,
+    /// Region name to the first region that took it, for name lookups only (`SetPoint` anchoring
+    /// to a sibling by name, after frames): first come, as the `_G` entry is (`0x701bd0`). A
+    /// region's own name, for `GetName` and error strings, is [`crate::widget::Region::name`].
+    pub(crate) region_by_name: HashMap<String, u32>,
 
     /// Which handlers each frame has; the closures themselves live in Lua's `REG_SCRIPTS` table.
     pub(crate) scripts: HashMap<FrameHandle, HashSet<&'static str>>,
@@ -385,6 +454,8 @@ pub(crate) struct Model {
     pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
     /// `Logout`, `Quit`, `CancelLogout`, `ForceQuit` calls; Lua sees the countdown only as events.
     pub(crate) session_requests: Vec<session::SessionRequest>,
+    /// The glue core's slots and request queue; empty in an in-game VM.
+    pub(crate) glue: super::glue_core::GlueCore,
     /// `PLAYER_LOGIN`'s one-shot, the reference's `[0xb4e260]`: armed by the UI load, spent by
     /// the next world-enter cascade ([`super::UiScript::fire_world_enter`]).
     pub(crate) player_login_armed: bool,
@@ -630,11 +701,13 @@ pub(crate) struct Model {
     pub(crate) drag_registered: HashMap<FrameHandle, HashSet<String>>,
     /// The drag gesture, armed by a press on a drag-registered frame, started past the threshold.
     pub(crate) drag: Option<cursor::DragGesture>,
-    /// The one `StartMoving()` in flight, the client's `root+0xcfc` slot, apart from `drag` as in
-    /// the reference: a move outlives the button, since mouse-up's auto-stop skips a Lua drag.
+    /// The one move or size in flight, the client's `root+0xcfc` slot with its grip (`+0xd04`),
+    /// apart from `drag` as in the reference: a `StartMoving` or `StartSizing` outlives the button,
+    /// since mouse-up's auto-stop skips a Lua drag.
     pub(crate) moving: Option<super::object::FrameMove>,
-    /// The `StartSizing` in flight, cleared by `StopMovingOrSizing` (`0x776990`).
-    pub(crate) sizing: Option<super::object::FrameSizing>,
+    /// `SetLayoutMode`'s value, the root's `+0xcf8` (0 at start, `0x7642a5`): while non-zero, a
+    /// press with Control or Alt held is a layout drag (`0x766301`).
+    pub(crate) layout_mode: i32,
     /// A Slider thumb drag, left press to release or pointer leave, handled here with no Lua.
     pub(crate) slider_drag: Option<slider::SliderDrag>,
     /// A ColorSelect wheel or value-bar drag, press to release.
@@ -1086,6 +1159,7 @@ impl Model {
 
     pub(crate) fn new() -> Model {
         Model {
+            vm: super::glue::VmKind::InGame,
             addons: Vec::new(),
             addon_index: Vec::new(),
             addon_info_hidden: None,
@@ -1126,18 +1200,19 @@ impl Model {
             layout_gate_walks: 0,
             layout_rounds: 0,
             resolved: HashMap::new(),
-            link_spans: HashMap::new(),
+            link_buttons: HashMap::new(),
             region_data: HashMap::new(),
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
             region_resolved: HashMap::new(),
+            region_kept: HashMap::new(),
             next_id: 1,
             id_to_frame: IdMap::default(),
             frame_to_id: HashMap::new(),
             id_to_region: IdMap::default(),
             region_to_id: HashMap::new(),
-            region_names: HashMap::new(),
+            region_by_name: HashMap::new(),
             scripts: HashMap::new(),
             on_update_frames: Vec::new(),
             on_update_joins: 0,
@@ -1159,6 +1234,13 @@ impl Model {
             pending_size_changed: Vec::new(),
             text_flips: Vec::new(),
             layout_force: Vec::new(),
+            layout_pending: Vec::new(),
+            layout_unsettled: HashSet::new(),
+            layout_hold: Vec::new(),
+            layout_pass: Vec::new(),
+            layout_pull: Vec::new(),
+            layout_chain: None,
+            layout_screen: None,
             errors: Vec::new(),
             pending_error_dispatch: Vec::new(),
             diagnostics: Default::default(),
@@ -1222,6 +1304,7 @@ impl Model {
             follow_requests: Vec::new(),
             camera_view_requests: Vec::new(),
             session_requests: Vec::new(),
+            glue: Default::default(),
             player_login_armed: false,
             pvp_toggles: 0,
             honor: None,
@@ -1329,7 +1412,7 @@ impl Model {
             drag_registered: HashMap::new(),
             drag: None,
             moving: None,
-            sizing: None,
+            layout_mode: 0,
             slider_drag: None,
             color_drag: None,
             gossip: None,
@@ -1598,7 +1681,9 @@ impl Model {
     /// A write to region `rh`'s layout inputs or liveness: its anchors, size, measured extent,
     /// art or owner. Its node re-derives at the next resolve, joining or leaving the graph as it
     /// gained or lost its anchors. An id is minted only for an anchored region, the only kind that
-    /// can be a node; an anchorless one with no id has nothing in the graph to move.
+    /// can be a node; an anchorless one with no id has nothing in the graph to move. Naming
+    /// invalidates nothing: a write the reference invalidates for goes through
+    /// [`Self::invalidate_region`].
     pub(crate) fn touch_layout_region(&mut self, rh: RegionHandle) {
         match self.region_to_id.get(&rh) {
             Some(&id) => self.name_layout_node(id),
@@ -1611,20 +1696,6 @@ impl Model {
             }
             None => self.bump_layout_epoch(),
         }
-    }
-
-    /// A write to region `rh`'s art, its texture or solid fill: a layout input only where an
-    /// anchored region takes an axis authored 0 from it ([`super::layout::content_span`]), and
-    /// named only when it moved the node's hash, so a repaint of the same art leaves the gate shut.
-    pub(crate) fn touch_layout_art(&mut self, rh: RegionHandle) {
-        if self
-            .region_data
-            .get(&rh)
-            .is_some_and(|d| d.size.is_some_and(|(w, h)| w != 0.0 && h != 0.0))
-        {
-            return;
-        }
-        self.touch_layout_content(rh);
     }
 
     /// A write to region `rh`'s text, which was non-empty iff `was_shown`: the sweep reads a
@@ -1643,7 +1714,9 @@ impl Model {
         }
     }
 
-    /// Names anchored region `rh` unless its node still holds its converged hash.
+    /// Text that emptied or filled on anchored region `rh`, which moves the measure its resolve
+    /// reads: a new string clears the valid bit and invalidates (`0x771ea4`), unless the node
+    /// still holds its converged hash, as when a clear and rebuild restored the same text.
     pub(crate) fn touch_layout_content(&mut self, rh: RegionHandle) {
         let Some(d) = self.region_data.get(&rh) else {
             return;
@@ -1656,17 +1729,17 @@ impl Model {
                 .arena
                 .region(rh)
                 .and_then(|r| self.frame_to_id.get(&r.owner).copied());
-            if self.layout_scope.holds(
-                id,
-                super::layout::region_node_hash(d, owner, self.texture_size_probe.as_ref()),
-            ) {
+            if self
+                .layout_scope
+                .holds(id, super::layout::region_node_hash(d, owner))
+            {
                 return;
             }
         }
-        self.touch_layout_region(rh);
+        self.clear_region_valid(rh);
     }
 
-    /// The same for frame `h`: its anchors, size, scale, clamp or scroll override.
+    /// The same for frame `h`: its anchors, size, scale or clamp.
     pub(crate) fn touch_layout_frame(&mut self, h: FrameHandle) {
         match self.frame_to_id.get(&h) {
             Some(&id) => self.name_layout_node(id),
@@ -1675,6 +1748,550 @@ impl Model {
             }
             None => self.bump_layout_epoch(),
         }
+    }
+
+    /// A write the reference invalidates frame `h` for (`0x7680e0`): `SetPoint`, `SetWidth`,
+    /// `SetClampedToScreen` and the like, which pass `changed` for whether it moved an input. One
+    /// that moved nothing is skipped, as a re-resolve gives back the rect the frame holds, unless
+    /// the frame holds one a re-resolve would not give it ([`Self::frame_holds_stale`]): only an
+    /// invalidated node, or one whose target stored a new rect, takes a new rect.
+    pub(crate) fn invalidate_frame(&mut self, h: FrameHandle, changed: bool) {
+        if !changed && !self.frame_holds_stale(h) {
+            return;
+        }
+        self.touch_layout_frame(h);
+        if let Some(&id) = self.frame_to_id.get(&h) {
+            self.queue_invalidate(id);
+        }
+    }
+
+    /// [`Self::invalidate_frame`] for region `rh`.
+    pub(crate) fn invalidate_region(&mut self, rh: RegionHandle, changed: bool) {
+        if !changed && !self.region_holds_stale(rh) {
+            return;
+        }
+        // A region with no id was never anchored, so it holds no rect to lose.
+        self.touch_layout_region(rh);
+        if let Some(&id) = self.region_to_id.get(&rh) {
+            self.queue_invalidate(id);
+        }
+    }
+
+    /// A write that clears region `rh`'s valid bit and invalidates it, as a FontString's new
+    /// string (`0x771ea4`), font (`0x7715e0`) or spacing (`0x771666`) does: the next resolve stores
+    /// its rect whole, and that store reaches what anchors to it (`0x768cf0`).
+    pub(crate) fn clear_region_valid(&mut self, rh: RegionHandle) {
+        // A region with no id was never anchored, so it holds no rect.
+        self.touch_layout_region(rh);
+        if let Some(&id) = self.region_to_id.get(&rh) {
+            self.queue_force(id);
+        }
+    }
+
+    /// Invalidate node `id` (`0x7680e0(0)`): queued for the next resolve, or, while it is deferred,
+    /// held pending, its invalidate passing to what anchors to it once (`0x768169`–`0x76819c`).
+    pub(crate) fn queue_invalidate(&mut self, id: u32) {
+        if self.node_deferred(id) {
+            self.hold_invalidated(id, false);
+        } else {
+            self.layout_pending.push(id);
+            self.hold_set(id, HOLD_QUEUED);
+        }
+    }
+
+    /// [`Self::queue_invalidate`] for a write that also clears the node's resolved bit, whose
+    /// resolve then stores without the keep test ([`Self::layout_force`]).
+    pub(crate) fn queue_force(&mut self, id: u32) {
+        if self.node_deferred(id) {
+            self.hold_invalidated(id, true);
+        } else {
+            self.layout_force.push(id);
+            self.hold_set(id, HOLD_QUEUED_FORCE);
+        }
+    }
+
+    /// A deferred node's invalidate: it sets `0x4` and passes on (`0x768169`–`0x76819c`); one
+    /// already pending only writes the drain's retry counter, `+0x38 = 6` (`0x76814b`–`0x768166`).
+    pub(super) fn hold_invalidated(&mut self, id: u32, force: bool) {
+        if self.hold_flags(id) & HOLD_HELD == 0 {
+            self.layout_pass.push(id);
+        }
+        self.hold_set(id, HOLD_HELD | if force { HOLD_FORCE } else { 0 });
+    }
+
+    /// Node `id`'s `HOLD_*` bits.
+    #[inline]
+    pub(crate) fn hold_flags(&self, id: u32) -> u8 {
+        self.layout_hold.get(id as usize).copied().unwrap_or(0)
+    }
+
+    pub(super) fn hold_set(&mut self, id: u32, bits: u8) {
+        let i = id as usize;
+        if self.layout_hold.len() <= i {
+            self.layout_hold.resize(i + 1, 0);
+        }
+        self.layout_hold[i] |= bits;
+    }
+
+    /// Whether node `id`'s deferral bit is set.
+    pub(crate) fn node_deferred(&self, id: u32) -> bool {
+        node_deferred(&self.arena, &self.id_to_frame, &self.id_to_region, id)
+    }
+
+    /// The queued resolve of node `id`, just deferred, leaves the queue and waits with it, pending
+    /// (`0x768074`–`0x7680b3`).
+    fn hold_queued(&mut self, id: u32) {
+        let f = self.hold_flags(id);
+        if f & (HOLD_QUEUED | HOLD_QUEUED_FORCE) != 0 {
+            let force = if f & HOLD_QUEUED_FORCE != 0 {
+                HOLD_FORCE
+            } else {
+                0
+            };
+            self.hold_set(id, HOLD_HELD | force);
+        }
+    }
+
+    /// `0x768060(1)` on frame `h`'s layout object.
+    pub(crate) fn defer_frame(&mut self, h: FrameHandle) {
+        let Some(f) = self.arena.frame_mut(h) else {
+            return;
+        };
+        f.layout_deferred = true;
+        if let Some(&id) = self.frame_to_id.get(&h) {
+            self.hold_queued(id);
+        }
+    }
+
+    /// `0x768060(1)` on region `rh`'s layout object.
+    pub(crate) fn defer_region(&mut self, rh: RegionHandle) {
+        let Some(r) = self.arena.region_mut(rh) else {
+            return;
+        };
+        r.layout_deferred = true;
+        if let Some(&id) = self.region_to_id.get(&rh) {
+            self.hold_queued(id);
+        }
+    }
+
+    /// `0x768060(0)` on frame `h`'s layout object: clear the bit, and a pending resolve runs now
+    /// (`0x7680c4` → `0x7680e0(1)`), here at the next resolve. Whether one is owed.
+    pub(crate) fn undefer_frame(&mut self, h: FrameHandle) -> bool {
+        let Some(f) = self.arena.frame_mut(h) else {
+            return false;
+        };
+        f.layout_deferred = false;
+        match self.frame_to_id.get(&h) {
+            Some(&id) => self.pull_pending(id),
+            None => false,
+        }
+    }
+
+    /// `0x768060(0)` on region `rh`'s layout object.
+    pub(crate) fn undefer_region(&mut self, rh: RegionHandle) -> bool {
+        let Some(r) = self.arena.region_mut(rh) else {
+            return false;
+        };
+        r.layout_deferred = false;
+        match self.region_to_id.get(&rh) {
+            Some(&id) => self.pull_pending(id),
+            None => false,
+        }
+    }
+
+    /// Node `id` resolves at the next resolve if it is pending, held or queued; whether it is.
+    pub(crate) fn pull_pending(&mut self, id: u32) -> bool {
+        let f = self.hold_flags(id);
+        if f & HOLD_HELD != 0 {
+            self.layout_pull.push(id);
+            self.name_layout_node(id);
+        }
+        f & (HOLD_HELD | HOLD_QUEUED | HOLD_QUEUED_FORCE) != 0
+    }
+
+    /// A getter's read of node `id` (`0x7a1a0b` → `0x7680e0(1)` while pending): a held node
+    /// resolves in the read's resolve, and its bit stays set.
+    pub(crate) fn pull_read(&mut self, id: u32) {
+        if self.hold_flags(id) & HOLD_HELD != 0 && self.node_deferred(id) {
+            self.layout_pull.push(id);
+            self.name_layout_node(id);
+        }
+    }
+
+    /// The hide transition's layout step (`0x76ad50`): out of its load window, the frame and its
+    /// title region defer (`0x76ad70`, `0x76ad84`), and each region it drew stops drawing and defers
+    /// (`0x76adbf` → `0x77fc82`).
+    pub(crate) fn layout_on_hide(&mut self, h: FrameHandle) {
+        let Some(f) = self.arena.frame(h) else {
+            return;
+        };
+        if f.load_window {
+            return;
+        }
+        let title = f.title_region;
+        let regions: Vec<RegionHandle> = f.regions.clone();
+        self.defer_frame(h);
+        if let Some(t) = title {
+            self.defer_region(t);
+        }
+        // The frame was visible until this transition, so each shown region drew.
+        for rh in regions {
+            if Some(rh) != title && self.region_shown_bit(rh) {
+                self.defer_region(rh);
+            }
+        }
+    }
+
+    /// The show transition's layout step for the frame (`0x76ae10`): out of its load window, the
+    /// frame and its title region undefer, resolving first (`0x76ae58`, `0x76ae6c`). Whether
+    /// either owes a resolve now, or an invalidate passed while deferred is yet to reach what it
+    /// may.
+    pub(crate) fn layout_on_show_frame(&mut self, h: FrameHandle) -> bool {
+        let Some(f) = self.arena.frame(h) else {
+            return false;
+        };
+        if f.load_window {
+            return false;
+        }
+        let title = f.title_region;
+        let mut owed = self.undefer_frame(h);
+        if let Some(t) = title {
+            owed |= self.undefer_region(t);
+        }
+        owed || !self.layout_pass.is_empty()
+    }
+
+    /// The show transition's region step, after the frame is marked visible (`0x76aeac` →
+    /// `0x77fcb0`): out of the frame's load window, each shown region starts drawing and
+    /// undefers (`0x77fce6`). Whether any owes a resolve now, as [`Self::layout_on_show_frame`].
+    pub(crate) fn layout_on_show_regions(&mut self, h: FrameHandle) -> bool {
+        let Some(f) = self.arena.frame(h) else {
+            return false;
+        };
+        if f.load_window {
+            return false;
+        }
+        let title = f.title_region;
+        let regions: Vec<RegionHandle> = f.regions.clone();
+        let mut owed = false;
+        for rh in regions {
+            if Some(rh) != title && self.region_shown_bit(rh) {
+                owed |= self.undefer_region(rh);
+            }
+        }
+        owed || !self.layout_pass.is_empty()
+    }
+
+    /// Both show steps at once, for a show with no handler to run between them.
+    pub(crate) fn layout_on_show(&mut self, h: FrameHandle) -> bool {
+        let frame = self.layout_on_show_frame(h);
+        self.layout_on_show_regions(h) || frame
+    }
+
+    /// Whether a resolve of `roots` now can fire `OnSizeChanged`: a root frame has the handler, or
+    /// a deferred, pending frame an anchor read on the way would resolve (`0x7a2fc0`) does. With no
+    /// such handler the resolve shows nothing in the binding, and the next resolve, a getter's or
+    /// the drain's, gives the same rects.
+    pub(crate) fn resolve_fires(&self, roots: &[u32]) -> bool {
+        let fires = |f: FrameHandle| {
+            self.scripts
+                .get(&f)
+                .is_some_and(|s| s.contains("OnSizeChanged"))
+        };
+        let anchors = |id: u32| -> Option<crate::layout::Anchors> {
+            match self.id_to_frame.get(&id) {
+                Some(h) => self.layout_inputs.get(h).map(|i| i.anchors),
+                None => self
+                    .id_to_region
+                    .get(&id)
+                    .and_then(|rh| self.region_data.get(rh))
+                    .map(|d| d.anchors),
+            }
+        };
+        let mut stack: Vec<u32> = Vec::new();
+        for &id in roots {
+            if self.id_to_frame.get(&id).is_some_and(|&h| fires(h)) {
+                return true;
+            }
+            stack.extend(
+                anchors(id)
+                    .iter()
+                    .flat_map(|a| a.iter().map(|a| a.relative_to)),
+            );
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        while let Some(t) = stack.pop() {
+            if seen.contains(&t) || self.hold_flags(t) & HOLD_HELD == 0 || !self.node_deferred(t) {
+                continue;
+            }
+            seen.push(t);
+            if self.id_to_frame.get(&t).is_some_and(|&th| fires(th)) {
+                return true;
+            }
+            stack.extend(
+                anchors(t)
+                    .iter()
+                    .flat_map(|a| a.iter().map(|a| a.relative_to)),
+            );
+        }
+        false
+    }
+
+    /// The layout ids [`Self::layout_on_show_frame`] undeferred: the frame and its title region.
+    pub(crate) fn show_frame_roots(&self, h: FrameHandle) -> Vec<u32> {
+        let mut out: Vec<u32> = self.frame_to_id.get(&h).copied().into_iter().collect();
+        if let Some(t) = self.arena.frame(h).and_then(|f| f.title_region) {
+            out.extend(self.region_to_id.get(&t).copied());
+        }
+        out
+    }
+
+    /// The layout ids [`Self::layout_on_show_regions`] undeferred: the shown regions.
+    pub(crate) fn show_region_roots(&self, h: FrameHandle) -> Vec<u32> {
+        let Some(f) = self.arena.frame(h) else {
+            return Vec::new();
+        };
+        f.regions
+            .iter()
+            .filter(|&&rh| Some(rh) != f.title_region && self.region_shown_bit(rh))
+            .filter_map(|rh| self.region_to_id.get(rh).copied())
+            .collect()
+    }
+
+    /// Whether node `id` is pending (`0x4`, [`Self::layout_hold`]): queued, or held under its
+    /// deferral.
+    pub(crate) fn node_pending(&self, id: u32) -> bool {
+        self.hold_flags(id) & (HOLD_HELD | HOLD_QUEUED | HOLD_QUEUED_FORCE) != 0
+    }
+
+    /// The arena's handler-free `Show`/`Hide` ([`WidgetArena::set_shown`]) with each transition's
+    /// layout step; a resolve the shows owe runs at the next resolve.
+    pub(crate) fn set_shown_silent(&mut self, h: FrameHandle, shown: bool) {
+        for f in self.arena.set_shown(h, shown) {
+            if shown {
+                self.layout_on_show(f);
+            } else {
+                self.layout_on_hide(f);
+            }
+        }
+    }
+
+    /// The pre-load hook's step (`0x769770`): the frame, its title region and every region defer
+    /// (`0x7697cc`, `0x7697e0`, `0x769807`).
+    pub(crate) fn layout_load_begin(&mut self, h: FrameHandle) {
+        let Some(f) = self.arena.frame(h) else {
+            return;
+        };
+        let regions: Vec<RegionHandle> = f.regions.clone();
+        self.defer_frame(h);
+        for rh in regions {
+            if self.arena.region(rh).is_some_and(|r| !r.detached) {
+                self.defer_region(rh);
+            }
+        }
+    }
+
+    /// The post-load hook's step (`0x76a2f0`): a visible frame undefers, with its title region and
+    /// each region it draws (`0x76a310`, `0x76a324`, `0x76a35b`). A hidden one stays deferred.
+    pub(crate) fn layout_load_end(&mut self, h: FrameHandle) {
+        let Some(f) = self.arena.frame(h) else {
+            return;
+        };
+        if !f.effective_visible {
+            return;
+        }
+        let title = f.title_region;
+        let regions: Vec<RegionHandle> = f.regions.clone();
+        self.undefer_frame(h);
+        if let Some(t) = title {
+            self.undefer_region(t);
+        }
+        for rh in regions {
+            if Some(rh) != title && self.region_draws(rh) {
+                self.undefer_region(rh);
+            }
+        }
+    }
+
+    /// The region's own shown bit (`+0xc4`): not hidden, and linked to its owner.
+    fn region_shown_bit(&self, rh: RegionHandle) -> bool {
+        self.arena.region(rh).is_some_and(|r| !r.detached)
+            && self.region_data.get(&rh).is_none_or(|d| !d.hidden)
+    }
+
+    /// Whether the region draws (`+0xc8`): shown, on a visible owner.
+    pub(crate) fn region_draws(&self, rh: RegionHandle) -> bool {
+        self.region_shown_bit(rh)
+            && self
+                .arena
+                .region(rh)
+                .and_then(|r| self.arena.frame(r.owner))
+                .is_some_and(|f| f.effective_visible)
+    }
+
+    /// Write region `rh`'s shown bit (`Show`/`Hide` and the engine's writes of `+0xc4`), with the
+    /// layout step of its start or stop drawing: out of the owner's load window it undefers
+    /// (`0x77fcb0` → `0x77fce6`) or defers (`0x77fc60` → `0x77fc82`).
+    pub(crate) fn set_region_hidden(&mut self, rh: RegionHandle, hidden: bool) {
+        let was = self.region_draws(rh);
+        self.region_data.entry(rh).or_default().hidden = hidden;
+        self.note_region_draw(rh, was);
+    }
+
+    /// The layout step of a write to region `rh`'s shown bit that `set_region_hidden` could not
+    /// wrap, given whether it drew before.
+    pub(crate) fn note_region_draw(&mut self, rh: RegionHandle, drew: bool) {
+        let now = self.region_draws(rh);
+        if drew == now || self.region_owner_loading(rh) {
+            return;
+        }
+        if now {
+            self.undefer_region(rh);
+        } else {
+            self.defer_region(rh);
+        }
+    }
+
+    pub(crate) fn region_owner_loading(&self, rh: RegionHandle) -> bool {
+        self.arena
+            .region(rh)
+            .and_then(|r| self.arena.frame(r.owner))
+            .is_some_and(|f| f.load_window)
+    }
+
+    /// The layout step of region `rh`'s re-link (`0x77fd10`), given whether it drew under its old
+    /// owner, whether that owner was in its load window and whether the owner changed: the new
+    /// owner's bit is copied (`0x77fd1e`–`0x77fd28`), a stop on the old owner defers (`0x77fd47` →
+    /// `0x77fc60`), and a start on the new one undefers (`0x77fd8f` → `0x77fcb0`). A detach copies
+    /// nothing and only stops.
+    ///
+    /// `shown` is the link's shown argument, written here; `None` keeps the bit, as
+    /// `Region:SetParent` passes the region's own (`0x7733d0`).
+    pub(crate) fn relink_region_layout(
+        &mut self,
+        rh: RegionHandle,
+        drew: bool,
+        old_loading: bool,
+        moved: bool,
+        shown: Option<bool>,
+    ) {
+        let Some(r) = self.arena.region(rh) else {
+            return;
+        };
+        if r.detached {
+            if let Some(shown) = shown {
+                self.region_data.entry(rh).or_default().hidden = !shown;
+            }
+            if drew && !old_loading {
+                self.defer_region(rh);
+            }
+            return;
+        }
+        let owner_bit = self.arena.frame(r.owner).is_some_and(|f| f.layout_deferred);
+        if owner_bit {
+            self.defer_region(rh);
+        } else {
+            self.undefer_region(rh);
+        }
+        if moved && drew && !old_loading {
+            self.defer_region(rh);
+        }
+        if let Some(shown) = shown {
+            self.region_data.entry(rh).or_default().hidden = !shown;
+        }
+        let loading = self.region_owner_loading(rh);
+        if self.region_draws(rh) {
+            if !loading {
+                self.undefer_region(rh);
+            }
+        } else if !moved && drew && !loading {
+            self.defer_region(rh);
+        }
+    }
+
+    /// A write that moved region `rh`'s layout inputs and invalidated nothing (a re-link into
+    /// another frame, `0x77fd10`; a dying target's unhook, `0x767e70`): its node re-derives, and
+    /// it keeps its state until the resolve reaches it.
+    pub(crate) fn unsettle_region(&mut self, rh: RegionHandle) {
+        self.touch_layout_region(rh);
+        if let Some(&id) = self.region_to_id.get(&rh) {
+            self.layout_unsettled.insert(id);
+        }
+    }
+
+    /// [`Self::unsettle_region`] for frame `h`.
+    pub(crate) fn unsettle_frame(&mut self, h: FrameHandle) {
+        self.touch_layout_frame(h);
+        if let Some(&id) = self.frame_to_id.get(&h) {
+            self.layout_unsettled.insert(id);
+        }
+    }
+
+    /// New art on region `rh` (`SetTexture` `0x770200`, the colour form `0x770360`): it marks
+    /// only the draw dirty (`0x77fdf0`), so the layout is not touched. An anchored texture with an
+    /// axis sized 0 reads its art in its next reaching resolve, so until then it holds a state
+    /// that resolve need not give back.
+    pub(crate) fn note_art(&mut self, rh: RegionHandle) {
+        let Some(&id) = self.region_to_id.get(&rh) else {
+            return;
+        };
+        if self.region_data.get(&rh).is_some_and(|d| {
+            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+        }) {
+            self.layout_unsettled.insert(id);
+        }
+    }
+
+    /// Whether frame `h` holds a state its inputs would not resolve to now: a write moved them
+    /// without invalidating it ([`Self::layout_unsettled`]), or it holds a rect with no anchors
+    /// or reading a target with no rect, which stands only because nothing invalidated it since.
+    pub(crate) fn frame_holds_stale(&self, h: FrameHandle) -> bool {
+        if self
+            .frame_to_id
+            .get(&h)
+            .is_some_and(|id| self.layout_unsettled.contains(id))
+        {
+            return true;
+        }
+        if !self.resolved.contains_key(&h) {
+            return false;
+        }
+        self.layout_inputs
+            .get(&h)
+            .is_none_or(|i| self.anchors_hold_stale(&i.anchors, false))
+    }
+
+    /// [`Self::frame_holds_stale`] for region `rh`.
+    pub(crate) fn region_holds_stale(&self, rh: RegionHandle) -> bool {
+        if self
+            .region_to_id
+            .get(&rh)
+            .is_some_and(|id| self.layout_unsettled.contains(id))
+        {
+            return true;
+        }
+        if !self.region_resolved.contains_key(&rh) {
+            return false;
+        }
+        self.region_data
+            .get(&rh)
+            .is_none_or(|d| self.anchors_hold_stale(&d.anchors, true))
+    }
+
+    /// No anchors, or one whose target has no rect; a region reads none at the screen root.
+    fn anchors_hold_stale(&self, anchors: &crate::layout::Anchors, region: bool) -> bool {
+        anchors.is_empty()
+            || anchors.iter().any(|a| {
+                let t = a.relative_to;
+                if t == super::SCREEN {
+                    return region;
+                }
+                match (self.id_to_frame.get(&t), self.id_to_region.get(&t)) {
+                    (Some(f), _) => !self.resolved.contains_key(f),
+                    (_, Some(r)) => !self.region_resolved.contains_key(r),
+                    _ => true,
+                }
+            })
     }
 
     /// Every frame under `root`, inclusive, for a write that moves the effective scale down a

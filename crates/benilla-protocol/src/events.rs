@@ -71,6 +71,8 @@ pub enum LoginStage {
     Authenticating,
     /// Realm picked; the world-socket handshake and char enum (`LOGIN_STATE_HANDSHAKING`).
     Handshaking,
+    /// The world socket connected, before its authentication (`RESPONSE_CONNECTED`, `0x5aaa90`).
+    WorldConnected,
 }
 
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
@@ -88,8 +90,11 @@ pub enum SessionEnd {
 /// `AUTH_LOGON_FAILED_SUSPENDED` to realmd but `AUTH_OK` to the world server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginRefusal {
-    /// realmd's logon-proof `AuthLogonResult` (`crate::AuthReject`).
+    /// realmd's `AuthLogonResult` in its logon-challenge reply (`crate::AuthReject`).
     Logon(u8),
+    /// realmd's `AuthLogonResult` in its logon-proof reply, where the reference swallows `0x0A`
+    /// (`0x5bada2`).
+    LogonProof(u8),
     /// The world server's `SMSG_AUTH_RESPONSE` code (`crate::WorldAuthReject`).
     World(u8),
 }
@@ -98,7 +103,7 @@ impl LoginRefusal {
     /// The raw byte, for logging only: without its server it is ambiguous.
     pub fn byte(self) -> u8 {
         match self {
-            LoginRefusal::Logon(b) | LoginRefusal::World(b) => b,
+            LoginRefusal::Logon(b) | LoginRefusal::LogonProof(b) | LoginRefusal::World(b) => b,
         }
     }
 }
@@ -112,9 +117,13 @@ impl LoginRefusal {
 pub enum SessionEvent {
     /// A login attempt reached `stage`; emitted by the IO thread, never wire-decoded.
     LoginStage { stage: LoginStage },
-    /// The account's realms (`CMD_REALM_LIST`); the IO thread blocks for the app's pick. Re-sent on
-    /// each refresh (the reference re-requests every 5 s) and on a realm change.
-    RealmList { realms: Vec<crate::RealmInfo> },
+    /// The account's realms (`CMD_REALM_LIST`); emitted by the IO thread after the logon and for
+    /// each query (the reference re-requests every 5 s). `failed` is a query that got no answer
+    /// (`REALM_LIST_FAILED`); `realms` is then the list last held, empty with no logon.
+    RealmList {
+        realms: Vec<crate::RealmInfo>,
+        failed: bool,
+    },
     /// Queued for a full realm (`AUTH_WAIT_QUEUE`), per queue packet: a wait, not an outcome.
     LoginQueued {
         position: Option<u32>,
@@ -1115,14 +1124,21 @@ impl SessionEventKind {
 /// The result of polling the reader for the next packet's events.
 pub enum Poll {
     /// A decoded packet; `events` is empty for an opcode parsed but not modelled. `tail` counts
-    /// body bytes left unread, which shows a decoder shorter than the server's layout.
+    /// body bytes left unread, which shows a decoder shorter than the server's layout. `body` is
+    /// the packet as it came off the wire, after the header, for the packet trace.
     Events {
         opcode: u16,
         events: Vec<SessionEvent>,
         tail: usize,
+        body: Vec<u8>,
     },
-    /// An unparseable packet, skipped to keep the stream aligned; `reason` has a hex preview.
-    Skipped { opcode: u16, reason: String },
+    /// An unparseable packet, skipped to keep the stream aligned; `reason` has a hex preview and
+    /// `body` the whole packet.
+    Skipped {
+        opcode: u16,
+        reason: String,
+        body: Vec<u8>,
+    },
 }
 
 mod decode;

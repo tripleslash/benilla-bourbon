@@ -263,10 +263,20 @@
             return bottom
         end
 
+        -- The scroll frame's size in its own units, from its edges: its anchors size it, and
+        -- GetWidth answers such a frame's span before the window's scale divides it.
+        local function BenillaOptionsScroll_Size(sf)
+            local l, r, t, b = sf:GetLeft(), sf:GetRight(), sf:GetTop(), sf:GetBottom()
+            if not l or not r or not t or not b then return nil end
+            return r - l, t - b
+        end
+
         -- The page's range is the body's overhang, the content Fit measures: the engine's range
         -- also counts the Keybindings list's faux scroll child, which is sized to every row.
         function BenillaOptionsScroll_Range(sf)
-            local range = BenillaOptionsFrameContainerBody:GetHeight() - sf:GetHeight()
+            local _, fh = BenillaOptionsScroll_Size(sf)
+            if not fh then return 0 end
+            local range = BenillaOptionsFrameContainerBody:GetHeight() - fh
             if range > 0 then return range end
             return 0
         end
@@ -275,7 +285,7 @@
         function BenillaOptionsScroll_Fit()
             local sf = BenillaOptionsFrameContainerScroll
             local body = BenillaOptionsFrameContainerBody
-            local fw, fh = sf:GetWidth(), sf:GetHeight()
+            local fw, fh = BenillaOptionsScroll_Size(sf)
             if not fw or fw <= 0 or not fh or fh <= 0 then return end
             if math.abs(body:GetWidth() - fw) >= 0.5 then body:SetWidth(fw) end
             local h = fh
@@ -796,11 +806,21 @@
             { value = 1, text = "100%" },
         }
 
+        -- A frame's width in its own units: from its edges once it has a rect, else the width it
+        -- was given.
+        function BenillaOptions_SpanWidth(frame)
+            local l, r = frame:GetLeft(), frame:GetRight()
+            if ( l and r ) then return r - l end
+            return frame:GetWidth()
+        end
+
         -- Placed once the slider has a width: the thumb travels its width less its own, so a
         -- mark sits where the thumb's centre stands at that value.
         function BenillaSlider_PlaceMarks(slider, min, max, marks)
             if ( not marks or max <= min ) then return end
-            local w = slider:GetWidth()
+            -- From its edges: this window's slider is sized by its anchors, and GetWidth answers
+            -- such a frame's span before the window's scale divides it.
+            local w = BenillaOptions_SpanWidth(slider)
             if ( not w or w <= 0 ) then return end
             local thumb = slider:GetThumbTexture()
             local tw = 0
@@ -4262,7 +4282,7 @@
                 end
                 for _, frame in ipairs(rows) do
                     local control, kind = frame.control, frame.option.type
-                    local width = BenillaTurtle_ColumnWidth(frame:GetWidth(), longest)
+                    local width = BenillaTurtle_ColumnWidth(BenillaOptions_SpanWidth(frame), longest)
                     local right = -BENILLA_TURTLE_VALUE_WIDTH
                     control:ClearAllPoints()
                     if ( kind == "slider" ) then

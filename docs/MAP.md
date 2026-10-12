@@ -56,6 +56,7 @@
 - ProbeFocusPlugin
 - ProbeChatPlugin
 - ProbeLuaPlugin
+- ProbeGlueLuaPlugin
 - ProbeDragPlugin
 - ProbeHoverPlugin
 - ProbeKeyPlugin
@@ -185,6 +186,7 @@
 - `WOW_AUDIT_` — benilla-world/src/bgwin.rs
 - `WOW_AUDIT_START` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUDIT_WMO` — benilla-world/src/wmo_portal/audit/mod.rs
+- `WOW_AUTO_EXPOSURE` — benilla-world/src/modern/look.rs
 - `WOW_BARE_DOODAD_COLLIDERS` — benilla-world/src/terrain_stream/collider.rs
 - `WOW_BG` — benilla-world/src/bgwin.rs
 - `WOW_BLOB_VIS` — benilla-world/src/terrain_stream/merge.rs
@@ -290,6 +292,7 @@
 - `WOW_GHOST_PROBE` — benilla-app/src/death/mod.rs
 - `WOW_GI_MERGE` — benilla-world/src/static_gx/render/modern_gi.rs
 - `WOW_GLUE_ROUNDTRIP` — benilla-app/src/char_select/mod.rs, benilla-world/src/bgwin.rs
+- `WOW_GLUE_STOCK` — benilla-app/src/ui_script/glue.rs
 - `WOW_GLYPH_CACHE` — benilla-app/src/ui_text/engine/gpu.rs
 - `WOW_GM` — benilla-app/src/probe_shield.rs
 - `WOW_GOD` — benilla-app/src/preflight.rs, benilla-app/src/probe_shield.rs
@@ -380,6 +383,7 @@
 - `WOW_MODERN_ZONE` — benilla-app/src/lib.rs, benilla-world/src/modern/look.rs
 - `WOW_MOVE_SPEED` — benilla-app/src/player/setup.rs
 - `WOW_MOVE_TRACE` — benilla-assets/src/trace.rs
+- `WOW_MOVE_TRACE_CHAT` — benilla-app/src/net/io/wire_trace.rs
 - `WOW_MOVE_TRACE_TAGS` — benilla-assets/src/trace.rs
 - `WOW_MSAA` — benilla-app/src/cvars/mod.rs, benilla-app/src/lib.rs, benilla-world/src/view.rs
 - `WOW_MT_EXTRACT` — benilla-app/src/lib.rs
@@ -476,6 +480,10 @@
 - `WOW_PROBE_DRAG_LUA` — benilla-app/src/capture/probes/act.rs
 - `WOW_PROBE_DRAG_STEP` — benilla-app/src/capture/probes/act.rs
 - `WOW_PROBE_EXIT_AT` — benilla-app/src/capture/probes/run.rs, benilla-app/src/dev.rs
+- `WOW_PROBE_GLUE_LUA` — benilla-app/src/capture/probes/act.rs, benilla-app/src/dev.rs
+- `WOW_PROBE_GLUE_LUA_AT` — benilla-app/src/capture/probes/act.rs
+- `WOW_PROBE_GLUE_SHOT` — benilla-app/src/capture/probes/act.rs
+- `WOW_PROBE_GLUE_SHOT_AFTER` — benilla-app/src/capture/probes/act.rs
 - `WOW_PROBE_GMTICKET` — benilla-app/src/dev.rs
 - `WOW_PROBE_GOQUEST` — benilla-app/src/capture/probe_goquest.rs, benilla-app/src/dev.rs
 - `WOW_PROBE_HOVER` — benilla-app/src/capture/probes/act.rs, benilla-app/src/dev.rs
@@ -514,7 +522,7 @@
 - `WOW_RESIZE` — benilla-app/src/capture/mod.rs
 - `WOW_RES_CENSUS` — benilla-app/src/perf/census.rs
 - `WOW_REVEAL` — benilla-app/src/capture/probes/reveal.rs, benilla-app/src/dev.rs
-- `WOW_RIG` — benilla-app/src/capture/probe_rig.rs, benilla-app/src/dev.rs, benilla-app/src/login/mod.rs, benilla-app/src/net.rs, benilla-app/src/probe_shield.rs, benilla-app/src/realm_select/smoke.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
+- `WOW_RIG` — benilla-app/src/capture/probe_rig.rs, benilla-app/src/dev.rs, benilla-app/src/local_state.rs, benilla-app/src/login/mod.rs, benilla-app/src/net.rs, benilla-app/src/probe_shield.rs, benilla-app/src/realm_select/smoke.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
 - `WOW_RIG_CENSUS` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_COST` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_SKIN` — benilla-assets/src/materials.rs
@@ -568,7 +576,7 @@
 - `WOW_UI_PROBE` — benilla-app/src/ui_pass.rs
 - `WOW_UI_SCALE` — benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/mod.rs
 - `WOW_UI_SPLICE_VERIFY` — benilla-app/src/ui_script/extract/mod.rs
-- `WOW_UNATTENDED` — benilla-app/src/login/mod.rs, benilla-app/src/net.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
+- `WOW_UNATTENDED` — benilla-app/src/local_state.rs, benilla-app/src/login/mod.rs, benilla-app/src/net.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
 - `WOW_UNIT_VISUALS` — benilla-app/src/capture/probes/visual_census.rs, benilla-app/src/dev.rs
 - `WOW_UNIT_VISUALS_RADIUS` — benilla-app/src/capture/probes/visual_census.rs
 - `WOW_UPLOAD_BUDGET` — benilla-world/src/world_plugins.rs
@@ -625,6 +633,7 @@
 - `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from `reference/1.12-message-catalog.tsv`.
 - `gen-reference-events.py` — Regenerate `reference/1.12-events.tsv`: each 1.12 FrameScript event and the arguments it carries.
 - `gen-reference-globals.py` — Regenerate `reference/1.12-globals.tsv`: the 1.12.1 client's global namespace, by origin.
+- `gen-reference-glue-surface.py` — Regenerate `reference/1.12-glue-surface.tsv`: every Lua function the glue screens' VM has in `_G`.
 - `gen-reference-verb-events.py` — Regenerate `reference/1.12-verb-events.tsv`: the events 1.12 Lua verbs fire, keyed by verb.
 - `mixsum.py` — Read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
 - `pass-span-lint.py` — Refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).

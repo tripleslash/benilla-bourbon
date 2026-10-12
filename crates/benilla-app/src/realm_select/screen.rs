@@ -209,6 +209,7 @@ fn spawn_screen(
 
     commands
         .spawn((
+            crate::glue::NativeGlue,
             RealmListUi { with_art, s },
             GlobalZIndex(REALM_Z),
             // `enableMouse="true"` on a full-screen frame: clicks never reach the screen below.
@@ -854,6 +855,7 @@ mod tests {
             .init_resource::<crate::login::LoginIntent>()
             .insert_resource(crate::net::RealmChoice(tx))
             .add_message::<crate::sound::GlueSound>()
+            .add_message::<crate::login::GlueLogin>()
             .insert_resource(Realms {
                 realms: list.iter().map(|&(n, c)| realm(n, c)).collect(),
                 categories: Some(super::super::category::tests::us()),

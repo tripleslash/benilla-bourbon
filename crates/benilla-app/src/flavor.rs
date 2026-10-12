@@ -112,21 +112,28 @@ fn settle_entry(
     }
 }
 
-/// Answer the realm park with `name`, switching the flavor first when the realm's differs from
-/// the one in force. Queued, so the switch has the whole world; it runs at this frame's command
-/// flush, before the world dial it precedes can return anything.
-pub(crate) fn enter_realm(commands: &mut Commands, name: String, to: ClientFlavor) {
+/// Answer the realm park with `realm`, the record as the list held it, switching the flavor first
+/// when the realm's differs from the one in force. Every [`RealmRequest::Enter`] is sent from
+/// here, the native list's and the stock glue's alike, so no realm is dialled on the other
+/// client's data. `generation` is the abandon generation the app held when it asked
+/// ([`crate::net::LoginAbandon::now`]). Queued, so the switch has the whole world; it runs at
+/// this frame's command flush, before the world dial it precedes can return anything.
+pub(crate) fn enter_realm(commands: &mut Commands, realm: RealmInfo, generation: u64) {
     commands.queue(move |world: &mut World| {
-        let from = *world.resource::<ClientFlavor>();
+        let to = ClientFlavor::of(&realm);
+        let from = world
+            .get_resource::<ClientFlavor>()
+            .copied()
+            .unwrap_or_default();
         if from != to {
             if let Err(e) = switch(world, to) {
-                refuse(world, &name, e);
+                refuse(world, &realm.name, e);
                 return;
             }
-            info!("flavor: {from:?} → {to:?} for realm {name:?}");
+            info!("flavor: {from:?} → {to:?} for realm {:?}", realm.name);
         }
         if let Some(choice) = world.get_resource::<RealmChoice>() {
-            let _ = choice.0.try_send(RealmRequest::Enter(name));
+            let _ = choice.0.try_send(RealmRequest::Enter { realm, generation });
         }
     });
 }
@@ -222,14 +229,33 @@ fn mount(to: ClientFlavor) -> anyhow::Result<Option<LayerContains>> {
 }
 
 /// A realm the client cannot play: say why over the realm list, which stays up, and leave the
-/// park unanswered so another realm can be picked.
+/// park unanswered so another realm can be picked. Under the stock glue screens the same words
+/// go out as a terminal login failure, which ends the connect their manager is waiting on
+/// ([`crate::ui_script::glue_mgr`]); the native dialog and list are not drawn there.
 fn refuse(world: &mut World, name: &str, e: anyhow::Error) {
     warn!("flavor: realm {name:?} refused — {e:#}");
+    let why = format!(
+        "{name} is a Turtle WoW 1.18.1 realm, and this client could not load the Turtle WoW data \
+         it needs."
+    );
+    if world
+        .get_resource::<crate::ui_script::glue::GlueStock>()
+        .is_some_and(|stock| stock.0)
+    {
+        if let Some(mut failures) =
+            world.get_resource_mut::<bevy::ecs::message::Messages<crate::net::LoginFailedMessage>>()
+        {
+            failures.write(crate::net::LoginFailedMessage {
+                refusal: None,
+                reason: why,
+                terminal: true,
+                dial: None,
+            });
+        }
+        return;
+    }
     if let Some(mut dialog) = world.get_resource_mut::<crate::glue::dialog::GlueDialog>() {
-        dialog.open_error(&format!(
-            "{name} is a Turtle WoW 1.18.1 realm, and this client could not load the Turtle WoW \
-             data it needs."
-        ));
+        dialog.open_error(&why);
     }
     if let Some(mut realms) = world.get_resource_mut::<crate::realm_select::Realms>() {
         realms.reopen();
@@ -242,8 +268,12 @@ mod tests {
     use benilla_protocol::RealmVersion;
 
     fn realm(version: Option<RealmVersion>) -> RealmInfo {
+        named("R", version)
+    }
+
+    fn named(name: &str, version: Option<RealmVersion>) -> RealmInfo {
         RealmInfo {
-            name: "R".into(),
+            name: name.into(),
             address: "127.0.0.1:8085".into(),
             population: 1.0,
             characters: 0,
@@ -329,12 +359,17 @@ mod tests {
         let mut commands = app.world_mut().commands();
         enter_realm(
             &mut commands,
-            "Classic (1.12.1.5875)".into(),
-            ClientFlavor::Vanilla,
+            named("Classic (1.12.1.5875)", v(1, 12, 1)),
+            7,
         );
         app.world_mut().flush();
         assert!(
-            matches!(rx.try_recv(), Ok(RealmRequest::Enter(n)) if n == "Classic (1.12.1.5875)")
+            matches!(
+                rx.try_recv(),
+                Ok(RealmRequest::Enter { realm, generation: 7 })
+                    if realm.name == "Classic (1.12.1.5875)"
+            ),
+            "the record and the generation it was asked under"
         );
         assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
@@ -354,8 +389,8 @@ mod tests {
         let mut commands = app.world_mut().commands();
         enter_realm(
             &mut commands,
-            "TurtleWoW (1.18.1.7272)".into(),
-            ClientFlavor::Turtle,
+            named("TurtleWoW (1.18.1.7272)", v(1, 18, 1)),
+            0,
         );
         app.world_mut().flush();
         assert!(rx.try_recv().is_err(), "the park stays unanswered");

@@ -10,8 +10,8 @@ use crate::script::Model;
 use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
-    append_line, bool_arg, clear, parse_line_color, parse_line_tail, set_owner_core, set_shown,
-    text_of, tip_mut, with_tip, write_cell, REG_TOOLTIP_METHODS,
+    append_line, clear, color_num, parse_line_color, parse_line_tail, set_owner_core, set_shown,
+    text_of, tip_mut, with_tip, wrap_arg, write_cell, REG_TOOLTIP_METHODS,
 };
 
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -115,13 +115,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 ));
             }
             let text = text_of(args.first());
-            let [r, g, b, _] = parse_line_color(args.get(1), args.get(2), args.get(3));
-            let a = match args.get(4) {
-                Some(Value::Number(n)) => *n as f32,
-                Some(Value::Integer(i)) => *i as f32,
-                _ => 1.0,
-            };
-            let wrap = bool_arg(args.get(5));
+            let [r, g, b, _] = parse_line_color(lua, args.get(1), args.get(2), args.get(3));
+            // The alpha is its own `lua_isnumber` gate (`0x531ddc`'s neighbour at idx 6), so a
+            // numeric string counts.
+            let a = color_num(lua, args.get(4)).unwrap_or(1.0);
+            let wrap = wrap_arg(args.get(5));
             clear(lua, h);
             append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
             set_shown(lua, h, true);
@@ -151,6 +149,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 None => (String::new(), [1.0, 1.0, 1.0, 1.0]),
             };
             write_cell(&mut model, lh, &(current + &extra), color);
+            super::owe_relayout(&mut model, h);
             Ok(())
         })?,
     )?;
@@ -160,25 +159,28 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "AddLine",
         lua.create_function(|lua, (this, args): (Table, Variadic<Value>)| {
             let text = text_of(args.first());
-            let (color, wrap) = parse_line_tail(&args[1.min(args.len())..]);
+            let (color, wrap) = parse_line_tail(lua, &args[1.min(args.len())..]);
             append_line(lua, &this, (text, color), None, wrap)
         })?,
     )?;
     // AddDoubleLine(textL, textR, rL, gL, bL, rR, gR, bR [, wrap]) (`0x531840`): each side's
-    // colour gates on its own r-slot. The core forces wrap off when the right text is non-empty;
-    // this never wraps.
+    // colour gates on its own r-slot, and the wrap flag is the tenth argument.
     m.set(
         "AddDoubleLine",
         lua.create_function(
             |lua, (this, tl, tr, cl): (Table, Value, Value, Variadic<Value>)| {
-                let left_color = parse_line_color(cl.first(), cl.get(1), cl.get(2));
-                let right_color = parse_line_color(cl.get(3), cl.get(4), cl.get(5));
+                let left_color = parse_line_color(lua, cl.first(), cl.get(1), cl.get(2));
+                let right_color = parse_line_color(lua, cl.get(3), cl.get(4), cl.get(5));
+                let right = text_of(Some(&tr));
+                // The line core (`0x530270`) clears the flag when the right text is non-empty
+                // (`0x530284`), so only a double line with an empty right side can wrap.
+                let wrap = right.is_empty() && wrap_arg(cl.get(6));
                 append_line(
                     lua,
                     &this,
                     (text_of(Some(&tl)), left_color),
-                    Some((text_of(Some(&tr)), right_color)),
-                    false,
+                    Some((right, right_color)),
+                    wrap,
                 )
             },
         )?,
@@ -229,6 +231,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
             };
             let left_id = model.region_id(lh);
+            let (left_drew, right_drew) = (model.region_draws(lh), model.region_draws(rh));
             {
                 let d = model.region_data.entry(lh).or_default();
                 d.hidden = true;
@@ -242,8 +245,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 d.anchors =
                     Anchors::from([Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)]);
             }
-            model.touch_layout_region(lh); // two line rows entered the layout graph
-            model.touch_layout_region(rh);
+            model.note_region_draw(lh, left_drew);
+            model.note_region_draw(rh, right_drew);
+            // Two line rows, their points set with the invalidate flag.
+            model.invalidate_region(lh, true);
+            model.invalidate_region(rh, true);
             let t = tip_mut(&mut model, h)?;
             t.left_lines.push(lh);
             t.right_lines.push(rh);

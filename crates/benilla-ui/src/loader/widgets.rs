@@ -118,9 +118,9 @@ impl Loader<'_> {
                     continue; // build_texture_child already reported why
                 };
                 this.install_texture(wrapper, tag, &region, None, dbg);
-                // Freeing the displaced region took its name out of the registry `GetName()`
-                // reads, which a replacement of the same name takes back: the reference keeps the
-                // name on the region (`0x76c650`). `_G` keeps its first holder (`0x701c8a`).
+                // Freeing the displaced region took its entry out of the name lookup, which a
+                // replacement of the same name takes back. The replacement's `GetName()` is its
+                // own (`0x76c650`); `_G` keeps its first holder (`0x701c8a`).
                 if let Some(rname) = raw.name().map(|n| framexml::resolve_name(n, self_name)) {
                     crate::script::region::publish_region_name(this.lua(), &rname, &region);
                 }
@@ -434,7 +434,9 @@ impl Loader<'_> {
 
     /// `<SimpleHTML>` (`0x78a130`): `font=` for all four element fonts (`0x78a17a`), the
     /// `<FontString>` and `<FontStringHeader1..3>` children one each (`0x78a1fe`, through
-    /// `0x783c30`), `hyperlinkFormat` (`0x78a540`), and `file=`, a global-string key for `SetText`.
+    /// `0x783c30`), `hyperlinkFormat` (`0x78a540`), and `file=`, a document whose whole text is
+    /// set as the frame's (`0x78a2a0` loads it through Storm, the attribute verbatim; `0x78a2b2`
+    /// sets it). A file that does not open leaves the frame empty.
     pub(super) fn apply_simplehtml(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
         if !el.tag.eq_ignore_ascii_case("SimpleHTML") {
             return;
@@ -463,8 +465,10 @@ impl Loader<'_> {
             self.apply_element_font(child, wrapper, elem, dbg);
         }
         if let Some(raw) = el.attr("file") {
-            let text = self.resolve_text(raw, dbg);
-            self.call(wrapper, "SetText", text, dbg);
+            if let Some(bytes) = (self.files)(raw) {
+                let text = crate::source::decode(&bytes).into_owned();
+                self.call(wrapper, "SetText", text, dbg);
+            }
         }
     }
 

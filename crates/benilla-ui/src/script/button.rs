@@ -6,7 +6,7 @@
 
 use mlua::{Lua, MultiValue, ObjectLike, Table, Value};
 
-use super::object::{as_f32, frame_handle_of};
+use super::object::frame_handle_of;
 use super::region::region_wrapper;
 use super::{event, JustifyH, Model, RegionData};
 use crate::justify::Justify;
@@ -481,7 +481,7 @@ fn set_slot_texture(
     if let Some(blend) = blend {
         data.blend = blend;
     }
-    model.touch_layout_art(rh);
+    model.note_art(rh);
     Ok(())
 }
 
@@ -697,30 +697,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // SetFont(file, height [, flags]) (`0x780880`) sets all three embedded fonts and returns
     // nothing, discarding the shared `0x79f210`'s load result. It never touches the label
-    // (`+0x338`), so creates none: extract applies the stored font to whatever label exists. Its
-    // checks are 5.0's coercing `lua_isstring`/`lua_isnumber`, else a usage error (`0x87c69c`).
+    // (`+0x338`), so creates none: extract applies the stored font to whatever label exists. The
+    // arguments pass the shared gate, which names the button in its usage line.
     m.set(
         "SetFont",
         lua.create_function(
-            |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
-                let usage = || {
-                    mlua::Error::runtime(
-                        "Usage: <Button>:SetFont(\"font\", fontHeight [, flags])".to_string(),
-                    )
-                };
-                let path = match &file {
-                    Value::String(s) => s.to_str()?.to_string(),
-                    Value::Number(_) | Value::Integer(_) => as_f32(&file).to_string(),
-                    _ => return Err(usage()),
-                };
-                let height = match &height {
-                    Value::Number(_) | Value::Integer(_) => as_f32(&height),
-                    Value::String(s) => s.to_str()?.parse::<f32>().map_err(|_| usage())?,
-                    _ => return Err(usage()),
-                };
-                let flags = super::Outline::flags(flags.as_deref().unwrap_or(""))
-                    .as_str()
-                    .to_string();
+            |lua, (this, file, height, flags): (Table, Value, Value, Value)| {
+                let super::font_block::FontArgs {
+                    path,
+                    height,
+                    flags,
+                } = super::font_block::set_font_args(lua, &this, &file, &height, &flags)?;
+                // Each embedded font's load fails alike, writing nothing (`0x79f30f` → `0x79f361`).
+                if !super::font_block::instance_loads(lua, &path, height) {
+                    return Ok(());
+                }
+                let flags = flags.as_str().to_string();
                 with_button(lua, &this, |bs| {
                     bs.font = Some(ButtonFont {
                         path,
@@ -765,16 +757,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 // Shape C on the channels (`Button:SetTextColor 0x780ee0`, `2=C 3=C 4=C 5=B`).
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
-                with_button(lua, &this, |bs| {
-                    bs.normal_color = Some([r, g, b, a.unwrap_or(1.0)])
-                })
+                with_button(lua, &this, |bs| bs.normal_color = Some([r, g, b, a]))
             },
         )?,
     )?;
@@ -798,32 +789,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetHighlightTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 // Shape C on the channels (`Button:SetTextColor 0x780ee0`, `2=C 3=C 4=C 5=B`).
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
-                with_button(lua, &this, |bs| {
-                    bs.highlight_color = Some([r, g, b, a.unwrap_or(1.0)])
-                })
+                with_button(lua, &this, |bs| bs.highlight_color = Some([r, g, b, a]))
             },
         )?,
     )?;
     m.set(
         "SetDisabledTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 // Shape C on the channels (`Button:SetTextColor 0x780ee0`, `2=C 3=C 4=C 5=B`).
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
-                with_button(lua, &this, |bs| {
-                    bs.disabled_color = Some([r, g, b, a.unwrap_or(1.0)])
-                })
+                with_button(lua, &this, |bs| bs.disabled_color = Some([r, g, b, a]))
             },
         )?,
     )?;
@@ -936,24 +925,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     texture_pair(lua, &c, "DisabledChecked", Slot::DisabledChecked)?;
     c.set(
         "SetChecked",
-        lua.create_function(|lua, (this, v): (Table, Value)| {
-            // `SetChecked` (`0x799bf0`) reads its argument through `0x6f1c10` with default 1
-            // (`0x799c77`), not Lua truthiness: a number truncates toward zero (`0x40a2b0`), so
-            // `SetChecked(0)` unchecks, and the stock UI passes `"true"`/`"false"`
-            // (`SpellBookFrame.lua:296-303`). Here a missing argument unchecks and a string checks
-            // only as `"true"` or a nonzero number, where the reference checks for a missing one
-            // and reads a string by its first byte, so `"yes"` checks there.
-            let checked = match v {
-                Value::Boolean(b) => b,
-                Value::Integer(i) => i != 0,
-                Value::Number(n) => n.trunc() != 0.0,
-                Value::String(s) => s.to_str().ok().is_some_and(|s| {
-                    let t = s.trim();
-                    t.eq_ignore_ascii_case("true")
-                        || t.parse::<f64>().is_ok_and(|n| n.trunc() != 0.0)
-                }),
-                _ => false,
-            };
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            // `SetChecked` (`0x799bf0`) reads its argument through `GetBoolOrDefault` (`0x6f1c10`)
+            // with default 1 (`0x799c77`), not Lua truthiness: no argument, `""`, a table or
+            // `"yes"` check, `nil`, `0` and `"0"` uncheck. The stock UI passes `"true"`/`"false"`
+            // (`SpellBookFrame.lua:296-303`).
+            let checked = super::binding_abi::bool_or_default(args.front(), true);
             with_button_shown(lua, &this, |bs| bs.refresh_checked(checked, false))
         })?,
     )?;
@@ -1014,6 +991,17 @@ pub(super) fn wants_press_visual(model: &Model, h: FrameHandle, button: &str) ->
 /// (`0x7826c0` passes 1, the mouse `0x779280`/`0x7793a4` pass 0): a LootButton then does nothing at
 /// all, not even its `OnClick` (`0x4c182b`); every other kind ignores it.
 pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripted: bool) {
+    // A hyperlink button's click slot (`+0x94`, `0x7a3510`) is its text frame's
+    // `OnHyperlinkClick`, in place of the Button's `OnClick` firer.
+    let target = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .id_to_frame
+        .get(&id)
+        .copied();
+    if target.is_some_and(|h| super::hyperlink::click(lua, h, button)) {
+        return;
+    }
     let mut take_loot = None;
     let fire = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");

@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 
 use crate::char_select::{ClientState, Roster};
-use crate::net::{RealmChoice, RealmRequest};
+use crate::net::RealmChoice;
 
 use super::Realms;
 
@@ -41,6 +41,7 @@ pub(super) fn debug_realm_smoke(
     roster: Res<Roster>,
     state: Res<State<ClientState>>,
     choice: Res<RealmChoice>,
+    abandon: Option<Res<crate::net::LoginAbandon>>,
     time: Res<Time>,
     mut walk: Local<Walk>,
     mut exit: MessageWriter<AppExit>,
@@ -111,7 +112,11 @@ pub(super) fn debug_realm_smoke(
                 return;
             }
             info!("realm-smoke: dialog up, character select still underneath → Okay");
-            okay(realms, &mut commands);
+            okay(
+                realms,
+                &mut commands,
+                crate::net::LoginAbandon::now(abandon.as_deref()),
+            );
             (walk.phase, walk.mark, walk.rosters) = (2, now, walk.seen + 1);
         }
         // ── 2 · Okay has to land: a fresh roster, dialog down, still at select. ──────────────
@@ -123,7 +128,7 @@ pub(super) fn debug_realm_smoke(
         // ── 3 · Cancel changes nothing. ──────────────────────────────────────────────────────
         3 if realms.shown && now - walk.mark > DWELL => {
             info!("realm-smoke: dialog up → Cancel");
-            cancel(realms, &choice);
+            cancel(realms);
             (walk.phase, walk.mark) = (4, now);
         }
         4 if !realms.shown && now - walk.mark > DWELL => {
@@ -138,7 +143,11 @@ pub(super) fn debug_realm_smoke(
             (walk.phase, walk.mark) = (5, now);
         }
         5 if realms.shown && now - walk.mark > DWELL => {
-            okay(realms, &mut commands);
+            okay(
+                realms,
+                &mut commands,
+                crate::net::LoginAbandon::now(abandon.as_deref()),
+            );
             (walk.phase, walk.mark, walk.rosters) = (6, now, walk.seen + 1);
         }
         6 if walk.seen >= walk.rosters && !realms.shown && at_select => {
@@ -160,7 +169,7 @@ fn open(mut realms: ResMut<Realms>, choice: &RealmChoice) {
 }
 
 /// `RealmList_OnOk` on whatever the dialog opened with highlighted, or the first row.
-fn okay(mut realms: ResMut<Realms>, commands: &mut Commands) {
+fn okay(mut realms: ResMut<Realms>, commands: &mut Commands, generation: u64) {
     let name = realms.selected().map(|r| r.name.clone()).or_else(|| {
         realms
             .rows()
@@ -171,11 +180,10 @@ fn okay(mut realms: ResMut<Realms>, commands: &mut Commands) {
         return;
     };
     realms.hide();
-    realms.enter(commands, name);
+    realms.enter(commands, name, generation);
 }
 
-/// `RealmList_OnCancel`.
-fn cancel(mut realms: ResMut<Realms>, choice: &RealmChoice) {
+/// `RealmList_OnCancel` over character select, where it only hides the list.
+fn cancel(mut realms: ResMut<Realms>) {
     realms.hide();
-    let _ = choice.0.try_send(RealmRequest::Abandon);
 }

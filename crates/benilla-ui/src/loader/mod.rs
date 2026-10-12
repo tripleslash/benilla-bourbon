@@ -235,11 +235,10 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
-/// A `CSimpleModel` kind, whose `LoadXML` (`0x76cac0`) reads `scale=` as the model's scale.
+/// A `CSimpleModel` kind, whose `LoadXML` (`0x76cac0`) reads `scale=` as the model's scale;
+/// `ModelFFX` shares it (its second vtable's slot 2).
 pub(super) fn model_kind_tag(tag: &str) -> bool {
-    ["Model", "PlayerModel", "DressUpModel", "TabardModel"]
-        .iter()
-        .any(|k| k.eq_ignore_ascii_case(tag))
+    crate::script::frame_kind_from_tag(tag).is_some_and(crate::widget::FrameKind::is_model)
 }
 
 impl Loader<'_> {
@@ -933,6 +932,12 @@ pub(super) fn font_object_from_element(el: &Element) -> FontObject {
         justify_h,
         justify_v,
         shadow,
+        // `spacing=` (`0x783ee0`, read with `atof` when not empty), inherited down the flattened
+        // chain like the other attributes.
+        spacing: el
+            .attr("spacing")
+            .filter(|v| !v.is_empty())
+            .map(crate::framexml::atof),
     }
 }
 

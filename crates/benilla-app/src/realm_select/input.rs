@@ -6,7 +6,8 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
 use crate::bindings::WheelNotches;
-use crate::net::{RealmChoice, RealmRequest};
+use crate::char_select::ClientState;
+use crate::login::GlueLogin;
 use crate::sound::GlueSound;
 
 use super::screen::{RealmAction, MAX_ROWS};
@@ -17,13 +18,14 @@ const DOUBLE_CLICK_SECS: f32 = 0.4;
 
 /// Clicks: a row selects (a second one enters), a tab fronts its category, the column headers
 /// sort, Okay enters, Cancel and the close X leave.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn clicks(
     buttons: Query<(Entity, &RealmAction)>,
     hits: Res<crate::glue::GlueClicks>,
     mut realms: ResMut<Realms>,
-    choice: Res<RealmChoice>,
     mut intent: ResMut<crate::login::LoginIntent>,
     mut sounds: MessageWriter<GlueSound>,
+    mut cancels: Cancels,
     time: Res<Time>,
     mut last_click: Local<Option<(String, f32)>>,
     mut commands: Commands,
@@ -62,11 +64,26 @@ pub(super) fn clicks(
         }
     }
     if enter {
-        try_enter(&mut realms, &mut intent, &mut commands, &mut sounds);
+        try_enter(
+            &mut realms,
+            &mut intent,
+            &mut commands,
+            &mut sounds,
+            &cancels,
+        );
     }
     if let Some(with_sound) = leave {
-        do_cancel(&mut realms, &choice, &mut intent, &mut sounds, with_sound);
+        do_cancel(&mut realms, &mut cancels, &mut sounds, with_sound);
     }
+}
+
+/// What Okay and Cancel need beyond the list: the screen under it, the login engine's ask, and
+/// the abandon generation a dial is stamped with.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct Cancels<'w> {
+    state: Option<Res<'w, State<ClientState>>>,
+    login: MessageWriter<'w, GlueLogin>,
+    abandon: Option<Res<'w, crate::net::LoginAbandon>>,
 }
 
 /// `RealmList_OnKeyDown` (ESCAPE / ENTER), plus arrow-key row cycling and the wheel.
@@ -74,17 +91,23 @@ pub(crate) fn keys(
     keys: Res<ButtonInput<KeyCode>>,
     (mut wheel, mut wheel_carry): (MessageReader<MouseWheel>, Local<WheelNotches>),
     mut realms: ResMut<Realms>,
-    choice: Res<RealmChoice>,
     mut intent: ResMut<crate::login::LoginIntent>,
     mut sounds: MessageWriter<GlueSound>,
+    mut cancels: Cancels,
     mut commands: Commands,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        do_cancel(&mut realms, &choice, &mut intent, &mut sounds, true);
+        do_cancel(&mut realms, &mut cancels, &mut sounds, true);
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        try_enter(&mut realms, &mut intent, &mut commands, &mut sounds);
+        try_enter(
+            &mut realms,
+            &mut intent,
+            &mut commands,
+            &mut sounds,
+            &cancels,
+        );
         return;
     }
 
@@ -150,17 +173,16 @@ fn scroll_into_view(realms: &mut Realms, row: usize, total: usize) {
 }
 
 /// `RealmList_OnCancel`, and the close X without the sound. `RealmListDialogCancelled`
-/// (`0x46ed20` -> `0x46b810`) does nothing off the login screen and there closes the realmd
-/// socket (`0x5b3320`) with no screen change; the character park ignores `Abandon` and the login
-/// park re-parks, dropping the socket.
+/// (`0x46ed20` -> `0x46b810`) does nothing off the login screen and there closes the realmd link
+/// (`CLoginMgr::Cancel`, `0x5b3320`) with no screen change, which ends the attempt: the login
+/// engine closes the logon park and takes the next Login.
 ///
-/// Deviation: the reference's X only cancels the pending realm query (`0x46ed10` -> `0x46b7e0`)
-/// and leaves the realmd link up; ours abandons, because the IO thread blocks at the realm park
-/// until answered.
+/// Deviation: the reference's X only cancels a pending realm query (`0x46ed10` -> `0x46b7e0`) and
+/// leaves the realmd link up; ours closes it as Cancel does, because the native login screen takes
+/// a new Login only once the attempt has ended.
 fn do_cancel(
     realms: &mut Realms,
-    choice: &RealmChoice,
-    intent: &mut crate::login::LoginIntent,
+    cancels: &mut Cancels,
     sounds: &mut MessageWriter<GlueSound>,
     with_sound: bool,
 ) {
@@ -168,11 +190,17 @@ fn do_cancel(
         sounds.write(GlueSound("gsLoginChangeRealmCancel"));
     }
     realms.hide();
-    let _ = choice.0.try_send(RealmRequest::Abandon);
-    intent.realm_list_cancelled();
+    if cancels
+        .state
+        .as_ref()
+        .is_none_or(|s| *s.get() == ClientState::Login)
+    {
+        cancels.login.write(GlueLogin::Abandon);
+    }
 }
 
-/// `RealmList_OnOk`: play the click, hide the frame, answer the park. The entry is the player's,
+/// `RealmList_OnOk`: play the click, hide the frame, answer the park through the flavor switch
+/// ([`Realms::enter`]). The entry is the player's,
 /// so a world server that cannot be reached shows its failure rather than a silent re-login into
 /// the remembered realm ([`crate::login::LoginIntent::realm_chosen`]).
 ///
@@ -183,6 +211,7 @@ fn try_enter(
     intent: &mut crate::login::LoginIntent,
     commands: &mut Commands,
     sounds: &mut MessageWriter<GlueSound>,
+    cancels: &Cancels,
 ) {
     let Some(realm) = realms.selected() else {
         return; // the reference disables Okay with nothing highlighted
@@ -195,7 +224,11 @@ fn try_enter(
     sounds.write(GlueSound("gsLoginChangeRealmOK"));
     realms.hide();
     realms.store_front_category();
-    realms.enter(commands, name);
+    realms.enter(
+        commands,
+        name,
+        crate::net::LoginAbandon::now(cancels.abandon.as_deref()),
+    );
 }
 
 #[cfg(test)]

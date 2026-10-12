@@ -15,15 +15,16 @@ use super::{
     size_bits_eq,
 };
 
-/// Install the layout methods into `m`.
-/// `ClearAllPoints` on a region (`0x767ed0`): the region leaves the cached graph with its edges.
+/// `ClearAllPoints` on a region (`0x767ed0` → `0x767620`): the region leaves the cached graph with
+/// its edges, and keeps its rect, as the clear queues no resolve, until its own next invalidate.
 pub(in crate::script) fn clear_points(model: &mut Model, rh: crate::widget::RegionHandle) {
-    // Mutates only on a real change; an unanchored region leaves the graph.
+    // Mutates only on a real change.
     if model.region_data.entry(rh).or_default().anchors.clear() {
         model.touch_layout_region(rh);
     }
 }
 
+/// Install the layout methods into `m`.
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // The explicit size fills the axes the anchors do not pin, so SetAllPoints's two corners
     // leave it unread.
@@ -39,11 +40,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let new = Some((w, d.size.map_or(0.0, |s| s.1)));
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
+            // No edge or roster change; the width, as wrap width, keys a FontString's measure. It
+            // invalidates whether or not the size moved (`0x7683d0`, `0x7683f0`).
             if changed {
-                // No edge or roster change; the width, as wrap width, keys a FontString's measure.
-                model.touch_layout_region(rh);
                 model.touch_measure(rh);
             }
+            model.invalidate_region(rh, changed);
             Ok(())
         },
     )?;
@@ -60,27 +62,32 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let new = Some((d.size.map_or(0.0, |s| s.0), h));
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
+            // No edge or roster change; the width, as wrap width, keys a FontString's measure. It
+            // invalidates whether or not the size moved (`0x7683d0`, `0x7683f0`).
             if changed {
-                // No edge or roster change; the width, as wrap width, keys a FontString's measure.
-                model.touch_layout_region(rh);
                 model.touch_measure(rh);
             }
+            model.invalidate_region(rh, changed);
             Ok(())
         },
     )?;
 
     // No `SetSize`: not a 1.12 verb.
 
+    // The frame's `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the region's own size
+    // ([`measured_wh`]) when non-zero, with no resolve; else, resolving a pending region, its
+    // rect's span, not divided by the owner's effective scale, or 0 with no rect.
     set_shared(lua, m, Side::Region, "GetWidth", |lua, this: Table| {
-        Ok(measured_wh(lua, &this)?.0)
+        region_size_read(lua, &this, true)
     })?;
 
     set_shared(lua, m, Side::Region, "GetHeight", |lua, this: Table| {
-        Ok(measured_wh(lua, &this)?.1)
+        region_size_read(lua, &this, false)
     })?;
 
     // GetLeft/GetRight/GetTop/GetBottom: the resolved edges in the owner's units (y up, screen
-    // over the owner's effective scale, which a region shares); nil for a region never resolved.
+    // over the owner's effective scale, which a region shares); nil while the valid bit is clear.
+    // The frame's getters (`0x7a1980`..), so they resolve first, as a frame's do.
     for (name, pick) in [
         ("GetLeft", 0u8),
         ("GetRight", 1u8),
@@ -89,6 +96,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     ] {
         set_shared(lua, m, Side::Region, name, move |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
+            crate::script::object::settle_region(lua, rh);
             let model = lua.app_data_ref::<Model>().expect("model");
             let inv = 1.0 / owner_scale(&model, rh);
             Ok(model.region_resolved.get(&rh).map(|r| {
@@ -144,12 +152,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
             ];
             let data = model.region_data.entry(rh).or_default();
-            // The reference clears and sets both (`0x767db0`); only a bit-identical pair skips.
+            // The reference clears, sets both and invalidates (`0x767db0`); a bit-identical pair
+            // moves no input.
             let pair = Anchors::from(pair);
-            if !data.anchors.bits_eq(&pair) {
-                data.anchors = pair;
-                model.touch_layout_region(rh);
-            }
+            let changed = !data.anchors.bits_eq(&pair);
+            data.anchors = pair;
+            model.invalidate_region(rh, changed);
             Ok(())
         },
     )?;
@@ -169,9 +177,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     })?;
 
     // GetCenter: the resolved rect's midpoint in the owner's units, as the edge readers answer, or
-    // two nils before the first resolve.
+    // two nils while the valid bit is clear; it resolves first, as the edge readers do.
     set_shared(lua, m, Side::Region, "GetCenter", |lua, this: Table| {
         let rh = region_handle_of(lua, &this)?;
+        crate::script::object::settle_region(lua, rh);
         let model = lua.app_data_ref::<Model>().expect("model");
         let inv = 1.0 / owner_scale(&model, rh);
         Ok(match model.region_resolved.get(&rh) {
@@ -237,4 +246,28 @@ fn owner_scale(model: &Model, rh: crate::widget::RegionHandle) -> f32 {
         .region(rh)
         .map(|r| crate::script::object::eff_scale(model, r.owner))
         .unwrap_or(1.0)
+}
+
+/// The region side of `GetWidth`/`GetHeight`; see the bindings.
+fn region_size_read(lua: &Lua, this: &Table, width: bool) -> mlua::Result<f32> {
+    let (w, h) = measured_wh(lua, this)?;
+    let set = if width { w } else { h };
+    let rh = region_handle_of(lua, this)?;
+    // A FontString's size is floored at one unit (`0x772930`, `0x772a60`), never 0, so it never
+    // reads its rect; its 0 is a host measure still in flight, which answers 0.
+    let text = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .arena
+        .region(rh)
+        .is_some_and(|r| matches!(r.kind, crate::widget::RegionKind::FontString));
+    if set != 0.0 || text {
+        return Ok(set);
+    }
+    crate::script::object::settle_region(lua, rh);
+    let model = lua.app_data_ref::<Model>().expect("model");
+    Ok(model
+        .region_resolved
+        .get(&rh)
+        .map_or(0.0, |r| if width { r.width() } else { r.height() }))
 }

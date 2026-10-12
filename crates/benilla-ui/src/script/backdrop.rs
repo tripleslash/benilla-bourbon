@@ -307,10 +307,14 @@ impl Installed {
 pub(crate) fn install(model: &mut Model, fh: FrameHandle, spec: Option<Backdrop>) {
     // Each freed piece names its node, and each built one below, so the next resolve takes the
     // swap through the cached graph.
-    let old = model.backdrops.remove(&fh);
-    for rh in old.iter().flat_map(|o| o.pieces).flatten() {
-        super::region::free_region(model, rh);
-    }
+    let old: Vec<RegionHandle> = model
+        .backdrops
+        .remove(&fh)
+        .iter()
+        .flat_map(|o| o.pieces)
+        .flatten()
+        .collect();
+    super::region::free_regions(model, &old);
     let Some(spec) = spec.filter(|_| model.arena.frame(fh).is_some()) else {
         return;
     };
@@ -365,8 +369,9 @@ pub(crate) fn install(model: &mut Model, fh: FrameHandle, spec: Option<Backdrop>
             );
         }
     }
+    // Each piece is invalidated after its points are set (`0x77e9ca`..`0x77ec77`, `0x77ed05`..).
     for rh in pieces.iter().flatten() {
-        model.touch_layout_region(*rh);
+        model.invalidate_region(*rh, true);
     }
     model.backdrops.insert(
         fh,
@@ -425,8 +430,9 @@ pub(crate) fn set_metrics(
         };
         (d.anchors, d.size) = piece_geometry(owner, layout);
     }
+    // Set as `0x77e8d0` sets them, so invalidated as there.
     for rh in pieces.iter().flatten() {
-        model.touch_layout_region(*rh);
+        model.invalidate_region(*rh, true);
     }
     if let Some(rect) = model.resolved.get(&fh).copied() {
         run_texcoords(model, fh, rect);

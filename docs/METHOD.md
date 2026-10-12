@@ -108,3 +108,18 @@ account. These bind every session and every agent:
 - Read the preflight banner before debugging anything else.
 
 The mechanics are the `probe` skill.
+
+## This fork
+
+This tree is a fork of benilla, kept current by merging upstream's `main`. These bind every
+session here:
+
+- **A merge keeps one mechanism per problem.** Where upstream and the fork both solve the same
+  problem, the merge takes the better approach or combines the two, in what merged cleanly as
+  much as in the conflicts; it never leaves both standing. An upstream change that contradicts a
+  decision the fork made is listed for the maintainer, never merged in silently. The steps are
+  the `merge-upstream` skill.
+- **A full disk is cleared of stale incremental build artifacts, and of nothing else.** When a
+  build fails for want of space, remove the `incremental/` entries under `target/` that no build
+  touched today and run it again. Free space is read with `df`, never `du`, which walks the whole
+  tree.

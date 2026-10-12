@@ -520,18 +520,28 @@ pub(super) fn tick_script(
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap follows
-        // the window; a moved dial applies once, as its CVar callback does (`0x490770`).
-        if resized {
-            let display = (w.round() as u32, h.round() as u32);
-            let mut none = None;
-            let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
-            script.apply_ui_scale(display, cache);
-        }
-        let rescaled = script.set_ui_scale(ui_scale.0);
-        // Either re-runs what the interface computed from the old `GetScreenHeight()`.
-        if resized || rescaled {
-            super::manifest::on_screen_resized(&script);
+        // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
+        // the root alone (`0x46dd30`).
+        if script.vm_kind() == benilla_ui::script::VmKind::InGame {
+            // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap
+            // follows the window; a moved dial applies once, as its CVar callback does
+            // (`0x490770`). Deviation: the reference then re-reads the aspect (`0x492f13`), and on
+            // a change of 0.001 or more calls `0x491380`, which sets the reload trigger
+            // (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a
+            // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
+            // with it, because the window resizes freely and a reload on each resize would tear
+            // down every addon's state mid-play.
+            if resized {
+                let display = (w.round() as u32, h.round() as u32);
+                let mut none = None;
+                let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                script.apply_ui_scale(display, cache);
+            }
+            let rescaled = script.set_ui_scale(ui_scale.0);
+            // Either re-runs what the interface computed from the old `GetScreenHeight()`.
+            if resized || rescaled {
+                super::manifest::on_screen_resized(&script);
+            }
         }
         script.tick(time.delta_secs());
     }
@@ -587,6 +597,9 @@ pub(super) fn tick_script(
                             path: r.font.as_deref(),
                             height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // the outline biases the stepped width
+                            spacing: 0.0,       // the gap moves rows, never counts them
+                            // The drawn shadow seeds each row, as the draw's does.
+                            shadow_x: r.shadow_x * s * r.scale,
                             alpha_gradient: None,
                         },
                     );
@@ -607,8 +620,13 @@ pub(super) fn tick_script(
     for w in script.take_warnings() {
         warn!("ui_script: {w}");
     }
-    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`.
-    super::load_log::write(script.take_load_log_writes());
+    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`; the glue has none, but
+    // whatever its VM drains is the glue log's.
+    let writes = script.take_load_log_writes();
+    match script.vm_kind() {
+        benilla_ui::script::VmKind::InGame => super::load_log::write(writes),
+        benilla_ui::script::VmKind::Glue => super::load_log::write_glue(writes),
+    }
 
     // ── The handover ────────────────────────────────────────────────────────────────────────
     *pass = super::UiPassState {
@@ -1473,6 +1491,7 @@ fn convert_entry(
             text_height,
             shadow,
             outline,
+            spacing,
             alpha_gradient,
             world_seat,
         } => {
@@ -1492,6 +1511,7 @@ fn convert_entry(
                     text_height,
                     shadow,
                     outline,
+                    spacing,
                     alpha_gradient,
                     world_seat,
                 },

@@ -449,7 +449,7 @@ fn fadeout_ramps_then_hides() {
     assert!(s.take_errors().is_empty());
 }
 
-/// Every GameTooltip clamps to the screen (the geometry-flags bit 4 clamp, `assemble 0x767a20`), so
+/// Every GameTooltip clamps to the screen (the geometry `0x10` clamp, `assemble 0x767a20`), so
 /// the zone text's `ANCHOR_LEFT` (`Minimap.lua:39`) hangs down from the screen top, not above it.
 #[test]
 fn owner_anchored_tooltip_clamps_to_screen() {
@@ -1173,4 +1173,45 @@ fn the_fade_end_restores_full_alpha_before_its_hide() {
     s.run(r#"assert(not EndTip:IsShown() and seen == 1, "cleared at alpha " .. tostring(seen))"#)
         .unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// The tooltip is invalidated by its relayout (`0x530640`, ending in `0x7680e0(1)` at `0x530a52`),
+/// which only Show and the line writers run (`0x530aad`, `0x52ad59`, ..): a cleared plate keeps its
+/// rect through an unrelated resolve, and the next line's relayout resolves it without points.
+#[test]
+fn only_the_relayout_invalidates_the_tooltip() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local owner = CreateFrame("Button", "Slot")
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetWidth(40); owner:SetHeight(40)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(owner, "ANCHOR_RIGHT")
+        tt:AddLine("Tough Jerky", 1, 1, 1)
+        tt:Show()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    measure_all(&mut s, &[("Tough Jerky", 80.0, 14.0)]);
+    let left = |s: &mut UiScript| s.eval::<Option<f64>>("return TT:GetLeft()").unwrap();
+    assert_eq!(left(&mut s), Some(140.0));
+    s.run(
+        r#"TT:ClearAllPoints()
+        local other = CreateFrame("Frame"); other:SetWidth(5); other:SetHeight(5)
+        other:SetPoint("CENTER", 0, 0)"#,
+    )
+    .unwrap();
+    s.resolve();
+    s.resolve();
+    assert_eq!(left(&mut s), Some(140.0), "nothing ran the relayout");
+    s.run(r#"TT:AddLine("Soulbound")"#).unwrap();
+    s.resolve();
+    assert_eq!(
+        left(&mut s),
+        None,
+        "the relayout invalidated a plate with no points"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
