@@ -470,7 +470,9 @@ pub(crate) fn grounded_y(
 /// position owner last wrote), never from the clamp's last answer, so a late floor takes the unit
 /// back. Skipped: flying and deck paths, and a swimming unit, whose wire Z is its depth (vmangos
 /// paths it in 3D without the flying flag, `MoveSplineInit.cpp:191`; the reference keeps Δz under
-/// SWIMMING, `[CMovement+0x40] & 0x200000` at `0x616cfa`).
+/// SWIMMING, `[CMovement+0x40] & 0x200000` at `0x616cfa`). A mount child is no body: its
+/// transform is parent-relative at its host's feet, and probed as a world pose it would ground
+/// onto whatever lies under the map origin.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(in crate::net) fn ground_clamp_creatures(
     world: benilla_world::collision::WorldCollision,
@@ -482,19 +484,22 @@ pub(in crate::net) fn ground_clamp_creatures(
     // extents are not built.
     capsule: Res<crate::player::PlayerCapsule>,
     mut commands: Commands,
-    mut q: Query<(
-        Entity,
-        &NetEntity,
-        Option<&Spline>,
-        &mut Transform,
-        Option<&mut GroundClamped>,
-        Has<CreatureSwimming>,
-        // HOVER and WATERWALKING both move the answer.
-        Option<&crate::net::UnitMoveModes>,
-        // [`ground_derived`]'s other Z authorities: the controller and the relay's dead-reckoning.
-        Has<crate::net::Embodied>,
-        Has<crate::net::RemoteMotion>,
-    )>,
+    mut q: Query<
+        (
+            Entity,
+            &NetEntity,
+            Option<&Spline>,
+            &mut Transform,
+            Option<&mut GroundClamped>,
+            Has<CreatureSwimming>,
+            // HOVER and WATERWALKING both move the answer.
+            Option<&crate::net::UnitMoveModes>,
+            // [`ground_derived`]'s other Z authorities: the controller and the relay's dead-reckoning.
+            Has<crate::net::Embodied>,
+            Has<crate::net::RemoteMotion>,
+        ),
+        Without<crate::entities::mount::MountBody>,
+    >,
 ) {
     let cost = clamp_cost_enabled();
     let legacy = clamp_seat_disabled();
@@ -1113,6 +1118,31 @@ mod under_floor {
             TERRAIN_Y + 40.0,
             "no surface in reach ⇒ the wire's Z stands"
         );
+    }
+
+    #[test]
+    fn a_mount_child_keeps_its_seat_over_a_floor_under_the_map_origin() {
+        // Alterac Valley: `md_icecave03`'s floor runs 2.03 yd under the map origin, where a mount
+        // child's parent-relative zero would probe if it were taken for a world pose.
+        let (mut app, npc) = half_arrived_world();
+        floor_at(&mut app, -2.03);
+        let mount = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                crate::entities::mount::MountBody { host: npc },
+                Transform::default(),
+                ChildOf(npc),
+            ))
+            .id();
+        app.update();
+        clamp(&mut app);
+        assert_eq!(y_of(&app, mount), 0.0, "the mount stays at its host's feet");
+        assert!(app.world().get::<GroundClamped>(mount).is_none());
     }
 }
 
