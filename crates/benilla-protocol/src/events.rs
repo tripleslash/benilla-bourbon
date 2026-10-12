@@ -75,11 +75,26 @@ pub enum LoginStage {
     WorldConnected,
 }
 
+/// What a roster was fetched for. The screen takes a reply as its own only when it asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterCause {
+    /// The IO thread's own enumeration on reaching the character park, which the native screens
+    /// wait for; the stock screens ask for theirs instead.
+    Park,
+    /// The reply to a roster request from the screen (`CMSG_CHAR_ENUM` for
+    /// `GetCharacterListUpdate`, `0x5aabb0`).
+    Asked,
+    /// A create or delete changed the roster; re-sent before the action's result.
+    Changed,
+}
+
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
 /// `GlueParent.lua` returns to the login screen; a logout returns to character select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEnd {
-    /// A logout the server confirmed (`SMSG_LOGOUT_COMPLETE`); a fresh roster follows.
+    /// A logout the server confirmed (`SMSG_LOGOUT_COMPLETE`), or a refused character login: the
+    /// world link is kept and the session is back at character select on it, as the reference's
+    /// `0x5aaeb0` and `0x5aad70` close nothing.
     LoggedOut,
     /// The stream died: a socket error, an EOF or a post-roster handshake failure. A displacement
     /// kick is this too: vmangos `WorldSession::KickPlayer` only closes the socket, no packet.
@@ -124,6 +139,21 @@ pub enum SessionEvent {
         realms: Vec<crate::RealmInfo>,
         failed: bool,
     },
+    /// The world server accepted the authentication (`SMSG_AUTH_RESPONSE` `AUTH_OK`, `0x5ab2b8`
+    /// → `0x5aab80`): the world connect is done and the IO thread is at the character park, with
+    /// no roster fetched unless the native policy's enumeration follows. Emitted by the IO thread,
+    /// never wire-decoded. `epoch` numbers the world session, per process; `generation` is the
+    /// abandon generation of the attempt that dialed it, which a Cancel or a disconnect since has
+    /// moved past (the reference drops the socket there, `0x46befd`, `0x46d360`).
+    WorldAuthenticated {
+        realm: crate::RealmInfo,
+        epoch: u64,
+        generation: u64,
+    },
+    /// A roster ask on the parked session failed on the stream (`0x5ab300`'s failure leg,
+    /// `SetStatus(0, 0x2c)`, `CHAR_LIST_FAILED`); the session ends after it. Emitted by the IO
+    /// thread, never wire-decoded.
+    RosterFailed { epoch: u64 },
     /// Queued for a full realm (`AUTH_WAIT_QUEUE`), per queue packet: a wait, not an outcome.
     LoginQueued {
         position: Option<u32>,
@@ -143,6 +173,11 @@ pub enum SessionEvent {
     CharacterList {
         characters: Vec<Character>,
         realm: Option<crate::RealmInfo>,
+        cause: RosterCause,
+        /// The world session's number ([`Self::WorldAuthenticated`]'s), 0 on the raw decode path.
+        epoch: u64,
+        /// The abandon generation of the attempt that dialed that session.
+        generation: u64,
     },
     /// `SMSG_CHAR_CREATE`/`_DELETE`'s raw `WorldResult`; on success a fresh roster comes first.
     CharActionResult { action: CharAction, code: u8 },
@@ -161,14 +196,16 @@ pub enum SessionEvent {
     /// Our pick was refused (`SMSG_CHARACTER_LOGIN_FAILED`) after [`Self::Connected`] was sent;
     /// `result` is a 1-based index into the reference's six `CHAR_LOGIN_*` strings.
     CharacterLoginFailed { result: u8 },
-    /// Logout confirmed (`SMSG_LOGOUT_COMPLETE`); a fresh [`Self::CharacterList`] follows.
+    /// Logout confirmed (`SMSG_LOGOUT_COMPLETE`); the session returns to character select on the
+    /// same link, where the roster is asked for again.
     LoggedOut,
     /// `SMSG_LOGOUT_RESPONSE`. A non-zero `reason` refuses: 1 in combat, 2 GM-frozen, 3 falling
     /// (vmangos). Zero starts the 20 s camp timer, or with `instant` (resting, taxi, GM) logs out.
     LogoutResponse { reason: u32, instant: bool },
     /// The server dropped a pending logout at our `CMSG_LOGOUT_CANCEL` (`SMSG_LOGOUT_CANCEL_ACK`).
     LogoutCancelled,
-    /// The session ended; `reason` is human-readable.
+    /// The world session ended, and with [`SessionEnd::Lost`] the link with it; `reason` is
+    /// human-readable.
     Disconnected { reason: String, end: SessionEnd },
     /// A placed object entered view, its spawn identity decoded per object type.
     ObjectCreate {

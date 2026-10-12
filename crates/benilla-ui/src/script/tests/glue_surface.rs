@@ -178,20 +178,8 @@ const NOT_YET: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "character select (0x4736c0, table 0x838578)",
-        &[
-            "DeleteCharacter",
-            "GetCharacterInfo",
-            "GetCharacterListUpdate",
-            "GetCharacterSelectFacing",
-            "GetNumCharacters",
-            "RenameCharacter",
-            "SelectCharacter",
-            "SetCharSelectBackground",
-            "SetCharSelectModelFrame",
-            "SetCharacterSelectFacing",
-            "UpdateSelectionCustomizationScene",
-        ],
+        "character select (0x4736c0, table 0x838578): the delete and the rename",
+        &["DeleteCharacter", "RenameCharacter"],
     ),
     (
         "character create (0x471a20, table 0x8380f8)",
@@ -359,7 +347,8 @@ fn glue_events_register_by_the_glue_table() {
     );
 }
 
-/// The in-game VM keeps its by-name registry: an in-game event registers and fires there.
+/// The in-game VM registers by its own event table (`0x48feab`): an in-game event registers and
+/// fires there.
 #[test]
 fn the_in_game_vm_keeps_its_events() {
     let mut s = UiScript::new().unwrap();

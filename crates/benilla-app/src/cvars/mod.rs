@@ -2512,6 +2512,9 @@ mod tests {
         app.world_mut().write_message(crate::net::CharListMessage {
             characters: roster(),
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
         assert_eq!(
@@ -2539,6 +2542,9 @@ mod tests {
         app.world_mut().write_message(crate::net::CharListMessage {
             characters: roster(),
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
 

@@ -56,6 +56,15 @@ impl Conn {
             },
         ))
     }
+
+    /// The halves [`Self::split`] made, one connection again. The reader's descriptor is a clone
+    /// of the writer's, so dropping it closes nothing.
+    pub fn join(reader: ConnReader, writer: ConnWriter) -> Conn {
+        drop(reader);
+        Conn {
+            stream: writer.stream,
+        }
+    }
 }
 
 impl ReadExactAsync for Conn {

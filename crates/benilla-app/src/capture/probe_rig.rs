@@ -73,6 +73,9 @@ impl Plugin for ProbeRigPlugin {
         else {
             return; // inert without a parseable spec (parse() has already said why)
         };
+        if super::refuse_under_stock(app, "WOW_RIG") {
+            return;
+        }
         info!("rig: {}", spec.describe());
         // Publish the claim on the character pick, so the roster knows the pick is spoken for.
         if let Some(name) = rig_char_name(&spec) {
@@ -278,7 +281,7 @@ fn drive_rig(
                 None => {
                     let (race, class, gender) = rig.spec.body.expect("name implies a body");
                     info!("rig: {want} does not exist — creating it");
-                    let _ = pick.0.try_send(CharRequest::Create(CharCreateReq {
+                    let _ = pick.0.send(CharRequest::Create(CharCreateReq {
                         name: want,
                         race,
                         class,
@@ -311,7 +314,7 @@ fn drive_rig(
                                  (guid {guid}). Only this checkout's rig-named characters are ever \
                                  deleted; Probe<N> and hand-made characters are never touched."
                             );
-                            let _ = pick.0.try_send(CharRequest::Delete(guid));
+                            let _ = pick.0.send(CharRequest::Delete(guid));
                             rig.phase = RigPhase::Deleting;
                         }
                         None => {

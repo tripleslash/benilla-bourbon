@@ -4,13 +4,13 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use benilla_protocol::messages::{self, opcode};
-use benilla_protocol::{SessionEnd, SessionEvent, WorldWriter};
+use benilla_protocol::{SessionEnd, SessionEvent};
 use benilla_srp::vanilla_header::HeaderCrypto;
 use benilla_srp::{
     password_verifier, NormalizedString, GENERATOR, LARGE_SAFE_PRIME_LITTLE_ENDIAN,
@@ -20,8 +20,8 @@ use crossbeam_channel::{Receiver, Sender};
 use num_bigint::BigUint;
 use sha1::{Digest, Sha1};
 
-use super::{run, Cycle, LoginRequest, Parks, PingClock};
-use crate::net::{CharRequest, RealmRequest};
+use super::{run, writer_loop, Cycle, LoginRequest, Parks, PingClock, WriterSwap};
+use crate::net::{CharRequest, ClientCommand, ParkRequest, ParkSender, RealmRequest};
 
 pub(crate) const USER: &str = "empty";
 pub(crate) const PASS: &str = "secret";
@@ -259,25 +259,159 @@ fn send(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>, op: u16, body: &[u
     let _ = s.write_all(body);
 }
 
-/// A client packet's opcode, reading past its body: `u16` BE size counting the 4-byte opcode.
-fn recv(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>) -> Option<u16> {
+/// A client packet as it left the client, header decrypted: `u16` BE size counting the 4-byte
+/// opcode, `u32` LE opcode, the body.
+fn recv_packet(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>) -> Option<Vec<u8>> {
     let mut header = [0u8; 6];
     s.read_exact(&mut header).ok()?;
     if let Some(c) = crypto {
         c.decrypter().decrypt(&mut header);
     }
     let size = usize::from(u16::from_be_bytes([header[0], header[1]]));
-    s.read_exact(&mut vec![0u8; size.saturating_sub(4)]).ok()?;
-    Some(u16::from_le_bytes([header[2], header[3]]))
+    let mut packet = header.to_vec();
+    packet.resize(2 + size, 0);
+    s.read_exact(&mut packet[6..]).ok()?;
+    Some(packet)
 }
+
+/// A client packet's opcode, reading past its body.
+fn recv(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>) -> Option<u16> {
+    let packet = recv_packet(s, crypto)?;
+    Some(u16::from_le_bytes([packet[2], packet[3]]))
+}
+
+/// An `SMSG_CHAR_ENUM` body for `characters`, in the order the client parses it
+/// (`Character::read`, the reference's `0x5b42a0`).
+pub(crate) fn char_enum_body(characters: &[benilla_protocol::Character]) -> Vec<u8> {
+    let mut b = vec![characters.len() as u8];
+    for c in characters {
+        b.extend_from_slice(&c.guid.to_le_bytes());
+        b.extend_from_slice(c.name.as_bytes());
+        b.push(0);
+        b.extend_from_slice(&[
+            c.race,
+            c.class,
+            c.gender,
+            c.skin,
+            c.face,
+            c.hair_style,
+            c.hair_color,
+            c.facial_hair,
+            c.level,
+        ]);
+        b.extend_from_slice(&c.zone.to_le_bytes());
+        b.extend_from_slice(&c.map.to_le_bytes());
+        for v in [c.position.x, c.position.y, c.position.z] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&0u32.to_le_bytes()); // guild
+        b.extend_from_slice(&c.flags.to_le_bytes());
+        b.push(0); // first login
+        for v in [c.pet_display_id, c.pet_level, c.pet_family] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for item in &c.equipment {
+            b.extend_from_slice(&item.display_id.to_le_bytes());
+            b.push(item.inventory_type);
+        }
+        b.extend_from_slice(&0u32.to_le_bytes()); // first bag
+        b.push(0);
+    }
+    b
+}
+
+/// Packets, by opcode and body, the fake world sends behind `SMSG_LOGOUT_COMPLETE`.
+type Trail = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
 /// The fake world server's record: every opcode the client sent, and the sessions still open.
 pub(crate) struct World {
     pub(crate) sent: Arc<Mutex<Vec<u16>>>,
+    /// Every packet the client sent, header decrypted, as [`recv_packet`] reads it.
+    pub(crate) packets: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Every session's packets in the order it sent them, by the order the sessions began.
+    pub(crate) session_packets: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
+    /// The `SMSG_CHAR_ENUM` body each session answers its `CMSG_CHAR_ENUM` with, by the order the
+    /// sessions began (the last repeats): no characters until set.
+    rosters: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// How long a `CMSG_CHAR_ENUM` waits before its answer.
+    enum_delay: Arc<Mutex<Duration>>,
+    /// Answer `CMSG_CHAR_ENUM` with `SMSG_WARDEN_DATA`, as a server does that wants Warden.
+    warden: Arc<AtomicBool>,
+    /// Close the socket on `CMSG_CHAR_ENUM` instead of answering.
+    cut: Arc<AtomicBool>,
+    /// Answer `CMSG_PLAYER_LOGIN` with `SMSG_CHARACTER_LOGIN_FAILED`.
+    refuse: Arc<AtomicBool>,
+    /// Packets sent right behind `SMSG_LOGOUT_COMPLETE`, as the world session leaves them in flight.
+    trail: Trail,
     open: Arc<AtomicUsize>,
 }
 
 impl World {
+    /// The characters the account holds from now on.
+    pub(crate) fn set_roster(&self, characters: &[benilla_protocol::Character]) {
+        *self.rosters.lock().unwrap() = vec![char_enum_body(characters)];
+    }
+
+    /// The characters each session sees, by the order the sessions begin.
+    pub(crate) fn set_rosters(&self, per_session: &[&[benilla_protocol::Character]]) {
+        *self.rosters.lock().unwrap() = per_session.iter().map(|c| char_enum_body(c)).collect();
+    }
+
+    /// Have the server demand Warden in place of the roster from now on.
+    pub(crate) fn demand_warden(&self) {
+        self.warden.store(true, Ordering::SeqCst);
+    }
+
+    /// Have the server cut the connection on the next roster ask.
+    pub(crate) fn cut_on_roster_ask(&self) {
+        self.cut.store(true, Ordering::SeqCst);
+    }
+
+    /// Have the server refuse every character login from now on (`SMSG_CHARACTER_LOGIN_FAILED`,
+    /// vmangos's result 1).
+    pub(crate) fn refuse_logins(&self) {
+        self.refuse.store(true, Ordering::SeqCst);
+    }
+
+    /// Send these packets right behind every `SMSG_LOGOUT_COMPLETE`.
+    pub(crate) fn trail_logouts_with(&self, packets: Vec<(u16, Vec<u8>)>) {
+        *self.trail.lock().unwrap() = packets;
+    }
+
+    /// The `CMSG_AUTH_SESSION`s the server admitted: one per world session.
+    pub(crate) fn authentications(&self) -> usize {
+        self.session_packets.lock().unwrap().len()
+    }
+
+    /// Hold every roster answer back this long.
+    pub(crate) fn delay_rosters(&self, by: Duration) {
+        *self.enum_delay.lock().unwrap() = by;
+    }
+
+    /// How many `CMSG_CHAR_ENUM` session `index` has sent.
+    pub(crate) fn enumerations_in(&self, index: usize) -> usize {
+        self.session_packets
+            .lock()
+            .unwrap()
+            .get(index)
+            .map_or(0, |packets| {
+                packets
+                    .iter()
+                    .filter(|p| p[2..4] == opcode::CMSG_CHAR_ENUM.to_le_bytes())
+                    .count()
+            })
+    }
+
+    /// How many `CMSG_CHAR_ENUM` the client has sent.
+    pub(crate) fn enumerations(&self) -> usize {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&op| op == opcode::CMSG_CHAR_ENUM)
+            .count()
+    }
+
     /// Sessions the client still holds.
     pub(crate) fn open(&self) -> usize {
         self.open.load(Ordering::SeqCst)
@@ -285,11 +419,29 @@ impl World {
 }
 
 /// A world server whose account has no characters: it admits each session under the latest key
-/// realmd made, answers every `CMSG_CHAR_ENUM` with an empty roster and a `CMSG_CHAR_CREATE` with
-/// success, and logs every opcode the client sends.
+/// realmd made, answers every `CMSG_CHAR_ENUM` with its roster (empty until [`World::set_roster`]),
+/// a `CMSG_CHAR_CREATE` with success, a `CMSG_LOGOUT_REQUEST` with `SMSG_LOGOUT_COMPLETE` and a
+/// `CMSG_PLAYER_LOGIN` with nothing (or a refusal, [`World::refuse_logins`]), and logs every opcode
+/// the client sends.
 pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let sent = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&sent);
+    let packets = Arc::new(Mutex::new(Vec::new()));
+    let packet_log = Arc::clone(&packets);
+    let rosters = Arc::new(Mutex::new(vec![vec![0u8]]));
+    let roster_bodies = Arc::clone(&rosters);
+    let session_packets = Arc::new(Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
+    let session_log = Arc::clone(&session_packets);
+    let enum_delay = Arc::new(Mutex::new(Duration::ZERO));
+    let enum_wait = Arc::clone(&enum_delay);
+    let warden = Arc::new(AtomicBool::new(false));
+    let warden_flag = Arc::clone(&warden);
+    let cut = Arc::new(AtomicBool::new(false));
+    let cut_flag = Arc::clone(&cut);
+    let refuse = Arc::new(AtomicBool::new(false));
+    let refuse_flag = Arc::clone(&refuse);
+    let trail: Trail = Arc::default();
+    let trailing = Arc::clone(&trail);
     let open = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::clone(&open);
     thread::spawn(move || {
@@ -324,14 +476,43 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                 &[messages::AUTH_OK],
             );
             let log = Arc::clone(&log);
+            let packet_log = Arc::clone(&packet_log);
+            let roster_bodies = Arc::clone(&roster_bodies);
+            let session_log = Arc::clone(&session_log);
+            let enum_wait = Arc::clone(&enum_wait);
+            let warden_flag = Arc::clone(&warden_flag);
+            let cut_flag = Arc::clone(&cut_flag);
+            let refuse_flag = Arc::clone(&refuse_flag);
+            let trailing = Arc::clone(&trailing);
+            let index = {
+                let mut all = session_log.lock().unwrap();
+                all.push(Vec::new());
+                all.len() - 1
+            };
             let sessions = Arc::clone(&sessions);
             sessions.fetch_add(1, Ordering::SeqCst);
             thread::spawn(move || {
-                while let Some(op) = recv(&mut s, Some(&mut crypto)) {
+                while let Some(packet) = recv_packet(&mut s, Some(&mut crypto)) {
+                    let op = u16::from_le_bytes([packet[2], packet[3]]);
                     log.lock().unwrap().push(op);
+                    session_log.lock().unwrap()[index].push(packet.clone());
+                    packet_log.lock().unwrap().push(packet);
                     match op {
                         opcode::CMSG_CHAR_ENUM => {
-                            send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_ENUM, &[0]);
+                            let body = {
+                                let all = roster_bodies.lock().unwrap();
+                                all[index.min(all.len() - 1)].clone()
+                            };
+                            let wait = *enum_wait.lock().unwrap();
+                            thread::sleep(wait);
+                            if cut_flag.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            if warden_flag.load(Ordering::SeqCst) {
+                                send(&mut s, Some(&mut crypto), opcode::SMSG_WARDEN_DATA, &[]);
+                                continue;
+                            }
+                            send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_ENUM, &body);
                         }
                         opcode::CMSG_CHAR_CREATE => send(
                             &mut s,
@@ -339,6 +520,18 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                             opcode::SMSG_CHAR_CREATE,
                             &[messages::CHAR_CREATE_SUCCESS],
                         ),
+                        opcode::CMSG_PLAYER_LOGIN if refuse_flag.load(Ordering::SeqCst) => send(
+                            &mut s,
+                            Some(&mut crypto),
+                            opcode::SMSG_CHARACTER_LOGIN_FAILED,
+                            &[1],
+                        ),
+                        opcode::CMSG_LOGOUT_REQUEST => {
+                            send(&mut s, Some(&mut crypto), opcode::SMSG_LOGOUT_COMPLETE, &[]);
+                            for (op, body) in trailing.lock().unwrap().clone() {
+                                send(&mut s, Some(&mut crypto), op, &body);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -346,7 +539,18 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             });
         }
     });
-    World { sent, open }
+    World {
+        sent,
+        packets,
+        session_packets,
+        rosters,
+        enum_delay,
+        warden,
+        cut,
+        refuse,
+        trail,
+        open,
+    }
 }
 
 /// A fake realmd listing `realms` and the world server they point at. `realms` takes the world's
@@ -365,30 +569,43 @@ pub(crate) fn dead_address() -> String {
     l.local_addr().unwrap().to_string()
 }
 
-/// The app's ends of the IO thread's channels; the three park channels are `async_channel`, as
-/// [`super::NetHandles`]' are.
+/// The app's ends of the IO thread's channels; the credentials and park channels are
+/// `async_channel`, as [`super::NetHandles`]' are.
 pub(crate) struct Cycles {
     pub(crate) events: Receiver<SessionEvent>,
+    /// The app's commands, to the write thread and on to the world socket while in the world.
+    pub(crate) commands: Sender<ClientCommand>,
     pub(crate) login: async_channel::Sender<LoginRequest>,
-    pub(crate) realm: async_channel::Sender<RealmRequest>,
-    pub(crate) pick: async_channel::Sender<CharRequest>,
+    pub(crate) realm: ParkSender<RealmRequest>,
+    pub(crate) pick: ParkSender<CharRequest>,
     pub(crate) abandon: Arc<AtomicU64>,
 }
 
-/// The read thread's cycle loop, as [`super::spawn_net`] runs it, with the world writer dropped.
+/// The read thread's cycle loop and the write thread, as [`super::spawn_net`] runs them: the native
+/// screens' policy, the IO thread enumerating on reaching the character park.
 pub(crate) fn spawn_cycles() -> Cycles {
+    spawn_cycles_for(false)
+}
+
+/// [`spawn_cycles`] under the stock screen's policy: the roster comes only when it is asked for.
+pub(crate) fn spawn_cycles_asking() -> Cycles {
+    spawn_cycles_for(true)
+}
+
+fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let (events_tx, events) = crossbeam_channel::unbounded();
+    let (commands, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
+    let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
+    thread::spawn(move || writer_loop(&cmd_rx, writer_rx, &Mutex::new(PingClock::default())));
     let (login, login_rx) = async_channel::unbounded();
-    let (realm, realm_rx) = async_channel::unbounded();
-    let (pick, pick_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded::<ParkRequest>();
     let abandon = Arc::new(AtomicU64::new(0));
     let thread_abandon = Arc::clone(&abandon);
     thread::spawn(move || {
-        let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
         let parks = Parks {
             login_rx,
-            realm_rx,
-            pick_rx,
+            park_rx,
+            screen_asks_roster: Arc::new(std::sync::atomic::AtomicBool::new(screen_asks_roster)),
         };
         let clock = Mutex::new(PingClock::default());
         let mut tails = Default::default();
@@ -405,12 +622,6 @@ pub(crate) fn spawn_cycles() -> Cycles {
             )) {
                 Ok(Cycle::Exit) => return,
                 Ok(Cycle::Repark) => {}
-                Ok(Cycle::LoggedOut | Cycle::LoginRefused) => {
-                    let _ = events_tx.send(SessionEvent::Disconnected {
-                        reason: "logged out".into(),
-                        end: SessionEnd::LoggedOut,
-                    });
-                }
                 Err(e) => {
                     if events_tx
                         .send(SessionEvent::Disconnected {
@@ -427,9 +638,10 @@ pub(crate) fn spawn_cycles() -> Cycles {
     });
     Cycles {
         events,
+        commands,
         login,
-        realm,
-        pick,
+        realm: ParkSender::park(park_tx.clone()),
+        pick: ParkSender::park(park_tx),
         abandon,
     }
 }

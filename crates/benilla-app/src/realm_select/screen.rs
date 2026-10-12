@@ -853,7 +853,7 @@ mod tests {
             .init_resource::<GlueClicks>()
             // `input::clicks` writes the login intent; the plugin's app has it from `LoginPlugin`.
             .init_resource::<crate::login::LoginIntent>()
-            .insert_resource(crate::net::RealmChoice(tx))
+            .insert_resource(crate::net::RealmChoice(tx.into()))
             .add_message::<crate::sound::GlueSound>()
             .add_message::<crate::login::GlueLogin>()
             .insert_resource(Realms {

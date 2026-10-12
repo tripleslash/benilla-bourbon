@@ -85,21 +85,7 @@ impl Plugin for CharSelectPlugin {
             .add_systems(
                 Update,
                 (
-                    // Runs in every state: the reconnect auto-answer and the logout edge arrive
-                    // `InWorld`. `back_on_disconnect` runs after the entry: a session that died
-                    // during entry queues both edges into one frame, and the dead one must win.
-                    (
-                        apply_roster_policy,
-                        enter_on_connected,
-                        back_on_logout,
-                        back_on_login_refused,
-                        back_on_disconnect,
-                        back_on_entry_failed,
-                        // Last and ungated: it mirrors the pick the frame ended with, and world
-                        // entry is reached from the create screen too.
-                        persist_last_character,
-                    )
-                        .chain(),
+                    session_edges(),
                     (
                         screen::materialize_screen,
                         input::select_input.run_if(crate::ui_script::glue::native_glue),
@@ -137,6 +123,27 @@ impl Plugin for CharSelectPlugin {
                     .run_if(in_state(ClientState::CharSelect)),
             );
     }
+}
+
+/// The session's edges, in every state: the reconnect auto-answer and the logout edge arrive
+/// `InWorld`. A logout or a refused login clears the pick before the roster policy reads it: the
+/// roster comes right behind them on the kept link, often in the same drain, and must be shown,
+/// not answered with the pick just left. `back_on_disconnect` runs after the entry: a session that
+/// died during entry queues both edges into one frame, and the dead one must win.
+fn session_edges() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (
+        back_on_logout,
+        back_on_login_refused,
+        apply_roster_policy,
+        enter_on_connected,
+        back_on_disconnect,
+        back_on_entry_failed,
+        // Last and ungated: it mirrors the pick the frame ended with, and world entry is reached
+        // from the create screen too.
+        persist_last_character,
+    )
+        .chain()
+        .into_configs()
 }
 
 // ── The roster and pick policy ──────────────────────────────────────────────────────────────────
@@ -309,7 +316,7 @@ fn persist_last_character(
 /// through here too, so a reconnect re-answers with its character.
 pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
     roster.pending_pick = Some(guid);
-    let _ = pick.0.try_send(CharRequest::Enter(guid));
+    let _ = pick.0.send(CharRequest::Enter(guid));
 }
 
 /// Drain each [`CharListMessage`] into the roster, then answer it with the pending pick
@@ -464,7 +471,7 @@ fn back_on_entry_failed(
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: back to select with the refusal in the glue dialog. The IO
 /// thread announces the entry with the pick, so this undoes a half-built one. The pick must be
-/// cleared, or the relist behind the refusal is auto-answered and the refused login loops.
+/// cleared, or the roster behind the refusal is auto-answered and the refused login loops.
 fn back_on_login_refused(
     mut msgs: MessageReader<CharacterLoginFailedMessage>,
     mut roster: ResMut<Roster>,
@@ -611,7 +618,8 @@ fn debug_glue_roundtrip(
 }
 
 /// The logout smoke (`WOW_LOGOUT_SMOKE=1`, with `WOW_CHAR`): once in the world, `/logout`, return
-/// to CharSelect, enter the world again and close the window. The second entry streams a map
+/// to CharSelect, wait for the roster the logout brings on the link the world was entered by,
+/// enter the world again and close the window. The second entry streams a map
 /// `terrain_stream::release_world` tore down. It ends by a window close, not an `AppExit`, since
 /// only the close reaches the shutdown tail that saves variables and addon files.
 fn debug_logout_smoke(
@@ -625,11 +633,34 @@ fn debug_logout_smoke(
     mut exit: MessageWriter<AppExit>,
     mut close: MessageWriter<bevy::window::WindowCloseRequested>,
     windows: Query<Entity, With<bevy::window::PrimaryWindow>>,
+    mut lists: MessageReader<CharListMessage>,
+    // The world session's number at the entry, and whether a roster has come since the logout.
+    mut link: Local<Option<u64>>,
+    mut relisted: Local<bool>,
     mut phase: Local<u8>,
     mut mark: Local<f32>,
 ) {
     if std::env::var("WOW_LOGOUT_SMOKE").is_err() {
         return;
+    }
+    for list in lists.read() {
+        if *phase < 2 {
+            *link = Some(list.epoch);
+        } else if !*relisted {
+            *relisted = true;
+            if Some(list.epoch) == *link {
+                info!(
+                    "logout-smoke: roster after the logout on the same link — {} char(s)",
+                    list.characters.len()
+                );
+            } else {
+                error!(
+                    "logout-smoke: FAILED — the roster after the logout came on world session {} \
+                     where the world was entered on {:?}",
+                    list.epoch, *link
+                );
+            }
+        }
     }
     let now = time.elapsed_secs();
     match *phase {
@@ -648,21 +679,24 @@ fn debug_logout_smoke(
         }
         // Residency is read here, not on arrival: `release_world` runs about 150 ms after the
         // state edge, on the world-live falling edge.
-        3 if now - *mark > 4.0 => match roster.chars.first().map(|c| (c.guid, c.name.clone())) {
-            Some((guid, name)) => {
-                info!(
-                    "logout-smoke: {} tiles resident after the release (must be 0)",
-                    streamer.residency().1
-                );
-                info!("logout-smoke: re-entering the world as {name}");
-                send_pick(&mut roster, &pick, guid);
-                (*phase, *mark) = (4, now);
+        // The roster the logout brings, not the one that survived it, decides the re-entry.
+        3 if now - *mark > 4.0 && *relisted => {
+            match roster.chars.first().map(|c| (c.guid, c.name.clone())) {
+                Some((guid, name)) => {
+                    info!(
+                        "logout-smoke: {} tiles resident after the release (must be 0)",
+                        streamer.residency().1
+                    );
+                    info!("logout-smoke: re-entering the world as {name}");
+                    send_pick(&mut roster, &pick, guid);
+                    (*phase, *mark) = (4, now);
+                }
+                None => {
+                    warn!("logout-smoke: empty roster — cannot test re-entry");
+                    *phase = 5;
+                }
             }
-            None => {
-                warn!("logout-smoke: empty roster — cannot test re-entry");
-                *phase = 5;
-            }
-        },
+        }
         4 if *state.get() == ClientState::InWorld && player.active && now - *mark > 3.0 => {
             // The suppressor reading catches a character that re-entered unable to move;
             // `scripts/smoke.sh` fails on anything but `none`. A GM account's logout is instant,
@@ -934,7 +968,7 @@ pub(crate) fn test_character(guid: u64, name: &str) -> Character {
 pub(crate) fn add_test_systems(app: &mut App, pick: async_channel::Sender<CharRequest>) {
     app.insert_state(ClientState::CharSelect)
         .init_resource::<Roster>()
-        .insert_resource(CharPick(pick))
+        .insert_resource(CharPick(pick.into()))
         .add_message::<CharListMessage>()
         .add_systems(
             Update,
@@ -1067,6 +1101,56 @@ mod tests {
             "World server is down",
             "a refusal the player cannot see is the bug this whole path exists to end",
         );
+    }
+
+    /// A logout, or a refused login, and the roster the kept link sends right behind it can land
+    /// in one drain: the pick the world was entered with goes first, so the roster is shown and
+    /// not answered with that pick again.
+    #[test]
+    fn a_return_and_its_roster_in_one_drain_show_the_roster() {
+        for refused in [false, true] {
+            let (tx, rx) = async_channel::unbounded();
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+                .insert_state(ClientState::InWorld)
+                .insert_resource(Roster::with_pending_pick(vec![character(7, "Seven")], 7))
+                .insert_resource(CharPick(tx.into()))
+                .init_resource::<crate::cvars::Cvars>()
+                .init_resource::<crate::glue::dialog::GlueDialog>()
+                .add_message::<CharListMessage>()
+                .add_message::<EnteredWorldMessage>()
+                .add_message::<LoggedOutMessage>()
+                .add_message::<CharacterLoginFailedMessage>()
+                .add_message::<crate::net::DisconnectedMessage>()
+                .add_systems(Update, session_edges());
+            app.world_mut().resource_mut::<Roster>().env_read = true;
+            if refused {
+                app.world_mut()
+                    .write_message(CharacterLoginFailedMessage { result: 0x01 });
+            } else {
+                app.world_mut().write_message(LoggedOutMessage);
+            }
+            app.world_mut().write_message(CharListMessage {
+                characters: vec![character(7, "Seven")],
+                realm: None,
+                cause: benilla_protocol::RosterCause::Park,
+                epoch: 1,
+                generation: 0,
+            });
+            app.update();
+            app.update();
+
+            assert_eq!(
+                *app.world().resource::<State<ClientState>>().get(),
+                ClientState::CharSelect,
+                "refused: {refused}"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "refused: {refused} — the roster was answered with the pick just left"
+            );
+            assert_eq!(app.world().resource::<Roster>().pending_pick, None);
+        }
     }
 
     /// Every refusal byte resolves to the sentence 1.12 ships, off the player's chain. `4` is
@@ -1210,7 +1294,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
-            .insert_resource(CharPick(tx))
+            .insert_resource(CharPick(tx.into()))
             .insert_resource(match stored {
                 Some(v) => crate::cvars::Cvars::with_value(CVAR_LAST_CHARACTER, v),
                 None => crate::cvars::Cvars::default(),
@@ -1228,6 +1312,9 @@ mod tests {
                 .map(|(i, n)| character(i as u64 + 1, n))
                 .collect(),
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
         app.world().resource::<Roster>().selected()
@@ -1322,7 +1409,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
-            .insert_resource(CharPick(tx))
+            .insert_resource(CharPick(tx.into()))
             .insert_resource(crate::cvars::Cvars::with_value(CVAR_LAST_CHARACTER, "0"))
             .add_message::<CharListMessage>()
             .add_message::<AppExit>()
@@ -1338,6 +1425,9 @@ mod tests {
                 character(3, "Zzbullone"),
             ],
             realm: None,
+            cause: benilla_protocol::RosterCause::Park,
+            epoch: 0,
+            generation: 0,
         });
         app.update();
         assert_eq!(
@@ -1374,7 +1464,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
             .init_resource::<crate::cvars::Cvars>()
-            .insert_resource(CharPick(tx))
+            .insert_resource(CharPick(tx.into()))
             .add_systems(Update, persist_last_character);
         {
             let mut roster = app.world_mut().resource_mut::<Roster>();

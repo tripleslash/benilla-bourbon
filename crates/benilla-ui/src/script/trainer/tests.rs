@@ -19,7 +19,7 @@ fn svc(
         name: Some(name.into()),
         subtext: Some("Rank 1".into()),
         texture: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
-        description: format!("Teaches {name}."),
+        description: Some(format!("Teaches {name}.")),
         cost: 100,
         prof_first_rank: false,
         category: cat,
@@ -124,6 +124,31 @@ fn tree_interleaves_headers_and_ordered_services() {
     assert_eq!(info(&mut s, 3), ("Cleave".into(), "used".into()));
     assert_eq!(info(&mut s, 4), ("Fury".into(), "header".into()));
     assert_eq!(info(&mut s, 5), ("Bloodrage".into(), "unavailable".into()));
+}
+
+/// `GetTrainerServiceDescription` (`0x4d9b40`) pushes one value, nil (`0x4d9d90`) where there is
+/// no text to show: no row at the index (`0x4d9ba8` to `0x4d9d93`), a service with no spell record
+/// (`0x4d9bd7`), or a service whose spell has none (`0x4d9d44`, `0x4d9d49`). A header row has no service either.
+#[test]
+fn service_description_is_nil_without_text() {
+    let mut s = UiScript::new().unwrap();
+    let mut t = trainer();
+    t.services[1].description = None;
+    s.set_trainer(Some(t));
+
+    // `arg.n` counts the returns (`select` is 5.1's, not a 1.12 global).
+    let shape = |s: &mut UiScript, i: i64| {
+        s.eval::<String>(&format!(
+            "local function c(...) return arg.n .. ':' .. type(arg[1]) end \
+             return c(GetTrainerServiceDescription({i}))"
+        ))
+        .unwrap()
+    };
+    assert_eq!(shape(&mut s, 2), "1:string");
+    assert_eq!(shape(&mut s, 3), "1:nil", "a service with no text");
+    assert_eq!(shape(&mut s, 4), "1:nil", "a header row");
+    assert_eq!(shape(&mut s, 99), "1:nil", "past the last row");
+    assert_eq!(shape(&mut s, 0), "1:nil", "before the first");
 }
 
 #[test]
@@ -678,4 +703,20 @@ fn talent_order_sorts_on_state_within_a_group() {
     }));
     let got: Vec<String> = visible(&mut s).into_iter().map(|(n, _)| n).collect();
     assert_eq!(got, ["Riding", "Aye", "Bee", "Cee"]);
+}
+
+/// The mask commits fire `TRAINER_UPDATE` inside the verb, after the re-filter (`0x4d8410`, then
+/// `0x4d8ca0`/`0x4d8ce0`): a handler reads the filtered tree before the next Lua line runs.
+#[test]
+fn the_filter_and_collapse_verbs_fire_trainer_update_in_place() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    crate::script::tick::heard::listen(&s, &["TRAINER_UPDATE"], Some("GetNumTrainerServices()"));
+    let seen: Vec<String> = s
+        .eval(
+            "SetTrainerServiceTypeFilter('used', 0) local h = HEARD HEARD = {} \
+             CollapseTrainerSkillLine(1) table.insert(h, HEARD[1]) return h",
+        )
+        .unwrap();
+    assert_eq!(seen, ["TRAINER_UPDATE 4", "TRAINER_UPDATE 3"]);
 }

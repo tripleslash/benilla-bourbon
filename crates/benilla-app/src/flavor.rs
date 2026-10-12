@@ -133,7 +133,7 @@ pub(crate) fn enter_realm(commands: &mut Commands, realm: RealmInfo, generation:
             info!("flavor: {from:?} → {to:?} for realm {:?}", realm.name);
         }
         if let Some(choice) = world.get_resource::<RealmChoice>() {
-            let _ = choice.0.try_send(RealmRequest::Enter { realm, generation });
+            let _ = choice.0.send(RealmRequest::Enter { realm, generation });
         }
     });
 }
@@ -349,7 +349,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(FlavorPlugin);
         let (tx, rx) = async_channel::unbounded();
-        app.insert_resource(RealmChoice(tx));
+        app.insert_resource(RealmChoice(tx.into()));
         app.add_schedule(bevy::ecs::schedule::Schedule::new(benilla_assets::DataLoad));
         let runs = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counter = runs.clone();
@@ -385,7 +385,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(FlavorPlugin);
         let (tx, rx) = async_channel::unbounded();
-        app.insert_resource(RealmChoice(tx));
+        app.insert_resource(RealmChoice(tx.into()));
         let mut commands = app.world_mut().commands();
         enter_realm(
             &mut commands,

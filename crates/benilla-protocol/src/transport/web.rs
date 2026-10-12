@@ -288,6 +288,13 @@ impl Conn {
             },
         ))
     }
+
+    /// The halves [`Self::split`] made, one connection again. Both hold the same socket, so the
+    /// reader's `Rc` simply drops; the socket closes only when the last holder goes.
+    pub fn join(reader: ConnReader, writer: ConnWriter) -> Conn {
+        drop(reader);
+        Conn { sock: writer.sock }
+    }
 }
 
 impl ReadExactAsync for Conn {

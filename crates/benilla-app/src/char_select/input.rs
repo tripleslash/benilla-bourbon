@@ -117,7 +117,7 @@ pub(super) fn select_input(
         sounds.write(GlueSound("gsCharacterSelectionExit"));
         roster.pending_pick = None;
         intent.clear();
-        let _ = pick.0.try_send(crate::net::CharRequest::Abandon);
+        let _ = pick.0.send(crate::net::CharRequest::Abandon);
         next.set(ClientState::Login);
     }
     let n = roster.chars.len();
@@ -195,8 +195,8 @@ mod tests {
                 .init_resource::<super::super::addons::AddonsPanel>()
                 .init_resource::<crate::login::LoginIntent>()
                 .init_resource::<crate::glue::dialog::GlueDialog>()
-                .insert_resource(CharPick(pick_tx))
-                .insert_resource(RealmChoice(realm_tx))
+                .insert_resource(CharPick(pick_tx.into()))
+                .insert_resource(RealmChoice(realm_tx.into()))
                 .add_message::<GlueSound>()
                 .add_message::<crate::login::GlueLogin>()
                 .add_message::<bevy::input::mouse::MouseWheel>()

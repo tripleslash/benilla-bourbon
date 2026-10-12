@@ -111,7 +111,8 @@ pub struct TrainerService {
     /// The wire spell's rank text, such as "Rank 2".
     pub subtext: Option<String>,
     pub texture: Option<String>,
-    pub description: String,
+    /// The expanded text; `None` answers nil (`0x4d9d90`).
+    pub description: Option<String>,
     /// In copper, already reputation-discounted by the server.
     pub cost: u32,
     /// A primary profession's first rank: the stock window's `cpCost2 > 0`, which asks to confirm.
@@ -376,14 +377,13 @@ fn selected_row(model: &Model) -> Option<usize> {
         .checked_add(1)
 }
 
-/// Queue `TRAINER_UPDATE`, which the reference fires from its mask commits, not from Lua:
-/// `0x4d8c90` writes the filter mask, re-runs the finalizer and fires event `0x136`, and the
-/// skill-line and expand-mask commits (`0x4d8cb0`, `0x4d8cd0`, the collapse verbs') do the same.
-/// The stock window's filter click (`Blizzard_TrainerUI.lua:524`) does not repaint.
-fn queue_trainer_update(model: &mut Model) {
-    model
-        .pending_events
-        .push(("TRAINER_UPDATE".to_string(), Vec::new()));
+/// Raise `TRAINER_UPDATE`, as the reference's mask commits do after the re-filter: `0x4d8c90`
+/// writes the type mask, re-runs the finalizer `0x4d8410` and signals at `0x4d8ca0`; the
+/// skill-line and expand-mask commits (`0x4d8cb0`, `0x4d8cd0`, the collapse verbs') do the same
+/// (`0x4d8cc0`, `0x4d8ce0`). The stock window's filter click (`Blizzard_TrainerUI.lua:524`) does
+/// not repaint.
+fn raise_trainer_update(model: &mut Model) {
+    model.raise("TRAINER_UPDATE", Vec::new());
 }
 
 fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
@@ -514,10 +514,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetTrainerServiceDescription",
         lua.create_function(|lua, index: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let text = service(&model, index)
-                .map(|s| s.description.clone())
-                .unwrap_or_default();
-            lua.create_string(&text)
+            opt_str(
+                lua,
+                service(&model, index).and_then(|s| s.description.as_ref()),
+            )
         })?,
     )?;
 
@@ -663,13 +663,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SetTrainerServiceTypeFilter",
         lua.create_function(|lua, (kind, on): (String, Value)| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(c) = TrainerServiceCategory::from_filter_str(&kind) {
                 // The stock window passes 1 or 0; nil, false and 0 disable.
                 let enable = !matches!(on, Value::Nil | Value::Integer(0) | Value::Boolean(false));
-                model.trainer_filter[c.filter_slot()] = enable;
-                // Fires even when the bit did not move, as the reference's thunk does.
-                queue_trainer_update(&mut model);
+                super::tick::verb(lua, |model| {
+                    model.trainer_filter[c.filter_slot()] = enable;
+                    // Fires even when the bit did not move, as the reference's setter does.
+                    raise_trainer_update(model);
+                });
             }
             Ok(())
         })?,
@@ -680,18 +681,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CollapseTrainerSkillLine",
         lua.create_function(|lua, id: usize| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            set_collapsed(&mut model, id, true);
-            queue_trainer_update(&mut model);
+            super::tick::verb(lua, |model| {
+                set_collapsed(model, id, true);
+                raise_trainer_update(model);
+            });
             Ok(())
         })?,
     )?;
     g.set(
         "ExpandTrainerSkillLine",
         lua.create_function(|lua, id: usize| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            set_collapsed(&mut model, id, false);
-            queue_trainer_update(&mut model);
+            super::tick::verb(lua, |model| {
+                set_collapsed(model, id, false);
+                raise_trainer_update(model);
+            });
             Ok(())
         })?,
     )?;

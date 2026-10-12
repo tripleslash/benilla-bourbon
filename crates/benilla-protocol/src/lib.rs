@@ -10,8 +10,8 @@ pub mod wire;
 pub mod world;
 pub use auth::{AuthReject, LogonReply, RealmVersion};
 pub use events::{
-    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, SessionEnd,
-    SessionEvent, SessionEventKind,
+    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, RosterCause,
+    SessionEnd, SessionEvent, SessionEventKind,
 };
 pub use messages::field;
 pub use messages::{
@@ -21,8 +21,8 @@ pub use messages::{
     CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{
-    observe_sends, SendObserver, WardenRequired, WorldAuthReject, WorldConnectEvent, WorldReader,
-    WorldSession, WorldWriter, WORLD_PORT,
+    observe_sends, SendObserver, Unparsed, WardenRequired, WorldAuthReject, WorldConnectEvent,
+    WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -185,6 +185,12 @@ impl Logon {
     /// Whether the realmd connection is still up, so [`Self::refresh_realms_async`] can do anything.
     pub fn realmd_live(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// `CLoginMgr::Cancel` (`0x5b3320`): the realmd socket closes; the session key and the last
+    /// list are kept.
+    pub fn close(&mut self) {
+        self.stream = None;
     }
 }
 

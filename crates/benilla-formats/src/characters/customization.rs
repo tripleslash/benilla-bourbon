@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{name_lang_at, parse, str_at, u32_at};
 use crate::Chain;
 
 const CHR_RACES: &str = "DBFilesClient\\ChrRaces.dbc";
@@ -163,6 +163,8 @@ pub struct CharCreateCatalog {
     displays: HashMap<u8, (u32, u32)>,
     /// race → ChrRaces fileString (col 15), the GlueStrings key stem (`RACE_INFO_<FILE>`).
     files: HashMap<u8, String>,
+    /// race → ChrRaces `Name_Lang` (cols 17-24, `+0x44`), the race name `GetCharacterInfo` returns.
+    names: HashMap<u8, String>,
     /// race → ([male, female] facial-hair token, cols 26/27; hair token, col 28).
     custom_tokens: HashMap<u8, ([String; 2], String)>,
     combos: HashSet<(u8, u8)>,
@@ -173,10 +175,16 @@ pub struct CharCreateCatalog {
 
 impl CharCreateCatalog {
     /// The body displayId for a (race, sex), resolved through CreatureDisplayInfo like any unit.
+    /// The reference reads the race row's male id for gender 0 and the female for 1 and nothing
+    /// for any other gender byte (`0x5ec4c0`), and a zero id finds no model (`0x5ec485`).
     pub fn body_display(&self, race: u8, sex: u8) -> Option<u32> {
-        self.displays
-            .get(&race)
-            .map(|&(m, f)| if sex == 0 { m } else { f })
+        let &(male, female) = self.displays.get(&race)?;
+        let id = match sex {
+            0 => male,
+            1 => female,
+            _ => return None,
+        };
+        (id != 0).then_some(id)
     }
 
     /// Whether a race may be created as a class (CharBaseInfo less `UNUSED_COMBOS`).
@@ -187,6 +195,12 @@ impl CharCreateCatalog {
     /// The ChrRaces fileString for a race (`"Human"`, `"Scourge"`), the GlueStrings key stem.
     pub fn race_file(&self, race: u8) -> Option<&str> {
         self.files.get(&race).map(String::as_str)
+    }
+
+    /// The ChrRaces `Name_Lang` name for a race (`"Night Elf"`, `"Undead"`) at the enUS slot:
+    /// `GetCharacterInfo`'s second return (`0x47332e`).
+    pub fn race_name(&self, race: u8) -> Option<&str> {
+        self.names.get(&race).map(String::as_str)
     }
 
     /// A race's hair glue token (`"NORMAL"`, `"HORNS"`), keying `HAIR_<tok>_STYLE`/`_COLOR`.
@@ -240,7 +254,7 @@ impl CharCreateCatalog {
     }
 
     fn load_with(chain: &mut Chain, rules: &Rules) -> Result<Self> {
-        let (displays, files, custom_tokens) = load_races(chain, rules.playable)?;
+        let (displays, files, names, custom_tokens) = load_races(chain, rules.playable)?;
         let combos = load_combos(chain)?;
         let start_outfits = load_start_outfits(chain)?;
         let avail = load_available_sections(chain)?;
@@ -260,6 +274,7 @@ impl CharCreateCatalog {
         let mut catalog = Self {
             displays,
             files,
+            names,
             custom_tokens,
             combos,
             ranges,
@@ -344,6 +359,7 @@ fn load_races(
 ) -> Result<(
     HashMap<u8, (u32, u32)>,
     HashMap<u8, String>,
+    HashMap<u8, String>,
     HashMap<u8, ([String; 2], String)>,
 )> {
     let bytes = chain
@@ -352,7 +368,7 @@ fn load_races(
     let mut schema = Schema::new("ChrRaces");
     for i in 0..29 {
         let ty = match i {
-            15 | 26 | 27 | 28 => FieldType::String,
+            15 | 17..=24 | 26 | 27 | 28 => FieldType::String,
             _ => FieldType::UInt32,
         };
         schema.add_field(SchemaField::new(format!("f{i}"), ty));
@@ -360,6 +376,7 @@ fn load_races(
     let rs = parse(&bytes, schema, "ChrRaces")?;
     let mut displays = HashMap::new();
     let mut files = HashMap::new();
+    let mut names = HashMap::new();
     let mut tokens = HashMap::new();
     for r in rs.records() {
         let Some(race) = u32_at(r, 0) else { continue };
@@ -373,13 +390,16 @@ fn load_races(
         if let Some(file) = str_at(&rs, r, 15) {
             files.insert(race, file);
         }
+        if let Some(name) = name_lang_at(&rs, r, 17) {
+            names.insert(race, name);
+        }
         if let (Some(fm), Some(ff), Some(hair)) =
             (str_at(&rs, r, 26), str_at(&rs, r, 27), str_at(&rs, r, 28))
         {
             tokens.insert(race, ([fm, ff], hair));
         }
     }
-    Ok((displays, files, tokens))
+    Ok((displays, files, names, tokens))
 }
 
 /// CharBaseInfo → (race, class) pairs: two one-byte fields, parsed by hand off the record block.
@@ -619,6 +639,35 @@ mod tests {
         // A misparse that drops a shipped pair still refuses.
         combos.remove(&(2, 7));
         assert!(shipped_combos_present(&combos, &KNOWN_COMBOS).is_err());
+    }
+
+    /// `GetCharacterInfo`'s race is ChrRaces `Name_Lang` (cols 17-24), not the file string beside
+    /// it: Night Elf and Undead differ from "NightElf" and "Scourge" in the one column each, so a
+    /// slip of a column reads the wrong one.
+    #[test]
+    fn race_names_are_the_name_lang_column() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = CharCreateCatalog::load(&mut chain).expect("load char-create catalog");
+        for (race, name, file) in [
+            (1, "Human", "Human"),
+            (2, "Orc", "Orc"),
+            (3, "Dwarf", "Dwarf"),
+            (4, "Night Elf", "NightElf"),
+            (5, "Undead", "Scourge"),
+            (6, "Tauren", "Tauren"),
+            (7, "Gnome", "Gnome"),
+            (8, "Troll", "Troll"),
+        ] {
+            assert_eq!(cat.race_name(race), Some(name), "race {race}");
+            assert_eq!(cat.race_file(race), Some(file), "race {race}");
+        }
+        assert_eq!(cat.race_name(0), None);
+        // The gender byte picks the race row's male (0) or female (1) display and nothing else.
+        for race in PLAYABLE_RACES {
+            assert!(cat.body_display(race, 0).is_some() && cat.body_display(race, 1).is_some());
+            assert_eq!(cat.body_display(race, 2), None, "race {race}");
+        }
     }
 
     #[test]

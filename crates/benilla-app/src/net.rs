@@ -104,6 +104,7 @@ impl Plugin for NetPlugin {
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
             .insert_resource(RealmChoice(handles.realm))
+            .insert_resource(RosterPolicy(handles.screen_asks_roster))
             .insert_resource(LoginSubmit(handles.login))
             .insert_resource(LoginAbandon(handles.login_abandon))
             .insert_resource(PingShared(handles.ping))
@@ -138,6 +139,8 @@ impl Plugin for NetPlugin {
             .add_message::<WorldportMessage>()
             .add_message::<RealmListMessage>()
             .add_message::<CharListMessage>()
+            .add_message::<WorldAuthMessage>()
+            .add_message::<RosterFailedMessage>()
             .add_message::<CharActionResultMessage>()
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
@@ -189,8 +192,8 @@ impl Plugin for NetPlugin {
 /// The web build's write half.
 ///
 /// A page has no write thread — it has no threads at all — so what `io::writer_loop` owns natively
-/// lives here instead: the current [`WorldWriter`], the swap channel each new connection hands one
-/// over, and the command queue. [`web_writer_pump`] drains both once a frame through the same
+/// lives here instead: the current [`WorldWriter`], the swap channel each world entry hands one over
+/// on and a logout takes it back on ([`io::WriterSwap`]), and the command queue. [`web_writer_pump`] drains both once a frame through the same
 /// `io::dispatch` the native thread calls, so the two targets send byte-identical packets.
 ///
 /// A `Resource` (not a non-`Send` one — Bevy 0.18 has none) because `WorldWriter` **is** `Send` on
@@ -200,7 +203,7 @@ impl Plugin for NetPlugin {
 #[derive(Resource)]
 pub(crate) struct WebWriter {
     writer: Option<benilla_protocol::WorldWriter>,
-    writer_rx: Receiver<benilla_protocol::WorldWriter>,
+    writer_rx: Receiver<io::WriterSwap>,
     cmd_rx: Receiver<ClientCommand>,
     /// `Time`'s elapsed seconds at the last keepalive — the tick the write thread gets from
     /// `crossbeam_channel::tick`, kept off the frame count so it holds at any frame rate.
@@ -210,18 +213,32 @@ pub(crate) struct WebWriter {
     warned: u32,
 }
 
-/// Adopt a freshly-connected writer, drain the frame's commands through it, and keep the 30 s
-/// keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
+/// Apply the sequencer's writer swaps, drain the frame's commands through the writer, and keep the
+/// 30 s keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
 #[cfg(target_arch = "wasm32")]
 fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingShared>) {
     let web = &mut *web;
-    while let Ok(w) = web.writer_rx.try_recv() {
-        web.writer = Some(w);
-        web.warned = 0;
-        web.last_ping = time.elapsed_secs_f64();
-        // A fresh connection restarts the keepalive from scratch, like the real client: sequence 1
-        // is the new socket's first ping, and a stale pong from the old one can no longer match.
-        *ping.0.lock().expect("ping clock") = io::PingClock::default();
+    while let Ok(swap) = web.writer_rx.try_recv() {
+        match swap {
+            io::WriterSwap::Install { writer, fresh_link } => {
+                web.writer = Some(writer);
+                web.warned = 0;
+                web.last_ping = time.elapsed_secs_f64();
+                // A fresh connection restarts the keepalive from scratch, like the real client:
+                // sequence 1 is the new socket's first ping, and a stale pong from the old one can
+                // no longer match. A later entry on the same link keeps the block.
+                if fresh_link {
+                    *ping.0.lock().expect("ping clock") = io::PingClock::default();
+                }
+            }
+            // The world session is over and the link kept: the writer goes back to the sequencer,
+            // which awaits it to rejoin the session at character select.
+            io::WriterSwap::Reclaim(reply) => {
+                if let Some(writer) = web.writer.take() {
+                    let _ = reply.try_send(writer);
+                }
+            }
+        }
     }
     let Some(writer) = web.writer.as_mut() else {
         // No live writer: the session is gone and these commands evaporate — the same answer the
@@ -475,9 +492,95 @@ pub(crate) struct NetEvents(Receiver<SessionEvent>);
 pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 
 /// The character-select channel to the IO thread parked at select: create and delete are served
-/// in place, re-emitting the roster, until an [`CharRequest::Enter`] moves into the world.
+/// in place, re-emitting the roster (under the native policy), until an [`CharRequest::Enter`]
+/// moves into the world.
 #[derive(Resource)]
-pub(crate) struct CharPick(pub(crate) async_channel::Sender<CharRequest>);
+pub(crate) struct CharPick(pub(crate) ParkSender<CharRequest>);
+
+/// A request to the IO thread at a park. The character screen's and the realm list's requests
+/// travel on one channel, in the order the app made them: the reference's verbs act at the call
+/// (`GetCharacterListUpdate` sends its `CMSG_CHAR_ENUM`, `ChangeRealm` then closes the link), so
+/// the IO thread must meet them in that order, which two channels cannot give.
+pub(crate) enum ParkRequest {
+    Char(CharRequest),
+    Realm(RealmRequest),
+}
+
+impl From<CharRequest> for ParkRequest {
+    fn from(r: CharRequest) -> Self {
+        ParkRequest::Char(r)
+    }
+}
+
+impl From<RealmRequest> for ParkRequest {
+    fn from(r: RealmRequest) -> Self {
+        ParkRequest::Realm(r)
+    }
+}
+
+/// The IO thread is gone.
+#[derive(Debug)]
+pub(crate) struct ParkGone;
+
+/// The app's end of the park channel for one kind of request. `async_channel`, as the sequencer
+/// awaits the park (a page's task cannot block); the ECS only ever `try_send`s into the unbounded
+/// queue, so a send never waits.
+pub(crate) enum ParkSender<T> {
+    /// The shared, ordered channel the IO thread reads.
+    Park(
+        async_channel::Sender<ParkRequest>,
+        std::marker::PhantomData<fn(T)>,
+    ),
+    /// A channel of that kind alone, for a test that reads the requests itself.
+    #[cfg(test)]
+    Direct(async_channel::Sender<T>),
+}
+
+impl<T> Clone for ParkSender<T> {
+    fn clone(&self) -> Self {
+        match self {
+            ParkSender::Park(tx, kind) => ParkSender::Park(tx.clone(), *kind),
+            #[cfg(test)]
+            ParkSender::Direct(tx) => ParkSender::Direct(tx.clone()),
+        }
+    }
+}
+
+impl<T> ParkSender<T> {
+    /// The app's end of the IO thread's park channel.
+    pub(super) fn park(tx: async_channel::Sender<ParkRequest>) -> Self {
+        ParkSender::Park(tx, std::marker::PhantomData)
+    }
+}
+
+impl<T> ParkSender<T> {
+    /// Send a request of either kind, in the order it is made against the rest.
+    pub(crate) fn send_request(&self, request: ParkRequest) -> Result<(), ParkGone> {
+        match self {
+            ParkSender::Park(tx, _) => tx.try_send(request).map_err(|_| ParkGone),
+            #[cfg(test)]
+            ParkSender::Direct(_) => Err(ParkGone),
+        }
+    }
+}
+
+impl<T: Into<ParkRequest>> ParkSender<T> {
+    /// Send a request without waiting: the queue is unbounded, so only a gone IO thread fails it.
+    pub(crate) fn send(&self, request: T) -> Result<(), ParkGone> {
+        match self {
+            ParkSender::Park(tx, _) => tx.try_send(request.into()).map_err(|_| ParkGone),
+            #[cfg(test)]
+            ParkSender::Direct(tx) => tx.try_send(request).map_err(|_| ParkGone),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T> From<async_channel::Sender<T>> for ParkSender<T> {
+    fn from(tx: async_channel::Sender<T>) -> Self {
+        ParkSender::Direct(tx)
+    }
+}
 
 /// One request to the IO thread parked at character select.
 pub(crate) enum CharRequest {
@@ -489,13 +592,24 @@ pub(crate) enum CharRequest {
     Delete(u64),
     /// Select's Back: drop the session and return to the pre-logon park.
     Abandon,
+    /// Fetch the roster again (`CMSG_CHAR_ENUM`) on the parked session, then stay parked with
+    /// the fresh roster: `GetCharacterListUpdate`, which the stock screen calls whenever it shows.
+    Enumerate,
 }
+
+/// Whether the screen asks for its roster (the stock glue screens' `GetCharacterListUpdate`)
+/// instead of the IO thread fetching it on reaching the character park (the native screens'). Set
+/// by the UI session as it installs the VM that runs: true with the stock glue VM up, false
+/// otherwise, so a run whose stock VM did not build still gets its roster. The IO thread reads it
+/// as each park is entered.
+#[derive(Resource, Clone)]
+pub(crate) struct RosterPolicy(pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 /// The realm channel: the answer to each [`RealmListMessage`]. Two parks listen, the login-side
 /// one and the character one, since the reference's realm list is a dialog over either screen
 /// (`RealmList.xml` is `frameStrata="DIALOG"`).
 #[derive(Resource)]
-pub(crate) struct RealmChoice(pub(crate) async_channel::Sender<RealmRequest>);
+pub(crate) struct RealmChoice(pub(crate) ParkSender<RealmRequest>);
 
 /// One request to the IO thread about the realm list, served at the logon park and at character
 /// select; at the login park a query fails and the rest are dropped.
@@ -517,7 +631,8 @@ pub(crate) enum RealmRequest {
     /// credentials. At character select, where `RealmListDialogCancelled` is a no-op, nothing.
     Close,
     /// `ConnectToRealm` with the world up (`0x46b22b` → `0x5ab1a0`): the session at character
-    /// select drops and the thread returns to the logon park, realmd still up. Elsewhere, nothing.
+    /// select drops and the thread returns to the logon park, the realmd link as it was (closed
+    /// since a world entry). Elsewhere, nothing.
     Leave,
 }
 
@@ -2117,6 +2232,30 @@ pub(crate) struct RealmListMessage {
 pub(crate) struct CharListMessage {
     pub(crate) characters: Vec<benilla_protocol::Character>,
     pub(crate) realm: Option<benilla_protocol::RealmInfo>,
+    /// What the roster was fetched for.
+    pub(crate) cause: benilla_protocol::RosterCause,
+    /// The world session that sent it ([`WorldAuthMessage::epoch`]).
+    pub(crate) epoch: u64,
+    /// The abandon generation of the attempt that dialed that session.
+    pub(crate) generation: u64,
+}
+
+/// The world server accepted the authentication: the world connect to `realm` is done and the IO
+/// thread is at the character park (`SMSG_AUTH_RESPONSE` success, `0x5ab2b8`).
+#[derive(Message)]
+pub(crate) struct WorldAuthMessage {
+    pub(crate) realm: benilla_protocol::RealmInfo,
+    /// This world session's number, counted per process: what its roster replies carry.
+    pub(crate) epoch: u64,
+    /// The abandon generation of the attempt that dialed it: behind [`LoginAbandon`], the attempt
+    /// was cancelled or disconnected since, and the session is not the screen's.
+    pub(crate) generation: u64,
+}
+
+/// A roster ask on the world session `epoch` failed on the stream.
+#[derive(Message)]
+pub(crate) struct RosterFailedMessage {
+    pub(crate) epoch: u64,
 }
 
 /// A character create or delete result; a refreshed [`CharListMessage`] precedes a success.
@@ -2151,7 +2290,7 @@ pub(crate) struct WorldEnterCascadeMessage;
 
 /// `SMSG_ADDON_INFO`: the addons the server hid from the Lua index space, or `None` if it did
 /// not answer. A resource, since it must exist before the world-entry UI load runs any addon;
-/// rewritten on every login.
+/// rewritten on every login from the reply its link got.
 #[derive(Resource, Default)]
 pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<String>>);
 
@@ -2185,7 +2324,9 @@ pub(crate) struct LoginQueuedMessage {
     pub(crate) realm: Option<String>,
 }
 
-/// The session ended; the IO thread is back at its pre-logon park.
+/// The world session ended. After a logout or a refused character login ([`SessionEnd::LoggedOut`](
+/// benilla_protocol::SessionEnd::LoggedOut)) the IO thread is back at character select on the
+/// same link; after a loss, at its pre-logon park.
 #[derive(Message, Clone)]
 pub(crate) struct DisconnectedMessage {
     pub(crate) reason: String,
@@ -2197,8 +2338,8 @@ pub(crate) struct DisconnectedMessage {
 }
 
 impl DisconnectedMessage {
-    /// `session_over` is false after a logout (the relist is the select the player asked for) and
-    /// in a run declared unattended ([`crate::run_mode::unattended`]), which reconnects. Not the
+    /// `session_over` is false after a logout (the link is kept and character select is what the
+    /// player asked for) and in a run declared unattended ([`crate::run_mode::unattended`]), which reconnects. Not the
     /// login env vars: a person's launch line sets them too, and a reconnect would take the
     /// account back from whoever displaced us.
     pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {

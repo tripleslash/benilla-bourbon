@@ -6,11 +6,14 @@ use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half and the
-/// decrypter. Lives on the network thread (native) or in the sequencer task (web).
+/// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half, the
+/// decrypter, and what the connection learned before the split, for
+/// [`WorldSession::rejoin`](super::WorldSession::rejoin). Lives on the network thread (native) or
+/// in the sequencer task (web).
 pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
+    pub(super) link: super::session::LinkFacts,
 }
 
 impl WorldReader {

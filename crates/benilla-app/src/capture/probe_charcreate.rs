@@ -21,6 +21,9 @@ impl Plugin for ProbeCharCreatePlugin {
         else {
             return; // inert without a valid env spec
         };
+        if super::refuse_under_stock(app, "WOW_PROBE_CHARCREATE") {
+            return;
+        }
         let keep = std::env::var("WOW_PROBE_CHARCREATE_KEEP").as_deref() == Ok("1");
         app.insert_resource(CharCreateProbe {
             req,
@@ -102,7 +105,7 @@ fn drive_charcreate_probe(
                     probe.req.hair_color,
                     probe.req.facial_hair,
                 );
-                let _ = pick.0.try_send(CharRequest::Create(probe.req.clone()));
+                let _ = pick.0.send(CharRequest::Create(probe.req.clone()));
                 probe.state = ProbeState::Creating;
             }
         }
@@ -126,7 +129,7 @@ fn drive_charcreate_probe(
                         Some(c) => {
                             let guid = c.guid;
                             info!("probe-charcreate: cleaning up — deleting guid {guid}");
-                            let _ = pick.0.try_send(CharRequest::Delete(guid));
+                            let _ = pick.0.send(CharRequest::Delete(guid));
                             probe.state = ProbeState::Deleting;
                         }
                         None => {

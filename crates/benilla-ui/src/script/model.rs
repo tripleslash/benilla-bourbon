@@ -1027,9 +1027,17 @@ pub(crate) struct Model {
     pub(crate) chat_bubbles: super::chat_bubble::ChatBubbles,
     /// The world-state readout's rows, gated and resolved by the app.
     pub(crate) worldstate: super::worldstate::WorldStateUiState,
-    /// Events bindings raise. Deviation: fired at the next tick, not synchronously as in the
-    /// reference, because a binding runs inside Lua and cannot re-enter handler dispatch.
+    /// The host's event queue, fired at the start of the next tick ahead of its `OnUpdate` pass
+    /// (`UiScript::tick`). Host producers only: the app's setters (the world map's, the
+    /// world-state rows, a dropped mail attachment), `UiScript::queue_event`, and an engine path
+    /// such as a world click that clears the cursor, which has no verb to fire inside and queues
+    /// so it stays behind the input already queued. A Lua verb never lands here: the reference's
+    /// `SignalEvent` (`0x703e50`, `0x703f50`) runs every handler before it returns, so a verb's
+    /// events fire inside the call, through [`super::tick::verb`].
     pub(crate) pending_events: Vec<(String, Vec<ScriptValue>)>,
+    /// The events the running [`super::tick::verb`] segment has raised, fired in order once its
+    /// model borrow drops; `None` outside a segment, where [`Model::raise`] queues instead.
+    pub(crate) verb_events: Option<Vec<(String, Vec<ScriptValue>)>>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
@@ -1541,6 +1549,7 @@ impl Model {
             chat_bubbles: super::chat_bubble::ChatBubbles::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
+            verb_events: None,
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
             minimap_ping: (0.0, 0.0),
@@ -2093,24 +2102,35 @@ impl Model {
 
     /// The post-load hook's step (`0x76a2f0`): a visible frame undefers, with its title region and
     /// each region it draws (`0x76a310`, `0x76a324`, `0x76a35b`). A hidden one stays deferred.
-    pub(crate) fn layout_load_end(&mut self, h: FrameHandle) {
+    /// Whether any owes a resolve now, as [`Self::layout_on_show_frame`]; the caller runs it
+    /// before the frame's `<Frames>` are built.
+    pub(crate) fn layout_load_end(&mut self, h: FrameHandle) -> bool {
         let Some(f) = self.arena.frame(h) else {
-            return;
+            return false;
         };
         if !f.effective_visible {
-            return;
+            return false;
         }
         let title = f.title_region;
         let regions: Vec<RegionHandle> = f.regions.clone();
-        self.undefer_frame(h);
+        let mut owed = self.undefer_frame(h);
         if let Some(t) = title {
-            self.undefer_region(t);
+            owed |= self.undefer_region(t);
         }
         for rh in regions {
             if Some(rh) != title && self.region_draws(rh) {
-                self.undefer_region(rh);
+                owed |= self.undefer_region(rh);
             }
         }
+        owed || !self.layout_pass.is_empty()
+    }
+
+    /// The layout ids [`Self::layout_load_end`] undeferred: the frame, its title region and the
+    /// regions it draws.
+    pub(crate) fn load_end_roots(&self, h: FrameHandle) -> Vec<u32> {
+        let mut out = self.show_frame_roots(h);
+        out.extend(self.show_region_roots(h));
+        out
     }
 
     /// The region's own shown bit (`+0xc4`): not hidden, and linked to its owner.
