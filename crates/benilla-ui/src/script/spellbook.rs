@@ -119,7 +119,9 @@ impl super::UiScript {
     /// `(spell id, onSelf)`.
     pub fn take_spell_casts(&mut self) -> Vec<(u32, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::CastSpell { spell_id, on_self } => Some((*spell_id, *on_self)),
+            ScriptCall::CastSpell {
+                spell_id, on_self, ..
+            } => Some((*spell_id, *on_self)),
             _ => None,
         })
     }
@@ -496,7 +498,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         model.script_calls.push(if is_pet_book(&book_type) {
                             ScriptCall::CastPetSpell { spell_id, on_self }
                         } else {
-                            ScriptCall::CastSpell { spell_id, on_self }
+                            ScriptCall::CastSpell {
+                                spell_id,
+                                on_self,
+                                unit: None,
+                            }
                         });
                     }
                 }
@@ -562,16 +568,44 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `CastSpell`, so it queues the same call; `SlashCmdList["CAST"]` calls it. The target guid
     // defaults to the selection (`0x4b4adb`), and a nonzero `GetBoolOrDefault(L, 2, 0)`
     // (`0x4b4aea`-`0x4b4af1`) swaps it for the active player's (`0x4b4afa`).
+    //
+    // Deviation (this fork): the name may carry retail macro options (`[@mouseover,help][] Heal`,
+    // [`super::macro_options`]), read before the name resolves: no clause holding casts nothing,
+    // `@player` is `onSelf`, and another unit is cast at in the selection's place, or at the
+    // selection when it names nobody. A retail `!` before the name (do not toggle off) is dropped.
     g.set(
         "CastSpellByName",
         lua.create_function(|lua, (name, on_self): (String, Option<Value>)| {
-            let on_self = bool_or_default(on_self.as_ref(), false);
+            let mut on_self = bool_or_default(on_self.as_ref(), false);
+            // A name without option syntax resolves exactly as 1.12's does.
+            let (name, unit) = if super::macro_options::has_options(&name) {
+                match super::macro_options::evaluate(lua, &name)? {
+                    Some((value, unit)) => {
+                        let value = value.strip_prefix('!').unwrap_or(&value).trim().to_string();
+                        (value, unit)
+                    }
+                    None => return Ok(()),
+                }
+            } else {
+                (name, None)
+            };
+            let name = name.as_str();
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(slot) = resolve_spell_by_name(&model.spellbook, &name) {
+            let unit = match unit {
+                Some(token) if token.eq_ignore_ascii_case("player") => {
+                    on_self = true;
+                    None
+                }
+                Some(token) => model.unit_guids.guid_of(&token).ok().flatten(),
+                None => None,
+            };
+            if let Some(slot) = resolve_spell_by_name(&model.spellbook, name) {
                 let spell_id = slot.spell_id;
-                model
-                    .script_calls
-                    .push(ScriptCall::CastSpell { spell_id, on_self });
+                model.script_calls.push(ScriptCall::CastSpell {
+                    spell_id,
+                    on_self,
+                    unit,
+                });
             }
             Ok(())
         })?,
@@ -1030,6 +1064,37 @@ mod tests {
                 vec![(133, on_self)],
                 "CastSpellByName(\"Fireball\"{arg})"
             );
+        }
+    }
+
+    /// This fork's retail macro options: a plain name resolves as before; `[]` always
+    /// holds, `@player` is `onSelf`, a clause that fails casts nothing and `!` is dropped.
+    #[test]
+    fn cast_spell_by_name_reads_retail_options_and_leaves_a_plain_name_alone() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        for (line, want) in [
+            (r#"CastSpellByName("Fireball")"#, vec![(133, false)]),
+            (r#"CastSpellByName("Fireball", 1)"#, vec![(133, true)]),
+            // A plain name reaches the resolver untouched, which reads padding as it always did.
+            (r#"CastSpellByName(" Fireball")"#, vec![(133, false)]),
+            (r#"CastSpellByName("[] Fireball")"#, vec![(133, false)]),
+            (
+                r#"CastSpellByName("[@mouseover,help,nodead][] !Fireball")"#,
+                vec![(133, false)],
+            ),
+            (
+                r#"CastSpellByName("[@player] Fireball")"#,
+                vec![(133, true)],
+            ),
+            (r#"CastSpellByName("[help] Fireball")"#, vec![]),
+            (
+                r#"CastSpellByName("[help] Nothing; Fireball")"#,
+                vec![(133, false)],
+            ),
+        ] {
+            s.run(line).unwrap();
+            assert_eq!(s.take_spell_casts(), want, "{line}");
         }
     }
 

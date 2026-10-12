@@ -96,6 +96,7 @@ mod layout_cache;
 mod loot;
 mod loot_roll;
 mod lua50;
+mod macro_options;
 mod macros;
 mod mail;
 mod measure;
@@ -235,6 +236,7 @@ pub use item_text::ItemTextState;
 pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
+pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
 pub use mail::{
     MailInboxRow, MailInvoice, MailSendRequest, MailState, PackageView, StationeryView,
@@ -621,6 +623,7 @@ fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     cursor::install(lua)?;
     spellbook::install(lua)?;
     macros::install(lua)?;
+    macro_options::install(lua)?;
     talent::install(lua)?;
     dialog_verbs::install(lua)?;
     battlefield_score::install(lua)?;

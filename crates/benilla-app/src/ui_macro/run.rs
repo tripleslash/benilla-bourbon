@@ -88,9 +88,29 @@ fn quoted_call_argument(line: &str) -> Option<String> {
 
 /// The macro's bound spell: [`cast_name`] resolved as `CastSpellByName` resolves
 /// ([`resolve_spell_by_name`]), so the cooldown swirl and the press agree on the rank.
-pub(crate) fn bound_spell(table: &SlashCommands, body: &str, book: &SpellBookState) -> BoundSpell {
-    let Some((arm, name)) = cast_name(table, body) else {
+///
+/// Deviation (this fork): a `#show` argument names the spell in the cast line's place, and a name
+/// with retail macro options binds the value `options` selects as the world stands (the VM's
+/// evaluator), nothing when no clause holds. A plain name binds as in 1.12.
+pub(crate) fn bound_spell(
+    table: &SlashCommands,
+    body: &str,
+    book: &SpellBookState,
+    options: &dyn Fn(&str) -> Option<String>,
+) -> BoundSpell {
+    let shown = benilla_ui::script::show_directive(body)
+        .and_then(|s| s.arg.filter(|_| !s.is_none()))
+        .map(|arg| (CastArm::Slash, arg.to_string()));
+    let Some((arm, name)) = shown.or_else(|| cast_name(table, body)) else {
         return BoundSpell::None;
+    };
+    let name = if benilla_ui::script::macro_has_options(&name) {
+        match options(&name) {
+            Some(value) => value.strip_prefix('!').unwrap_or(&value).trim().to_string(),
+            None => return BoundSpell::None,
+        }
+    } else {
+        name
     };
     match (resolve_spell_by_name(book, &name), arm) {
         (Some(s), _) => BoundSpell::Spell(s.spell_id),
@@ -214,16 +234,51 @@ mod tests {
         let t = table();
         // No subtext -> the highest known rank.
         assert_eq!(
-            bound_spell(&t, "/cast Fireball", &book),
+            bound_spell(&t, "/cast Fireball", &book, &|_| None),
             BoundSpell::Spell(145)
         );
         // A pinned subtext -> that rank, both spacings.
         assert_eq!(
-            bound_spell(&t, "/cast Fireball(Rank 1)", &book),
+            bound_spell(&t, "/cast Fireball(Rank 1)", &book, &|_| None),
             BoundSpell::Spell(133)
         );
         assert_eq!(
-            bound_spell(&t, "/cast Fireball (Rank 1)", &book),
+            bound_spell(&t, "/cast Fireball (Rank 1)", &book, &|_| None),
+            BoundSpell::Spell(133)
+        );
+    }
+
+    /// This fork: `#show` names the bound spell, `#show none` leaves the cast line's, and a cast
+    /// with retail options binds what the evaluator selects, nothing when no clause holds.
+    #[test]
+    fn show_lines_and_options_choose_the_bound_spell() {
+        use benilla_ui::script::SpellSlotView;
+
+        let slot = |spell_id, name: &str| SpellSlotView {
+            spell_id,
+            name: name.into(),
+            ..Default::default()
+        };
+        let book = SpellBookState {
+            tabs: Vec::new(),
+            slots: vec![slot(133, "Fireball"), slot(116, "Frostbolt")],
+        };
+        let t = table();
+        let none = |_: &str| None;
+        let last = |s: &str| s.rsplit(']').next().map(|v| v.trim().to_string());
+        let hop = "#showtooltip\n/cast [@mouseover,help,nodead][] Frostbolt";
+        assert_eq!(bound_spell(&t, hop, &book, &last), BoundSpell::Spell(116));
+        assert_eq!(bound_spell(&t, hop, &book, &none), BoundSpell::None);
+        assert_eq!(
+            bound_spell(&t, "#show Fireball\n/cast Frostbolt", &book, &none),
+            BoundSpell::Spell(133)
+        );
+        assert_eq!(
+            bound_spell(&t, "#show none\n/cast Frostbolt", &book, &none),
+            BoundSpell::Spell(116)
+        );
+        assert_eq!(
+            bound_spell(&t, "/cast [] !Fireball", &book, &last),
             BoundSpell::Spell(133)
         );
     }
@@ -235,17 +290,28 @@ mod tests {
         let book = SpellBookState::default();
         let t = table();
         assert_eq!(
-            bound_spell(&t, "/cast Pyroblast", &book),
+            bound_spell(&t, "/cast Pyroblast", &book, &|_| None),
             BoundSpell::Unresolved
         );
         assert_eq!(
-            bound_spell(&t, "/spell Pyroblast\n/say pew", &book),
+            bound_spell(&t, "/spell Pyroblast\n/say pew", &book, &|_| None),
             BoundSpell::Unresolved
         );
-        assert_eq!(bound_spell(&t, "/say hi", &book), BoundSpell::None);
-        assert_eq!(bound_spell(&t, ".spawn 16032", &book), BoundSpell::None);
         assert_eq!(
-            bound_spell(&t, r#"/script CastSpellByName("Pyroblast")"#, &book),
+            bound_spell(&t, "/say hi", &book, &|_| None),
+            BoundSpell::None
+        );
+        assert_eq!(
+            bound_spell(&t, ".spawn 16032", &book, &|_| None),
+            BoundSpell::None
+        );
+        assert_eq!(
+            bound_spell(
+                &t,
+                r#"/script CastSpellByName("Pyroblast")"#,
+                &book,
+                &|_| None
+            ),
             BoundSpell::None
         );
     }

@@ -171,6 +171,8 @@ fn rebind_macro_spells(
     table: Option<Res<crate::ui_chat::commands::SlashCommands>>,
     mut bound: ResMut<MacroBoundSpells>,
     mut last_generation: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    // Whether a macro reads retail options, whose choice moves with the world (this fork).
+    mut conditional: Local<bool>,
 ) {
     let (Some(mut script), Some(table)) = (script, table) else {
         return;
@@ -178,19 +180,33 @@ fn rebind_macro_spells(
     // Per VM: a fresh VM restarts its generation at 0, which a bare memo would gate off for good.
     let last_generation = last_generation.get(&script);
     let generation = script.macros_generation();
-    if *last_generation == Some(generation) && !actions.is_changed() {
+    if *last_generation == Some(generation) && !actions.is_changed() && !*conditional {
         return;
     }
     *last_generation = Some(generation);
 
     let (macros, book) = (script.macros(), script.spellbook());
     let mut fresh = std::collections::HashMap::new();
-    for index in 1..=(benilla_ui::script::MAX_MACROS as u32 * 2) {
-        let Some(m) = macros.get(index as usize) else {
-            continue;
-        };
-        fresh.insert(index, run::bound_spell(&table, &m.body, &book));
+    *conditional = false;
+    {
+        let options = |s: &str| script.macro_option_value(s).map(|(value, _)| value);
+        for index in 1..=(benilla_ui::script::MAX_MACROS as u32 * 2) {
+            let Some(m) = macros.get(index as usize) else {
+                continue;
+            };
+            *conditional |= m.body.contains('[') || m.body.contains(';');
+            fresh.insert(index, run::bound_spell(&table, &m.body, &book, &options));
+        }
     }
+    // A `#show` button draws its bound spell's icon (`GetActionTexture`), so a slot whose macro
+    // moved to another spell is told to redraw, as an edit would.
+    let moved: Vec<u32> = actions
+        .buttons
+        .iter()
+        .filter(|(_, b)| b.kind == benilla_protocol::messages::ACTION_KIND_MACRO)
+        .filter(|(_, b)| !bound.0.is_empty() && fresh.get(&b.action) != bound.0.get(&b.action))
+        .map(|(slot, _)| u32::from(*slot) + 1)
+        .collect();
     // The engine's copy, for `GetActionAutocast`, re-pushed on every recompute so a fresh VM has
     // it. The book flag stays the player's: `run::bound_spell` resolves the player's book only.
     script.set_macro_bindings(
@@ -223,6 +239,12 @@ fn rebind_macro_spells(
         );
         bound.0 = fresh;
     }
+    for slot in moved {
+        script.fire_event(
+            "ACTIONBAR_SLOT_CHANGED",
+            vec![ScriptValue::Int(i64::from(slot))],
+        );
+    }
 }
 
 /// The event each macro line is fired as: id `0x188`, whose registry slot `0xbe17b8` is written
@@ -237,7 +259,12 @@ pub(crate) fn run_macro(script: &mut UiScript, index: u32) -> bool {
     let Some(body) = script.macros().get(index as usize).map(|m| m.body.clone()) else {
         return false;
     };
-    let lines: Vec<String> = run::macro_lines(&body).map(str::to_string).collect();
+    // Deviation (this fork): a `#` line (`#showtooltip`) is the button's, never sent, as retail
+    // keeps it; 1.12 would send it as chat.
+    let lines: Vec<String> = run::macro_lines(&body)
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
     if lines.is_empty() {
         return false;
     }

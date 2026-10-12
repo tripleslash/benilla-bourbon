@@ -221,6 +221,26 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// This fork: a `#showtooltip` line is the button's and never reaches the chat frame, which 1.12
+/// would send as `/say`.
+#[test]
+fn a_show_line_is_not_sent() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = ui();
+    s.set_macros(MacroState {
+        account: vec![macro_view("Hop", "#showtooltip\n/say go")],
+        character: Vec::new(),
+    });
+    assert!(super::run_macro(&mut s, 1));
+    assert_eq!(
+        s.take_chat_sends()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["go".to_string()]
+    );
+}
+
 /// The reference's tokenizer (`0x64ae50`) splits on either `\r` or `\n`.
 #[test]
 fn either_line_ending_splits_a_body() {

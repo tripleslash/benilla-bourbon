@@ -196,7 +196,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, action: u32| {
             let tex = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.actions.get(&action).and_then(|s| s.texture.clone())
+                // Deviation (this fork): a `#show` macro shows its spell's icon, as retail does.
+                let shown = model
+                    .actions
+                    .get(&action)
+                    .filter(|s| s.kind & 0xf0 == ACTION_KIND_MACRO)
+                    .and_then(|s| super::macro_options::shown_spell(&model, s.action))
+                    .and_then(|(spell, _)| {
+                        model
+                            .spellbook
+                            .slots
+                            .iter()
+                            .find(|slot| slot.spell_id == spell)
+                            .and_then(|slot| slot.texture.clone())
+                    });
+                shown.or_else(|| model.actions.get(&action).and_then(|s| s.texture.clone()))
             };
             match tex {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),

@@ -14,6 +14,9 @@ const BEYOND_1_12: &[&str] = &[
     // addon reaches the globals with `getfenv(0)`); ours does, as our `getglobal`/`setglobal` are
     // written over it.
     "_G",
+    // This fork reads retail macro options (`script::macro_options`), and keeps the evaluator
+    // under retail's name for `/script` lines and macro addons written against it.
+    "SecureCmdOptionParse",
 ];
 
 /// `reference/1.12-globals.tsv`'s names.

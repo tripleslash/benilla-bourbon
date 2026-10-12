@@ -35,7 +35,13 @@ pub enum ScriptCall {
     SpellStopCasting,
     /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)`, through `0x4b3300`'s
     /// player leg; `onSelf` swaps the target guid for the active player's (`0x4b4afa`, `0x4b4345`).
-    CastSpell { spell_id: u32, on_self: bool },
+    /// `unit` is the guid a macro option's `@unit` resolved to (this fork,
+    /// [`super::macro_options`]), cast at in the selection's place; `None` in 1.12.
+    CastSpell {
+        spell_id: u32,
+        on_self: bool,
+        unit: Option<u64>,
+    },
     /// `CastSpell(id, "pet", onSelf)`, `0x4b3300`'s `CMSG_PET_ACTION` fork (`0x4b34ce`), with the
     /// same guid swap.
     CastPetSpell { spell_id: u32, on_self: bool },

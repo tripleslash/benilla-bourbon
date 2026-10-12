@@ -174,6 +174,9 @@ pub struct UnitState {
     /// The city-protector title, `PLAYER_BYTES_3` byte 2 (0 none): `UnitPVPName` appends the
     /// `PVP_MEDAL<n>` line for a non-zero one (`0x6093ef`).
     pub pvp_medal: u8,
+    /// `UNIT_FIELD_MOUNTDISPLAYID` is set: the retail macro option `[mounted]` (this fork; 1.12
+    /// exposes no mounted verb).
+    pub mounted: bool,
     /// `UnitFactionGroup`'s first return, `"Alliance"` or `"Horde"`: `FactionGroup.dbc`'s English
     /// `InternalName` for the side bit of the faction template's group mask, which stock builds
     /// texture paths from (`PlayerFrame.lua:68`). `None` for a template with no side.

@@ -767,7 +767,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetAction(slot): the action-bar hover by payload kind (`0x5322a0`): a spell
     // (0x00) to the spell builder `0x52e610`, an item (0x80) to the item builder `0x52b650`, a
     // macro (0x40) to `0x52b040`, which fetches it (`0x4f0f40`) and renders only its name, white
-    // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`.
+    // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`, which this
+    // fork reads (`script::macro_options`).
     m.set(
         "SetAction",
         lua.create_function(|lua, (this, slot): (Table, u32)| {
@@ -789,6 +790,29 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None,
                 ),
                 0x80 => super::tooltip_item::render_by_id(lua, &this, a.action, None, None),
+                // Deviation (this fork): a `#showtooltip` macro shows its spell's tooltip, as
+                // retail does.
+                0x40 if {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    super::macro_options::shown_spell(&model, a.action).is_some_and(|(_, t)| t)
+                } =>
+                {
+                    let spell = {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        super::macro_options::shown_spell(&model, a.action).map_or(0, |(s, _)| s)
+                    };
+                    set_spell_by_id(
+                        lua,
+                        &this,
+                        spell,
+                        None,
+                        SpellRenderOpts {
+                            show_rank: true,
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                }
                 0x40 => {
                     let h = frame_handle_of(lua, &this)?;
                     clear(lua, h);

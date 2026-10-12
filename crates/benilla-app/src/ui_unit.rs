@@ -961,6 +961,9 @@ pub(crate) fn snapshot(
         pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
         // `PLAYER_BYTES_3` byte 2, the city-protector title (`PVP_MEDAL<n>`), unset by vmangos.
         pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
+        // `[mounted]` (this fork): a mount display is the one mounted signal, as the animation
+        // driver reads it.
+        mounted: store.0.unit_mount_display_id() != 0,
         // The quest-log window, off a player alone: `IsUnitOnQuest` looks the guid up with
         // TYPEMASK_PLAYER (`0x4dfe97`) before it reads `[obj+0xe68]`.
         quest_log: if matches!(store.0.object_type(), Some(ObjectType::Player)) {

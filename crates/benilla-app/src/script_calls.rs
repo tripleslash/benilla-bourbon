@@ -49,8 +49,12 @@ pub(crate) fn apply_script_calls(
             ScriptCall::SpellTargetUnit(token) => appliers.p1().spell_target_unit(&token),
             ScriptCall::SpellStopTargeting => appliers.p1().stop_targeting(),
             ScriptCall::SpellStopCasting => appliers.p2().stop_casting(),
-            ScriptCall::CastSpell { spell_id, on_self } => {
-                crate::ui_spellbook::cast_spell(&mut appliers.p3(), spell_id, on_self);
+            ScriptCall::CastSpell {
+                spell_id,
+                on_self,
+                unit,
+            } => {
+                crate::ui_spellbook::cast_spell(&mut appliers.p3(), spell_id, on_self, unit);
             }
             ScriptCall::CastShapeshiftForm(spell_id) => {
                 crate::ui_shapeshift::cast_form(&mut appliers.p3(), spell_id);

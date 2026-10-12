@@ -424,7 +424,12 @@ fn leading_number(s: &str) -> u32 {
 /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)` (`0x4b3300`'s player leg),
 /// through the cast tail the action bar uses, at the selection as the calls before it left it, or
 /// with `onSelf` at the caster.
-pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_self: bool) {
+pub(crate) fn cast_spell(
+    cast: &mut crate::spell::ScriptCast,
+    spell_id: u32,
+    on_self: bool,
+    unit: Option<u64>,
+) {
     let crate::spell::ScriptCast { targeting, ladder } = cast;
     // `CastSpell`'s two cancel forks (`0x4b3300`), in order: the active-action toggle
     // (`0x4b36f0`), then the form match (`0x4b348b`), which `UseAction` lacks, with its silent
@@ -458,12 +463,18 @@ pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_
             }
         }
     }
+    // A macro option's `@unit` (this fork) binds that unit in the selection's place; `onSelf`
+    // still wins, as `@player` resolves to it.
+    let ctx = match unit.filter(|_| !on_self) {
+        Some(guid) => targeting.context_at(guid),
+        None => targeting.context().self_bound(on_self),
+    };
     debug!(
         "ui_spellbook: cast {spell_id} (target {:?}{})",
-        targeting.selection.guid,
+        ctx.selection_guid,
         if on_self { ", on self" } else { "" }
     );
-    ladder.send_spell(spell_id, &targeting.context().self_bound(on_self), on_self);
+    ladder.send_spell(spell_id, &ctx, on_self);
 }
 
 #[cfg(test)]
