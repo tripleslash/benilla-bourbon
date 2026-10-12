@@ -123,6 +123,9 @@ pub(crate) struct GlueArt {
     pub(crate) chat_input_right: Option<(Handle<Image>, Vec2)>,
     /// The login screen's logo (bottom center) and checkbox.
     pub(crate) blizzard_logo: Option<Handle<Image>>,
+    /// The login screen's own WoW logo where the client's `AccountLogin.xml` names one: Turtle WoW
+    /// 1.18.1's `turtlewow_expansion_logo`, drawn 236×118. `None` shows [`Self::logo`].
+    pub(crate) login_logo: Option<Handle<Image>>,
     pub(crate) checkbox: Option<CheckboxArt>,
     /// The AddOn List screen's set (`GlueXML/AddonList.xml`). The six `HelpFrame-*` pieces are the
     /// whole framed panel; its tooltip uses the in-game `UI-Tooltip-Border`, not the glue one.
@@ -405,6 +408,14 @@ impl GlueArt {
         // The login screen's set.
         self.blizzard_logo = assets
             .sprite_texture_blocking("Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo", images);
+        self.login_logo = if crate::flavor::turtle() {
+            assets.sprite_texture_blocking(
+                "Interface\\Glues\\Common\\turtlewow_expansion_logo",
+                images,
+            )
+        } else {
+            None
+        };
         self.checkbox = (|| {
             Some(CheckboxArt {
                 up: assets.sprite_texture_blocking("Interface\\Buttons\\UI-CheckBox-Up", images)?,

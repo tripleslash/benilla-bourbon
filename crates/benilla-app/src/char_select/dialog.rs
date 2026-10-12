@@ -188,9 +188,14 @@ pub(super) fn drive_delete_dialog(
     }
 }
 
-/// Build `CharacterDeleteDialog`'s layout: the 512×256 DialogBox centered, the question, the
+/// Build `CharacterDeleteDialog`'s layout: the 512-wide DialogBox centered, the question, the
 /// instructions, the alert icon, the edit box, Okay and Cancel. The vertical positions resolve the
 /// reference's anchor chain: Text1 TOP (0,-16), instructions 20 below, the box 5 below (top 102).
+/// The box is as tall as `CharacterDeleteDialog_OnShow` makes it, `16 + Text1 + Text2 + 23 + the
+/// edit box + 8 + a button + 16`: 196 with the two-line question and the one-line instructions at
+/// the heights this screen draws them (47 and 14), where the authored 256 only stands until the
+/// first show. Turtle WoW 1.18.1 seats the alert icon 6 lower and captions the first button
+/// `CONFIRM`.
 fn spawn_dialog(
     commands: &mut Commands,
     art: &GlueArt,
@@ -219,6 +224,11 @@ fn spawn_dialog(
         Some((a, b)) => (a.trim_end_matches('\n').to_string(), b.replace("|r", "")),
         None => (filled.clone(), String::new()),
     };
+    let turtle = crate::flavor::turtle();
+    // `CharacterDeleteDialog_OnShow`'s height (the function's doc).
+    let box_h: f32 = 196.0;
+    // The 64² alert icon at LEFT (12,10), Turtle's at LEFT (12,4): centred, then that far up.
+    let icon_top = (box_h - 64.0) / 2.0 - if turtle { 4.0 } else { 10.0 };
 
     commands
         .spawn((
@@ -236,7 +246,7 @@ fn spawn_dialog(
         .with_children(|overlay_ui| {
             let mut boxed = overlay_ui.spawn(Node {
                 width: px(512.0),
-                height: px(256.0),
+                height: px(box_h),
                 ..default()
             });
             boxed.with_children(|b| {
@@ -260,14 +270,13 @@ fn spawn_dialog(
                         overlay(),
                     ));
                 }
-                // The 64² alert icon at LEFT (12,10): its center is 118 from the top.
                 if let Some(alert) = &art.dialog_alert {
                     b.spawn((
                         ImageNode::new(alert.clone()),
                         Node {
                             position_type: PositionType::Absolute,
                             left: px(12.0),
-                            top: px(86.0),
+                            top: px(icon_top),
                             width: px(64.0),
                             height: px(64.0),
                             ..default()
@@ -431,7 +440,11 @@ fn spawn_dialog(
                             art,
                             &font,
                             DialogAction::Okay,
-                            strings.text("OKAY", "Okay"),
+                            if turtle {
+                                strings.text("CONFIRM", "Confirm")
+                            } else {
+                                strings.text("OKAY", "Okay")
+                            },
                             200.0,
                             40.0,
                             GlueBtnKind::Dialog,

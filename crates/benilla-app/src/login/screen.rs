@@ -6,6 +6,11 @@
 //! because the screen keeps only what logging in needs. Deviation (this fork): so is the Quit
 //! button (`AccountLoginExitButton`), because in a browser tab closing the client is the
 //! browser's gesture.
+//!
+//! Under Turtle WoW 1.18.1 the screen takes that client's `AccountLogin.xml` seats: its own logo
+//! at 236×118, the Blizzard logo at BOTTOM (0,20), a 173-wide Login button at TOP (11,−519) and
+//! the checkbox under that button. Deviation: Turtle's six link buttons are absent, as the
+//! Community Site button is.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -38,12 +43,14 @@ pub(crate) enum LoginAction {
     ToggleSave,
 }
 
-/// Root of the login screen; `with_art` and `s` (the glue scale) record what the tree was built
-/// with, so late art or a window resize rebuilds it.
+/// Root of the login screen; `with_art`, `s` (the glue scale) and `turtle` (the client whose
+/// seats it took) record what the tree was built with, so late art, a window resize or a change
+/// of flavor rebuilds it.
 #[derive(Component)]
 pub(super) struct LoginUi {
     with_art: bool,
     s: f32,
+    turtle: bool,
 }
 /// The account box's row items, painted by [`refresh_boxes`].
 #[derive(Component, Clone)]
@@ -84,9 +91,10 @@ pub(super) fn materialize_screen(
     }
     let with_art = art.button_up.is_some();
     let s = crate::glue::screen_scale(window.single().ok());
+    let turtle = crate::flavor::turtle();
     match existing.single() {
         Ok((root, ui)) => {
-            if (!ui.with_art && with_art) || ui.s != s {
+            if (!ui.with_art && with_art) || ui.s != s || ui.turtle != turtle {
                 commands.entity(root).despawn();
                 spawn_screen(
                     &mut commands,
@@ -139,6 +147,8 @@ fn spawn_screen(
     };
     let s = crate::glue::screen_scale(window.single().ok());
     let px = |v: f32| Val::Px(v * s);
+    // Whose `AccountLogin.xml` seats the screen takes (the module header).
+    let turtle = crate::flavor::turtle();
     let empty = GlueStrings::default();
     let strings = strings.unwrap_or(&empty);
 
@@ -148,6 +158,7 @@ fn spawn_screen(
             LoginUi {
                 with_art: art.button_up.is_some(),
                 s,
+                turtle,
             },
             GlobalZIndex(SCREEN_Z),
             Node {
@@ -169,21 +180,30 @@ fn spawn_screen(
     // The chrome hangs off the canvas, the boxed scene's rect, so it stays out of the bars.
     let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
     canvas.with_children(|ui| {
-        // The WoW logo (`AccountLoginLogo`, 256×128 at TOPLEFT (3,−7), OVERLAY).
-        if let Some(logo) = &art.logo {
-            ui.spawn((
+        // The WoW logo (`AccountLoginLogo`, 256×128 at TOPLEFT (3,−7), OVERLAY). Turtle's is its
+        // own file at 236×118 in the same seat; it is no [`GlueLogo`](crate::glue::art::GlueLogo),
+        // which a data change repoints at the shared logo.
+        let (logo, logo_w, logo_h) = if turtle {
+            (art.login_logo.as_ref().or(art.logo.as_ref()), 236.0, 118.0)
+        } else {
+            (art.logo.as_ref(), 256.0, 128.0)
+        };
+        if let Some(logo) = logo {
+            let mut node = ui.spawn((
                 ImageNode::new(logo.clone()),
-                abs(s, 3.0, 7.0, 256.0, 128.0),
-                crate::glue::art::GlueLogo,
+                abs(s, 3.0, 7.0, logo_w, logo_h),
             ));
+            if !turtle {
+                node.insert(crate::glue::art::GlueLogo);
+            }
         }
 
-        // The Blizzard logo (100×100 at BOTTOM (0,8), ARTWORK) under the `BLIZZ_DISCLAIMER`
-        // line at BOTTOM (0,10), an authored overlap.
+        // The Blizzard logo (100×100 at BOTTOM (0,8), ARTWORK; Turtle's at (0,20)) under the
+        // `BLIZZ_DISCLAIMER` line at BOTTOM (0,10), an authored overlap.
         if let Some(blizz) = &art.blizzard_logo {
             ui.spawn((Node {
                 position_type: PositionType::Absolute,
-                bottom: px(8.0),
+                bottom: px(if turtle { 20.0 } else { 8.0 }),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -345,7 +365,9 @@ fn spawn_screen(
                 });
         }
 
-        // Login (`GlueButtonTemplate` 170×45 at TOP (8,−519)).
+        // Login (`GlueButtonTemplate` 170×45 at TOP (8,−519); Turtle's 173×45 at TOP (11,−519)):
+        // the left margin in a centred row is twice the x offset.
+        let (login_w, login_dx) = if turtle { (173.0, 11.0) } else { (170.0, 8.0) };
         ui.spawn((Node {
             position_type: PositionType::Absolute,
             top: px(519.0),
@@ -355,7 +377,7 @@ fn spawn_screen(
         },))
             .with_children(|row| {
                 row.spawn(Node {
-                    margin: UiRect::left(px(16.0)),
+                    margin: UiRect::left(px(2.0 * login_dx)),
                     ..default()
                 })
                 .with_children(|slot| {
@@ -365,7 +387,7 @@ fn spawn_screen(
                         &font,
                         LoginAction::Login,
                         strings.text("LOGIN", "Login"),
-                        170.0,
+                        login_w,
                         45.0,
                         GlueBtnKind::Normal,
                         s,
@@ -402,11 +424,18 @@ fn spawn_screen(
         );
 
         // The Remember Account Name checkbox (20×20 at (17, top 653), resolved from its anchor
-        // under the absent Community button) and its label at LEFT+24.
+        // under the absent Community button) and its label at LEFT+24. Turtle anchors its
+        // BOTTOMLEFT to the Login button's at (−15,−15): 90.5 left of the centre, top 559.
+        let (check_left, check_margin, check_top) = if turtle {
+            (Val::Percent(50.0), px(-90.5), 559.0)
+        } else {
+            (px(17.0), Val::Px(0.0), 653.0)
+        };
         ui.spawn((Node {
             position_type: PositionType::Absolute,
-            left: px(17.0),
-            top: px(653.0),
+            left: check_left,
+            top: px(check_top),
+            margin: UiRect::left(check_margin),
             height: px(20.0),
             align_items: AlignItems::Center,
             flex_direction: FlexDirection::Row,
