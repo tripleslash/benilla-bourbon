@@ -188,24 +188,6 @@ fn view_normal_at(px: vec2<i32>, p: vec3<f32>, dims: vec2<f32>, bounds: vec2<i32
     return select(unit, -unit, dot(unit, -p) < 0.0);
 }
 
-// The EMITTER normal, on the cheap: forward differences only. It is wanted once per sample that
-// actually shuts new sectors — a minority — where the receiver normal above is wanted once per
-// pixel, so the two are allowed to disagree about how much they pay.
-fn emitter_normal(px: vec2<i32>, sp: vec3<f32>, dims: vec2<f32>, bounds: vec2<i32>) -> vec3<f32> {
-    let zero = vec2<i32>(0);
-    let rx = clamp(px + vec2<i32>(1, 0), zero, bounds);
-    let ry = clamp(px + vec2<i32>(0, 1), zero, bounds);
-    if (depth_at(rx) <= 0.0 || depth_at(ry) <= 0.0) {
-        return normalize(-sp);
-    }
-    let n = cross(view_pos_at(ry, dims) - sp, view_pos_at(rx, dims) - sp);
-    if (dot(n, n) < 1e-12) {
-        return normalize(-sp);
-    }
-    let unit = normalize(n);
-    return select(unit, -unit, dot(unit, -sp) < 0.0);
-}
-
 /// Spans thinner than this fraction of ONE sector are dropped instead of rounded up. A sample lying
 /// in the receiver's own plane produces a span a few float epsilons wide, and `ceil` would promote
 /// every one of them to a whole sector — open ground would sit at 31/32 visible and never reach 1.
@@ -367,7 +349,13 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
                 // Only what this sample shut FIRST may light us. That is what stops a row of trees
                 // from each bouncing the same patch of lit grass into the same pixel.
-                if (want_gi && fresh != 0u) {
+                // And only a surface the receiver is not BEHIND. Under the thickness model the
+                // sample is a slab one thickness deep; a receiver further from the camera than its
+                // back face sees only that back, which the colour buffer never holds. Bouncing the
+                // lit front face instead draws every object's colour as a halo onto what stands
+                // behind it. It still shuts its sectors: the occlusion is real, the colour is not.
+                let behind_slab = sp.z - p.z > thickness;
+                if (want_gi && fresh != 0u && !behind_slab) {
                     let n_dot_l = saturate(dot(n, to_sample));
                     if (n_dot_l > 0.0) {
                         // The emitter's own cosine is a ONE-SIDED TEST, not a weight. What the
@@ -378,7 +366,10 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                         // seen at, which is what left the whole indirect half at a few levels out
                         // of 255. What the test IS for is the back of a surface: a wall whose lit
                         // face points away from this pixel must not light it through itself.
-                        let en = emitter_normal(spx, sp, dims, bounds);
+                        // The receiver's silhouette-aware normal: forward differences would cross
+                        // an object's right and bottom silhouette and fabricate a sideways normal
+                        // that passes this test.
+                        let en = view_normal_at(spx, sp, dims, bounds);
                         if (dot(en, -to_sample) > 0.0) {
                             let c = scene_linear(spx);
                             let share = f32(countOneBits(fresh)) / f32(SECTORS);
