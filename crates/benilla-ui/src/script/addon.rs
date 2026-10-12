@@ -42,7 +42,16 @@ pub struct AddOnInfo {
     pub load_on_demand: bool,
     /// `## Dependencies` / `## RequiredDeps`.
     pub dependencies: Vec<String>,
-    /// Every `## Key: Value` in manifest order, for `GetAddOnMetadata`.
+    /// `## OptionalDeps`: loaded first by `AddOn_Load`, a failure ignored (`0x51f320`).
+    pub optional_dependencies: Vec<String>,
+    /// `## LoadWith`: the addons whose load loads this one (`[rec+0x58]`, `0x51cf0a`-`0x51cf8c`).
+    pub load_with: Vec<String>,
+    /// The registry rows whose `## LoadWith` names this addon, in registry order (`[rec+0x88]`):
+    /// filled by [`super::UiScript::register_addons`], as the reference builds it once the scan
+    /// ends (`0x51c7c0`-`0x51c8c9`). `AddOn_Load` loads each after this one's `ADDON_LOADED`.
+    pub dependents: Vec<usize>,
+    /// The lines that reach the reference's metadata map in manifest order ([`crate::toc::Toc::metadata`]):
+    /// all `GetAddOnMetadata` answers from.
     pub directives: Vec<(String, String)>,
     /// The `.toc`'s file list in order: what `LoadAddOn` runs.
     pub files: Vec<String>,
@@ -152,12 +161,14 @@ fn row_of(model: &Model, key: &AddonKey) -> Option<usize> {
 }
 
 /// The enable setter (`0x51ea20`), the one write every enable verb makes, for the current
-/// character's row: the registry bit the gate reads, and the character's enable hash, which the
-/// setter dirties only when the row changes or is new.
-fn set_enabled(model: &mut Model, i: usize, on: bool) {
-    model.addons[i].enabled = on;
-    let name = model.addons[i].name.clone();
-    model.addon_enable.set(&name, on);
+/// character's row: the character's enable hash, which the setter dirties only when the row
+/// changes or is new, and, for an installed addon (`row`), the registry bit the gate reads. A
+/// name nothing installed answers to still gets its hash row, which the logout writer saves.
+fn set_enabled(model: &mut Model, row: Option<usize>, name: &str, on: bool) {
+    if let Some(i) = row {
+        model.addons[i].enabled = on;
+    }
+    model.addon_enable.set(name, on);
 }
 
 /// The registry as [`super::addon_gate`] rows, the one input every verb's verdict reads.
@@ -222,7 +233,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // In-game `0x48e390` returns seven: `name, title, notes, enabled, loadable, reason,
     // security`, the flags the number 1 or nil (`lua_pushnumber` via `0x6f3810`). The glue's
-    // `0x46d460` returns eight, `url` fourth; in-game the URL is `GetAddOnMetadata(name, "URL")`.
+    // `0x46d460` returns eight, `url` fourth, from `0x51e180`: the server's, never the `.toc`'s.
+    // In-game no verb returns it.
     g.set(
         "GetAddOnInfo",
         lua.create_function(|lua, key: Value| {
@@ -316,9 +328,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(i) = row_of(&model, &key) else {
                 return Ok(Value::Nil);
             };
+            // The map's insert replaces (`0x51d77b`): a key a host lists twice answers its last.
             match model.addons[i]
                 .directives
                 .iter()
+                .rev()
                 .find(|(k, _)| k.eq_ignore_ascii_case(&field))
             {
                 Some((_, v)) => lua_str(lua, v),
@@ -328,9 +342,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // One argument, keyed on the logged-in character (`0x48e690`, `0x48e760`, via `0x5abdc0`);
-    // the `(character, index)` form is the glue's (`0x46d7b0`, `0x46d8a0`). Deviation: an unknown
-    // name is a no-op, where the reference adds an enable-hash entry for it, so that a typo leaves
-    // no row behind.
+    // the `(character, index)` form is the glue's (`0x46d7b0`, `0x46d8a0`). A name goes to the
+    // setter as the caller spelled it (`0x6f3690`), installed or not: the setter never checks the
+    // installed list, and a name its hash lacks gets a new node (`0x51eaf2`, allocated `0x51eb62`,
+    // appended at the tail with the state at `0x51eb6f`).
     for (name, on, usage) in [
         ("EnableAddOn", true, USAGE_ENABLE),
         ("DisableAddOn", false, USAGE_DISABLE),
@@ -339,10 +354,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, key: Value| {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                let key = addon_key(lua, &model, &key, usage)?;
-                if let Some(i) = row_of(&model, &key) {
-                    set_enabled(&mut model, i, on);
-                }
+                let (row, name) = match addon_key(lua, &model, &key, usage)? {
+                    AddonKey::Index(i) => (Some(i), model.addons[i].name.clone()),
+                    AddonKey::Name(n) => (by_name(&model, &n), n),
+                };
+                set_enabled(&mut model, row, &name, on);
                 Ok(())
             })?,
         )?;
@@ -359,7 +375,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 for k in 0..model.addon_index.len() {
                     let i = model.addon_index[k];
-                    set_enabled(&mut model, i, on);
+                    let name = model.addons[i].name.clone();
+                    set_enabled(&mut model, Some(i), &name, on);
                 }
                 Ok(())
             })?,
@@ -400,7 +417,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("model")
                 .load_log
                 .demand_depth += 1;
-            let result = load_addon(lua, i);
+            let mut host = DemandLoad { lua };
+            let version_check = version_check(&lua.app_data_ref::<Model>().expect("model"));
+            let loaded = load_row(lua, &mut host, i, true, version_check);
             {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let log = &mut model.load_log;
@@ -410,121 +429,200 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     log.writes.push(crate::status::LogWrite::Append(lines));
                 }
             }
-            match result {
-                Ok(()) => Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil])),
-                Err(reason) => Ok(MultiValue::from_vec(vec![
-                    Value::Nil,
-                    lua_str(lua, &reason)?,
-                ])),
+            if loaded {
+                return Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil]));
             }
+            // `0x48eae7`: a refusal is explained by asking the gate again; a gate that now says yes
+            // leaves `UNKNOWN_ERROR` (`0x842ebc`), and an addon with no files to read is `MISSING`.
+            let reason = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                match verdict(&model, i).token() {
+                    Some(reason) => reason,
+                    None if !host.available(i) => "MISSING".to_owned(),
+                    None => "UNKNOWN_ERROR".to_owned(),
+                }
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::Nil,
+                lua_str(lua, &reason)?,
+            ]))
         })?,
     )?;
 
     Ok(())
 }
 
-/// `AddOn_Load` (`0x51f240`), dependencies first; `Err` is the reason token. Synchronous inside
-/// the Lua call, as stock callers use the addon on the next line (`UIParent.lua:577`).
-fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
-    let (name, root, files, deps, already, chain, secure, chain_reader) = {
+/// The part of `AddOn_Load` (`0x51f240`) that differs by caller: the startup walk (`0x51f600`)
+/// and `LoadAddOn` (`0x48e980`) share [`load_row`] and bring their own way to run an addon's files
+/// and to report what failed. Rows are registry indices.
+pub trait AddonLoad {
+    /// Whether row `i` has anything to read from: a capture has no AddOns folder. Asked after the
+    /// gate; an addon that answers no does not load.
+    fn available(&self, _i: usize) -> bool {
+        true
+    }
+
+    /// Row `i`'s own load, between its dependencies and `ADDON_LOADED`: its `.toc` files,
+    /// `Bindings.xml` and saved variables, under its load context (`0x51f3fa`-`0x51f53b`).
+    fn run(&mut self, i: usize);
+
+    /// The gate refused row `i` for a reason of its own (`DISABLED`, `INTERFACE_VERSION`, ...).
+    fn refused(&mut self, _i: usize, _reason: &str) {}
+
+    /// A required dependency of row `i` is missing or failed, whether the gate saw it before the
+    /// load began or the load found it (`0x51f357`).
+    fn dep_failed(&mut self, _i: usize, _dep: &str) {}
+}
+
+/// `AddOn_Load` (`0x51f240`) on registry row `i`, the one loader every surface runs; `demand` is
+/// its `dl` (`LoadAddOn` 1, the startup walk 0) and `version_check` the live `checkAddonVersion`.
+/// Returns the reference's bool. In its order:
+/// - a loaded addon answers 1 at once (`0x51f2d6`);
+/// - `AddOn_CanLoad` decides next (`0x51f2fa`), which already answers "can load" for an addon it is
+///   checking, so a cycle of required dependencies passes;
+/// - the addon is marked loaded (`0x51f313`) before any dependency, its files or `ADDON_LOADED`,
+///   which is what ends a cycle: a re-entry takes the first line. Inside a cycle `IsAddOnLoaded`
+///   is 1 from the addon's own files, and the second addon's `ADDON_LOADED` fires first;
+/// - optional dependencies load, failures ignored (`0x51f320`); required ones load, and one that
+///   fails clears the mark and fails this addon (`0x51f343`-`0x51f357`, `0x51f5ee`);
+/// - the addon's files run, `ADDON_LOADED` fires (`0x51f5ad`), and each addon whose `## LoadWith`
+///   names this one loads (`0x51f5b2`-`0x51f5e1`), failures ignored.
+pub(super) fn load_row(
+    lua: &Lua,
+    host: &mut dyn AddonLoad,
+    i: usize,
+    demand: bool,
+    version_check: bool,
+) -> bool {
+    let (name, optional, required, dependents) = {
         let model = lua.app_data_ref::<Model>().expect("model");
         let a = &model.addons[i];
-        (
-            a.name.clone(),
-            model.addons_root.clone(),
-            a.files.clone(),
-            a.dependencies.clone(),
-            a.loaded,
-            a.chain,
-            a.secure,
-            model.addons_chain_reader.clone(),
-        )
-    };
-    if already {
-        return Ok(()); // a redundant load succeeds, as in the reference
-    }
-    // `LoadAddOn` (`0x48e980`) refuses through `AddOn_CanLoad` and takes the reason from the same
-    // gate; an out-of-date addon loads only with the version check off (`0x48ea8c`).
-    {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        if let refused @ Verdict::Refused { .. } = verdict(&model, i) {
-            return Err(refused.token().expect("a refusal always carries a token"));
+        if a.loaded {
+            return true;
         }
-    }
-    // An absent source (a capture has no folder, a bare VM no chain) is `MISSING`.
-    let read: Reader = if chain {
-        let Some(reader) = chain_reader else {
-            return Err("MISSING".into());
-        };
-        Box::new(move |req: &str| reader(&format!("Interface/AddOns/{req}")))
-    } else {
-        let Some(root) = root else {
-            return Err("MISSING".into());
-        };
-        Box::new(move |req: &str| read_under(&root, req))
-    };
-
-    // Loaded is stamped after the gate (`0x51f2fa`), so a refusal stays retryable, and before the
-    // dependencies, which is what ends a cycle: `AddOn_Load` has no re-entrancy guard, but its
-    // store `0x51f313` precedes both dependency loops (`0x51f320`, `0x51f343`), so a re-entry
-    // takes the loaded early-out (`0x51f2d6`). Inside a cycle, then, `IsAddOnLoaded("A")` is 1
-    // while B runs and `ADDON_LOADED` fires B before A, as in the reference.
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.addons[i].loaded = true;
-    }
-
-    // Past the gate, a dependency that fails to load maps to its `DEP_` reason.
-    for dep in &deps {
-        let d = {
-            let model = lua.app_data_ref::<Model>().expect("model");
-            model
-                .addons
-                .iter()
-                .position(|a| a.name.eq_ignore_ascii_case(dep))
-        };
-        match d {
-            None => return Err("DEP_MISSING".into()),
-            Some(d) => {
-                let loaded = {
-                    let model = lua.app_data_ref::<Model>().expect("model");
-                    model.addons[d].loaded
-                };
-                if !loaded {
-                    load_addon(lua, d).map_err(|r| {
-                        if r.starts_with("DEP_") {
-                            // `DEP_` applies once at any depth (`0x51e8ce`, `0x51e8cf`).
-                            r
-                        } else {
-                            format!("DEP_{r}")
-                        }
-                    })?;
-                }
+        match can_load(&gate_rows(&model), i, demand, version_check) {
+            Verdict::Loadable => {}
+            Verdict::Refused {
+                reason: Some(reason),
+                ..
+            } => {
+                drop(model);
+                host.refused(i, reason);
+                return false;
+            }
+            Verdict::Refused { reason: None, .. } => {
+                let dep = failing_dependency(&model, i, demand, version_check);
+                drop(model);
+                host.dep_failed(i, &dep);
+                return false;
             }
         }
+        (
+            a.name.clone(),
+            a.optional_dependencies.clone(),
+            a.dependencies.clone(),
+            a.dependents.clone(),
+        )
+    };
+    if !host.available(i) {
+        return false;
+    }
+    lua.app_data_mut::<Model>().expect("model").addons[i].loaded = true;
+    for dep in &optional {
+        let row = by_name(&lua.app_data_ref::<Model>().expect("model"), dep);
+        if let Some(d) = row {
+            load_row(lua, host, d, demand, version_check);
+        }
+    }
+    for dep in &required {
+        let row = by_name(&lua.app_data_ref::<Model>().expect("model"), dep);
+        if !row.is_some_and(|d| load_row(lua, host, d, demand, version_check)) {
+            lua.app_data_mut::<Model>().expect("model").addons[i].loaded = false;
+            host.dep_failed(i, dep);
+            return false;
+        }
+    }
+    host.run(i);
+    super::event::fire_global(lua, "ADDON_LOADED", &[super::ScriptValue::Str(name)]);
+    for d in dependents {
+        load_row(lua, host, d, demand, version_check);
+    }
+    true
+}
+
+/// The first required dependency of row `i` that cannot load, for the gate's `DEP_` refusal: a
+/// name no addon answers to, or an unloaded one the gate refuses.
+fn failing_dependency(model: &Model, i: usize, demand: bool, version_check: bool) -> String {
+    let rows = gate_rows(model);
+    let a = &model.addons[i];
+    a.dependencies
+        .iter()
+        .find(|dep| match by_name(model, dep) {
+            None => true,
+            Some(d) => {
+                !model.addons[d].loaded && !can_load(&rows, d, demand, version_check).loadable()
+            }
+        })
+        .or(a.dependencies.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `LoadAddOn`'s way to run an addon: from the AddOns folder, or the patch chain for Blizzard's
+/// own, into the demand-load record.
+struct DemandLoad<'a> {
+    lua: &'a Lua,
+}
+
+impl DemandLoad<'_> {
+    /// The reader for row `i`'s files; `None` when its source is absent (a capture has no folder,
+    /// a bare VM no chain).
+    fn reader(&self, i: usize) -> Option<Reader> {
+        let model = self.lua.app_data_ref::<Model>().expect("model");
+        if model.addons[i].chain {
+            let reader = model.addons_chain_reader.clone()?;
+            Some(Box::new(move |req: &str| {
+                reader(&format!("Interface/AddOns/{req}"))
+            }))
+        } else {
+            let root = model.addons_root.clone()?;
+            Some(Box::new(move |req: &str| read_under(&root, req)))
+        }
+    }
+}
+
+impl AddonLoad for DemandLoad<'_> {
+    fn available(&self, i: usize) -> bool {
+        self.reader(i).is_some()
     }
 
-    // The files, `Bindings.xml` and the saved variables run under the addon's context.
-    let outer = swap_exec_context(lua, addon_load_context(&name, secure));
-    let mut toc = crate::status::Status::default();
-    run_files(lua, &name, &read, &files, &mut toc);
-    // The toc's record under its banner, then the add-on's (`0x6eddc8`, `0x51f464`).
-    let debug = framexml_debug(lua);
-    let mut own = crate::status::Status::default();
-    let toc_path = crate::status::addon_toc_path(&name);
-    toc.close_into(&mut own, debug, crate::status::toc_banner(&toc_path));
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        let banner = crate::status::addon_banner(&name);
-        own.close_into(&mut model.load_log.demand, debug, banner);
+    fn run(&mut self, i: usize) {
+        let lua = self.lua;
+        let Some(read) = self.reader(i) else { return };
+        let (name, files, secure) = {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let a = &model.addons[i];
+            (a.name.clone(), a.files.clone(), a.secure)
+        };
+        // The files, `Bindings.xml` and the saved variables run under the addon's context.
+        let outer = swap_exec_context(lua, addon_load_context(&name, secure));
+        let mut toc = crate::status::Status::default();
+        run_files(lua, &name, &read, &files, &mut toc);
+        // The toc's record under its banner, then the add-on's (`0x6eddc8`, `0x51f464`).
+        let debug = framexml_debug(lua);
+        let mut own = crate::status::Status::default();
+        let toc_path = crate::status::addon_toc_path(&name);
+        toc.close_into(&mut own, debug, crate::status::toc_banner(&toc_path));
+        {
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let banner = crate::status::addon_banner(&name);
+            own.close_into(&mut model.load_log.demand, debug, banner);
+        }
+        // `Bindings.xml` loads between the files and the saved variables.
+        load_bindings(lua, &name, &read);
+        load_saved_variables(lua, i);
+        swap_exec_context(lua, outer);
     }
-    // `Bindings.xml` loads between the files and the saved variables.
-    load_bindings(lua, &name, &read);
-    load_saved_variables(lua, i);
-    swap_exec_context(lua, outer);
-    // `ADDON_LOADED` closes the addon's load (`0x51f5ad`).
-    super::event::fire_global(lua, "ADDON_LOADED", &[super::ScriptValue::Str(name)]);
-    Ok(())
 }
 
 /// Register the addon's `Bindings.xml` where the reference loads it (`0x51f400`): after the
@@ -763,6 +861,21 @@ impl super::UiScript {
         for a in &mut addons {
             a.saved_enabled = a.enabled;
         }
+        // The reverse of `## LoadWith`, once the whole list is known (`0x51c7c0`-`0x51c8c9`): each
+        // addon is appended to every addon it names, in list order, a repeat included.
+        for a in &mut addons {
+            a.dependents.clear();
+        }
+        for r in 0..addons.len() {
+            for t in 0..addons[r].load_with.len() {
+                let target = addons
+                    .iter()
+                    .position(|a| a.name.eq_ignore_ascii_case(&addons[r].load_with[t]));
+                if let Some(target) = target {
+                    addons[target].dependents.push(r);
+                }
+            }
+        }
         let mut model = self.model_mut();
         model.addons = addons;
         model.addons_root = root;
@@ -782,8 +895,35 @@ impl super::UiScript {
         rebuild_index(&mut model);
     }
 
+    /// The registry row a folder name answers to, case-insensitively.
+    pub fn addon_row(&self, name: &str) -> Option<usize> {
+        by_name(&self.model_ref(), name)
+    }
+
+    /// The registry rows whose `## LoadWith` names row `i`, in the order `AddOn_Load` loads them
+    /// after its `ADDON_LOADED` (`0x51f5b2`-`0x51f5e1`).
+    pub fn addon_dependents(&self, i: usize) -> Vec<usize> {
+        self.model_ref()
+            .addons
+            .get(i)
+            .map(|a| a.dependents.clone())
+            .unwrap_or_default()
+    }
+
+    /// `AddOn_Load` (`0x51f240`) on registry row `i` ([`load_row`]) for a host that runs the
+    /// addon's files itself, as the startup walk does (`demand` false).
+    pub fn load_addon_row(
+        &self,
+        host: &mut dyn AddonLoad,
+        i: usize,
+        demand: bool,
+        version_check: bool,
+    ) -> bool {
+        load_row(self.lua(), host, i, demand, version_check)
+    }
+
     /// Run one addon's saved-variables files at the startup walk's position, as `LoadAddOn` does.
-    pub fn load_addon_saved_variables(&mut self, name: &str) {
+    pub fn load_addon_saved_variables(&self, name: &str) {
         let i = self
             .model_ref()
             .addons
