@@ -102,6 +102,8 @@ const SHADOW_SUN_FLOOR: f32 = 0.70;
 const WET_SPEC_GAIN: f32 = 0.2;
 const WET_SUN_GAIN: f32 = 0.28;
 const WET_REFLECT_GAIN: f32 = 0.8;
+// fork: yards per unit of the `UV1.x` fraction: `adt::WATER_DEPTH_RANGE / WATER_DEPTH_SPAN`.
+const WATER_DEPTH_UNPACK: f32 = 40.0;
 
 // Per-tile Vec4 uniforms, packed into one buffer (binding 106); the field order must match the Rust
 // `TerrainExtension`. params.x = layer tiling factor; yzw unused.
@@ -466,7 +468,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     }
 
     // Per-chunk array indices baked per vertex, COLOR the 4 layers and UV1.x the alpha; constant
-    // across a chunk, so they interpolate back to the integer.
+    // across a chunk, so they interpolate back to the integer. (fork: UV1.x's fraction is the
+    // depth under water, read by the wet hook below.)
     let li = vec4<i32>(round(in.color));
     let ai = i32(round(in.uv_b.x));
 
@@ -623,6 +626,10 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
                 wow_light.shelter[wet_st.idx.y], wow_light.shelter[wet_st.idx.z],
                 wow_light.shelter[wet_st.idx.w], in.world_position.y, wow_light.shelter_cfg);
         }
+        // Nor under water: the depth below the chunk's own liquid rides the alpha index's
+        // fraction (`adt::pack_water_depth`).
+        wet_open = wet_open
+            * wet_hook::above_water((in.uv_b.x - round(in.uv_b.x)) * WATER_DEPTH_UNPACK);
     }
     // Rain-darkened ground and puddles; a dry frame returns `color` untouched. The combine below is
     // gamma math in either lighting model (a modern frame decodes at the output), so one hook

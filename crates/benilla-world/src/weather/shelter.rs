@@ -14,7 +14,9 @@
 //! outer and ceiling faces a hand apart) is thinner than the gap, so it does not count as shelter.
 //! Doodads without a canopy collider (most trees) do not shelter; that is a limit of the source.
 //! fork: a liquid surface counts as a roof too ([`under_liquid`]): rain does not wet a riverbed,
-//! so ground a yard or more under the water line is dry, while the shore stays wet.
+//! so ground a yard or more under the water line is dry, while the shore stays wet. That is the
+//! models' answer near the camera; terrain carries its own depth under the water per vertex
+//! (`benilla_assets::adt::pack_water_depth`), which holds past the grid and in the shallows.
 //!
 //! Per cell the GPU gets one `u32` ([`pack_cell`]): the low half the top height relative to the
 //! header's `base_y` in 1/64 yd (±512 yd), the high half the soft cover 0..1 as unorm16. The cover is the

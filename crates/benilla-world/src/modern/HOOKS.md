@@ -177,6 +177,7 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs` | the `lavaLight` row and its `on_cvar` arm | Everwood port: lava |
 | `benilla-world/src/weather/mod.rs` | `pub mod wetness; pub mod shelter;` and their `register` calls in `WeatherPlugin` | Everwood port: rain |
 | `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | the wet hooks before the fog: the shelter grid's open share, `wet_hook::wet_surface` (and `wet_puddles` on terrain) on the colour, `wet_sheen` added and clamped | Everwood port: rain |
+| `benilla-formats/src/terrain.rs`, `benilla-assets/src/adt.rs`, `terrain.wgsl` | `ChunkMesh::water_depths`; `chunks_to_mesh` adds `pack_water_depth` to `UV1.x` (the alpha index's fraction); the wet hook multiplies the open share by `wet_hook::above_water` | Everwood port: rain |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `assets/ui/OptionsFrame.xml` | the `rainSurfaces` row, its `on_cvar` arm, `GRAPHICS_CVARS`, the option rows in both windows | Everwood port: rain |
 | `benilla-app/src/cvars/{mod,table}.rs`, `video.rs`, `pipe_warm/menagerie.rs`, `assets/ui/OptionsFrame.xml` | the `foliageWind` / `foliageWindStrength` rows, their `on_cvar` arms, `GRAPHICS_CVARS`, the option rows in both windows; the clutter pipelines warmed on the UV_1 layout | Everwood port: wind |
 | `benilla-world/src/weather/precip/mist.rs` | `REFERENCE_PUFF`; `push_mist` takes a `modern::weather::PuffLook` (half-extent, distance fade, life ramps, alpha cap) in place of its constants | modern weather |

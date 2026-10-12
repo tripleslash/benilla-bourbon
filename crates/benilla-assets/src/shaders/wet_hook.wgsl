@@ -63,6 +63,15 @@ fn shelter_amount(t: ShelterTaps, wa: u32, wb: u32, wc: u32, wd: u32, world_y: f
     return clamp(mix(near, far, t.frac.y), 0.0, 1.0);
 }
 
+// fork: the open share of ground that carries its own depth under the water line (yards, positive
+// submerged; terrain packs it per vertex, `benilla_assets::adt::pack_water_depth`): the shore is
+// wet to the water's edge, and nothing under the surface darkens, shines or holds a puddle. The
+// shelter grid's water roof covers only the yards around the camera and only a bed a yard down;
+// this reaches every drawn chunk and the shallows.
+fn above_water(depth: f32) -> f32 {
+    return 1.0 - smoothstep(0.0, 0.15, depth);
+}
+
 struct WetSurface {
     albedo: vec3<f32>,
     // Gloss weight for `wet_sheen`: 0 dry, ~1 a soaked top face, up to 2 in a terrain puddle (the

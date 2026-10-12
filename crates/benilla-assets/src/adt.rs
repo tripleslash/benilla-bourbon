@@ -48,7 +48,8 @@ pub struct ChunkShading {
     /// Up to 4 layer-array indices (vertex `COLOR`); an unused slot repeats slot 0 and never shows,
     /// as its alpha weight is 0.
     pub layers: [u32; 4],
-    /// The alpha-array index (vertex `UV1.x`); 0 when the chunk has no map.
+    /// The alpha-array index (vertex `UV1.x`, whose fraction is `pack_water_depth`); 0 when the
+    /// chunk has no map.
     pub alpha: u32,
     /// The shadow-array index (vertex `UV1.y`); `-1.0` when there is no MCSH map.
     pub shadow: f32,
@@ -62,6 +63,27 @@ impl Default for ChunkShading {
             shadow: -1.0,
         }
     }
+}
+
+/// fork: the depths [`pack_water_depth`] tells apart, in yards either side of the water line. Past
+/// it only the sign matters, and a bank that steep holds no puddle.
+const WATER_DEPTH_RANGE: f32 = 16.0;
+/// The share of the index's rounding margin (±0.5) the packed depth uses.
+const WATER_DEPTH_SPAN: f32 = 0.4;
+
+/// fork: a vertex's depth under its chunk's water (`ChunkMesh::water_depths`, positive submerged)
+/// as the fraction added to the alpha-array index in `UV1.x`. The index is uniform over a chunk, so
+/// the fraction interpolates on its own and `round` still recovers the index; the terrain shader
+/// reads it back to keep the rain's wet look off ground that lies under water
+/// (`wet_hook::above_water`). Dry ground, with no water over it, packs as far above the line.
+fn pack_water_depth(depth: f32) -> f32 {
+    depth.clamp(-WATER_DEPTH_RANGE, WATER_DEPTH_RANGE) * (WATER_DEPTH_SPAN / WATER_DEPTH_RANGE)
+}
+
+/// The inverse of [`pack_water_depth`] over a whole `UV1.x`, as `terrain.wgsl` decodes it.
+#[cfg(test)]
+fn unpack_water_depth(uv1_x: f32) -> f32 {
+    (uv1_x - uv1_x.round()) * (WATER_DEPTH_RANGE / WATER_DEPTH_SPAN)
 }
 
 /// One drawn MCNK chunk's mesh in Bevy space and absolute world coords; `None` for a chunk the
@@ -103,10 +125,13 @@ pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
         let li = shading.layers;
         let col = [li[0] as f32, li[1] as f32, li[2] as f32, li[3] as f32];
         let n = chunk_positions.len();
-        uv1.extend(std::iter::repeat_n(
-            [shading.alpha as f32, shading.shadow],
-            n,
-        ));
+        // fork: the depth under the chunk's own water rides the alpha index's fraction.
+        uv1.extend(chunk.water_depths().into_iter().map(|depth| {
+            [
+                shading.alpha as f32 + pack_water_depth(depth),
+                shading.shadow,
+            ]
+        }));
         colors.extend(std::iter::repeat_n(col, n));
         uvs.extend_from_slice(&chunk.uvs);
         indices.extend(chunk.indices.iter().map(|i| i + base));
@@ -320,4 +345,30 @@ fn computed_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     acc.into_iter()
         .map(|n| n.normalize_or_zero().to_array())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The packed depth never moves the index it rides on, at the largest index a tile can hold,
+    /// and comes back to a hundredth of a yard; past the range only the sign survives.
+    #[test]
+    fn the_water_depth_rides_the_alpha_index_without_moving_it() {
+        for alpha in [0u32, 1, 97, 255] {
+            for depth in [-3.0f32, -0.05, 0.0, 0.1, 1.5, 12.0] {
+                let x = alpha as f32 + pack_water_depth(depth);
+                assert_eq!(x.round(), alpha as f32);
+                assert!((unpack_water_depth(x) - depth).abs() < 0.01, "{depth}");
+            }
+            // The shader's constant is the same scale.
+            assert!((WATER_DEPTH_RANGE / WATER_DEPTH_SPAN - 40.0).abs() < 1e-4);
+            let dry = alpha as f32 + pack_water_depth(f32::NEG_INFINITY);
+            assert_eq!(dry.round(), alpha as f32);
+            assert!(unpack_water_depth(dry) < -WATER_DEPTH_RANGE + 0.01);
+            let deep = alpha as f32 + pack_water_depth(400.0);
+            assert_eq!(deep.round(), alpha as f32);
+            assert!(unpack_water_depth(deep) > WATER_DEPTH_RANGE - 0.01);
+        }
+    }
 }

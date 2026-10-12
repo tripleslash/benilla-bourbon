@@ -126,6 +126,46 @@ impl ChunkMesh {
         ((0.0..=1.0).contains(&south) && (0.0..=1.0).contains(&east)).then_some(self.impassable)
     }
 
+    /// fork: per vertex, how far the ground lies under the chunk's own MCLQ surface, in yards:
+    /// positive under water, negative above it, `f32::NEG_INFINITY` where no wet cell touches the
+    /// vertex. An outer vertex reads the liquid vertex it shares the lattice with; an inner one the
+    /// mean of its cell's four. Linear over a fan triangle, as the ground and the surface both are,
+    /// so the interpolated value is the depth at every point of a wet cell.
+    pub fn water_depths(&self) -> Vec<f32> {
+        let mut depths = vec![f32::NEG_INFINITY; self.positions.len()];
+        if self.positions.len() != 145 {
+            return depths;
+        }
+        for liquid in &self.liquids {
+            if liquid.grid != [9, 9] || liquid.positions.len() != 81 || liquid.wet.len() != 64 {
+                continue;
+            }
+            let wet = |r: usize, c: usize| r < 8 && c < 8 && liquid.wet[r * 8 + c];
+            let surface = |r: usize, c: usize| liquid.positions[r * 9 + c][2];
+            for r in 0..9usize {
+                for c in 0..9usize {
+                    // The (up to) four cells meeting at this corner; `wrapping_sub` sends the
+                    // row or column before the first out of range.
+                    let (rn, cw) = (r.wrapping_sub(1), c.wrapping_sub(1));
+                    if wet(rn, cw) || wet(rn, c) || wet(r, cw) || wet(r, c) {
+                        let i = r * 17 + c;
+                        depths[i] = depths[i].max(surface(r, c) - self.positions[i][2]);
+                    }
+                    if wet(r, c) {
+                        let i = r * 17 + 9 + c;
+                        let mean = 0.25
+                            * (surface(r, c)
+                                + surface(r, c + 1)
+                                + surface(r + 1, c)
+                                + surface(r + 1, c + 1));
+                        depths[i] = depths[i].max(mean - self.positions[i][2]);
+                    }
+                }
+            }
+        }
+        depths
+    }
+
     /// The terrain height under a raw WoW column, interpolated on the covering fan triangle. `None`
     /// off the footprint or in a hole: a cave mouth's column goes to the WMO below it, where the
     /// reference's terrain probe misses too.
@@ -737,6 +777,53 @@ mod tests {
         );
         // A column past the chunk's east edge is off the footprint entirely.
         assert_eq!(c.height_at([quarter_x, far_y - 5.0, 0.0]), None);
+    }
+
+    /// A chunk sloping from z 2 at its north edge to z −6 at its south, under a pond at z 0 whose
+    /// westmost column of cells is dry: the depth is the water line less the ground wherever a wet
+    /// cell touches the vertex, and nothing where none does.
+    #[test]
+    fn water_depths_follow_the_surface_over_wet_cells_only() {
+        let ground = |row: f32| 2.0 - row;
+        let mut positions = Vec::with_capacity(145);
+        for row in 0..9 {
+            for col in 0..9 {
+                positions.push([-(row as f32), -(col as f32), ground(row as f32)]);
+            }
+            if row < 8 {
+                for col in 0..8 {
+                    let r = row as f32 + 0.5;
+                    positions.push([-r, -(col as f32 + 0.5), ground(r)]);
+                }
+            }
+        }
+        let mut c = chunk(positions, Vec::new());
+        assert!(c.water_depths().iter().all(|d| *d == f32::NEG_INFINITY));
+        c.liquids.push(crate::liquid::LiquidMesh {
+            grid: [9, 9],
+            wet: (0..64).map(|cell| cell % 8 != 0).collect(),
+            shared: vec![false; 64],
+            positions: (0..81)
+                .map(|n| [-((n / 9) as f32), -((n % 9) as f32), 0.0])
+                .collect(),
+            uvs: Vec::new(),
+            depths: Vec::new(),
+            indices: Vec::new(),
+            sound_nibble: 0,
+            material_id: None,
+            kind: crate::liquid::LiquidKind::Still,
+        });
+        let d = c.water_depths();
+        // Outer row 5, column 4: ground −3 under the line. Row 1: a yard above it.
+        assert_eq!(d[5 * 17 + 4], 3.0);
+        assert_eq!(d[17 + 4], -1.0);
+        // The inner vertex of wet cell (5, 4) sits half a row further down.
+        assert_eq!(d[5 * 17 + 9 + 4], 3.5);
+        // Column 0 touches only dry cells, and so does the dry column's inner vertex; column 1
+        // borders a wet cell and carries its depth.
+        assert_eq!(d[5 * 17], f32::NEG_INFINITY);
+        assert_eq!(d[5 * 17 + 9], f32::NEG_INFINITY);
+        assert_eq!(d[5 * 17 + 1], 3.0);
     }
 
     /// 20 of the 43 shipped WDTs author no ADT tiles: their global WMO is the whole map.
