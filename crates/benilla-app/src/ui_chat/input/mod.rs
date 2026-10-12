@@ -802,6 +802,8 @@ pub(super) fn drain_chat_input(
                             entity,
                             spell_id,
                             kind,
+                            cast_flags: 0,
+                            item_cast: false,
                             seq: play_seq.next(),
                         });
                         // A selected caster's GO hits us, so a missile flies end to end; a

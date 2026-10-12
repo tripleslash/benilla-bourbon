@@ -57,7 +57,6 @@ fn two_recipe_state() -> TradeSkillState {
                 Some((2, 1, "Cloth")),
             ),
         ],
-        repeat_count: 3,
     }
 }
 
@@ -107,7 +106,6 @@ fn state() -> TradeSkillState {
             ),
             recipe(6, "Mystery Item", TradeSkillDifficulty::Easy, 1, None),
         ],
-        repeat_count: 3,
     }
 }
 
@@ -409,7 +407,8 @@ fn snapshot_feeds_the_api_tuples_through_the_visible_mapping() {
     );
     assert_eq!(
         s.eval::<i64>("return GetTradeskillRepeatCount()").unwrap(),
-        3
+        1,
+        "nothing armed"
     );
 }
 
@@ -457,9 +456,14 @@ fn do_trade_skill_drains_spell_id_and_count() {
     assert_eq!(s.take_trade_skill_dos(), vec![(2963, 5)]);
     assert!(s.take_trade_skill_dos().is_empty(), "drained");
 
-    // Row 2 = Simple Robe (spell 3919, numAvailable 0): a missing or zero count is 1 (`0x500280`).
+    // Row 2 = Simple Robe (spell 3919, numAvailable 0): the count clamps to numAvailable
+    // (`0x5002f8`), and the cast goes all the same (`0x500314`).
     s.run("DoTradeSkill(2) DoTradeSkill(2, 0)").unwrap();
-    assert_eq!(s.take_trade_skill_dos(), vec![(3919, 1), (3919, 1)]);
+    assert_eq!(s.take_trade_skill_dos(), vec![(3919, 0), (3919, 0)]);
+
+    // A count that is no number reads as 1 (`0x5002c5`-`0x5002cc`), never a raise.
+    s.run("DoTradeSkill(3, 'x') DoTradeSkill(3, {})").unwrap();
+    assert_eq!(s.take_trade_skill_dos(), vec![(2963, 1), (2963, 1)]);
 
     s.run("DoTradeSkill(99)").unwrap();
     assert!(s.take_trade_skill_dos().is_empty());
@@ -551,17 +555,23 @@ fn close_reopen_keeps_state_for_the_same_line_and_resets_on_a_switch() {
     s.run("CollapseTradeSkillSubClass(1)").unwrap();
     assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 1);
 
+    let selected = s
+        .eval::<i64>("return GetTradeSkillSelectionIndex()")
+        .unwrap();
     assert!(!s.take_trade_skill_close());
     s.run("CloseTradeSkill()").unwrap();
     assert!(s.take_trade_skill_close());
     assert!(!s.take_trade_skill_close(), "drained");
+    assert!(!s.trade_skill_open());
 
+    // `0x4fc870` zeroes only the open marker (`[0xbde040]`): `GetNumTradeSkills` (`0x4fd800`,
+    // `[0xbde054]`) and the selection still answer the held list, through the app's close too.
     s.set_trade_skill(None);
-    assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 0);
+    assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 1);
     assert_eq!(
         s.eval::<i64>("return GetTradeSkillSelectionIndex()")
             .unwrap(),
-        0
+        selected
     );
 
     // The same line: the fold survives...
@@ -692,8 +702,9 @@ fn filter_getters_treat_a_non_positive_index_as_all_and_raise_past_the_end() {
         "GetTradeSkillInvSlotFilter()",
         "Usage: GetTradeSkillInvSlotFilter(index)",
     );
-    // With no skill window open the list is empty: all is shown, and index 1 is past the end.
-    s.set_trade_skill(None);
+    // With no skill window ever opened the list is empty: all is shown, and index 1 is past the
+    // end. A close keeps the list (`0x4fc870`), so this is a fresh VM.
+    let s = UiScript::new().unwrap();
     assert_eq!(
         s.eval::<i64>("return GetTradeSkillSubClassFilter(0)")
             .unwrap(),
@@ -790,25 +801,142 @@ fn one_hand_weapon_spans_both_hand_slots() {
     );
 }
 
-/// Each filter or fold raises the flag the app answers with TRADE_SKILL_UPDATE (`0x4fd710`,
-/// `0x4fd750`).
+/// Each filter or fold re-sorts and signals TRADE_SKILL_UPDATE before it returns (`0x4fd710`,
+/// `0x4fd730`, `0x4fd750`), its handler reading the new list.
 #[test]
-fn filter_and_fold_mutators_raise_the_touched_flag() {
+fn filter_and_fold_mutators_signal_the_update_in_place() {
+    use crate::script::tick::heard;
     let mut s = UiScript::new().unwrap();
     s.set_trade_skill(Some(state()));
-    assert!(!s.take_trade_skill_touched());
+    heard::listen(&s, &["TRADE_SKILL_UPDATE"], Some("GetNumTradeSkills()"));
+    let before = s.eval::<i64>("return GetNumTradeSkills()").unwrap();
 
     s.run("SetTradeSkillSubClassFilter(2, 1, 1)").unwrap();
-    assert!(s.take_trade_skill_touched());
-    assert!(!s.take_trade_skill_touched(), "drained");
+    let after_filter = s.eval::<i64>("return GetNumTradeSkills()").unwrap();
+    assert!(after_filter < before);
+    assert_eq!(
+        heard::take(&s),
+        [format!("TRADE_SKILL_UPDATE {after_filter}")]
+    );
 
-    s.run("SetTradeSkillInvSlotFilter(0, 1, 1)").unwrap();
-    assert!(s.take_trade_skill_touched());
+    s.run("SetTradeSkillSubClassFilter(0) SetTradeSkillInvSlotFilter(0, 1, 1)")
+        .unwrap();
+    assert_eq!(heard::take(&s).len(), 2);
 
     s.run("CollapseTradeSkillSubClass(0)").unwrap();
-    assert!(s.take_trade_skill_touched());
+    let folded = s.eval::<i64>("return GetNumTradeSkills()").unwrap();
+    assert_eq!(heard::take(&s), [format!("TRADE_SKILL_UPDATE {folded}")]);
     s.run("ExpandTradeSkillSubClass(0)").unwrap();
-    assert!(s.take_trade_skill_touched());
+    assert_eq!(heard::take(&s), [format!("TRADE_SKILL_UPDATE {before}")]);
+}
+
+/// `DoTradeSkill` of more than one arms the repeat and signals `UPDATE_TRADESKILL_RECAST` in place
+/// (`0x500307` → `0x4fd770`); one signals nothing. `CloseTradeSkill` disarms an armed repeat with
+/// its own signal (`0x4fd790`) ahead of `TRADE_SKILL_CLOSE` (`0x4fc884`), which fires even with
+/// nothing open.
+#[test]
+fn the_repeat_and_the_close_signal_in_place() {
+    use crate::script::tick::heard;
+    let mut s = UiScript::new().unwrap();
+    s.set_trade_skill(Some(state()));
+    s.run("SelectTradeSkill(2)").unwrap();
+    heard::listen(
+        &s,
+        &["UPDATE_TRADESKILL_RECAST", "TRADE_SKILL_CLOSE"],
+        Some("GetTradeskillRepeatCount()"),
+    );
+    s.run("DoTradeSkill(2, 1)").unwrap();
+    assert!(heard::take(&s).is_empty(), "a single craft arms nothing");
+    s.run("DoTradeSkill(2, 3)").unwrap();
+    assert_eq!(heard::take(&s), ["UPDATE_TRADESKILL_RECAST 3"]);
+    let spell = s.take_trade_skill_dos()[0].0;
+
+    s.run("CloseTradeSkill()").unwrap();
+    assert_eq!(
+        heard::take(&s),
+        ["UPDATE_TRADESKILL_RECAST 1", "TRADE_SKILL_CLOSE 1"]
+    );
+    s.run("CloseTradeSkill()").unwrap();
+    assert_eq!(heard::take(&s), ["TRADE_SKILL_CLOSE 1"], "disarmed once");
+    assert_eq!(s.trade_skill_repeat(), (0, 3), "a disarm leaves the count");
+    assert_eq!(s.trade_skill_spell_go(spell), None, "nothing armed");
+    assert!(heard::take(&s).is_empty());
+}
+
+/// `GetTradeskillRepeatCount` (`0x500230`) answers the armed count only while the armed spell is
+/// the selected recipe's and the count is above 1; every other case is 1, never 0.
+#[test]
+fn the_repeat_count_is_at_least_one_and_only_for_the_selected_recipe() {
+    let s = UiScript::new().unwrap();
+    let count = |s: &UiScript| s.eval::<i64>("return GetTradeskillRepeatCount()").unwrap();
+    assert_eq!(count(&s), 1, "no book");
+    let mut s = s;
+    s.set_trade_skill(Some(state()));
+    assert_eq!(count(&s), 1, "idle");
+    s.run("DoTradeSkill(2, 3)").unwrap();
+    assert_eq!(count(&s), 1, "armed, but no recipe selected");
+    s.run("SelectTradeSkill(2)").unwrap();
+    assert_eq!(count(&s), 3, "armed for the selected recipe");
+}
+
+/// The post-cast hook `0x4fd7b0`: a three-craft batch signals at 3, 2 and 1 and none at 0
+/// (`0x4fd7cf`), the spell staying armed; a failed cast of the armed spell disarms with its own
+/// signal (`0x6e1a55`), so the close after it is silent; another spell's GO disarms (`0x4fd7e6`).
+#[test]
+fn the_repeat_counts_down_on_our_casts_and_ends_silently() {
+    use crate::script::tick::heard;
+    let mut s = UiScript::new().unwrap();
+    s.set_trade_skill(Some(state()));
+    s.run("SelectTradeSkill(2)").unwrap();
+    heard::listen(
+        &s,
+        &["UPDATE_TRADESKILL_RECAST", "TRADE_SKILL_CLOSE"],
+        Some("GetTradeskillRepeatCount()"),
+    );
+    s.run("DoTradeSkill(2, 3)").unwrap();
+    let spell = s.take_trade_skill_dos()[0].0;
+    // The hook returns the recast silently; the app sends it, then signals (`0x4fd7d7`,
+    // `0x4fd7dc`).
+    assert_eq!(heard::take(&s), ["UPDATE_TRADESKILL_RECAST 3"]);
+    for left in [2, 1] {
+        assert_eq!(s.trade_skill_spell_go(spell), Some(spell));
+        assert!(heard::take(&s).is_empty(), "no signal before the recast");
+        s.trade_skill_recast_sent();
+        assert_eq!(
+            heard::take(&s),
+            [format!("UPDATE_TRADESKILL_RECAST {left}")]
+        );
+    }
+    assert_eq!(
+        s.trade_skill_spell_go(spell),
+        None,
+        "the last craft recasts nothing"
+    );
+    assert!(heard::take(&s).is_empty(), "the last craft is silent");
+    assert_eq!(s.trade_skill_repeat(), (spell, 0), "still armed at 0");
+
+    s.run("DoTradeSkill(2, 3)").unwrap();
+    s.trade_skill_cast_failed(spell + 1);
+    assert_eq!(
+        heard::take(&s).len(),
+        1,
+        "another spell's failure leaves it armed"
+    );
+    s.trade_skill_cast_failed(spell);
+    assert_eq!(heard::take(&s), ["UPDATE_TRADESKILL_RECAST 1"]);
+    s.run("CloseTradeSkill()").unwrap();
+    assert_eq!(
+        heard::take(&s),
+        ["TRADE_SKILL_CLOSE 1"],
+        "the close finds nothing armed"
+    );
+
+    s.run("DoTradeSkill(2, 3)").unwrap();
+    assert_eq!(s.trade_skill_spell_go(spell + 1), None);
+    assert_eq!(
+        heard::take(&s),
+        ["UPDATE_TRADESKILL_RECAST 3", "UPDATE_TRADESKILL_RECAST 1"]
+    );
 }
 
 /// ItemLevel (`record+0x14`) sorts between tier and name.
@@ -845,7 +973,6 @@ fn same_tier_recipes_order_by_product_item_level_before_name() {
         rank: 57,
         max_rank: 75,
         recipes: vec![aaa, zzz, mid],
-        repeat_count: 0,
     }));
     // Header, then: Mmm(10) before Zzz(10) by name, both before Aaa(30) despite the alphabet.
     let names: Vec<String> = (1..=4)

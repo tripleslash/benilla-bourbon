@@ -18,7 +18,7 @@ use benilla_ui::script::{
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
@@ -139,8 +139,6 @@ pub(crate) struct AuctionOpen {
     pub(crate) lists: [AuctionListSlot; 3],
     /// Fire `AUCTION_HOUSE_SHOW` next feed: a hello reply landed.
     show_requested: bool,
-    /// Fire `NEW_AUCTION_UPDATE` next feed: the sell slot changed.
-    sell_slot_dirty: bool,
     /// Per list, a result landed, so its event is owed even for an identical page: the Browse
     /// pane leaves "Searching" only on it (`Blizzard_AuctionUI.lua:187`). Only that list's: the
     /// Auctions tab's update needs the `page` its `OnShow` sets (`Blizzard_AuctionUI.lua:817`).
@@ -151,9 +149,6 @@ pub(crate) struct AuctionOpen {
     /// `AUCTION_OWNED_LIST_UPDATE`, `0x1aa` `AUCTION_BIDDER_LIST_UPDATE`) and fall into one shared
     /// `call 0x496720` at `0x4ca37d`. One message, one event, and no site that fires two.
     list_result_landed: [bool; 3],
-    /// Empty the sell slot next feed: a listing was accepted, and the stale `(bag, slot)` would
-    /// auction whatever lands there next.
-    sell_slot_taken: bool,
     /// The `Time::elapsed_secs_f64` before which a browse query is refused; opening clears it.
     query_gate: Option<f64>,
     /// Messages queued for [`feed_auction`]; [`Self::clear`] keeps them, since a sale notice can
@@ -225,10 +220,6 @@ impl AuctionOpen {
             .map(|r| r.auction_id)
     }
 
-    pub(crate) fn sell_slot_taken(&mut self) {
-        self.sell_slot_taken = true;
-    }
-
     /// Re-query our listings next frame, only if we hold them: the reference patches its cached
     /// rows, so a list it never fetched announces nothing.
     pub(crate) fn refresh_owner(&mut self) {
@@ -246,12 +237,10 @@ impl AuctionOpen {
         self.house_id = 0;
         self.lists = Default::default();
         self.show_requested = false;
-        self.sell_slot_dirty = false;
         self.query_gate = None;
         self.pending_owner_refresh = false;
         self.pending_bidder_refresh = false;
         self.list_result_landed = [false; 3];
-        self.sell_slot_taken = false;
     }
 
     pub(crate) fn clear_session(&mut self) {
@@ -497,7 +486,6 @@ fn feed_auction(
     mut last: Local<crate::ui_script::VmMemo<Option<AuctionState>>>,
     mut last_open: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_can_query: Local<crate::ui_script::VmMemo<bool>>,
-    mut last_sell: Local<crate::ui_script::VmMemo<Option<(i64, u32)>>>,
     mut last_classes: Local<crate::ui_script::VmMemo<Vec<AuctionCategory>>>,
 ) {
     let Some(mut script) = script else {
@@ -506,7 +494,6 @@ fn feed_auction(
     let last = last.get(&script);
     let last_open = last_open.get(&script);
     let last_can_query = last_can_query.get(&script);
-    let last_sell = last_sell.get(&script);
 
     // The class tree needs no session: the stock `AuctionFrameBrowse_OnLoad` reads
     // `GetAuctionItemClasses()` when the addon loads (`Blizzard_AuctionUI.lua:174`).
@@ -614,17 +601,6 @@ fn feed_auction(
     *last = fresh;
     *last_open = auction.auctioneer;
 
-    // A listing was accepted: drop the staged item before anything reads the slot.
-    if std::mem::take(&mut auction.sell_slot_taken) {
-        script.clear_auction_sell_item();
-    }
-
-    let sell = script.auction_sell_item();
-    if sell != *last_sell || std::mem::take(&mut auction.sell_slot_dirty) {
-        *last_sell = sell;
-        script.fire_event("NEW_AUCTION_UPDATE", vec![]);
-    }
-
     // The browse gate, pushed when it changes; the Search button polls it every frame.
     let now = time.elapsed_secs_f64();
     let can_query = auction.query_gate.is_none_or(|gate| now >= gate);
@@ -640,11 +616,10 @@ fn drain_auction(
     mut auction: ResMut<AuctionOpen>,
     commands: Res<NetCommands>,
     time: Res<Time>,
-    objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     names: Res<NameCache>,
-    self_q: Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
+    self_q: Query<&crate::net::Guid, With<SelfPlayer>>,
     props: Option<Res<crate::items::RandomProperties>>,
     enchants: Option<Res<crate::items::Enchants>>,
 ) {
@@ -665,7 +640,7 @@ fn drain_auction(
         let _ = script.take_auction_bidder_query();
         let _ = script.take_auction_bids();
         let _ = script.take_auction_cancels();
-        let _ = script.take_auction_start();
+        let _ = script.take_auction_starts();
         let _ = script.take_auction_sorts();
         return;
     };
@@ -723,7 +698,7 @@ fn drain_auction(
     }
 
     // Bids and cancels map the clicked row through the sorted view the feed pushed, roll included.
-    let self_guid = self_q.iter().next().map(|(_, g)| g.0);
+    let self_guid = self_q.iter().next().map(|g| g.0);
     let bids = script.take_auction_bids();
     let cancels = script.take_auction_cancels();
     if !bids.is_empty() || !cancels.is_empty() {
@@ -766,25 +741,16 @@ fn drain_auction(
         }
     }
 
-    // The `(bag, slot)` resolves at send time, as the reference re-reads the slot on create.
-    if let Some(req) = script.take_auction_start() {
-        let item_guid = script
-            .auction_sell_item()
-            .and_then(|(bag, slot)| {
-                self_q.iter().next().and_then(|(store, _)| {
-                    crate::ui_items::slot_guid(&store.0, bag, (slot.max(1) - 1) as u8, &objects)
-                })
-            })
-            .unwrap_or(0);
-        if item_guid != 0 {
-            let _ = commands.0.send(ClientCommand::AuctionSellItem {
-                auctioneer,
-                item_guid,
-                bid: req.min_bid,
-                buyout: req.buyout,
-                etime_minutes: req.duration,
-            });
-        }
+    // `StartAuction` emptied the sell slot in the verb (`0x4ce92a`); it sends the guid the attach
+    // stored (`0x4ce8f3`), wherever the item has since gone.
+    for req in script.take_auction_starts() {
+        let _ = commands.0.send(ClientCommand::AuctionSellItem {
+            auctioneer,
+            item_guid: req.item_guid,
+            bid: req.min_bid,
+            buyout: req.buyout,
+            etime_minutes: req.duration,
+        });
     }
 
     // Header clicks last: a row pick above indexes last frame's order, so sorting first would
@@ -930,20 +896,6 @@ mod tests {
         open.clear();
         open.refresh_owner();
         assert!(!open.pending_owner_refresh);
-    }
-
-    #[test]
-    fn an_accepted_listing_releases_the_sell_slot() {
-        let mut open = AuctionOpen::default();
-        open.open(0x1234, 1);
-        assert!(!open.sell_slot_taken, "nothing listed yet");
-
-        open.sell_slot_taken();
-        assert!(open.sell_slot_taken, "the feed owes the slot a clear");
-
-        // A closed session forgets it rather than clearing a slot it does not own.
-        open.clear();
-        assert!(!open.sell_slot_taken);
     }
 
     const ME: u64 = 0x77;

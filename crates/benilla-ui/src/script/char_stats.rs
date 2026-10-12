@@ -169,6 +169,8 @@ pub struct InvSlotView {
     pub item_id: u32,
     /// Whether the item may go on an action bar, by the same filter as a bag slot's.
     pub bar_placeable: bool,
+    /// The action bar's count gate, as a bag slot's ([`super::container::ContainerSlot`]).
+    pub consumable: bool,
     /// Icon texture path (`Interface\Icons\…`); `None` while the template answer is in flight.
     pub icon: Option<String>,
     /// `ITEM_FIELD_STACK_COUNT`, or for the ammo slot the bag-summed carried total.
@@ -191,8 +193,9 @@ pub struct InvSlotView {
     pub already_bound: bool,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
-    /// Whether a pending item operation covers this slot (`IsInventoryItemLocked`).
-    pub locked: bool,
+    /// The item object's guid, 0 while unresolved: `IsInventoryItemLocked` reads the client's lock
+    /// on it.
+    pub guid: u64,
     /// The 1-based live-API slots this item could be equipped into; empty if none.
     pub equip_slots: Vec<u8>,
     /// The resolved `ITEM_FIELD_CREATOR` name, the tooltip's "<Made by %s>" line.
@@ -499,7 +502,7 @@ impl InvSlotView {
             durability: slot.durability,
             already_bound: slot.already_bound,
             link: slot.link.clone(),
-            locked: slot.locked,
+            guid: slot.guid,
             creator: slot.creator.clone(),
             enchants: slot.enchants.clone(),
             // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.

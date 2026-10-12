@@ -78,6 +78,8 @@ fn install_glue_vm(world: &mut World, screen: super::glue::GlueScreen) -> bool {
     let failures = super::glue::load_glue(&mut script);
     super::glue::finish_glue_load_log(&mut script);
     start_server_alert(world, &script);
+    // What the glue carries across its rebuild, in place before the screen's `OnShow` reads it.
+    super::glue_mgr::seat_glue_build(world, &mut script);
     super::glue::set_glue_screen(&mut script, screen);
     info!(
         "ui_script: stock glue up in {:.0} ms on \"{}\" ({} load failure(s))",
@@ -701,6 +703,9 @@ fn entry_prepare(
         }
         None => script.register_cvars(crate::cvars::registered_pairs()),
     }
+    // The item locks before any file or event runs: a `/reload`'s survive, as on the reference's
+    // item objects.
+    crate::ui_items::locks::seed_vm_item_locks(world, script, seat == LoadSeat::Live);
     // The realm before the load, since addons read `GetRealmName()` at file scope; the roster
     // carries the realm-list entry this session connected to.
     let realm = world
@@ -755,6 +760,10 @@ fn entry_prepare(
     // file-scope `SendChatMessage` names its tongue from.
     crate::ui_chat::seed_zone_channel_catalog(world, script);
     crate::bindings::seed_bindings_for_vm(world, script);
+    // The engine globals a previous VM folded out: the quest log's fold mask and the tradeskill
+    // repeat.
+    crate::ui_quest_log::seed_quest_folds(world, script);
+    crate::ui_tradeskill::seed_repeat(world, script);
     crate::ui_unit::seed_default_language(world, script);
     crate::ui_unit::seed_language_table(world, script);
     // The world map's continent and zone lists: static DBC data in the reference, read at file
@@ -1115,6 +1124,15 @@ pub(crate) fn shutdown_ui_state(
 /// ([`install_glue_side_vm`]).
 pub(crate) fn end_ui_session(world: &mut World) {
     close_ui_session(world);
+    // The session's end drops what the fold just carried, as the disconnect handler, a frame
+    // earlier, dropped the rest: only a `/reload` seats it again.
+    if let Some(mut log) = world.get_resource_mut::<crate::ui_quest_log::QuestLog>() {
+        log.forget_folds();
+    }
+    if let Some(mut carry) = world.get_resource_mut::<crate::ui_tradeskill::TradeSkillRepeatCarry>()
+    {
+        carry.0 = 0;
+    }
     // `0x401ee0`'s glue leg: `"charselect"` after a logout, `"login"` after a disconnect
     // (`0x402084`); the state this exit enters says which.
     let screen = match world
@@ -1149,6 +1167,12 @@ fn close_ui_session(world: &mut World) {
     crate::cvars::fold_dying_vm_cvars(world);
     // The chat cache folds here, not in its own `OnExit(InWorld)` system, which a `/reload` skips.
     crate::ui_chat::settings::fold_dying_vm_chat_cache(world);
+    // The item locks too: the reference keeps them on the item objects, which a `/reload` keeps.
+    crate::ui_items::locks::fold_dying_vm_item_locks(world);
+    // So do the engine globals the VM holds for the session: the quest log's fold mask and the
+    // tradeskill repeat, which no UI init resets.
+    crate::ui_quest_log::fold_dying_vm_quest_folds(world);
+    crate::ui_tradeskill::fold_dying_vm_repeat(world);
     world.insert_resource(AddOnIdentity(None));
 
     // Host values taken from the dying frame tree go with it (a `VmMemo` resets on its own): the

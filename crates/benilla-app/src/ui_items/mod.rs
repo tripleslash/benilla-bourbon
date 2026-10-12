@@ -5,9 +5,8 @@
 //! 81.. with no container object, like the bank), the object index and the template cache, and
 //! fires `BAG_UPDATE(bagID)` per changed bag. [`drain`] sends the Lua intents over [`wire_pos`]:
 //! an equippable item that starts no quest goes out as `CMSG_AUTOEQUIP_ITEM`, anything else
-//! through [`send_item_use`]. A move or split locks both ends and a destroy its slot in
-//! [`PendingItemOps`], until the descriptor resolves them or the server answers a non-zero
-//! `SMSG_INVENTORY_CHANGE_FAILURE`.
+//! through [`send_item_use`]. The cursor verbs lock what they pick up and place onto, and the
+//! server's answer lifts it ([`crate::ui_items::locks`]).
 
 use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST};
@@ -17,20 +16,20 @@ use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects};
-use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod drain;
 mod equip_error;
 pub(crate) mod feed;
+pub(crate) mod locks;
 mod net;
 
-pub(crate) use drain::send_auto_equip;
 use drain::{
     drain_bag_autostores, drain_container_autoequips, drain_container_destroys,
     drain_container_moves, drain_container_repairs,
 };
+pub(crate) use drain::{send_auto_equip, AutoEquipSent};
 // `UseContainerItem` and `UseInventoryItem`, applied in call order by `crate::script_calls`.
 pub(crate) use drain::ScriptItemUse;
 use feed::{
@@ -119,6 +118,9 @@ pub(crate) struct EquipError {
     /// Reason 16's `%s` source: the destination bag's player slot (255 names no bag), which the
     /// drain resolves to the bag's `BagFamily` name.
     pub bag_slot: u8,
+    /// The item guids a refused inventory operation unlocks after its line (`0x5e3ac0`,
+    /// `0x5e3ad3`); none for a mail refusal.
+    pub unlocks: [u64; 2],
 }
 
 /// Inventory refusals (`SMSG_INVENTORY_CHANGE_FAILURE`) queued for the UI error line.
@@ -170,7 +172,7 @@ pub(crate) fn slot_guid(
 }
 
 /// `(item guid, stack count)` at a Lua-space `(bag, 1-based slot)`, `(0, 0)` when empty:
-/// [`PendingItemOps`]'s baseline, since a partial split or destroy changes only the count.
+/// the trade window's offered-item view reads both.
 pub(crate) fn slot_guid_count(
     store: Option<&ObjectStore>,
     bag: i64,
@@ -628,6 +630,15 @@ pub(crate) fn item_use_route(
     }
 }
 
+/// `CGItem::Use`'s first gate (`0x5d8d32`): a locked item is refused, silently. Of its callers the
+/// doll (`0x4c7af0`) and the bag (`0x4fa430`, behind `UseContainerItem`'s own `0x4fa1cd`) are
+/// refused in their Lua call and the bar (`0x4e607b`) against the locks its call read
+/// ([`benilla_ui::script::ActionUse`]); the soulstone (`0x48ae7d`) and the bind-on-use confirm
+/// (`0x5d92c1`) ask here.
+pub(crate) fn item_use_refused(script: &benilla_ui::script::UiScript, guid: Option<u64>) -> bool {
+    guid.is_some_and(|g| script.item_locked(g))
+}
+
 /// Send what [`item_use_route`] decides; the only place a `CMSG_USE_ITEM` leaves benilla. The
 /// reference's cast tail calls `0x6e5a90`, whose body is `call 0x6e4b60`, `TryCast`: the function
 /// the spellbook, `/cast` and the action bar run, with the item as an argument no gate skips for
@@ -774,8 +785,8 @@ pub(super) fn item_link(item_id: u32, name: &str, quality: u32) -> String {
     item_link_full(item_id, 0, 0, 0, name, quality)
 }
 
-/// `INVTYPE_AMMO`: loaded with `CMSG_SET_AMMO`, not the equip swap.
-pub(super) const INVTYPE_AMMO: u32 = 24;
+/// `ITEM_CLASS_PROJECTILE`, the template class `UseContainerItem` leaves unlocked (`0x4fa40b`).
+pub(super) const ITEM_CLASS_PROJECTILE: u32 = 6;
 
 /// The `InventoryType` → live-API equip slots map (wire `EQUIPMENT_SLOT_*` + 1, bag icons
 /// 20..23; empty is not equippable), from vmangos `ItemPrototype::GetAllowedEquipSlots`
@@ -839,7 +850,7 @@ pub(super) fn find_equip_slot(inventory_type: u32, has_relic_slot: bool) -> Vec<
         21 => vec![MAINHAND],                  // INVTYPE_WEAPONMAINHAND
         22 => vec![OFFHAND],                   // INVTYPE_WEAPONOFFHAND
         23 => vec![OFFHAND],                   // INVTYPE_HOLDABLE
-        24 => vec![AMMO],                      // INVTYPE_AMMO → the ammo slot (loaded via SET_AMMO)
+        24 => vec![AMMO],                      // INVTYPE_AMMO
         25 | 26 if !has_relic_slot => vec![RANGED], // INVTYPE_THROWN / INVTYPE_RANGEDRIGHT
         28 if has_relic_slot => vec![RANGED],  // INVTYPE_RELIC, the same slot
         // NON_EQUIP (0), QUIVER (27), a RANGED-slot type on the wrong side of the relic test, and
@@ -919,12 +930,13 @@ impl Plugin for UiItemsPlugin {
         net::register(app);
         // The icons come from the equipment renderer's `ItemDisplays`.
         app.init_resource::<EquipErrors>()
-            .init_resource::<PendingItemOps>()
+            .init_resource::<crate::ui_items::locks::ItemReleases>()
+            .init_resource::<crate::ui_items::locks::HeldItemLocks>()
+            .init_resource::<crate::ui_items::locks::LockWatch>()
             // The soulbind confirmations' pending records: the client's pending-equip array and
             // its one bind-on-use cell.
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
-            .init_resource::<LockTransitions>()
             .init_resource::<net::BagOpens>()
             // After the chain opens (unordered, it can run first and skip every item DBC), and
             // again when its data changes.
@@ -932,8 +944,10 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
-                    // The pending-lock clear, ahead of both feeds that push `locked`.
-                    feed::resolve_item_locks
+                    // The server's unlocks, ahead of both inventory feeds: the reference's
+                    // watchers run before the descriptor takes the new guid.
+                    crate::ui_items::locks::apply_item_releases
+                        .in_set(crate::ui_script::UiFeed)
                         .before(feed_containers)
                         .before(crate::ui_char::feed_char),
                     // The slot cooldowns must be in the VM before `feed_action_state`'s

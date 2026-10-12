@@ -1099,6 +1099,8 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_merchant(Some(stock()));
         s.model_mut().cursor = Some(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x101,
             bag: 0,
             slot: 7,
             item_id: 4540,
@@ -1108,6 +1110,7 @@ mod tests {
             quality: None,
             equip_slots: Vec::new(),
             bar_placeable: false,
+            consumable: false,
         }));
 
         s.run("PickupMerchantItem(0)").unwrap();

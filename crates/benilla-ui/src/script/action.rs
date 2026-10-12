@@ -70,13 +70,24 @@ pub(crate) struct StoredActionState {
 }
 
 /// One queued `UseAction` press.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionUse {
     /// The 1-based Lua action id, as `UseAction` was given it.
     pub action: u32,
     /// `UseAction`'s third argument, which only the self-cast bindings (`SELFACTIONBUTTON1`-`12`)
     /// pass, through `ActionButtonUp(id, 1)`.
     pub on_self: bool,
+    /// The item locks as the call read them. An item slot's use leg tests its copy's lock inside
+    /// the call (`0x4e607b` → `0x5d8d32`), so the app, which finds the copy, tests it against
+    /// these and not the locks a later call in the frame took or released.
+    pub item_locks: Vec<u64>,
+}
+
+impl ActionUse {
+    /// Whether item `guid` was locked when the press was made.
+    pub fn item_was_locked(&self, guid: u64) -> bool {
+        self.item_locks.contains(&guid)
+    }
 }
 
 impl super::UiScript {
@@ -91,6 +102,17 @@ impl super::UiScript {
                 model.actions.remove(&action);
             }
         }
+    }
+
+    /// Every occupied slot as the VM holds it, the cursor verbs' writes included, keyed by Lua
+    /// action id: what the slots' `ACTIONBAR_SLOT_CHANGED` handlers last read.
+    pub fn action_slots(&self) -> std::collections::HashMap<u32, ActionSlot> {
+        self.model_ref().actions.clone()
+    }
+
+    /// One slot as the VM holds it.
+    pub fn action_slot(&self, action: u32) -> Option<ActionSlot> {
+        self.model_ref().actions.get(&action).cloned()
     }
 
     /// Push (or clear) one action's state; the cooldown start is already on the `GetTime` clock,
@@ -124,7 +146,7 @@ impl super::UiScript {
     /// Take the `UseAction` presses out of the call stream.
     pub fn take_action_uses(&mut self) -> Vec<ActionUse> {
         self.take_calls_where(|c| match c {
-            super::ScriptCall::UseAction(press) => Some(*press),
+            super::ScriptCall::UseAction(press) => Some(press.clone()),
             _ => None,
         })
     }
@@ -268,9 +290,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 drop(model);
                 super::cursor::place_action(lua, action);
             } else {
+                let item_locks = model.item_locks.iter().copied().collect();
                 model
                     .script_calls
-                    .push(super::ScriptCall::UseAction(ActionUse { action, on_self }));
+                    .push(super::ScriptCall::UseAction(ActionUse {
+                        action,
+                        on_self,
+                        item_locks,
+                    }));
             }
             Ok(())
         })?,
@@ -598,6 +625,8 @@ mod tests {
             kind: 0x00,
             action: 111,
             texture: Some("Interface\\Icons\\Spell_A".into()),
+            count: 0,
+            consumable: false,
         }));
 
         s.run("UseAction(9, 0)").unwrap();

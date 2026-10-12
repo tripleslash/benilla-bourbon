@@ -145,14 +145,17 @@ impl Plugin for CharSelectPlugin {
 /// The session's edges, in every state: the reconnect auto-answer and the logout edge arrive
 /// `InWorld`. A logout or a refused login clears the pick before the roster policy reads it: the
 /// roster comes right behind them on the kept link, often in the same drain, and must be shown,
-/// not answered with the pick just left. `back_on_disconnect` runs after the entry: a session that
-/// died during entry queues both edges into one frame, and the dead one must win.
-fn session_edges() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+/// not answered with the pick just left. The refusal and `back_on_disconnect` run after the entry:
+/// the entry is announced with `CMSG_PLAYER_LOGIN`, so a refusal or a session that died during
+/// entry queues both edges into one frame, and the later word must win (`0x5aad70` leaves the
+/// player on the select screen).
+pub(crate) fn session_edges(
+) -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
     (
         back_on_logout,
+        enter_on_connected,
         back_on_login_refused,
         apply_roster_policy,
-        enter_on_connected,
         back_on_disconnect,
         back_on_entry_failed,
         // Last and ungated: it mirrors the pick the frame ended with, and world entry is reached
@@ -198,6 +201,15 @@ impl Roster {
         if let Some(c) = self.chars.iter_mut().find(|c| c.guid == guid) {
             c.name = name.to_string();
             c.flags &= !benilla_protocol::CHARACTER_FLAG_RENAME;
+        }
+    }
+
+    /// A roster the screen holds with no pick, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn with_chars(chars: Vec<Character>) -> Self {
+        Self {
+            chars,
+            ..Self::default()
         }
     }
 
@@ -498,19 +510,24 @@ fn back_on_entry_failed(
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: back to select with the refusal in the glue dialog. The IO
 /// thread announces the entry with the pick, so this undoes a half-built one. The pick must be
-/// cleared, or the roster behind the refusal is auto-answered and the refused login loops.
+/// cleared, or the roster behind the refusal is auto-answered and the refused login loops. Under
+/// the stock glue the refusal's dialog is its glue manager's (state 9), not this one.
 fn back_on_login_refused(
     mut msgs: MessageReader<CharacterLoginFailedMessage>,
     mut roster: ResMut<Roster>,
     mut next: ResMut<NextState<ClientState>>,
     mut dialog: ResMut<crate::glue::dialog::GlueDialog>,
     strings: Option<Res<GlueStrings>>,
+    stock: Option<Res<crate::ui_script::glue::GlueStock>>,
 ) {
     let Some(msg) = msgs.read().last().copied() else {
         return;
     };
     roster.pending_pick = None;
     next.set(ClientState::CharSelect);
+    if stock.is_some_and(|s| s.0) {
+        return;
+    }
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
     dialog.open_error(char_login_refusal_text(strings, msg.result));
@@ -1087,17 +1104,22 @@ mod tests {
     /// database, so the refusal lands in the same drain and must be the last word.
     #[test]
     fn a_refused_login_beats_the_entry_it_revokes() {
+        let (tx, rx) = async_channel::unbounded();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .insert_state(ClientState::CharSelect)
-            .init_resource::<Roster>()
-            .init_resource::<crate::ui_script::PlayerUiHover>()
-            .init_resource::<crate::ui_script::UiKeyboardCapture>()
-            .add_message::<EnteredWorldMessage>()
-            .add_message::<CharacterLoginFailedMessage>()
+            .insert_resource(Roster::with_pending_pick(vec![character(7, "Seven")], 7))
+            .insert_resource(CharPick(tx.into()))
+            .init_resource::<crate::cvars::Cvars>()
             .init_resource::<crate::glue::dialog::GlueDialog>()
-            .add_systems(Update, (enter_on_connected, back_on_login_refused).chain());
-        app.world_mut().resource_mut::<Roster>().pending_pick = Some(7);
+            .add_message::<CharListMessage>()
+            .add_message::<EnteredWorldMessage>()
+            .add_message::<LoggedOutMessage>()
+            .add_message::<CharacterLoginFailedMessage>()
+            .add_message::<crate::net::DisconnectedMessage>()
+            // The production chain, in its own order.
+            .add_systems(Update, session_edges());
+        app.world_mut().resource_mut::<Roster>().env_read = true;
 
         app.world_mut().write_message(EnteredWorldMessage {
             billing_time_rested: 0,
@@ -1120,6 +1142,7 @@ mod tests {
             "and the pick goes with it: the relist behind the refusal is auto-answered with \
              `pending_pick`, so keeping it would re-enter the character just refused, forever",
         );
+        assert!(rx.try_recv().is_err(), "nothing picked again");
         // No GlueStrings here, so the fallback literal; the shipped one is checked below.
         assert_eq!(
             app.world()
@@ -1128,6 +1151,31 @@ mod tests {
             "World server is down",
             "a refusal the player cannot see is the bug this whole path exists to end",
         );
+    }
+
+    /// Under the stock glue a refusal still leaves for select and drops the pick, but opens no
+    /// native dialog: the stock screen's own (its glue manager's state 9) says why.
+    #[test]
+    fn a_refusal_under_the_stock_glue_opens_no_native_dialog() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::InWorld)
+            .insert_resource(Roster::with_pending_pick(vec![character(7, "Seven")], 7))
+            .insert_resource(crate::ui_script::glue::GlueStock(true))
+            .init_resource::<crate::glue::dialog::GlueDialog>()
+            .add_message::<CharacterLoginFailedMessage>()
+            .add_systems(Update, back_on_login_refused);
+        app.world_mut()
+            .write_message(CharacterLoginFailedMessage { result: 0x01 });
+        app.update();
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<ClientState>>().get(),
+            ClientState::CharSelect
+        );
+        assert_eq!(app.world().resource::<Roster>().pending_pick, None);
+        let dialog = app.world().resource::<crate::glue::dialog::GlueDialog>();
+        assert!(dialog.kind.is_none() && dialog.text.is_empty());
     }
 
     /// A logout, or a refused login, and the roster the kept link sends right behind it can land

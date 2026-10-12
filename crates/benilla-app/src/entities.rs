@@ -937,7 +937,12 @@ fn setup_entities(
         CharCreateCatalog::load(&mut chain)
     };
     match catalog {
-        Ok(catalog) => commands.insert_resource(CharCreate(catalog)),
+        Ok(catalog) => {
+            if let Some(e) = catalog.name_gen_error() {
+                warn!("NameGen.dbc unavailable, the create screen's random name is empty: {e}");
+            }
+            commands.insert_resource(CharCreate(catalog));
+        }
         Err(e) => {
             // A rerun must not leave the other flavor's catalog answering.
             commands.remove_resource::<CharCreate>();

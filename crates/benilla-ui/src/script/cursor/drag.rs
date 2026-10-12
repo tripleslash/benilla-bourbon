@@ -387,7 +387,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x118,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -437,7 +440,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x119,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -475,7 +481,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11a,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -517,7 +526,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11b,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -576,7 +588,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11c,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -615,7 +630,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11d,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -654,7 +672,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11e,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -939,7 +960,10 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            item_class: None,
+            guid: 0x11f,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,

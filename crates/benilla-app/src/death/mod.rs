@@ -238,18 +238,7 @@ fn feed_death(
     let memo = feed.vm.get(&script);
     let prev = memo.last.filter(|&(g, ..)| g == guid);
     memo.last = Some((guid, dead, ghost));
-    match (prev, dead, ghost) {
-        (Some((_, false, false)) | None, true, false) => {
-            script.fire_event("PLAYER_DEAD", vec![]);
-        }
-        (Some((_, true, false)), d, g) if g || !d => {
-            script.fire_event("PLAYER_ALIVE", vec![]);
-        }
-        (Some((_, _, true)), false, false) => {
-            script.fire_event("PLAYER_UNGHOST", vec![]);
-        }
-        _ => {}
-    }
+    fire_vm_edges(&mut script, prev.map(|(_, d, g)| (d, g)), dead, ghost);
 
     // ── The offer and confirm announcements ──
     if let Some(name) = offer_announcement(memo, &death_net, store.0.is_dead_or_ghost(), |offer| {
@@ -494,7 +483,14 @@ fn drain_death(
                     )
                 }) {
                     Some(SelfRes::Spell { .. }) => net.0.send(ClientCommand::SelfRes),
-                    // An ordinary item use, `0x5d8d00`, like every bag click.
+                    // An ordinary item use, `0x5d8d00` (called at `0x48ae7d`), like every bag
+                    // click: a locked stone is refused at its first gate (`0x5d8d32`).
+                    Some(SelfRes::Item { guid, .. })
+                        if crate::ui_items::item_use_refused(&script, Some(guid)) =>
+                    {
+                        debug!("death: soulstone {guid:#x} is locked — refused");
+                        Ok(())
+                    }
                     Some(SelfRes::Item {
                         bag_index,
                         slot,
@@ -640,6 +636,87 @@ mod tests {
         );
     }
 
+    /// `UseSoulstone`'s item leg is `CGItem::Use` (`0x48ae7d`), whose first gate refuses a
+    /// locked item (`0x5d8d32`): the stone's use goes out only once the lock lifts.
+    #[test]
+    fn a_locked_soulstone_is_not_used() {
+        const STONE: u64 = 0x4000_0000_0000_5232;
+        const STONE_ENTRY: u32 = 5232;
+        const SELF_RES: u32 = 20707;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let world = app.world_mut();
+        // A dead player (health 0 of 100) with the stone in backpack slot 1.
+        world.spawn((
+            SelfPlayer,
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 0),
+                (28, 100),
+                (532, STONE as u32),
+                (533, (STONE >> 32) as u32),
+            ])),
+        ));
+        crate::items::test_spawn_item(
+            world,
+            STONE,
+            benilla_protocol::ObjectFields::from_pairs(&[(3, STONE_ENTRY)]),
+            false,
+        );
+        world.resource_mut::<crate::items::Items>().insert_template(
+            STONE_ENTRY,
+            Some(benilla_protocol::messages::ItemInfo {
+                spells: vec![benilla_protocol::messages::ItemSpellEntry {
+                    index: 0,
+                    spell_id: SELF_RES,
+                    trigger: 0,
+                    charges: -1,
+                    cooldown_ms: -1,
+                    category: 0,
+                    category_cooldown_ms: -1,
+                }],
+                // A quest-starter's arm sends with no cast ladder to satisfy.
+                start_quest: 42,
+                ..crate::items::test_template("Minor Soulstone")
+            }),
+        );
+        let display = benilla_formats::SpellDisplay {
+            effects: [SPELL_EFFECT_SELF_RESURRECT, 0, 0],
+            ..Default::default()
+        };
+        world.insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays([(SELF_RES, display)].into()),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        let mut script = UiScript::new().unwrap();
+        script.lock_item(STONE);
+        world.insert_non_send(script);
+        let press = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<UiScript>()
+                .run("UseSoulstone()")
+                .unwrap();
+            app.world_mut().run_system_once(drain_death).unwrap();
+        };
+        let _ = rx.try_iter().count();
+        press(&mut app);
+        assert_eq!(rx.try_iter().count(), 0, "a locked stone is not used");
+        assert!(app
+            .world_mut()
+            .non_send_mut::<UiScript>()
+            .take_ui_errors()
+            .is_empty());
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .unlock_item(STONE);
+        press(&mut app);
+        assert!(
+            rx.try_iter().count() > 0,
+            "unlocked, the stone's use goes out"
+        );
+    }
+
     /// A `/reload` must not restart the release window; a relog must clear it.
     #[test]
     fn the_session_edge_clears_the_world_scoped_death_memory_and_nothing_else_does() {
@@ -679,6 +756,64 @@ mod tests {
             feed.died_at.is_none(),
             "the release window is the dead session's, and re-arms at the next login"
         );
+    }
+}
+
+/// The body's VM events between the last `(dead, ghost)` seen, if any, and this one.
+fn fire_vm_edges(script: &mut UiScript, prev: Option<(bool, bool)>, dead: bool, ghost: bool) {
+    match (prev, dead, ghost) {
+        (Some((false, false)) | None, true, false) => {
+            script.fire_event("PLAYER_DEAD", vec![]);
+        }
+        (Some((true, false)), d, g) if g || !d => {
+            // The health edge out of 0 (`0x6047f0`) unlocks every item (`0x5fefae`), then fires
+            // `PLAYER_ALIVE` (`0x5fefb8`).
+            script.unlock_all_items();
+            script.fire_event("PLAYER_ALIVE", vec![]);
+        }
+        (Some((_, true)), false, false) => {
+            script.fire_event("PLAYER_UNGHOST", vec![]);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use benilla_ui::script::UiScript;
+
+    /// The revive edge unlocks every item, its one `ITEM_LOCK_CHANGED` ahead of `PLAYER_ALIVE`
+    /// (`0x5fefae`, `0x5fefb8`); the ghost's own revive, no health edge, unlocks nothing.
+    #[test]
+    fn the_revive_edge_unlocks_every_item_before_player_alive() {
+        const ITEM: u64 = 0x4000_0000_0000_0042;
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "SEEN = {} local f = CreateFrame('Frame') \
+             f:RegisterEvent('ITEM_LOCK_CHANGED') f:RegisterEvent('PLAYER_ALIVE') \
+             f:RegisterEvent('PLAYER_UNGHOST') \
+             f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
+        )
+        .unwrap();
+        let seen = |s: &UiScript| {
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        s.lock_item(ITEM);
+        let _ = seen(&s);
+        super::fire_vm_edges(&mut s, Some((true, false)), true, true);
+        assert_eq!(
+            seen(&s),
+            ["ITEM_LOCK_CHANGED", "PLAYER_ALIVE"],
+            "the release"
+        );
+        assert!(!s.item_locked(ITEM));
+        s.lock_item(ITEM);
+        let _ = seen(&s);
+        super::fire_vm_edges(&mut s, Some((true, true)), false, false);
+        assert_eq!(seen(&s), ["PLAYER_UNGHOST"], "the corpse run's end");
+        assert!(s.item_locked(ITEM));
     }
 }
 

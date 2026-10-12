@@ -147,7 +147,18 @@ pub(crate) struct KeybindState {
     /// Bumped by every change to the live table or the commands: the app's signal to re-derive
     /// dispatch.
     generation: u64,
+    /// The generation a Lua verb last signalled `UPDATE_BINDINGS` for in place (`SetBinding`
+    /// `0x4b805b`, `LoadBindings` through `0x4b649d`), so the app owes no second signal for it.
+    signalled: u64,
     requests: Vec<KeybindRequest>,
+}
+
+impl KeybindState {
+    /// A verb's change, signalled in place: `UPDATE_BINDINGS` (`0x182`) before the verb returns.
+    fn signal(model: &mut Model) {
+        model.keybinds.signalled = model.keybinds.generation;
+        model.raise("UPDATE_BINDINGS", Vec::new());
+    }
 }
 
 /// `SetBinding(set, key, command)` on one key list: unbind `key` everywhere, then bind it to the
@@ -388,6 +399,11 @@ impl super::UiScript {
         self.model_mut().keybinds.generation
     }
 
+    /// The generation a Lua verb already signalled `UPDATE_BINDINGS` for in place.
+    pub fn keybinds_signalled_generation(&self) -> u64 {
+        self.model_ref().keybinds.signalled
+    }
+
     /// Drain the queued host requests.
     pub fn take_keybind_requests(&mut self) -> Vec<KeybindRequest> {
         std::mem::take(&mut self.model_mut().keybinds.requests)
@@ -476,11 +492,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(MultiValue::from_iter(out))
         })?,
     )?;
+    // A stored binding signals `UPDATE_BINDINGS` before the verb returns 1 (`0x4b805b`); a refused
+    // key returns nil and signals nothing.
     lua.globals().set(
         "SetBinding",
         lua.create_function(|lua, (key, command): (String, Option<String>)| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let ok = model.keybinds.set_binding(&key, command.as_deref());
+            let ok = super::tick::verb(lua, |model| {
+                let ok = model.keybinds.set_binding(&key, command.as_deref());
+                if ok {
+                    KeybindState::signal(model);
+                }
+                ok
+            });
             Ok(if ok { Some(1) } else { None })
         })?,
     )?;
@@ -528,11 +551,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_string(name)
         })?,
     )?;
+    // The set's copy into the live table (`0x4b8252` → `0x4b6310`, destination 3) signals
+    // `UPDATE_BINDINGS` (`0x4b649d`) before the verb returns. The set is read by `tonumber`
+    // alone (`0x4b8228`, a non-number is 0); 3 and above raise the usage (`0x4b8232`-`0x4b823d`).
     lua.globals().set(
         "LoadBindings",
-        lua.create_function(|lua, set: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.keybinds.load(set);
+        lua.create_function(|lua, set: Value| {
+            let set = super::binding_abi::ftol(super::binding_abi::coerced_number(lua, Some(set)));
+            if set >= 3 {
+                return Err(mlua::Error::RuntimeError(
+                    "Usage: LoadBindings(0||1||2)".into(),
+                ));
+            }
+            super::tick::verb(lua, |model| {
+                if let Ok(set) = u32::try_from(set) {
+                    model.keybinds.load(set);
+                    KeybindState::signal(model);
+                }
+            });
             Ok(())
         })?,
     )?;
@@ -635,6 +671,43 @@ mod tests {
             &parse(r#"<Bindings><Binding name="A">x()</Binding></Bindings>"#).unwrap(),
         );
         assert_eq!(rows(&s), [row(&["A"])]);
+    }
+
+    /// `SetBinding` signals `UPDATE_BINDINGS` before it returns 1 (`0x4b805b`), its handler reading
+    /// the new key; a refused key signals nothing. `LoadBindings` signals from the copy into the
+    /// live set (`0x4b649d`).
+    #[test]
+    fn the_binding_verbs_signal_update_bindings_in_place() {
+        let s = script();
+        crate::script::tick::heard::listen(&s, &["UPDATE_BINDINGS"], Some("GetBindingAction('F')"));
+        s.run(r#"SetBinding("F", "JUMP")"#).unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["UPDATE_BINDINGS JUMP"]
+        );
+        s.run(r#"SetBinding("NOT A KEY", "JUMP")"#).unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        s.run("LoadBindings(0)").unwrap();
+        assert_eq!(crate::script::tick::heard::take(&s), ["UPDATE_BINDINGS "]);
+        assert_eq!(s.keybinds_signalled_generation(), s.keybinds_generation());
+    }
+
+    /// `LoadBindings` reads its set with a bare `tonumber` (`0x4b8228`) and raises its usage for
+    /// 3 and above (`0x4b8232`-`0x4b823d`), loading and signalling nothing; a non-number is set 0.
+    #[test]
+    fn load_bindings_raises_its_usage_past_set_two() {
+        let s = script();
+        crate::script::tick::heard::listen(&s, &["UPDATE_BINDINGS"], None);
+        let err = s.run("LoadBindings(3)").unwrap_err().to_string();
+        assert!(err.contains("Usage: LoadBindings(0||1||2)"), "{err}");
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        s.run(r#"SetBinding("F", "JUMP") LoadBindings("x")"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "",
+            "a non-number restores the defaults"
+        );
     }
 
     #[test]

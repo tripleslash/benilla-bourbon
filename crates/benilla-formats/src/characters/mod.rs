@@ -12,7 +12,7 @@ mod customization;
 mod geosets;
 mod sections;
 
-pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
+pub use customization::{CharCreateCatalog, ChrRaceRow, DialRanges, NameGenRow, StartOutfitItem};
 pub use geosets::{CharacterGeosets, EquipGeosets, VisibleGeosets};
 pub use sections::{
     composite_input_at_1x, equip_blits, equip_column, equip_region_candidates, equip_tex_dir,

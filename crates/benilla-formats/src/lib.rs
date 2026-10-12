@@ -41,8 +41,8 @@ pub mod webpack;
 pub use characters::{
     composite_input_at_1x, equip_blits, equip_column, equip_region_candidates, equip_tex_dir,
     equip_tile, forearm_dressed, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets,
-    CompositeBlobs, CompositePlan, DialRanges, EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem,
-    StartOutfitItem, VisibleGeosets,
+    ChrRaceRow, CompositeBlobs, CompositePlan, DialRanges, EmblemLayer, EquipBlit, EquipGeosets,
+    GuildEmblem, NameGenRow, StartOutfitItem, VisibleGeosets,
 };
 mod camera_shakes;
 mod cinematics;
@@ -82,8 +82,8 @@ mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
 pub use factions::{
-    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo,
-    FactionTemplate, Reaction,
+    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionGroupRow,
+    FactionInfo, FactionTemplate, Reaction,
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};

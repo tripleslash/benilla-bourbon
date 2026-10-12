@@ -434,8 +434,13 @@ pub(crate) struct Model {
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
     /// other word to 1). Boots at 1, as the reference writes `AUTO` for an untouched option.
     pub(crate) guild_recruitment_mode: u8,
-    /// Any `SetGuildRecruitmentMode(1)`, even unchanged: the reference runs the cascade `0x49ea90`.
+    /// A `SetGuildRecruitmentMode(1)` whose cascade could not act: the run stays owed
+    /// (`[0xb6e5e4]`) for the app's retry.
     pub(crate) guild_recruitment_cascade: bool,
+    /// What the cascade `0x49ea90` would do now, pushed by the app.
+    pub(crate) guild_recruitment_plan: super::channel::RecruitmentPlan,
+    /// The cascade's joins and leaves since the last drain, for the app's wire and slot halves.
+    pub(crate) guild_recruitment_runs: Vec<super::channel::RecruitmentRun>,
     /// Lua changed the recruitment mode: the chat cache's dirty signal.
     pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls queued.
@@ -770,8 +775,11 @@ pub(crate) struct Model {
     pub(crate) taxi_close: bool,
     pub(crate) taxi_riding: bool,
 
-    /// The open tradeskill window's recipes.
+    /// The tradeskill window's recipes, kept past a close as the reference's list (`[0xbde054]`)
+    /// is, until the next open rebuilds it.
     pub(crate) trade_skill: Option<tradeskill::TradeSkillState>,
+    /// The window is open (`[0xbde040]`), which a close alone zeroes (`0x4fc870`).
+    pub(crate) trade_skill_open: bool,
     /// `DoTradeSkill` calls, `(spell id, count)`.
     pub(crate) trade_skill_dos: Vec<(u32, u32)>,
     /// The 1-based selection, 0 for none, carried across a re-push by the recipe's spell id.
@@ -791,12 +799,18 @@ pub(crate) struct Model {
     pub(crate) trade_skill_last_line: u32,
     /// The selected recipe's spell id (`0xbde044`), which carries it across reopen and re-push.
     pub(crate) trade_skill_selected_spell: u32,
-    /// A filter or subclass collapse changed: `TRADE_SKILL_UPDATE` (`0x13a`) is owed this frame, as
-    /// the client fires it inside the call (`0x4fd710`/`0x4fd730`/`0x4fd750`, `0x4fd180`).
-    pub(crate) trade_skill_touched: bool,
+    /// The Create All repeat's spell (`0xbde05c`), armed by a `DoTradeSkill` of more than one
+    /// (`0x4fd770`) and disarmed, with its `UPDATE_TRADESKILL_RECAST`, by the close (`0x4fd790`).
+    pub(crate) trade_skill_repeat_spell: u32,
+    /// The Create All count (`0xbde060`), set with the spell and counted down by each of our own
+    /// casts of it (`0x4fd7ca`); a disarm leaves it.
+    pub(crate) trade_skill_repeat_count: u32,
 
-    /// The open craft window's recipes.
+    /// The craft window's recipes, kept past a close as the reference's list (`[0xbdcfc8]`) is,
+    /// until the next open rebuilds it.
     pub(crate) craft: Option<craft::CraftState>,
+    /// The window is open (`[0xbdcfb8]`), which a close alone zeroes (`0x4f5fe0`).
+    pub(crate) craft_open: bool,
     /// `DoCraft` spell ids; no count, as the 1.12 CraftFrame has no Create All.
     pub(crate) craft_dos: Vec<u32>,
     /// The 1-based selection, 0 for none, carried across a re-push by the recipe's spell id.
@@ -821,8 +835,6 @@ pub(crate) struct Model {
     /// The open group-loot rolls, and the `RollOnLoot` `(roll_id, roll_type)` votes.
     pub(crate) loot_rolls: loot_roll::LootRollsState,
     pub(crate) loot_roll_votes: Vec<(u32, u8)>,
-    /// Need or Greed on a bind-on-pickup roll: a `CONFIRM_LOOT_ROLL` popup ask, not a vote.
-    pub(crate) loot_roll_confirms: Vec<(u32, u8)>,
 
     /// The item-text reader: the pushed page, then the close and page-turn calls.
     pub(crate) item_text: Option<item_text::ItemTextState>,
@@ -831,6 +843,16 @@ pub(crate) struct Model {
     /// The open inbox and mail calls, rows 1-based: `mail_opens` are rows `GetInboxText` read.
     pub(crate) mail: Option<mail::MailState>,
     pub(crate) mail_check_inbox: bool,
+    /// `CheckInbox`'s throttle `[0xb6efc4]`, on the `GetTime` clock: the list query 60 s ago
+    /// plus its window, before which a check re-announces the held list instead.
+    pub(crate) mail_list_stamp: Option<f64>,
+    /// A mail request in flight (`[0xb6efc8]`), set by the list query and cleared by its answer
+    /// or a send's; `CheckInbox` does nothing while it is set.
+    pub(crate) mail_busy: bool,
+    /// A send awaits its result (`[0xb6efac]`): set with the send (`0x4aea76`), lifted only by
+    /// the send's result (`0x4ad159`) or the compose reset (`0x4ace02`); `SendMail` returns while
+    /// it is up (`0x4ae85e`).
+    pub(crate) mail_send_pending: bool,
     pub(crate) mail_opens: Vec<u32>,
     pub(crate) mail_take_items: Vec<u32>,
     pub(crate) mail_take_money: Vec<u32>,
@@ -866,7 +888,7 @@ pub(crate) struct Model {
     pub(crate) auction_bidder_query: Option<u32>,
     pub(crate) auction_bids: Vec<auction::AuctionBid>,
     pub(crate) auction_cancels: Vec<u32>,
-    pub(crate) auction_start: Option<auction::AuctionStartRequest>,
+    pub(crate) auction_starts: Vec<auction::AuctionStartRequest>,
     pub(crate) auction_sorts: Vec<(usize, String)>,
     pub(crate) auction_close: bool,
     /// The sell slot's item, resolved to its guid when `StartAuction` fires.
@@ -930,8 +952,13 @@ pub(crate) struct Model {
     pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
     /// The tooltips whose spell render missed its view, re-rendered when the app answers.
     pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
-    /// `CollapseQuestHeader`/`ExpandQuestHeader` as `(1-based entry, collapse)`, entry 0 for all.
-    pub(crate) quest_log_collapses: Vec<(u32, bool)>,
+    /// Every quest-log row as the app pushed it, each header followed by all its quests, which
+    /// [`quest_log::fold`] folds into the visible [`Self::quest_log`].
+    pub(crate) quest_log_rows: Vec<quest_log::QuestLogEntryView>,
+    /// The collapsed headers by title, the reference's fold mask `0xbb748c`.
+    pub(crate) quest_log_collapsed: HashSet<String>,
+    /// A selected quest a previous VM left, placed at the first push.
+    pub(crate) quest_log_selection_seed: Option<u32>,
     /// Watched quest ids in watch order, pruned when a quest leaves the log.
     pub(crate) quest_log_watched: Vec<u32>,
     /// The server's clock in Unix seconds, `None` before `SMSG_QUERY_TIME_RESPONSE`. A quest
@@ -1050,9 +1077,10 @@ pub(crate) struct Model {
     /// The events the running [`super::tick::verb`] segment has raised, fired in order once its
     /// model borrow drops; `None` outside a segment, where [`Model::raise`] queues instead.
     pub(crate) verb_events: Option<Vec<super::tick::Raised>>,
-    /// Set while a clear's own events fire with the payload it is dropping still showing
-    /// ([`super::tick::Raised::CursorView`]): whether that clear lifted a held item's lock.
-    pub(crate) cursor_view_unlocked: Option<bool>,
+    /// The guids of the items the client holds locked, the reference's `item+0x314` bit 0, set by
+    /// `LockItem` (`0x4953e0`) and cleared by `UnlockItem` (`0x495420`) and the unlock-all
+    /// (`0x495460`) ([`super::cursor::lock_item`]).
+    pub(crate) item_locks: std::collections::HashSet<u64>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
@@ -1316,6 +1344,8 @@ impl Model {
             channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
             guild_recruitment_cascade: false,
+            guild_recruitment_plan: Default::default(),
+            guild_recruitment_runs: Vec::new(),
             guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),
@@ -1469,6 +1499,7 @@ impl Model {
             taxi_close: false,
             taxi_riding: false,
             trade_skill: None,
+            trade_skill_open: false,
             trade_skill_dos: Vec::new(),
             trade_skill_selection: 0,
             trade_skill_close: false,
@@ -1477,8 +1508,10 @@ impl Model {
             trade_skill_invslot_mask: u32::MAX,
             trade_skill_last_line: 0,
             trade_skill_selected_spell: 0,
-            trade_skill_touched: false,
+            trade_skill_repeat_spell: 0,
+            trade_skill_repeat_count: 0,
             craft: None,
+            craft_open: false,
             craft_dos: Vec::new(),
             craft_selection: 0,
             craft_close: false,
@@ -1491,12 +1524,14 @@ impl Model {
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
             loot_roll_votes: Vec::new(),
-            loot_roll_confirms: Vec::new(),
             item_text: None,
             item_text_close: false,
             item_text_page_turns: Vec::new(),
             mail: None,
             mail_check_inbox: false,
+            mail_list_stamp: None,
+            mail_busy: false,
+            mail_send_pending: false,
             mail_opens: Vec::new(),
             mail_take_items: Vec::new(),
             mail_take_money: Vec::new(),
@@ -1522,7 +1557,7 @@ impl Model {
             auction_bidder_query: None,
             auction_bids: Vec::new(),
             auction_cancels: Vec::new(),
-            auction_start: None,
+            auction_starts: Vec::new(),
             auction_sorts: Vec::new(),
             auction_close: false,
             auction_sell_item: None,
@@ -1559,7 +1594,9 @@ impl Model {
             pet_spell_tooltips: HashMap::new(),
             pet_spell_tooltip_asks: HashSet::new(),
             spell_tooltip_waits: HashMap::new(),
-            quest_log_collapses: Vec::new(),
+            quest_log_rows: Vec::new(),
+            quest_log_collapsed: HashSet::new(),
+            quest_log_selection_seed: None,
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
@@ -1568,7 +1605,7 @@ impl Model {
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             verb_events: None,
-            cursor_view_unlocked: None,
+            item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
             minimap_ping: (0.0, 0.0),

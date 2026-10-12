@@ -352,10 +352,13 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
@@ -363,7 +366,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
             inventory_type: 0,
             item_id: 117,
             link: None,
-            locked: false,
+            guid: 0x710,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
@@ -1340,5 +1343,29 @@ fn the_docked_tabs_follow_the_dock_through_a_session() {
     check(&mut s, "pet bar gone");
     click(&mut s, "ChatFrame1Tab");
     check(&mut s, "General selected again");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The stock chat frames re-read window 1's channels on the cascade's `UPDATE_CHAT_WINDOWS`
+/// (`ChatFrame.lua:1272`), so `ChatFrame1` lists `GuildRecruitment` before
+/// `SetGuildRecruitmentMode(1)` returns (`0x49eb70`, then `0x49eb5f` and `0x4a00a9`).
+#[test]
+fn the_recruitment_join_reaches_the_chat_frame_before_the_verb_returns() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame();
+    s.set_guild_recruitment_plan(benilla_ui::script::RecruitmentPlan::Join {
+        name: "GuildRecruitment - City".into(),
+        shortcut: "GuildRecruitment".into(),
+        id: 25,
+    });
+    let listed: bool = s
+        .eval(
+            "SetGuildRecruitmentMode(1) \
+             for _, c in ipairs(ChatFrame1.channelList) do \
+               if c == 'GuildRecruitment' then return true end \
+             end return false",
+        )
+        .unwrap();
+    assert!(listed, "ChatFrame1.channelList lacks GuildRecruitment");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

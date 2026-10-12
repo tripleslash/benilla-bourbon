@@ -292,6 +292,7 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
             item_name: Some("Linen Cloth".into()),
             ..Default::default()
         }],
+        open: true,
     }));
     let mut auction = AuctionState::default();
     auction.lists[0].rows.push(AuctionItemRow {
@@ -303,6 +304,8 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
     {
         let mut model = s.model_mut();
         let item = CursorItem {
+            item_class: None,
+            guid: 0x120,
             bag: 0,
             slot: 1,
             item_id: 2589,
@@ -312,6 +315,7 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
             quality: Some(1),
             equip_slots: Vec::new(),
             bar_placeable: false,
+            consumable: false,
         };
         model.mail_send_item = Some(item.clone());
         model.auction_sell_item = Some(item);
@@ -371,6 +375,8 @@ fn live_objects_and_blocks_reach_the_flag() {
         }),
     );
     let cursor = |slot| CursorItem {
+        item_class: None,
+        guid: 0x121,
         bag: 0,
         slot,
         item_id: if slot <= 2 { 8300 } else { 8301 },
@@ -380,6 +386,7 @@ fn live_objects_and_blocks_reach_the_flag() {
         quality: Some(1),
         equip_slots: Vec::new(),
         bar_placeable: false,
+        consumable: false,
     };
     for (slot, want) in [
         (1, "1:number:1"),

@@ -699,10 +699,13 @@ fn backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 1,
@@ -710,7 +713,7 @@ fn backpack() -> ContainerState {
             inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x714,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,

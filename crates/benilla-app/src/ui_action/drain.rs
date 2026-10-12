@@ -239,7 +239,7 @@ pub(crate) fn use_action(
                     "ui_action: cast {} re-pressed — targeting toggles off",
                     b.action
                 );
-                ladder.ground.clear();
+                ladder.ground.cancel();
                 return UseOutcome::Done;
             }
             // A live `ActiveIconID` spell re-pressed cancels its aura (`0x4e55f0`, cancel
@@ -304,8 +304,10 @@ pub(crate) fn use_action(
                 // No quest guard: the bar tests only `InventoryType` (`0x4e5fdd`), unlike
                 // the bag click (`StartQuest`, `0x4fa3c4`), so a quest-starter equips.
                 debug!("ui_action: item action {action} auto-equip (wire {bag_index}/{slot0})");
-                // The shared auto-equip sender, so a BoE asks before binding, as from a bag.
-                crate::ui_items::send_auto_equip(
+                // The shared auto-equip sender, so a BoE asks before binding, as from a bag. The
+                // bar's arm (`0x4e602a` → `0x5e1840`) neither tests nor takes the lock, but a
+                // projectile's clear unlocks, signalling whether or not it was set (`0x5e1763`).
+                let sent = crate::ui_items::send_auto_equip(
                     script,
                     gate,
                     &ladder.objects,
@@ -316,10 +318,18 @@ pub(crate) fn use_action(
                     Some(guid),
                     false,
                 );
+                if sent == crate::ui_items::AutoEquipSent::Ammo {
+                    script.unlock_item(guid);
+                }
             } else {
                 // The shared `CGItem::Use` fork (called at `0x4e607b`): a quest-starter offers
                 // its quest, and the use runs the whole cast ladder. The wire's third byte is
-                // the spell block ordinal, not a flag.
+                // the spell block ordinal, not a flag. A copy locked when the call was made is
+                // refused first.
+                if press.item_was_locked(guid) {
+                    debug!("ui_action: item action {action} on a locked item — refused");
+                    return UseOutcome::Done;
+                }
                 let spell_index = template.use_spell_index().unwrap_or(0);
                 debug!(
                     "ui_action: item action {action} use (wire {bag_index}/{slot0}, spell #{spell_index})"
