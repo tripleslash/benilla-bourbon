@@ -11,13 +11,23 @@
 //! The main loop hook is `app.main_mut().update_schedule`, replaced by [`FgMain`], whose one
 //! exclusive system returns at once on H and runs `Main` on W.
 //!
-//! **Solo world frames.** A pair only reads as smooth when its two frames are on screen equally
-//! long. The web presents each frame on the next `requestAnimationFrame` after its work, so a world
-//! frame that costs four display intervals beside a held frame's one shows the generated frame for
-//! one interval and the real frame for four (measured in Frostmane Hollow: rAF intervals
-//! alternating 6.9 and 27.8 ms). While the world frame outlasts the held frame like that, the
-//! cadence stops holding: world frames render back to back ([`FgSolo`]), each presenting the real
-//! frame it rendered, until one fits a held frame's interval again. Native has its own pacer
+//! **The split pair (the web).** The browser has one thread and no render thread, and a frame is
+//! presented when its `requestAnimationFrame` callback returns. A held frame that only presented
+//! would follow the whole world frame (update, extract, render), so the generated frame would be
+//! on screen for one short callback and the real one for all the rest (measured in the world
+//! viewer: callbacks of 13.0 and 2.7 ms). So there the held frame carries half the work: after its
+//! present is drawn, still inside its callback, it runs `Main` for the next world frame
+//! ([`run_ahead`], called by the runner's `AfterUpdate` hook), and the world frame after it skips
+//! `Main` and only extracts and renders. The pair then costs about one world frame, and its two
+//! presents are spaced by the update and by the render. Extraction is untouched by this: a world
+//! frame's extract still follows its `Main` directly, and a held frame's follows none.
+//!
+//! **Solo world frames.** A pair is worth holding while its two callbacks are on screen about
+//! equally long and the pair presents more often than world frames alone would. While either
+//! fails, the cadence stops holding: world frames render back to back ([`FgSolo`]), each
+//! presenting the real frame it rendered, and holding is tried again after a wait that doubles on
+//! each relapse. It is not tried while the world frame already fits the fastest interval seen: the
+//! display's rate is reached and no present can be added. Native has its own pacer
 //! ([`pace_held_frames`]) and is not timed.
 
 use bevy::core_pipeline::schedule::RootNonCameraView;
@@ -30,18 +40,25 @@ use bevy::window::PrimaryWindow;
 
 use super::{FgSolo, FsrHeld, FsrView};
 
-/// A world frame lasting this many held frames' intervals or more splits its pair unevenly; the
-/// web's frames last whole display intervals, so an even pair reads 1 and the first uneven one 2.
-const UNEVEN_SPLIT: f32 = 1.5;
-/// Uneven pairs in a row before the cadence goes solo: a single hitch (a streamed tile, a GC
-/// pause) is not a world frame that no longer fits.
+/// A pair whose longer callback lasts this many of its shorter one or more is uneven; the web's
+/// frames last whole display intervals, so one interval beside two passes and beside three does
+/// not.
+const UNEVEN_SPLIT: f32 = 2.5;
+/// A pair must present this many times as often as solo world frames to be worth its halved real
+/// frames.
+const MIN_GAIN: f32 = 1.15;
+/// A solo world frame shorter than this many of the fastest interval seen already presents at the
+/// display's rate.
+const RAILED: f32 = 1.5;
+/// Bad pairs in a row before the cadence goes solo: a single hitch (a streamed tile, a GC pause)
+/// is not a pair that no longer pays.
 const UNEVEN_PAIRS: u32 = 6;
-/// Fitting solo frames in a row before holding again, at first; doubled each time holding again
-/// went uneven within [`RELAPSE_FRAMES`], so a world frame on the edge does not flap.
+/// Solo frames before holding again, at first; doubled each time holding again went bad within
+/// [`RELAPSE_FRAMES`], so a pair on the edge does not flap.
 const RESUME_FRAMES: u32 = 30;
 /// The longest wait before holding again: about four seconds at 144 Hz.
 const RESUME_FRAMES_MAX: u32 = 480;
-/// World frames after holding again within which going uneven counts as a relapse.
+/// World frames after holding again within which going solo counts as a relapse.
 const RELAPSE_FRAMES: u32 = 240;
 
 /// The main app's update schedule while frame generation can run: one exclusive system that
@@ -83,11 +100,15 @@ pub struct FgCadence {
     solo: bool,
     /// The last frame was a solo world frame: it ran no chain, so nothing can be held after it.
     ran_solo: bool,
-    /// The last world frame's interval, while a held frame follows it.
+    /// The last frame was the world frame after a held one: the second half of a pair.
+    after_held: bool,
+    /// The held callback's interval, while the world frame after it runs.
     paired: Option<f32>,
-    /// A held frame's interval, smoothed: about one display interval where frames are timed.
-    held_interval: Option<f32>,
-    /// Uneven pairs in a row, while holding; fitting solo frames in a row, while solo.
+    /// The interval of world frames that ran whole (update, extract, render), smoothed.
+    solo_interval: Option<f32>,
+    /// The fastest interval seen, eased up slowly: about one display interval.
+    fastest: Option<f32>,
+    /// Bad pairs in a row, while holding; solo frames in a row, while solo.
     run: u32,
     /// Fitting solo frames needed before holding again.
     resume_after: u32,
@@ -126,8 +147,8 @@ pub struct FgVerdict {
 impl FgCadence {
     /// Decide this frame. A held frame is only ever the one after a world frame that interpolated
     /// from valid history; a resize, a new epoch, a capture or leaving the world forces a world
-    /// frame and restarts the count. A timed world frame that outlasts held frames turns the
-    /// cadence solo, and a solo one that fits a held frame's interval again turns it back.
+    /// frame and restarts the count. Timed pairs that are uneven or gain no presents turn the
+    /// cadence solo, and a wait turns it back.
     pub fn next(&mut self, i: FgInputs) -> FgVerdict {
         let reset = i.window != self.window || i.epoch != self.epoch || !i.wanted || !i.in_world;
         if reset {
@@ -156,6 +177,7 @@ impl FgCadence {
             self.epoch = i.epoch;
             self.since_resume = self.since_resume.saturating_add(1).min(RELAPSE_FRAMES);
         }
+        self.after_held = !hold && self.held;
         self.held = hold;
         self.ran_solo = !hold && self.solo;
         FgVerdict {
@@ -164,32 +186,47 @@ impl FgCadence {
         }
     }
 
-    /// Book the last frame's interval: a held frame's sets the reference and closes its pair, a
-    /// world frame's waits for the held frame after it or, solo, is checked against the reference.
+    /// Frames presented per main-world update: two while a pair is held, else one.
+    pub fn presents_per_update(&self) -> u32 {
+        if self.held || self.after_held {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Book the last frame's interval: a held callback's opens its pair, the world callback's
+    /// after it closes and judges the pair, and a whole world frame's is the solo reference.
     fn time_last_frame(&mut self, dt: f32) {
+        // Eased up, so a display that slows down is followed.
+        self.fastest = Some(self.fastest.map_or(dt, |f| (f * 1.001).min(dt)));
         if self.held {
-            self.held_interval = Some(self.held_interval.map_or(dt, |h| h * 0.9 + dt * 0.1));
-            if let Some(world) = self.paired.take() {
-                // Against this pair's own held frame, so a slow stretch of both reads even.
-                self.run = if world >= UNEVEN_SPLIT * dt {
-                    self.run + 1
-                } else {
-                    0
-                };
-                if self.run >= UNEVEN_PAIRS {
-                    self.go_solo();
-                }
-            }
-        } else if self.solo {
-            let fits = self.held_interval.is_some_and(|h| dt < UNEVEN_SPLIT * h);
-            self.run = if fits { self.run + 1 } else { 0 };
-            if self.run >= self.resume_after.max(RESUME_FRAMES) {
-                self.solo = false;
-                self.run = 0;
-                self.since_resume = 0;
+            self.paired = Some(dt);
+        } else if self.after_held {
+            let Some(held) = self.paired.take() else {
+                return;
+            };
+            let uneven = held.max(dt) >= UNEVEN_SPLIT * held.min(dt);
+            let gains = self
+                .solo_interval
+                .is_none_or(|solo| (held + dt) * MIN_GAIN < 2.0 * solo);
+            self.run = if uneven || !gains { self.run + 1 } else { 0 };
+            if self.run >= UNEVEN_PAIRS {
+                self.go_solo();
             }
         } else {
-            self.paired = Some(dt);
+            self.paired = None;
+            let solo = self.solo_interval.map_or(dt, |s| s * 0.8 + dt * 0.2);
+            self.solo_interval = Some(solo);
+            if self.solo {
+                self.run += 1;
+                let railed = self.fastest.is_some_and(|f| solo < RAILED * f);
+                if self.run >= self.resume_after.max(RESUME_FRAMES) && !railed {
+                    self.solo = false;
+                    self.run = 0;
+                    self.since_resume = 0;
+                }
+            }
         }
     }
 
@@ -197,7 +234,7 @@ impl FgCadence {
         self.solo = true;
         self.run = 0;
         self.paired = None;
-        // Uneven again soon after holding again: wait twice as long before the next try.
+        // Bad again soon after holding again: wait twice as long before the next try.
         self.resume_after = if self.resume_after > 0 && self.since_resume < RELAPSE_FRAMES {
             (self.resume_after.max(RESUME_FRAMES) * 2).min(RESUME_FRAMES_MAX)
         } else {
@@ -212,9 +249,31 @@ type FgLookups = (
     Query<'static, 'static, &'static FsrView>,
 );
 
+/// The web's split pair: whether the held frame in progress owes the next `Main` once it has
+/// presented, and whether that `Main` ran, so the world frame after it skips its own.
+#[derive(Resource, Default)]
+struct FgAhead {
+    owed: bool,
+    ran: bool,
+}
+
+/// The runner's `AfterUpdate` hook: behind a held frame's present, in the same callback, run the
+/// next world frame's `Main`.
+fn run_ahead(world: &mut World) {
+    let Some(mut ahead) = world.get_resource_mut::<FgAhead>() else {
+        return;
+    };
+    if !std::mem::take(&mut ahead.owed) {
+        return;
+    }
+    world.run_schedule(Main);
+    world.resource_mut::<FgAhead>().ran = true;
+}
+
 /// `FgMain`'s one system: hold the frame, or run the game. With frame generation off it only
 /// resets the cadence and runs `Main`; its lookups are a cached system state, not rebuilt. On the
-/// web it times each frame from the start of the last: the `requestAnimationFrame` cadence.
+/// web it times each frame from the start of the last, the `requestAnimationFrame` cadence, and a
+/// held frame leaves the next `Main` to [`run_ahead`].
 fn fg_main(
     world: &mut World,
     lookups: &mut SystemState<FgLookups>,
@@ -266,13 +325,18 @@ fn fg_main(
     if world.resource::<FgSolo>().0 != verdict.solo {
         world.resource_mut::<FgSolo>().0 = verdict.solo;
     }
+    let ran_ahead = {
+        let mut ahead = world.resource_mut::<FgAhead>();
+        ahead.owed = held && cfg!(target_arch = "wasm32");
+        std::mem::take(&mut ahead.ran)
+    };
     if held {
         // `First`'s `time_system` does not run, so drain the render thread's frame instant here:
         // its channel holds one, and the next send would panic on a full one.
         if let Some(rx) = world.get_resource::<bevy::time::TimeReceiver>() {
             let _ = rx.0.try_recv();
         }
-    } else {
+    } else if !ran_ahead {
         world.run_schedule(Main);
     }
 }
@@ -375,7 +439,9 @@ pub(super) fn pace_held_frames(
 pub(super) fn install(app: &mut App) {
     app.init_resource::<FgCadence>()
         .init_resource::<FrameGeneration>()
-        .init_resource::<FgBlocked>();
+        .init_resource::<FgBlocked>()
+        .init_resource::<FgAhead>()
+        .insert_resource(bevy::winit::AfterUpdate(run_ahead));
     let mut schedule = Schedule::new(FgMain);
     schedule.add_systems(fg_main);
     app.add_schedule(schedule);
@@ -420,19 +486,38 @@ mod tests {
     /// One display interval at 144 Hz, seconds.
     const VSYNC: f32 = 1.0 / 144.0;
 
-    /// Feed `frames` frames, each lasting `world` display intervals when it renders the world and
-    /// one when it is held, as the web's `requestAnimationFrame` paces them; the verdicts back.
-    fn run(c: &mut FgCadence, w: UVec2, world: f32, frames: usize) -> Vec<FgVerdict> {
-        let mut last: Option<FgVerdict> = None;
+    /// Feed `frames` frames as the web times them, in display intervals: a world frame that ran
+    /// whole lasts `whole`, a held callback (its present, then the next update) `held`, and the
+    /// world callback after it (extract and render) `world`. The verdicts back.
+    fn run(
+        c: &mut FgCadence,
+        w: UVec2,
+        [whole, held, world]: [f32; 3],
+        frames: usize,
+    ) -> Vec<FgVerdict> {
         (0..frames)
             .map(|_| {
-                let interval = last.map(|v| if v.held { VSYNC } else { world * VSYNC });
-                let v = c.next(FgInputs { interval, ..on(w) });
-                last = Some(v);
-                v
+                let last = if c.held {
+                    held
+                } else if c.after_held {
+                    world
+                } else {
+                    whole
+                };
+                c.next(FgInputs {
+                    interval: Some(last * VSYNC),
+                    ..on(w)
+                })
             })
             .collect()
     }
+
+    /// A world frame of two display intervals that splits one and one.
+    const EVEN: [f32; 3] = [2.0, 1.0, 1.0];
+    /// A world frame of four that splits one and three.
+    const LOPSIDED: [f32; 3] = [4.0, 1.0, 3.0];
+    /// A world frame that fits one display interval: the pair presents no more often.
+    const RAILED_FRAME: [f32; 3] = [1.0, 1.0, 1.0];
 
     /// Two world frames of history, then world and held frames alternate.
     #[test]
@@ -488,88 +573,89 @@ mod tests {
         assert!(c.next(epoch).held);
     }
 
-    /// A world frame that fits a display interval keeps alternating, timed or not.
+    /// A pair whose halves are as long as each other, and shorter together than two world frames,
+    /// keeps holding.
     #[test]
-    fn an_even_pair_keeps_holding() {
+    fn an_even_split_keeps_holding() {
         let mut c = FgCadence::default();
-        let seq = run(&mut c, UVec2::new(1600, 900), 1.0, 400);
+        let seq = run(&mut c, UVec2::new(1600, 900), EVEN, 400);
         assert!(seq.iter().all(|v| !v.solo));
         assert_eq!(seq.iter().filter(|v| v.held).count(), 199);
+        assert_eq!(c.presents_per_update(), 2);
     }
 
-    /// Four display intervals beside a held frame's one (Frostmane Hollow's bridge): after a run
-    /// of uneven pairs the world frames go solo, and none is held while they stay that slow.
+    /// One display interval beside three: after a run of uneven pairs the world frames go solo,
+    /// and nearly all of them stay solo while the split stays that lopsided.
     #[test]
-    fn an_uneven_pair_goes_solo() {
+    fn a_lopsided_split_goes_solo() {
         let mut c = FgCadence::default();
-        let seq = run(&mut c, UVec2::new(1600, 900), 4.0, 400);
+        let seq = run(&mut c, UVec2::new(1600, 900), LOPSIDED, 2000);
         let first = seq.iter().position(|v| v.solo).expect("goes solo");
         assert!(first < 2 + 2 * (UNEVEN_PAIRS as usize + 1), "{first}");
+        let held = seq.iter().filter(|v| v.held).count();
+        assert!(held < seq.len() / 10, "{held}");
+    }
+
+    /// A world frame that already fits the display interval gains no present from a pair: solo,
+    /// and never tried again.
+    #[test]
+    fn a_railed_frame_goes_solo_for_good() {
+        let mut c = FgCadence::default();
+        let seq = run(&mut c, UVec2::new(1600, 900), RAILED_FRAME, 2000);
+        let first = seq.iter().position(|v| v.solo).expect("goes solo");
         assert!(seq[first..].iter().all(|v| v.solo && !v.held));
+        assert_eq!(c.presents_per_update(), 1);
     }
 
-    /// A single hitch is not a world frame that no longer fits.
+    /// A single hitch is not a pair that no longer pays.
     #[test]
-    fn one_slow_pair_does_not_go_solo() {
+    fn one_bad_pair_does_not_go_solo() {
         let mut c = FgCadence::default();
         let w = UVec2::new(1600, 900);
-        run(&mut c, w, 1.0, 20);
-        // The run above ended on a world frame; one slow world frame, then even ones again.
-        let mut step = |dt: f32| {
-            c.next(FgInputs {
-                interval: Some(dt),
-                ..on(w)
-            })
-        };
-        assert!(step(VSYNC).held);
-        assert!(!step(VSYNC).held);
-        assert!(step(5.0 * VSYNC).held);
-        assert!(run(&mut c, w, 1.0, 100).iter().all(|v| !v.solo));
+        run(&mut c, w, EVEN, 21);
+        assert!(c.held);
+        run(&mut c, w, [2.0, 1.0, 5.0], 2);
+        assert!(run(&mut c, w, EVEN, 100).iter().all(|v| !v.solo));
     }
 
-    /// Solo world frames that fit a display interval again hold again, through a world frame that
-    /// runs the chain first: a held frame never follows a solo one.
+    /// Solo world frames hold again after the wait, through a world frame that runs the chain
+    /// first: a held frame never follows a solo one.
     #[test]
-    fn a_fitting_solo_frame_holds_again() {
+    fn a_solo_frame_holds_again_after_the_wait() {
         let mut c = FgCadence::default();
         let w = UVec2::new(1600, 900);
-        run(&mut c, w, 4.0, 60);
+        run(&mut c, w, LOPSIDED, 20);
         assert!(c.solo);
-        let seq = run(&mut c, w, 1.0, 200);
+        let seq = run(&mut c, w, EVEN, 200);
         let back = seq.iter().position(|v| !v.solo).expect("holds again");
         assert!(back <= RESUME_FRAMES as usize + 1, "{back}");
         assert!(!seq[back].held, "the first frame back renders the world");
         assert!(seq[back + 1].held);
+        assert!(seq[back..].iter().all(|v| !v.solo));
         for pair in seq.windows(2) {
             assert!(!(pair[0].solo && pair[1].held));
         }
     }
 
-    /// Going uneven again soon after holding again doubles the wait before the next try, up to
-    /// its bound; a long even stretch starts the wait over.
+    /// Going bad again soon after holding again doubles the wait before the next try, up to its
+    /// bound; a long good stretch starts the wait over.
     #[test]
     fn a_relapse_waits_longer() {
         let mut c = FgCadence::default();
         let w = UVec2::new(1600, 900);
-        run(&mut c, w, 4.0, 60);
+        run(&mut c, w, LOPSIDED, 20);
         assert_eq!(c.resume_after, RESUME_FRAMES);
-        for want in [2, 4, 8, 16, 16].map(|k| (RESUME_FRAMES * k).min(RESUME_FRAMES_MAX)) {
-            // Fits solo, holds again, then the pair is uneven at once.
-            let wait = c.resume_after as usize + 2;
-            run(&mut c, w, 1.0, wait);
-            assert!(!c.solo);
-            run(&mut c, w, 4.0, 40);
-            assert!(c.solo);
-            assert_eq!(c.resume_after, want);
-        }
+        run(&mut c, w, LOPSIDED, 4 * RESUME_FRAMES_MAX as usize);
+        assert_eq!(c.resume_after, RESUME_FRAMES_MAX);
         run(
             &mut c,
             w,
-            1.0,
+            EVEN,
             RESUME_FRAMES_MAX as usize + 2 + 2 * RELAPSE_FRAMES as usize,
         );
         assert!(!c.solo);
-        run(&mut c, w, 4.0, 40);
+        run(&mut c, w, LOPSIDED, 20);
+        assert!(c.solo);
         assert_eq!(c.resume_after, RESUME_FRAMES);
     }
 
@@ -578,7 +664,7 @@ mod tests {
     fn a_reset_or_no_timing_leaves_solo() {
         let mut c = FgCadence::default();
         let w = UVec2::new(1600, 900);
-        run(&mut c, w, 4.0, 60);
+        run(&mut c, w, LOPSIDED, 20);
         assert!(c.solo);
         assert!(!c.next(on(UVec2::new(1280, 720))).solo);
         assert!(!c.solo);

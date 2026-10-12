@@ -456,6 +456,7 @@ pub(crate) use lifecycle::{
 fn feed_framerate(
     script: Option<NonSendMut<UiScript>>,
     time: Res<Time<bevy::time::Real>>,
+    cadence: Option<Res<benilla_world::fsr::cadence::FgCadence>>,
     mut smoothed: Local<f64>,
 ) {
     let Some(mut script) = script else {
@@ -465,7 +466,9 @@ fn feed_framerate(
     if dt <= 0.0 {
         return; // the first frame, or a paused one
     }
-    let instant = 1.0 / dt;
+    // fork: fsr (FORK.md) — frames presented: frame generation shows two per update.
+    let presents = cadence.map_or(1, |c| c.presents_per_update());
+    let instant = f64::from(presents) / dt;
     // One-pole IIR with a 1 s time constant, frame-rate independent.
     let alpha = (dt / 1.0).min(1.0);
     *smoothed = if *smoothed <= 0.0 {

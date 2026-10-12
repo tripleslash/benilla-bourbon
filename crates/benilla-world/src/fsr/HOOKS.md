@@ -46,3 +46,5 @@ systems run in `Last`.
 | `benilla-app/src/pipe_warm/mod.rs` | the FSR lanes named as warmed at `RenderStartup` |
 | `benilla-app/src/ui_script/options_tests.rs` | the frame-generation row's tests and counts |
 | `benilla-app/assets/ui/OptionsFrame.xml` | `BENILLA_TOOLTIP_FRAME_GENERATION`, Render Scale's tooltip, `RowFrameGeneration` in both windows |
+| `benilla-app/src/ui_script/mod.rs` | `feed_framerate` counts presented frames (`FgCadence::presents_per_update`) |
+| `../third_party/bevy_winit/src/state.rs` | the `AfterUpdate` call after `App::update`, where the web's held frame runs the next `Main` |
