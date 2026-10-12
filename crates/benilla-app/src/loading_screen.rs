@@ -59,6 +59,10 @@ const CLEAR_AFTER_READY_FRAMES: u32 = 3;
 /// [`WAIT_LOG_EVERY`] seconds.
 const WAIT_LOG_AFTER: f32 = 3.0;
 const WAIT_LOG_EVERY: f32 = 2.0;
+/// How far (yd) a same-map snap must move the body to count as a load. It clears every combat
+/// relocation (charge and intercept 25 yd, blink 20, knockbacks under 30), which also ends in a
+/// server teleport and must never black out the screen.
+const SNAP_LOAD_MIN_YD: f32 = 100.0;
 
 /// Consecutive covered, in-world frames before the cover is on the glass: renders are serial, so
 /// at 3 the two frames before have presented.
@@ -171,6 +175,8 @@ pub(crate) struct LoadingScreen {
     /// `Time::elapsed_secs` at the last raise and at the last wait log line.
     active_since: f32,
     last_wait_log: f32,
+    /// The avatar's position last frame, to measure a snap (applied in `Input`, a stage earlier).
+    last_pos: Option<Vec3>,
 }
 
 impl LoadingScreen {
@@ -589,9 +595,9 @@ fn drive_loading_screen(
         let art = screen.map.filter(|_| screen.ship.is_none());
         screen.raise("transport leg", false, art, now);
     }
-    // A same-map teleport ends any awaited snap and raises nothing: the reference's
-    // `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises.
-    if teleports.read().next().is_some() {
+    // A same-map teleport ends any awaited snap; whether it needs a screen is decided below.
+    let teleported = teleports.read().next().is_some();
+    if teleported {
         screen.snap_landed(None);
     }
     // Logout, a lost session or a refused login: `CharSelect` applies next frame, so cover the torn
@@ -639,6 +645,25 @@ fn drive_loading_screen(
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         screen.raise("ground under the body still arriving", false, map_id, now);
+    }
+
+    // --- Deviation: a long same-map snap is covered until the destination is presentable. The
+    // reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's
+    // raises; benilla covers it so the destination is not seen streaming in. ---
+    let body = player.as_ref().map(|p| p.pos);
+    let relocated = match (teleported, screen.last_pos, body) {
+        (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
+        // No previous position (the entry frame): treat it as a relocation.
+        (true, _, _) => true,
+        _ => false,
+    };
+    screen.last_pos = body;
+    if relocated
+        && !screen.active
+        && *state.get() == crate::char_select::ClientState::InWorld
+        && !(progress.is_ready() && progress.presentable())
+    {
+        screen.raise("teleport, destination not presentable", false, map_id, now);
     }
 
     // --- Clear, sustained a few frames. ---
@@ -977,7 +1002,7 @@ mod tests {
 
     /// GM Island to the South Seas, both on Kalimdor.
     #[test]
-    fn a_same_map_teleport_across_the_continent_shows_no_loading_screen() {
+    fn a_same_map_teleport_across_the_continent_covers_its_load() {
         let mut app = in_world(GM_ISLAND);
         assert!(!covering(&app), "standing on resident ground");
 
@@ -989,14 +1014,24 @@ mod tests {
             orientation: 0.0,
         });
         app.update();
-        assert!(!covering(&app), "the snap frame raises no screen");
+        assert!(covering(&app), "the deviation covers a long same-map snap");
+    }
 
+    /// A charge-length snap (25 yd) onto ground still arriving is never covered.
+    #[test]
+    fn a_short_same_map_snap_shows_no_loading_screen() {
+        let mut app = in_world(GM_ISLAND);
+        let near = [GM_ISLAND[0] + 25.0, GM_ISLAND[1], GM_ISLAND[2]];
+        land_unloaded(&mut app, near);
+        app.world_mut().write_message(crate::net::TeleportMessage {
+            guid: 1,
+            counter: 0,
+            position: near,
+            orientation: 0.0,
+        });
         for _ in 0..30 {
             app.update();
-            assert!(
-                !covering(&app),
-                "nor does the destination streaming in under the held body"
-            );
+            assert!(!covering(&app));
         }
     }
 
