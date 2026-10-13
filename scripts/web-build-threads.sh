@@ -6,6 +6,8 @@
 # only difference is the environment, and this script exists so that environment has one home
 # instead of living in a README paragraph that drifts.
 #
+# `scripts/web-build-threads.ps1` is the same build for Windows PowerShell 5.1; change both together.
+#
 # What each variable is for:
 #
 #   RUSTUP_TOOLCHAIN        nightly, and not by preference: `-Zbuild-std` is nightly-only, and it is
