@@ -1049,3 +1049,73 @@ fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inheri
         )
     );
 }
+
+// ── The live `inherits=` link ──
+
+/// A setter on a declared font reaches the fonts declared from it, down the chain, and leaves
+/// what each of them holds itself: pfUI's `GameFontNormal:SetFont` has to restyle
+/// `GameFontHighlight`, which only adds a colour.
+#[test]
+fn a_parent_fonts_setter_reaches_the_fonts_that_inherit_it() {
+    let mut s = script();
+    load(
+        &s,
+        r#"<Ui>
+            <Font name="LinkBase" font="Fonts\FRIZQT__.TTF" virtual="true">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+                <Color r="1" g="0.82" b="0"/>
+            </Font>
+            <Font name="LinkHighlight" inherits="LinkBase" virtual="true">
+                <Color r="1" g="1" b="1"/>
+            </Font>
+            <Font name="LinkSmall" inherits="LinkHighlight" virtual="true">
+                <FontHeight><AbsValue val="10"/></FontHeight>
+            </Font>
+        </Ui>"#,
+    );
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "LinkHost", UIParent)
+        f:SetPoint("CENTER", 0, 0); f:SetWidth(200); f:SetHeight(20)
+        local t = f:CreateFontString(nil, "ARTWORK", "LinkHighlight")
+        t:SetAllPoints(f)
+        t:SetText("linked")
+        LinkBase:SetFont("Fonts\\ARIALN.TTF", 14)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let font = |name: &str| s.font_object(name).expect("a declared font");
+    let highlight = font("LinkHighlight");
+    assert_eq!(highlight.font.as_deref(), Some("Fonts\\ARIALN.TTF"));
+    assert_eq!(highlight.height, Some(14.0));
+    assert_eq!(
+        highlight.color,
+        Some([1.0, 1.0, 1.0, 1.0]),
+        "its own colour"
+    );
+    let small = font("LinkSmall");
+    assert_eq!(small.font.as_deref(), Some("Fonts\\ARIALN.TTF"));
+    assert_eq!(small.height, Some(10.0), "its own height");
+    // The region that inherits the child follows too.
+    let (face, height, _) = painted(&s, "linked");
+    assert_eq!(face.as_deref(), Some("Fonts\\ARIALN.TTF"));
+    assert_eq!(height, Some(14.0));
+
+    // What a child was given directly, its parent no longer supplies.
+    s.run(
+        r#"
+        LinkHighlight:SetFont("Fonts\\MORPHEUS.TTF", 16)
+        LinkBase:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        font("LinkHighlight").font.as_deref(),
+        Some("Fonts\\MORPHEUS.TTF")
+    );
+    assert_eq!(
+        font("LinkSmall").font.as_deref(),
+        Some("Fonts\\MORPHEUS.TTF")
+    );
+}

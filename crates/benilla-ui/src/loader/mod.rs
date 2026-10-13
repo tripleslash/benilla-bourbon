@@ -552,6 +552,21 @@ impl Loader<'_> {
         let font = font_object_from_element(&merged);
         {
             let mut model = self.model();
+            // The unmerged element is what this font sets itself; the rest follows its parent.
+            match el.attr("inherits").filter(|parent| !parent.is_empty()) {
+                Some(parent) => {
+                    model.font_links.insert(
+                        name.to_ascii_lowercase(),
+                        crate::script::font::FontLink {
+                            parent: parent.to_ascii_lowercase(),
+                            own: font_object_from_element(el),
+                        },
+                    );
+                }
+                None => {
+                    model.font_links.remove(&name.to_ascii_lowercase());
+                }
+            }
             model
                 .font_objects_by_lower
                 .insert(name.to_ascii_lowercase(), font);

@@ -15,10 +15,11 @@
 //! that mask. `+0x38` is not it; its high bits mark a held value, which the inheriting merge also
 //! sets (`0x7709d3`).
 //!
-//! Not built: a `<Font inherits=…>` chain is flattened at load (`Loader::do_font`), so mutating
-//! `MasterFont` does not reach `GameFontNormal`, where the reference links it live: `LoadXML
-//! 0x783c30` calls the `SetFontObject` link `0x770c60` for `inherits=` (`0x783ce6`) and `font=`
-//! (`0x783d22`). No corpus addon mutates a declared font object.
+//! A `<Font inherits=…>` chain is flattened at load (`Loader::do_font`) and kept linked
+//! ([`FontLink`]): a setter on a parent re-derives each font that inherits it ([`cascade`]), as the
+//! reference links them live (`LoadXML 0x783c30` calls the `SetFontObject` link `0x770c60` for
+//! `inherits=`, `0x783ce6`). pfUI restyles the client by `GameFontNormal:SetFont`, which has to
+//! reach `GameFontHighlight` and every other font declared from it.
 
 use mlua::{Lua, Table, Value};
 
@@ -169,15 +170,108 @@ pub(crate) fn propagate(model: &mut Model, name: &str) {
     model.touch_measure_all();
 }
 
-/// Run `f` on the named font object's record, then [`propagate`]: every setter's one write path.
+/// A declared font's live link to the font it inherits.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FontLink {
+    /// The parent's lowercased name.
+    pub(crate) parent: String,
+    /// What this font holds itself, declared or set since; every other property is the parent's.
+    pub(crate) own: FontObject,
+}
+
+/// `own` over `parent`: a property the font holds wins, the rest is inherited. An outline of
+/// none is the unset state here, as [`Outline`](super::Outline) has no other.
+fn derive(parent: &FontObject, own: &FontObject) -> FontObject {
+    FontObject {
+        font: own.font.clone().or_else(|| parent.font.clone()),
+        height: own.height.or(parent.height),
+        shadow: own.shadow.or(parent.shadow),
+        color: own.color.or(parent.color),
+        outline: if own.outline == super::Outline::default() {
+            parent.outline
+        } else {
+            own.outline
+        },
+        justify_h: own.justify_h.or(parent.justify_h),
+        justify_v: own.justify_v.or(parent.justify_v),
+        spacing: own.spacing.or(parent.spacing),
+    }
+}
+
+/// Re-derive every font that inherits `parent` (a lowercased name), repaint its regions, and go
+/// on down the chain. A chain deeper than any real one stops, so a declared cycle cannot spin.
+pub(crate) fn cascade(model: &mut Model, parent: &str, depth: u8) {
+    if depth > 16 {
+        return;
+    }
+    let Some(parent_record) = model.font_objects_by_lower.get(parent).cloned() else {
+        return;
+    };
+    let children: Vec<(String, FontObject)> = model
+        .font_links
+        .iter()
+        .filter(|(_, link)| link.parent == parent)
+        .map(|(child, link)| (child.clone(), derive(&parent_record, &link.own)))
+        .collect();
+    for (child, record) in children {
+        if model.font_objects_by_lower.get(&child) == Some(&record) {
+            continue;
+        }
+        model
+            .font_objects_by_lower
+            .insert(child.clone(), record.clone());
+        for d in model.region_data.values_mut() {
+            if d.font_object
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&child))
+            {
+                repaint(d, &record);
+            }
+        }
+        cascade(model, &child, depth + 1);
+    }
+}
+
+/// Run `f` on the named font object's record, then [`propagate`] and [`cascade`]: every setter's
+/// one write path. What the setter changed becomes the font's own, so its parent no longer
+/// supplies it.
 fn edit<R>(lua: &Lua, this: &Table, f: impl FnOnce(&mut FontObject) -> R) -> mlua::Result<R> {
     let name = name_of(this)?;
+    let key = name.to_ascii_lowercase();
     let mut model = lua.app_data_mut::<Model>().expect("model");
-    let out = f(model
-        .font_objects_by_lower
-        .entry(name.to_ascii_lowercase())
-        .or_default());
+    let record = model.font_objects_by_lower.entry(key.clone()).or_default();
+    let before = record.clone();
+    let out = f(record);
+    let after = record.clone();
+    if let Some(link) = model.font_links.get_mut(&key) {
+        let own = &mut link.own;
+        if before.font != after.font {
+            own.font = after.font.clone();
+        }
+        if before.height != after.height {
+            own.height = after.height;
+        }
+        if before.shadow != after.shadow {
+            own.shadow = after.shadow;
+        }
+        if before.color != after.color {
+            own.color = after.color;
+        }
+        if before.outline != after.outline {
+            own.outline = after.outline;
+        }
+        if before.justify_h != after.justify_h {
+            own.justify_h = after.justify_h;
+        }
+        if before.justify_v != after.justify_v {
+            own.justify_v = after.justify_v;
+        }
+        if before.spacing != after.spacing {
+            own.spacing = after.spacing;
+        }
+    }
     propagate(&mut model, &name);
+    cascade(&mut model, &key, 0);
     Ok(out)
 }
 
