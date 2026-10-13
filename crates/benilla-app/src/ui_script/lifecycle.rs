@@ -394,12 +394,14 @@ pub(crate) fn reinstall_boot_vm(world: &mut World) {
 }
 
 /// Rebuild a stock glue VM built under the other flavor ([`crate::flavor`] switched the chain at a
-/// realm entry) on the screen it shows, once the glue manager is idle on `login` or `charselect`:
+/// realm entry) on the screen it shows, once that flavor is committed and the glue manager is idle
+/// on `login` or `charselect`:
 /// the same rebuild a logout makes (`0x46a7b0`), so nothing mid-operation is lost, and the new VM
 /// runs the new chain's GlueXML and the new flavor's create catalog.
 pub(crate) fn rebuild_stale_glue_vm(
     script: Option<NonSend<UiScript>>,
     flavor: Option<Res<crate::flavor::ClientFlavor>>,
+    committed: Option<Res<crate::flavor::Committed>>,
     mgr: Option<NonSend<super::glue_mgr::SharedGlueMgr>>,
     mut commands: Commands,
 ) {
@@ -407,6 +409,11 @@ pub(crate) fn rebuild_stale_glue_vm(
         return;
     };
     let flavor = flavor.as_deref().copied().unwrap_or_default();
+    // Only a settled flavor: the realm's roster arrived, or a failed entry switched back. Between
+    // the switch and the roster the realm entry is in flight, and a rebuild would drop it.
+    if committed.is_none_or(|c| c.0 != flavor) {
+        return;
+    }
     if script.vm_kind() != benilla_ui::script::VmKind::Glue || script.flavor() == flavor.ui() {
         return;
     }

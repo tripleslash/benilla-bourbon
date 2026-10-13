@@ -69,7 +69,7 @@ pub(crate) fn playable(realm: &RealmInfo) -> bool {
 /// The flavor of the last realm whose world handshake held (its roster arrived): the one a failed
 /// entry falls back to. Vanilla until a first roster.
 #[derive(Resource, Default)]
-struct Committed(ClientFlavor);
+pub(crate) struct Committed(pub(crate) ClientFlavor);
 
 pub(crate) struct FlavorPlugin;
 
@@ -87,7 +87,7 @@ impl Plugin for FlavorPlugin {
 /// A roster commits the flavor its realm was entered under. A login failure after an entry that
 /// switched it (the Turtle realm's world server unreachable) switches back, so the realm list and
 /// the next realm are never served the failed realm's data.
-fn settle_entry(
+pub(crate) fn settle_entry(
     mut rosters: MessageReader<crate::net::CharListMessage>,
     mut failures: MessageReader<crate::net::LoginFailedMessage>,
     flavor: Res<ClientFlavor>,

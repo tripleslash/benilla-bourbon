@@ -88,6 +88,7 @@ impl Plugin for LoginPlugin {
                         // After a flavor switch, the glue VM off the new chain.
                         crate::ui_script::rebuild_stale_glue_vm
                             .after(crate::ui_script::glue_mgr::drive_glue_mgr)
+                            .after(crate::flavor::settle_entry)
                             .run_if(crate::ui_script::glue::stock_glue),
                         // Off the roster and the screen the manager and the tick just moved.
                         crate::ui_script::glue_scene::feed_stock_glue_preview
