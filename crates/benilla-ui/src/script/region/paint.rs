@@ -4,6 +4,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::script::object::{draw_layer_from_str, draw_layer_name, tonumber_f32};
+use crate::script::texel::TexSet;
 use crate::script::{BlendMode, Model, TexCoords};
 
 use super::region_handle_of;
@@ -55,7 +56,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 let kept = d.vertex_color.map_or(1.0, |c| c[3]);
-                d.vertex_color = Some([r, g, b, a.unwrap_or(kept)]);
+                d.set_vertex_color(Some([r, g, b, a.unwrap_or(kept)]));
                 // The slot `SetTextColor` writes on a FontString, so it overrides the font object.
                 d.font_explicit.color = true;
                 Ok(())
@@ -63,7 +64,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         )?,
     )?;
 
-    // GetVertexColor (`0x79aa50`): white when never set.
+    // GetVertexColor (`0x79aa50`): white when never set, and under a gradient (`0x77f8c0` answers
+    // white unless the slot holds exactly one colour).
     m.set(
         "GetVertexColor",
         lua.create_function(|lua, this: Table| {
@@ -78,11 +80,23 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetGradientAlpha(orientation, r1, g1, b1, a1, r2, g2, b2, a2) and SetGradient without the
-    // alphas: a two-stop gradient the client generates into the texture slot (`+0xcc`); here it is
-    // stored whole and drawn as its midpoint. Any orientation but "VERTICAL", in any case, is
-    // horizontal.
-    for (name, with_alpha) in [("SetGradientAlpha", true), ("SetGradient", false)] {
+    // SetGradientAlpha(orientation, minR, minG, minB, minA, maxR, maxG, maxB, maxA) (`0x79b180`)
+    // and SetGradient without the alphas (`0x79ae30`) write the four vertex colours (`0x77f910`),
+    // the slot `SetVertexColor` writes one colour into, so each clears the other. The orientation
+    // is a `lua_isstring` matched case-insensitively against HORIZONTAL and VERTICAL (`0x6f1a20`);
+    // anything else raises the usage line (`0x79b126`, `0x79b54a`) and writes nothing.
+    for (name, with_alpha, usage) in [
+        (
+            "SetGradientAlpha",
+            true,
+            "(\"orientation\", minR, minG, minB, minA, maxR, maxG, maxB, maxA)",
+        ),
+        (
+            "SetGradient",
+            false,
+            "(\"orientation\", minR, minG, minB, maxR, maxG, maxB)",
+        ),
+    ] {
         m.set(
             name,
             lua.create_function(move |lua, args: mlua::MultiValue| {
@@ -91,10 +105,21 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     Some(Value::Table(t)) => t,
                     _ => return Err(mlua::Error::runtime("expected a region")),
                 };
-                let orientation = match it.next() {
-                    Some(Value::String(s)) => s.to_str()?.to_string(),
-                    // A missing or non-string orientation is horizontal.
-                    _ => String::new(),
+                let rh = region_handle_of(lua, &this)?;
+                let vertical = match it.next() {
+                    Some(Value::String(s)) => s.to_str().ok().and_then(|t| orientation(&t)),
+                    // A number is a `lua_isstring` too, and names neither orientation.
+                    _ => None,
+                };
+                let Some(vertical) = vertical else {
+                    let model = lua.app_data_ref::<Model>().expect("model");
+                    let who = crate::script::object::decode_id(&this)
+                        .ok()
+                        .and_then(|id| super::region_name_of(&model, id));
+                    return Err(mlua::Error::runtime(format!(
+                        "Usage: {}:{name}{usage}",
+                        who.as_deref().unwrap_or("<unnamed>")
+                    )));
                 };
                 let n = if with_alpha { 8 } else { 6 };
                 let mut c = [0.0f32; 8];
@@ -103,7 +128,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // Every channel is a bare `lua_tonumber` (`0x79aef3`-`0x79b083`, `0x79b242`-
                     // `0x79b490`) except the two alphas, which are `lua_isnumber`-gated with
                     // default 1 (`0x79b30d`, `0x79b480`).
-                    *slot = match v {
+                    let raw = match v {
                         Some(v) if with_alpha && matches!(i, 3 | 7) => lua
                             .coerce_number(v)
                             .ok()
@@ -113,6 +138,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         None if with_alpha && matches!(i, 3 | 7) => 1.0,
                         None => 0.0,
                     };
+                    *slot = clamp_channel(raw);
                 }
                 let (start, end) = if with_alpha {
                     ([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]])
@@ -120,14 +146,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // SetGradient has no alpha stops: both ends are opaque.
                     ([c[0], c[1], c[2], 1.0], [c[3], c[4], c[5], 1.0])
                 };
-                let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 d.gradient = Some(crate::script::Gradient {
-                    vertical: orientation.eq_ignore_ascii_case("VERTICAL"),
+                    vertical,
                     start,
                     end,
                 });
+                d.vertex_color = None;
                 Ok(())
             })?,
         )?;
@@ -156,7 +182,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // (`+0x128`) from an argument the binding (`0x79bb40`) always passes NULL. The
                     // same path returns first (`0x770225`) and keeps it, nil or "" clear it, and
                     // the colour form (`0x770360`) never writes it.
-                    let same_path = matches!((&arg, &data.texture),
+                    let same_path = matches!((&arg, data.tex.path()),
                     (Value::String(s), Some(cur)) if s.to_str().is_ok_and(|s| *s == **cur));
                     if !same_path && !colour_form {
                         data.desaturated = false;
@@ -164,7 +190,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // Both forms write the one texture slot (`+0xcc`), a file or an 8×8 solid, so
                     // each clears the other; neither touches the vertex colour (`+0xb8`), so a
                     // tint outlives its art.
-                    let loaded = match &arg {
+                    let (set, loaded) = match &arg {
                         // The colour form (`lua_isnumber`, `0x79bbd5`, so a numeric string too): g
                         // and b are a bare `lua_tonumber`, and alpha is `lua_isnumber`-gated with
                         // default 1.
@@ -174,22 +200,17 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 .ok()
                                 .flatten()
                                 .map_or(1.0, |n| n as f32);
-                            data.fill = Some([
+                            let fill = [
                                 tonumber_f32(lua, &arg),
                                 tonumber_f32(lua, &g),
                                 tonumber_f32(lua, &b),
                                 alpha,
-                            ]);
-                            data.texture = None;
-                            true
+                            ];
+                            (Some(TexSet::Fill(fill)), true)
                         }
                         // "" clears, as nil does (stock `QuestLogFrame.lua:166`), and answers nil
                         // like a failed load; the reference's answer for "" is untraced.
-                        Value::String(s) if s.to_str()?.is_empty() => {
-                            data.texture = None;
-                            data.fill = None;
-                            false
-                        }
+                        Value::String(s) if s.to_str()?.is_empty() => (Some(TexSet::None), false),
                         // Ask the probe before writing: on a failed load the reference returns 0
                         // and keeps the texture it had (`0x770288`, `0x77028e`-`0x7702b2`). With
                         // no probe the path is stored, though the answer is nil.
@@ -203,23 +224,27 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                     .as_ref()
                                     .is_none_or(|probe| probe(&path))
                             };
-                            let mut model = lua.app_data_mut::<Model>().expect("model");
+                            model = lua.app_data_mut::<Model>().expect("model");
                             let had_probe = model.texture_probe.is_some();
                             if resolvable {
-                                let data = model.region_data.entry(rh).or_default();
-                                data.texture = Some(path);
-                                data.fill = None;
+                                // Resolvable already: the probe need not run again.
+                                let Model {
+                                    region_data,
+                                    texels,
+                                    ..
+                                } = &mut *model;
+                                let data = region_data.entry(rh).or_default();
+                                texels.set(&mut data.tex, TexSet::File(path), |_| false);
                             }
-                            resolvable && had_probe
+                            (None, resolvable && had_probe)
                         }
                         // nil clears, so the region draws nothing, and answers 1 (`0x79bb40`).
-                        Value::Nil => {
-                            data.texture = None;
-                            data.fill = None;
-                            true
-                        }
-                        _ => false,
+                        Value::Nil => (Some(TexSet::None), true),
+                        _ => (None, false),
                     };
+                    if let Some(set) = set {
+                        model.set_texel(rh, set);
+                    }
                     loaded
                 };
                 // The draw only (`0x77fdf0`); an art-sized texture now holds a state its next
@@ -266,10 +291,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let Some(data) = model.region_data.get(&rh) else {
                 return Ok(None);
             };
-            if data.fill.is_some() {
+            if data.tex.fill().is_some() {
                 return Ok(Some("Solid Texture".to_string()));
             }
-            Ok(data.texture.as_ref().map(|t| match t.rfind('.') {
+            Ok(data.tex.path().as_ref().map(|t| match t.rfind('.') {
                 Some(i) => t[..i].to_string(),
                 None => t.clone(),
             }))
@@ -513,5 +538,27 @@ impl crate::script::UiScript {
         // No per-node hash holds a probe's answer: a full-scope rebuild, as for a screen move.
         model.layout_scope.invalidate();
         model.touch_layout();
+    }
+}
+
+/// A gradient orientation token (`0x6f1a20` over `0x811b00`): `Some(true)` for VERTICAL,
+/// `Some(false)` for HORIZONTAL, in any case; `None` for anything else.
+pub(crate) fn orientation(token: &str) -> Option<bool> {
+    if token.eq_ignore_ascii_case("VERTICAL") {
+        Some(true)
+    } else if token.eq_ignore_ascii_case("HORIZONTAL") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// A gradient channel's clamp to `0..=1` (`0x79af05`-`0x79af2d`): the two `fcom`s fall through an
+/// unordered compare, so NaN lands on 1.
+fn clamp_channel(v: f32) -> f32 {
+    if v.is_nan() {
+        1.0
+    } else {
+        v.clamp(0.0, 1.0)
     }
 }

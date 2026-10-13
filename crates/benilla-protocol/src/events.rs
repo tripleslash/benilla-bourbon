@@ -412,6 +412,9 @@ pub enum SessionEvent {
     Reputations { standings: Vec<(u8, i32)> },
     /// `SMSG_SET_FACTION_STANDING`: `(reputationListId, standing)` per slot, base excluded.
     ReputationDelta { standings: Vec<(u32, i32)> },
+    /// `SMSG_SET_FORCED_REACTIONS`: `(Faction.dbc id, reaction rank)`, the whole table replacing
+    /// the last. The reaction resolvers read it ahead of the faction rules.
+    ForcedReactions { reactions: Vec<(u32, u32)> },
     /// `SMSG_SET_FACTION_VISIBLE`: sets the slot's visible flag, which decides if it is listed.
     ReputationVisible { list_id: u32 },
     /// `SMSG_NAME_QUERY_RESPONSE`: names are never descriptor fields in 1.12, only query answers.
@@ -855,8 +858,9 @@ pub enum SessionEvent {
     LootMoneyNotify { amount: u32 },
     /// The coin line disappears for every current looter (`SMSG_LOOT_CLEAR_MONEY`).
     LootClearMoney,
-    /// The loot window closes (`SMSG_LOOT_RELEASE_RESPONSE`), answering our `CMSG_LOOT_RELEASE`.
-    LootReleaseResponse { guid: u64 },
+    /// A loot release (`SMSG_LOOT_RELEASE_RESPONSE`), answering a `CMSG_LOOT_RELEASE`; `result`
+    /// is the wire byte, which the client reads as a gate.
+    LootReleaseResponse { guid: u64, result: u8 },
     /// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`); its `rollID` is client-allocated.
     LootStartRoll(LootStartRoll),
     /// A vote or dice (`SMSG_LOOT_ROLL`); `LootRoll::is_dice`/`vote` split the overloaded pair.

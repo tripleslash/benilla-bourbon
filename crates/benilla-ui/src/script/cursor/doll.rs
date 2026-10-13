@@ -9,8 +9,8 @@ use crate::script::tick::verb;
 use crate::script::Model;
 
 use super::{
-    clear, clear_cursor, item_locked, lock_item, pick_up_item, Clear, CursorItem, CursorPayload,
-    EQUIPMENT_BAG,
+    clear, clear_cursor, equip::auto_equip_cursor_item, item_locked, lock_item, pick_up_item,
+    Clear, CursorItem, CursorPayload, EQUIPMENT_BAG,
 };
 
 /// `PickupInventoryItem(id)` (`0x4c7300`), the doll slot's click, on the bag click's model: a
@@ -181,36 +181,6 @@ pub(super) fn cursor_can_go_in_slot(model: &Model, id: u32) -> bool {
     }
 }
 
-/// `AutoEquipCursorItem()` (`0x48a040` into `0x5e1480`), a click or drop on the doll's model
-/// (`PaperDollFrame.lua:31-35`): an item from an equipment or equipped-bag slot, the 0-based slot
-/// below 0x17, goes back with `ClearCursor(1,1)` (`0x5e155a`, `0x5e1567`); any other whole stack,
-/// from a bag, the backpack, the bank, a bank bag slot or the keyring, becomes
-/// `CMSG_AUTOEQUIP_ITEM` (`0x5e1575`), the server picking the slot and swapping the displaced
-/// piece back (`ItemHandler.cpp:138-228`); a split stays held. Returns whether to repaint.
-pub(super) fn auto_equip_cursor_item(model: &mut Model) -> bool {
-    match &model.cursor {
-        Some(CursorPayload::Item(item)) if item.bag == EQUIPMENT_BAG && item.slot <= 23 => {
-            clear_cursor(model);
-            true
-        }
-        Some(CursorPayload::Item(item)) if item.count.is_none() => {
-            // The send tail clears with `ClearCursor(ebx,1)` (`0x5e1761`): a projectile loads by
-            // entry with `CMSG_SET_AMMO` and stays in its bag, so its arm sets `ebx = 1`
-            // (`0x5e1704`, `0x5e1711`) and the item unlocks; every other arm keeps the lock for
-            // the server's answer (`0x5e1577`). Neither locks anything new.
-            let how = if item.item_class == Some(super::ITEM_CLASS_PROJECTILE) {
-                Clear::BOTH
-            } else {
-                Clear::KEEP_LOCK
-            };
-            model.container_autoequips.push((item.bag, item.slot));
-            clear(model, how);
-            true
-        }
-        _ => false,
-    }
-}
-
 /// `UseInventoryItem(id)`, the doll slot's right-click (`PaperDollFrame.lua:658-659`): the cursor
 /// clears before the slot is read (`0x4c79a9`), so a held payload goes back, never placed, its
 /// events running first; then the app sends `CMSG_USE_ITEM` with bag 255 and the 0-based slot,
@@ -229,7 +199,24 @@ fn use_cleared(model: &mut Model, id: u32) {
         let locked = model
             .inv_slot("player", id as usize)
             .is_some_and(|s| super::item_locked(model, s.guid));
-        if !locked {
+        // Then the dispatcher's requirement and control gates (`0x5d8e0e`, `0x5d8eaa`), which an
+        // empty slot never reaches.
+        let refusal = model
+            .inv_slot("player", id as usize)
+            // A container returns ahead of both gates (`0x5d8d26`).
+            .filter(|s| s.item_id != 0 && s.contents_count.is_none())
+            .and_then(|s| {
+                crate::script::use_gates::item_use_refusal(
+                    model,
+                    s.use_fork,
+                    s.item_id,
+                    s.use_spell,
+                    s.link.is_some(),
+                )
+            });
+        if let Some(key) = refusal.filter(|_| !locked) {
+            model.ui_errors.push(key);
+        } else if !locked {
             model
                 .script_calls
                 .push(crate::script::ScriptCall::UseInventoryItem(id));
@@ -355,6 +342,9 @@ mod tests {
         slots[1] = Some(InvSlotView {
             duration_ms: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
+            use_fork: Default::default(),
             bar_placeable: true,
             consumable: false,
             durability: None,
@@ -374,6 +364,9 @@ mod tests {
         slots[11] = Some(InvSlotView {
             duration_ms: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
+            use_fork: Default::default(),
             bar_placeable: true,
             consumable: false,
             durability: None,
@@ -393,6 +386,9 @@ mod tests {
         slots[19] = Some(InvSlotView {
             duration_ms: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
+            use_fork: Default::default(),
             bar_placeable: true,
             consumable: false,
             durability: None,
@@ -422,6 +418,8 @@ mod tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                bonding: 0,
+                use_spell: 0,
                 bar_placeable: true,
                 consumable: false,
                 durability: None,
@@ -576,6 +574,9 @@ mod tests {
         slots[20] = Some(InvSlotView {
             duration_ms: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
+            use_fork: Default::default(),
             bar_placeable: true,
             consumable: false,
             durability: None,
@@ -617,6 +618,8 @@ mod tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                bonding: 0,
+                use_spell: 0,
                 bar_placeable: true,
                 consumable: false,
                 durability: None,
@@ -1093,5 +1096,69 @@ mod tests {
         }));
         assert!(auto_equip_cursor_item(&mut s.model_mut()));
         assert_eq!(s.take_container_autoequips(), vec![(EQUIPMENT_BAG, 64)]);
+    }
+
+    /// `UseInventoryItem` reaches the dispatcher too (`0x4c7af0`), so a worn trinket meets its
+    /// requirement and control gates (`0x5d8e0e`, `0x5d8eaa`); a bypass spell passes the latter.
+    #[test]
+    fn a_worn_item_use_meets_the_dispatchers_gates() {
+        let mut s = UiScript::new().unwrap();
+        let mut doll: crate::script::InventorySlots = Default::default();
+        doll[13] = Some(InvSlotView {
+            item_id: 871,
+            guid: 0x31,
+            link: Some("|Hitem:871:0:0:0|h[Trinket]|h".into()),
+            use_spell: 7744,
+            ..Default::default()
+        });
+        s.set_inventory_slots(doll);
+        s.set_player_control(false);
+        s.run("UseInventoryItem(13)").unwrap();
+        assert_eq!(s.take_ui_errors(), vec!["ERR_CLIENT_LOCKED_OUT"]);
+        assert!(s.take_script_calls().is_empty());
+
+        s.set_control_bypass([7744].into());
+        s.run("UseInventoryItem(13)").unwrap();
+        assert!(s.take_ui_errors().is_empty());
+        assert_eq!(s.take_script_calls().len(), 1);
+
+        s.set_control_bypass(Default::default());
+        s.set_player_control(true);
+        s.set_player_req_state(crate::script::PlayerReqState {
+            level: 10,
+            class_id: 1,
+            race_id: 1,
+            ..Default::default()
+        });
+        s.set_item_template(
+            871,
+            crate::script::ItemTemplateView {
+                required_level: 60,
+                allowable_class: -1,
+                allowable_race: -1,
+                ..Default::default()
+            },
+        );
+        s.run("UseInventoryItem(13)").unwrap();
+        assert_eq!(s.take_ui_errors(), vec!["ERR_CANT_USE_ITEM"]);
+        assert!(s.take_script_calls().is_empty());
+    }
+
+    /// `CGItem::Use` returns silently for a container (`0x5d8d26`), ahead of both gates.
+    #[test]
+    fn a_worn_container_meets_no_gate() {
+        let mut s = UiScript::new().unwrap();
+        let mut doll: crate::script::InventorySlots = Default::default();
+        doll[13] = Some(InvSlotView {
+            item_id: 4500,
+            guid: 0x31,
+            link: Some("|Hitem:4500:0:0:0|h[Bag]|h".into()),
+            contents_count: Some(0),
+            ..Default::default()
+        });
+        s.set_inventory_slots(doll);
+        s.set_player_control(false);
+        s.run("UseInventoryItem(13)").unwrap();
+        assert!(s.take_ui_errors().is_empty());
     }
 }

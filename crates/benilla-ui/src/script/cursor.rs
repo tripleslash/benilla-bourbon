@@ -15,8 +15,9 @@ mod bag_verbs;
 mod bar;
 mod doll;
 mod drag;
+pub(crate) mod equip;
 pub(crate) mod money;
-mod pet;
+pub(super) mod pet;
 
 pub(crate) use bar::place_action;
 pub(crate) use drag::{
@@ -992,6 +993,8 @@ mod tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                bonding: 0,
+                use_spell: 0,
                 bar_placeable: true,
                 consumable: false,
                 durability: None,

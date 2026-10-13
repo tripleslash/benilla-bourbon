@@ -236,6 +236,8 @@ pub(crate) struct Model {
     pub(crate) link_buttons: HashMap<FrameHandle, Vec<FrameHandle>>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
+    /// The textures the regions' slots hold, with their creation stamps ([`super::texel`]).
+    pub(crate) texels: super::texel::Texels,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
     /// its spec and the nine Texture regions it built.
     pub(crate) backdrops: HashMap<FrameHandle, backdrop::Installed>,
@@ -657,6 +659,9 @@ pub(crate) struct Model {
     /// `HasFullControl`, the reference's `[0xb4b3e4]`: set by `SMSG_CLIENT_CONTROL_UPDATE` for the
     /// player, boots 1, and every cast, item and cursor gate refuses at 0.
     pub(crate) player_control: bool,
+    /// The on-use spells that pass the item dispatcher's control gate without control of the
+    /// character (`0x5d8ec0`-`0x5d8f6a`), fed by the app.
+    pub(crate) control_bypass: HashSet<u32>,
     /// One `CMSG_PET_SET_ACTION` per entry, its one or two `(position, packed word)` pairs: the
     /// server tells the forms apart by body size, so a move's two pairs must not be flattened.
     pub(crate) pet_set_actions: Vec<Vec<(u32, u32)>>,
@@ -705,6 +710,8 @@ pub(crate) struct Model {
     pub(crate) ui_cursor_dirty: bool,
     /// `AutoEquipCursorItem`'s `(bag, slot)` sources, sent as `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
+    /// `AutoEquipCursorItem`'s bind-on-equip questions, `(bag, slot, guid)`: the item stays held.
+    pub(crate) container_equip_asks: Vec<(i64, u32, u64)>,
     /// `PutItemInBag` and `PutItemInBackpack` stores, sent as `CMSG_AUTOSTORE_BAG_ITEM`, or
     /// `CMSG_SPLIT_ITEM` for a split stack.
     pub(crate) bag_autostores: Vec<container::BagAutoStore>,
@@ -1253,6 +1260,7 @@ impl Model {
             resolved: HashMap::new(),
             link_buttons: HashMap::new(),
             region_data: HashMap::new(),
+            texels: super::texel::Texels::default(),
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
@@ -1442,6 +1450,7 @@ impl Model {
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
             player_control: true,
+            control_bypass: HashSet::new(),
             pet_set_actions: Vec::new(),
             pet_abandons: 0,
             pet_dismisses: 0,
@@ -1463,6 +1472,7 @@ impl Model {
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),
+            container_equip_asks: Vec::new(),
             bag_autostores: Vec::new(),
             drag_registered: HashMap::new(),
             drag: None,
@@ -2301,6 +2311,19 @@ impl Model {
         if let Some(&id) = self.frame_to_id.get(&h) {
             self.layout_unsettled.insert(id);
         }
+    }
+
+    /// Set region `rh`'s texture slot ([`super::texel::Texels::set`]), the one way it is written.
+    pub(crate) fn set_texel(&mut self, rh: RegionHandle, set: super::texel::TexSet) {
+        let Model {
+            region_data,
+            texels,
+            texture_probe,
+            ..
+        } = self;
+        let data = region_data.entry(rh).or_default();
+        let missing = |p: &str| texture_probe.as_ref().is_some_and(|probe| !probe(p));
+        texels.set(&mut data.tex, set, missing);
     }
 
     /// New art on region `rh` (`SetTexture` `0x770200`, the colour form `0x770360`): it marks

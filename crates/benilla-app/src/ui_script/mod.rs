@@ -42,7 +42,7 @@ mod session;
 /// The feed gate: a UI feed's input-side early-out, audited by `WOW_FEED_GATE_CHECK=1`.
 pub(crate) mod gate;
 
-pub(crate) use session::VmMemo;
+pub(crate) use session::{VmMemo, WindowMemo};
 
 // Not test-only: the addon harness loads the whole shipped interface under each addon.
 pub(crate) use manifest::default_bindings;
@@ -306,7 +306,7 @@ impl Plugin for UiScriptPlugin {
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
             .insert_resource(glue::GlueStock::from_env())
-            .init_resource::<glue_mgr::GlueMgr>()
+            .init_non_send::<glue_mgr::SharedGlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
             .init_resource::<crate::bindings::WheelNotches>()
@@ -346,9 +346,8 @@ impl Plugin for UiScriptPlugin {
                 end_ui_session,
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
-            .init_resource::<LeavingWorldArmed>()
-            .add_message::<WorldLeaveSweepMessage>()
-            .add_systems(Update, lifecycle::arm_leaving_world_on_self_create)
+            .init_world_leave_sweep()
+            .add_systems(Update, sweep::arm_leaving_world_on_self_create)
             // A queued `ReloadUI()` runs in `PreUpdate`, a frame after its drain (the reference's
             // deferral, `0x495590`) and before every `Update` seed or feed.
             .init_resource::<ReloadUiPending>()
@@ -441,9 +440,19 @@ fn arbitrate_pointer_over_ui(
 mod lifecycle;
 pub(crate) use lifecycle::{
     end_ui_session, ingame_ui_up, rebuild_stale_glue_vm, reinstall_boot_vm, run_pending_reload,
-    setup_script, strings_vm, AddOnIdentity, LeaveWorldSweep, LeavingWorldArmed,
-    PendingEntryUiLoad, ReloadUiPending, WorldLeaveSweepMessage,
+    setup_script, strings_vm, AddOnIdentity, PendingEntryUiLoad, ReloadUiPending,
 };
+/// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
+mod sweep;
+#[cfg(test)]
+pub(crate) use sweep::test_support as sweep_test;
+#[cfg(test)]
+pub(crate) use sweep::WorldLeaveSweep;
+pub(crate) use sweep::{
+    run_leave_world_sweep, sweep_on_worldport, LeavingWorldArmed, SweepApp, SweepLeg, SweptWorlds,
+};
+#[cfg(test)]
+mod sweep_tests;
 // Test-only: other modules' tests consume these, and a plain re-export would warn unused.
 #[cfg(test)]
 pub(crate) use lifecycle::load_ingame_ui_on_world_entry;

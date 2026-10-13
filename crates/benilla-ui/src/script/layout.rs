@@ -199,10 +199,10 @@ pub(super) fn content_span(
     data: &RegionData,
     probe: Option<&crate::script::TextureSizeProbe>,
 ) -> Option<(f32, f32)> {
-    if data.fill.is_some() {
+    if data.tex.fill().is_some() {
         return Some((SOLID_TEXTURE_TEXELS, SOLID_TEXTURE_TEXELS));
     }
-    texel_span(probe, data.texture.as_deref()?)
+    texel_span(probe, data.tex.path().as_deref()?)
 }
 
 /// [`content_span`] for a path: SimpleHTML reserves an image's height the same way (`0x770790`).
@@ -718,8 +718,8 @@ fn node_inputs(model: &Model, id: u32) -> String {
             d.size,
             d.measured.map(|m| (m.w, m.h)),
             d.text.as_deref().map_or(0, str::len),
-            d.texture,
-            d.fill.is_some(),
+            d.tex.path(),
+            d.tex.fill().is_some(),
             model.layout_unsettled.contains(&id),
         ),
         None => format!("region owner {owner:?} with no data"),
@@ -1548,7 +1548,7 @@ impl UiScript {
                         if height == 0.0 {
                             height = ch;
                         }
-                    } else if data.texture.is_some() {
+                    } else if data.tex.path().is_some() {
                         // Art with no size yet waits for `name_landed_art`.
                         layout_art_waiting.insert(rh);
                     }

@@ -592,7 +592,7 @@ pub(super) fn feed_player_req(
         for (id, info) in cat.reputation_factions() {
             let standing = usize::try_from(info.rep_index)
                 .ok()
-                .and_then(|i| reputations.0.get(i))
+                .and_then(|i| reputations.slots.get(i))
                 .map(|&(_, s)| s)
                 .unwrap_or(0);
             rep_ranks.insert(
@@ -724,6 +724,8 @@ fn resolve_slot(
     Some(ContainerSlot {
         use_fork: super::drain::use_fork(&t, flags, fields.item_text_id().unwrap_or(0)),
         item_class: Some(t.class),
+        bonding: t.bonding,
+        use_spell: t.use_spell.map_or(0, |u| u.spell_id),
         // A charter's guild name and master, keyed by the petition id the server puts in
         // enchantment slot 0 (`PetitionsHandler.cpp:126`), where the reference reads it
         // (`0x5ef337`) and its enchant lines skip it (`0x52c9e0`). The first hover sends the query.

@@ -2915,7 +2915,7 @@ mod tests {
         let fresh = ("Realm".to_string(), "Fresh".to_string());
         let mut script = UiScript::new().unwrap();
         let _ = load_third_party(&mut script, Some(&fresh), &[], true);
-        crate::ui_script::shutdown_ui_state(&mut script, Some(&fresh), true);
+        crate::ui_script::shutdown_ui_state(&mut script, Some(&fresh));
         assert!(
             !enable_state_path(Some(&fresh)).unwrap().exists(),
             "a login and logout with no toggle creates no AddOns file"
@@ -2936,7 +2936,7 @@ mod tests {
             let mut script = UiScript::new().unwrap();
             let _ = load_third_party(&mut script, Some(&id), &[], true);
             script.run(lua).unwrap();
-            crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+            crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
             assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),
                 before,
@@ -2970,7 +2970,7 @@ mod tests {
             let _ = load_third_party(&mut script, Some(&id), roster, true);
             let ran = script.eval::<bool>("return SharedRan == true").unwrap();
             script.run(lua).unwrap();
-            crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+            crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
             ran
         };
         assert!(session("Alice", &roster, ""), "enabled by default");
@@ -3031,7 +3031,7 @@ mod tests {
         script
             .run("KeeperDB.count = 7 KeeperDB.note = 'hi' KeeperChar = 'mine'")
             .unwrap();
-        crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+        crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
 
         // ── session two: a fresh VM reads them back ──
         let mut next = UiScript::new().unwrap();
@@ -3084,7 +3084,7 @@ mod tests {
         script
             .run("GramDB = { ['on'] = true, ['n'] = 2, ['s'] = 'a\\\"b', ['t'] = { 1 } } GramChar = 5")
             .unwrap();
-        crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+        crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
 
         let account = std::fs::read_to_string(home.join("saved/Gram.lua")).unwrap();
         let body = account.lines().skip(2).collect::<Vec<_>>().join("\n");
@@ -3138,7 +3138,7 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         let _ = load_third_party(&mut script, Some(&id), &[], true);
-        crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+        crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
 
         let written = std::fs::read_to_string(home.join("saved/Last.lua")).unwrap();
         assert!(

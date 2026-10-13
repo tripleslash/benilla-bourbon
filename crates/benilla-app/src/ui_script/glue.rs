@@ -323,6 +323,126 @@ mod tests {
         );
     }
 
+    /// The create screen's three info panels raise their icon frame a level in its `OnLoad`
+    /// (`CharacterCreate.xml:238`, `:399`, `:560`), above the ScrollFrame beside it. The scroll
+    /// child draws in that ScrollFrame's HIGHLIGHT callback (`0x787220`), so the description text
+    /// draws under the icon it runs past, not at the scroll child's own level, which ties the icon
+    /// and would put the text on top.
+    #[test]
+    fn the_create_panels_icons_cover_their_scrolled_text() {
+        let _ = benilla_formats::wow_data_or_skip!();
+        let mut s = UiScript::new_glue().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        let _ = load_glue(&mut s);
+        set_glue_screen(&mut s, GlueScreen::Login);
+        // Shown alone: the screen's art and text need no create catalog.
+        s.run("AccountLogin:Hide() CharacterCreate:Show()").unwrap();
+        let _ = s.take_errors();
+        s.resolve();
+        let quads = s.extract();
+        let owned = |name: &str| {
+            quads
+                .iter()
+                .filter(|q| s.quad_owner_name(q.target).as_deref() == Some(name))
+                .collect::<Vec<_>>()
+        };
+        for panel in ["Faction", "Race", "Class"] {
+            let icon = owned(&format!("CharacterCreate{panel}IconFrame"));
+            let icon = icon
+                .iter()
+                .find(|q| matches!(q.content, benilla_ui::script::QuadContent::Texture { .. }))
+                .unwrap_or_else(|| panic!("the {panel} icon draws"));
+            let text = owned(&format!("CharacterCreate{panel}ScrollChild"));
+            let text: Vec<_> = text
+                .iter()
+                .filter(|q| matches!(q.content, benilla_ui::script::QuadContent::Text { .. }))
+                .collect();
+            assert!(!text.is_empty(), "the {panel} panel's text draws");
+            let icon_rect = icon.rect.expect("the icon is placed");
+            assert!(
+                text.iter().any(|q| q
+                    .rect
+                    .is_some_and(|r| r.left < icon_rect.right && r.top > icon_rect.bottom)),
+                "some {panel} text runs under the icon's corner"
+            );
+            for q in text {
+                assert!(q.z < icon.z, "the {panel} text draws under the raised icon");
+            }
+        }
+    }
+
+    /// The stock credits screen (`CreditsFrame.xml`). Its two fades are a black `<Color>` under a
+    /// vertical alpha `<Gradient>`, opaque at the scroll frame's edge and clear inward, so the
+    /// credits text fades instead of being cut. Its borders are file art in the BACKGROUND layer
+    /// beside the solid black bars, and the layer batch's sort (`0x7731a0`) draws them over.
+    #[test]
+    fn the_stock_credits_fades_ramp_and_its_borders_cover_the_bars() {
+        use benilla_ui::script::QuadContent;
+        let _ = benilla_formats::wow_data_or_skip!();
+        let mut s = UiScript::new_glue().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        let _ = load_glue(&mut s);
+        set_glue_screen(&mut s, GlueScreen::Login);
+        s.run("AccountLogin:Hide() CreditsFrame:Show()").unwrap();
+        let _ = s.take_errors();
+        s.resolve();
+        let quads = s.extract();
+        let black = Some([0.0, 0.0, 0.0, 1.0]);
+
+        let (clear, opaque) = ([0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.0]);
+        let mut fades: Vec<_> = quads
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: None,
+                    color,
+                    gradient: Some(g),
+                    ..
+                } if *color == black => Some((q.rect.expect("a fade is placed"), *g)),
+                _ => None,
+            })
+            .collect();
+        fades.sort_by(|a, b| a.0.bottom.total_cmp(&b.0.bottom));
+        assert_eq!(fades.len(), 2, "both fades draw");
+        assert_eq!(
+            fades[0].1,
+            [clear, clear, opaque, opaque],
+            "the bottom fade: opaque along the bottom, clear at its top"
+        );
+        assert_eq!(
+            fades[1].1,
+            [opaque, opaque, clear, clear],
+            "the top fade: opaque along the top, clear at its bottom"
+        );
+
+        let owned_by_credits = |q: &&benilla_ui::script::ExtractedQuad| {
+            s.quad_owner_name(q.target).as_deref() == Some("CreditsFrame")
+        };
+        let bars: Vec<u128> = quads
+            .iter()
+            .filter(owned_by_credits)
+            .filter(|q| {
+                matches!(&q.content, QuadContent::Texture { path: None, color, gradient: None, .. }
+                    if *color == black)
+            })
+            .map(|q| q.z)
+            .collect();
+        let borders: Vec<u128> = quads
+            .iter()
+            .filter(owned_by_credits)
+            .filter(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("Credits\\Border1"))
+            })
+            .map(|q| q.z)
+            .collect();
+        assert_eq!((bars.len(), borders.len()), (2, 2));
+        assert!(
+            borders.iter().all(|b| bars.iter().all(|bar| b > bar)),
+            "the borders draw over the black bars: {borders:?} over {bars:?}"
+        );
+    }
+
     /// `GlueParent` fills the screen root, 768 tall and `768·a` wide (`0x41ad10`, from `0x46ab40`),
     /// up to 16:9; past that `GlueParent_OnLoad` centres it 16:9 wide on the root's height.
     #[test]

@@ -777,6 +777,33 @@ pub(crate) mod schedule_tests {
         }
     }
 
+    /// The worldport's sweep runs whether or not the interface is up, as the local player's
+    /// destructor does (`0x5dd543`): nothing gates it on `ingame_ui_up`.
+    #[test]
+    fn the_worldport_sweep_is_not_gated_on_the_interface() {
+        let mut app = headless_client();
+        let update = census(&mut app, Update, SyncPoints::Built);
+        if !type_names_available(&update) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let sweep = update
+            .systems
+            .values()
+            .find(|s| s.name.ends_with("::sweep_on_worldport"))
+            .expect("the worldport's sweep is in Update");
+        assert!(
+            !sweep
+                .conditions
+                .iter()
+                .any(|c| c.ends_with("::ingame_ui_up")),
+            "{:?}",
+            sweep.conditions
+        );
+    }
+
     #[test]
     fn the_client_builds_headless() {
         let app = headless_client();
@@ -821,7 +848,7 @@ pub(crate) mod schedule_tests {
     ///   writers of `GluePreview`: the switch runs one side or the other (`stock_glue` against
     ///   `native_glue`), never both;
     /// - the cursor classifier against `world_focus`'s focus publish and settle release over
-    ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
+    ///   `Player`: it reads `own_control_lost`, and they write only `settling` and `world_stale`;
     /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
     ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
     ///   those two do not write, and a chat line commutes with their pushes;
@@ -850,7 +877,15 @@ pub(crate) mod schedule_tests {
     /// - a crate's interaction (`target::click::act_on_interact`) against what
     ///   `act_on_right_click` and the cursor classifier already pair with: it runs the click's
     ///   dispatchers over the classifier's reading of its object, and its attack leg
-    ///   selects as the click does, so it writes `Selection` where the click's drain does.
+    ///   selects as the click does, so it writes `Selection` where the click's drain does;
+    /// - the soulstone's cast cancel (`death::drain_death`, through `spell::SelfCancel`) against
+    ///   `cursor::drive_displayed_cursor` over `SpellTargeting` and
+    ///   `creature_anim::spell_visual::route_cast_visuals` over the `CastEvent` messages: both are
+    ///   level-triggered readers, so a cancel seen a frame early or late is decided again next
+    ///   frame;
+    /// - the item gate's control-bypass feed (`ui_unit::control_gate::feed_control_bypass`)
+    ///   against `player::camera_saved::load_camera_pose` over `Player`: the feed reads
+    ///   `own_control_lost` only, and the loader writes the saved camera pose.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -882,7 +917,11 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's AddOns screen and character rename (71d65a488) bring +6: the `LaunchAddOnURL`
     /// opener and the addon reply's news against the glue systems.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_005;
+    ///
+    /// Upstream's ceiling then moved 4,689 -> 4,642 (-47) with the glue verbs and the world-leave
+    /// sweep (dd3983a47); the fork's count follows it, plus the stock glue's pending music opener
+    /// and its glue-VM rebuild after a flavor switch, against the glue and sound systems.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_979;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1318,7 +1357,7 @@ pub(crate) mod schedule_tests {
     /// memo-diffed `fire_event`, keyed `(path under src/, fn)`, with the reason it is safe.
     const EXEMPT: &[(&str, &str, Because, &str)] = &[
         ("bindings.rs", "sync_dispatch", Because::MemoLatched,
-         "`seen_generation` is a `VmMemo`: a new VM reads `None`, rebuilds and re-fires UPDATE_BINDINGS"),
+         "`seen_generation` is a `VmMemo`: a new VM reads `None` and rebuilds, and its seed's load owes the UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
          "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the boot VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
         ("death/mod.rs", "feed_death", Because::MemoLatched,
@@ -1434,7 +1473,8 @@ pub(crate) mod schedule_tests {
                     continue;
                 }
                 let takes = f.body.contains("mem::take(") || f.body.contains(".drain(");
-                let memo = f.params.contains("VmMemo<");
+                // A `WindowMemo` is a `VmMemo` the leave-world sweep also clears.
+                let memo = f.params.contains("VmMemo<") || f.params.contains("WindowMemo<");
                 consumers.push((rel.clone(), f.name.to_string(), takes, memo));
             }
         }
@@ -1447,6 +1487,23 @@ pub(crate) mod schedule_tests {
             return;
         }
         let post = census(&mut app, PostUpdate, SyncPoints::Built);
+        // The leave-world sweep's legs run only inside its schedule, whose callers hold the
+        // interface up: the worldport's producer is gated with the unit feed, the shutdown edges
+        // run the sweep before a parked boot VM returns, and the quit returns inside the
+        // entry-load window.
+        let swept: Vec<String> = census(
+            &mut app,
+            crate::ui_script::WorldLeaveSweep,
+            SyncPoints::Built,
+        )
+        .systems
+        .values()
+        .map(|s| s.name.clone())
+        .collect();
+        let in_sweep = |full: &str, name: &str| {
+            let suffix = format!("::{name}");
+            swept.iter().any(|s| s == full || s.ends_with(&suffix))
+        };
         let by_name: HashMap<&str, &SystemInfo> = update
             .systems
             .values()
@@ -1475,8 +1532,9 @@ pub(crate) mod schedule_tests {
                 }
             });
             let exempt = EXEMPT.iter().find(|(p, f, _, _)| p == rel && f == name);
-            let is_gated =
-                info.is_some_and(|i| i.conditions.iter().any(|c| c.ends_with("::ingame_ui_up")));
+            let is_gated = info
+                .is_some_and(|i| i.conditions.iter().any(|c| c.ends_with("::ingame_ui_up")))
+                || (info.is_none() && in_sweep(&full, name));
             if is_gated {
                 gated += 1;
                 if exempt.is_some() {

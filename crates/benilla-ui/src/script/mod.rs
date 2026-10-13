@@ -74,8 +74,9 @@ mod glue_realm;
 mod glue_select;
 pub use glue::{VmKind, GLUE_EVENTS};
 pub use glue_core::{
-    glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed,
-    GlueCredentials, GlueNotice, GlueRequest, GlueServer, NoticeState, GLUE_STATUS_KEYS,
+    glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
+    GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
+    GLUE_STATUS_KEYS,
 };
 pub use glue_create::{
     GlueCreateCatalog, GlueCreateClass, GlueCreateCounts, GlueCreateLook, GlueCreateRace,
@@ -104,6 +105,9 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+mod layer_batch;
+pub(crate) mod texel;
+pub(crate) mod use_gates;
 pub(crate) use keyboard::enable_for_script;
 pub use keyboard::{KeyUp, KeyWalk};
 mod layout;
@@ -211,6 +215,7 @@ pub use container::{
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,

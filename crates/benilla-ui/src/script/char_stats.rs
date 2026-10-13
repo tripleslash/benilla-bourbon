@@ -191,6 +191,13 @@ pub struct InvSlotView {
     /// Bound at runtime (`0x5da2c0`): `ITEM_FIELD_FLAGS & 1`, or an enchant whose
     /// `SpellItemEnchantment` row binds. The tooltip's bind line then says Soulbound.
     pub already_bound: bool,
+    /// The template's bonding (`[rec+0x194]`), 0 while unresolved: the equip arms ask on 2.
+    pub bonding: u32,
+    /// The on-use spell the dispatcher reads (`0x5d8c80`), 0 for none or while unresolved.
+    pub use_spell: u32,
+    /// The arm `UseInventoryItem` takes in the dispatcher, with no equip fork; `link` is set once
+    /// the template is cached, which the dispatcher needs (`0x5d8d5c`).
+    pub use_fork: super::container::UseFork,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
     /// The item object's guid, 0 while unresolved: `IsInventoryItemLocked` reads the client's lock
@@ -501,6 +508,8 @@ impl InvSlotView {
             name: slot.link.as_deref().and_then(link_item_name),
             durability: slot.durability,
             already_bound: slot.already_bound,
+            bonding: slot.bonding,
+            use_spell: slot.use_spell,
             link: slot.link.clone(),
             guid: slot.guid,
             creator: slot.creator.clone(),

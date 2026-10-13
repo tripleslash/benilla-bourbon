@@ -18,12 +18,10 @@ enum SeqTarget {
 #[derive(Component)]
 pub struct GlobalSeqDrive {
     bones: Vec<(SeqTarget, GlobalBone)>,
-    /// The scene clock at attach (secs), stamped once, like the reference's `+0x68`.
+    /// The scene clock at attach (secs), stamped once, like the reference's `+0x68`. The clock is
+    /// the host's [`super::SceneClock`] when it carries one (the reference reads
+    /// `[[model+0x2c]+0xc]`, its own scene's), else the world's.
     anchor: Option<f64>,
-    /// The owning scene's clock (secs) when it is not the world's: the reference reads
-    /// `[[model+0x2c]+0xc]`, and a `<Model>` widget owns a private scene (`CSimpleModel+0x314`,
-    /// `0x76cfc0`) advanced only by its `OnUpdate` (`0x76d7f0`), so a hidden pane's clock stops.
-    clock: Option<f64>,
     /// Skip the writes: the doodad lane pauses culled instances, as the reference evaluates a
     /// model only when drawn (`0x707680`). The cursor is absolute, so a resume needs no seek.
     paused: bool,
@@ -64,7 +62,6 @@ impl GlobalSeqDrive {
         (!bones.is_empty()).then_some(Self {
             bones,
             anchor: None,
-            clock: None,
             paused: false,
             joint_samples: Vec::new(),
         })
@@ -80,7 +77,6 @@ impl GlobalSeqDrive {
         (!bones.is_empty()).then_some(Self {
             bones,
             anchor: None,
-            clock: None,
             paused: false,
             joint_samples: Vec::new(),
         })
@@ -90,11 +86,6 @@ impl GlobalSeqDrive {
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
-
-    /// Set this instance's scene clock (secs), each frame, for a scene that is not the world's.
-    pub fn set_clock(&mut self, secs: f64) {
-        self.clock = Some(secs);
-    }
 }
 
 /// Sample each drive at `sceneNow − anchor`, wrapped in f64 for a long uptime, and write only the
@@ -103,58 +94,63 @@ impl GlobalSeqDrive {
 /// The sampling runs in parallel, one drive per item: a rig's bones are its own host's
 /// [`super::RigPose`] and are written there, while a joint target is another entity, so its sample
 /// is kept on the drive and written by the serial pass after.
+/// A drive, whether its host is parked, the host's collapsed rig and its scene's clock.
+type DriveItem = (
+    &'static mut GlobalSeqDrive,
+    Has<super::AnimParked>,
+    Option<&'static mut super::RigPose>,
+    Option<&'static super::SceneClock>,
+);
+
 fn apply_global_sequences(
     time: Res<Time>,
-    mut drives: Query<(
-        &mut GlobalSeqDrive,
-        Has<super::AnimParked>,
-        Option<&mut super::RigPose>,
-    )>,
+    mut drives: Query<DriveItem>,
     mut joints: Query<&mut Transform>,
 ) {
     let now = time.elapsed_secs_f64();
-    drives.par_iter_mut().for_each(|(drive, parked, mut rig)| {
-        let GlobalSeqDrive {
-            bones,
-            anchor,
-            clock,
-            paused,
-            joint_samples,
-        } = drive.into_inner();
-        joint_samples.clear();
-        let scene_now = clock.unwrap_or(now);
-        // Stamped even while parked: the reference stamps `+0x68` at attach, not at first draw.
-        let t = scene_now - *anchor.get_or_insert(scene_now);
-        if *paused || parked {
-            return;
-        }
-        for (target, bone) in bones.iter() {
-            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
-            let sampled = SampledChannels {
-                translation: bone.translation.as_ref().map(|c| c.sample(at(c.period))),
-                rotation: bone.rotation.as_ref().map(|c| c.sample(at(c.period))),
-                scale: bone.scale.as_ref().map(|c| c.sample(at(c.period))),
-            };
-            match target {
-                SeqTarget::Joint(joint) => joint_samples.push((*joint, sampled)),
-                // A rig's `pose_dirty` costs a re-fold and anchor re-seat, so only a moved value is
-                // stored.
-                SeqTarget::Bone(b) => {
-                    let Some(rig) = rig.as_mut() else { continue };
-                    let Some(cur) = rig.locals.get(*b as usize).copied() else {
-                        continue;
-                    };
-                    let posed = sampled.over(&cur);
-                    if cur != posed {
-                        rig.locals[*b as usize] = posed;
-                        rig.pose_dirty = true;
+    drives
+        .par_iter_mut()
+        .for_each(|(drive, parked, mut rig, clock)| {
+            let GlobalSeqDrive {
+                bones,
+                anchor,
+                paused,
+                joint_samples,
+            } = drive.into_inner();
+            joint_samples.clear();
+            let scene_now = clock.map_or(now, |c| c.0);
+            // Stamped even while parked: the reference stamps `+0x68` at attach, not at first draw.
+            let t = scene_now - *anchor.get_or_insert(scene_now);
+            if *paused || parked {
+                return;
+            }
+            for (target, bone) in bones.iter() {
+                let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
+                let sampled = SampledChannels {
+                    translation: bone.translation.as_ref().map(|c| c.sample(at(c.period))),
+                    rotation: bone.rotation.as_ref().map(|c| c.sample(at(c.period))),
+                    scale: bone.scale.as_ref().map(|c| c.sample(at(c.period))),
+                };
+                match target {
+                    SeqTarget::Joint(joint) => joint_samples.push((*joint, sampled)),
+                    // A rig's `pose_dirty` costs a re-fold and anchor re-seat, so only a moved value is
+                    // stored.
+                    SeqTarget::Bone(b) => {
+                        let Some(rig) = rig.as_mut() else { continue };
+                        let Some(cur) = rig.locals.get(*b as usize).copied() else {
+                            continue;
+                        };
+                        let posed = sampled.over(&cur);
+                        if cur != posed {
+                            rig.locals[*b as usize] = posed;
+                            rig.pose_dirty = true;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
     // A joint's `Changed` costs a propagation walk, so only a moved value is stored.
-    for (drive, _, _) in &drives {
+    for (drive, ..) in &drives {
         for (joint, sampled) in &drive.joint_samples {
             if let Ok(mut tf) = joints.get_mut(*joint) {
                 let posed = sampled.over(&tf);
@@ -204,6 +200,46 @@ mod tests {
                 keys: vec![(0.0, Vec3::ZERO), (100.0, Vec3::splat(100.0))],
             }),
         }
+    }
+
+    /// A drive whose host stands in a scene with its own clock samples that clock, not the
+    /// world's: a hidden pane's scene stops (`0x76d7f0`), and its eyelids with it.
+    #[test]
+    fn a_drive_samples_its_scenes_clock_when_it_has_one() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(60),
+        ));
+        app.add_systems(Update, apply_global_sequences);
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let host = app
+            .world_mut()
+            .spawn((
+                GlobalSeqDrive::new(&[ramp()], &[joint]).expect("a keyed channel maps"),
+                crate::rig_anim::SceneClock(2.0),
+            ))
+            .id();
+        app.update(); // attach: the anchor is the scene's 2.0
+        let scale = |app: &App| app.world().get::<Transform>(joint).unwrap().scale.x;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            scale(&app),
+            0.0,
+            "the world ran on, the scene's clock did not"
+        );
+        app.world_mut()
+            .get_mut::<crate::rig_anim::SceneClock>(host)
+            .unwrap()
+            .0 = 2.5;
+        app.update();
+        assert!(
+            (scale(&app) - 0.5).abs() < 1e-4,
+            "half a second of the scene's clock past attach: {}",
+            scale(&app)
+        );
     }
 
     /// A drive spawned later reads a smaller cursor: the phase is per instance.

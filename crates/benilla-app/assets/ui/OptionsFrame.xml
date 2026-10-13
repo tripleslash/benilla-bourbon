@@ -1582,9 +1582,11 @@
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
         </Backdrop>
         <Layers>
-            <Layer level="BACKGROUND">
+            <!-- BORDER, over the tile: a layer draws its textures sorted by texture, not in
+                 declaration order, so on BACKGROUND the fill could sort under the tile. -->
+            <Layer level="BORDER">
                 <!-- 0.88 combined with the tile, so labels read over bright terrain. Inset 15:
-                     regions draw over the border, whose ink ends by texel 14. -->
+                     clear of the border's ink, which ends by texel 14. -->
                 <Texture name="$parentGroundDim">
                     <Anchors>
                         <Anchor point="TOPLEFT"><Offset><AbsDimension x="15" y="-15"/></Offset></Anchor>
@@ -1843,8 +1845,14 @@
                             <OnScrollRangeChanged>BenillaScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <!-- Declared before the body and the bar so it draws beneath both. -->
-                            <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate"/>
+                            <!-- At the ScrollFrame's own level, beneath both the body, which the
+                                 ScrollFrame's HIGHLIGHT callback draws at that level, and the bar,
+                                 a level up. -->
+                            <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate">
+                                <Scripts>
+                                    <OnLoad>this:SetFrameLevel(this:GetParent():GetFrameLevel())</OnLoad>
+                                </Scripts>
+                            </Frame>
                             <!-- Sized, not anchored: SetScrollChild pins its TOPLEFT and
                                  BenillaOptionsScroll_Fit sizes it. -->
                             <Frame name="BenillaOptionsFrameContainerBody">
@@ -3420,7 +3428,8 @@
                                     </Anchors>
                                 </Frame>
                                         <!-- Declared before the faux frame so it draws beneath
-                                             it. -->
+                                             it: inside the body, the scroll child, link order
+                                             draws, not level. -->
                                         <Frame name="$parentScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
                                         <!-- Ends at -32, so the kit's bar rides the -26..-10
                                              gutter. -->

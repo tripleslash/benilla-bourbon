@@ -54,6 +54,9 @@ fn inventory_with_head_item() -> InventorySlots {
     slots[1] = Some(InvSlotView {
         duration_ms: None,
         already_bound: false,
+        bonding: 0,
+        use_spell: 0,
+        use_fork: Default::default(),
         bar_placeable: true,
         consumable: false,
         durability: None,
@@ -84,6 +87,8 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             duration_ms: None,
             petition: None,
             already_bound: false,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
             consumable: false,
             durability: None,

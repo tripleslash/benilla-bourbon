@@ -9,15 +9,24 @@ use crate::net::{
 };
 use benilla_protocol::{RealmInfo, SessionEnd};
 
-/// The manager with both agreements accepted, the way a returning player's CVars seed it.
-fn accepted() -> GlueMgr {
-    let mut n = [NoticeState::default(); 4];
-    n[GlueNotice::Tos as usize] = NoticeState::from_cvar("1");
-    n[GlueNotice::Eula as usize] = NoticeState::from_cvar("1");
-    GlueMgr {
-        notices: Some(n),
-        ..GlueMgr::default()
-    }
+/// Run the steps the outbox holds past their signals and drop them, as the frame's flush does
+/// where it reaches them: what a test of the manager alone sees once the frame has run.
+fn settle(m: &mut GlueMgr) {
+    m.settle();
+}
+
+/// A manager as the app starts it.
+fn fresh() -> GlueMgr {
+    GlueMgr::default()
+}
+
+/// The manager the shared handle holds.
+fn mgr(app: &App) -> std::cell::Ref<'_, GlueMgr> {
+    app.world().non_send::<SharedGlueMgr>().get()
+}
+
+fn mgr_mut(app: &App) -> std::cell::RefMut<'_, GlueMgr> {
+    app.world().non_send::<SharedGlueMgr>().get_mut()
 }
 
 fn open(which: &'static str, key: Option<&'static str>) -> Outgoing {
@@ -76,62 +85,69 @@ fn a_realmd_refusal_maps_through_the_references_table() {
 /// A proof's 0x0A leaves the logon's dialog as it stands.
 #[test]
 fn a_proof_0x0a_changes_no_dialog() {
-    let mut m = accepted();
-    m.login("a".into(), "b".into(), &mut Vec::new());
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
     m.on_stage(LoginStage::Connecting, true);
     m.tick();
+    settle(&mut m);
     m.outbox.clear();
     m.on_failed(&failed(Some(LoginRefusal::LogonProof(0x0a)), false));
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "{:?}", m.outbox);
     assert_eq!(m.state, ScreenState::Logon);
 }
 
-/// `CGlueMgr::Login`'s guards: nothing without both agreements or outside state 0, an `OKAY`
-/// dialog for an empty box, else the `CANCEL` dialog with no text and the attempt.
+/// `CGlueMgr::Login` past the agreements (the VM's): nothing outside state 0, an `OKAY` dialog for
+/// an empty box, else the `CANCEL` dialog with no text and the attempt.
 #[test]
 fn login_guards_then_starts_the_logon() {
-    let mut asks = Vec::new();
-    let mut m = GlueMgr::default();
-    m.login("a".into(), "b".into(), &mut asks);
-    assert!(asks.is_empty() && m.outbox.is_empty(), "no TOS, no login");
-
-    let mut m = accepted();
-    m.login(String::new(), "b".into(), &mut asks);
+    let mut m = fresh();
+    m.login(String::new(), "b".into());
+    settle(&mut m);
     assert_eq!(m.outbox, [open("OKAY", Some("LOGIN_ENTER_NAME"))]);
     m.outbox.clear();
-    m.login("a".into(), String::new(), &mut asks);
+    m.login("a".into(), String::new());
+    settle(&mut m);
     assert_eq!(m.outbox, [open("OKAY", Some("LOGIN_ENTER_PASSWORD"))]);
-    assert!(asks.is_empty());
+    assert!(m.login_out.is_empty());
     m.outbox.clear();
 
-    m.login("a".into(), "b".into(), &mut asks);
+    m.login("a".into(), "b".into());
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Logon);
     assert_eq!(m.outbox, [open("CANCEL", None)]);
     assert!(matches!(
-        asks.as_slice(),
+        m.login_out.as_slice(),
         [GlueLogin::Submit { account, password }] if account == "a" && password == "b"
     ));
-    m.login("a".into(), "b".into(), &mut asks);
-    assert_eq!(asks.len(), 1, "a second login waits for state 0");
+    m.login("a".into(), "b".into());
+    settle(&mut m);
+    assert_eq!(m.login_out.len(), 1, "a second login waits for state 0");
 }
 
 /// The logon's dialogs come off its `(state, result)` pair once per change (`0x46b140`); the
 /// authenticated state moves to the world connect on the same tick.
 #[test]
 fn the_logon_shows_each_state_once_then_connects() {
-    let mut m = accepted();
-    m.login("a".into(), "b".into(), &mut Vec::new());
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "the cleared cells show nothing");
     m.on_stage(LoginStage::Connecting, true);
     m.tick();
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(m.outbox, [open("CANCEL", Some("LOGIN_STATE_CONNECTING"))]);
     m.outbox.clear();
     m.on_logon_done();
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [open("CANCEL", Some("LOGIN_STATE_AUTHENTICATED"))]
@@ -162,11 +178,13 @@ fn a_logon_refusal_opens_its_result_and_ends_the_logon() {
         (Some(LoginRefusal::Logon(0x03)), "OKAY", "LOGIN_BANNED"),
         (None, "OKAY", "DISCONNECTED"),
     ] {
-        let mut m = accepted();
-        m.login("a".into(), "b".into(), &mut Vec::new());
+        let mut m = fresh();
+        m.login("a".into(), "b".into());
+        settle(&mut m);
         m.outbox.clear();
         m.on_failed(&failed(refusal, false));
         m.tick();
+        settle(&mut m);
         assert_eq!(m.outbox, [open(which, Some(key))], "{refusal:?}");
         assert_eq!(m.state, ScreenState::Idle);
     }
@@ -193,7 +211,7 @@ fn realm(name: &str) -> RealmInfo {
 #[test]
 fn a_world_refusal_opens_its_status_and_url() {
     let connected = || {
-        let mut m = accepted();
+        let mut m = fresh();
         m.state = ScreenState::Connect;
         m.holder = vec![realm("Fake")];
         m
@@ -205,6 +223,7 @@ fn a_world_refusal_opens_its_status_and_url() {
     let mut m = connected();
     m.on_failed(&failed(Some(LoginRefusal::World(0x1c)), false));
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -222,21 +241,25 @@ fn a_world_refusal_opens_its_status_and_url() {
     assert_eq!(m.state, ScreenState::Idle);
 
     let mut m = connected();
-    m.screen = "charselect".into();
     m.on_failed(&failed(Some(LoginRefusal::World(0x0d)), false));
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
             update("AUTH_FAILED"),
             open("OKAY", Some("AUTH_FAILED")),
-            Outgoing::Screen("login")
+            Outgoing::ScreenFrom {
+                current: "charselect",
+                name: "login"
+            }
         ]
     );
 
     let mut m = connected();
     m.on_failed(&failed(None, false));
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -257,6 +280,7 @@ fn a_world_refusal_opens_its_status_and_url() {
     m.holder.clear();
     m.on_failed(&failed(None, false));
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -278,16 +302,20 @@ fn a_world_refusal_opens_its_status_and_url() {
 /// then `AUTH_OK` and the character screen.
 #[test]
 fn the_world_connect_shows_each_completion() {
-    let mut m = accepted();
-    m.login("a".into(), "b".into(), &mut Vec::new());
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
     m.on_logon_done();
     m.tick();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Connect);
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "the running connect's text is empty");
     m.on_stage(LoginStage::WorldConnected, true);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [Outgoing::Update {
@@ -297,12 +325,15 @@ fn the_world_connect_shows_each_completion() {
     );
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(
         m.outbox.is_empty(),
         "the running authentication's text is empty"
     );
     m.on_world_authenticated(realm("Fake"), 0);
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -321,19 +352,22 @@ fn the_world_connect_shows_each_completion() {
 /// it, and neither is one a request did not ask for.
 #[test]
 fn the_authentication_puts_the_character_screen_up() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.state = ScreenState::Connect;
     let alpha = || vec![crate::char_select::test_character(7, "Alpha")];
     m.on_roster(alpha(), RosterCause::Asked, 0);
     m.on_roster(alpha(), RosterCause::Park, 0);
     m.tick();
+    settle(&mut m);
     assert!(
         m.outbox.is_empty() && m.state == ScreenState::Connect,
         "a roster does not complete the connect: {:?}",
         m.outbox
     );
     m.on_world_authenticated(realm("Fake"), 0);
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -347,7 +381,7 @@ fn the_authentication_puts_the_character_screen_up() {
     );
     assert_eq!(m.state, ScreenState::Idle);
     assert!(m.connected);
-    assert_eq!(m.realm.as_ref().map(|r| r.name.as_str()), Some("Fake"));
+    assert_eq!(m.selected.as_ref().map(|r| r.name.as_str()), Some("Fake"));
     assert!(m.roster.is_empty() && m.park_out.is_empty());
 }
 
@@ -364,10 +398,11 @@ fn the_character_list_query_loads_the_roster_on_its_reply() {
         Outgoing::Close,
         Outgoing::Roster,
     ];
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     for (id, name) in [(7, "Alpha"), (8, "Bravo")] {
         m.get_character_list();
+        settle(&mut m);
         assert_eq!(m.state, ScreenState::CharList);
         assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_LIST_RETRIEVING"))]);
         assert!(matches!(
@@ -377,6 +412,7 @@ fn the_character_list_query_loads_the_roster_on_its_reply() {
         m.park_out.clear();
         m.outbox.clear();
         m.tick();
+        settle(&mut m);
         assert!(m.outbox.is_empty(), "a running query shows no text");
         // Rosters nothing asked for are not this screen's.
         for cause in [RosterCause::Park, RosterCause::Changed] {
@@ -387,6 +423,7 @@ fn the_character_list_query_loads_the_roster_on_its_reply() {
             );
         }
         m.tick();
+        settle(&mut m);
         assert!(m.outbox.is_empty());
         assert!(m.roster.iter().all(|c| c.name != "Stray"));
         m.on_roster(
@@ -395,6 +432,7 @@ fn the_character_list_query_loads_the_roster_on_its_reply() {
             0,
         );
         m.tick();
+        settle(&mut m);
         assert_eq!(m.outbox, done);
         assert_eq!(m.state, ScreenState::Idle);
         assert_eq!((m.roster[0].name.as_str(), m.characters), (name, 1));
@@ -410,16 +448,20 @@ fn the_character_list_query_loads_the_roster_on_its_reply() {
 #[test]
 fn a_late_roster_reply_is_dropped_unless_it_lands_before_the_tick() {
     let late = || vec![crate::char_select::test_character(9, "Late")];
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.get_character_list();
+    settle(&mut m);
     m.park_out.clear();
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::RealmList);
     m.outbox.clear();
     m.on_roster(late(), RosterCause::Asked, 0);
     m.tick();
+    settle(&mut m);
     assert!(
         m.roster.is_empty(),
         "no roster after the tick took the cancel"
@@ -433,27 +475,35 @@ fn a_late_roster_reply_is_dropped_unless_it_lands_before_the_tick() {
     // A reply in the frame of the Cancel, before the tick takes it: `SetStatus` overwrites the
     // cancelled status, so the query succeeds and the roster loads (after the teardown the click
     // made).
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.get_character_list();
-    m.status_dialog_click(&mut Vec::new());
+    settle(&mut m);
+    m.status_dialog_click();
+    settle(&mut m);
     m.on_roster(late(), RosterCause::Asked, 0);
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     assert!(m.outbox.iter().any(|o| matches!(o, Outgoing::Roster)));
     assert_eq!(m.roster[0].name, "Late");
 
     // Deviation: the reference's handler completes whichever operation is current; a reply while
     // a realm change's connect is the operation completes nothing here.
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.holder = vec![realm("Fake")];
     m.get_character_list();
+    settle(&mut m);
     m.connect_to_realm("fake");
+    settle(&mut m);
+    m.reconnect();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Connect);
     m.on_roster(late(), RosterCause::Asked, 0);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.state,
         ScreenState::Connect,
@@ -467,12 +517,15 @@ fn a_late_roster_reply_is_dropped_unless_it_lands_before_the_tick() {
     );
 
     // Another link's reply (the world session before a realm change) is not this link's.
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.on_world_authenticated(realm("Fake"), 5);
+    settle(&mut m);
     m.get_character_list();
+    settle(&mut m);
     m.on_roster(late(), RosterCause::Asked, 4);
     m.tick();
+    settle(&mut m);
     assert!(m.roster.is_empty() && !m.op.done);
     m.on_roster(late(), RosterCause::Asked, 5);
     assert!(m.op.done && m.op.ok);
@@ -483,13 +536,15 @@ fn a_late_roster_reply_is_dropped_unless_it_lands_before_the_tick() {
 /// would otherwise stand on its `CANCEL` dialog for ever. The link is gone.
 #[test]
 fn a_terminal_failure_fails_the_character_list_query_with_its_words() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.get_character_list();
+    settle(&mut m);
     m.park_out.clear();
     m.outbox.clear();
     m.on_failed(&failed(None, true));
     m.tick();
+    settle(&mut m);
     let words = || Text::Raw("test".into());
     assert_eq!(
         m.outbox,
@@ -514,16 +569,20 @@ fn a_terminal_failure_fails_the_character_list_query_with_its_words() {
 /// dialog up; one of another link changes nothing.
 #[test]
 fn a_failed_roster_ask_opens_okay_with_char_list_failed() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.on_world_authenticated(realm("Fake"), 3);
+    settle(&mut m);
     m.get_character_list();
+    settle(&mut m);
     m.outbox.clear();
     m.on_roster_failed(2);
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty() && !m.op.done, "another link's failure");
     m.on_roster_failed(3);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -551,21 +610,23 @@ fn an_authentication_behind_the_abandon_generation_is_dropped() {
     };
     app.world_mut().write_message(auth(0));
     app.update();
-    assert!(!app.world().resource::<GlueMgr>().connected);
+    assert!(!mgr(&app).connected);
     app.world_mut().write_message(auth(1));
     app.update();
-    assert!(app.world().resource::<GlueMgr>().connected);
+    assert!(mgr(&app).connected);
 }
 
 /// With no world link `0x5aabb0` fails the query `RESPONSE_FAILED_TO_CONNECT` at once, and the
 /// arm opens `OKAY` with that text (`0x46c173`) and goes to state 0.
 #[test]
 fn a_character_list_query_with_no_link_fails_okay() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.get_character_list();
+    settle(&mut m);
     assert!(m.park_out.is_empty());
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -584,15 +645,18 @@ fn a_character_list_query_with_no_link_fails_okay() {
 /// (`RequestRealmList(1)`, `0x46c069`-`0x46c073`).
 #[test]
 fn cancelling_the_character_list_raises_the_realm_list() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.get_character_list();
+    settle(&mut m);
     m.park_out.clear();
     m.outbox.clear();
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.outbox, [Outgoing::Teardown]);
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -611,13 +675,26 @@ fn cancelling_the_character_list_raises_the_realm_list() {
     ));
 }
 
-/// Change Realm with the world up drops the session before the connect's query (`0x46b22b`).
+/// Change Realm with the world up drops the session in the call, its flag down at once, and
+/// leaves the screen state and the dialog to the drop's handler (`0x46b22b`-`0x46b241`), whose
+/// connect then asks realmd behind the drop (`0x46c585`-`0x46c5bf`).
 #[test]
 fn change_realm_with_the_world_up_leaves_it_first() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.holder = vec![realm("Fake")];
     m.connected = true;
     m.connect_to_realm("fake");
+    settle(&mut m);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Realm(RealmRequest::Leave)]
+    ));
+    assert_eq!(m.state, ScreenState::Idle, "the call changes no state");
+    assert!(m.outbox.is_empty(), "and opens no dialog");
+    assert!(!m.connected);
+    assert_eq!(m.selected.as_ref().map(|r| r.name.as_str()), Some("Fake"));
+    m.reconnect();
+    settle(&mut m);
     assert!(matches!(
         m.park_out.as_slice(),
         [
@@ -626,12 +703,16 @@ fn change_realm_with_the_world_up_leaves_it_first() {
         ]
     ));
     assert_eq!(m.state, ScreenState::Connect);
-    assert!(!m.connected);
-    assert_eq!(m.selected.as_ref().map(|r| r.name.as_str()), Some("Fake"));
+    assert_eq!(m.outbox, [open("CANCEL", Some("GAME_SERVER_LOGIN"))]);
+    m.outbox.clear();
+    m.reconnect();
+    settle(&mut m);
+    assert!(m.outbox.is_empty(), "the handler's reconnect runs once");
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.holder = vec![realm("Fake")];
     m.connect_to_realm("Fake");
+    settle(&mut m);
     assert!(matches!(
         m.park_out.as_slice(),
         [ParkRequest::Realm(RealmRequest::Refresh)]
@@ -641,11 +722,13 @@ fn change_realm_with_the_world_up_leaves_it_first() {
 /// The queue re-texts the dialog every frame while the world connect waits.
 #[test]
 fn the_queue_retexts_every_frame() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.state = ScreenState::Connect;
     m.on_queued(Some(40), Some("Realm".into()), 1000);
     m.tick();
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(m.outbox, [Outgoing::Queue, Outgoing::Queue]);
 }
 
@@ -654,24 +737,26 @@ fn the_queue_retexts_every_frame() {
 /// raises the realm list; a query is cancelled to state 0; idle does nothing.
 #[test]
 fn status_dialog_click_cancels_by_state() {
-    let mut asks = Vec::new();
-    let mut m = accepted();
-    m.status_dialog_click(&mut asks);
-    assert!(asks.is_empty());
+    let mut m = fresh();
+    m.status_dialog_click();
+    settle(&mut m);
+    assert!(m.login_out.is_empty());
     m.state = ScreenState::Logon;
-    m.status_dialog_click(&mut asks);
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
-    assert!(matches!(asks.as_slice(), [GlueLogin::Abandon]));
+    assert!(matches!(m.login_out.as_slice(), [GlueLogin::Abandon]));
 
-    let mut asks = Vec::new();
-    let mut m = accepted();
+    let mut m = fresh();
     m.holder = vec![realm("Fake")];
     m.state = ScreenState::Connect;
     m.op = Operation::begin(OpKind::Auth, STATUS_AUTHENTICATING);
-    m.status_dialog_click(&mut asks);
-    assert!(asks.is_empty(), "the logon stays up");
+    m.status_dialog_click();
+    settle(&mut m);
+    assert!(m.login_out.is_empty(), "the logon stays up");
     assert_eq!(m.state, ScreenState::Connect, "the next tick takes it");
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -689,12 +774,15 @@ fn status_dialog_click_cancels_by_state() {
     assert!(matches!(m.login_out.as_slice(), [GlueLogin::CancelWorld]));
     assert_eq!(m.state, ScreenState::Idle);
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.request_realm_list(false);
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::RealmList);
-    m.status_dialog_click(&mut asks);
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "a cancelled query reports nothing");
 }
 
@@ -704,9 +792,10 @@ fn status_dialog_click_cancels_by_state() {
 /// (`0x46c173`).
 #[test]
 fn a_delete_runs_state_6_to_the_list_or_to_okay() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.delete_character(0x12);
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Delete);
     assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_DELETE_IN_PROGRESS"))]);
     assert!(matches!(
@@ -716,9 +805,11 @@ fn a_delete_runs_state_6_to_the_list_or_to_okay() {
     m.park_out.clear();
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "no text while the reply is out");
     m.on_char_deleted(0x39);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -737,12 +828,14 @@ fn a_delete_runs_state_6_to_the_list_or_to_okay() {
     ));
 
     // vmangos refuses a guild master's delete with `CHAR_DELETE_FAILED` (0x3a).
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.delete_character(0x12);
+    settle(&mut m);
     m.outbox.clear();
     m.on_char_deleted(0x3a);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -761,25 +854,30 @@ fn a_delete_runs_state_6_to_the_list_or_to_okay() {
 /// lands after shows nothing.
 #[test]
 fn a_delete_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.delete_character(0x12);
+    settle(&mut m);
     assert!(m.park_out.is_empty());
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox.last(),
         Some(&open("OKAY", Some("RESPONSE_FAILED_TO_CONNECT")))
     );
     assert_eq!(m.state, ScreenState::Idle);
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.delete_character(0x12);
+    settle(&mut m);
     m.outbox.clear();
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     m.on_char_deleted(0x39);
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty());
 }
 
@@ -805,9 +903,10 @@ fn create_request(name: &str) -> benilla_ui::script::GlueCreateRequest {
 /// `OKAY` with its status's text and goes to state 0 (`0x46c118` → `0x46c177`).
 #[test]
 fn a_create_runs_state_5_to_the_select_screen_or_to_okay() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.create_character(create_request("Newbie"));
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Create);
     assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_CREATE_IN_PROGRESS"))]);
     assert!(matches!(
@@ -820,13 +919,16 @@ fn a_create_runs_state_5_to_the_select_screen_or_to_okay() {
     m.park_out.clear();
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "no text while the reply is out");
     // Another operation's reply is not the create's.
     m.on_char_deleted(0x39);
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty());
     m.on_char_created(0x2e);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -849,12 +951,14 @@ fn a_create_runs_state_5_to_the_select_screen_or_to_okay() {
         (0x30, "CHAR_CREATE_FAILED"),
         (0x4e, "CHAR_NAME_THREE_CONSECUTIVE"),
     ] {
-        let mut m = accepted();
+        let mut m = fresh();
         m.connected = true;
         m.create_character(create_request("Newbie"));
+        settle(&mut m);
         m.outbox.clear();
         m.on_char_created(code);
         m.tick();
+        settle(&mut m);
         assert_eq!(
             m.outbox,
             [
@@ -875,25 +979,30 @@ fn a_create_runs_state_5_to_the_select_screen_or_to_okay() {
 /// lands after shows nothing.
 #[test]
 fn a_create_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.create_character(create_request("Newbie"));
+    settle(&mut m);
     assert!(m.park_out.is_empty());
     m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox.last(),
         Some(&open("OKAY", Some("RESPONSE_FAILED_TO_CONNECT")))
     );
     assert_eq!(m.state, ScreenState::Idle);
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.create_character(create_request("Newbie"));
+    settle(&mut m);
     m.outbox.clear();
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     m.on_char_created(0x2e);
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty());
 }
 
@@ -901,9 +1010,10 @@ fn a_create_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
 /// frame arm; the button goes to state 0 and sends nothing (`0x46b79d`).
 #[test]
 fn a_rename_takes_state_7_which_only_its_button_leaves() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.rename_character(0x12, "Newname".into());
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Rename);
     assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_RENAME_IN_PROGRESS"))]);
     assert!(matches!(
@@ -913,14 +1023,17 @@ fn a_rename_takes_state_7_which_only_its_button_leaves() {
     m.outbox.clear();
     m.park_out.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty() && m.park_out.is_empty());
     assert_eq!(m.state, ScreenState::Rename);
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     assert!(m.outbox.is_empty() && m.park_out.is_empty());
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.rename_character(0x12, "Newname".into());
+    settle(&mut m);
     assert!(m.park_out.is_empty(), "no link, nothing sent");
 }
 
@@ -928,7 +1041,7 @@ fn a_rename_takes_state_7_which_only_its_button_leaves() {
 /// `CHAR_CREATE_NAME_IN_USE`, anything else `CHAR_RENAME_FAILED`; the state stays.
 #[test]
 fn the_rename_reply_closes_the_dialog_then_renames_or_asks_again() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.state = ScreenState::Rename;
     for (result, renamed, then) in [
         (
@@ -963,19 +1076,19 @@ fn the_rename_reply_closes_the_dialog_then_renames_or_asks_again() {
 /// (`0x46c671`-`0x46c68f`), and a running one still fires the event.
 #[test]
 fn a_lost_session_fires_disconnected() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.on_disconnected(SessionEnd::Lost, false);
     assert!(m.outbox.is_empty());
     m.on_disconnected(SessionEnd::Lost, true);
     assert_eq!(m.outbox, [Outgoing::Disconnected]);
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.state = ScreenState::Connect;
     m.op = Operation::begin(OpKind::Connect, STATUS_CONNECTING);
     m.on_disconnected(SessionEnd::Lost, true);
     assert_eq!(m.outbox, [Outgoing::Disconnected]);
 
-    let mut m = accepted();
+    let mut m = fresh();
     m.state = ScreenState::Connect;
     m.op.complete(false, STATUS_FAILED_TO_CONNECT);
     m.on_disconnected(SessionEnd::Lost, true);
@@ -988,12 +1101,13 @@ fn a_lost_session_fires_disconnected() {
 /// sends the roster ask on it (`0x46b880` → `0x5aabb0`), with no dialog of a disconnect.
 #[test]
 fn a_logout_keeps_the_link_for_the_screens_roster_ask() {
-    let mut m = accepted();
+    let mut m = fresh();
     m.connected = true;
     m.on_disconnected(SessionEnd::LoggedOut, false);
     assert!(m.connected, "the link is kept");
     assert!(m.outbox.is_empty());
     m.get_character_list();
+    settle(&mut m);
     let (_, park) = m.take_asks();
     assert!(
         matches!(park[..], [ParkRequest::Char(CharRequest::Enumerate)]),
@@ -1004,7 +1118,7 @@ fn a_logout_keeps_the_link_for_the_screens_roster_ask() {
 
 /// The manager on the character screen: a realm selected this process and the world link up.
 fn on_select() -> GlueMgr {
-    let mut m = accepted();
+    let mut m = fresh();
     m.selected = Some(realm("Alpha"));
     m.connected = true;
     m
@@ -1030,6 +1144,7 @@ fn enter_world_without_a_realm_or_a_link_does_nothing() {
             }
             m.connected = link;
             m.enter_world(1, 0x12, flags);
+            settle(&mut m);
             assert!(
                 nothing_done(&m),
                 "realm {realm}, link {link}, flags {flags:#x}"
@@ -1046,6 +1161,7 @@ fn enter_world_on_a_character_locked_for_transfer_opens_okay() {
     for flags in [0x4, 0x4004] {
         let mut m = on_select();
         m.enter_world(1, 0x12, flags);
+        settle(&mut m);
         assert_eq!(
             m.outbox,
             [open("OKAY", Some("CHAR_LOGIN_LOCKED_FOR_TRANSFER"))],
@@ -1062,6 +1178,7 @@ fn enter_world_on_a_character_locked_for_transfer_opens_okay() {
 fn enter_world_on_a_character_flagged_for_rename_asks_for_a_name() {
     let mut m = on_select();
     m.enter_world(1, 0x12, 0x4000 | 0x2000);
+    settle(&mut m);
     assert_eq!(m.outbox, [Outgoing::ForceRename("CHAR_RENAME_DESCRIPTION")]);
     assert_eq!(m.state, ScreenState::Idle);
     assert!(m.park_out.is_empty() && m.last_character.is_none());
@@ -1077,12 +1194,22 @@ fn enter_world_on_a_character_flagged_for_rename_asks_for_a_name() {
 fn enter_world_writes_the_index_and_picks_in_state_8() {
     let mut m = on_select();
     m.get_character_list();
+    settle(&mut m);
     m.outbox.clear();
     m.state = ScreenState::Idle;
     m.enter_world(2, 0x13, 0x2000);
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::EnterWorld);
     assert_eq!(m.last_character, Some(2));
-    assert!(m.outbox.is_empty(), "no dialog of its own");
+    assert_eq!(
+        m.outbox,
+        [Outgoing::Cvar {
+            name: "lastCharacterIndex",
+            value: "2".into()
+        }],
+        "the CVar in the call (`0x46b5fa`), and no dialog of its own"
+    );
+    m.outbox.clear();
     assert!(matches!(
         m.park_out.as_slice(),
         [
@@ -1092,6 +1219,7 @@ fn enter_world_writes_the_index_and_picks_in_state_8() {
     ));
     // A second call in the same frame: the last record wins both.
     m.enter_world(1, 0x12, 0);
+    settle(&mut m);
     assert_eq!(m.last_character, Some(1));
     assert!(matches!(
         m.park_out.as_slice(),
@@ -1104,13 +1232,57 @@ fn enter_world_writes_the_index_and_picks_in_state_8() {
     m.park_out.clear();
     m.last_character = None;
     m.enter_world(0, 0x11, 0);
+    settle(&mut m);
     assert_eq!(m.last_character, Some(0));
     assert!(m.park_out.is_empty(), "one login per entry");
+    m.outbox.clear();
     m.tick();
+    settle(&mut m);
     assert!(m.outbox.is_empty(), "no frame arm for state 8 here");
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
     assert!(m.park_out.is_empty());
+}
+
+/// `GetStatus` (`0x5aa960`) formats a status past the 83-row table (`0x5aa99d`) as `"(%i)"`
+/// (`0x85d5b0`), where the last row, 0x52, still reads its key.
+#[test]
+fn a_world_status_past_the_table_reads_its_number() {
+    let refused = |code| {
+        let mut m = fresh();
+        m.state = ScreenState::Connect;
+        m.holder = vec![realm("Fake")];
+        m.on_failed(&failed(Some(LoginRefusal::World(code)), false));
+        m.tick();
+        settle(&mut m);
+        m.outbox
+    };
+    for (code, text) in [(0xc8u8, "(200)"), (0x53, "(83)"), (0xff, "(255)")] {
+        assert_eq!(
+            refused(code),
+            [
+                Outgoing::Update {
+                    text: Text::Raw(text.into()),
+                    button: None,
+                },
+                Outgoing::Open {
+                    which: "OKAY",
+                    text: Some(Text::Raw(text.into())),
+                    data: None,
+                },
+                Outgoing::Teardown,
+                Outgoing::Close,
+                Outgoing::Rebuild,
+            ],
+            "status {code:#x}"
+        );
+    }
+    assert_eq!(
+        status_text(0x52).0,
+        Text::Key(GLUE_STATUS_KEYS[0x52]),
+        "the last row is still a key"
+    );
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`'s byte through `0x5aad70`'s table (`0x5aae08`): 1 to 6 onto
@@ -1145,19 +1317,25 @@ fn a_refused_login_maps_its_byte_through_the_references_table() {
 fn a_refused_login_takes_state_9_until_its_dialogs_button() {
     let mut m = on_select();
     m.enter_world(1, 0x12, 0);
+    settle(&mut m);
     m.park_out.clear();
+    m.outbox.clear();
     m.on_char_login_failed(1);
     assert_eq!(m.state, ScreenState::EnterWorld, "the rebuild sets it");
     m.state = ScreenState::Idle;
     m.take_refusal();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::LoginRefused);
     m.get_character_list();
+    settle(&mut m);
     assert!(
         m.outbox.is_empty() && m.park_out.is_empty(),
         "no ask in state 9"
     );
     m.tick();
+    settle(&mut m);
     m.tick();
+    settle(&mut m);
     assert_eq!(
         m.outbox,
         [
@@ -1166,7 +1344,8 @@ fn a_refused_login_takes_state_9_until_its_dialogs_button() {
         ]
     );
     m.outbox.clear();
-    m.status_dialog_click(&mut Vec::new());
+    m.status_dialog_click();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::CharList);
     assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_LIST_RETRIEVING"))]);
     assert!(matches!(
@@ -1174,6 +1353,7 @@ fn a_refused_login_takes_state_9_until_its_dialogs_button() {
         [ParkRequest::Char(CharRequest::Enumerate)]
     ));
     m.take_refusal();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::CharList, "a refusal is taken once");
 
     // A session lost before the rebuild leaves no refusal for the next glue.
@@ -1181,7 +1361,581 @@ fn a_refused_login_takes_state_9_until_its_dialogs_button() {
     m.on_char_login_failed(6);
     m.on_disconnected(SessionEnd::Lost, true);
     m.take_refusal();
+    settle(&mut m);
     assert_eq!(m.state, ScreenState::Idle);
+}
+
+// ── The verbs run inside their call ─────────────────────────────────────────────────────────────
+
+/// A bare glue VM seated with `shared` as its host, with the strings the manager's dialogs name
+/// and a listener that logs each event the verbs raise as `"EVENT arg1 arg2"` into `HEARD`.
+fn seated(shared: &SharedGlueMgr) -> UiScript {
+    let mut s = UiScript::new_glue().unwrap();
+    s.set_glue_host(shared.host());
+    s.run(
+        "LOGIN_ENTER_NAME = 'Enter your account name' \
+         CHAR_LIST_RETRIEVING = 'Retrieving character list' \
+         CHAR_DELETE_IN_PROGRESS = 'Deleting character' \
+         CHAR_RENAME_IN_PROGRESS = 'Renaming character' \
+         REALM_LIST_IN_PROGRESS = 'Retrieving realm list' \
+         GAME_SERVER_LOGIN = 'Connecting' \
+         CHAR_LOGIN_LOCKED_FOR_TRANSFER = 'Locked' \
+         HEARD = {} local f = CreateFrame('Frame') \
+         for _, e in ipairs({'OPEN_STATUS_DIALOG', 'UPDATE_SELECTED_CHARACTER', \
+             'CHARACTER_LIST_UPDATE', 'FORCE_RENAME_CHARACTER'}) do f:RegisterEvent(e) end \
+         f:SetScript('OnEvent', function() \
+           table.insert(HEARD, event .. ' ' .. tostring(arg1) .. ' ' .. tostring(arg2)) end)",
+    )
+    .unwrap();
+    s
+}
+
+/// What `chunk` raised, read by the chunk's own last line: inside the verb's call, before any
+/// frame of the manager.
+fn heard_in(s: &UiScript, chunk: &str) -> Vec<String> {
+    s.eval(&format!("HEARD = {{}} {chunk} return HEARD"))
+        .unwrap()
+}
+
+/// One roster record with `guid` and `flags`.
+fn record(guid: u64, flags: u32) -> GlueCharacter {
+    GlueCharacter {
+        guid,
+        name: "Alpha".into(),
+        race: String::new(),
+        class: String::new(),
+        level: 1,
+        zone: None,
+        file_string: String::new(),
+        gender: 0,
+        flags,
+        model: false,
+    }
+}
+
+/// `DefaultServerLogin` (`0x46d160` → `0x46afb0`): an empty box's `OKAY`, or state 1 and the
+/// `CANCEL` dialog with no text (`0x46b028`-`0x46b04d`), before the call returns; the logon is the
+/// frame's to send.
+#[test]
+fn default_server_login_opens_its_dialog_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    s.set_glue_notice(GlueNotice::Tos, NoticeState::from_cvar("1"));
+    s.set_glue_notice(GlueNotice::Eula, NoticeState::from_cvar("1"));
+    assert_eq!(
+        heard_in(&s, "DefaultServerLogin('', 'b')"),
+        ["OPEN_STATUS_DIALOG OKAY Enter your account name"]
+    );
+    assert_eq!(
+        heard_in(&s, "DefaultServerLogin('a', 'b')"),
+        ["OPEN_STATUS_DIALOG CANCEL nil"]
+    );
+    let m = shared.get();
+    assert_eq!(m.state, ScreenState::Logon);
+    assert!(matches!(m.login_out.as_slice(), [GlueLogin::Submit { .. }]));
+}
+
+/// `StatusDialogClick` (`0x46d270` → `0x46b720`): in state 9 the list is asked again
+/// (`0x46b767` → `0x46b880`), state 3 and its dialog in the call; in state 2 the operation is
+/// cancelled and the roster torn down (`0x46b754` → `0x472580`), its two events in the call.
+#[test]
+fn status_dialog_click_runs_its_state_arm_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let s = seated(&shared);
+    {
+        let mut m = shared.get_mut();
+        m.connected = true;
+        m.state = ScreenState::LoginRefused;
+    }
+    assert_eq!(
+        heard_in(&s, "StatusDialogClick()"),
+        ["OPEN_STATUS_DIALOG CANCEL Retrieving character list"]
+    );
+    {
+        let mut m = shared.get_mut();
+        assert_eq!(m.state, ScreenState::CharList);
+        assert!(matches!(
+            m.park_out.as_slice(),
+            [ParkRequest::Char(CharRequest::Enumerate)]
+        ));
+        m.park_out.clear();
+        m.state = ScreenState::Connect;
+        m.op = Operation::begin(OpKind::Auth, STATUS_AUTHENTICATING);
+    }
+    assert_eq!(
+        heard_in(&s, "StatusDialogClick()"),
+        [
+            "UPDATE_SELECTED_CHARACTER 1 nil",
+            "CHARACTER_LIST_UPDATE nil nil"
+        ]
+    );
+    assert_eq!(shared.get().op.status, STATUS_CANCELLED);
+}
+
+/// `GetCharacterListUpdate` (`0x473270` → `0x4723d0` → `0x46b880`): state 3 and the
+/// `CHAR_LIST_RETRIEVING` dialog in the call; in state 9 nothing (`0x46b887`).
+#[test]
+fn get_character_list_update_opens_its_dialog_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let s = seated(&shared);
+    shared.get_mut().connected = true;
+    assert_eq!(
+        heard_in(&s, "GetCharacterListUpdate()"),
+        ["OPEN_STATUS_DIALOG CANCEL Retrieving character list"]
+    );
+    assert_eq!(shared.get().state, ScreenState::CharList);
+    shared.get_mut().state = ScreenState::LoginRefused;
+    assert!(heard_in(&s, "GetCharacterListUpdate()").is_empty());
+    assert_eq!(shared.get().state, ScreenState::LoginRefused);
+}
+
+/// `DeleteCharacter` (`0x4734c0` → `0x46b2e0`): state 6 and the `CHAR_DELETE_IN_PROGRESS`
+/// dialog in the call, the `CMSG_CHAR_DELETE` the frame's to send.
+#[test]
+fn delete_character_opens_its_dialog_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    shared.get_mut().connected = true;
+    s.load_glue_roster(vec![record(2, 0)]);
+    assert_eq!(
+        heard_in(&s, "DeleteCharacter(1)"),
+        ["OPEN_STATUS_DIALOG CANCEL Deleting character"]
+    );
+    let m = shared.get();
+    assert_eq!(m.state, ScreenState::Delete);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Delete(2))]
+    ));
+}
+
+/// `RenameCharacter` (`0x473520` → `0x46b340`): a passing name's state 7 and
+/// `CHAR_RENAME_IN_PROGRESS` dialog in the call (`0x46b39b`-`0x46b3c0`), before the verb answers 1.
+#[test]
+fn rename_character_opens_its_dialog_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    shared.get_mut().connected = true;
+    s.load_glue_roster(vec![record(2, benilla_protocol::CHARACTER_FLAG_RENAME)]);
+    assert_eq!(
+        heard_in(
+            &s,
+            "local answer = RenameCharacter(1, 'Newname') \
+             table.insert(HEARD, 'answer ' .. tostring(answer))"
+        ),
+        ["OPEN_STATUS_DIALOG CANCEL Renaming character", "answer 1"]
+    );
+    assert_eq!(shared.get().state, ScreenState::Rename);
+}
+
+/// `RequestRealmList(1)` (`0x46ecf0` → `0x46b8d0`): state 4 and its dialog in the call;
+/// `CancelRealmListQuery` (`0x46b7e0`) takes state 4 to 0 in its.
+#[test]
+fn the_realm_list_query_and_its_cancel_run_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let s = seated(&shared);
+    assert_eq!(
+        heard_in(&s, "RequestRealmList(1)"),
+        ["OPEN_STATUS_DIALOG CANCEL Retrieving realm list"]
+    );
+    assert_eq!(shared.get().state, ScreenState::RealmList);
+    assert!(
+        heard_in(&s, "RequestRealmList()").is_empty(),
+        "no flag, no dialog"
+    );
+    s.run("CancelRealmListQuery()").unwrap();
+    assert_eq!(shared.get().state, ScreenState::Idle);
+}
+
+/// `ChangeRealm` (`0x46f0e0` → `0x46b210`): with no world link, state 2 and `GAME_SERVER_LOGIN`
+/// in the call (`0x46b250`-`0x46b26c`); with one, the call drops it, so `IsConnectedToServer`
+/// straight after reads nil, and changes no state and opens no dialog (`0x46b22b`-`0x46b241`).
+#[test]
+fn change_realm_runs_its_half_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    s.register_cvars([(crate::realm_select::CVAR_REALM_NAME, "")]);
+    let (categories, types) = crate::realm_select::Realms::us_client().glue_setup();
+    s.set_glue_realm_setup(categories, types);
+    s.set_glue_realms(vec![glue_realm(&realm("Fake"))]);
+    shared.get_mut().holder = vec![realm("Fake")];
+    s.rebuild_glue_realms();
+    assert_eq!(
+        heard_in(&s, "ChangeRealm(1, 1)"),
+        ["OPEN_STATUS_DIALOG CANCEL Connecting"]
+    );
+    assert_eq!(shared.get().state, ScreenState::Connect);
+
+    {
+        let mut m = shared.get_mut();
+        m.state = ScreenState::Idle;
+        m.connected = true;
+        m.park_out.clear();
+    }
+    assert_eq!(
+        heard_in(
+            &s,
+            "ChangeRealm(1, 1) table.insert(HEARD, 'link ' .. tostring(IsConnectedToServer()))"
+        ),
+        ["link nil"]
+    );
+    let m = shared.get();
+    assert_eq!(m.state, ScreenState::Idle);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Realm(RealmRequest::Leave)]
+    ));
+}
+
+/// `EnterWorld` (`0x46d3c0` → `0x46b500`): a locked record's `OKAY` (`0x46b5a5`) and a rename's
+/// `FORCE_RENAME_CHARACTER` (`0x46b5c2`) fire in the call; a clean one takes state 8 in it.
+#[test]
+fn enter_world_runs_its_arms_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    {
+        let mut m = shared.get_mut();
+        m.connected = true;
+        m.selected = Some(realm("Fake"));
+    }
+    for (flags, want) in [
+        (0x4, "OPEN_STATUS_DIALOG OKAY Locked"),
+        (
+            benilla_protocol::CHARACTER_FLAG_RENAME,
+            "FORCE_RENAME_CHARACTER CHAR_RENAME_DESCRIPTION nil",
+        ),
+    ] {
+        s.load_glue_roster(vec![record(2, flags)]);
+        assert_eq!(heard_in(&s, "EnterWorld()"), [want]);
+        assert_eq!(shared.get().state, ScreenState::Idle);
+    }
+    // `lastCharacterIndex` is written in the call (`0x46b5fa`): the selection's 0-based index.
+    s.register_cvars([(crate::char_select::CVAR_LAST_CHARACTER, "0")]);
+    s.load_glue_roster(vec![record(2, 0), record(3, 0)]);
+    s.run("SelectCharacter(2)").unwrap();
+    assert!(heard_in(&s, "EnterWorld()").is_empty());
+    assert_eq!(
+        s.cvar(crate::char_select::CVAR_LAST_CHARACTER).as_deref(),
+        Some("1"),
+        "no frame has run"
+    );
+    assert_eq!(shared.get().state, ScreenState::EnterWorld);
+}
+
+/// `DisconnectFromServer` (`0x46d340`): the link's flag is down in the call (`0x5ab1a8`), so
+/// `IsConnectedToServer` straight after reads nil; `QuitGame` and `RealmListDialogCancelled` leave
+/// their asks in theirs.
+#[test]
+fn the_link_verbs_run_in_the_call() {
+    let shared = SharedGlueMgr::default();
+    let s = seated(&shared);
+    shared.get_mut().connected = true;
+    assert_eq!(
+        s.eval::<(Option<i64>, Option<i64>)>(
+            "local before = IsConnectedToServer() DisconnectFromServer() \
+             return before, IsConnectedToServer()"
+        )
+        .unwrap(),
+        (Some(1), None)
+    );
+    s.run("QuitGame() SetCurrentScreen('login') RealmListDialogCancelled()")
+        .unwrap();
+    assert!(matches!(
+        shared.get().login_out.as_slice(),
+        [GlueLogin::Disconnect, GlueLogin::Quit, GlueLogin::Abandon]
+    ));
+}
+
+/// A handler inside a verb's fan-out that calls another verb runs that verb's call there, and the
+/// first verb's operation begins only after its dialog's handlers have run (`0x46b8b7` after the
+/// signal at `0x46b8af`): the `CANCEL` dialog's button pressed from its own `OPEN_STATUS_DIALOG`
+/// handler cancels the operation before it and tears the roster down (`0x46b754`), and the list
+/// query then begins and is asked, not cancelled.
+#[test]
+fn a_verb_called_inside_another_verbs_fan_out_acts_before_its_operation_begins() {
+    let shared = SharedGlueMgr::default();
+    let s = seated(&shared);
+    {
+        let mut m = shared.get_mut();
+        m.connected = true;
+        m.op = Operation::begin(OpKind::Delete, STATUS_CHAR_DELETE_IN_PROGRESS);
+    }
+    s.run(
+        "local pressed = false local f = CreateFrame('Frame') \
+         f:RegisterEvent('OPEN_STATUS_DIALOG') \
+         f:SetScript('OnEvent', function() \
+           if arg1 == 'CANCEL' and not pressed then pressed = true StatusDialogClick() end end)",
+    )
+    .unwrap();
+    // The nested events run inside `OPEN_STATUS_DIALOG`'s dispatch, whose `arg1` and `arg2` stand
+    // where a nested event has fewer: `0x704f10` sets only the arguments it is given
+    // (`0x705045`-`0x70508d`) and restores them after the call (`0x7051fc`-).
+    assert_eq!(
+        heard_in(&s, "GetCharacterListUpdate()"),
+        [
+            "OPEN_STATUS_DIALOG CANCEL Retrieving character list",
+            "UPDATE_SELECTED_CHARACTER 1 Retrieving character list",
+            "CHARACTER_LIST_UPDATE CANCEL Retrieving character list"
+        ]
+    );
+    let m = shared.get();
+    assert_eq!(m.state, ScreenState::CharList);
+    assert_eq!(m.op.kind, OpKind::CharList);
+    assert!(!m.op.done, "the query began after the press: {:?}", m.op);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Enumerate)]
+    ));
+    assert!(m.resumes.is_empty(), "every step ran once");
+}
+
+/// `GetServerName` (`0x46d280`) through the seated manager: the `realmName` CVar's text as it
+/// stands, and the PvP and RP of the realm selected this process, link or no link
+/// (`0x5ab9a0`, the `Cfg_Configs` walk at `0x46d2a5`-`0x46d30d`).
+#[test]
+fn get_server_name_reads_the_cvar_and_the_selected_realm_with_no_link() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    s.register_cvars([(crate::realm_select::CVAR_REALM_NAME, "aLPHA")]);
+    let (categories, types) = crate::realm_select::Realms::us_client().glue_setup();
+    s.set_glue_realm_setup(categories, types);
+    let read = |s: &UiScript| {
+        s.eval::<(String, Option<i64>, Option<i64>)>("return GetServerName()")
+            .unwrap()
+    };
+    assert_eq!(
+        read(&s),
+        ("aLPHA".to_string(), None, None),
+        "nothing selected"
+    );
+    let mut pvp = realm("Alpha");
+    pvp.realm_type = 1;
+    shared.get_mut().selected = Some(pvp);
+    assert!(!shared.get().connected);
+    assert_eq!(read(&s), ("aLPHA".to_string(), Some(1), None));
+    // With the link up the name is still the CVar's, in its own case, not the realm record's.
+    shared.get_mut().connected = true;
+    assert_eq!(read(&s), ("aLPHA".to_string(), Some(1), None));
+    s.set_cvar_host(crate::realm_select::CVAR_REALM_NAME, "Bravo");
+    assert_eq!(read(&s).0, "Bravo", "read as it stands, no frame between");
+}
+
+/// `DisconnectFromServer` with no world link only cancels the logon (`0x46d34d` past the drop):
+/// a connect in flight keeps its state and its operation.
+#[test]
+fn disconnect_with_no_link_leaves_the_connect_in_flight() {
+    let mut m = fresh();
+    m.state = ScreenState::Connect;
+    m.op = Operation::begin(OpKind::Connect, STATUS_CONNECTING);
+    m.disconnect_from_server();
+    assert_eq!(m.state, ScreenState::Connect);
+    assert_eq!(m.op.kind, OpKind::Connect);
+    assert!(!m.op.done);
+    assert!(matches!(m.login_out.as_slice(), [GlueLogin::Disconnect]));
+}
+
+/// The frame's arm through the seated VM: its signals fired and its steps run in order.
+fn frame(shared: &SharedGlueMgr, s: &mut UiScript) {
+    shared.get_mut().tick();
+    let names = RosterNames {
+        areas: None,
+        create: None,
+        classes: None,
+        creatures: None,
+    };
+    super::pump(shared, Some(s), None, 0, &names, None);
+}
+
+/// State 2's failure arm with no realm held: the failure's `OKAY` is pressed by its own `OnShow`
+/// while the arm is still in state 2 (`0x46b754`: the operation cancelled, the roster torn
+/// down); only then come state 0 (`0x46bef5`) and `RequestRealmList(1)` (`0x46bf86` →
+/// `0x46c06e`), whose query is not cancelled, so its reply closes its dialog and raises the list.
+#[test]
+fn a_world_failure_with_no_realm_held_asks_for_the_list_and_its_reply_closes_it() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    // The stock `OKAY` type's `OnShow` press (`GlueDialog.lua:72`), and the dialog's close.
+    s.run(
+        "REALM_LIST_FAILED = 'Realm list failed' local f = CreateFrame('Frame') \
+         f:RegisterEvent('OPEN_STATUS_DIALOG') f:RegisterEvent('CLOSE_STATUS_DIALOG') \
+         f:SetScript('OnEvent', function() \
+           if event == 'CLOSE_STATUS_DIALOG' then table.insert(HEARD, 'CLOSE') \
+           elseif arg1 == 'OKAY' then StatusDialogClick() end end)",
+    )
+    .unwrap();
+    {
+        let mut m = shared.get_mut();
+        m.state = ScreenState::Connect;
+        m.op = Operation::begin(OpKind::Connect, STATUS_CONNECTING);
+        m.op.complete(false, STATUS_REALM_LIST_FAILED);
+    }
+    s.run("HEARD = {}").unwrap();
+    frame(&shared, &mut s);
+    let events = |s: &UiScript| -> Vec<String> {
+        s.eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
+            .unwrap()
+            .iter()
+            .map(|h| h.split(' ').take(2).collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    assert_eq!(
+        events(&s),
+        [
+            "OPEN_STATUS_DIALOG OKAY",
+            // The press in state 2, inside the dialog's dispatch: the teardown (`0x472580`).
+            "UPDATE_SELECTED_CHARACTER 1",
+            "CHARACTER_LIST_UPDATE OKAY",
+            // The arm's own teardown (`0x46bf1f`), then `RequestRealmList(1)`. Inside the
+            // dispatch the outer `arg1` stood for the argument-less event; here it is nil again
+            // (`0x704f10` sets only the arguments it has and restores them after).
+            "UPDATE_SELECTED_CHARACTER 1",
+            "CHARACTER_LIST_UPDATE nil",
+            "OPEN_STATUS_DIALOG CANCEL",
+        ]
+    );
+    {
+        let m = shared.get();
+        assert_eq!(m.state, ScreenState::RealmList, "the query stands");
+        assert_eq!(m.op.kind, OpKind::GetRealms);
+        assert!(!m.op.done, "and was not cancelled: {:?}", m.op);
+        assert!(m.outbox.is_empty() && m.resumes.is_empty());
+    }
+    shared
+        .get_mut()
+        .on_realm_list(vec![realm("Fake")], false, "Fake");
+    frame(&shared, &mut s);
+    assert!(
+        events(&s).contains(&"CLOSE".to_string()),
+        "the query's success closes its dialog (`0x46c0d7`)"
+    );
+    assert_eq!(shared.get().state, ScreenState::Idle);
+}
+
+/// The logon arm's failure: its `OKAY` is pressed by its own `OnShow` while the arm is still in
+/// state 1, which cancels the logon (`0x46b73d`); then the arm cancels it and goes to state 0
+/// (`0x46bbbf`-`0x46bbcb`). A failed logon has no link left (`0x5b3320` tests `[login+5]`), so
+/// both close only what may stand and leave the credentials and the resubmit alone.
+#[test]
+fn a_failed_logons_dialog_is_pressed_in_state_1() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    s.run(
+        "local f = CreateFrame('Frame') f:RegisterEvent('OPEN_STATUS_DIALOG') \
+         f:SetScript('OnEvent', function() if arg1 == 'OKAY' then StatusDialogClick() end end)",
+    )
+    .unwrap();
+    {
+        let mut m = shared.get_mut();
+        m.login("a".into(), "b".into());
+        m.settle();
+        m.outbox.clear();
+        m.login_out.clear();
+        m.on_failed(&failed(Some(LoginRefusal::Logon(0x04)), false));
+    }
+    frame(&shared, &mut s);
+    let m = shared.get();
+    assert_eq!(m.state, ScreenState::Idle);
+    assert!(
+        matches!(
+            m.login_out.as_slice(),
+            [GlueLogin::CloseLink, GlueLogin::CloseLink]
+        ),
+        "the press's cancel, then the arm's: {:?}",
+        m.login_out.len()
+    );
+}
+
+/// The logon arm reads the latch and the login state after its dialog's handlers (`0x46ba85`,
+/// `0x46baaa`), not off what it read before: a failure that lands after the dialog was raised is
+/// the one the arm acts on.
+#[test]
+fn the_logon_arm_reads_its_login_state_after_the_dialog() {
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
+    m.outbox.clear();
+    m.login_out.clear();
+    m.on_stage(LoginStage::Connecting, true);
+    m.tick();
+    // What a handler of the dialog's dispatch would have seen land.
+    m.cells.state = LOGIN_FAILED_STATE;
+    m.cells.result = RESULT_DISCONNECTED;
+    settle(&mut m);
+    assert_eq!(m.state, ScreenState::Idle);
+    assert!(matches!(m.login_out.as_slice(), [GlueLogin::CloseLink]));
+}
+
+/// The world link's flag goes up with the socket's connect (`0x5aaa9c`), so `DisconnectFromServer`
+/// between the connect and the authentication takes state 2 down as the drop's handler does
+/// (`0x46c55d`).
+#[test]
+fn a_disconnect_after_the_world_socket_connects_ends_the_connect() {
+    let mut m = fresh();
+    m.state = ScreenState::Connect;
+    m.op = Operation::begin(OpKind::Connect, STATUS_CONNECTING);
+    m.on_stage(LoginStage::WorldConnected, true);
+    assert!(m.connected, "up with the socket");
+    m.disconnect_from_server();
+    assert_eq!(m.state, ScreenState::Idle);
+    assert_eq!(m.op, Operation::default());
+}
+
+/// `AUTH_FAILED` reads the current screen as it stands after the failure's dialog (`0x46bfa7`):
+/// a handler of that dialog that puts the character screen's name up sends it back to login.
+#[test]
+fn an_auth_failure_reads_the_screen_live() {
+    let shared = SharedGlueMgr::default();
+    let mut s = seated(&shared);
+    s.run(
+        "SetCurrentScreen('login') SCREENS = {} local f = CreateFrame('Frame') \
+         f:RegisterEvent('OPEN_STATUS_DIALOG') f:RegisterEvent('SET_GLUE_SCREEN') \
+         f:SetScript('OnEvent', function() \
+           if event == 'SET_GLUE_SCREEN' then table.insert(SCREENS, arg1) \
+           elseif arg1 == 'OKAY' then SetCurrentScreen('charselect') end end)",
+    )
+    .unwrap();
+    {
+        let mut m = shared.get_mut();
+        m.state = ScreenState::Connect;
+        m.holder = vec![realm("Fake")];
+        m.op = Operation::begin(OpKind::Auth, STATUS_AUTHENTICATING);
+        m.op.complete(false, STATUS_AUTH_FAILED);
+    }
+    frame(&shared, &mut s);
+    assert_eq!(s.eval::<Vec<String>>("return SCREENS").unwrap(), ["login"]);
+}
+
+/// A VM the manager has not seated holds its verbs' calls, which the manager runs when it seats
+/// the VM on its frame.
+#[test]
+fn a_call_before_the_seat_runs_on_the_seating_frame() {
+    let s = UiScript::new_glue().unwrap();
+    s.run("RequestRealmList(1)").unwrap();
+    let shared = SharedGlueMgr::default();
+    assert_eq!(shared.get().state, ScreenState::Idle);
+    let mut app = App::new();
+    app.init_resource::<Time>()
+        .insert_non_send(shared.clone())
+        .add_message::<LoginStageMessage>()
+        .add_message::<LoginQueuedMessage>()
+        .add_message::<LoginFailedMessage>()
+        .add_message::<CharListMessage>()
+        .add_message::<WorldAuthMessage>()
+        .add_message::<RosterFailedMessage>()
+        .add_message::<AddonInfoMessage>()
+        .add_message::<crate::net::CharActionResultMessage>()
+        .add_message::<crate::net::CharRenameMessage>()
+        .add_message::<crate::net::CharacterLoginFailedMessage>()
+        .add_message::<RealmListMessage>()
+        .add_message::<DisconnectedMessage>()
+        .add_message::<GlueLogin>()
+        .add_message::<crate::sound::GlueMusicRequest>()
+        .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+        .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
+        .add_systems(Update, drive_glue_mgr);
+    app.insert_non_send(s);
+    app.update();
+    assert_eq!(shared.get().state, ScreenState::RealmList);
 }
 
 // ── The stock screens over the native login, end to end ─────────────────────────────────────────
@@ -1193,7 +1947,7 @@ fn stock_app() -> (App, async_channel::Receiver<LoginRequest>, Arc<AtomicU64>) {
     let abandon = Arc::new(AtomicU64::new(0));
     let mut app = App::new();
     app.init_resource::<Time>()
-        .init_resource::<GlueMgr>()
+        .init_non_send::<SharedGlueMgr>()
         .init_resource::<crate::login::LoginIntent>()
         .insert_resource(crate::realmlist::Realmlist::unpinned(
             crate::realmlist::DEFAULT_REALMLIST,
@@ -1273,24 +2027,24 @@ fn disconnecting_from_the_server_ends_the_query_in_flight() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _rx, _abandon) = stock_app();
     {
-        let mut mgr = app.world_mut().resource_mut::<GlueMgr>();
+        let mut mgr = mgr_mut(&app);
         mgr.connected = true;
         mgr.get_character_list();
+        settle(&mut mgr);
     }
     vm(&app).run("DisconnectFromServer()").unwrap();
     app.update();
-    let mgr = app.world().resource::<GlueMgr>();
-    assert_eq!(mgr.state, ScreenState::Idle);
-    assert!(!mgr.connected && mgr.op.kind != OpKind::CharList);
+    {
+        let m = mgr(&app);
+        assert_eq!(m.state, ScreenState::Idle);
+        assert!(!m.connected && m.op.kind != OpKind::CharList);
+    }
 
     // With no world connection the verb only cancels the logon (`0x46d34d`): the state stands.
-    app.world_mut().resource_mut::<GlueMgr>().state = ScreenState::RealmList;
+    mgr_mut(&app).state = ScreenState::RealmList;
     vm(&app).run("DisconnectFromServer()").unwrap();
     app.update();
-    assert_eq!(
-        app.world().resource::<GlueMgr>().state,
-        ScreenState::RealmList
-    );
+    assert_eq!(mgr(&app).state, ScreenState::RealmList);
 }
 
 /// The select verbs' cells are C globals in the reference, so a glue rebuild finds them as they
@@ -1305,7 +2059,7 @@ fn the_select_cells_outlive_the_glue_vm() {
         built: true,
     };
     {
-        let mut mgr = app.world_mut().resource_mut::<GlueMgr>();
+        let mut mgr = mgr_mut(&app);
         mgr.select_cells = cells;
         mgr.vm = None;
     }
@@ -1313,7 +2067,7 @@ fn the_select_cells_outlive_the_glue_vm() {
     assert_eq!(vm(&app).glue_select_cells(), cells);
     vm(&app).run("SetCharacterSelectFacing(90)").unwrap();
     app.update();
-    let moved = app.world().resource::<GlueMgr>().select_cells;
+    let moved = mgr(&app).select_cells;
     assert!(
         (moved.facing - 90f32.to_radians()).abs() < 1e-5,
         "{moved:?}"
@@ -1346,7 +2100,7 @@ fn the_stock_login_reaches_the_native_login_and_shows_its_status() {
     assert_eq!((req.user.as_str(), req.pass.as_str()), ("probe", "secret"));
     let (which, _) = dialog(&app).expect("the status dialog is up");
     assert_eq!(which, "CANCEL");
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Logon);
+    assert_eq!(mgr(&app).state, ScreenState::Logon);
 
     app.world_mut().write_message(LoginStageMessage {
         stage: LoginStage::Connecting,
@@ -1361,7 +2115,61 @@ fn the_stock_login_reaches_the_native_login_and_shows_its_status() {
     let unknown = vm(&app).global_text("LOGIN_UNKNOWN_ACCOUNT");
     assert!(!unknown.is_empty());
     assert_eq!(dialog(&app), Some(("OKAY".into(), unknown)));
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
+}
+
+/// The stock select shown with no world link names the realm off `realmName` and its type off the
+/// realm selected this process (`CharacterSelect_OnShow`, `CharacterSelect.lua:48`), as
+/// `GetServerName` (`0x46d280`) answers them link or no link.
+#[test]
+fn the_stock_select_with_no_link_shows_the_selected_realms_pvp() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _rx, _) = stock_app();
+    {
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
+        s.register_cvars([(crate::realm_select::CVAR_REALM_NAME, "aLPHA")]);
+        let (categories, types) = crate::realm_select::Realms::us_client().glue_setup();
+        s.set_glue_realm_setup(categories, types);
+    }
+    let mut pvp = realm("Alpha");
+    pvp.realm_type = 1;
+    mgr_mut(&app).selected = Some(pvp);
+    vm(&app).run("SetGlueScreen('charselect')").unwrap();
+    assert!(
+        vm(&app)
+            .eval::<bool>(
+                "return CharSelectRealmName:GetText() == \
+                 'aLPHA\\n(' .. TEXT(SERVER_DOWN) .. ') ' .. PVP_PARENTHESES"
+            )
+            .unwrap(),
+        "{:?}",
+        vm(&app).eval::<String>("return CharSelectRealmName:GetText()")
+    );
+}
+
+/// The stock dialog over a world failure with no realm held: the failure's `OKAY` presses itself
+/// in state 2, the `CANCEL` "Retrieving realm list" follows, and the list's reply closes it.
+#[test]
+fn the_stock_realm_list_dialog_after_a_world_failure_closes_on_its_reply() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _rx, _) = stock_app();
+    {
+        let mut m = mgr_mut(&app);
+        m.state = ScreenState::Connect;
+        m.op = Operation::begin(OpKind::Connect, STATUS_CONNECTING);
+        m.op.complete(false, STATUS_REALM_LIST_FAILED);
+    }
+    app.update();
+    let retrieving = vm(&app).global_text("REALM_LIST_IN_PROGRESS");
+    assert_eq!(dialog(&app), Some(("CANCEL".into(), retrieving)));
+    assert_eq!(mgr(&app).state, ScreenState::RealmList);
+    app.world_mut().write_message(RealmListMessage {
+        realms: vec![realm("Fake")],
+        failed: false,
+    });
+    app.update();
+    assert_eq!(dialog(&app), None, "the query's success closes it");
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
 }
 
 /// The status dialog's Cancel is `StatusDialogClick`, which abandons the native attempt.
@@ -1380,7 +2188,7 @@ fn the_status_dialogs_cancel_abandons_the_attempt() {
         1,
         "Cancel bumps the abandon generation"
     );
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
     assert_eq!(dialog(&app), None);
 }
 
@@ -1563,7 +2371,7 @@ fn live_app_with(
     let cycles = fake::spawn_cycles_asking();
     let mut app = App::new();
     app.init_resource::<Time>()
-        .init_resource::<GlueMgr>()
+        .init_non_send::<SharedGlueMgr>()
         .init_resource::<crate::login::LoginIntent>()
         .insert_resource(crate::realmlist::Realmlist::unpinned(&realmd.addr))
         .insert_resource(LoginSubmit(cycles.login.clone()))
@@ -1659,14 +2467,14 @@ fn until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
     let deadline = std::time::Instant::now() + fake::WAIT;
     while !done(app) {
         if std::time::Instant::now() >= deadline {
-            let m = app.world().resource::<GlueMgr>();
+            let m = mgr(app);
             panic!(
                 "timed out waiting for {what}: state {:?}, op {:?}, holder {}, screen {:?}, \
                  dialog {:?}, errors {:?}",
                 m.state,
                 m.op,
                 m.holder.len(),
-                m.screen,
+                vm(app).glue_screen(),
                 dialog(app),
                 vm(app).errors()
             );
@@ -1697,7 +2505,7 @@ fn shown(app: &App, frame: &str) -> bool {
 }
 
 fn screen_up(app: &App) -> bool {
-    let m = app.world().resource::<GlueMgr>();
+    let m = mgr(app);
     m.state == ScreenState::Idle && m.connected
 }
 
@@ -1724,7 +2532,7 @@ fn a_fresh_account_is_asked_for_a_realm_and_suggested_one() {
         shown(app, "RealmWizard")
     });
     assert_eq!(dialog(&app), None, "the not-found OKAY is taken back down");
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
     assert_eq!(
         vm(&app)
             .eval::<(String, String, bool)>(
@@ -1781,9 +2589,9 @@ fn closing_the_realm_list_lets_the_next_login_through() {
         },
         "Gone",
     );
-    app.world_mut().resource_mut::<GlueMgr>().realm_cells.chosen = Some(0);
+    mgr_mut(&app).realm_cells.chosen = Some(0);
     // The fresh VM takes the cells on the next frame.
-    app.world_mut().resource_mut::<GlueMgr>().vm = None;
+    mgr_mut(&app).vm = None;
     app.update();
 
     log_in(&mut app);
@@ -1908,9 +2716,9 @@ fn char_select_app_on(
         seat(&world);
     }
     if chosen {
-        app.world_mut().resource_mut::<GlueMgr>().realm_cells.chosen = Some(0);
+        mgr_mut(&app).realm_cells.chosen = Some(0);
         // The fresh VM takes the cells on the next frame.
-        app.world_mut().resource_mut::<GlueMgr>().vm = None;
+        mgr_mut(&app).vm = None;
     }
     {
         let mut script = app.world_mut().non_send_mut::<UiScript>();
@@ -1955,8 +2763,7 @@ fn the_stock_login_loads_the_roster_into_character_select() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _realmd, world) = char_select_app(&roster3(), "1", false);
     until(&mut app, "the roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     assert!(shown(&app, "CharacterSelect"));
     assert_eq!(dialog(&app), None, "the retrieving dialog is closed");
@@ -2021,8 +2828,7 @@ fn the_stock_login_loads_the_roster_into_character_select() {
         Some(("CANCEL".into(), "Retrieving character list".into()))
     );
     until(&mut app, "the second roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") > before
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") > before && mgr(app).state == ScreenState::Idle
     });
     assert_eq!(dialog(&app), None);
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
@@ -2065,8 +2871,7 @@ fn an_empty_roster_asks_for_the_realm_list_only_with_no_realm_chosen() {
 
     let (mut app, realmd, _) = char_select_app(&[], "0", true);
     until(&mut app, "the roster load", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     for _ in 0..20 {
         app.update();
@@ -2123,8 +2928,7 @@ fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
     roster.push(dwarf);
     let (mut app, _realmd, _world) = char_select_app(&roster, "1", false);
     until(&mut app, "the roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     app.update();
     let p = preview(&app);
@@ -2176,8 +2980,7 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _realmd, _world) = char_select_app(&[], "0", true);
     until(&mut app, "the roster load", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     app.update();
     let p = preview(&app);
@@ -2190,8 +2993,7 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     (tauren.race, tauren.zone) = (6, 12);
     let (mut app, _realmd, world) = char_select_app(&[tauren], "0", true);
     until(&mut app, "the roster load", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     app.update();
     let p = preview(&app);
@@ -2202,8 +3004,7 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     let before = seen(&app, "CHARACTER_LIST_UPDATE");
     vm(&app).run("GetCharacterListUpdate()").unwrap();
     until(&mut app, "the empty roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") > before
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") > before && mgr(app).state == ScreenState::Idle
     });
     app.update();
     let p = preview(&app);
@@ -2315,8 +3116,7 @@ fn showing_the_screen_then_changing_realm_asks_the_old_link_once() {
             None,
         );
         until(&mut app, "the first roster", |app| {
-            seen(app, "CHARACTER_LIST_UPDATE") >= 2
-                && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+            seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
         });
         assert_eq!(vm(&app).glue_roster_guids(), [0x21], "round {round}");
         // The list the realm verbs read: built where the wizard's or the list's events build it.
@@ -2334,8 +3134,7 @@ fn showing_the_screen_then_changing_realm_asks_the_old_link_once() {
             .run("SetGlueScreen('charselect') ChangeRealm(1, 2)")
             .unwrap();
         until(&mut app, "the new realm's roster", |app| {
-            app.world().resource::<GlueMgr>().state == ScreenState::Idle
-                && vm(app).glue_roster_guids() == [0x31]
+            mgr(app).state == ScreenState::Idle && vm(app).glue_roster_guids() == [0x31]
         });
         assert_eq!(vm(&app).errors(), Vec::<String>::new(), "round {round}");
         assert_eq!(
@@ -2362,23 +3161,19 @@ fn a_roster_reply_after_the_dialogs_cancel_is_dropped() {
     let before = vec![crate::char_select::test_character(0x41, "Before")];
     let (mut app, _realmd, world) = char_select_app(&before, "0", true);
     until(&mut app, "the roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
     world.set_roster(&[crate::char_select::test_character(0x42, "Later")]);
     world.delay_rosters(std::time::Duration::from_millis(400));
     vm(&app).run("GetCharacterListUpdate()").unwrap();
     app.update();
-    assert_eq!(
-        app.world().resource::<GlueMgr>().state,
-        ScreenState::CharList
-    );
+    assert_eq!(mgr(&app).state, ScreenState::CharList);
     vm(&app).run("StatusDialogClick()").unwrap();
     until(&mut app, "the realm list", |app| shown(app, "RealmList"));
     // The late reply has gone by (the IO thread served the realm list after it).
     assert_eq!(world.enumerations(), 2);
     assert_eq!(
-        app.world().resource::<GlueMgr>().roster[0].name,
+        mgr(&app).roster[0].name,
         "Before",
         "the late reply replaced the held roster"
     );
@@ -2465,13 +3260,11 @@ fn a_fetched_alert_cancels_the_logon_and_shows_the_alert_frame() {
     app.update();
     type_and_login(&mut app);
     assert!(rx.try_recv().is_ok());
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Logon);
+    assert_eq!(mgr(&app).state, ScreenState::Logon);
     assert!(!shown(&app, "ServerAlertFrame"));
 
     let fetch = crate::ui_script::server_alert::spawn_fetch(url);
-    app.world_mut()
-        .resource_mut::<GlueMgr>()
-        .set_alert_fetch(fetch);
+    mgr_mut(&app).set_alert_fetch(fetch);
     until(&mut app, "the alert frame", |app| {
         shown(app, "ServerAlertFrame")
     });
@@ -2480,7 +3273,7 @@ fn a_fetched_alert_cancels_the_logon_and_shows_the_alert_frame() {
     let want = &body[b"SERVERALERT:".len()..body.len() - 1];
     assert_eq!(vm(&app).eval::<String>("return ALERT_ARG").unwrap(), want);
     assert_eq!(abandon.load(Ordering::SeqCst), 1, "the logon was abandoned");
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
 
     // Once: nothing refires it.
     for _ in 0..5 {
@@ -2501,16 +3294,14 @@ fn a_body_without_the_prefix_shows_no_alert() {
     type_and_login(&mut app);
     assert!(rx.try_recv().is_ok());
     let fetch = crate::ui_script::server_alert::spawn_fetch(url);
-    app.world_mut()
-        .resource_mut::<GlueMgr>()
-        .set_alert_fetch(fetch);
+    mgr_mut(&app).set_alert_fetch(fetch);
     until(&mut app, "the fetch to end", |app| {
-        app.world().resource::<GlueMgr>().alert_fetch.is_none()
+        mgr(app).alert_fetch.is_none()
     });
     app.update();
     assert!(!shown(&app, "ServerAlertFrame"));
     assert_eq!(abandon.load(Ordering::SeqCst), 0);
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Logon);
+    assert_eq!(mgr(&app).state, ScreenState::Logon);
 }
 
 /// `LaunchURL` reaches the host as a launch message, for a whitelisted URL only.
@@ -2589,8 +3380,7 @@ fn enable_files(home: &std::path::Path) -> std::collections::BTreeMap<String, Ve
 /// Up to the loaded roster.
 fn at_the_roster(app: &mut App) {
     until(app, "the roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") >= 2
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2 && mgr(app).state == ScreenState::Idle
     });
 }
 
@@ -2751,8 +3541,7 @@ fn addon_list_update_fires_once_when_the_reply_is_read() {
     let before = seen(&app, "CHARACTER_LIST_UPDATE");
     vm(&app).run("GetCharacterListUpdate()").unwrap();
     until(&mut app, "the second roster", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") > before
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") > before && mgr(app).state == ScreenState::Idle
     });
     assert_eq!(
         seen(&app, "ADDON_LIST_UPDATE"),
@@ -2965,10 +3754,9 @@ fn the_stock_delete_refetches_the_list_and_selects_the_first_row() {
         dialog(&app),
         Some(("CANCEL".into(), "Deleting character".into()))
     );
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Delete);
+    assert_eq!(mgr(&app).state, ScreenState::Delete);
     until(&mut app, "the list without Bravo", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") > lists
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") > lists && mgr(app).state == ScreenState::Idle
     });
     assert_eq!(
         world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_DELETE),
@@ -3001,9 +3789,9 @@ fn a_refused_stock_delete_opens_okay_and_keeps_the_list() {
     world.answer_deletes(0x3a);
     vm(&app).run("DeleteCharacter(2)").unwrap();
     app.update();
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Delete);
+    assert_eq!(mgr(&app).state, ScreenState::Delete);
     until(&mut app, "the refusal", |app| {
-        app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        mgr(app).state == ScreenState::Idle
     });
     assert_eq!(
         dialog(&app),
@@ -3061,7 +3849,7 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
     );
     assert_eq!(seen(&app, "FORCE_RENAME_CHARACTER CHAR_NAME_TOO_SHORT"), 1);
     app.update();
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
 
     // A passing one.
     vm(&app)
@@ -3087,7 +3875,7 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
     assert_eq!(world.enumerations(), 1, "the record is renamed in place");
     assert_eq!(row_names(&app), ["Alpha", "Newbie", "Charlie"]);
     assert_eq!(
-        app.world().resource::<GlueMgr>().state,
+        mgr(&app).state,
         ScreenState::Rename,
         "the reply leaves state 7"
     );
@@ -3100,16 +3888,12 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
             .unwrap(),
         0.0
     );
-    let kept = app
-        .world()
-        .resource::<GlueMgr>()
-        .roster_character(0x12)
-        .map(|c| {
-            (
-                c.name.clone(),
-                c.flags & benilla_protocol::CHARACTER_FLAG_RENAME,
-            )
-        });
+    let kept = mgr(&app).roster_character(0x12).map(|c| {
+        (
+            c.name.clone(),
+            c.flags & benilla_protocol::CHARACTER_FLAG_RENAME,
+        )
+    });
     assert_eq!(kept, Some(("Newbie".to_string(), 0)));
     // The world entry names its files by the new name.
     let picked = app.world().resource::<crate::char_select::Roster>();
@@ -3224,7 +4008,7 @@ fn until_entry(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
             std::time::Instant::now() < deadline,
             "timed out waiting for {what}: client {:?}, glue {:?}, errors {:?}",
             client_state(app),
-            app.world().resource::<GlueMgr>().state,
+            mgr(app).state,
             glue_vm(app).map(UiScript::errors)
         );
         app.update();
@@ -3257,10 +4041,7 @@ fn the_stock_enter_world_logs_in_and_the_glue_leaves_with_the_screen() {
         .run("CharacterSelect_SelectCharacter(2) CharSelectEnterWorldButton:Click()")
         .unwrap();
     app.update();
-    assert_eq!(
-        app.world().resource::<GlueMgr>().state,
-        ScreenState::EnterWorld
-    );
+    assert_eq!(mgr(&app).state, ScreenState::EnterWorld);
     assert_eq!(
         app.world()
             .resource::<crate::cvars::Cvars>()
@@ -3292,7 +4073,7 @@ fn the_stock_enter_world_logs_in_and_the_glue_leaves_with_the_screen() {
         "no VM of the glue's left in the world"
     );
     app.update();
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
 }
 
 /// A refused login (vmangos's result 1) that lands once the client is in the world comes back to
@@ -3318,9 +4099,19 @@ fn a_refused_stock_login_comes_back_to_the_select_and_lists_again() {
         client_state(app) == ClientState::InWorld
     });
     world.release_refusals();
-    until_entry(&mut app, "state 9 on a new glue", |app| {
-        glue_vm(app).is_some()
-            && app.world().resource::<GlueMgr>().state == ScreenState::LoginRefused
+    // State 9's `OKAY` is pressed by its own `OnShow` inside the dispatch that opens it
+    // (`0x46b767` → `0x46b880`), so no frame ends on the refusal's text.
+    let refusal = Some(("OKAY".to_string(), "World server is down".to_string()));
+    until_entry(&mut app, "a new glue asking again", |app| {
+        if glue_vm(app).is_none() {
+            return false;
+        }
+        assert_ne!(
+            dialog(app),
+            refusal,
+            "the refusal is replaced before a frame ends"
+        );
+        mgr(app).state == ScreenState::CharList
     });
     assert_eq!(client_state(&app), ClientState::CharSelect);
     assert!(shown(&app, "CharacterSelect"));
@@ -3329,23 +4120,16 @@ fn a_refused_stock_login_comes_back_to_the_select_and_lists_again() {
         "Alpha ",
         "the build carried the link and the server into the screen's OnShow"
     );
-    assert_eq!(
-        dialog(&app),
-        Some(("OKAY".into(), "World server is down".into()))
-    );
-    assert_eq!(
-        world.enumerations(),
-        1,
-        "the OnShow's ask, made on the link, sent nothing in state 9"
-    );
+    let retrieving = vm(&app).global_text("CHAR_LIST_RETRIEVING");
+    assert_eq!(dialog(&app), Some(("CANCEL".into(), retrieving)));
     until_entry(&mut app, "the list again", |app| {
-        app.world().resource::<GlueMgr>().state == ScreenState::Idle
-            && vm(app).glue_roster_guids().len() == 3
+        assert_ne!(dialog(app), refusal);
+        mgr(app).state == ScreenState::Idle && vm(app).glue_roster_guids().len() == 3
     });
     assert_eq!(
         (world.authentications(), world.enumerations_in(0)),
         (1, 2),
-        "on the same session"
+        "on the same session: the OnShow's ask, made on the link in state 9, sent nothing"
     );
     assert_eq!(vm(&app).glue_selected_guid(), Some(0x12));
     assert_eq!(dialog(&app), None);
@@ -3389,7 +4173,7 @@ fn the_stock_enter_world_stops_at_a_locked_or_renamed_character() {
     for _ in 0..5 {
         app.update();
     }
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+    assert_eq!(mgr(&app).state, ScreenState::Idle);
     assert!(world
         .bodies(benilla_protocol::messages::opcode::CMSG_PLAYER_LOGIN)
         .is_empty());
@@ -3429,7 +4213,7 @@ fn a_stock_logout_comes_back_to_the_select_and_asks_for_its_list() {
         .unwrap();
     until_entry(&mut app, "the select's list", |app| {
         glue_vm(app).is_some()
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+            && mgr(app).state == ScreenState::Idle
             && vm(app).glue_roster_guids().len() == 3
     });
     assert_eq!(client_state(&app), ClientState::CharSelect);
@@ -3457,6 +4241,12 @@ fn a_refusal_in_the_entrys_drain_keeps_the_stock_select() {
     let (mut app, world) = entry_app(true);
     let session = vm(&app).session();
     vm(&app)
+        .run(
+            "OPENED = {} local f = CreateFrame('Frame') f:RegisterEvent('OPEN_STATUS_DIALOG') \
+             f:SetScript('OnEvent', function() table.insert(OPENED, arg1 .. ' ' .. tostring(arg2)) end)",
+        )
+        .unwrap();
+    vm(&app)
         .run("CharacterSelect_SelectCharacter(2) CharSelectEnterWorldButton:Click()")
         .unwrap();
     app.update();
@@ -3466,17 +4256,33 @@ fn a_refusal_in_the_entrys_drain_keeps_the_stock_select() {
         assert!(std::time::Instant::now() < deadline, "no refusal");
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    until_entry(&mut app, "state 9", |app| {
-        app.world().resource::<GlueMgr>().state == ScreenState::LoginRefused
+    // State 9's dialog, on the glue that stood, is opened and pressed by its own `OnShow` in one
+    // dispatch: the list's dialog replaces it before the frame ends.
+    let refusal = Some(("OKAY".to_string(), "World server is down".to_string()));
+    until_entry(&mut app, "the list asked again", |app| {
+        assert_ne!(
+            dialog(app),
+            refusal,
+            "the refusal is replaced before a frame ends"
+        );
+        mgr(app).state == ScreenState::CharList
     });
+    let retrieving = vm(&app).global_text("CHAR_LIST_RETRIEVING");
+    assert_eq!(dialog(&app), Some(("CANCEL".into(), retrieving.clone())));
     assert_eq!(
-        dialog(&app),
-        Some(("OKAY".into(), "World server is down".into())),
-        "state 9's dialog, on the glue that stood"
+        vm(&app).eval::<Vec<String>>("return OPENED").unwrap(),
+        [
+            format!("CANCEL {retrieving}"),
+            "OKAY World server is down".to_string()
+        ],
+        "the refusal was raised, and replaced inside its own dispatch: `GlueDialog`, registered \
+         first, shows it and its `OnShow` raises the next, which this listener, registered last, \
+         hears before the outer delivery reaches it"
     );
     until_entry(&mut app, "the list again", |app| {
+        assert_ne!(dialog(app), refusal);
         glue_vm(app).is_some()
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+            && mgr(app).state == ScreenState::Idle
             && vm(app).glue_roster_guids().len() == 3
     });
     assert_eq!(client_state(&app), ClientState::CharSelect);
@@ -3615,16 +4421,20 @@ fn the_stock_create_makes_the_character_and_selects_it() {
     vm(&app)
         .run("CharacterCreateNameEdit:SetText('Newbie') CharCreateOkayButton:Click()")
         .unwrap();
-    let lists = seen(&app, "CHARACTER_LIST_UPDATE");
-    app.update();
+    // `CreateCharacter`'s state 5 and dialog land in its call (`0x46b29e`-`0x46b2c4`), before any
+    // frame of the manager; the `CMSG_CHAR_CREATE` waits for the frame.
     assert_eq!(
         dialog(&app),
         Some(("CANCEL".into(), "Creating character".into()))
     );
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Create);
+    assert_eq!(mgr(&app).state, ScreenState::Create);
+    assert!(world
+        .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE)
+        .is_empty());
+    let lists = seen(&app, "CHARACTER_LIST_UPDATE");
+    app.update();
     until(&mut app, "the list with Newbie", |app| {
-        seen(app, "CHARACTER_LIST_UPDATE") > lists
-            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        seen(app, "CHARACTER_LIST_UPDATE") > lists && mgr(app).state == ScreenState::Idle
     });
     let mut sent = b"Newbie\0".to_vec();
     sent.extend([
@@ -3673,9 +4483,9 @@ fn a_refused_stock_create_shows_its_text() {
         .run("CharacterCreateNameEdit:SetText('Alpha') CharCreateOkayButton:Click()")
         .unwrap();
     app.update();
-    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Create);
+    assert_eq!(mgr(&app).state, ScreenState::Create);
     until(&mut app, "the refusal", |app| {
-        app.world().resource::<GlueMgr>().state == ScreenState::Idle
+        mgr(app).state == ScreenState::Idle
     });
     assert_eq!(
         dialog(&app),
@@ -3713,7 +4523,7 @@ fn a_stock_create_whose_name_fails_the_check_sends_nothing() {
             .unwrap();
         assert_eq!(dialog(&app), Some(("OKAY".into(), text.into())), "{name:?}");
         app.update();
-        assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+        assert_eq!(mgr(&app).state, ScreenState::Idle);
         vm(&app).run("GlueDialog:Hide()").unwrap();
     }
     for _ in 0..5 {

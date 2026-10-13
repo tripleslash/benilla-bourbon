@@ -34,7 +34,7 @@ pub(super) struct TextStyle {
 
 /// The extraction loop's context for one Text quad.
 pub(super) struct TextHost<'a> {
-    pub z: u64,
+    pub z: u128,
     pub alpha: f32,
     pub target: ZTarget,
     pub rect: Rect,
@@ -147,6 +147,7 @@ pub(super) fn emit(
                 texture: None,
                 uv: UvRect::FULL,
                 color: [hc[0], hc[1], hc[2], hc[3] * host.alpha],
+                corner_colors: None,
                 additive: false,
                 circular: false,
                 desaturated: false,
@@ -328,6 +329,7 @@ pub(super) fn emit(
                 texture: None,
                 uv: UvRect::FULL,
                 color: [1.0, 1.0, 1.0, host.alpha],
+                corner_colors: None,
                 additive: false,
                 circular: false,
                 desaturated: false,
