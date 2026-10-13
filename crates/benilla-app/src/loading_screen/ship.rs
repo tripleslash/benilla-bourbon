@@ -336,7 +336,7 @@ impl ShipLookup<'_, '_> {
     ) -> Option<Option<&ShipRoute>> {
         let (entry, from_map) = transport?;
         let guid = self.guids.get(deck?).ok()?;
-        if benilla_protocol::guid::entry(guid.0) != Some(entry) {
+        if self.templates.entry_of(guid.0) != Some(entry) {
             return None;
         }
         let path_id = self.templates.get(guid.0).and_then(|t| t.mo_transport);

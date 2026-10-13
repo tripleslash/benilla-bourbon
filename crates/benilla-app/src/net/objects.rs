@@ -535,6 +535,9 @@ fn object_create(
     // Warm the template cache as a GameObject streams in: only the query carries its lockId,
     // which decides use-vs-cast on a right-click.
     if matches!(kind, EntityKind::GameObject) {
+        if let Some(entry) = fields.object_entry() {
+            go_templates.note_transport_entry(guid, entry);
+        }
         go_templates.request(guid, net_commands);
         // Where and how big, under `RUST_LOG=benilla_app::net::objects=debug`.
         debug!(

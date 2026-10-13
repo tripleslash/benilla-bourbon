@@ -1222,14 +1222,69 @@ fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
 /// A create's pose: a GameObject's `GAMEOBJECT_POS_*` when sent, else the movement block, since
 /// vmangos never sets those fields on a transport. Gate on `gameobject_pos_sent`, not `.or`: a
 /// create reads absent fields as zero, so `gameobject_position()` is `Some` even when unsent.
+///
+/// A Turtle core sends every ship and zeppelin at login with its path progress alone. Its pose is
+/// the timetable's from the first tick, so it is created at the origin (spawned hidden until that
+/// tick); any other object with no pose is dropped.
 fn create_placement(
     object_type: ObjectType,
     mask: &ObjectFields,
     movement: &MovementBlock,
 ) -> Option<(Vector3d, f32)> {
-    if object_type == ObjectType::GameObject && mask.gameobject_pos_sent() {
+    let placed = if object_type == ObjectType::GameObject && mask.gameobject_pos_sent() {
         mask.gameobject_position()
     } else {
         movement.position
+    };
+    placed.or_else(|| {
+        (object_type == ObjectType::GameObject && movement.transport_progress.is_some()).then_some(
+            (
+                Vector3d {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                0.0,
+            ),
+        )
+    })
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn block(position: Option<(Vector3d, f32)>, transport_progress: Option<u32>) -> MovementBlock {
+        MovementBlock {
+            position,
+            mover: None,
+            speeds: None,
+            transport_progress,
+            transport: None,
+            spline: None,
+        }
+    }
+
+    /// A ship sent with its path progress and no pose is still created: the timetable places it.
+    /// Anything else without a pose has nowhere to be and is dropped.
+    #[test]
+    fn a_transport_without_a_pose_is_created_at_the_origin() {
+        let fields = ObjectFields::default();
+        let ship = create_placement(ObjectType::GameObject, &fields, &block(None, Some(47_030)));
+        assert!(ship.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (0.0, 0.0, 0.0, 0.0)));
+        assert!(create_placement(ObjectType::GameObject, &fields, &block(None, None)).is_none());
+        assert!(create_placement(ObjectType::Unit, &fields, &block(None, Some(1))).is_none());
+        // A pose that was sent is kept.
+        let at = Vector3d {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        };
+        let placed = create_placement(
+            ObjectType::GameObject,
+            &fields,
+            &block(Some((at, 0.5)), Some(1)),
+        );
+        assert!(placed.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (1.0, 2.0, 3.0, 0.5)));
     }
 }
