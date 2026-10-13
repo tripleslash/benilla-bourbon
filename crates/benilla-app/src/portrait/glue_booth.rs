@@ -1388,21 +1388,10 @@ pub(super) fn pillarbox_glue_scene(
     preview: Res<GluePreview>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut cams: Query<(&BoothCam, &mut Camera)>,
-    booths: Res<super::Booths>,
-    images: Res<Assets<Image>>,
-    mut last_target: Local<UVec2>,
 ) {
     let Ok(w) = window.single() else {
         return;
     };
-    // The target as it stands now: a resize reallocates it, and a viewport past its edge, or a
-    // camera still sized to the old one, leaves the scene unrendered on its last frame.
-    let target = booths
-        .0
-        .get(GLUE_SLOT)
-        .and_then(|b| images.get(&b.target))
-        .map(|i| UVec2::new(i.width(), i.height()));
-    let resized = target.is_some_and(|t| std::mem::replace(&mut *last_target, t) != t);
     let full_h = w.physical_height().max(1);
     let viewport = match preview.pane {
         Some(pane) => {
@@ -1421,22 +1410,9 @@ pub(super) fn pillarbox_glue_scene(
             },
         ),
     };
-    let viewport = match (viewport, target) {
-        (Some(mut v), Some(t)) => {
-            let pos = v.physical_position.min(t.saturating_sub(UVec2::ONE));
-            v.physical_position = pos;
-            v.physical_size = v.physical_size.min(t - pos).max(UVec2::ONE);
-            Some(v)
-        }
-        (v, _) => v,
-    };
     for (booth, mut cam) in cams.iter_mut() {
         if booth.0 != GLUE_SLOT {
             continue;
-        }
-        if resized {
-            // The camera's target info is recomputed off its own change, not the image's.
-            cam.set_changed();
         }
         let same = match (&cam.viewport, &viewport) {
             (None, None) => true,
