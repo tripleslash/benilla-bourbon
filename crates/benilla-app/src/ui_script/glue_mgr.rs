@@ -521,6 +521,21 @@ pub(crate) struct GlueMgr {
 impl GlueMgr {
     /// The record the last character list reply carried for `guid`: what the scene drive builds
     /// the selected character from (`0x472950` reads the select record's own copy).
+    /// The screen up while no operation runs, `login` or `charselect`: where the glue VM may be
+    /// rebuilt without losing anything ([`super::lifecycle::rebuild_stale_glue_vm`]).
+    pub(crate) fn idle_screen(&self) -> Option<super::glue::GlueScreen> {
+        if self.state != ScreenState::Idle || !self.outbox.is_empty() {
+            return None;
+        }
+        if self.screen.eq_ignore_ascii_case("charselect") {
+            Some(super::glue::GlueScreen::CharSelect)
+        } else if self.screen.eq_ignore_ascii_case("login") {
+            Some(super::glue::GlueScreen::Login)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn roster_character(&self, guid: u64) -> Option<&Character> {
         self.roster.iter().find(|c| c.guid == guid)
     }
@@ -688,8 +703,8 @@ impl GlueMgr {
                     hair_style: request.hair_style,
                     hair_color: request.hair_color,
                     facial_hair: request.facial_hair,
-                    // Set by flavor where the ask is sent ([`send_asks`]).
-                    challenge_mask: None,
+                    // Kept on Turtle WoW alone where the ask is sent ([`send_asks`]).
+                    challenge_mask: Some(request.challenge_modes),
                 })
                 .into(),
             );
@@ -1431,7 +1446,7 @@ pub(crate) fn drive_glue_mgr(
     mut news: LoginNews,
     mut asks: GlueAsks,
     realms: Option<Res<crate::realm_select::Realms>>,
-    mut realmlist: Option<ResMut<crate::realmlist::Realmlist>>,
+    realmlist: Option<ResMut<crate::realmlist::Realmlist>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     sources: super::glue_create::CreateSources,
     state: Option<Res<State<crate::char_select::ClientState>>>,
@@ -1655,14 +1670,6 @@ pub(crate) fn drive_glue_mgr(
     let Some(mut script) = script else {
         return;
     };
-    // The realmlist control's typed value that was not an address reopens its dialog.
-    if let Some(typed) = realmlist.as_deref_mut().and_then(|r| r.take_refused()) {
-        mgr.outbox.push(Outgoing::Open {
-            which: "BENILLA_REALMLIST",
-            text: Some(Text::Raw(crate::login::REALMLIST_BAD.to_string())),
-            data: Some(typed),
-        });
-    }
     seed(
         &mut mgr,
         &mut script,
@@ -1775,8 +1782,9 @@ fn send_asks(
                 }
                 mut ask => {
                     if let ParkRequest::Char(CharRequest::Create(req)) = &mut ask {
-                        req.challenge_mask =
-                            asks.flavor.as_deref().and_then(|f| f.is_turtle().then_some(0));
+                        if !asks.flavor.as_deref().is_some_and(|f| f.is_turtle()) {
+                            req.challenge_mask = None;
+                        }
                     }
                     let _ = choice.0.send_request(ask);
                 }

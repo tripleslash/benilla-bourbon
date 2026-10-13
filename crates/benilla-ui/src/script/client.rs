@@ -278,7 +278,12 @@ impl super::UiScript {
     pub fn set_flavor(&mut self, flavor: UiFlavor) {
         self.model_mut().flavor = flavor;
         if flavor == UiFlavor::Turtle {
-            if let Err(e) = super::camera_view::install_turtle(&self.lua) {
+            let installed = if self.vm_kind() == super::VmKind::Glue {
+                super::glue_create::install_turtle(&self.lua)
+            } else {
+                super::camera_view::install_turtle(&self.lua)
+            };
+            if let Err(e) = installed {
                 self.push_error(e);
             }
         }

@@ -1,7 +1,7 @@
-//! The stock glue screens, behind `WOW_GLUE_STOCK=1` in a dev build: the player's own
+//! The stock glue screens, this fork's default ([`GlueStock`]): the player's own
 //! `GlueXML.toc` off the patch chain, run into a glue VM ([`UiScript::new_glue`]) that stands in
 //! the world while no character is in it, where the boot VM otherwise stands. The native screens
-//! stay the default and, under the switch, keep driving the network unseen.
+//! stay behind `WOW_GLUE_STOCK=0` and, under the stock ones, keep driving the network unseen.
 //!
 //! The reference's glue builder (`0x46a7b0`) resets the Lua state on a rebuild (`0x46a87b`; the
 //! cold first build, `0x46a505`, passes 0 and skips it), registers the glue functions
@@ -36,18 +36,21 @@ use super::reference_ui;
 /// The switch's variable.
 const SWITCH: &str = "WOW_GLUE_STOCK";
 
-/// Whether this run puts the stock glue screens up, read once at plugin build: a dev build with
-/// `WOW_GLUE_STOCK=1`. A player build never does.
+/// Whether this run puts the stock glue screens up, read once at plugin build. In this fork they
+/// are the default, the player and browser builds included; `WOW_GLUE_STOCK=0` puts the native
+/// screens up instead, and so does an unattended run (a probe reads the native screens' rosters)
+/// unless `WOW_GLUE_STOCK=1` asks for the stock ones.
 #[derive(Resource, Default, Clone, Copy)]
 pub(crate) struct GlueStock(pub(crate) bool);
 
 impl GlueStock {
     /// The switch as this process has it.
     pub(crate) fn from_env() -> Self {
-        Self(
-            crate::run_mode::dev_affordances()
-                && std::env::var(SWITCH).ok().as_deref() == Some("1"),
-        )
+        Self(match std::env::var(SWITCH).ok().as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => !crate::run_mode::unattended(),
+        })
     }
 }
 

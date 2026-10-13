@@ -1969,8 +1969,7 @@ fn the_layer_does_not_grow() {
         .collect();
     found.sort();
     // Deviation: one glue file beside the in-game layer, `AccountLoginRealmlist.xml`, the
-    // realmlist control on the stock login screen, because benilla is a client for any server and
-    // 1.12.1 has no interface for the realmlist, only `realmlist.wtf`.
+    // realmlist readout on the stock login screen and, in this fork, its Quit button hidden.
     assert_eq!(super::glue::GLUE_LAYER, "AccountLoginRealmlist.xml");
     let mut shipped: Vec<String> = LAYER
         .iter()

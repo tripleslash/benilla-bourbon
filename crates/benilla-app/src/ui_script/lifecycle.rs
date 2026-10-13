@@ -375,9 +375,47 @@ fn mint_entry_vm(world: &mut World) {
 /// Rebuild the glue VM for a change of the data the chain answers from (a realm of the other
 /// flavor entered, [`crate::flavor`]): GlobalStrings and the emote tokens come from the new
 /// chain. The dying VM's CVars fold first, as at world entry.
+/// Under the stock glue screens the glue VM is the one standing; it is rebuilt off the new chain
+/// (its GlueXML, Turtle WoW's own under the Turtle layer) once the manager is idle,
+/// [`rebuild_stale_glue_vm`].
 pub(crate) fn reinstall_boot_vm(world: &mut World) {
+    let glue_up = world
+        .get_non_send::<UiScript>()
+        .is_some_and(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue);
+    if glue_up {
+        return;
+    }
     crate::cvars::fold_dying_vm_cvars(world);
     install_boot_vm(world);
+}
+
+/// Rebuild a stock glue VM built under the other flavor ([`crate::flavor`] switched the chain at a
+/// realm entry) on the screen it shows, once the glue manager is idle on `login` or `charselect`:
+/// the same rebuild a logout makes (`0x46a7b0`), so nothing mid-operation is lost, and the new VM
+/// runs the new chain's GlueXML and the new flavor's create catalog.
+pub(crate) fn rebuild_stale_glue_vm(world: &mut World) {
+    let Some(script) = world.get_non_send::<UiScript>() else {
+        return;
+    };
+    let flavor = world
+        .get_resource::<crate::flavor::ClientFlavor>()
+        .copied()
+        .unwrap_or_default();
+    if script.vm_kind() != benilla_ui::script::VmKind::Glue || script.flavor() == flavor.ui() {
+        return;
+    }
+    let Some(screen) = world
+        .get_resource::<super::glue_mgr::GlueMgr>()
+        .and_then(|m| m.idle_screen())
+    else {
+        return;
+    };
+    info!(
+        "ui_script: the glue VM predates the {flavor:?} chain; rebuilt on \"{}\"",
+        screen.key()
+    );
+    crate::cvars::fold_dying_vm_cvars(world);
+    install_glue_side_vm(world, screen);
 }
 
 /// Put the parked boot VM back into the world, if one is parked.

@@ -33,7 +33,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<R
         Some(address) => realmlist.set(&address),
         None => {
             warn!("cvar realmList: unusable realmlist '{}' ignored", ev.new);
-            realmlist.refused = Some(ev.new.clone());
         }
     }
 }
@@ -68,9 +67,6 @@ pub(crate) struct Realmlist {
     /// dialed the wrong server should say so on its face), but nothing — a saved `config.toml`
     /// value, a `SetCVar`, the page's `/config.json` — can move it, and nothing is written back.
     pinned_by_env: bool,
-    /// The last `realmList` value that was not an address, for the stock login screen's
-    /// realmlist dialog to reopen on ([`crate::ui_script::glue_mgr`]).
-    refused: Option<String>,
 }
 
 impl Default for Realmlist {
@@ -83,12 +79,10 @@ impl Default for Realmlist {
             Ok(host) if !host.trim().is_empty() => Realmlist {
                 address: host,
                 pinned_by_env: true,
-                refused: None,
             },
             _ => Realmlist {
                 address: default_realmlist(),
                 pinned_by_env: false,
-                refused: None,
             },
         }
     }
@@ -101,7 +95,6 @@ impl Realmlist {
         Realmlist {
             address: address.to_string(),
             pinned_by_env: false,
-            refused: None,
         }
     }
 
@@ -111,11 +104,6 @@ impl Realmlist {
 
     pub(crate) fn pinned_by_env(&self) -> bool {
         self.pinned_by_env
-    }
-
-    /// The last value refused as no address, taken once.
-    pub(crate) fn take_refused(&mut self) -> Option<String> {
-        self.refused.take()
     }
 
     /// Points at an already normalized `address`; ignored while pinned by the env.
@@ -286,7 +274,6 @@ mod tests {
         let mut r = Realmlist {
             address: "harness.example.org".into(),
             pinned_by_env: true,
-            refused: None,
         };
         r.set("somewhere.else.org");
         assert_eq!(r.address(), "harness.example.org");
@@ -298,7 +285,6 @@ mod tests {
         let mut r = Realmlist {
             address: DEFAULT_REALMLIST.into(),
             pinned_by_env: false,
-            refused: None,
         };
         r.set("logon.example.org");
         assert_eq!(r.address(), "logon.example.org");

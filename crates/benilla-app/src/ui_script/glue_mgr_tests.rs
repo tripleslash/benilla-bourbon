@@ -795,6 +795,7 @@ fn create_request(name: &str) -> benilla_ui::script::GlueCreateRequest {
         hair_style: 6,
         hair_color: 7,
         facial_hair: 0,
+        challenge_modes: 0,
     }
 }
 
@@ -1383,10 +1384,10 @@ fn the_status_dialogs_cancel_abandons_the_attempt() {
     assert_eq!(dialog(&app), None);
 }
 
-/// benilla's realmlist control on the stock screen: its button opens the stock dialog on the
-/// current address, and Okay writes `realmList`.
+/// benilla's realmlist readout on the stock screen: the address the next login dials, and no
+/// control to change it (this fork has no realmlist editor).
 #[test]
-fn the_realmlist_button_writes_realmlist() {
+fn the_realmlist_readout_shows_the_address() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _rx, _) = stock_app();
     {
@@ -1405,35 +1406,9 @@ fn the_realmlist_button_writes_realmlist() {
         crate::realmlist::DEFAULT_REALMLIST,
         "the readout shows the address the next login dials"
     );
-    assert_eq!(
-        vm(&app)
-            .eval::<String>("return BenillaRealmlistButton:GetParent():GetName()")
-            .unwrap(),
-        "AccountLoginUI"
-    );
-    vm(&app).run("BenillaRealmlistButton:Click()").unwrap();
-    assert_eq!(
-        vm(&app)
-            .eval::<(String, String)>("return GlueDialog.which, GlueDialogEditBox:GetText()")
-            .unwrap(),
-        (
-            "BENILLA_REALMLIST".to_string(),
-            crate::realmlist::DEFAULT_REALMLIST.to_string()
-        )
-    );
-    vm(&app)
-        .run("GlueDialogEditBox:SetText('logon.example.org') GlueDialogButton1:Click()")
-        .unwrap();
-    let changes = app
-        .world_mut()
-        .non_send_mut::<UiScript>()
-        .take_cvar_changes();
-    assert!(
-        changes
-            .iter()
-            .any(|(n, v)| n.eq_ignore_ascii_case("realmList") && v == "logon.example.org"),
-        "{changes:?}"
-    );
+    assert!(vm(&app)
+        .eval::<bool>("return BenillaRealmlistButton == nil")
+        .unwrap());
     assert!(vm(&app).errors().is_empty(), "{:?}", vm(&app).errors());
 }
 

@@ -4,7 +4,7 @@
 //! screen keeps only what logging in needs. Deviation (this fork): so is the Quit button, because
 //! in a browser tab closing the client is the browser's gesture; ESC, which the reference binds
 //! to that Quit, does nothing.
-//! The stock glue screens' own `QuitGame` (a native dev switch, [`crate::ui_script::glue`]) is
+//! The stock glue screens' own `QuitGame` ([`crate::ui_script::glue`], this fork's default) is
 //! heard and ignored for the same reason ([`GlueLogin::Quit`]).
 //!
 //! The credential policy drives the IO thread's pre-logon park: `WOW_USER` plus `WOW_PASS`
@@ -84,6 +84,10 @@ impl Plugin for LoginPlugin {
                         crate::ui_script::glue_mgr::drive_glue_mgr
                             .after(crate::ui_script::UiInput)
                             .after(crate::realm_select::RealmSelectSet)
+                            .run_if(crate::ui_script::glue::stock_glue),
+                        // After a flavor switch, the glue VM off the new chain.
+                        crate::ui_script::rebuild_stale_glue_vm
+                            .after(crate::ui_script::glue_mgr::drive_glue_mgr)
                             .run_if(crate::ui_script::glue::stock_glue),
                         // Off the roster and the screen the manager and the tick just moved.
                         crate::ui_script::glue_scene::feed_stock_glue_preview

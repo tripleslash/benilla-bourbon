@@ -162,6 +162,9 @@ pub struct GlueCreateRequest {
     pub hair_style: u8,
     pub hair_color: u8,
     pub facial_hair: u8,
+    /// Turtle WoW's challenge modes, the bits `SetSelectedChallengeModes` last stored; 0 on a
+    /// 1.12.1 VM, which has no such verb.
+    pub challenge_modes: u32,
 }
 
 /// The customization indices, by customization id less one: skin, face, hair style, hair colour,
@@ -349,6 +352,8 @@ pub(crate) struct GlueCreate {
     standing: bool,
     names: NameGen,
     words: Words,
+    /// Turtle WoW's challenge-mode bits (`ChallengeList.lua`'s `SELECTED_IDS`).
+    challenge_modes: u32,
 }
 
 impl Default for GlueCreate {
@@ -364,6 +369,7 @@ impl Default for GlueCreate {
             standing: false,
             names: NameGen::default(),
             words: Words::default(),
+            challenge_modes: 0,
         }
     }
 }
@@ -656,6 +662,26 @@ fn text(lua: &Lua, s: Option<&str>) -> mlua::Result<Value> {
         Some(s) => lua.create_string(s).map(Value::String),
         None => Ok(Value::Nil),
     }
+}
+
+/// Register the challenge-mode pair in a Turtle WoW glue VM, whose `ChallengeList.lua` stores the
+/// picked modes' bits with `SetSelectedChallengeModes(n)` and reads them back with
+/// `GetSelectedChallengeModes()`; `CreateCharacter` sends them as the request's challenge mask.
+pub(super) fn install_turtle(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    g.set(
+        "SetSelectedChallengeModes",
+        lua.create_function(|lua, bits: Value| {
+            let bits = lua.coerce_number(bits).ok().flatten().unwrap_or(0.0);
+            model(lua).glue.create.challenge_modes = bits as u32;
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "GetSelectedChallengeModes",
+        lua.create_function(|lua, ()| Ok(model(lua).glue.create.challenge_modes))?,
+    )?;
+    Ok(())
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -1018,6 +1044,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     hair_style: obj.dials[HAIR_STYLE] as u8,
                     hair_color: obj.dials[HAIR_COLOR] as u8,
                     facial_hair: obj.dials[FACIAL_HAIR] as u8,
+                    challenge_modes: c.challenge_modes,
                 });
                 (status, request)
             };
