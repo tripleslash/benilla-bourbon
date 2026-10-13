@@ -7,9 +7,8 @@
 # repository the bytes the compiler sees.
 *.rgba binary
 
-# Shell scripts are LF in every working copy. Trunk's post-build hook runs `bash` by bare name,
-# and on Windows that resolves System32's WSL bash before any PATH entry, which reads a CRLF
-# script's `set -euo pipefail` as the option `pipefail` and fails the whole web build.
+# Shell scripts are LF in every working copy. On Windows a bare `bash` resolves System32's WSL bash
+# before any PATH entry, which reads a CRLF script's `set -euo pipefail` as the option `pipefail\r`.
 *.sh text eol=lf
 
 # The bundled third-party addons are vendored as their authors ship them, byte for byte: the

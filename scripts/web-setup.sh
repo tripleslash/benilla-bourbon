@@ -36,7 +36,8 @@ rustup target add wasm32-unknown-unknown
 
 echo "== trunk"
 if command -v trunk >/dev/null; then
-  echo "trunk $(trunk --version | awk '{print $2}') already installed"
+  trunk_version="$(trunk --version)"
+  echo "trunk ${trunk_version#* } already installed"
 else
   cargo install trunk --locked
 fi

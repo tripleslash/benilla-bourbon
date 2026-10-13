@@ -38,7 +38,7 @@ tree_key() {
     rm -f "$tmpidx"
     [ -n "$t" ] || return 1
     printf '%s|%s|%s' "$t" "$(rustc -V 2>/dev/null)" \
-        "$(shasum "$root/scripts/gates.sh" 2>/dev/null | cut -d' ' -f1)"
+        "$(git hash-object "$root/scripts/gates.sh" 2>/dev/null)"
 }
 resolve_wow() { cargo run -q -p benilla-formats --example where 2>/dev/null || true; }
 # A delta only under docs/ or in top-level *.md files keeps the stamped verdict, since no gate
@@ -131,11 +131,11 @@ run test-no-install env -u BENILLA_REQUIRE_DATA WOW_DATA= cargo test --no-fail-f
 
 # doc-links: refuses a doc link to a `crate::`, `super::`, `self::` or `Self::` path whose leaf is
 # declared nowhere in the workspace. Narrow on purpose: every other unresolved link is a convention.
-run doc-links scripts/doc-links.py
+run doc-links scripts/doc-links.sh
 
 # pass-span-lint: refuses a second `pass_span` on a render pass whose span is still open, a fatal
 # wgpu validation error on Vulkan and a silent no-op on Metal and DX12, which no macOS run sees.
-run pass-span-lint scripts/pass-span-lint.py
+run pass-span-lint scripts/pass-span-lint.sh
 
 # player-tests: the player build, `benilla-app` without `dev`, which compiles out the debug panel,
 # perf HUD, inspector, capture harness and probes, so it fails when any other code names one of

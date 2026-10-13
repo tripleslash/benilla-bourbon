@@ -121,24 +121,8 @@ if [ -z "${WASM}" ]; then
   exit 1
 fi
 
-# Probe by RUNNING it, not by `command -v`. Windows ships an App Execution Alias called `python3`
-# that exists on PATH, exits 9009 and prints an advert for the Microsoft Store — so a `command -v`
-# probe finds an interpreter that cannot interpret, and the verification below silently reports
-# three failures on a module that is fine.
-PY=""
-for cand in python3 python py; do
-  if command -v "${cand}" >/dev/null 2>&1 && "${cand}" -c "pass" >/dev/null 2>&1; then
-    PY="${cand}"
-    break
-  fi
-done
-if [ -z "${PY}" ]; then
-  echo "== verify: SKIPPED (no working python on PATH; run scripts/wasm-memory.py by hand)"
-  exit 0
-fi
-
 echo "== verify: $(basename "${WASM}") ($(du -h "${WASM}" | cut -f1))"
-REPORT=$("${PY}" scripts/wasm-memory.py "${WASM}")
+REPORT=$(scripts/wasm-memory.sh "${WASM}")
 echo "${REPORT}" | sed 's/^/   /'
 
 # All three have to hold. Each is a different way to end up single-threaded without an error.
@@ -187,7 +171,9 @@ if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
   fi
   "${WBG}" --target web --out-dir web/dist --out-name wenilla --no-demangle "${ARTIFACT}"
   # Same rewrite `stage-packs.sh` does, for the same reason — workers have no import map.
-  perl -pi -e 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wenilla.js
+  sed 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wenilla.js > web/dist/wenilla.js.tmp
+  cat web/dist/wenilla.js.tmp > web/dist/wenilla.js
+  rm -f web/dist/wenilla.js.tmp
   echo "   web/dist now carries the NAMED module ($(du -h web/dist/wenilla_bg.wasm | cut -f1)); web/site still has the optimized one."
 fi
 
