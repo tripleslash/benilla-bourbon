@@ -213,6 +213,11 @@ fn pose_period(dist: f32) -> u32 {
     }
 }
 
+/// A rig posed every frame whatever its distance: a UI model pane's stage (the character screen,
+/// the character pane, every `PlayerModel`/`DressUpModel`), which no world camera frames.
+#[derive(Component, Default)]
+pub struct PoseEveryFrame;
+
 fn anim_lod_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| crate::launch_env::var("WOW_ANIM_LOD").as_deref() != Some("0"))
@@ -221,7 +226,13 @@ fn anim_lod_enabled() -> bool {
 /// Pose every live rig where `animate_targets` runs, after `advance_animations`.
 fn evaluate_rig_poses(
     mut rigs: Query<
-        (Entity, &AnimationPlayer, &ModelAnimations, &mut RigPose),
+        (
+            Entity,
+            &AnimationPlayer,
+            &ModelAnimations,
+            &mut RigPose,
+            Has<PoseEveryFrame>,
+        ),
         Without<AnimParked>,
     >,
     roots: Query<&GlobalTransform>,
@@ -236,9 +247,9 @@ fn evaluate_rig_poses(
     let frame = frame.map_or(0, |f| f.0);
     // Parallel: a rig reads shared clips and writes only its own pose.
     rigs.par_iter_mut()
-        .for_each(|(holder, player, anims, mut rig)| {
+        .for_each(|(holder, player, anims, mut rig, every_frame)| {
             // A far rig is posed on its own staggered slot of every `pose_period` frames.
-            if let (Some(eye), Ok(root)) = (eye, roots.get(rig.joints_root)) {
+            if let (Some(eye), Ok(root), false) = (eye, roots.get(rig.joints_root), every_frame) {
                 let period = pose_period(root.translation().distance(eye));
                 if period > 1 && (frame.wrapping_add(holder.index_u32())) % period != 0 {
                     return;

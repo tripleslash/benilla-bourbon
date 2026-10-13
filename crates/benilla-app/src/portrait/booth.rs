@@ -216,6 +216,7 @@ pub(super) fn clear_booth_rig(commands: &mut Commands, root: Entity) {
         benilla_world::rig_anim::RigPose,
         benilla_world::rig_anim::AnimParked,
         super::StageRig,
+        benilla_world::rig_anim::PoseEveryFrame,
         benilla_world::rig_palette::RigSkin,
     )>();
 }
