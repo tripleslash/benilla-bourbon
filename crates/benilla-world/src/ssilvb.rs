@@ -202,7 +202,11 @@ fn arm_depth_binding(
 
 // ---------------------------------------------------------------- render world
 
-/// The two layouts and the four pipelines, **per MSAA sample count**.
+/// The two layouts and the four pipelines, **per MSAA sample count and per AO-only state**.
+///
+/// **AO-only** (`gi == 0`) is a compile-time variant, `SSILVB_AO_ONLY`: the emitter-colour path is
+/// compiled out of the gather and the sweep takes fewer slices and steps. The variant is built the
+/// first frame the state is seen, so crossing the indirect slider through zero compiles once.
 ///
 /// **Why two layouts.** Every pass but the last reads (view, depth, source, params); the composite
 /// reads only the gathered term and the params, and needs neither the view nor the depth. One WGSL
@@ -217,7 +221,7 @@ fn arm_depth_binding(
 #[derive(Resource)]
 struct SsilvbPipelines {
     shader: Handle<Shader>,
-    variants: bevy::platform::collections::HashMap<u32, SsilvbVariant>,
+    variants: bevy::platform::collections::HashMap<(u32, bool), SsilvbVariant>,
 }
 
 struct SsilvbVariant {
@@ -249,17 +253,12 @@ fn specialize_pipelines(
         return;
     }
     for msaa in &views {
-        let samples = msaa.samples();
-        if pipelines.variants.contains_key(&samples) {
+        let key = (msaa.samples(), lighting.gi <= 0.0);
+        if pipelines.variants.contains_key(&key) {
             continue;
         }
-        let variant = build_variant(
-            &pipelines.shader,
-            &fullscreen_shader,
-            &pipeline_cache,
-            samples,
-        );
-        pipelines.variants.insert(samples, variant);
+        let variant = build_variant(&pipelines.shader, &fullscreen_shader, &pipeline_cache, key);
+        pipelines.variants.insert(key, variant);
     }
 }
 
@@ -267,7 +266,7 @@ fn build_variant(
     shader: &Handle<Shader>,
     fullscreen_shader: &FullscreenShader,
     pipeline_cache: &PipelineCache,
-    samples: u32,
+    (samples, ao_only): (u32, bool),
 ) -> SsilvbVariant {
     let ms = samples > 1;
     let params = || uniform_buffer_sized(false, Some(std::num::NonZero::new(PARAMS_SIZE).unwrap()));
@@ -295,11 +294,13 @@ fn build_variant(
         "ssilvb_composite_layout",
         &BindGroupLayoutEntries::with_indices(ShaderStages::FRAGMENT, ((2, term()), (3, params()))),
     );
-    let defs: Vec<ShaderDefVal> = if ms {
-        vec!["SSILVB_MSAA".into()]
-    } else {
-        vec![]
-    };
+    let mut defs: Vec<ShaderDefVal> = Vec::new();
+    if ms {
+        defs.push("SSILVB_MSAA".into());
+    }
+    if ao_only {
+        defs.push("SSILVB_AO_ONLY".into());
+    }
     let pipeline = |label: &'static str,
                     layout: &BindGroupLayoutDescriptor,
                     entry: &'static str,
@@ -495,7 +496,10 @@ pub(crate) fn ssilvb_pass(
             return;
         }
         let pipelines = world.resource::<SsilvbPipelines>();
-        let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
+        let Some(variant) = pipelines
+            .variants
+            .get(&(msaa.samples(), lighting.gi <= 0.0))
+        else {
             return; // `specialize_pipelines` builds it this frame; gathered next
         };
         let pipeline_cache = world.resource::<PipelineCache>();

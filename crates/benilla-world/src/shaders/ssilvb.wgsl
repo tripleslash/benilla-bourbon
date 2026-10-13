@@ -85,14 +85,27 @@ const HALF_PI: f32 = 1.57079632679490;
 /// a free parameter: it is u32, the widest lane countOneBits resolves in one instruction.
 const SECTORS: u32 = 32u;
 
+// `SSILVB_AO_ONLY` is the variant built while the indirect slider is zero: no bounce is gathered, so
+// the emitter-colour path is compiled out and the sweep drops to the tap budget an occlusion-only
+// term needs (the bitmask stays exact at low counts; the blur hides the extra noise).
+
 /// Directions swept per pixel. Each slice is an independent horizon sweep, so this is the dominant
 /// cost multiplier; 3, with a per-pixel rotation, is where the blur below can still hide what noise
-/// is left.
+/// is left. The AO-only variant takes 2.
+#ifdef SSILVB_AO_ONLY
+const SLICES: i32 = 2;
+#else
 const SLICES: i32 = 3;
+#endif
 
 /// Samples per side, per slice. Spaced quadratically, so the near field — where contact shadows
-/// live and where the eye actually reads occlusion — takes most of them.
+/// live and where the eye actually reads occlusion — takes most of them. The AO-only variant
+/// takes 4.
+#ifdef SSILVB_AO_ONLY
+const STEPS: i32 = 4;
+#else
 const STEPS: i32 = 8;
+#endif
 
 /// The closest a sample may be taken, in pixels. Below about a texel the reconstructed normal and
 /// the sample position come out of the same depth quad and the pixel shadows itself.
@@ -272,7 +285,9 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // cheapest way to get two independent-looking sequences out of one hash.
     let noise_step = fract(noise + 0.6180339887);
 
+#ifndef SSILVB_AO_ONLY
     let want_gi = params.strength.y > 0.0;
+#endif
     var visibility = 0.0;
     var radiance = vec3<f32>(0.0);
 
@@ -354,6 +369,7 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                 // back face sees only that back, which the colour buffer never holds. Bouncing the
                 // lit front face instead draws every object's colour as a halo onto what stands
                 // behind it. It still shuts its sectors: the occlusion is real, the colour is not.
+#ifndef SSILVB_AO_ONLY
                 let behind_slab = sp.z - p.z > thickness;
                 if (want_gi && fresh != 0u && !behind_slab) {
                     let n_dot_l = saturate(dot(n, to_sample));
@@ -377,6 +393,7 @@ fn fs_gather(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                         }
                     }
                 }
+#endif
             }
         }
         visibility += 1.0 - f32(countOneBits(mask)) / f32(SECTORS);
