@@ -100,8 +100,6 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if let Some(overlaid) = fixture::read(req) {
         return overlaid;
     }
-    // Native only: a page has no install folder to look in, only the chain it is served.
-    #[cfg(not(target_arch = "wasm32"))]
     if let Some(bytes) = read_loose(req) {
         return Some(bytes);
     }
@@ -152,6 +150,38 @@ fn read_loose(req: &str) -> Option<Vec<u8>> {
             .unwrap_or_default()
     });
     std::fs::read(index.get(&req.to_ascii_lowercase())?).ok()
+}
+
+/// [`read_loose`] on the page, which has no install folder: the site serves the install's loose
+/// files beside each container, lowercased, at `<container>/loose/<name>` (`Credits.html`,
+/// `eula.html`, `tos.html`), the Turtle WoW layer's ahead of the corpus while it is mounted. Each
+/// name is fetched once per layer; a miss is remembered too.
+#[cfg(target_arch = "wasm32")]
+fn read_loose(req: &str) -> Option<Vec<u8>> {
+    use std::collections::HashMap;
+    if req.is_empty() || req.contains(['\\', '/']) || req.contains("..") {
+        return None;
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<(bool, String), Option<Vec<u8>>>> =
+            Default::default();
+    }
+    let name = req.to_ascii_lowercase();
+    let turtle = benilla_formats::layers::turtle_mounted();
+    let key = (turtle, name.clone());
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let mut bases = Vec::new();
+    if turtle {
+        bases.push(benilla_formats::web::turtle_data_base());
+    }
+    bases.push(benilla_formats::web::data_base());
+    let bytes = bases
+        .iter()
+        .find_map(|base| benilla_formats::web::fetch_sync(&format!("{base}/loose/{name}")).ok());
+    CACHE.with(|c| c.borrow_mut().insert(key, bytes.clone()));
+    bytes
 }
 
 /// The files directly in `dirs` by lowercased name, read once; an earlier directory wins a name

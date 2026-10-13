@@ -108,6 +108,22 @@ done
 [ -d "${PACKS_TURTLE}" ] || echo "note: no ${PACKS_TURTLE} — staging without the Turtle WoW 1.18.1 layer" >&2
 [ -d "${PACKS_REFORGED}" ] || echo "note: no ${PACKS_REFORGED} — staging without the reforged art layer" >&2
 
+# The install's loose files the interface reads by bare name (`Credits.html`, `eula.html`,
+# `tos.html`, off `Data\`; `reference_ui::read_loose`), lowercased into `<container>/loose/`:
+# the archives do not hold them, so the packs do not either. Read from the installs named by
+# LOOSE_DATA (the 1.12.1 `Data`) and LOOSE_DATA_TURTLE (Turtle's), never written to.
+stage_loose() {
+  [ -n "$1" ] && [ -d "$1" ] && [ -d "$2" ] || return 0
+  mkdir -p "$2/loose"
+  for f in "$1"/*.html; do
+    [ -f "$f" ] || continue
+    cp "$f" "$2/loose/$(basename "$f" | tr '[:upper:]' '[:lower:]')"
+  done
+  echo "  staged $(ls "$2/loose" | wc -l) loose file(s) from $1 into $2/loose"
+}
+stage_loose "${LOOSE_DATA:-}" "${PACKS}"
+stage_loose "${LOOSE_DATA_TURTLE:-}" "${PACKS_TURTLE}"
+
 mkdir -p "${SITE}"
 # Everything EXCEPT data/. Deleting a junction or symlink never touches its target, but leaving it
 # in place also skips re-creating it, and on Windows that is one fewer `cmd //c` per build.

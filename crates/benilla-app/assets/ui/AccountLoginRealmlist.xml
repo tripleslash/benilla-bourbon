@@ -1,12 +1,31 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!-- benilla's layer over the stock login screen, as this fork has it: no Quit button, since in
          a browser tab closing the client is the browser's gesture (the host ignores QuitGame
-         too), and the realmlist as a readout alone, the address the next login dials, over the
-         Cinematics button; this fork offers no realmlist editor. The host keeps
-         BENILLA_REALMLIST. -->
+         too), none of the web-link buttons, and the realmlist as a readout alone, the address the
+         next login dials, over the Cinematics button; this fork offers no realmlist editor. The
+         host keeps BENILLA_REALMLIST. -->
     <Script>
-        AccountLoginExitButton:Hide();
-        AccountLoginExitButton.Show = AccountLoginExitButton.Hide;
+        -- This fork's login screen keeps logging in, Credits and Cinematics: Quit, the stock
+        -- screen's Terms of Use, Community Site and Manage Account, and Turtle WoW's Reddit,
+        -- Discord, forum, database, armory and website buttons are hidden for good.
+        for _, name in ipairs({
+            "AccountLoginExitButton", "AccountLoginTOSButton", "AccountLoginCommunityButton",
+            "AccountLoginManageAccountButton", "AccountLoginTurtleReddit",
+            "AccountLoginTurtleDiscord", "AccountLoginTurtleCommunityForum",
+            "AccountLoginTurtleKnowledgeDatabase", "AccountLoginTurtleArmory",
+            "AccountLoginTurtleWebsite",
+        }) do
+            local button = getglobal(name);
+            if ( button ) then
+                button:Hide();
+                button.Show = button.Hide;
+            end
+        end
+        -- The stock Credits button stands on Terms of Use; it takes that place, as Turtle's does.
+        if ( AccountLoginTOSButton ) then
+            AccountLoginCreditsButton:ClearAllPoints();
+            AccountLoginCreditsButton:SetPoint("BOTTOM", "AccountLoginExitButton", "TOP", 0, 80);
+        end
     </Script>
     <Frame name="BenillaRealmlistReadout" parent="AccountLoginUI">
         <Size>

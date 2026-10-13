@@ -127,8 +127,8 @@ fn escape_on_a_playing_movie_returns_to_login_on_the_key_up() {
     assert_eq!(s.take_errors(), Vec::<String>::new());
 }
 
-/// This fork's login layer: the stock Quit button is gone and stays gone through the screen's own
-/// `OnShow`.
+/// This fork's login layer: the stock Quit button and the web-link buttons are gone and stay gone
+/// through the screen's own `OnShow`.
 #[test]
 fn the_stock_login_shows_no_quit_button() {
     let _ = benilla_formats::wow_data_or_skip!();
@@ -140,6 +140,21 @@ fn the_stock_login_shows_no_quit_button() {
     s.run("AccountLoginExitButton:Show()").unwrap();
     assert!(!s
         .eval::<bool>("return AccountLoginExitButton:IsShown() == 1")
+        .unwrap());
+    // Nor the stock screen's web links; Credits takes the Terms of Use button's place.
+    for name in [
+        "AccountLoginTOSButton",
+        "AccountLoginCommunityButton",
+        "AccountLoginManageAccountButton",
+    ] {
+        assert!(
+            !s.eval::<bool>(&format!("return {name} ~= nil and {name}:IsShown() == 1"))
+                .unwrap(),
+            "{name}"
+        );
+    }
+    assert!(s
+        .eval::<bool>("return AccountLoginCreditsButton:IsShown() == 1")
         .unwrap());
     assert_eq!(s.take_errors(), Vec::<String>::new());
 }
