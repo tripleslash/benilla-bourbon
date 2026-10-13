@@ -174,8 +174,10 @@ fn tick_clouds(
                     .expect("cpu-side cloud image")
                     .copy_from_slice(cov.kernel.rgba().as_flattened());
                 // Touch the material: a modified Image gets a new GPU texture, and a stale bind
-                // group keeps sampling the first upload.
-                materials.get_mut(&layer.material);
+                // group keeps sampling the first upload. `into_inner`: a bare `AssetMut` emits nothing.
+                if let Some(material) = materials.get_mut(&layer.material) {
+                    material.into_inner();
+                }
             }
         }
     }

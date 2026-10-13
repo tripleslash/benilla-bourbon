@@ -421,13 +421,18 @@ fn sync_model_pipelines(
     if first && !modern {
         return;
     }
+    // `into_inner`: a bare `AssetMut` emits no `Modified`, so nothing would re-specialize.
     let ids: Vec<_> = materials.ids().collect();
     for id in ids {
-        let _ = materials.get_mut(id);
+        if let Some(material) = materials.get_mut(id) {
+            material.into_inner();
+        }
     }
     let terrain_ids: Vec<_> = terrain.ids().collect();
     for id in terrain_ids {
-        let _ = terrain.get_mut(id);
+        if let Some(material) = terrain.get_mut(id) {
+            material.into_inner();
+        }
     }
 }
 

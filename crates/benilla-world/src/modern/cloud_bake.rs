@@ -512,7 +512,10 @@ fn upload(
         .expect("cpu-side cloud image")
         .copy_from_slice(bake.image().as_flattened());
     // A modified Image gets a new GPU texture; touch the material so its bind group follows.
-    materials.get_mut(&layer.material);
+    // `into_inner`: a bare `AssetMut` emits nothing.
+    if let Some(material) = materials.get_mut(&layer.material) {
+        material.into_inner();
+    }
 }
 
 #[cfg(test)]

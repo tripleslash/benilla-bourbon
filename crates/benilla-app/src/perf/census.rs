@@ -493,8 +493,11 @@ pub(super) fn mesh_touch(
             bevy::asset::RenderAssetUsages::default(),
         ))
     });
-    // `get_mut` writes `AssetEvent::Modified`, bumping the tick every `AssetChanged` filter reads.
-    let _ = meshes.get_mut(&*handle);
+    // A mutably borrowed `AssetMut` writes `AssetEvent::Modified`, bumping the tick every
+    // `AssetChanged` filter reads; dropped bare it writes nothing.
+    if let Some(mesh) = meshes.get_mut(&*handle) {
+        mesh.into_inner();
+    }
 }
 
 /// When [`mesh_touch`] starts touching (seconds of `Time<Real>`).
