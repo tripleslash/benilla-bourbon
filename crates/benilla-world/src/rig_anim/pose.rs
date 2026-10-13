@@ -223,18 +223,18 @@ fn anim_lod_enabled() -> bool {
     *ON.get_or_init(|| crate::launch_env::var("WOW_ANIM_LOD").as_deref() != Some("0"))
 }
 
+/// What `evaluate_rig_poses` reads and writes per rig.
+type RigPoseData = (
+    Entity,
+    &'static AnimationPlayer,
+    &'static ModelAnimations,
+    &'static mut RigPose,
+    Has<PoseEveryFrame>,
+);
+
 /// Pose every live rig where `animate_targets` runs, after `advance_animations`.
 fn evaluate_rig_poses(
-    mut rigs: Query<
-        (
-            Entity,
-            &AnimationPlayer,
-            &ModelAnimations,
-            &mut RigPose,
-            Has<PoseEveryFrame>,
-        ),
-        Without<AnimParked>,
-    >,
+    mut rigs: Query<RigPoseData, Without<AnimParked>>,
     roots: Query<&GlobalTransform>,
     cams: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
     frame: Option<Res<bevy::diagnostic::FrameCount>>,
