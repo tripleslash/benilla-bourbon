@@ -124,6 +124,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             clear(lua, h);
             append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
             set_shown(lua, h, true);
+            super::measure_lines(lua, h);
             Ok(())
         })?,
     )?;

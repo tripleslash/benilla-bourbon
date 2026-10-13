@@ -371,6 +371,8 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
         visibility::base_hide(lua, h);
     } else {
         visibility::set_shown(lua, h, true);
+        // A content setter sizes the plate in its own call, as `Show` does.
+        measure_lines(lua, h);
     }
 }
 
@@ -390,10 +392,42 @@ pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
     };
     if live {
         visibility::base_show(lua, h);
+        measure_lines(lua, h);
     } else {
         visibility::set_shown_bit(lua, h, false);
         visibility::hide(lua, h);
     }
+}
+
+/// Measure a shown plate's lines and settle its size in the call that showed it: addon code reads
+/// `GetWidth` and `GetLeft` straight after `Show` or a content setter, with no frame between. A
+/// no-op without a host font engine, and for a line whose measure is current.
+pub(super) fn measure_lines(lua: &Lua, h: FrameHandle) {
+    let lines: Vec<crate::widget::RegionHandle> = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        match tip_mut(&mut model, h) {
+            Ok(t) => {
+                let n = t.num_lines;
+                t.left_lines
+                    .iter()
+                    .take(n)
+                    .chain(t.right_lines.iter().take(n))
+                    .copied()
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+    for line in lines {
+        super::measure::ensure_measured(lua, line);
+    }
+    // The plate's size is the layout's to write from those measures; pay it now, so the size a
+    // script reads next is this content's and not the content it replaced.
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        owe_relayout(&mut model, h);
+    }
+    crate::script::object::settle_frame(lua, h);
 }
 
 /// The tooltip's hide (`0x530a60`, slot `+0x84`), however the hide comes, its parent's included:
