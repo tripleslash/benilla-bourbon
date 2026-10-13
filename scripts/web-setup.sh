@@ -73,7 +73,8 @@ cat <<'EOF'
 
 ready. The build is now:
 
-  WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # -> web/dist, then web/site
+  WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # -> web/dist
+  scripts/stage-packs.sh                                  # -> web/site
 
 or, for the build with worker threads (nightly + -Zbuild-std + shared memory; same output dirs,
 and it verifies the emitted module really came out threaded):

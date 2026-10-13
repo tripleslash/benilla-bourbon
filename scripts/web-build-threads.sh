@@ -6,7 +6,8 @@
 # only difference is the environment, and this script exists so that environment has one home
 # instead of living in a README paragraph that drifts.
 #
-# `scripts/web-build-threads.ps1` is the same build for Windows PowerShell 5.1; change both together.
+# `scripts/web-build-threads.ps1` (Windows PowerShell 5.1) and `scripts/web-build-threads.py` are the
+# same build; the three change together.
 #
 # What each variable is for:
 #
@@ -106,6 +107,9 @@ fi
 
 echo "== trunk build --release"
 trunk build --release
+
+echo "== stage-packs"
+scripts/stage-packs.sh
 
 # ---------------------------------------------------------------------------------------------
 # Verify the module actually came out threaded. Reads the build's own output, never the flags that

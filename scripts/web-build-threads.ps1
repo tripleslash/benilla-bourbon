@@ -1,10 +1,7 @@
 #Requires -Version 5.1
 #
 # web-build-threads.ps1 - the browser build WITH THREADS, for Windows PowerShell 5.1 and later.
-#
-# The same build as `scripts/web-build-threads.sh`, step for step; that script's header says why
-# each variable and linker flag is there, and the two change together. Trunk's post_build hook
-# still runs `bash scripts/stage-packs.sh`, so a `bash` on PATH (Git for Windows) is still needed.
+# The PowerShell twin of scripts/web-build-threads.sh; that header holds the why, and the twins change together.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\web-build-threads.ps1
 #
@@ -45,10 +42,7 @@ $env:RUSTFLAGS = "$env:RUSTFLAGS $threadFlags"
 
 Write-Host '== toolchain'
 rustc -vV | ForEach-Object { Write-Host "   $_" }
-if ($LASTEXITCODE -ne 0) {
-    [Console]::Error.WriteLine("rustc failed for toolchain $env:RUSTUP_TOOLCHAIN")
-    exit 1
-}
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "   RUSTFLAGS=$env:RUSTFLAGS"
 Write-Host "   CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR"
 
@@ -64,6 +58,10 @@ Write-Host '== trunk build --release'
 trunk build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host '== stage-packs'
+& (Join-Path $root 'scripts\stage-packs.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # ---------------------------------------------------------------------------------------------
 # Verify the module actually came out threaded, from the build's own output.
 # ---------------------------------------------------------------------------------------------
@@ -74,22 +72,8 @@ if ($null -eq $wasm) {
     exit 1
 }
 
-# Probe by running it: Windows' `python3` App Execution Alias is on PATH and cannot interpret.
-$py = $null
-foreach ($cand in @('python3', 'python', 'py')) {
-    if (-not (Get-Command $cand -ErrorAction SilentlyContinue)) { continue }
-    try {
-        & $cand -c 'pass' *> $null
-        if ($LASTEXITCODE -eq 0) { $py = $cand; break }
-    } catch { }
-}
-if ($null -eq $py) {
-    Write-Host '== verify: SKIPPED (no working python on PATH; run scripts/wasm-memory.py by hand)'
-    exit 0
-}
-
 Write-Host ('== verify: {0} ({1:N0} MB)' -f $wasm.Name, ($wasm.Length / 1MB))
-$report = (& $py scripts/wasm-memory.py $wasm.FullName) -join "`n"
+$report = (& (Join-Path $root 'scripts\wasm-memory.ps1') $wasm.FullName) -join "`n"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $report -split "`n" | ForEach-Object { Write-Host "   $_" }
 
@@ -137,11 +121,12 @@ if ($env:BENILLA_KEEP_NAMES -eq '1') {
     }
     & $wbg --target web --out-dir web/dist --out-name wenilla --no-demangle $artifact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Same rewrite `stage-packs.sh` does: workers have no import map.
+    # Same rewrite `stage-packs.ps1` does: workers have no import map. Latin-1 keeps every other byte.
     $glue = Join-Path $root 'web\dist\wenilla.js'
-    $text = [IO.File]::ReadAllText($glue)
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $text = $latin1.GetString([IO.File]::ReadAllBytes($glue))
     $text = $text.Replace('from "wasi_snapshot_preview1"', 'from "./wasi_stubs.js"')
-    [IO.File]::WriteAllText($glue, $text, (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllBytes($glue, $latin1.GetBytes($text))
     $named = Get-Item -LiteralPath (Join-Path $root 'web\dist\wenilla_bg.wasm')
     Write-Host ('   web/dist now carries the NAMED module ({0:N0} MB); web/site still has the optimized one.' -f ($named.Length / 1MB))
 }

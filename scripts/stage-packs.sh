@@ -2,8 +2,8 @@
 #
 # stage-packs.sh — assemble web/site/, the directory a static host serves.
 #
-# Runs as Trunk's post_build hook (see Trunk.toml); also runnable on its own after a container
-# rebuild. Three directories, and the split is forced:
+# Run by the build scripts once `trunk build` returns (see Trunk.toml); also runnable on its own after
+# a container rebuild. Three directories, and the split is forced:
 #
 #   web/dist/    Trunk's output. CLEARED ON EVERY BUILD — which is why 3.3 GiB of container
 #                cannot live here, and why the site root is not simply `dist`.
@@ -89,7 +89,7 @@ echo "staging from ${DIST}"
 #
 # Rewriting the specifier to the relative path the import map pointed at makes the page and the
 # worker resolve it the same way, through the ordinary module resolver. `index.html` keeps its
-# import map as a fallback for anyone driving cargo + wasm-bindgen by hand without this hook.
+# import map as a fallback for anyone driving cargo + wasm-bindgen by hand without this script.
 #
 # **Here, and not in `scripts/web-build-threads.sh`.** This must happen before the `cp -l` below:
 # the site is HARDLINKED to these files, `sed -i` replaces an inode rather than editing one, and

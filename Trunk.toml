@@ -3,8 +3,8 @@
 # The script did the same five things by hand — cargo build, wasm-bindgen, wasm-opt, copy the page
 # files, precompress — and each was a version pin or a flag list maintained in a comment. Trunk owns
 # the tool versions (and downloads them itself, so `scripts/web-setup.sh` no longer installs
-# wasm-bindgen-cli), reads the build's shape out of `web/index.html`, and gives the pack staging a
-# post-build hook to hang off.
+# wasm-bindgen-cli) and reads the build's shape out of `web/index.html`; the pack staging runs after
+# it, not as a hook (see the end of this file).
 #
 # What Trunk does NOT own is `web/packs/` — 3.3 GiB of container that must not be rebuilt, copied,
 # or (Trunk clears `dist/` on every build) deleted. Hence the three-directory layout that
@@ -55,13 +55,7 @@ wasm_opt = "version_130"
 [serve]
 headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
 
-# Assemble `web/site/` — the directory a static host serves — from this build plus the
-# container. Never the other way round: `dist/` is cleared per build and the container is not.
-#
-# The hook does NOT read `web/dist`: post_build runs before Trunk moves its staging directory into
-# place, so `dist/` is still empty at that point (and 0.21.14 exports no `$TRUNK_STAGING_DIR` to
-# name it with). The script resolves the staging directory itself; see its header.
-[[hooks]]
-stage = "post_build"
-command = "bash"
-command_arguments = ["scripts/stage-packs.sh"]
+# Assemble `web/site/` - the directory a static host serves - from this build plus the
+# container: not a Trunk hook, since a hook names one interpreter for every caller. Each build
+# script stages in its own language once `trunk build` returns (`scripts/stage-packs.{sh,ps1,py}`),
+# and a bare `trunk build` is followed by one of those by hand.

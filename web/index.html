@@ -141,7 +141,7 @@
      died at module resolution with an error event carrying no message. `scripts/stage-packs.sh`
      now rewrites the specifier to `./wasi_stubs.js` in the built glue, which the page and a
      worker resolve identically. Kept for a build driven by cargo + wasm-bindgen by hand, with
-     no Trunk hook to do the rewrite. -->
+     no stage-packs run to do the rewrite. -->
 <script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
 <script>
   // WGSL compile errors are otherwise invisible: wgpu's browser backend never asks the module for

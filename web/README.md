@@ -29,7 +29,8 @@ behind a seam the native build already had:
 
 ```bash
 scripts/web-setup.sh                                    # once
-WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist, then web/site
+WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist
+scripts/stage-packs.sh                                  # → web/site
 ```
 
 The same build **with worker threads** — nightly, `-Zbuild-std`, shared memory — is one script, and
@@ -160,7 +161,7 @@ shape is the gateway below, which serves no files at all.
 ## Staging to a static host
 
 The hosted tree is static assets and **no Worker script** — no invocations, no request billing.
-`scripts/stage-packs.sh` (Trunk's post-build hook) assembles `web/site/` out of the two things
+`scripts/stage-packs.sh` (run after `trunk build`; the build scripts run it themselves) assembles `web/site/` out of the two things
 that must not be in the same directory:
 
 ```

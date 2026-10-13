@@ -19,8 +19,9 @@ wasm with the wasi-sdk sysroot. WebGPU is required for the world.
 
 ```bash
 scripts/web-setup.sh                                   # once: wasm target, Trunk, wasi-sdk (no sudo)
-WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist/, then web/site/
-scripts/web-build-threads.sh                           # …or the same build WITH worker threads
+WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist/
+scripts/stage-packs.sh                                 # → web/site/ (.ps1 and .py twins too)
+scripts/web-build-threads.sh                           # …or the same build WITH worker threads, staged
 
 # once per install: 6.3 GiB of MPQ → a 3.3 GiB container of ~4,700 static objects
 cargo run --release -p benilla-packer --bin benilla-pack -- \
