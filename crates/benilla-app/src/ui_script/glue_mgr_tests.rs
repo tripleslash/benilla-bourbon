@@ -2082,18 +2082,14 @@ fn the_stock_login_reaches_the_native_login_and_shows_its_status() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, rx, _) = stock_app();
 
-    // A first launch: the EULA stands, and a login before it is accepted does nothing.
+    // A first launch: this fork stands the agreements accepted, so the login boxes are up.
     assert_eq!(
         vm(&app)
             .eval::<(bool, bool)>("return TOSFrame:IsShown() == 1, AccountLoginUI:IsShown() == 1")
             .unwrap(),
-        (true, false),
-        "readEULA 0 puts the EULA up"
+        (false, true),
+        "no EULA in this fork"
     );
-    type_and_login(&mut app);
-    assert!(rx.try_recv().is_err(), "no login before the agreements");
-    vm(&app).run("AcceptEULA() AcceptTOS()").unwrap();
-    app.update();
 
     type_and_login(&mut app);
     let req = rx.try_recv().expect("the native login gets the attempt");

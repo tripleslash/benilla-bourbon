@@ -1620,7 +1620,7 @@ mod tests {
 
     /// The agreements are read from their CVars before the first screen is set (`0x46a400` at
     /// `0x402b36`, `SET_GLUE_SCREEN` at `0x402b65`): a returning player's login shows the boxes,
-    /// not the EULA, and a first launch still shows the EULA.
+    /// not the EULA. In this fork a first launch goes there too: the TOS and EULA stand accepted.
     #[test]
     fn the_login_screen_comes_up_on_the_accepted_agreements() {
         use crate::char_select::ClientState;
@@ -1649,8 +1649,8 @@ mod tests {
         );
         assert_eq!(
             screens(crate::cvars::Cvars::default()),
-            (true, false, false),
-            "a first launch is asked for the EULA"
+            (false, true, true),
+            "this fork asks no first launch for the EULA"
         );
     }
 

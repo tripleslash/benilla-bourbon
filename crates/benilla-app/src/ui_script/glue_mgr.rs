@@ -1775,6 +1775,13 @@ pub(crate) fn read_agreements(cvars: &crate::cvars::Cvars) -> [NoticeState; 4] {
             n[notice as usize] = NoticeState::from_cvar(value);
         }
     }
+    // Deviation (this fork): the TOS and the EULA stand accepted, as the native login has no
+    // agreements step. Their texts are loose `eula.html`/`tos.html` beside the install, which the
+    // browser build's packs do not carry, and an empty agreement cannot be scrolled to its end to
+    // enable Accept.
+    for notice in [GlueNotice::Tos, GlueNotice::Eula] {
+        n[notice as usize].accepted = true;
+    }
     n
 }
 
