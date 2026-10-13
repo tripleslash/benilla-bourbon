@@ -765,16 +765,27 @@ fn rebuild_ui_mesh(
     // leaks: a cached material holds a strong image handle and, prepared, its GPU texture.
     // `Removed`, not `Unused`: this cache is itself a strong handle, so `Unused` never fires for a
     // cached image, and a producer retiring an image removes the asset explicitly.
-    let retired: Vec<AssetId<Image>> = stores
-        .2
-        .read()
-        .filter_map(|e| match e {
-            AssetEvent::Removed { id } => Some(*id),
-            _ => None,
-        })
-        .collect();
+    let mut retired: Vec<AssetId<Image>> = Vec::new();
+    let mut resized: Vec<AssetId<Image>> = Vec::new();
+    for e in stores.2.read() {
+        match e {
+            AssetEvent::Removed { id } => retired.push(*id),
+            AssetEvent::Modified { id } => resized.push(*id),
+            _ => {}
+        }
+    }
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
+    }
+    // A modified image may stand on a new GPU texture (a booth's render target resized with the
+    // window), while a prepared material's bind group still holds the old one's view: the pane
+    // would show its last frame for good. Touching the material re-prepares its bind group.
+    if !resized.is_empty() {
+        for (key, handle) in &pools.materials {
+            if resized.contains(&key.0) {
+                stores.1.get_mut(handle);
+            }
+        }
     }
     // The meter is off unless asked (the hover recorder, `WOW_UI_COST=1`): one bool test.
     let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
