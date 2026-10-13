@@ -5,6 +5,7 @@
 //! 0x4e4170`); any other unit's reads its descriptor by ascending slot, or, for a group member or
 //! pet with no live object, its roster record.
 
+mod clock;
 mod units;
 
 use std::collections::HashMap;
@@ -43,14 +44,20 @@ struct DurationStamp {
 }
 
 impl AuraDurations {
-    /// Records one `SMSG_UPDATE_AURA_DURATION`.
+    /// Records one `SMSG_UPDATE_AURA_DURATION`. The span is the server's signed `int32`: a
+    /// permanent non-passive aura (a shapeshift form) carries -1, which is no duration, so the
+    /// slot holds no stamp and the aura reads `(0, 0)`.
     pub(crate) fn set(&mut self, slot: u8, remaining_ms: u32, now: f64) {
-        let total = f64::from(remaining_ms) / 1000.0;
         if trace_period().is_some() {
             info!(
                 "aura trace: SMSG_UPDATE_AURA_DURATION slot {slot} = {remaining_ms} ms @ {now:.2}"
             );
         }
+        if (remaining_ms as i32) < 0 {
+            self.by_slot.remove(&slot);
+            return;
+        }
+        let total = f64::from(remaining_ms) / 1000.0;
         self.by_slot.insert(
             slot,
             DurationStamp {
@@ -419,6 +426,7 @@ fn feed_auras(
     durations: Res<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
     time: Res<Time<Real>>,
+    clock: Option<Res<crate::ui_script::UiClock>>,
     mut mem: ResMut<AuraFeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -452,7 +460,7 @@ fn feed_auras(
 
     // No stamp is pruned for an empty slot: the packet arrives before its slot fills.
 
-    let script_now = script.now();
+    let script_now = clock::script_now(&time, clock.as_deref(), script.now());
 
     let list: Vec<AuraState> = cache
         .auras
@@ -867,6 +875,25 @@ mod tests {
         assert_eq!(order(&cache), [(0, 10), (1, 20)], "position unchanged");
         assert_eq!(cache[1].stacks, 5, "stack count refreshed");
         assert_eq!(cache[0].appeared_at, 1.0, "appeared_at is not disturbed");
+    }
+
+    /// A shapeshift form's duration packet carries -1: no duration, and it replaces a timed
+    /// aura's stamp in a slot the form took over.
+    #[test]
+    fn a_negative_duration_is_no_duration() {
+        let mut durations = AuraDurations::default();
+        durations.set(3, 30_000, 10.0);
+        assert_eq!(
+            join_duration(durations.by_slot.get(&3), 10.0, 10.0, 100.0),
+            (30.0, 130.0)
+        );
+        durations.set(3, u32::MAX, 12.0);
+        assert_eq!(
+            join_duration(durations.by_slot.get(&3), 12.0, 12.0, 102.0),
+            (0.0, 0.0)
+        );
+        durations.set(4, u32::MAX, 12.0);
+        assert!(durations.by_slot.is_empty());
     }
 
     #[test]
