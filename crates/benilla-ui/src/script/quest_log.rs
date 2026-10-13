@@ -60,7 +60,7 @@ pub struct QuestLogEntryView {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuestLogObjectiveView {
     pub text: String,
-    /// The type string: `"monster"`, `"item"` or `"object"`.
+    /// The type string: `"event"`, `"monster"`, `"item"` or `"object"`.
     pub kind: String,
     /// Done: the stock log greys the line and appends `(Complete)` (`QuestLogFrame.lua:389`).
     pub finished: bool,

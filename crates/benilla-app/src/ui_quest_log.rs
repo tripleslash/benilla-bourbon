@@ -303,7 +303,7 @@ fn resolve_template_item(
 /// One quest's objective lines, for every quest, as the watch frame reads any quest's
 /// (`QuestLogFrame.lua:613-663`). The reference walks the array once per kind, `event`, creature
 /// or GameObject, item, reputation (`0x4e0000`, `0x4e0110`), so one quad can give two lines. The
-/// `event` and reputation lines are not built.
+/// reputation line is not built.
 fn build_objectives(
     template: &QuestTemplate,
     log_slot: &QuestLogSlot,
@@ -315,7 +315,19 @@ fn build_objectives(
     // The VM's own `GlobalStrings.lua`, for the leaderboard's three format keys.
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<QuestLogObjectiveView> {
-    let mut objectives = Vec::with_capacity(template.objectives.len());
+    let mut objectives = Vec::with_capacity(template.objectives.len() + 1);
+    // Event: a quest with an end text has it as its first line (`0x4e0278`, index 1 at
+    // `0x4e0285`), typed `"event"` (`0x4e0293`) and done by the slot's COMPLETE bit (`0x4e02a2`).
+    // It carries no count, so the progress announce never reads it as a line that advanced.
+    if !template.end_text.is_empty() {
+        objectives.push(QuestLogObjectiveView {
+            text: template.end_text.clone(),
+            kind: "event".into(),
+            finished: log_slot.state & quest_slot_state::COMPLETE != 0,
+            cur: 0,
+            req: 0,
+        });
+    }
     // Creature or GameObject: the counter index is the array index, empty elements included.
     for (i, obj) in template.objectives.iter().enumerate() {
         let is_go = obj.creature_or_go & GO_OBJECTIVE_BIT != 0;
@@ -1210,6 +1222,56 @@ mod tests {
         assert_eq!(objectives[0].text, "<FOUND Graverobbers routed 8 of 8>");
         // The item line wears the in-flight placeholder, never the creature's text.
         assert_eq!(objectives[1].text, "<NEEDED ... 0 of 8>");
+    }
+
+    /// A quest whose objective is an event carries it as its end text: the first line, typed
+    /// `"event"`, done only when the slot is COMPLETE. The druid's "Body and Heart" has nothing
+    /// else, and an addon that counts no lines takes the quest for finished.
+    #[test]
+    fn an_end_text_is_the_first_line_and_follows_the_complete_bit() {
+        let mut template = quest_template([
+            obj(6, 5, 0, 0, ""),
+            obj(0, 0, 0, 0, ""),
+            obj(0, 0, 0, 0, ""),
+            obj(0, 0, 0, 0, ""),
+        ]);
+        template.end_text = "Face Lunaclaw and earn the strength of body and heart.".into();
+        let store = ObjectFields::default();
+        let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let names = NameCache::default();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let lines = |state| {
+            build_objectives(
+                &template,
+                &QuestLogSlot {
+                    quest_id: 6001,
+                    counters: [2, 0, 0, 0],
+                    state,
+                    timer: 0,
+                },
+                &store,
+                &objects,
+                &items,
+                &names,
+                &commands,
+                &probe_strings,
+            )
+        };
+        let open = lines(0);
+        assert_eq!(open.len(), 2, "the event line, then the creature line");
+        assert_eq!(open[0].text, template.end_text);
+        assert_eq!(open[0].kind, "event");
+        assert!(!open[0].finished);
+        assert_eq!(open[1].kind, "monster");
+        let done = lines(quest_slot_state::COMPLETE);
+        assert!(done[0].finished);
+        assert!(
+            !advanced(&done[0], &open[0]),
+            "the flip is no progress toast"
+        );
     }
 
     /// `ReqItemId[i] != SrcItemId` (`0x4e00ce`, `0x4e04fa`).
