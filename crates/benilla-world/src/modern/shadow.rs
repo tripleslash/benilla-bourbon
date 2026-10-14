@@ -397,7 +397,7 @@ fn update_cascades(
     mut out: ResMut<ModernCascades>,
     mut aimed: Local<Option<Vec3>>,
     mut spheres: Local<[Option<(Vec3, f32)>; MAX_CASCADES]>,
-    mut sphere_dir: Local<Option<Vec3>>,
+    mut cascade_dirs: Local<[Option<Vec3>; MAX_CASCADES]>,
 ) {
     if !active.is_modern() {
         if out.count != 0 {
@@ -419,11 +419,6 @@ fn update_cascades(
             dir
         }
     };
-    // A new sun direction re-fits every cascade.
-    if *sphere_dir != Some(dir) {
-        *spheres = [None; MAX_CASCADES];
-        *sphere_dir = Some(dir);
-    }
     let world_from_view = camera.to_matrix();
     let splits = cascade_splits(active.quality);
     let mut next = ModernCascades {
@@ -432,7 +427,20 @@ fn update_cascades(
         ..default()
     };
     let mut near = persp.near.max(0.1);
+    // fork (perf): a re-aim redraws a cascade's whole static layer, so it reaches one cascade a
+    // frame, nearest first, rather than all four (~12 ms on an Iris Xe) in one frame.
+    let mut reaimed = false;
     for (i, &far) in splits.iter().enumerate() {
+        let dir = match cascade_dirs[i] {
+            Some(d) if d == dir || reaimed => d,
+            _ => {
+                reaimed = true;
+                cascade_dirs[i] = Some(dir);
+                // A new sun direction re-fits the cascade.
+                spheres[i] = None;
+                dir
+            }
+        };
         let (c, r) = slice_sphere(world_from_view, persp.fov, persp.aspect_ratio, near, far);
         let (center, radius) = match spheres[i] {
             Some((sc, sr)) if sc.distance(c) + r <= sr => (sc, sr),

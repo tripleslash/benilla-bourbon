@@ -785,10 +785,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // `ssgiStrength` — how much of the single bounce to add back, tinted by what bounced it. `0` is
     // off and is exact, on the same terms. `$WOW_SSGI` overrides session-only.
-    // fork: 0.3 since 2026-10-12 (the director's call), welded to `GI_DEFAULT` below.
+    // fork: 0 since 2026-10-14 (perf), welded to `GI_DEFAULT` below.
     ours(
         "ssgiStrength",
-        "0.3",
+        "0",
         "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
          split across two rows only so a player can move them apart",
     ),

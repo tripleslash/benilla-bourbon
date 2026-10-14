@@ -304,6 +304,64 @@ const RELEASE_SECS: f32 = 1.0;
 /// way to see unmirrored water is a turn wider than this in one frame.
 const VIEW_MARGIN: f32 = 0.175;
 
+/// fork (perf): how far the eye may move (yd) before the terrain sight lines to open-world water are
+/// re-tested ([`WaterSight`]).
+const SIGHT_MOVE_YD: f32 = 3.0;
+/// fork (perf): sight lines tested per frame; a box not yet tested counts as seen, a stale verdict
+/// stands until its box is re-tested.
+const SIGHT_RAYS_PER_FRAME: u32 = 48;
+/// fork (perf): water this close to the eye (yd) is never hidden by the terrain test.
+const SIGHT_NEAR_YD: f32 = 48.0;
+/// fork (perf): the end of a sight line left unsampled (yd): a shore box's corners sit over dry bank.
+const SIGHT_END_YD: f32 = 8.0;
+/// fork (perf): ground must stand this far over a sight line (yd) to block it.
+const SIGHT_CLEAR_YD: f32 = 1.0;
+
+/// fork (perf): which open-world water boxes the terrain hides from the eye. The mirror is a second
+/// render of the whole scene, and a lake behind a ridge, or the sea under a plateau, armed it on
+/// distance and frustum alone.
+#[derive(Default)]
+struct WaterSight {
+    /// Where the current generation of verdicts is taken from.
+    eye: Option<Vec3>,
+    generation: u32,
+    /// Per box centre: (seen, the generation it was tested in).
+    verdicts: std::collections::HashMap<[u32; 3], (bool, u32)>,
+}
+
+/// Can the eye see any of an ADT water box's top face past the terrain? Five sight lines (the
+/// centre and four inset corners); a column with no resident ground never blocks.
+fn terrain_hides(
+    eye: Vec3,
+    (centre, half): (Vec3, Vec3),
+    mut ground: impl FnMut(Vec3) -> Option<f32>,
+) -> bool {
+    let top = centre.y + half.y;
+    let targets = [
+        Vec3::new(centre.x, top, centre.z),
+        Vec3::new(centre.x - half.x * 0.9, top, centre.z - half.z * 0.9),
+        Vec3::new(centre.x + half.x * 0.9, top, centre.z - half.z * 0.9),
+        Vec3::new(centre.x - half.x * 0.9, top, centre.z + half.z * 0.9),
+        Vec3::new(centre.x + half.x * 0.9, top, centre.z + half.z * 0.9),
+    ];
+    targets.into_iter().all(|target| {
+        let ray = target - eye;
+        let len = ray.length();
+        if len < SIGHT_NEAR_YD {
+            return false;
+        }
+        let steps = (len / 8.0).clamp(4.0, 32.0) as u32;
+        (1..steps).any(|k| {
+            let t = k as f32 / steps as f32;
+            if t * len > len - SIGHT_END_YD {
+                return false;
+            }
+            let p = eye + ray * t;
+            ground(p).is_some_and(|h| h > p.y + SIGHT_CLEAR_YD)
+        })
+    })
+}
+
 /// fork (perf): the world camera's frustum widened by [`VIEW_MARGIN`] on every side and cut at
 /// `far`. `None` for a projection that is not perspective, which arms on distance alone.
 fn mirror_frustum(pose: &GlobalTransform, projection: &Projection, far: f32) -> Option<Frustum> {
@@ -355,6 +413,9 @@ fn sync_reflection_camera(
     mut plane_out: ResMut<ReflectionPlane>,
     mut water_seen_at: Local<f32>,
     mut held: Local<f32>,
+    streamer: Option<Res<crate::terrain_stream::TerrainStreamer>>,
+    adt_tiles: Option<Res<Assets<benilla_assets::AdtTile>>>,
+    mut sight: Local<WaterSight>,
     world_cam: Query<
         (&GlobalTransform, &Projection, &Camera),
         (With<WorldCamera>, Without<LiquidReflectionCamera>),
@@ -390,12 +451,18 @@ fn sync_reflection_camera(
                 Some(_) => None,
                 None => aabb.map(|a| world_box(gt, a)),
             };
+            // The flag: an ADT layer, the only kind the terrain sight test may hide.
             own.into_iter()
-                .chain(layers.into_iter().flat_map(|l| l.0.iter().copied()))
-                .map(move |b| (b, seen.get()))
+                .map(|b| (b, false))
+                .chain(
+                    layers
+                        .into_iter()
+                        .flat_map(|l| l.0.iter().copied().map(|b| (b, true))),
+                )
+                .map(move |(b, adt)| (b, seen.get(), adt))
         })
     };
-    let plane = match closest_reflection_height(eye, boxes()) {
+    let plane = match closest_reflection_height(eye, boxes().map(|(b, seen, _)| (b, seen))) {
         Some(surface) => {
             *held = surface;
             surface
@@ -417,8 +484,25 @@ fn sync_reflection_camera(
     // arms the mirror before the water is on screen.
     let reach = view.farclip + WATER_REACH_MARGIN;
     let frustum = mirror_frustum(world_pose, world_projection, reach);
-    let near_water = boxes().any(|((centre, half), _)| {
-        ((eye - centre).abs() - half)
+    // fork (perf): open-world water the terrain hides from the eye does not arm it either.
+    let mut tile_cache = None;
+    let mut ground = |p: Vec3| {
+        let (s, t) = (streamer.as_deref()?, adt_tiles.as_deref()?);
+        crate::terrain_stream::terrain_height_under_cached(s, t, p, &mut tile_cache)
+    };
+    // An eye under the ground (a cave, a tunnel) is not judged by it at all.
+    let sight_live = ground(eye).is_none_or(|h| h <= eye.y + SIGHT_CLEAR_YD);
+    if sight.eye.is_none_or(|at| at.distance(eye) > SIGHT_MOVE_YD) {
+        sight.eye = Some(eye);
+        sight.generation = sight.generation.wrapping_add(1);
+        if sight.verdicts.len() > 4096 {
+            sight.verdicts.clear();
+        }
+    }
+    let mut rays_left = SIGHT_RAYS_PER_FRAME;
+    let mut near_water = false;
+    for ((centre, half), _, adt) in boxes() {
+        let in_view = ((eye - centre).abs() - half)
             .max(Vec3::ZERO)
             .length_squared()
             <= reach * reach
@@ -427,8 +511,32 @@ fn sync_reflection_camera(
                     center: centre.into(),
                     half_extents: half.into(),
                 })
-            })
-    });
+            });
+        if !in_view {
+            continue;
+        }
+        if !adt || !sight_live {
+            near_water = true;
+            break;
+        }
+        let key = centre.to_array().map(f32::to_bits);
+        let generation = sight.generation;
+        let seen = match sight.verdicts.get(&key).copied() {
+            Some((seen, g)) if g == generation => seen,
+            _ if rays_left >= 5 => {
+                rays_left -= 5;
+                let seen = !terrain_hides(eye, (centre, half), &mut ground);
+                sight.verdicts.insert(key, (seen, generation));
+                seen
+            }
+            // Out of rays: a stale verdict stands, an untested box counts as seen.
+            stale => stale.is_none_or(|(s, _)| s),
+        };
+        if seen {
+            near_water = true;
+            break;
+        }
+    }
     if near_water {
         *water_seen_at = time.elapsed_secs();
     }

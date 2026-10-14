@@ -547,15 +547,20 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     if (!lite) {
         let mview_z = (view.view_from_world * in.world_position).z;
         let mn = normalize(in.world_normal);
-        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
-        // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
-        let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
-        world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
         // fork: modern lighting (FORK.md, P3) — the sun is evaluated per pixel under the cascades
         // (Lambert on the MCNR normal) instead of Gouraud per vertex. The primary's point-light share
         // rides along, recovered as what the vertex sum holds beyond ambient + sun.
         let ml = -normalize(wow_light.light_sun.xyz);
         let mndotl = max(dot(mn, ml), 0.0);
+        // fork (perf): a slope facing away from the sun takes none of its light, so it skips the
+        // cascade and cloud reads; only the sheen gate reads 0 there, under a vanishing N·H^20.
+        world_shadow = 0.0;
+        if (mndotl > 0.0) {
+            world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
+            // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
+            let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
+            world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+        }
         // fork: modern lighting (FORK.md, P6) — the binned local-light grid
         // replaces the reference's three-nearest selection wherever it is live; Low has no grid and
         // keeps P3's per-pixel evaluation of that selection.

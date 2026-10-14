@@ -41,7 +41,7 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("weatherDensity",    ["2",    "3",    "3",    "3",   "3",    "3"]),
     ("worldShadows",      ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("ssaoStrength",      ["0",    "0",    "0.4",  "0.4", "0.4",  "0.4"]),
-    ("ssgiStrength",      ["0",    "0",    "0.3",  "0.3", "0.3",  "0.3"]),
+    ("ssgiStrength",      ["0",    "0",    "0",    "0",   "0",    "0"]),
     ("waterDetail",       ["0",    "1",    "2",    "3",   "3",    "3"]),
     ("hdCharacterModels", ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("reforgedModels",    ["0",    "1",    "1",    "1",   "1",    "1"]),

@@ -93,9 +93,9 @@ pub const AO_DEFAULT: f32 = 0.4;
 
 /// The shipped indirect strength. See [`AO_DEFAULT`] — off on the same call and the same terms.
 ///
-/// fork: **0.3 since 2026-10-12** (the director's call) — the modern look ships with the colour
-/// bleed on. It rides the gather the AO default already runs, so it adds no pass.
-pub const GI_DEFAULT: f32 = 0.3;
+/// fork: **0 since 2026-10-14** (perf): the bounce gather cost ~21 ms against ~5 ms for the AO-only
+/// variant at Dolanaar (Iris Xe, 1600×900), and the modern probe GI already supplies the bounce.
+pub const GI_DEFAULT: f32 = 0.0;
 
 impl Default for IndirectLighting {
     /// `$WOW_SSAO` / `$WOW_SSGI` override the shipped defaults, **session-only** — the A/B levers,
@@ -688,7 +688,7 @@ mod tests {
         // 0 since 2026-09-08 — the pass ships off; see [`AO_DEFAULT`]. Spelled as a literal rather
         // than derived, so turning the pass back on out of the box is a deliberate edit here too.
         assert_eq!(AO_DEFAULT, 0.4); // fork: 0.4 since 2026-10-12
-        assert_eq!(GI_DEFAULT, 0.3); // fork: 0.3 since 2026-10-12
+        assert_eq!(GI_DEFAULT, 0.0); // fork: 0 since 2026-10-14
         assert!(SSILVB_RANGE.contains(&AO_DEFAULT));
         assert!(SSILVB_RANGE.contains(&GI_DEFAULT));
         // The row offers 0–1; the clamp leaves headroom above it for a hand-typed CVar.

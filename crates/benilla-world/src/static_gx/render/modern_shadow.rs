@@ -270,9 +270,35 @@ struct ModernShadowFrame {
     restore_next: std::sync::atomic::AtomicUsize,
     /// Frames prepared so far, the clock [`holds_entities`] alternates the far cascades on.
     frame_no: u32,
+    /// fork (perf): per cascade and the sky map, what static content its cached layer holds.
+    layer_casters: std::sync::Mutex<[LayerCasters; SKY_LAYER + 1]>,
     bind: Option<BindGroup>,
     count: u32,
 }
+
+/// fork (perf): one shadow layer's static casters. The cached layer used to be keyed on the whole
+/// world's static set, so any cell streaming in anywhere redrew every cascade and the sky map
+/// (~12 ms on an Iris Xe); now only the content inside a layer's own light-space rectangle counts,
+/// and a change to it waits for the streaming to settle (the light clip moving still redraws at once).
+#[derive(Clone, Copy, Default)]
+struct LayerCasters {
+    /// The light clip and world fingerprint [`Self::casters`] was taken under (0 = never).
+    clip: u64,
+    world: u64,
+    /// The static casters inside the layer ([`layer_casters_key`]).
+    casters: u64,
+    /// The frame [`Self::casters`] last changed on.
+    changed_at: u32,
+    /// The casters the cached layer was drawn with.
+    drawn: u64,
+    /// The frame a newer set started waiting, while one does.
+    waiting_since: Option<u32>,
+}
+
+/// fork (perf): frames a layer's changed caster set must hold still before it is redrawn…
+const LAYER_SETTLE_FRAMES: u32 = 30;
+/// …and the longest a changed set waits regardless, so content streaming in for a minute still lands.
+const LAYER_MAX_DEFER_FRAMES: u32 = 120;
 
 /// fork (perf): the first cascade whose entity casters are redrawn every other frame.
 ///
@@ -1025,14 +1051,16 @@ pub(crate) fn gx_shadow_pass(
             } else {
                 cascades.clip_from_world[i]
             };
-            let key = if active {
-                cascade_key(&clip_from_world, static_hash)
+            let (key, layer_casters) = if active {
+                layer_key(frame, i, &clip_from_world, static_hash, &casters, terrain)
             } else {
-                0
+                (0, 0)
             };
             let slot = &frame.cache_keys[i];
-            let cached =
-                active && key != 0 && slot.load(std::sync::atomic::Ordering::Relaxed) == key;
+            let drawn = slot.load(std::sync::atomic::Ordering::Relaxed);
+            let cached = active
+                && key != 0
+                && (drawn == key || defers_redraw(frame, i, &clip_from_world, drawn));
             // A held layer keeps what it shows: no restore, no entity pass, and its dirty
             // rectangles stand for the frame that next redraws it.
             if cached && !is_sky && holds_entities(i, frame.frame_no) {
@@ -1227,6 +1255,15 @@ pub(crate) fn gx_shadow_pass(
                         );
                     }
                     slot.store(key, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(state) = frame
+                        .layer_casters
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(i)
+                    {
+                        state.drawn = layer_casters;
+                        state.waiting_since = None;
+                    }
                 } else {
                     slot.store(0, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -2140,6 +2177,91 @@ fn cascade_key(clip_from_world: &Mat4, static_hash: u64) -> u64 {
         .hash(&mut h);
     static_hash.hash(&mut h);
     h.finish().max(1)
+}
+
+/// fork (perf): layer `i`'s cache key this frame and its caster fingerprint. The fingerprint is
+/// re-taken only when the light clip or the world's static set moved.
+fn layer_key(
+    frame: &ModernShadowFrame,
+    i: usize,
+    clip_from_world: &Mat4,
+    static_hash: u64,
+    casters: &[(&GxCellGpu, &GxCellDraw)],
+    terrain: Option<&ModernTerrainCasters>,
+) -> (u64, u64) {
+    let mut states = frame
+        .layer_casters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = states.get_mut(i) else {
+        return (cascade_key(clip_from_world, static_hash), static_hash);
+    };
+    let clip = cascade_key(clip_from_world, 0);
+    if state.clip != clip || state.world != static_hash {
+        state.clip = clip;
+        state.world = static_hash;
+        let now = layer_casters_key(clip_from_world, casters, terrain);
+        if now != state.casters {
+            state.casters = now;
+            state.changed_at = frame.frame_no;
+        }
+    }
+    (cascade_key(clip_from_world, state.casters), state.casters)
+}
+
+/// fork (perf): may layer `i` keep showing its cached content although its casters changed? Only
+/// while the light clip is the one it was drawn under, and only until the new set has held still
+/// for [`LAYER_SETTLE_FRAMES`] or waited [`LAYER_MAX_DEFER_FRAMES`].
+fn defers_redraw(frame: &ModernShadowFrame, i: usize, clip_from_world: &Mat4, drawn: u64) -> bool {
+    let mut states = frame
+        .layer_casters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = states.get_mut(i) else {
+        return false;
+    };
+    if drawn == 0 || drawn != cascade_key(clip_from_world, state.drawn) {
+        return false;
+    }
+    let now = frame.frame_no;
+    let since = *state.waiting_since.get_or_insert(now);
+    now.wrapping_sub(state.changed_at) < LAYER_SETTLE_FRAMES
+        && now.wrapping_sub(since) < LAYER_MAX_DEFER_FRAMES
+}
+
+/// fork (perf): the static casters inside one layer's light-space rectangle, fingerprinted
+/// order-independently — exactly the set the layer's static pass replays.
+fn layer_casters_key(
+    clip_from_world: &Mat4,
+    casters: &[(&GxCellGpu, &GxCellDraw)],
+    terrain: Option<&ModernTerrainCasters>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
+    for (mesh, center, half) in terrain.map(|t| t.cells.as_slice()).unwrap_or_default() {
+        if outside_box(clip_from_world, *center, *half) {
+            continue;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        mesh.hash(&mut h);
+        center.to_array().map(f32::to_bits).hash(&mut h);
+        acc = acc.wrapping_add(h.finish());
+    }
+    for (gpu, draw) in casters {
+        if outside_cascade(clip_from_world, draw) {
+            continue;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        gpu.mesh.hash(&mut h);
+        gpu.killed_applied.hash(&mut h);
+        gpu.unready.hash(&mut h);
+        for run in &gpu.whole {
+            (run.index_range.start, run.index_range.end, run.cutout).hash(&mut h);
+        }
+        draw.origin.to_array().map(f32::to_bits).hash(&mut h);
+        acc = acc.wrapping_add(h.finish());
+    }
+    acc.max(1)
 }
 
 /// Copy one whole array layer between two same-sized `Depth32Float` arrays.
