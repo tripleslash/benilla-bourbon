@@ -283,14 +283,16 @@ fn format_two_strings(fmt: &str, a: &str, b: &str) -> String {
     out
 }
 
-/// The install keys a name-line rank prefix can resolve: `UNIT_PVP_NAME` and every
-/// `PVP_RANK_<rank>_<team>[_FEMALE]` for ranks 1..=19 and both team digits. The range reaches 19
+/// The install keys a name-line rank prefix can resolve: `UNIT_PVP_NAME`, every `PVP_MEDAL<n>`
+/// for the title byte, and every `PVP_RANK_<rank>_<team>[_FEMALE]` for ranks 1..=19 and both team
+/// digits. The range reaches 19
 /// because the builder is range-unchecked and the install's `PVP_RANK_19_*` names the racial
 /// "Leader", past the player rank byte's 0..=18. The world-text pass, which runs without the VM,
 /// reads them off each VM once; `UnitPVPName` looks them up live.
 pub fn pvp_name_global_keys() -> Vec<String> {
-    let mut keys = Vec::with_capacity(1 + 19 * 2 * 2);
+    let mut keys = Vec::with_capacity(1 + 255 + 19 * 2 * 2);
     keys.push("UNIT_PVP_NAME".to_string());
+    keys.extend((1..=255u8).map(|n| format!("PVP_MEDAL{n}")));
     for rank in 1..=19 {
         for team in 0..=1 {
             keys.push(format!("PVP_RANK_{rank}_{team}"));
@@ -315,6 +317,23 @@ pub fn decorated_name(
     let title = rank_title(&lookup, key)?;
     let template = lookup("UNIT_PVP_NAME")?;
     Some(format_two_strings(&template, &title, name))
+}
+
+/// The title line under a player's name: `PVP_MEDAL<medal>` (`0x6093ef`, ungendered) for a nonzero
+/// `PLAYER_BYTES_3` byte 2. The reference reaches it only from the ranked-player leg; a Turtle
+/// 1.18 realm stores the chosen character title ("Still Alive", `PVP_MEDAL18`) in that byte for
+/// any player, so under `turtle` an unranked player shows it too. `None` for no title or a string
+/// the lookup lacks.
+pub fn medal_line(
+    lookup: impl Fn(&str) -> Option<String>,
+    rank: u8,
+    medal: u8,
+    turtle: bool,
+) -> Option<String> {
+    if medal == 0 || (rank == 0 && !turtle) {
+        return None;
+    }
+    lookup(&format!("PVP_MEDAL{medal}"))
 }
 
 /// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding) and the unit
@@ -342,6 +361,19 @@ pub(super) fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level
             return out;
         }
         return name.to_owned();
+    }
+    // Leg A″: an unranked player's Turtle character title, on its own line under the name.
+    if u.is_player && u.pvp_rank == 0 && u.pvp_medal != 0 {
+        let turtle = lua
+            .app_data_ref::<Model>()
+            .is_some_and(|m| m.flavor == super::UiFlavor::Turtle);
+        let medal = medal_line(|key| global_string(lua, key), 0, u.pvp_medal, turtle);
+        if let Some(medal) = medal {
+            return format!(
+                "{name}
+{medal}"
+            );
+        }
     }
     // Leg B: the dishonorable-kill warning, on the same predicate the tooltip's CIVILIAN line uses.
     if is_civilian_kill(u, player_level) {

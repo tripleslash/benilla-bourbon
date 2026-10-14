@@ -512,7 +512,9 @@ const BOOTH_SETTLE_FRAMES: u32 = 4;
 
 /// A rig on a booth stage: its `AnimParked` marker belongs to [`gate_booth_cameras`] alone, and
 /// the world-view parker skips it, since a stage is outside every world frustum.
+/// A stage rig is posed every frame: the world's distance LOD measures from no camera of its own.
 #[derive(bevy::prelude::Component)]
+#[require(benilla_world::rig_anim::PoseEveryFrame)]
 pub(crate) struct StageRig;
 
 /// How long a [`Booth::pending`] hold may keep the camera awake (wall secs).

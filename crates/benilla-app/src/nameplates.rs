@@ -20,10 +20,12 @@
 //!   first, `PVP_RANK_<rank>_<team>` off the unit's public `PLAYER_BYTES_3` byte 3 and its race's
 //!   team digit, and never a creature's.
 //!
+//! - The title line under the name is `PVP_MEDAL<n>` for a set `PLAYER_BYTES_3` byte 2
+//!   (`0x6093ef`). The reference reaches it from the ranked leg only; a Turtle realm stores the
+//!   chosen character title in that byte, so there it shows for an unranked player too.
+//!
 //! Not built: `0x609370`'s civilian leg (`0x609449`, `PVP_RANK_CIVILIAN` and a space before a
-//! hostile PvP-flagged civilian NPC's name) and its city-protector line (`0x6093ef`, `"\n"` and
-//! `PVP_MEDAL<n>` for a set `PLAYER_BYTES_3` byte 2, which vmangos's `.character citytitle` sets);
-//! a7 and a8 have no cross-realm wire here.
+//! hostile PvP-flagged civilian NPC's name); a7 and a8 have no cross-realm wire here.
 
 use std::collections::HashMap;
 
@@ -146,6 +148,11 @@ struct TitleKey {
     /// The rank, team and gender the title lookup keyed on
     /// ([`benilla_ui::script::RankTitle`]).
     title: benilla_ui::script::RankTitle,
+    /// `PLAYER_BYTES_3` byte 2: the city-protector or, on a Turtle realm, chosen character title
+    /// (`PVP_MEDAL<n>`), 0 none.
+    medal: u8,
+    /// The client flavor was Turtle: an unranked player's title shows only there.
+    turtle: bool,
     /// The a4 bit (`0x20`) was set and the strings held the template when the line was built.
     on: bool,
     /// The [`PvpNameStrings`] generation the line was built from.
@@ -170,6 +177,8 @@ fn title_key(
                 .map_or(-1, crate::ui_unit::race_pvp_team),
             female: store.0.unit_gender() == Some(1),
         },
+        medal: store.0.player_pvp_medal().unwrap_or(0),
+        turtle: crate::flavor::turtle(),
         on: cfg.player_pvp_title && strings.ready(),
         strings: strings.generation,
     })
@@ -184,6 +193,17 @@ fn name_line(flags: u32, key: Option<TitleKey>, strings: &PvpNameStrings, name: 
     let mut line = flag_prefix(flags);
     line.push_str(decorated.as_deref().unwrap_or(name));
     line
+}
+
+/// The title line under the main name line: the unit's `PVP_MEDAL<n>` string where `key` is on.
+fn title_line(key: Option<TitleKey>, strings: &PvpNameStrings) -> Option<String> {
+    let key = key.filter(|key| key.on)?;
+    benilla_ui::script::medal_line(
+        |global| strings.strings.get(global).cloned(),
+        key.title.rank,
+        key.medal,
+        key.turtle,
+    )
 }
 
 /// A live plate: its entity and stack, and the inputs the stack was built from, so a steady frame
@@ -547,6 +567,7 @@ pub(crate) fn drive_nameplates(
                     }
                 }
                 let mut lines = vec![name_line(flags, key, &pvp_strings, name)];
+                lines.extend(title_line(key, &pvp_strings));
                 if let Some(bracketed) = bracketed {
                     lines.push(format!("<{bracketed}>"));
                 }
@@ -983,6 +1004,8 @@ mod tests {
                 team: 1,
                 female: false,
             },
+            medal: 0,
+            turtle: false,
             on: true,
             strings: strings.generation,
         };
@@ -1018,6 +1041,39 @@ mod tests {
             ),
             None,
             "the Horde key is not the Alliance one"
+        );
+    }
+
+    /// An unranked player's title line is Turtle's only; a ranked unit shows its medal anywhere.
+    #[test]
+    fn the_title_line_is_the_medal_string() {
+        let strings = strings_of(1, &[TEMPLATE, ("PVP_MEDAL18", "Still Alive")]);
+        let key = |rank, turtle| {
+            Some(TitleKey {
+                title: benilla_ui::script::RankTitle {
+                    rank,
+                    team: 0,
+                    female: false,
+                },
+                medal: 18,
+                turtle,
+                on: true,
+                strings: strings.generation,
+            })
+        };
+        assert_eq!(
+            title_line(key(0, true), &strings).as_deref(),
+            Some("Still Alive")
+        );
+        assert_eq!(
+            title_line(key(0, false), &strings),
+            None,
+            "vanilla: no title"
+        );
+        assert_eq!(
+            title_line(key(5, false), &strings).as_deref(),
+            Some("Still Alive"),
+            "the ranked leg reaches it everywhere"
         );
     }
 
