@@ -289,19 +289,21 @@ struct LayerCasters {
     world: u64,
     /// The static casters inside the layer ([`layer_casters_key`]).
     casters: u64,
-    /// When [`Self::casters`] last changed.
-    changed_at: Option<Instant>,
+    /// When (instant, frame) [`Self::casters`] last changed.
+    changed_at: Option<(Instant, u32)>,
     /// The casters the cached layer was drawn with.
     drawn: u64,
-    /// When a newer set started waiting, while one does.
-    waiting_since: Option<Instant>,
+    /// When (instant, frame) a newer set started waiting, while one does.
+    waiting_since: Option<(Instant, u32)>,
 }
 
 /// fork (perf): how long a layer's changed caster set must hold still before it is redrawn…
 const LAYER_SETTLE: Duration = Duration::from_millis(500);
+const LAYER_SETTLE_FRAMES: u32 = 30;
 /// …and the longest a changed set waits regardless, so content streaming in for a minute still lands.
-/// Wall time, not frames: a slow GPU would otherwise stretch both.
+/// Both the time and the frame limit must pass: a slow GPU keeps the frame count, a fast one the time.
 const LAYER_MAX_DEFER: Duration = Duration::from_secs(2);
+const LAYER_MAX_DEFER_FRAMES: u32 = 120;
 
 /// fork (perf): the first cascade whose entity casters are redrawn every other frame.
 ///
@@ -2208,7 +2210,7 @@ fn layer_key(
         let fingerprint = layer_casters_key(clip_from_world, casters, terrain);
         if fingerprint != state.casters {
             state.casters = fingerprint;
-            state.changed_at = Some(now);
+            state.changed_at = Some((now, frame.frame_no));
         }
     }
     // A set that reverted to the drawn one is no longer waiting.
@@ -2238,11 +2240,15 @@ fn defers_redraw(
     if drawn == 0 || drawn != cascade_key(clip_from_world, state.drawn) {
         return false;
     }
-    let since = *state.waiting_since.get_or_insert(now);
+    let at = (now, frame.frame_no);
+    let within = |(t, f): (Instant, u32), time: Duration, frames: u32| {
+        now.saturating_duration_since(t) < time || at.1.wrapping_sub(f) < frames
+    };
+    let since = *state.waiting_since.get_or_insert(at);
     state
         .changed_at
-        .is_some_and(|c| now.saturating_duration_since(c) < LAYER_SETTLE)
-        && now.saturating_duration_since(since) < LAYER_MAX_DEFER
+        .is_some_and(|c| within(c, LAYER_SETTLE, LAYER_SETTLE_FRAMES))
+        && within(since, LAYER_MAX_DEFER, LAYER_MAX_DEFER_FRAMES)
 }
 
 /// fork (perf): the static casters inside one layer's light-space rectangle, fingerprinted
