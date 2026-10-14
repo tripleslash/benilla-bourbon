@@ -12,8 +12,10 @@ authors = ["sam <samuv.eth@gmail.com>"]
 # crate. `image` stays per-crate: its consumers differ on default features, and a member cannot
 # turn off default features that a workspace entry enables.
 # `too_many_arguments` is off: a Bevy system's parameter list is its dependency declaration.
+# `missing_const_for_thread_local` is off: clippy 1.98.1 flags initializers already `const { … }`.
 [workspace.lints.clippy]
 too_many_arguments = "allow"
+missing_const_for_thread_local = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
