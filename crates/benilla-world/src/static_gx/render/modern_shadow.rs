@@ -31,9 +31,11 @@ use crate::modern::shadow::{
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::platform::collections::HashMap as StrideMap;
+use bevy::platform::time::Instant;
 use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, texture_2d, texture_depth_2d,
 };
+use std::time::Duration;
 
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
@@ -287,18 +289,19 @@ struct LayerCasters {
     world: u64,
     /// The static casters inside the layer ([`layer_casters_key`]).
     casters: u64,
-    /// The frame [`Self::casters`] last changed on.
-    changed_at: u32,
+    /// When [`Self::casters`] last changed.
+    changed_at: Option<Instant>,
     /// The casters the cached layer was drawn with.
     drawn: u64,
-    /// The frame a newer set started waiting, while one does.
-    waiting_since: Option<u32>,
+    /// When a newer set started waiting, while one does.
+    waiting_since: Option<Instant>,
 }
 
-/// fork (perf): frames a layer's changed caster set must hold still before it is redrawn…
-const LAYER_SETTLE_FRAMES: u32 = 30;
+/// fork (perf): how long a layer's changed caster set must hold still before it is redrawn…
+const LAYER_SETTLE: Duration = Duration::from_millis(500);
 /// …and the longest a changed set waits regardless, so content streaming in for a minute still lands.
-const LAYER_MAX_DEFER_FRAMES: u32 = 120;
+/// Wall time, not frames: a slow GPU would otherwise stretch both.
+const LAYER_MAX_DEFER: Duration = Duration::from_secs(2);
 
 /// fork (perf): the first cascade whose entity casters are redrawn every other frame.
 ///
@@ -1034,6 +1037,7 @@ pub(crate) fn gx_shadow_pass(
         else {
             return;
         };
+        let now = Instant::now();
 
         // The local-light atlas is the layer after the sky map and is drawn below, not here: it is
         // not a cascade, it is not cleared every frame, and no entity is drawn into it.
@@ -1052,7 +1056,7 @@ pub(crate) fn gx_shadow_pass(
                 cascades.clip_from_world[i]
             };
             let (key, layer_casters) = if active {
-                layer_key(frame, i, &clip_from_world, static_hash, &casters, terrain)
+                layer_key(frame, i, &clip_from_world, static_hash, &casters, terrain, now)
             } else {
                 (0, 0)
             };
@@ -1060,7 +1064,7 @@ pub(crate) fn gx_shadow_pass(
             let drawn = slot.load(std::sync::atomic::Ordering::Relaxed);
             let cached = active
                 && key != 0
-                && (drawn == key || defers_redraw(frame, i, &clip_from_world, drawn));
+                && (drawn == key || defers_redraw(frame, i, &clip_from_world, drawn, now));
             // A held layer keeps what it shows: no restore, no entity pass, and its dirty
             // rectangles stand for the frame that next redraws it.
             if cached && !is_sky && holds_entities(i, frame.frame_no) {
@@ -2188,6 +2192,7 @@ fn layer_key(
     static_hash: u64,
     casters: &[(&GxCellGpu, &GxCellDraw)],
     terrain: Option<&ModernTerrainCasters>,
+    now: Instant,
 ) -> (u64, u64) {
     let mut states = frame
         .layer_casters
@@ -2200,19 +2205,29 @@ fn layer_key(
     if state.clip != clip || state.world != static_hash {
         state.clip = clip;
         state.world = static_hash;
-        let now = layer_casters_key(clip_from_world, casters, terrain);
-        if now != state.casters {
-            state.casters = now;
-            state.changed_at = frame.frame_no;
+        let fingerprint = layer_casters_key(clip_from_world, casters, terrain);
+        if fingerprint != state.casters {
+            state.casters = fingerprint;
+            state.changed_at = Some(now);
         }
+    }
+    // A set that reverted to the drawn one is no longer waiting.
+    if state.casters == state.drawn {
+        state.waiting_since = None;
     }
     (cascade_key(clip_from_world, state.casters), state.casters)
 }
 
 /// fork (perf): may layer `i` keep showing its cached content although its casters changed? Only
 /// while the light clip is the one it was drawn under, and only until the new set has held still
-/// for [`LAYER_SETTLE_FRAMES`] or waited [`LAYER_MAX_DEFER_FRAMES`].
-fn defers_redraw(frame: &ModernShadowFrame, i: usize, clip_from_world: &Mat4, drawn: u64) -> bool {
+/// for [`LAYER_SETTLE`] or waited [`LAYER_MAX_DEFER`].
+fn defers_redraw(
+    frame: &ModernShadowFrame,
+    i: usize,
+    clip_from_world: &Mat4,
+    drawn: u64,
+    now: Instant,
+) -> bool {
     let mut states = frame
         .layer_casters
         .lock()
@@ -2223,10 +2238,11 @@ fn defers_redraw(frame: &ModernShadowFrame, i: usize, clip_from_world: &Mat4, dr
     if drawn == 0 || drawn != cascade_key(clip_from_world, state.drawn) {
         return false;
     }
-    let now = frame.frame_no;
     let since = *state.waiting_since.get_or_insert(now);
-    now.wrapping_sub(state.changed_at) < LAYER_SETTLE_FRAMES
-        && now.wrapping_sub(since) < LAYER_MAX_DEFER_FRAMES
+    state
+        .changed_at
+        .is_some_and(|c| now.saturating_duration_since(c) < LAYER_SETTLE)
+        && now.saturating_duration_since(since) < LAYER_MAX_DEFER
 }
 
 /// fork (perf): the static casters inside one layer's light-space rectangle, fingerprinted
@@ -2236,13 +2252,13 @@ fn layer_casters_key(
     casters: &[(&GxCellGpu, &GxCellDraw)],
     terrain: Option<&ModernTerrainCasters>,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::{BuildHasher, Hash, Hasher};
     let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
     for (mesh, center, half) in terrain.map(|t| t.cells.as_slice()).unwrap_or_default() {
         if outside_box(clip_from_world, *center, *half) {
             continue;
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = bevy::platform::hash::FixedHasher.build_hasher();
         mesh.hash(&mut h);
         center.to_array().map(f32::to_bits).hash(&mut h);
         acc = acc.wrapping_add(h.finish());
@@ -2251,7 +2267,7 @@ fn layer_casters_key(
         if outside_cascade(clip_from_world, draw) {
             continue;
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = bevy::platform::hash::FixedHasher.build_hasher();
         gpu.mesh.hash(&mut h);
         gpu.killed_applied.hash(&mut h);
         gpu.unready.hash(&mut h);

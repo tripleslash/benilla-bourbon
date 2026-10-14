@@ -307,9 +307,9 @@ const VIEW_MARGIN: f32 = 0.175;
 /// fork (perf): how far the eye may move (yd) before the terrain sight lines to open-world water are
 /// re-tested ([`WaterSight`]).
 const SIGHT_MOVE_YD: f32 = 3.0;
-/// fork (perf): sight lines tested per frame; a box not yet tested counts as seen, a stale verdict
-/// stands until its box is re-tested.
-const SIGHT_RAYS_PER_FRAME: u32 = 48;
+/// fork (perf): water boxes sight-tested per frame (five sight lines each), oldest verdict first; a
+/// box not yet tested counts as seen, a stale verdict stands until its box is re-tested.
+const SIGHT_BOXES_PER_FRAME: usize = 9;
 /// fork (perf): water this close to the eye (yd) is never hidden by the terrain test.
 const SIGHT_NEAR_YD: f32 = 48.0;
 /// fork (perf): the end of a sight line left unsampled (yd): a shore box's corners sit over dry bank.
@@ -327,6 +327,8 @@ struct WaterSight {
     generation: u32,
     /// Per box centre: (seen, the generation it was tested in).
     verdicts: std::collections::HashMap<[u32; 3], (bool, u32)>,
+    /// This frame's boxes without a current verdict: (age in generations, key, box).
+    pending: Vec<(u32, [u32; 3], (Vec3, Vec3))>,
 }
 
 /// Can the eye see any of an ADT water box's top face past the terrain? Five sight lines (the
@@ -499,7 +501,9 @@ fn sync_reflection_camera(
             sight.verdicts.clear();
         }
     }
-    let mut rays_left = SIGHT_RAYS_PER_FRAME;
+    let sight = &mut *sight;
+    let generation = sight.generation;
+    sight.pending.clear();
     let mut near_water = false;
     for ((centre, half), _, adt) in boxes() {
         let in_view = ((eye - centre).abs() - half)
@@ -520,21 +524,37 @@ fn sync_reflection_camera(
             break;
         }
         let key = centre.to_array().map(f32::to_bits);
-        let generation = sight.generation;
-        let seen = match sight.verdicts.get(&key).copied() {
-            Some((seen, g)) if g == generation => seen,
-            _ if rays_left >= 5 => {
-                rays_left -= 5;
-                let seen = !terrain_hides(eye, (centre, half), &mut ground);
+        match sight.verdicts.get(&key) {
+            Some(&(seen, g)) if g == generation => {
+                if seen {
+                    near_water = true;
+                    break;
+                }
+            }
+            last => sight.pending.push((
+                last.map_or(u32::MAX, |&(_, g)| generation.wrapping_sub(g)),
+                key,
+                (centre, half),
+            )),
+        }
+    }
+    if !near_water {
+        // Oldest first, so a long walk cannot starve the boxes late in the query order.
+        sight
+            .pending
+            .sort_unstable_by_key(|&(age, ..)| std::cmp::Reverse(age));
+        for (k, &(_, key, b)) in sight.pending.iter().enumerate() {
+            let seen = if k < SIGHT_BOXES_PER_FRAME {
+                let seen = !terrain_hides(eye, b, &mut ground);
                 sight.verdicts.insert(key, (seen, generation));
                 seen
+            } else {
+                sight.verdicts.get(&key).is_none_or(|&(s, _)| s)
+            };
+            if seen {
+                near_water = true;
+                break;
             }
-            // Out of rays: a stale verdict stands, an untested box counts as seen.
-            stale => stale.is_none_or(|(s, _)| s),
-        };
-        if seen {
-            near_water = true;
-            break;
         }
     }
     if near_water {

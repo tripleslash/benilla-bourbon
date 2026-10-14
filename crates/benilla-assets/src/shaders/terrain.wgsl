@@ -554,8 +554,9 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         let mndotl = max(dot(mn, ml), 0.0);
         // fork (perf): a slope facing away from the sun takes none of its light, so it skips the
         // cascade and cloud reads; only the sheen gate reads 0 there, under a vanishing N·H^20.
+        // The shadow debug views keep the reads, so they still show what the cascades hold.
         world_shadow = 0.0;
-        if (mndotl > 0.0) {
+        if (mndotl > 0.0 || modern_block.cascades.params.w > 0.5) {
             world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
             // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
             let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
