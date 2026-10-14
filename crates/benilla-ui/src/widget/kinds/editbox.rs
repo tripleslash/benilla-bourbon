@@ -109,9 +109,12 @@ pub struct EditBoxState {
     /// A multi-line relayout that found its text's measure pending, retried at each flush until it
     /// lands; with no font engine installed the measure arrives from the host a tick later.
     pub relayout_owed: bool,
-    /// The first visible display byte of a single-line box (`E+0x348`), scrolled by whole chars
-    /// to keep the caret in view; `0x77da80` hides a caret outside the window.
+    /// The window's first display byte (`E+0x348`), which only the flush's relayout moves
+    /// ([`Self::rewindow`]), so the window stays where the caret last left it.
     pub scroll_start: usize,
+    /// The window's length in display bytes (`E+0x34c`): what of the text from
+    /// [`Self::scroll_start`] the text region holds and draws (`0x77d858`).
+    pub window_len: usize,
     /// A left-button press in the box is held (`E+0x364`); moves extend the selection (`0x77a860`).
     pub drag_active: bool,
     /// Caret blink half-period in seconds (`E+0x370`; ctor 0.5, XML `blinkSpeed`).
@@ -194,6 +197,7 @@ impl Default for EditBoxState {
             dirty: Self::DIRTY_TEXT,
             relayout_owed: false,
             scroll_start: 0,
+            window_len: 0,
             drag_active: false,
             blink_period: 0.5,
             blink_accum: 0.0,
@@ -264,35 +268,25 @@ impl EditBoxState {
 
     // ── selection / geometry law ─────────────────────────────────────────────────────────────
 
-    /// What the box draws and hit-tests: the text, or one `*` per character under `password`
-    /// (`E+0x334`; the draw `0x77da80` and the hit-test `0x77d0d0` both branch on the flag).
+    /// What the box draws and hit-tests: the text, or under `password` one `*` per byte of it
+    /// (`E+0x334`, `strlen` at `0x77d4fc` then `rep stos` of `0x2a`; the draw `0x77da80` and the
+    /// hit-test `0x77d0d0` both branch on the flag), so a mask byte stands for each text byte.
     pub fn display(&self) -> String {
         if self.password {
-            "*".repeat(self.text.chars().count())
+            "*".repeat(self.text.len())
         } else {
             self.text.clone()
         }
     }
 
-    /// A text byte offset as a display byte offset.
+    /// A text byte offset as a display byte offset: the same, the mask being byte for byte.
     pub fn text_to_display(&self, byte: usize) -> usize {
-        if self.password {
-            self.text[..byte.min(self.text.len())].chars().count()
-        } else {
-            byte
-        }
+        byte.min(self.text.len())
     }
 
-    /// A display byte offset as a text byte offset.
+    /// A display byte offset as a text byte offset, the caller snapping it to a character.
     pub fn display_to_text(&self, dbyte: usize) -> usize {
-        if self.password {
-            self.text
-                .char_indices()
-                .nth(dbyte)
-                .map_or(self.text.len(), |(b, _)| b)
-        } else {
-            dbyte
-        }
+        dbyte.min(self.text.len())
     }
 
     /// The display index nearest pixel `x` from the text origin, the caller adding the scroll
@@ -423,37 +417,101 @@ impl EditBoxState {
         self.blink_accum = 0.0;
     }
 
-    /// Scroll the single-line window (`E+0x348`) by whole chars to keep the caret in `avail` px.
-    pub fn clamp_scroll(&mut self, avail: f32) {
-        if self.multi_line {
-            // A multiline box wraps; its parent ScrollFrame scrolls it.
-            self.scroll_start = 0;
-            return;
-        }
+    /// Whether the caret lies in the window, its ends included (`0x77da95`–`0x77daa7`).
+    pub fn caret_in_window(&self) -> bool {
+        let c = self.text_to_display(self.cursor);
+        c >= self.scroll_start && c <= self.scroll_start + self.window_len
+    }
+
+    /// What the text region holds: the window's bytes of the display (`0x77d840`–`0x77d858`), or
+    /// with `to_end` everything from the window's start, which an edit writes so that what it
+    /// typed shows before the flush re-windows. A multi-line box's window is its whole text.
+    /// A window inside a colour run keeps its colour: [`colour_carry`] prefixes the run's `|c`.
+    pub fn window_text(&self, to_end: bool) -> String {
         let display = self.display();
-        if self.advances.len() != display.len() + 1 || avail <= 0.0 {
+        if self.multi_line {
+            return display;
+        }
+        let from = snap_down(&display, self.scroll_start);
+        let to = if to_end {
+            display.len()
+        } else {
+            snap_down(&display, from + self.window_len)
+        };
+        let window = &display[from..to.max(from)];
+        match colour_carry(&display, from) {
+            Some(code) => format!("{code}{window}"),
+            None => window.to_string(),
+        }
+    }
+
+    /// The relayout's window (`0x77d4d0`), `width` the text region's in the advance table's
+    /// units. A single-line box keeps its start and takes the stops from it that fit the width
+    /// (`0x77d71a`, `0x77d739`); when the caret has left that window, `0x77d320` starts it again
+    /// at the stops back from the caret that fit a quarter of the width, the caret having left
+    /// by the left, or three quarters, by the right (`0x77d7d4`–`0x77d7f3`). A multi-line box's
+    /// window is its whole text (its line table ends at the text's length, `0x77d6ef`). Needs the
+    /// advance table measured for the display.
+    ///
+    /// The caret is tested against the start as it stands (`0x77d7b4`–`0x77d7c2`), so a text that
+    /// shrank below it re-windows. A `password` box never re-windows (`0x77d769` skips both
+    /// calls): its window is the mask that fits from its start, and a caret past it is hidden.
+    pub fn rewindow(&mut self, width: f32) {
+        let display = self.display();
+        if self.multi_line || self.advances.len() != display.len() + 1 {
+            self.scroll_start = 0;
+            self.window_len = display.len();
             return;
         }
-        let cursor_d = self.text_to_display(self.cursor);
-        // Snap a stale start back onto a char boundary.
-        self.scroll_start = self.scroll_start.min(display.len());
-        while self.scroll_start > 0 && !display.is_char_boundary(self.scroll_start) {
-            self.scroll_start -= 1;
-        }
-        if cursor_d < self.scroll_start {
-            self.scroll_start = cursor_d;
+        let map = crate::markup::ClassMap::new(&display);
+        let cursor = self.text_to_display(self.cursor);
+        if self.password {
+            let start = self.scroll_start.min(display.len());
+            self.scroll_start = start;
+            self.window_len = self.fit_forward(&map, start, width) - start;
             return;
         }
-        while self.advances[cursor_d] - self.advances[self.scroll_start] > avail {
-            // Advance the window one char; the loop is bounded by cursor_d.
-            let mut next = self.scroll_start + 1;
-            while next < display.len() && !display.is_char_boundary(next) {
-                next += 1;
+        let (start, end) = if cursor < self.scroll_start {
+            let start = self.fit_back(&map, cursor, width * 0.25);
+            (start, self.fit_forward(&map, start, width))
+        } else {
+            // At or before the caret, so inside the text.
+            let start = snap_down(&display, self.scroll_start);
+            let end = self.fit_forward(&map, start, width);
+            if cursor > end {
+                let start = self.fit_back(&map, cursor, width * 0.75);
+                (start, self.fit_forward(&map, start, width))
+            } else {
+                (start, end)
             }
-            if next > cursor_d {
-                break;
+        };
+        self.scroll_start = start;
+        self.window_len = end - start;
+    }
+
+    /// The last stop from `start` whose advance fits `width`, stepping each visible character
+    /// (`0x772bc0`'s count, as bytes by `0x77bb30` with links not atomic).
+    fn fit_forward(&self, map: &crate::markup::ClassMap, start: usize, width: f32) -> usize {
+        let mut end = start;
+        loop {
+            let next = map.advance(end, 1, false);
+            if next <= end || self.advances[next] - self.advances[start] > width {
+                return end;
             }
-            self.scroll_start = next;
+            end = next;
+        }
+    }
+
+    /// The first stop back from `cursor` whose span to it fits `width` (`0x772c30`, then
+    /// `0x77bb30` backward), at 0 at the latest (`0x77d363`).
+    fn fit_back(&self, map: &crate::markup::ClassMap, cursor: usize, width: f32) -> usize {
+        let mut start = cursor;
+        loop {
+            let prev = map.advance(start, -1, false);
+            if prev >= start || self.advances[cursor] - self.advances[prev] > width {
+                return start;
+            }
+            start = prev;
         }
     }
 }
@@ -473,8 +531,9 @@ pub struct EditOutcome {
     /// An insert went in, so `OnChar` fires (`0x77c13c`); a `numeric` abort that only deleted the
     /// selection did not.
     pub inserted: bool,
-    /// Typed spaces inserted, one `OnSpacePressed` each; a paste reports none.
-    pub spaces: usize,
+    /// The inserted string holds a space: one `OnSpacePressed`, however many it holds, since the
+    /// scan stops at the first (`0x77c153` → `0x77c173`).
+    pub space: bool,
 }
 
 impl EditOutcome {
@@ -553,12 +612,28 @@ impl EditBoxState {
         EditOutcome {
             text_changed: true,
             inserted: true,
-            spaces: ins.matches(' ').count(),
+            space: ins.contains(' '),
         }
     }
 
-    /// Insert clipboard text with its control characters dropped, bar `\n` in a multiline box; a
-    /// paste fires no `OnSpacePressed`.
+    /// What typing `c` inserts (`0x77c200`): a `|` goes in as `||` (`0x879cac`, `0x77c254`), so
+    /// markup cannot be typed, and a tab as four spaces (`0x879cb0`, `0x77c228`); a newline goes in
+    /// only in a `multiLine` box (`0x77c234`–`0x77c240`), and any other control character, DEL
+    /// (`0x7f`) included, is dropped. `None` for a dropped character.
+    pub fn typed(&self, c: char) -> Option<String> {
+        match c {
+            '\t' => Some("    ".to_string()),
+            '\n' if self.multi_line => Some("\n".to_string()),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => None,
+            '|' => Some("||".to_string()),
+            c => Some(c.to_string()),
+        }
+    }
+
+    /// Paste for benilla's own glue-screen fields, which are benilla's code and not the stock
+    /// GlueXML that is to replace them: the clipboard as one insert, its control characters
+    /// dropped, bar `\n` in a multiline box. A FrameXML box types a paste a character at a time
+    /// (`0x77e250`).
     pub fn paste(&mut self, text: &str) -> EditOutcome {
         let cleaned: String = text
             .chars()
@@ -593,7 +668,8 @@ impl EditBoxState {
         true
     }
 
-    /// The selection for Ctrl+C (`0x77e1d0`); a password box yields its mask, never the text.
+    /// The selection for Ctrl+C (`0x77e1d0`); a password box yields the empty string, the image's
+    /// `""` at `0x882748` (`0x77e1ef`–`0x77e1fd`), never its text.
     pub fn selected_text(&self) -> Option<String> {
         if self.sel_start == self.sel_end {
             return None;
@@ -603,7 +679,7 @@ impl EditBoxState {
             self.sel_start.max(self.sel_end),
         );
         Some(if self.password {
-            "*".repeat(self.text[a..b].chars().count())
+            String::new()
         } else {
             self.text[a..b].to_string()
         })
@@ -954,6 +1030,33 @@ impl EditBoxState {
         self.sel_start = snap_down(&self.text, self.sel_start.min(len));
         self.sel_end = snap_down(&self.text, self.sel_end.min(len));
     }
+}
+
+/// The colour code a window starting at `from` must carry, `0x77d7f8`–`0x77d93c`: scanning on
+/// from `from` (a `||` skipped), an unescaped `|r` met before any `|c` sends a scan back from it
+/// for the nearest `|c` not preceded by a `|`, whose ten bytes (`|cAARRGGBB`) go before the
+/// window.
+fn colour_carry(display: &str, from: usize) -> Option<&str> {
+    let b = display.as_bytes();
+    let mut i = from;
+    let reset = loop {
+        if i >= b.len() {
+            return None;
+        }
+        if b[i] == b'|' {
+            match b.get(i + 1) {
+                Some(b'|') => i += 1,
+                Some(b'c') => return None,
+                Some(b'r') => break i,
+                _ => {}
+            }
+        }
+        i += 1;
+    };
+    (0..=reset)
+        .rev()
+        .find(|&p| b[p] == b'|' && (p == 0 || b[p - 1] != b'|') && b.get(p + 1) == Some(&b'c'))
+        .and_then(|p| display.get(p..p + 10))
 }
 
 /// The char boundary at or below `i`.

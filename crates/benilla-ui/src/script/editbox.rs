@@ -49,25 +49,36 @@ pub(super) fn char_input(lua: &Lua, text: &str) -> bool {
     if text == "\u{1}" {
         // Ctrl+A selects all (the client's keydown case 0x41/0x61).
         highlight_text(lua, h, 0, -1);
-    } else if text.chars().any(|c| (c as u32) >= 0x20) {
-        // A typed `|` goes in as `||` (`0x77c200` pushes the literal `"||"` at `0x879cac`), so
-        // markup cannot be typed; the pair draws as one `|` and counts as one letter.
-        insert(lua, h, &text.replace('|', "||"), true);
+    } else {
+        // Each character is typed on its own, as each `WM_CHAR` is; the host's control codes
+        // (Tab, Enter, Backspace) arrive as keys, so their chars stay inert here.
+        for c in text.chars().filter(|&c| (c as u32) >= 0x20) {
+            type_char(lua, h, c);
+        }
     }
     true
 }
 
-/// Paste host clipboard text into the focused box as one edit: C0 controls are dropped, except a
-/// newline in a `multiLine` box, and no `OnSpacePressed` fires.
+/// Ctrl+V or Shift+Insert (`0x77b3bb`, `0x77b55c`) into the focused box, `0x77e250`: the
+/// clipboard typed one character at a time (`0x77e27d`), so each is escaped and filtered as a
+/// typed one and fires `OnChar`, and `OnSpacePressed` for a space or a tab, as it goes in.
 pub(super) fn paste(lua: &Lua, text: &str) -> bool {
     let Some(h) = route(lua) else {
         return false;
     };
     flush::flush(lua, h); // Ctrl+V is a key-down (`0x77b1e2`)
-    if with_eb(lua, h, |eb| eb.paste(text)).is_some_and(|o| o.text_changed) {
-        sync_text_region(lua, h);
+    for c in text.chars() {
+        type_char(lua, h, c);
     }
     true
+}
+
+/// One typed character, `0x77c200`: what [`EditBoxState::typed`] makes of it goes through
+/// `Insert` with its events on (`0x77c274`), so a numeric box refuses each non-digit alone.
+fn type_char(lua: &Lua, h: FrameHandle, c: char) {
+    if let Some(s) = with_eb(lua, h, |eb| eb.typed(c)).flatten() {
+        insert(lua, h, &s, true);
+    }
 }
 
 /// A named key: only Enter, Escape and Tab act, and a focused box consumes every key.
@@ -282,8 +293,8 @@ fn clear_focus_handle(lua: &Lua, h: FrameHandle) {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `Insert` (`0x77bee0`): delete the selection, abort on a non-digit when `numeric`, splice,
-/// enforce caps, raise the dirty bits for the flush, and with `fire_space` fire one
-/// `OnSpacePressed` per space.
+/// enforce caps, raise the dirty bits for the flush, and with `fire_space` fire `OnSpacePressed`
+/// once if the string holds a space.
 fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
     let Some(out) = with_eb(lua, h, |eb| eb.insert(ins)) else {
         return; // not an EditBox
@@ -307,10 +318,8 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
             .expect("model app_data")
             .record_lua_error(&e);
     }
-    if fire_space {
-        for _ in 0..out.spaces {
-            fire_script(lua, id, "OnSpacePressed");
-        }
+    if fire_space && out.space {
+        fire_script(lua, id, "OnSpacePressed");
     }
 }
 
@@ -373,26 +382,30 @@ fn highlight_text(lua: &Lua, h: FrameHandle, start: i64, end: i64) {
 
 // ── text-region sync ─────────────────────────────────────────────────────────────────────────
 
-/// Write the display string into the text region; a `password` box shows one `*` per character.
+/// After an edit, write the display from the window's start into the text region; a `password`
+/// box shows one `*` per byte. The reference sets the region only in the flush's relayout
+/// (`0x77d858`); benilla's host takes input after the tick's flush, so this shows what was typed
+/// in the same frame, and the next flush trims it to the window.
 fn sync_text_region(lua: &Lua, h: FrameHandle) {
     let Some(rh) = ensure_text_region(lua, h) else {
         return;
     };
-    let display = with_eb(lua, h, |eb| {
-        if eb.password {
-            "*".repeat(eb.text.chars().count())
-        } else {
-            eb.text.clone()
-        }
-    });
-    if let Some(display) = display {
+    if let Some(text) = with_eb(lua, h, |eb| eb.window_text(true)) {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let data = model.region_data.entry(rh).or_default();
-        let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
-        data.text = Some(display);
-        model.touch_measure(rh);
-        model.touch_layout_text(rh, was_shown);
+        write_region_text(&mut model, rh, text);
     }
+}
+
+/// Set the text region's string, `SetText` on the box's font string (`0x771d80`).
+fn write_region_text(model: &mut Model, rh: RegionHandle, text: String) {
+    let data = model.region_data.entry(rh).or_default();
+    if data.text.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
+    data.text = Some(text);
+    model.touch_measure(rh);
+    model.touch_layout_text(rh, was_shown);
 }
 
 /// `SetTextInsets(l, r, t, b)` (`0x77a6e0`): store the insets and re-seat the text region by

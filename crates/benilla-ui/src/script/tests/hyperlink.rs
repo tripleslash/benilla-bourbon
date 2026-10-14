@@ -29,14 +29,14 @@ fn chat() -> UiScript {
     )
     .unwrap();
     s.resolve();
-    set_link(&mut s);
+    set_link(&mut s, "CF");
     s
 }
 
-fn set_link(s: &mut UiScript) {
-    let cf = s.model_ref().arena.lookup("CF").expect("CF");
+fn set_link(s: &mut UiScript, owner: &str) {
+    let owner = s.model_ref().arena.lookup(owner).expect("owner");
     s.set_link_spans(vec![(
-        cf,
+        owner,
         Rect::new(120.0, 110.0, 134.0, 160.0),
         LINK.to_string(),
         MARKUP.to_string(),
@@ -138,5 +138,27 @@ fn a_hittable_body_title_drags_but_its_link_still_clicks() {
     s.resolve();
     assert_eq!(s.eval::<f64>("return CF:GetLeft()").unwrap(), 150.0);
     assert!(s.eval::<bool>("return CF:IsUserPlaced()").unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The take `0x7a3880` is called from the ScrollingMessageFrame and SimpleHTML updates alone; the
+/// MessageFrame's update (`0x786200`) reaches neither, so a span on one builds no button and the
+/// pointer over it passes through.
+#[test]
+fn a_message_frame_line_gets_no_link_button() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        EF = CreateFrame("MessageFrame", "EF")
+        EF:SetPoint("BOTTOMLEFT", 100, 100); EF:SetWidth(430); EF:SetHeight(120)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    set_link(&mut s, "EF");
+    assert_eq!(s.eval::<i64>("return EF:GetNumChildren()").unwrap(), 0);
+    s.mouse_move(130.0, 127.0);
+    assert!(s.eval::<bool>("return GetMouseFocus() == nil").unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
