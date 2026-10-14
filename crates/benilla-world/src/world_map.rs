@@ -69,7 +69,11 @@ fn announce_map_change(
 }
 
 /// Read `Map.dbc` off the patch chain into [`MapCatalogRes`] and seed [`CurrentMap`].
-fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>) {
+fn load_world_map(
+    mut commands: Commands,
+    world_assets: Option<Res<WorldAssets>>,
+    current: Option<Res<CurrentMap>>,
+) {
     let Some(world_assets) = world_assets else {
         return;
     };
@@ -80,8 +84,10 @@ fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>
             commands.insert_resource(MapCatalogRes(c));
             // `$WOW_MAP` picks a server-less run's map (a named capture scenario sets it before
             // `Startup`); a live session's `player::wire_in` overwrites it from the server.
-            let map = map_id_from_env();
-            commands.insert_resource(CurrentMap(map));
+            // Seeded once: a rerun on a data change must not move a player off the map they are on.
+            if current.is_none() {
+                commands.insert_resource(CurrentMap(map_id_from_env()));
+            }
         }
         Err(e) => error!("failed to load Map.dbc, cross-map teleport disabled: {e:#}"),
     }
