@@ -438,6 +438,7 @@ fn push_precip(
     precip: Option<Res<Precip>>,
     assets: Option<Res<PrecipAssets>>,
     indoors: Res<WeatherIndoors>,
+    underwater: Option<Res<crate::liquid::Underwater>>,
     lighting: Res<WowLighting>,
     wind: Res<WeatherWind>,
     cam: Query<(Entity, &GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
@@ -446,7 +447,8 @@ fn push_precip(
     let (Some(precip), Some(assets)) = (precip, assets) else {
         return;
     };
-    if indoors.0 {
+    // fork: a submerged eye draws no precipitation; the drops keep simulating for the surfacing.
+    if indoors.0 || underwater.is_some_and(|u| u.0.any()) {
         return;
     }
     let Ok((cam_entity, cam_tf, camera, proj)) = cam.single() else {
