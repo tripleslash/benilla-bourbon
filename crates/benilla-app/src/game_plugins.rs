@@ -922,9 +922,9 @@ pub(crate) mod schedule_tests {
     /// sweep (dd3983a47); the fork's count follows it, plus the stock glue's pending music opener
     /// and its glue-VM rebuild after a flavor switch, against the glue and sound systems.
     ///
-    /// Upstream's chunk-visible targeting (benilla#1225) moved its ceiling 4,642 -> 4,598 (-44);
-    /// the fork's count follows it.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_935;
+    /// Upstream's chunk-visible targeting (benilla#1244, superseding #1225) moved its ceiling
+    /// 4,642 -> 4,603 (-39); the fork's count follows it.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_940;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
