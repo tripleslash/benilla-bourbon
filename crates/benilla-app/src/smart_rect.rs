@@ -73,9 +73,12 @@ impl SmartBucket {
     fn solve(&self, input: Rect, viewport: Vec2) -> Rect {
         let (seed, flags) = clamp_to_bands(input, viewport);
         let region = region_index(flags);
-        // `0x509dd0`. A degenerate size saturates, but never overlaps, so adopts at once.
-        let bound = ((viewport.x / input.width()).trunc() as i64 + 1)
-            .saturating_mul((viewport.y / input.height()).trunc() as i64 + 1);
+        // `0x509dd0`. A degenerate size saturates, but never overlaps, so adopts at once. Both
+        // factors saturate too: a minimised window is a 0x0 viewport, and a zero-width rect over
+        // it is `inf as i64` = `i64::MAX`, whose `+ 1` overflowed in a checked build.
+        let bound = ((viewport.x / input.width()).trunc() as i64)
+            .saturating_add(1)
+            .saturating_mul(((viewport.y / input.height()).trunc() as i64).saturating_add(1));
         let mut queue = VecDeque::from([seed]);
         for _ in 0..bound {
             let Some(node) = queue.pop_front() else {
@@ -269,6 +272,16 @@ mod tests {
                 got.min.y
             );
         }
+    }
+
+    /// A zero-width plate is seated, not a panic: a 0x0 window made `inf as i64 + 1` overflow.
+    #[test]
+    fn a_degenerate_rect_bounds_the_search_without_overflow() {
+        let mut b = SmartBucket::default();
+        seat(&mut b, Rect::new(500.0, 380.0, 540.0, 400.0));
+        let flat = Rect::new(510.0, 385.0, 510.0, 395.0);
+        let _ = b.resolve(flat, VP);
+        let _ = b.resolve(flat, Vec2::ZERO);
     }
 
     #[test]
