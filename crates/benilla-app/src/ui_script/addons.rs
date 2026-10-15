@@ -564,11 +564,13 @@ pub(crate) fn addon_replies(
 /// [`info_for`]'s body, shared with `addon_harness` so its survey seats the registry row
 /// production does. `chain` is whether the addon comes off the player's patch chain.
 pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::script::AddOnInfo {
+    // The metadata lines of the client's locale (`[0xc0e080]`) count; another locale's drop.
+    let locale = super::client_locale().index();
     benilla_ui::script::AddOnInfo {
         name: name.to_owned(),
         // From the metadata map, whose `Title` the reader seeds with the folder (`0x51cb3d`).
-        title: toc.metadata_value(name, "Title"),
-        notes: toc.metadata_value(name, "Notes"),
+        title: toc.metadata_value(name, "Title", locale),
+        notes: toc.metadata_value(name, "Notes", locale),
         // The `.toc` has no URL: `0x51e180` answers `[rec+0x30]`, which only the server's
         // `SMSG_ADDON_INFO` writes (`0x51db6a`).
         url: None,
@@ -589,7 +591,7 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::s
             .collect(),
         load_with: toc.load_with().into_iter().map(str::to_owned).collect(),
         dependents: Vec::new(), // filled by `register_addons`
-        directives: toc.metadata(name),
+        directives: toc.metadata(name, locale),
         files: toc.files.clone(),
         saved_variables: toc
             .saved_variables()
@@ -685,6 +687,7 @@ pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
     } else {
         UiFlavor::Vanilla
     };
+    let locale = super::client_locale().index();
     let mut addons = discover_folder();
     let seen: HashSet<String> = addons.iter().map(|a| a.name.to_ascii_lowercase()).collect();
     addons.extend(
@@ -696,8 +699,8 @@ pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
         .into_iter()
         .map(|addon| InstalledAddOn {
             default_state: addon.toc.default_state(),
-            title: addon.toc.metadata_value(&addon.name, "Title"),
-            notes: addon.toc.metadata_value(&addon.name, "Notes"),
+            title: addon.toc.metadata_value(&addon.name, "Title", locale),
+            notes: addon.toc.metadata_value(&addon.name, "Notes", locale),
             url: None, // the server's, never the `.toc`'s (`0x51e180`, `0x51db6a`)
             dependencies: addon
                 .toc
@@ -1252,7 +1255,7 @@ mod tests {
             "the archive's copy won"
         );
         assert_ne!(
-            row.toc.metadata_value(&row.name, "Title").as_deref(),
+            row.toc.metadata_value(&row.name, "Title", 0).as_deref(),
             Some("Impostor"),
             "the loose manifest did not overwrite the archive's"
         );

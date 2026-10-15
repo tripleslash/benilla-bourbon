@@ -1735,6 +1735,7 @@ mod bind_confirm_tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                occupied_seats: None,
                 bonding: 2,
                 use_spell: 0,
                 bar_placeable: true,

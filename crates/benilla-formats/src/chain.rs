@@ -23,6 +23,7 @@ use anyhow::{anyhow, bail, Context};
 #[cfg(not(target_arch = "wasm32"))]
 use benilla_mpq::Archive;
 
+use crate::Locale;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::VANILLA_BASE_ORDER;
 
@@ -59,6 +60,8 @@ pub enum TryRead {
 pub struct Chain {
     /// Ascending priority: later archives win.
     archives: Vec<Archive>,
+    /// The locale the chain's `Wow.ini` names, read once at open as start-up reads it once.
+    locale: Locale,
 }
 
 /// The web build's `Chain`: a **BENPACK container** (`crate::webpack`) read out of a static object
@@ -78,6 +81,8 @@ pub struct Chain {
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     store: crate::webpack::PackStore,
+    /// The locale the container's `Wow.ini` names, read once at open as start-up reads it once.
+    locale: Locale,
 }
 
 /// The live layers one read resolves against — the updated character models, the Turtle WoW
@@ -206,7 +211,25 @@ impl Chain {
                 Archive::open(path).with_context(|| format!("opening MPQ {}", path.display()))?,
             );
         }
-        Ok(Self { archives })
+        let mut chain = Self {
+            archives,
+            locale: Locale::default(),
+        };
+        chain.locale = crate::wow_ini::client_locale(&chain);
+        Ok(chain)
+    }
+
+    /// The client locale, from the chain's `Wow.ini` (`0x402350`): its index picks the column of
+    /// every localized DBC string.
+    pub fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    /// The same archives read as another locale, for a test of the column a loader reads.
+    #[cfg(test)]
+    pub(crate) fn with_locale(mut self, locale: Locale) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// A chain of exactly these archives, in ascending priority (a later one wins), whatever
@@ -221,7 +244,12 @@ impl Chain {
             .iter()
             .map(|p| Archive::open(p).with_context(|| format!("opening MPQ {}", p.display())))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { archives })
+        let mut chain = Self {
+            archives,
+            locale: Locale::default(),
+        };
+        chain.locale = crate::wow_ini::client_locale(&chain);
+        Ok(chain)
     }
 
     /// The highest-priority archive with an entry for `name`, a delete marker included, as a
@@ -400,7 +428,18 @@ impl Chain {
                 )),
             }
         }
-        Ok(Self { store })
+        let mut chain = Self {
+            store,
+            locale: Locale::default(),
+        };
+        chain.locale = crate::wow_ini::client_locale(&chain);
+        Ok(chain)
+    }
+
+    /// The client locale, from the container's `Wow.ini` (`0x402350`): its index picks the column
+    /// of every localized DBC string.
+    pub fn locale(&self) -> Locale {
+        self.locale
     }
 
     /// The container that should answer for `name` — [`crate::layers::pick_layer`] over the layers

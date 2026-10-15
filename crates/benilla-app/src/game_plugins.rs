@@ -940,7 +940,10 @@ pub(crate) mod schedule_tests {
     ///
     /// The merge of upstream e3eade8e (the NPC interaction latch, the in-flight cast slot, the
     /// Lua and chat gates) measures 4,804, 142 fewer: upstream's own ceiling fell 4,603 -> 4,463.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_804;
+    ///
+    /// Upstream's character-pane `SetUnit` subjects (b727e30f3, #1352) moved its ceiling 4,463 ->
+    /// 3,964 (-499); the merge of 7b608671a (the locale, the item watchers) measures 4,284.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_284;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

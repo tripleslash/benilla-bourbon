@@ -53,8 +53,13 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
         let mut stream = block_on(Conn::connect(host, port))
             .with_context(|| format!("connecting to {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)
-            .context("sending logon challenge")?;
+        auth::write_logon_challenge(
+            &mut stream,
+            &user.to_uppercase(),
+            CLIENT_BUILD,
+            auth::LOCALE_TAG_EN_US,
+        )
+        .context("sending logon challenge")?;
         let reply = block_on(auth::read_challenge_reply(&mut stream))
             .context("reading challenge reply")?
             .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
@@ -186,7 +191,12 @@ fn main() -> Result<()> {
     let mut stream = block_on(Conn::connect(host, port))
         .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)?;
+    auth::write_logon_challenge(
+        &mut stream,
+        &user.to_uppercase(),
+        CLIENT_BUILD,
+        auth::LOCALE_TAG_EN_US,
+    )?;
     let crc_salt = block_on(auth::read_challenge_reply(&mut stream))?
         .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?
         .crc_salt;

@@ -23,7 +23,9 @@ mod net;
 struct TradeOffer {
     slots: [Option<TradeItem>; TRADE_SLOT_COUNT],
     gold: u32,
-    /// The spell on this side's enchant slot, 0 for none; stored, not shown yet.
+    /// The header's spell, `[0xc4bed8 + 4*side]` (`0x5d49fa`): the spell this side's player cast
+    /// on the other side's enchant slot, 0 for none. Our own window's names the partner's slot 7,
+    /// the partner's names ours (`0x4c02b7`, `0x4c05d1`).
     enchant_spell_id: u32,
     /// Our side only: each placed item's `ITEM_FIELD_FLAGS`, read off its object when it was
     /// placed. The slot's tooltip passes that live object to the builder (`0x5342ed`).
@@ -51,6 +53,13 @@ pub(crate) struct TradeSession {
     their_accept: bool,
     /// Our 0-based slots `InvalidateTradeSlot` (`0x4bfbd0`) runs on, owed to [`feed_trade`].
     invalidated: Vec<u8>,
+    /// Each side's spell as `0x4bf2b0` last compared it (`0xb71738`, `0xb7173c`), indexed by the
+    /// header's side byte; zero for a fresh window (`0x4bf5cc`).
+    spell_seen: [u32; 2],
+    /// The enchant slot's change signals owed to [`feed_trade`], by side byte, in arrival order:
+    /// side 0's is `TRADE_TARGET_ITEM_CHANGED(7)` (`0x4bf452`), side 1's
+    /// `TRADE_PLAYER_ITEM_CHANGED(7)` (`0x4bf487`).
+    enchant_changed: Vec<bool>,
     /// Owed lines whose `%s` names a player, parked until [`NameCache`] answers. The reference
     /// prints `ERR_INITIATE_TRADE_S` from its name cache in the sender (`0x5d4031`: `0x5d4042` on
     /// a hit, the query callback `0x5d4080` at `0x5d40ca` on a miss); the lines survive
@@ -133,6 +142,13 @@ impl TradeSession {
         side.slots = ext.slots;
         side.gold = ext.gold;
         side.enchant_spell_id = ext.enchant_spell_id;
+        // `0x4bf2b0`'s two compares after the slots (`0x4bf430`, `0x4bf464`): only this side's
+        // spell can have moved.
+        let seen = &mut self.spell_seen[usize::from(ext.their_window)];
+        if *seen != ext.enchant_spell_id {
+            *seen = ext.enchant_spell_id;
+            self.enchant_changed.push(ext.their_window);
+        }
         self.our_accept = false;
         self.their_accept = false;
     }
@@ -203,6 +219,10 @@ impl TradeSession {
 
     fn take_invalidated(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.invalidated)
+    }
+
+    fn take_enchant_changed(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.enchant_changed)
     }
 
     /// Park a line that names a player.
@@ -380,6 +400,8 @@ impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         net::register(app);
+        // A UI-only harness has no net stack; declaring a message twice is idempotent.
+        app.add_message::<crate::item_watch::ItemNotice>();
         app.init_resource::<TradeSession>()
             .init_resource::<BlockTrades>()
             .add_latched_window::<TradeSession>()
@@ -391,6 +413,11 @@ impl Plugin for UiTradePlugin {
                     // the input pass, with the drain after it, so each lands the same frame. The
                     // latch's watchdog leashes the partner at 14 yd.
                     feed_trade.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
+                    // Each item handler runs the action bar's recount before the trade scan
+                    // (`0x5d94e1` then `0x5d94f0`).
+                    resignal_trade_items
+                        .in_set(crate::ui_unit::UnitFeed)
+                        .after(crate::ui_action::recount_item_actions),
                     // Ahead of the feed, so an accepted partner shows the frame the window opens.
                     answer_trade_request
                         .after(crate::player::ControlRestore)
@@ -511,7 +538,8 @@ fn answer_trade_request(
 }
 
 /// A wire [`TradeItem`] as the Lua row: name and quality from the item-template cache once it
-/// answers, the icon from `display_id` via `ItemDisplayInfo.dbc`; `enchantment` is not filled yet.
+/// answers, the icon from `display_id` via `ItemDisplayInfo.dbc`; [`resolve_side`] names slot 7's
+/// `enchantment`.
 fn resolve_slot(
     item: &TradeItem,
     items: &Items,
@@ -564,6 +592,17 @@ fn own_item_at(
     if guid == 0 {
         return None;
     }
+    own_item(guid, count, objects, items, commands)
+}
+
+/// Our item object `guid` as a wire [`TradeItem`] of `count`, with its `ITEM_FIELD_FLAGS`.
+fn own_item(
+    guid: u64,
+    count: u32,
+    objects: &Objects,
+    items: &Items,
+    commands: &NetCommands,
+) -> Option<(TradeItem, u32)> {
     let fields = objects.object(guid)?;
     let entry = fields.object_entry()?;
     let flags = fields.item_flags().unwrap_or(0);
@@ -591,9 +630,15 @@ fn own_item_at(
     ))
 }
 
+/// The enchant slot, the seventh: the only row with an enchantment.
+const ENCHANT_SLOT: usize = TRADE_SLOT_COUNT - 1;
+
+/// `enchant` is the name the column's slot 7 shows: the `Spell.dbc` name of the spell cast on it,
+/// read for a filled slot only (`0x4c02b0`, `0x4c05c6`).
 fn resolve_side(
     offer: &TradeOffer,
     ours: bool,
+    enchant: Option<&str>,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -604,6 +649,9 @@ fn resolve_side(
             let mut row = resolve_slot(&it, items, icons, commands);
             // Our items are live objects; the partner's are blocks (`0x5342ed`, `0x53456b`).
             row.object_flags = ours.then_some(offer.object_flags[i]);
+            if i == ENCHANT_SLOT {
+                row.enchantment = enchant.map(str::to_string);
+            }
             row
         });
     }
@@ -617,15 +665,107 @@ fn snapshot(
     trade: &TradeSession,
     items: &Items,
     icons: Option<&ItemDisplays>,
+    spells: Option<&crate::ui_action::Spells>,
     commands: &NetCommands,
 ) -> Option<TradeState> {
     if !trade.open {
         return None;
     }
+    // A spell id with no positive `Spell.dbc` row names nothing (`0x4c02be`-`0x4c02d5`).
+    let name = |id: u32| {
+        (id != 0)
+            .then(|| spells?.catalog.get(id))
+            .flatten()
+            .map(|d| d.name.as_str())
+    };
     Some(TradeState {
-        player: resolve_side(&trade.our, true, items, icons, commands),
-        target: resolve_side(&trade.their, false, items, icons, commands),
+        // The partner's window carries the spell they cast on our slot 7 (`0x4c05d1`, side 1).
+        player: resolve_side(
+            &trade.our,
+            true,
+            name(trade.their.enchant_spell_id),
+            items,
+            icons,
+            commands,
+        ),
+        // Our window carries the spell we cast on theirs (`0x4c02b7`, side 0).
+        target: resolve_side(
+            &trade.their,
+            false,
+            name(trade.our.enchant_spell_id),
+            items,
+            icons,
+            commands,
+        ),
     })
+}
+
+/// The item watchers' trade half, after the action bar's recount in each handler: an item of
+/// ours that one of our slots holds re-signals the slot (`0x4bfb10`, `0x4bfb60` into `0x4bfa70`).
+/// Gone, the slot clears with `CMSG_CLEAR_TRADE_ITEM` (`0x5d4480`), as a click's clear does;
+/// restacked or enchanted, the same item is placed again with `CMSG_SET_TRADE_ITEM` from the
+/// position it was placed from (`0x5d4380`), our session's offer left as it is. vmangos refuses an
+/// item its trade already holds and cancels the trade (`TradeHandler.cpp:716-720`), as it does
+/// for the reference's send. Neither scan asks whether a trade is open.
+fn resignal_trade_items(
+    script: Option<NonSendMut<UiScript>>,
+    mut notices: MessageReader<crate::item_watch::ItemNotice>,
+    mut trade: ResMut<TradeSession>,
+    commands: Res<NetCommands>,
+    objects: Objects,
+    items: Res<Items>,
+    icons: Option<Res<ItemDisplays>>,
+) {
+    use crate::item_watch::TradeTouch;
+    let touches: Vec<TradeTouch> = notices
+        .read()
+        .filter_map(crate::item_watch::ItemNotice::trade)
+        .collect();
+    let Some(mut script) = script else {
+        return;
+    };
+    for touch in touches {
+        match touch {
+            TradeTouch::Gone(guid) => {
+                let Some((slot, _, _)) = script.trade_slot_holding(guid) else {
+                    continue;
+                };
+                info!(target: "trade", "item {guid:#x} gone from slot {}; sending CMSG_CLEAR_TRADE_ITEM", slot + 1);
+                let _ = commands
+                    .0
+                    .send(ClientCommand::ClearTradeItem { trade_slot: slot });
+                trade.clear_own_item(u32::from(slot) + 1);
+                script.empty_trade_slot(slot);
+            }
+            TradeTouch::Changed(guid) => {
+                let Some((slot, bag, bag_slot)) = script.trade_slot_holding(guid) else {
+                    continue;
+                };
+                // The send refuses with no active player or no item object (`0x5d43af`,
+                // `0x5d43da`), and then nothing is stored or signalled (`0x4bfab3`).
+                let count = objects
+                    .object(guid)
+                    .and_then(|f| f.item_stack_count())
+                    .unwrap_or(1);
+                let (Some(_), Some((item, flags)), Some((wire_bag, wire_slot))) = (
+                    objects.player(),
+                    own_item(guid, count, &objects, &items, &commands),
+                    crate::ui_items::wire_pos(bag, bag_slot),
+                ) else {
+                    continue;
+                };
+                info!(target: "trade", "item {guid:#x} in slot {} changed; sending CMSG_SET_TRADE_ITEM", slot + 1);
+                let _ = commands.0.send(ClientCommand::SetTradeItem {
+                    trade_slot: slot,
+                    bag: wire_bag,
+                    slot: wire_slot,
+                });
+                let mut row = resolve_slot(&item, &items, icons.as_deref(), &commands);
+                row.object_flags = Some(flags);
+                script.replace_trade_slot(slot, row);
+            }
+        }
+    }
 }
 
 /// Push the trade into the VM and fire its events on a change, diffed against `Local` memory;
@@ -635,6 +775,7 @@ fn feed_trade(
     mut trade: ResMut<TradeSession>,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
@@ -664,7 +805,13 @@ fn feed_trade(
         *last_their_gold = 0;
     }
 
-    let fresh = snapshot(&trade, &items, icons.as_deref(), &commands);
+    let fresh = snapshot(
+        &trade,
+        &items,
+        icons.as_deref(),
+        spells.as_deref(),
+        &commands,
+    );
     // A close is the core's, which told the VM; a disconnect's clear tells it nothing.
     let opened = !*last_open && trade.is_open();
     let changed = fresh != *last;
@@ -702,12 +849,20 @@ fn feed_trade(
         let empty = TradeState::default();
         let old = last.as_ref().unwrap_or(&empty);
         if let Some(new) = fresh.as_ref() {
+            // The record compare (`0x4bf2c7`-`0x4bf378`) reads the item fields, never the
+            // enchant slot's spell, which signals on its own below.
+            let record = |s: &Option<TradeSlotItem>| {
+                s.as_ref().map(|s| TradeSlotItem {
+                    enchantment: None,
+                    ..s.clone()
+                })
+            };
             let changed_slots = |mine: &[Option<TradeSlotItem>],
                                  theirs: &[Option<TradeSlotItem>]| {
                 mine.iter()
                     .zip(theirs.iter())
                     .enumerate()
-                    .filter(|(_, (a, b))| a != b)
+                    .filter(|(_, (a, b))| record(a) != record(b))
                     .map(|(i, _)| ScriptValue::Int(i as i64 + 1))
                     .collect::<Vec<_>>()
             };
@@ -735,6 +890,16 @@ fn feed_trade(
                 script.fire_event("TRADE_TARGET_ITEM_CHANGED", vec![slot]);
             }
         }
+    }
+    // The enchant slot's spell, after the partner's slots (`0x4bf429` on): the spell we cast
+    // repaints their slot 7, the one they cast repaints ours.
+    for partner_window in trade.take_enchant_changed() {
+        let event = if partner_window {
+            "TRADE_PLAYER_ITEM_CHANGED"
+        } else {
+            "TRADE_TARGET_ITEM_CHANGED"
+        };
+        script.fire_event(event, vec![ScriptValue::Int(ENCHANT_SLOT as i64 + 1)]);
     }
     // The owed `%s` lines, resolved here where the name cache is; a miss waits for the query it
     // started. The catalog row, read by `ui_action::feed_actions`, decides where each lands.
@@ -2127,5 +2292,246 @@ mod tests {
                 "TRADE_CLOSED"
             ]
         );
+    }
+
+    /// The offered linen (backpack slot 1, our trade slot 1) as a live item object of ours, with
+    /// our player, the re-signal system ahead of the feed, and the spy's list emptied.
+    fn resignal_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        use benilla_protocol::field::{FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY};
+        use benilla_protocol::ObjectFields;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = offered_app();
+        app.insert_resource(NetCommands(tx))
+            .add_message::<crate::item_watch::ItemNotice>()
+            .add_systems(Update, resignal_trade_items.before(feed_trade));
+        let world = app.world_mut();
+        crate::items::test_spawn_item(
+            world,
+            LINEN,
+            ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, 2589), (FIELD_ITEM_STACK_COUNT, 1)]),
+            false,
+        );
+        world.spawn(crate::net::SelfPlayer);
+        seen(&mut app);
+        (app, rx)
+    }
+
+    /// The offered linen's guid in [`offered_app`].
+    const LINEN: u64 = 0x4000_0000_0000_2589;
+
+    fn notify(app: &mut App, notice: crate::item_watch::ItemNotice) {
+        app.world_mut()
+            .resource_mut::<Messages<crate::item_watch::ItemNotice>>()
+            .write(notice);
+        app.update();
+    }
+
+    /// `0x4bfb10` from the destroy: the slot holding the item clears on the wire and in the VM,
+    /// and signals once; nothing unlocks, the lock having gone with the item.
+    #[test]
+    fn a_destroyed_offer_clears_its_slot_and_tells_the_server() {
+        let (mut app, rx) = resignal_app();
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::Destroyed {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        let sent: Vec<ClientCommand> = rx.try_iter().collect();
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, ClientCommand::ClearTradeItem { trade_slot: 0 })),
+            "CMSG_CLEAR_TRADE_ITEM for slot 1: {sent:?}"
+        );
+        assert_eq!(seen(&mut app), ["TRADE_PLAYER_ITEM_CHANGED"]);
+        let name: Option<String> = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval("return (GetTradePlayerItemInfo(1))")
+            .unwrap();
+        assert_eq!(name, None, "the slot is empty");
+        // Another item's destroy, or the same one again, touches no slot.
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::Destroyed {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        assert!(rx.try_iter().next().is_none());
+        assert!(seen(&mut app).is_empty());
+    }
+
+    /// `0x4bfb60` from the stack and enchantment watchers: the same item placed again from its
+    /// position, the slot showing the live count, and one signal; a placement of an item that
+    /// is no longer an object sends and signals nothing (`0x5d43da`).
+    #[test]
+    fn a_restacked_offer_is_placed_again_with_its_live_count() {
+        use benilla_protocol::field::FIELD_ITEM_STACK_COUNT;
+        use benilla_protocol::ObjectFields;
+        let (mut app, rx) = resignal_app();
+        let linen = app.world().resource::<GuidIndex>().0[&LINEN];
+        app.world_mut()
+            .get_mut::<ObjectStore>(linen)
+            .unwrap()
+            .0
+            .merge(ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 7)]));
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::StackCount {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        let sent: Vec<ClientCommand> = rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                ClientCommand::SetTradeItem {
+                    trade_slot: 0,
+                    bag: 255,
+                    slot: 23
+                }
+            )),
+            "CMSG_SET_TRADE_ITEM from backpack slot 1: {sent:?}"
+        );
+        assert_eq!(seen(&mut app), ["TRADE_PLAYER_ITEM_CHANGED"]);
+        let count: i64 = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval("local _, _, n = GetTradePlayerItemInfo(1) return n")
+            .unwrap();
+        assert_eq!(count, 7, "the slot reads the live stack");
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::Enchantment {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        assert_eq!(rx.try_iter().count(), 1, "the enchantment places it again");
+        assert_eq!(seen(&mut app), ["TRADE_PLAYER_ITEM_CHANGED"]);
+        app.world_mut().resource_mut::<GuidIndex>().0.remove(&LINEN);
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::StackCount {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        assert!(rx.try_iter().next().is_none(), "no item, no send");
+        assert!(seen(&mut app).is_empty());
+    }
+
+    /// Each item handler refreshes the action bar before it scans the trade (`0x5d8798` before
+    /// `0x5d87a7`, `0x5d94e1` before `0x5d94f0`, `0x5d9afd` before `0x5d9b0c`), and the slot's
+    /// signal lands before the feed's push of the column.
+    #[test]
+    fn the_trade_re_signal_follows_the_bar_recount_and_precedes_the_feed() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        assert!(crate::test_support::runs_before(
+            &mut app,
+            crate::ui_action::recount_item_actions,
+            resignal_trade_items
+        ));
+        assert!(crate::test_support::runs_before(
+            &mut app,
+            resignal_trade_items,
+            feed_trade
+        ));
+    }
+
+    /// Slot 7's spell per side (`0x4bf2b0`): the partner's window carries the spell cast on our
+    /// slot 7, which repaints ours and names its enchantment; our window carries ours on theirs.
+    /// A resend of the same spell signals nothing, and the record compare ignores the name.
+    #[test]
+    fn the_enchant_slots_spell_signals_its_side_and_names_the_enchantment() {
+        const FIERY: u32 = 13898;
+        let (mut app, _rx) = feed_app();
+        app.insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from(
+                [(
+                    FIERY,
+                    benilla_formats::SpellDisplay {
+                        name: "Enchant Weapon - Fiery Weapon".into(),
+                        ..Default::default()
+                    },
+                )],
+            )),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(2589, Some(crate::items::test_template("Linen Cloth")));
+        open_with(&mut app, 0x7);
+        app.update();
+        let mut slots = [None; TRADE_SLOT_COUNT];
+        slots[ENCHANT_SLOT] = Some(wire_item(2589));
+        let ext = |their_window: bool, spell: u32| TradeStatusExtended {
+            their_window,
+            gold: 0,
+            enchant_spell_id: spell,
+            slots,
+        };
+        // Both columns hold an item in slot 7, as their windows say.
+        {
+            let mut trade = app.world_mut().resource_mut::<TradeSession>();
+            trade.set_offer(&ext(true, 0));
+            trade.set_offer(&ext(false, 0));
+        }
+        app.update();
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .run(
+                r#"SEEN = {}
+                   local f = CreateFrame("Frame")
+                   f:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+                   f:RegisterEvent("TRADE_TARGET_ITEM_CHANGED")
+                   f:SetScript("OnEvent", function() table.insert(SEEN, event .. " " .. arg1) end)"#,
+            )
+            .unwrap();
+        let enchantments = |app: &mut App| -> (Option<String>, Option<String>) {
+            app.world_mut()
+                .non_send::<UiScript>()
+                .eval(
+                    "local _, _, _, _, p = GetTradePlayerItemInfo(7) \
+                     local _, _, _, _, _, t = GetTradeTargetItemInfo(7) return p, t",
+                )
+                .unwrap()
+        };
+        app.world_mut()
+            .resource_mut::<TradeSession>()
+            .set_offer(&ext(true, FIERY));
+        app.update();
+        assert_eq!(seen(&mut app), ["TRADE_PLAYER_ITEM_CHANGED 7"]);
+        assert_eq!(
+            enchantments(&mut app),
+            (Some("Enchant Weapon - Fiery Weapon".into()), None)
+        );
+        app.world_mut()
+            .resource_mut::<TradeSession>()
+            .set_offer(&ext(true, FIERY));
+        app.update();
+        assert!(seen(&mut app).is_empty(), "the same spell again");
+        app.world_mut()
+            .resource_mut::<TradeSession>()
+            .set_offer(&ext(false, FIERY));
+        app.update();
+        assert_eq!(seen(&mut app), ["TRADE_TARGET_ITEM_CHANGED 7"]);
+        assert_eq!(
+            enchantments(&mut app),
+            (
+                Some("Enchant Weapon - Fiery Weapon".into()),
+                Some("Enchant Weapon - Fiery Weapon".into())
+            )
+        );
+        // Cleared on our side: the partner's slot 7 repaints and names nothing.
+        app.world_mut()
+            .resource_mut::<TradeSession>()
+            .set_offer(&ext(false, 0));
+        app.update();
+        assert_eq!(seen(&mut app), ["TRADE_TARGET_ITEM_CHANGED 7"]);
+        assert_eq!(enchantments(&mut app).1, None);
     }
 }

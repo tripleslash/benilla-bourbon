@@ -83,6 +83,7 @@ mod go_templates;
 mod hd_models;
 #[cfg(feature = "dev")]
 mod hover_log;
+mod item_watch;
 mod items;
 mod loading_screen;
 mod local_state;
