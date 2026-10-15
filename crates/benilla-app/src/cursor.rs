@@ -78,9 +78,10 @@ fn decode_payload_cursor_rgba(
     assets: &mut benilla_assets::WorldAssets,
     path: &str,
 ) -> Option<Vec<u8>> {
+    // The dragged picture opens with the loose flag, as the cursor code's `0x449610` opens it.
     // Blocking: the composite becomes a hardware cursor for the whole drag, and nothing asks
     // again mid-drag. See `WorldAssets::sprite_texture_blocking`.
-    let (w, h, rgba) = assets.decode_rgba_blocking(path)?;
+    let (w, h, rgba) = assets.decode_rgba_blocking(path, benilla_assets::LooseOpen::Index)?;
     let mut out = box_downsample_32(w, h, &rgba);
     for a in out.iter_mut().skip(3).step_by(4) {
         *a = 0xFF;
@@ -443,9 +444,7 @@ mod macos {
     use std::collections::{HashMap, HashSet};
 
     use crate::player::CameraControl;
-    use benilla_assets::LockRecover;
     use benilla_assets::WorldAssets;
-    use benilla_formats::read_texture_rgba;
     use bevy::prelude::*;
     use objc2::rc::Retained;
     use objc2::ClassType; // brings `alloc()` into scope
@@ -471,9 +470,10 @@ mod macos {
         }
         let mut cursors = HashMap::new();
         for stem in CURSOR_STEMS {
-            let Some((w, h, rgba)) = world.get_resource_mut::<WorldAssets>().and_then(|wa| {
-                read_texture_rgba(&mut wa.chain.lock_recover(), &cursor_path(stem)).ok()
-            }) else {
+            let Some((w, h, rgba)) = world
+                .get_resource::<WorldAssets>()
+                .and_then(|wa| wa.cursor_rgba(&cursor_path(stem)))
+            else {
                 warn!("cursor {stem}.blp missing/undecodable — mode falls back");
                 continue;
             };

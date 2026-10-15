@@ -95,6 +95,8 @@ impl GlueScreen {
 /// is tagged `"GlueXML/<file>: <error>"`, a handler that raised during the walk is one too. The
 /// load's record is left for [`finish_glue_load_log`].
 pub(super) fn load_glue(script: &mut UiScript) -> Vec<String> {
+    // The builder's sweep before the checks and the toc (`0x46a8eb`).
+    super::addons::sweep_loose_interface();
     let mut failures = match reference_ui::glue() {
         Some(glue) => {
             let mut toc = benilla_ui::status::Status::default();
@@ -180,9 +182,9 @@ mod tests {
     /// list only shrinks: a name built, or no longer reached, comes off it.
     const UNBUILT_CALLED: &[&str] = &[];
 
-    /// What the player's own files make the reference report too: their `tos.html` uses `<H4>`,
-    /// which 1.12's SimpleHTML does not know (`"Frame %s: Unknown element type: %s"`,
-    /// `0x87a95c`, and the walk goes on).
+    /// What the player's own files make the reference report too: their `tos.html` uses `<H4>`
+    /// (`<h4>` in a US install), which 1.12's SimpleHTML does not know (`"Frame %s: Unknown
+    /// element type: %s"`, `0x87a95c`, the tag as written, and the walk goes on).
     const INSTALL_WARNINGS: &[&str] = &["Frame TOSText: Unknown element type: H4"];
 
     /// The frames each stock glue screen and dialog is, which the load must build.
@@ -270,7 +272,7 @@ mod tests {
                     called.insert(name);
                     return false;
                 }
-                if INSTALL_WARNINGS.contains(&e.as_str()) {
+                if INSTALL_WARNINGS.iter().any(|w| w.eq_ignore_ascii_case(e)) {
                     return false;
                 }
                 true

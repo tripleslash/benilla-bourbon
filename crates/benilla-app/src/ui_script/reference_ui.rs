@@ -93,14 +93,20 @@ fn named_addon(name: &str, files: Vec<String>) -> Addon {
     )
 }
 
-/// One file's bytes off the player's patch chain, by internal path. Bytes, not a string: Lua
-/// takes a chunk as stored, and a cp1252 file is not valid UTF-8.
+/// One file's bytes as an interface file opens (`SFile::Load`, flag 1): a loose file of the
+/// player's install, then the patch chain, by internal path. Bytes, not a string: Lua takes a
+/// chunk as stored, and a cp1252 file is not valid UTF-8.
 pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     #[cfg(test)]
     if let Some(overlaid) = fixture::read(req) {
         return overlaid;
     }
-    if let Some(bytes) = read_loose(req) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(answer) = read_loose(&benilla_formats::install_index().get(), req) {
+        return answer;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(bytes) = read_loose_web(req) {
         return Some(bytes);
     }
     let chain = chain()?;
@@ -127,37 +133,27 @@ pub(super) fn ready(req: &str) -> bool {
     chain().is_none_or(|chain| chain.ready(req))
 }
 
-/// A bare file name off the install's own folders, read-only: Storm's open tries the install
-/// directory (its base path `0xc52418`) and its `Data\` before the archives, which is where the
-/// login screen's agreements (`<SimpleHTML file="eula.html">`) are found, loose in `Data\`. The
-/// lookup ignores case, as the reference's file system does, so `credits.html` finds
-/// `Data/Credits.html` on a case-sensitive one. Only a bare name looks on disk; every chain path
-/// keeps reading the archives alone.
+/// The install's answer for `req`, read-only, or `None` to ask the chain: Storm's open asks its
+/// index of the install folder and its `Data\` (`0x647f89`) before the archives (`0x648116`), so
+/// a loose copy of an interface file shadows the archive's, and the login screen's agreements
+/// (`<SimpleHTML file="eula.html">`) are found loose in `Data\`. A file the index holds that
+/// will not read answers `Some(None)`, with no turn to the chain (`0x647865`). `/` is read as `\`,
+/// where the index misses a name written with `/`: a `.toc` line and an `<Include>` or
+/// `<Script file=>` reach here joined by `benilla_ui::loader::join_ref`, which writes every
+/// separator as `/`, so the name's own is gone.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_loose(req: &str) -> Option<Vec<u8>> {
-    if req.is_empty() || req.contains(['\\', '/']) || req.contains("..") {
-        return None;
-    }
-    static INDEX: OnceLock<std::collections::HashMap<String, std::path::PathBuf>> = OnceLock::new();
-    let index = INDEX.get_or_init(|| {
-        benilla_formats::wow_data()
-            .map(|data| {
-                let install = data.parent().map(std::path::Path::to_path_buf);
-                let dirs: Vec<std::path::PathBuf> =
-                    install.into_iter().chain(std::iter::once(data)).collect();
-                loose_index(&dirs)
-            })
-            .unwrap_or_default()
-    });
-    std::fs::read(index.get(&req.to_ascii_lowercase())?).ok()
+fn read_loose(index: &benilla_formats::LooseIndex, req: &str) -> Option<Option<Vec<u8>>> {
+    let file = index.resolve(&req.replace('/', "\\"), benilla_formats::LooseOpen::Index)?;
+    Some(file.read())
 }
 
 /// [`read_loose`] on the page, which has no install folder: the site serves the install's loose
-/// files beside each container, lowercased, at `<container>/loose/<name>` (`Credits.html`,
-/// `eula.html`, `tos.html`), the Turtle WoW layer's ahead of the corpus while it is mounted. Each
-/// name is fetched once per layer; a miss is remembered too.
+/// top-level files beside each container, lowercased, at `<container>/loose/<name>`
+/// (`Credits.html`, `eula.html`, `tos.html`), the Turtle WoW layer's ahead of the corpus while it
+/// is mounted. Only a bare name is asked; each is fetched once per layer, and a miss is
+/// remembered too.
 #[cfg(target_arch = "wasm32")]
-fn read_loose(req: &str) -> Option<Vec<u8>> {
+fn read_loose_web(req: &str) -> Option<Vec<u8>> {
     use std::collections::HashMap;
     if req.is_empty() || req.contains(['\\', '/']) || req.contains("..") {
         return None;
@@ -182,30 +178,6 @@ fn read_loose(req: &str) -> Option<Vec<u8>> {
         .find_map(|base| benilla_formats::web::fetch_sync(&format!("{base}/loose/{name}")).ok());
     CACHE.with(|c| c.borrow_mut().insert(key, bytes.clone()));
     bytes
-}
-
-/// The files directly in `dirs` by lowercased name, read once; an earlier directory wins a name
-/// two share.
-#[cfg(not(target_arch = "wasm32"))]
-fn loose_index(
-    dirs: &[std::path::PathBuf],
-) -> std::collections::HashMap<String, std::path::PathBuf> {
-    let mut index = std::collections::HashMap::new();
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                index.entry(name.to_ascii_lowercase()).or_insert(path);
-            }
-        }
-    }
-    index
 }
 
 /// The player's patch chain, opened once per process and shared by every VM. Process-local, not
@@ -286,20 +258,36 @@ mod tests {
     use super::super::fire_scan;
     use benilla_ui::script::UiScript;
 
-    /// A bare name finds its loose file whatever the case on disk, the install root ahead of
-    /// `Data`.
+    /// An interface file loose in the install answers by its path below the install folder or
+    /// `Data\`, whatever its case and separators, ahead of the chain; a bare name finds a file at
+    /// either top; a copy of `Interface\FrameXML` below the install folder is never read.
     #[test]
-    fn the_loose_index_ignores_case_and_prefers_the_install_root() {
-        let tmp = std::env::temp_dir().join(format!("benilla-loose-{}", std::process::id()));
-        let data = tmp.join("Data");
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(data.join("Credits.html"), b"data").unwrap();
-        std::fs::write(data.join("eula.html"), b"data").unwrap();
-        std::fs::write(tmp.join("EULA.html"), b"root").unwrap();
-        let index = super::loose_index(&[tmp.clone(), data.clone()]);
-        let read = |name: &str| std::fs::read(&index[name]).unwrap();
-        assert_eq!(read("credits.html"), b"data");
-        assert_eq!(read("eula.html"), b"root");
+    fn a_loose_interface_file_answers_ahead_of_the_chain() {
+        let tmp = std::env::temp_dir().join(format!(
+            "benilla-ui-loose-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let put = |rel: &str, body: &[u8]| {
+            let path = tmp.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        put("Data/Credits.html", b"data");
+        put("Data/eula.html", b"data");
+        put("EULA.html", b"root");
+        put("Data/Interface/Glues/Credits/Credits.xml", b"loose xml");
+        put("Interface/FrameXML/UIParent.lua", b"moved aside");
+        let index = benilla_formats::LooseIndex::build(Some(&tmp), &tmp.join("Data"));
+        let read = |name: &str| super::read_loose(&index, name).map(Option::unwrap);
+        assert_eq!(read("credits.html").as_deref(), Some(&b"data"[..]));
+        assert_eq!(read("eula.html").as_deref(), Some(&b"root"[..]));
+        assert_eq!(
+            read("Interface/Glues/Credits/credits.XML").as_deref(),
+            Some(&b"loose xml"[..])
+        );
+        assert_eq!(read("Interface\\FrameXML\\UIParent.lua"), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

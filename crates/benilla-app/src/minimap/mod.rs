@@ -35,7 +35,7 @@ use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{DataLoadAppExt, LockRecover, WorldAssets};
+use benilla_assets::{DataLoadAppExt, LockRecover, LooseOpen, WorldAssets};
 use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
@@ -263,10 +263,20 @@ fn setup_minimap(
             info!("minimap: md5translate.trs — {} tiles", translate.len());
             // Every read in this table is BLOCKING: it builds one resource, once, and each handle
             // in it lives for the session with nothing to ask again. See
-            // `WorldAssets::sprite_texture_blocking`.
-            let mask = assets.mask_texture_blocking("Textures\\MinimapMask", &mut images);
+            // `WorldAssets::sprite_texture_blocking`. The default mask and icons open from the
+            // archives alone, as `0x4ed810`'s `TextureCreate` calls pass file flag 0 (`0x4ed862`,
+            // `0x4ed88b`, `0x4ed8b4`). The arrows are model textures (`MinimapArrow.m2`,
+            // `Rotating-MinimapArrow.m2`), and `CGMinimapFrame::LoadArrowModel` creates the models
+            // with flags 4 (`0x4ee181`), which their textures' opens keep (`0x71da64`), so they
+            // open loose-flagged.
+            let archives = LooseOpen::Archives;
+            let mask = assets.mask_texture_blocking("Textures\\MinimapMask", archives, &mut images);
             let arrow = assets.sprite_texture_blocking(blips::PLAYER_ARROW_TEXTURE, &mut images);
-            let poi = assets.sprite_texture_blocking("Interface\\Minimap\\POIIcons", &mut images);
+            let poi = assets.sprite_texture_opened_blocking(
+                "Interface\\Minimap\\POIIcons",
+                archives,
+                &mut images,
+            );
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
                 rim_arrows.set(
@@ -274,8 +284,11 @@ fn setup_minimap(
                     assets.sprite_texture_blocking(kind.texture(), &mut images),
                 );
             }
-            let object_icons =
-                assets.sprite_texture_blocking("Interface\\Minimap\\ObjectIcons", &mut images);
+            let object_icons = assets.sprite_texture_opened_blocking(
+                "Interface\\Minimap\\ObjectIcons",
+                archives,
+                &mut images,
+            );
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -829,12 +842,17 @@ fn feed_minimap_mask(
         return;
     }
     *last = want.clone();
-    let path = want
-        .as_deref()
-        .unwrap_or(benilla_ui::widget::MINIMAP_DEFAULT_MASK);
+    // `SetMaskTexture` opens with the loose flag (`0x4ee5e4`); the default, with flag 0 (`0x4ed862`).
+    let (path, open) = match want.as_deref() {
+        Some(path) => (path, LooseOpen::Index),
+        None => (
+            benilla_ui::widget::MINIMAP_DEFAULT_MASK,
+            LooseOpen::Archives,
+        ),
+    };
     // Blocking: `*last` was committed above, so a deferred read would leave this mask unfetched
     // with nothing to ask again. See `WorldAssets::sprite_texture_blocking`.
-    match world_assets.mask_texture_blocking(path, &mut images) {
+    match world_assets.mask_texture_blocking(path, open, &mut images) {
         Some(handle) => assets.mask = Some(handle),
         None => {
             warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")

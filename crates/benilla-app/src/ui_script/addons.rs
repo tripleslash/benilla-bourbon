@@ -4,7 +4,7 @@
 //! but not for the lifecycle: they load outside `AddOn_Load`
 //! ([`super::manifest::load_ingame_ui`]), get no `ADDON_LOADED` and have no registry row.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -250,14 +250,17 @@ fn is_lua(entry: &str) -> bool {
 
 /// The one file namespace, install-relative, as in the reference: `0x647e60` answers a name from
 /// the install tree's hash index, then the archive chain, after `0x6ede10` collapses `..`. So an
-/// addon's `..\Blizzard_AuctionUI\…` reaches the archive behind a `.pub`-only folder. Only a path
-/// under `Interface/AddOns/` touches the filesystem, never above the AddOns root, and each of its
-/// components matches case-insensitively, as on the reference's Windows filesystem: the resolver
-/// addon art and sound use ([`benilla_assets::loose_addon_file`]).
+/// addon's `..\Blizzard_AuctionUI\…` reaches the archive behind a `.pub`-only folder. A path under
+/// `Interface/AddOns/` reads the AddOns root, never above it, each of its components matched
+/// case-insensitively, as on the reference's Windows filesystem: the resolver addon art and sound
+/// use ([`benilla_assets::loose_addon_file`]). Any other reads as an interface file
+/// ([`super::reference_ui::read`]), as does one the root lacks. A loose file that will not read is a
+/// miss (`0x647865`).
 pub(crate) fn read_addon_file(root: &Path, req: &str) -> Option<Vec<u8>> {
-    benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(req))
-        .and_then(|file| std::fs::read(file).ok())
-        .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
+    match benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(req)) {
+        Some(file) => std::fs::read(file).ok(),
+        None => super::reference_ui::read(&req.replace('/', "\\")),
+    }
 }
 
 /// A `Dir` addon's base before its folder name ([`Addon::prefix`]), `/`-separated as `join_ref` is.
@@ -430,13 +433,58 @@ fn upcase_unit(c: char) -> char {
     }
 }
 
+/// The glue build's sweep of loose interface folders (`0x51fb50`, at `0x46a8eb`): the reference
+/// moves the install's `Interface\GlueXML` and `Interface\FrameXML` and each moved-aside `Blizzard*`
+/// add-on folder to `%s.old`, and when anything moved empties the loose-file index (`0x51fbe3`).
+/// benilla moves nothing (the index leaves the first two out, discovery the third), and empties
+/// the index when the reference would have: when a sweep finds a folder the last one did not, as
+/// the reference finds each only once, the move taking it away.
+pub(super) fn sweep_loose_interface() {
+    static LAST: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+    let mut now: BTreeSet<String> = benilla_formats::install_loose_interface_folders()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(root) = root() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for e in entries.flatten() {
+                if let Some(name) = e.file_name().to_str() {
+                    if benilla_assets::moved_aside(&e.path(), name) {
+                        now.insert(format!("Interface\\AddOns\\{name}"));
+                    }
+                }
+            }
+        }
+    }
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if sweep_moves(&mut last, now) {
+        benilla_formats::install_index().clear();
+    }
+}
+
+/// Whether a sweep that finds `now` would move anything, given the folders the last sweep found:
+/// one it has not seen before. `last` becomes `now`.
+fn sweep_moves(last: &mut BTreeSet<String>, now: BTreeSet<String>) -> bool {
+    let moves = !now.is_subset(last);
+    *last = now;
+    moves
+}
+
 /// The player's own addons: every folder under the AddOns root with a `<Name>.toc`, in
 /// [`sort_by_directory_order`].
 fn discover_folder() -> Vec<Addon> {
     let Some(root) = root() else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    discover_in(&root)
+}
+
+/// [`discover_folder`] under `root`. A `Blizzard*` folder holding its own `.toc` is one the glue
+/// build moves aside before the scan ([`benilla_assets::moved_aside`]), so it is not registered.
+fn discover_in(root: &Path) -> Vec<Addon> {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new(); // no addon folder is the normal case, not an error
     };
     let mut names: Vec<String> = entries
@@ -449,13 +497,17 @@ fn discover_folder() -> Vec<Addon> {
         .into_iter()
         .filter_map(|name| {
             let dir = root.join(&name);
+            if benilla_assets::moved_aside(&dir, &name) {
+                info!("ui_script: {name} is a loose copy of a Blizzard add-on — not loaded");
+                return None;
+            }
             // A folder with no `<Name>.toc` is not an addon; the reference skips it silently too.
             let text = manifest_in(&dir, &name)?;
             Some(Addon {
                 name,
                 toc: Toc::parse(&text),
                 // The root, not `dir`, so a sibling library addon is reachable.
-                source: Source::Dir(root.clone()),
+                source: Source::Dir(root.to_path_buf()),
             })
         })
         .collect()
@@ -728,7 +780,11 @@ pub(crate) fn write_enable_state(identity: Option<&(String, String)>, rows: &[(S
         return; // no character picked, or no state folder
     };
     match crate::local_state::write_atomic(&path, &render_enable_state(rows)) {
-        Ok(()) => info!("addons: wrote {} ({} rows)", path.display(), rows.len()),
+        Ok(()) => {
+            info!("addons: wrote {} ({} rows)", path.display(), rows.len());
+            // A written `AddOns.txt` empties the loose-file index (`0x51f09d`).
+            benilla_formats::install_index().clear();
+        }
         Err(e) => warn!("addons: cannot write {}: {e}", path.display()),
     }
 }
@@ -748,6 +804,7 @@ pub(super) fn save_enable_state(script: &UiScript, identity: Option<&(String, St
 pub(super) fn save_addon_variables(script: &mut UiScript, identity: Option<&(String, String)>) {
     let account = crate::local_state::addon_saved_account_dir();
     let character = identity.and_then(|(r, c)| crate::local_state::addon_saved_character_dir(r, c));
+    let mut written = 0;
     for (name, account_names, character_names) in script.addon_saved_variable_sets() {
         for (dir, names) in [(&account, &account_names), (&character, &character_names)] {
             if names.is_empty() {
@@ -767,10 +824,17 @@ pub(super) fn save_addon_variables(script: &mut UiScript, identity: Option<&(Str
             let mut body = SAVED_HEADER.as_bytes().to_vec();
             body.extend(script.saved_variables_bytes_for(names));
             match crate::local_state::write_atomic_bytes(&path, &body) {
-                Ok(()) => info!("ui_script: wrote {}", path.display()),
+                Ok(()) => {
+                    info!("ui_script: wrote {}", path.display());
+                    written += 1;
+                }
                 Err(e) => warn!("ui_script: cannot write {}: {e}", path.display()),
             }
         }
+    }
+    // Any file written empties the loose-file index (`0x51fa2f` tests the count, `0x51fa31`).
+    if written > 0 {
+        benilla_formats::install_index().clear();
     }
     for w in script.take_warnings() {
         warn!("ui_script: saved variables: {w}");
@@ -1749,6 +1813,30 @@ mod tests {
         std::fs::write(tmp.join("Bare/notes.txt"), "not an addon").unwrap();
         assert!(manifest_in(&tmp.join("Cased"), "Cased").is_some());
         assert!(manifest_in(&tmp.join("Bare"), "Bare").is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A loose `Blizzard*` folder holding its own `.toc`, in any case, is not registered, as the
+    /// glue build moves it aside before the scan (`0x51fb50`); one with only a `.pub`, as an
+    /// install ships them, has no `.toc` to register, and any other name with its `.toc` is.
+    #[test]
+    fn a_loose_blizzard_addon_with_its_toc_is_not_registered() {
+        let tmp = std::env::temp_dir().join(format!(
+            "benilla-addon-blizzard-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let put = |rel: &str| {
+            let path = tmp.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "## Interface: 11200\nMain.lua\n").unwrap();
+        };
+        put("Blizzard_Foo/Blizzard_Foo.toc");
+        put("blizzard_auctionui/BLIZZARD_AUCTIONUI.toc");
+        put("Blizzard_RaidUI/Blizzard_RaidUI.pub");
+        put("MyBlizzard/MyBlizzard.toc");
+        let names: Vec<String> = discover_in(&tmp).into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["MyBlizzard"]);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2753,6 +2841,59 @@ mod tests {
                 "{call}"
             );
         }
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A sweep moves something only when it finds a folder the last sweep did not: nothing found,
+    /// the same set again, or a smaller one moves nothing.
+    #[test]
+    fn a_sweep_moves_only_a_folder_it_has_not_seen() {
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+        let mut last = BTreeSet::new();
+        assert!(!sweep_moves(&mut last, set(&[])), "nothing would move");
+        assert!(sweep_moves(
+            &mut last,
+            set(&["Interface\\AddOns\\Blizzard_Foo"])
+        ));
+        assert!(
+            !sweep_moves(&mut last, set(&["Interface\\AddOns\\Blizzard_Foo"])),
+            "unchanged"
+        );
+        assert!(sweep_moves(
+            &mut last,
+            set(&["Interface\\AddOns\\Blizzard_Foo", "Interface\\FrameXML"])
+        ));
+        assert!(
+            !sweep_moves(&mut last, set(&["Interface\\FrameXML"])),
+            "one went away"
+        );
+    }
+
+    /// Writing a character's `AddOns.txt` empties the loose-file index (`0x51f09d`), and so does
+    /// the glue build's sweep when a loose `Blizzard*` copy sits in the AddOns folder (`0x51fbe3`),
+    /// so the next flagged open builds it again.
+    #[test]
+    fn an_enable_write_and_the_glue_sweep_empty_the_loose_index() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("loose-clear");
+        let cell = benilla_formats::install_index();
+        let before = cell.generation();
+        let id = ("Realm".to_string(), "Onemage".to_string());
+        write_enable_state(Some(&id), &[("Atlas".into(), true)]);
+        assert!(
+            cell.generation() > before,
+            "the AddOns.txt write empties the index"
+        );
+        write_addon(&home, "Blizzard_Foo", "## Interface: 11200\nfoo.lua\n", &[]);
+        let before = cell.generation();
+        sweep_loose_interface();
+        assert!(
+            cell.generation() > before,
+            "a Blizzard* copy empties it at the glue build"
+        );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 

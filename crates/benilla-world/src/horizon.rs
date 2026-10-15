@@ -11,10 +11,14 @@
 //! Outdoors only: inside a building the reference walks once per portal window with the occluder
 //! feed at the window's plane (`0x6811a9`); a window frame here tests nothing.
 //!
-//! Inferred, pending the 1.12.1.5875 bytes: which outer row and column `0x6c15d0` adds (its two
-//! compares read masked globals; here the edges away from the camera), the band corner table
-//! `0x86b580` (here the corner away from the camera), and the per-level vertex count and stride
-//! (here all nine).
+//! A chunk's occluder rows (`CMapChunk::AddHorizonRows`, `0x6c15d0`) are its outer row and column
+//! away from the eye: row 8 when the camera target's x is below the eye's (`[0xc7d118] <
+//! [0xc7cf20]`), column 8 when its y is (`[0xc7d11c] < [0xc7cf24]`); and the chunk files into its
+//! band by the corner `0x86b580[q]` = {0, 8, 0x88, 0x90}, `q` = `[0xc7f294]`, built from the same
+//! two compares (`0x681026` to `0x681059`). Each row takes `[0x810f60 + 4·level]` = {2, 3, 5, 9}
+//! vertices at stride `[0x810f70 + 4·level]` = {8, 4, 2, 1}; the level is 3, or 2 when the `lod`
+//! CVar (world flag 4) is on and the chunk's view depth is above `lodDist` (`0x6afb06` to
+//! `0x6afb2a`).
 
 use std::sync::Arc;
 
@@ -61,11 +65,47 @@ const ALL_HOLES: u16 = 0xffff;
 
 /// World flag 0x20, the `showCull` toggle: on by default, as `0x66f6cb` starts it.
 /// `$WOW_HORIZON=0` starts it off; `$WOW_HORIZON=count` walks and counts without hiding.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub struct HorizonCulling {
     pub enabled: bool,
     /// Off under `count`: every verdict is computed and counted, none applied.
     pub enforce: bool,
+    /// The `lod` CVar, world flag 4 (`0x688920`): a chunk past [`Self::lod_dist`] adds its rows at
+    /// level 2. Registered "1".
+    pub lod: bool,
+    /// The `lodDist` CVar (`0x672680`, `[0x867960]`), registered "100.0".
+    pub lod_dist: f32,
+}
+
+/// `lodDist`'s registered value (`0x688524`).
+pub const LOD_DIST_DEFAULT: f32 = 100.0;
+/// The range `lodDist`'s callback (`0x688ab0`) accepts; outside it, it prints its line and stores
+/// [`LOD_DIST_FALLBACK`] (`0x688af4`).
+pub const LOD_DIST_RANGE: std::ops::RangeInclusive<f32> = 50.0..=250.0;
+/// `0x429a0000`, what an out-of-range `lodDist` stores.
+pub const LOD_DIST_FALLBACK: f32 = 77.0;
+/// `[0x867964]`, `maxLOD`: a chunk's level.
+const LEVEL_NEAR: usize = 3;
+/// `[0x867968]`: a chunk's level past `lodDist` while `lod` is on.
+const LEVEL_FAR: usize = 2;
+/// `[0x810f60]`: the vertices a level's row takes.
+const ROW_COUNT: [usize; 4] = [2, 3, 5, 9];
+/// `[0x810f70]`: their stride along the outer grid.
+const ROW_STRIDE: [usize; 4] = [8, 4, 2, 1];
+
+impl HorizonCulling {
+    /// As the reference starts: culling on and enforced, terrain LOD on at `lodDist` 100.
+    const REFERENCE: Self = Self {
+        enabled: true,
+        enforce: true,
+        lod: true,
+        lod_dist: LOD_DIST_DEFAULT,
+    };
+
+    /// The depth past which a chunk adds its rows at level 2, `None` while `lod` is off.
+    fn lod_depth(&self) -> Option<f32> {
+        self.lod.then_some(self.lod_dist)
+    }
 }
 
 impl Default for HorizonCulling {
@@ -73,16 +113,13 @@ impl Default for HorizonCulling {
         match crate::launch_env::var("WOW_HORIZON").as_deref() {
             Some("0") => Self {
                 enabled: false,
-                enforce: true,
+                ..Self::REFERENCE
             },
             Some("count") => Self {
-                enabled: true,
                 enforce: false,
+                ..Self::REFERENCE
             },
-            _ => Self {
-                enabled: true,
-                enforce: true,
-            },
+            _ => Self::REFERENCE,
         }
     }
 }
@@ -393,6 +430,7 @@ struct Walk {
 fn walk<'a>(
     view: &HorizonView,
     occluder_far: f32,
+    lod_depth: Option<f32>,
     chunks: impl Iterator<Item = Chunk<'a>>,
     in_view: impl Fn(Vec3, Vec3) -> bool,
 ) -> Walk {
@@ -418,7 +456,7 @@ fn walk<'a>(
     let mut snapshots = Vec::with_capacity(BANDS + 1);
     for band in &bands {
         snapshots.push(buf);
-        let mut occluders = Vec::new();
+        let mut occluders: Vec<(&Chunk, usize)> = Vec::new();
         for ch in band {
             let seen = cells.entry(ch.cell).or_default();
             if box_hidden(view, &buf, ch.b.min, ch.b.max, 0) {
@@ -430,19 +468,24 @@ fn walk<'a>(
             if ch.b.holes != 0 {
                 continue;
             }
+            // The chunk's `+0x78`: its sphere's view depth, nearest point.
             let center = (ch.b.min + ch.b.max) * 0.5;
             let depth = view.view_depth(center) - (ch.b.max - ch.b.min).length() * 0.5;
             if (0.0..occluder_far).contains(&depth) {
-                occluders.push(ch);
+                occluders.push((ch, level_of(depth, lod_depth)));
             }
         }
-        for ch in occluders {
+        for (ch, level) in occluders {
             stats.occluders += 1;
-            let row: [[f32; 3]; 9] =
-                std::array::from_fn(|c| view.screen(wow_to_bevy(ch.positions[far_row * 17 + c])));
+            let (count, stride) = (ROW_COUNT[level], ROW_STRIDE[level]);
+            let pick = |i: usize| view.screen(wow_to_bevy(ch.positions[i]));
+            let row: Vec<[f32; 3]> = (0..count)
+                .map(|k| pick(far_row * 17 + k * stride))
+                .collect();
             insert(&mut buf, &row);
-            let column: [[f32; 3]; 9] =
-                std::array::from_fn(|r| view.screen(wow_to_bevy(ch.positions[r * 17 + far_col])));
+            let column: Vec<[f32; 3]> = (0..count)
+                .map(|k| pick(k * stride * 17 + far_col))
+                .collect();
             insert(&mut buf, &column);
         }
     }
@@ -457,6 +500,15 @@ fn walk<'a>(
         snapshots,
         hidden_cells,
         stats,
+    }
+}
+
+/// A chunk's level by its view depth (`0x6afb06` to `0x6afb2a`): [`LEVEL_FAR`] only when terrain
+/// LOD is on and the depth is strictly above `lodDist`, a NaN staying near.
+fn level_of(depth: f32, lod_depth: Option<f32>) -> usize {
+    match lod_depth {
+        Some(dist) if depth > dist => LEVEL_FAR,
+        _ => LEVEL_NEAR,
     }
 }
 
@@ -527,6 +579,7 @@ fn build_horizon(
         let w = walk(
             &view,
             view_dist.farclip - OCCLUDER_FAR_MARGIN,
+            culling.lod_depth(),
             chunks,
             in_view,
         );

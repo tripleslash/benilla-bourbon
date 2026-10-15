@@ -134,8 +134,8 @@ pub(crate) fn all_rows() -> impl Iterator<Item = &'static Registered> {
 
 /// The host-backed CVars, one row per knob that has a reader: a host knob, or a Lua consumer
 /// such as the stock Video Options window's verbs. The reference's other script-visible CVars,
-/// which nothing here reads, are `super::inert::INERT`: `lodDist`, `footstepBias`,
-/// `mapObjLightLOD`, `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
+/// which nothing here reads, are `super::inert::INERT`: `footstepBias`, `mapObjLightLOD`,
+/// `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
 /// `maxLOD` is no 1.12 CVar and stays unregistered.
 pub(crate) const REGISTERED: &[Registered] = &[
     // `realmName` (`0x83f2d0`): registered `""` (`0x882748`), help "Last realm connected to"
@@ -759,9 +759,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("M2UseShaders", "1"),
     same("M2UsePixelShaders", "0"),
     // `lod` (`0x68848c`: name `0x8697d0`, "1", flags 1, callback `0x688920`, record `[0xc7f314]`),
-    // World LOD: bit 2 of `[0xc7b2a4]`, which gates the doodad LOD distance test at `0x6afb11`. No
-    // effect here: benilla has no doodad LOD swap, as `lodDist` above has no row.
+    // World LOD: bit 2 of `[0xc7b2a4]`, which gates the chunk level's distance test at
+    // `0x6afb11`. The knob is `benilla_world::horizon::HorizonCulling::lod`: a chunk's level
+    // sets how many vertices its horizon rows add (`0x6c15d0`); benilla draws one terrain mesh.
     same("lod", "1"),
+    // `lodDist` (`0x688524`, "100.0", callback `0x688ab0` into `[0x867960]`): the view depth past
+    // which a chunk drops to level 2 while `lod` is on. The knob is
+    // `benilla_world::horizon::HorizonCulling::lod_dist`.
+    same("lodDist", "100.0"),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
     // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
     // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.

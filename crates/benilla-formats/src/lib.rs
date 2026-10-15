@@ -28,6 +28,12 @@ pub use install::{
     addon_corpus, addon_corpus_candidates, candidates, project_folder, set_project_folder, skipped,
     wow_data,
 };
+/// The install's loose files, asked before the archives by the opens that set the loose flag.
+mod loose;
+pub use loose::{
+    install_index, install_loose_interface_folders, LooseFile, LooseIndex, LooseIndexCell,
+    LooseOpen,
+};
 mod characters;
 /// Web-target HTTP plumbing (bytes and byte ranges, in place of a filesystem). Always compiled
 /// (`encode_name` is plain Rust and tested natively); the browser-only pieces are gated to `wasm32`

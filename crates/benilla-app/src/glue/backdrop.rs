@@ -57,9 +57,10 @@ pub(super) fn backdrop_edges(
     path: &str,
     images: &mut Assets<Image>,
 ) -> Option<BackdropEdges> {
+    // A backdrop's pieces are textures of the frame, set through `SetTexture` (`0x770200`).
     // Blocking, like the rest of the glue art table this is part of: split once, kept for the
     // session. See `WorldAssets::sprite_texture_blocking`.
-    let (w, h, rgba) = assets.decode_rgba_blocking(path)?;
+    let (w, h, rgba) = assets.decode_rgba_blocking(path, benilla_assets::LooseOpen::Index)?;
     let e = h as usize;
     if e == 0 || w as usize != 8 * e {
         warn!("glue art: {path} is {w}x{h}, not an 8-cell edge strip");

@@ -284,7 +284,11 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
     let mut s = UiScript::new().unwrap();
     // Wired as `ui_script::lifecycle::install_addon_asset_resolvers` wires the live one.
     s.set_texture_size_probe(Box::new(move |path| {
-        match benilla_assets::sprite_dimensions(&chain, None, path) {
+        match benilla_assets::sprite_dimensions(
+            &chain,
+            &benilla_assets::LooseFiles::default(),
+            path,
+        ) {
             benilla_assets::SpriteDims::Ready(w, h) => Some((w, h)),
             // Native never defers, so `Pending` is unreachable here.
             benilla_assets::SpriteDims::Pending | benilla_assets::SpriteDims::Missing => None,

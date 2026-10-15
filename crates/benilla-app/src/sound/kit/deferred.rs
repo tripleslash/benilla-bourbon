@@ -40,7 +40,7 @@ use std::time::Duration;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use benilla_assets::{LockRecover, WorldAssets};
+use benilla_assets::WorldAssets;
 use benilla_formats::TryRead;
 use benilla_protocol::events::EntityKind;
 
@@ -147,7 +147,8 @@ pub(super) fn land_sfx_loads(
     let mut gone: Vec<String> = Vec::new();
     for (key, p) in kits.pending.iter_mut() {
         if matches!(p.phase, SfxPhase::Reading) {
-            match assets.chain.lock_recover().try_read(&p.path) {
+            // The same loose-flagged read the first attempt made (`0x7a8860`).
+            match assets.try_read_loose_or_chain(&p.path) {
                 TryRead::Ready(bytes) => {
                     p.phase = SfxPhase::Decoding(web_decode::begin(bytes, false));
                 }

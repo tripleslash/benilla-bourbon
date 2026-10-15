@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 
 use crate::char_select::ClientState;
-use benilla_assets::{LockRecover, WorldAssets};
+use benilla_assets::WorldAssets;
 
 use super::kit::{self, KitRef, SoundCategory, SoundKits};
 use super::{mixer, SoundConfig, SoundOutput};
@@ -148,9 +148,10 @@ const GLUE_MUSIC_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 impl StreamLoad {
     #[cfg(not(target_arch = "wasm32"))]
     fn poll(&mut self, assets: &WorldAssets, file: &str) -> StreamData {
-        let bytes = {
-            let chain = assets.chain.lock_recover();
-            chain.read(file)
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        let bytes = match assets.try_read_loose_or_chain(file) {
+            benilla_formats::TryRead::Ready(bytes) => Ok(bytes),
+            _ => Err(anyhow::anyhow!("not in the loose files or the patch chain")),
         };
         match bytes.and_then(mixer::stream_from_bytes) {
             Ok(d) => StreamData::Ready(Box::new(d)),
@@ -184,7 +185,8 @@ impl StreamLoad {
         if self.retry_at.is_some_and(|t| Instant::now() < t) {
             return StreamData::Failed;
         }
-        match assets.chain.lock_recover().try_read(file) {
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        match assets.try_read_loose_or_chain(file) {
             TryRead::Ready(bytes) => {
                 self.decode = Some(super::web_decode::begin(bytes, false));
                 StreamData::Waiting
@@ -192,7 +194,7 @@ impl StreamLoad {
             // The pack is warming; that ask started it. Progress, not failure.
             TryRead::Pending => StreamData::Waiting,
             TryRead::Missing => {
-                debug!("glue music: {file} — not readable from the patch chain");
+                debug!("glue music: {file} — not in the loose files or the patch chain");
                 self.retry_at = Some(Instant::now() + GLUE_MUSIC_RETRY);
                 StreamData::Failed
             }
@@ -270,7 +272,8 @@ fn start_glue_music(
     open_glue_music(&mut music, &mut out, assets.as_deref(), &config, GLUE_MUSIC);
 }
 
-/// Open `file` off the chain as a stream at `amp` (the category's slider already multiplied in).
+/// Open `file` off the loose files or the chain as a stream at `amp` (the category's slider
+/// already multiplied in).
 fn open_stream(
     out: &mut SoundOutput,
     assets: Option<&WorldAssets>,

@@ -207,6 +207,8 @@ pub(crate) fn on_cvar(
         Option<ResMut<benilla_world::lighting::LavaLightGain>>,
         // fork: the modern model's light auto-exposure.
         Option<ResMut<benilla_world::modern::look::AutoExposure>>,
+        // fork: the terrain horizon (FORK.md) — `lod` and `lodDist`.
+        Option<ResMut<benilla_world::horizon::HorizonCulling>>,
     ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -236,6 +238,23 @@ pub(crate) fn on_cvar(
         // The registry refuses a value outside the callback's range (`0x688d40`); the clamp only
         // keeps the knob in it.
         "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
+        "lod" => {
+            if let Some(horizon) = fork.8.as_deref_mut() {
+                horizon.lod = ev.flag();
+            }
+        }
+        // `0x688ab0` takes 50 to 250 and stores 77 for anything else (`0x688af4`).
+        "loddist" => {
+            use benilla_world::horizon::{LOD_DIST_FALLBACK, LOD_DIST_RANGE};
+            if let Some(horizon) = fork.8.as_deref_mut() {
+                horizon.lod_dist = if LOD_DIST_RANGE.contains(&v) {
+                    v
+                } else {
+                    LOD_DIST_FALLBACK
+                };
+            }
+        }
         // Clamped, where the reference refuses an out-of-range write and keeps the value
         // (`0x688d90` echoes "NearClip must be in range 0.01 - 0.33" and returns 0).
         "nearclip" => view.set_nearclip(v),

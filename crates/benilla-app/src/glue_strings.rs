@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use benilla_assets::{LockRecover, WorldAssets};
+use benilla_assets::WorldAssets;
 
 const GLUE_STRINGS: &str = "Interface\\GlueXML\\GlueStrings.lua";
 const GLUE_LOCALIZATION: &str = "Interface\\GlueXML\\GlueLocalization.lua";
@@ -46,22 +46,22 @@ impl GlueStrings {
 /// Either may be missing on its own.
 pub(crate) fn load_glue_strings(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     let mut table = GlueStrings::default();
+    // Interface files open with the loose flag, as `SFile::Load` does for the glue's `.lua`.
     if let Some(assets) = assets {
-        let mut chain = assets.chain.lock_recover();
-        match chain.read_file(GLUE_STRINGS) {
-            Ok(bytes) => {
+        match assets.read_file_or_loose(GLUE_STRINGS) {
+            Some(bytes) => {
                 table.0 = parse_glue_strings(&String::from_utf8_lossy(&bytes));
                 info!("glue strings: {} entries", table.0.len());
             }
-            Err(e) => warn!("glue strings unavailable ({e:#}) — built-in captions only"),
+            None => warn!("glue strings unavailable — built-in captions only"),
         }
-        match chain.read_file(GLUE_LOCALIZATION) {
-            Ok(bytes) => {
+        match assets.read_file_or_loose(GLUE_LOCALIZATION) {
+            Some(bytes) => {
                 let patch = parse_localize_overrides(&String::from_utf8_lossy(&bytes));
                 info!("glue strings: {} locale overrides", patch.len());
                 table.0.extend(patch);
             }
-            Err(e) => warn!("glue localization unavailable ({e:#}) — unpatched glue strings"),
+            None => warn!("glue localization unavailable — unpatched glue strings"),
         }
     }
     commands.insert_resource(table);
@@ -205,7 +205,9 @@ end
         assert!(parse_localize_overrides("function Localize()\n\tK = \"v\";\n").is_empty());
     }
 
-    /// Three keys whose base and patched text differ. Skips without client data.
+    /// The chain's own `Localize()` laid over its base strings, whatever the locale: every key the
+    /// patch sets reads the patched text, every other the base's. On an enGB chain three keys
+    /// differ from the base; enUS's `Localize()` sets none. Skips without client data.
     #[test]
     fn the_real_chain_patches_the_login_refusals_and_the_realm_suffixes() {
         let data = benilla_formats::wow_data_or_skip!();
@@ -213,20 +215,38 @@ end
 
         let base = chain.read_file(GLUE_STRINGS).expect("GlueStrings.lua");
         let base = parse_glue_strings(&String::from_utf8_lossy(&base));
+        let patch = chain
+            .read_file(GLUE_LOCALIZATION)
+            .expect("GlueLocalization.lua");
+        let patch = parse_localize_overrides(&String::from_utf8_lossy(&patch));
         let table = table_from_chain(&mut chain);
 
-        for key in ["AUTH_BANNED", "LOGIN_UNKNOWN_ACCOUNT", "PVP_PARENTHESES"] {
-            let before = base.get(key).expect("key in the base file").as_str();
-            let after = table.get(key).expect("key in the patched table");
-            assert_ne!(before, after, "{key} was not patched by Localize()");
+        for (key, value) in &base {
+            let want = patch.get(key).unwrap_or(value);
+            assert_eq!(table.get(key), Some(want.as_str()), "{key}");
+        }
+        for (key, value) in &patch {
+            assert_eq!(
+                table.get(key),
+                Some(value.as_str()),
+                "{key} was not patched"
+            );
         }
 
-        // The enGB patch drops the parentheses: `CharSelectRealmName` reads "Realm PVP".
-        assert_eq!(
-            base.get("PVP_PARENTHESES").map(String::as_str),
-            Some("(PVP)")
-        );
-        assert_eq!(table.get("PVP_PARENTHESES"), Some("PVP"));
+        // The enGB patch: the login refusals reworded, and the parentheses dropped, so
+        // `CharSelectRealmName` reads "Realm PVP".
+        if patch.contains_key("PVP_PARENTHESES") {
+            for key in ["AUTH_BANNED", "LOGIN_UNKNOWN_ACCOUNT", "PVP_PARENTHESES"] {
+                let before = base.get(key).expect("key in the base file").as_str();
+                let after = table.get(key).expect("key in the patched table");
+                assert_ne!(before, after, "{key} was not patched by Localize()");
+            }
+            assert_eq!(
+                base.get("PVP_PARENTHESES").map(String::as_str),
+                Some("(PVP)")
+            );
+            assert_eq!(table.get("PVP_PARENTHESES"), Some("PVP"));
+        }
 
         // The patch overwrites keys; it does not replace the table.
         assert!(table.get("FACTION_INFO_HORDE").is_some(), "base lost");

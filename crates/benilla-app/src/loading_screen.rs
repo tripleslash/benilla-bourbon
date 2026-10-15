@@ -21,7 +21,7 @@ use benilla_formats::{load_loading_screens, LoadingScreenCatalog};
 
 use benilla_assets::LockRecover;
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::{AssetSet, LooseOpen, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::terrain_stream::WorldLoadProgress;
 use benilla_world::world_map::CurrentMap;
@@ -385,10 +385,12 @@ fn setup_loading_screen(
         }
     }
 
-    // The two layers 1.12 draws, as sRGB clamp sprites.
-    // Blocking: the `ImageNode`s spawned below own these handles for the session and this system
-    // runs once. See `WorldAssets::sprite_texture_blocking`.
-    let mut tex = |path: &str| assets.sprite_texture_blocking(path, &mut images);
+    // The two layers 1.12 draws, as sRGB clamp sprites, from the archives alone: the loading
+    // screen's `TextureCreate` calls (`0x406891`) pass file flag 0. Blocking: the `ImageNode`s
+    // spawned below own these handles for the session and this system runs once. See
+    // `WorldAssets::sprite_texture_blocking`.
+    let mut tex =
+        |path: &str| assets.sprite_texture_opened_blocking(path, LooseOpen::Archives, &mut images);
     let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
         error!("loading bar textures missing — plain black cover, no art");
         return;
@@ -757,11 +759,12 @@ fn drive_loading_screen(
                 .map(str::to_string);
             let handle = path.and_then(|path| match screen.art_cache.get(&path) {
                 Some(h) => Some(h.clone()),
+                // `ResolveLoadingArt` opens the art with file flag 0 (`0x406eba`, `0x406ef1`).
                 // Blocking: the handle goes straight into `art_cache` and is never re-resolved, so
                 // a deferred read would leave this continent's backdrop black for the session. The
                 // frame it stalls is a loading frame, which is the one place that is free.
                 None => assets
-                    .sprite_texture_blocking(&path, &mut images)
+                    .sprite_texture_opened_blocking(&path, LooseOpen::Archives, &mut images)
                     .inspect(|h| {
                         screen.art_cache.insert(path.clone(), h.clone());
                     }),

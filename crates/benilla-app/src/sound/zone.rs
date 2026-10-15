@@ -703,7 +703,8 @@ fn open_music_stream(
     if out.mixer.is_none() {
         return false;
     }
-    let bytes = match assets.chain.lock_recover().try_read(&path) {
+    // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+    let bytes = match assets.try_read_loose_or_chain(&path) {
         TryRead::Ready(bytes) => bytes,
         // Not in memory yet (web only): the read has started the warm. Remember the pick — file and
         // all — so the retry opens this track rather than re-rolling the kit, and leave the frame.
@@ -720,7 +721,7 @@ fn open_music_stream(
         }
         TryRead::Missing => {
             if first_unplayable(zone, &path) {
-                warn!("zone music: {path} — not readable from the patch chain");
+                warn!("zone music: {path} — not in the loose files or the patch chain");
             }
             zone.music_pending = None;
             return false;

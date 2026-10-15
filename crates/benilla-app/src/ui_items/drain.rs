@@ -1951,6 +1951,7 @@ mod bind_confirm_tests {
             app.world().non_send::<UiScript>().item_locked(AXE_GUID),
             "the place's send keeps the axe locked under the question"
         );
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         app.world_mut()
             .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"EQUIP_BIND\"), 2)")

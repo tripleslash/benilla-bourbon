@@ -33,6 +33,8 @@ use benilla_ui::script::{CvarCheck, SeededCvar, UiScript};
 use benilla_world::liquid::WaterDetail;
 use benilla_world::modern::LightingSettings;
 
+#[cfg(test)]
+mod deviations_doc;
 mod inert;
 // fork: the Graphics Preset ladder (FORK.md).
 mod presets;
@@ -3505,7 +3507,6 @@ mod tests {
                 "OptionsFrame.lua's Vertex Animation Shaders box",
             ),
             ("M2UsePixelShaders", "OptionsFrame.lua's Phong Shading box"),
-            ("lod", "OptionsFrame.lua's World LOD box"),
             (
                 "movieSubtitle",
                 "OptionsFrame.lua's Cinematic Subtitles box",

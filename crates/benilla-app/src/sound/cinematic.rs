@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::{LockRecover, WorldAssets};
+use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
 use super::mixer::{self, StreamingSoundHandle};
@@ -167,9 +167,10 @@ fn narrate(
     }
     #[cfg(not(target_arch = "wasm32"))]
     let data = {
-        let bytes = {
-            let chain = assets.chain.lock_recover();
-            chain.read(&path)
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        let bytes = match assets.try_read_loose_or_chain(&path) {
+            benilla_formats::TryRead::Ready(bytes) => Ok(bytes),
+            _ => Err(anyhow::anyhow!("not in the loose files or the patch chain")),
         };
         match bytes.and_then(mixer::stream_from_bytes) {
             Ok(d) => d,
@@ -235,14 +236,18 @@ fn drive_pending_line(
         return;
     }
     match &mut line.phase {
-        LinePhase::Reading => match assets.chain.lock_recover().try_read(&line.path) {
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        LinePhase::Reading => match assets.try_read_loose_or_chain(&line.path) {
             TryRead::Ready(bytes) => {
                 line.phase = LinePhase::Decoding(super::web_decode::begin(bytes, false));
             }
             // The ask started the pack warming. Come back next frame.
             TryRead::Pending => {}
             TryRead::Missing => {
-                warn!("cinematic voice: {} — not in the patch chain", line.path);
+                warn!(
+                    "cinematic voice: {} — not in the loose files or the patch chain",
+                    line.path
+                );
                 voice.pending = None;
             }
         },

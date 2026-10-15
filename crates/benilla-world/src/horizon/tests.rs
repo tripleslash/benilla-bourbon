@@ -157,6 +157,7 @@ fn a_ridge_hides_what_lies_behind_it_and_nothing_before_it() {
     let w = walk(
         &view,
         1000.0,
+        None,
         [chunk(0, &ridge, 0), chunk(1, &behind, 0)].into_iter(),
         |_, _| true,
     );
@@ -192,6 +193,7 @@ fn a_holed_chunk_draws_but_never_occludes() {
     let w = walk(
         &view,
         1000.0,
+        None,
         [chunk(0, &ridge, 1), chunk(1, &behind, 0)].into_iter(),
         |_, _| true,
     );
@@ -203,6 +205,7 @@ fn a_holed_chunk_draws_but_never_occludes() {
     let w = walk(
         &view,
         1000.0,
+        None,
         [chunk(0, &ridge, ALL_HOLES)].into_iter(),
         |_, _| true,
     );
@@ -215,6 +218,59 @@ fn an_occluder_must_lie_inside_the_feed() {
     let half = benilla_formats::CHUNK_SIZE / 2.0;
     let ridge = flat_chunk(100.0 + benilla_formats::CHUNK_SIZE, half, 30.0);
     // A far end nearer than the ridge's nearest point.
-    let w = walk(&view, 50.0, [chunk(0, &ridge, 0)].into_iter(), |_, _| true);
+    let w = walk(
+        &view,
+        50.0,
+        None,
+        [chunk(0, &ridge, 0)].into_iter(),
+        |_, _| true,
+    );
     assert_eq!(w.stats.occluders, 0);
+}
+
+/// The level `0x6afb06` gives a chunk: 3, or 2 only while `lod` is on and the depth is strictly
+/// above `lodDist`; a NaN depth stays at 3.
+#[test]
+fn a_chunk_drops_to_level_2_only_past_lod_dist_with_lod_on() {
+    assert_eq!(level_of(150.0, None), LEVEL_NEAR);
+    assert_eq!(level_of(150.0, Some(100.0)), LEVEL_FAR);
+    assert_eq!(level_of(100.0, Some(100.0)), LEVEL_NEAR);
+    assert_eq!(level_of(f32::NAN, Some(100.0)), LEVEL_NEAR);
+    // Level 3 takes all nine outer vertices, level 2 every second one (`0x810f60`, `0x810f70`).
+    let picks = |l: usize| -> Vec<usize> { (0..ROW_COUNT[l]).map(|k| k * ROW_STRIDE[l]).collect() };
+    assert_eq!(picks(LEVEL_NEAR), (0..9).collect::<Vec<_>>());
+    assert_eq!(picks(LEVEL_FAR), [0, 2, 4, 6, 8]);
+    assert!((0..4).all(|l| *picks(l).last().unwrap() == 8));
+}
+
+/// A far chunk whose far row rises only between its odd and even vertex 1 and 2: at level 3 that
+/// edge raises the buffer; at level 2, past `lodDist`, the row skips vertex 1 and nothing rises.
+#[test]
+fn a_far_chunk_past_lod_dist_adds_its_rows_at_level_2() {
+    let view = level_view();
+    let half = benilla_formats::CHUNK_SIZE / 2.0;
+    let mut far = flat_chunk(300.0 + benilla_formats::CHUNK_SIZE, half, 0.0);
+    // Row 0 is the far row looking north (WoW x rises along −Z).
+    far[1][2] = 40.0;
+    far[2][2] = 40.0;
+    let top = |lod: Option<f32>| {
+        let w = walk(
+            &view,
+            1000.0,
+            lod,
+            [chunk(0, &far, 0)].into_iter(),
+            |_, _| true,
+        );
+        assert_eq!(w.stats.occluders, 1);
+        w.snapshots
+            .last()
+            .unwrap()
+            .iter()
+            .copied()
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(top(None) > 0.05, "level 3 adds the raised edge");
+    assert!(top(Some(LOD_DIST_DEFAULT)) < 0.01, "level 2 steps over it");
+    // Within `lodDist` the chunk is level 3 either way.
+    assert!(top(Some(1000.0)) > 0.05);
 }

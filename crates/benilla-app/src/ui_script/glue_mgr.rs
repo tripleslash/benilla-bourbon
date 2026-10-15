@@ -1775,11 +1775,12 @@ pub(crate) fn read_agreements(cvars: &crate::cvars::Cvars) -> [NoticeState; 4] {
             n[notice as usize] = NoticeState::from_cvar(value);
         }
     }
-    // Deviation (this fork): the TOS and the EULA stand accepted, as the native login has no
+    // Deviation (this fork): every agreement stands accepted, as the native login has no
     // agreements step. Their texts are loose `eula.html`/`tos.html` beside the install, which the
     // browser build's packs do not carry, and an empty agreement cannot be scrolled to its end to
-    // enable Accept.
-    for notice in [GlueNotice::Tos, GlueNotice::Eula] {
+    // enable Accept. The enUS glue also shows the scanning agreement (`AccountLogin.lua`'s
+    // `SHOW_SCANNING_AGREEMENT` leg), and the contest one shows wherever its flag is set.
+    for notice in GlueNotice::ALL {
         n[notice as usize].accepted = true;
     }
     n
