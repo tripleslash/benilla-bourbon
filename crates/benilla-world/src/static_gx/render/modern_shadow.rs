@@ -1058,7 +1058,15 @@ pub(crate) fn gx_shadow_pass(
                 cascades.clip_from_world[i]
             };
             let (key, layer_casters) = if active {
-                layer_key(frame, i, &clip_from_world, static_hash, &casters, terrain, now)
+                layer_key(
+                    frame,
+                    i,
+                    &clip_from_world,
+                    static_hash,
+                    &casters,
+                    terrain,
+                    now,
+                )
             } else {
                 (0, 0)
             };
