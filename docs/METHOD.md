@@ -20,7 +20,8 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
    client before building: its code as
    [benilla-re](https://github.com/samwhosung/benilla-re) documents it by address, its
    behaviour, a DBC field, a FrameXML line, a packet capture. The names and shapes under
-   `reference/` are the surface benilla tracks.
+   `reference/` are the surface benilla tracks. A fact benilla-re lacks, or gets wrong, is
+   settled there, as an issue or a finding, and cited here by its client address.
 2. **Build it idiomatically.** Modern Bevy and Rust, performance woven in from the start.
    Implement the mechanism well; do not ape a quirk that is a bug.
 3. **Measure, never eyeball.** Timing, delay, ordering and feel are settled with instruments:
@@ -76,7 +77,7 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 ## Gates
 
 - **The land gates**: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo test --workspace`, the doc-link and render-pass lints, the player
+  -- -D warnings`, `cargo test --workspace`, the doc-link lint (a full `cargo doc` of the workspace) and the render-pass lint, the vendored-reference and message-catalog checks, the player
   build without the `dev` feature with its own tests, and the engine boot checks, as
   `scripts/gates.sh`. It runs on the tree that lands, before it lands; it is memoized on the
   tree. The tests that read the install or the addon corpus skip where the data is absent, and

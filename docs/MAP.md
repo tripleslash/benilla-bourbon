@@ -634,16 +634,13 @@
 - `check.py` — The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
 - `doc-links.py` — Fail on a doc link whose target is declared nowhere in the workspace.
 - `gates.py` — The land gate chain: every gate in order, stopping at the first failure.
-- `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from `reference/1.12-message-catalog.tsv`.
-- `gen-reference-events.py` — Regenerate `reference/1.12-events.tsv`: each 1.12 FrameScript event and the arguments it carries.
-- `gen-reference-globals.py` — Regenerate `reference/1.12-globals.tsv`: the 1.12.1 client's global namespace, by origin.
-- `gen-reference-glue-surface.py` — Regenerate `reference/1.12-glue-surface.tsv`: every Lua function the glue screens' VM has in `_G`.
-- `gen-reference-verb-events.py` — Regenerate `reference/1.12-verb-events.tsv`: the events 1.12 Lua verbs fire, keyed by verb.
+- `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from `reference/messages.tsv`.
 - `mixsum.py` — Read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
 - `pass-span-lint.py` — Refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).
 - `probe-identity.py` — Who a scripted run logs in as; loaded by smoke.py, cine.py and summon-live.py, never run alone.
 - `soundprobe.py` — Read back a `$WOW_SOUND_PROBE` capture and name the mechanism behind a speaker-breaking sound.
 - `stage-packs.py` — Assemble web/site/, the directory a static host serves.
+- `sync-reference.py` — Vendor benilla-re's tables into `reference/` at the commit `reference/PIN` names.
 - `upscale-hd-textures.py` — resample the HD character layer's art to 2x, in place, BLP to BLP.
 - `vplsum.py` — Read a `vpl`/`bub` overlay trace and say where the motion came from: projection, solve or snap.
 - `wasm-memory.py` — Say what a wasm module's linear memory actually is, and which target features it was built with.

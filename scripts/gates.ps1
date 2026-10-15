@@ -7,7 +7,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\gates.ps1
 #
 # GATES_FORCE=1 runs the chain anyway, WOW_DATA picks the install (set and empty: none) and TMPDIR
-# holds the scratch files.
+# holds the scratch files. BENILLA_RE names the benilla-re checkout the reference gate compares
+# `reference/` with; that gate and message-catalog run upstream's Python scripts through `python`.
 
 $ErrorActionPreference = 'Stop'
 $dash = [string][char]0x2014
@@ -297,6 +298,26 @@ try {
         Write-Output ("gates: NOTE $dash install or addon corpus not found here (install='$shownWow', " +
             "corpus=$hasCorpus): data-gated tests skip silently on this machine")
     }
+
+    if ($env:BENILLA_RE -and -not [IO.Directory]::Exists([IO.Path]::Combine($env:BENILLA_RE, 'tables'))) {
+        Write-Output "GATE FAILED: reference (BENILLA_RE=$($env:BENILLA_RE) holds no benilla-re checkout)"
+        exit 1
+    }
+    $candidates = @($env:BENILLA_RE, [IO.Path]::Combine($root, '..', 'benilla-re'))
+    if ((Invoke-Native 'git' @('rev-parse', '--git-common-dir') -Capture) -eq 0 -and $script:NativeOut) {
+        $primary = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([IO.Path]::Combine($root, $script:NativeOut)))
+        $candidates += [IO.Path]::Combine($primary, '..', 'benilla-re')
+    }
+    $reCheckout = $candidates | Where-Object { $_ -and [IO.Directory]::Exists([IO.Path]::Combine($_, 'tables')) } | Select-Object -First 1
+    if ($reCheckout) {
+        Invoke-Gate 'reference' 'python' @([IO.Path]::Combine($root, 'scripts', 'sync-reference.py'), $reCheckout, '--check')
+    } elseif ($requireData -or $env:BENILLA_REQUIRE_DATA -eq '1') {
+        Write-Output 'GATE FAILED: reference (no benilla-re checkout: set BENILLA_RE, or clone it beside the repo)'
+        exit 1
+    } else {
+        Write-Output 'gate SKIPPED: reference (no benilla-re checkout found: BENILLA_RE, ../benilla-re)'
+        Add-Timing 'reference' 0 'SKIPPED'
+    }
     $testEnv = @{ BENILLA_SKIP_LOG = $skips }
     if ($requireData) { $testEnv['BENILLA_REQUIRE_DATA'] = '1' }
     Invoke-Gate 'test' 'cargo' @('test', '--no-fail-fast', '--workspace') $testEnv
@@ -305,6 +326,7 @@ try {
     Invoke-Gate 'test-no-install' 'cargo' @('test', '--no-fail-fast', '--workspace') @{ BENILLA_REQUIRE_DATA = $null; WOW_DATA = '' }
 
     Invoke-Gate 'doc-links' $psExe (Get-ScriptArgs 'doc-links.ps1')
+    Invoke-Gate 'message-catalog' 'python' @([IO.Path]::Combine($root, 'scripts', 'gen-message-catalog.py'), '--check')
     Invoke-Gate 'pass-span-lint' $psExe (Get-ScriptArgs 'pass-span-lint.ps1')
 
     $playerEnv = @{ BENILLA_SKIP_LOG = $skips }

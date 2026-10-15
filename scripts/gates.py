@@ -7,7 +7,8 @@ Runs doc-links.py and pass-span-lint.py, and memoizes on this file's own hash.
     python scripts/gates.py
 
 GATES_FORCE=1 runs the chain anyway, WOW_DATA picks the install (set and empty: none) and TMPDIR
-holds the scratch files.
+holds the scratch files. BENILLA_RE names the benilla-re checkout the reference gate compares
+`reference/` with.
 """
 
 import datetime
@@ -236,6 +237,26 @@ def main():
             say("gates: NOTE \u2014 install or addon corpus not found here (install='%s', corpus=%s): "
                 "data-gated tests skip silently on this machine"
                 % (wow_data or "none", "yes" if os.path.isdir(os.path.join(root, "wow-addons-vanilla")) else "no"))
+
+        re_env = os.environ.get("BENILLA_RE", "")
+        if re_env and not os.path.isdir(os.path.join(re_env, "tables")):
+            say("GATE FAILED: reference (BENILLA_RE=%s holds no benilla-re checkout)" % re_env)
+            sys.exit(1)
+        rc, common = capture(["git", "rev-parse", "--git-common-dir"])
+        primary = os.path.dirname(os.path.abspath(common)) if rc == 0 and common else ""
+        candidates = [re_env, os.path.join(root, "..", "benilla-re")]
+        if primary:
+            candidates.append(os.path.join(primary, "..", "benilla-re"))
+        re_checkout = next((c for c in candidates if c and os.path.isdir(os.path.join(c, "tables"))), "")
+        if re_checkout:
+            run("reference", script("sync-reference.py") + [re_checkout, "--check"])
+        elif require_data or os.environ.get("BENILLA_REQUIRE_DATA", "") == "1":
+            say("GATE FAILED: reference (no benilla-re checkout: set BENILLA_RE, or clone it beside the repo)")
+            sys.exit(1)
+        else:
+            say("gate SKIPPED: reference (no benilla-re checkout found: BENILLA_RE, ../benilla-re)")
+            note_timing("reference", 0, "SKIPPED")
+
         sets = {"BENILLA_SKIP_LOG": skips}
         if require_data:
             sets["BENILLA_REQUIRE_DATA"] = "1"
@@ -246,6 +267,7 @@ def main():
             {"WOW_DATA": ""}, unset=("BENILLA_REQUIRE_DATA",))
 
         run("doc-links", script("doc-links.py"))
+        run("message-catalog", script("gen-message-catalog.py") + ["--check"])
         run("pass-span-lint", script("pass-span-lint.py"))
 
         sets = {}

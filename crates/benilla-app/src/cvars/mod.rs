@@ -32,6 +32,8 @@ use benilla_world::modern::LightingSettings;
 
 // fork: the Graphics Preset ladder (FORK.md).
 mod presets;
+#[cfg(test)]
+mod reference_table;
 mod table;
 #[cfg(test)]
 use table::Reference;

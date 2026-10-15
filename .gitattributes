@@ -14,3 +14,6 @@
 # The bundled third-party addons are vendored as their authors ship them, byte for byte: the
 # client reads them as files, and a checkout must not rewrite a line ending in a `.lua` or a `.tga`.
 third_party/addons/** -text
+
+# Vendored benilla-re tables are compared and read byte for byte; no line-ending conversion.
+reference/*.tsv -text
