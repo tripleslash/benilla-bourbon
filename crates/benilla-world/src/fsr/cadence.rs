@@ -106,7 +106,7 @@ pub struct FgCadence {
     paired: Option<f32>,
     /// The interval of world frames that ran whole (update, extract, render), smoothed.
     solo_interval: Option<f32>,
-    /// The fastest interval seen, eased up slowly: about one display interval.
+    /// The fastest interval seen: about one display interval.
     fastest: Option<f32>,
     /// Bad pairs in a row, while holding; solo frames in a row, while solo.
     run: u32,
@@ -198,14 +198,9 @@ impl FgCadence {
     /// Book the last frame's interval: a held callback's opens its pair, the world callback's
     /// after it closes and judges the pair, and a whole world frame's is the solo reference.
     fn time_last_frame(&mut self, dt: f32) {
-        // Eased up, so a display that slows down is followed; a solo frame times the world, not
-        // the display, so it only lowers it.
-        let solo = self.solo;
-        self.fastest =
-            Some(
-                self.fastest
-                    .map_or(dt, |f| if solo { f.min(dt) } else { (f * 1.001).min(dt) }),
-            );
+        // Never eased up: where no callback fits one display interval the minimum is all that
+        // marks it, and a drifted one reads a two-interval solo frame as railed, solo for good.
+        self.fastest = Some(self.fastest.map_or(dt, |f| f.min(dt)));
         if self.held {
             self.paired = Some(dt);
         } else if self.after_held {
@@ -663,6 +658,38 @@ mod tests {
         run(&mut c, w, LOPSIDED, 20);
         assert!(c.solo);
         assert_eq!(c.resume_after, RESUME_FRAMES);
+    }
+
+    /// A stretch where no callback fits one display interval does not make a two-interval solo
+    /// frame read as railed: after a hitch sends the cadence solo, it holds again.
+    #[test]
+    fn long_callbacks_do_not_strand_the_cadence_solo() {
+        let mut c = FgCadence::default();
+        let w = UVec2::new(1600, 900);
+        // The glue screens: one display interval a frame, out of the world.
+        for _ in 0..200 {
+            c.next(FgInputs {
+                in_world: false,
+                interval: Some(VSYNC),
+                ..on(w)
+            });
+        }
+        // In the world, every callback spans two intervals: a pair of 2 + 2 against a solo
+        // frame of 2.6 still presents more often.
+        let steady = [2.6, 2.0, 2.0];
+        run(&mut c, w, steady, 2000);
+        assert!(!c.solo);
+        // A hitch: lopsided pairs until the cadence goes solo.
+        run(
+            &mut c,
+            w,
+            [2.6, 2.0, 6.0],
+            2 + 2 * (UNEVEN_PAIRS as usize + 1),
+        );
+        assert!(c.solo);
+        let seq = run(&mut c, w, steady, 2000);
+        assert!(!c.solo, "stranded solo");
+        assert!(seq.iter().filter(|v| v.held).count() > 800);
     }
 
     /// A reset tries holding again; untimed frames (native) never go solo.
