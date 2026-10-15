@@ -198,8 +198,14 @@ impl FgCadence {
     /// Book the last frame's interval: a held callback's opens its pair, the world callback's
     /// after it closes and judges the pair, and a whole world frame's is the solo reference.
     fn time_last_frame(&mut self, dt: f32) {
-        // Eased up, so a display that slows down is followed.
-        self.fastest = Some(self.fastest.map_or(dt, |f| (f * 1.001).min(dt)));
+        // Eased up, so a display that slows down is followed; a solo frame times the world, not
+        // the display, so it only lowers it.
+        let solo = self.solo;
+        self.fastest =
+            Some(
+                self.fastest
+                    .map_or(dt, |f| if solo { f.min(dt) } else { (f * 1.001).min(dt) }),
+            );
         if self.held {
             self.paired = Some(dt);
         } else if self.after_held {
