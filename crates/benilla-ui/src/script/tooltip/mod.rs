@@ -381,10 +381,13 @@ pub(super) fn measure_lines(lua: &Lua, h: FrameHandle) {
         super::measure::ensure_measured(lua, line);
     }
     // The plate's size is the layout's to write from those measures; pay it now, so the size a
-    // script reads next is this content's and not the content it replaced.
+    // script reads next is this content's and not the content it replaced. Only a full resolve
+    // runs the tooltip pre-pass ([`layout_tooltips`]) that writes it: the settle of a pending
+    // node pulls that node's read alone.
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         owe_relayout(&mut model, h);
+        crate::script::UiScript::resolve_layout(&mut model);
     }
     crate::script::object::settle_frame(lua, h);
 }
