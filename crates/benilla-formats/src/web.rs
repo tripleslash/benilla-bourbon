@@ -645,7 +645,9 @@ mod wasm {
         unpacked.unwrap_or_else(|| {
             let s = value.as_string().unwrap_or_default();
             // A BOM-sniffed UTF-8 body, as `unpackBinary` reads it: the BOM and the text.
-            if s.chars().any(|c| c > '\u{7f}' && !('\u{f780}'..='\u{f7ff}').contains(&c)) {
+            if s.chars()
+                .any(|c| c > '\u{7f}' && !('\u{f780}'..='\u{f7ff}').contains(&c))
+            {
                 return ["\u{feff}", &s].concat().into_bytes();
             }
             s.chars().map(|c| (c as u32 & 0xff) as u8).collect()

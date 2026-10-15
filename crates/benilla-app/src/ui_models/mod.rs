@@ -7,7 +7,8 @@
 //! into its own cell of one shared atlas, through the sheet's one orthographic camera or a pooled
 //! perspective one, and [`compose_tiles`] draws each cell as a quad at the pane's callback rank.
 //! `PlayerModel`, `DressUpModel` and `TabardModel` are booths instead (`crate::portrait`): the
-//! reference frames them through camera 1 frozen at load.
+//! reference frames them through camera 1 frozen at load. They share this module's light pool
+//! ([`PaneLights`]).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,9 @@ use crate::portrait::{
     UI_MODEL_CAM_LAYER_BASE,
 };
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
+
+mod pane_light;
+pub(crate) use pane_light::{PaneLights, PaneScene, CHARACTER_SCENE_SLOT};
 
 /// `WOW_TILE_TRACE=1`: a `tile-trace:` line per pane per frame from the renderer and the
 /// extract's arm, naming the gate a listed pane that draws nothing stopped at.
@@ -115,9 +119,10 @@ pub(crate) struct UiModelTiles {
 
 /// A pane's light input: its embedded `CGLight`, its armed fog and its M2's own lights. Panes
 /// with the same scene share one light buffer and twin cache; the default, a disabled light, no
-/// fog and a file with no lights, is slot 0.
+/// fog and a file with no lights, is slot 0, and the character panes' constructor scene is slot 1
+/// ([`CHARACTER_SCENE_SLOT`]).
 #[derive(Clone, PartialEq)]
-struct TileScene {
+pub(crate) struct TileScene {
     light: ModelLight,
     fog: Option<ModelFog>,
     /// The file's authored lights: `SetModel` (`0x76cce0`) loads the M2 into the widget's own
@@ -144,6 +149,16 @@ impl TileScene {
             light: req.light,
             fog: req.fog,
             rig: scene_rig(file_lights),
+        }
+    }
+
+    /// A character pane's scene: the pane's own light and fog. The copy's own M2 lights, which
+    /// `0x707400` builds into the pane's scene, are not gathered: the display cache keeps none.
+    pub(crate) fn of_character(light: ModelLight, fog: Option<ModelFog>) -> Self {
+        Self {
+            light,
+            fog,
+            rig: SceneRig::default(),
         }
     }
 
@@ -201,6 +216,8 @@ struct TileLight {
     scene: TileScene,
     buffer: Buffer,
     variants: HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
+    /// The epoch a tile or pane last asked for this scene ([`TileRig::epoch`]).
+    used: u64,
 }
 
 /// A point light's candidacy range, unbounded: the reference's 4-nearest gather has none.
@@ -219,13 +236,66 @@ const LIGHT_MIRROR_KEYS: [&str; UI_MODEL_CAM_LAYERS] = [
     "ui_models_7",
 ];
 
-/// The ortho tiles' layer and the light pool, where a pane that arms `SetLight(1, …)` or
-/// `SetFogColor` takes a slot. A slot costs a whole shared-light buffer, so the pool is capped
-/// and a scene past the cap draws as slot 0, the default.
+/// The ortho tiles' layer and the light pool, one slot per distinct scene drawn. The reference
+/// gives each pane its own `CGLight` (`+0x324`); here a slot is a whole shared-light buffer, so
+/// the pool is capped and a slot no pane asked for through a whole frame is reused.
 #[derive(Resource)]
 struct TileRig {
     layer: RenderLayers,
     lights: Vec<TileLight>,
+    /// Advanced once a frame ([`advance_light_epoch`]), so a slot knows when it was last asked.
+    epoch: u64,
+    /// The pool ran out once; said once.
+    warned: bool,
+}
+
+/// The slots the pool never reuses: the `<Model>` and the character ctor scenes.
+const PINNED_SLOTS: usize = 2;
+
+/// Where a scene goes in the pool.
+#[derive(Debug, PartialEq, Eq)]
+enum SlotPick {
+    /// It has a slot.
+    Held(usize),
+    /// A slot no one asked for through the last whole frame, rewritten for it.
+    Reuse(usize),
+    /// A new slot.
+    Grow,
+    /// The pool is full of scenes in use.
+    Full,
+}
+
+/// [`TileRig::slot_or`]'s choice, apart from the buffers: `slots` holds each slot's scene and the
+/// epoch it was last asked at.
+fn pick_slot<'a>(
+    slots: impl Iterator<Item = (&'a TileScene, u64)>,
+    scene: &TileScene,
+    epoch: u64,
+    cap: usize,
+) -> SlotPick {
+    let mut len = 0;
+    let mut idle = None;
+    for (i, (s, used)) in slots.enumerate() {
+        if s == scene {
+            return SlotPick::Held(i);
+        }
+        if idle.is_none() && i >= PINNED_SLOTS && used + 1 < epoch {
+            idle = Some(i);
+        }
+        len = i + 1;
+    }
+    match (len < cap, idle) {
+        (true, _) => SlotPick::Grow,
+        (false, Some(i)) => SlotPick::Reuse(i),
+        (false, None) => SlotPick::Full,
+    }
+}
+
+/// Start a new epoch of the light pool's use.
+fn advance_light_epoch(rig: Option<ResMut<TileRig>>) {
+    if let Some(mut rig) = rig {
+        rig.epoch += 1;
+    }
 }
 
 impl TileRig {
@@ -238,25 +308,62 @@ impl TileRig {
         mirrors: &mut RigPaletteMirrors,
         anim_mirrors: &mut MatAnimMirrors,
     ) -> usize {
-        if let Some(i) = self.lights.iter().position(|l| l.scene == scene) {
-            return i;
-        }
-        if self.lights.len() >= UI_MODEL_CAM_LAYERS {
-            warn!("ui_models: the light pool is full — a pane's M2 lights, SetLight and fog are not applied");
-            return 0;
-        }
-        let key = LIGHT_MIRROR_KEYS[self.lights.len()];
-        let blob = scene.blob();
-        let buffer = blob.create(device, "wow_ui_model_light");
-        blob.write(queue, &buffer);
-        mirrors.0.insert(key, buffer.clone());
-        anim_mirrors.0.insert(key, buffer.clone());
-        self.lights.push(TileLight {
-            scene,
-            buffer,
-            variants: HashMap::new(),
-        });
-        self.lights.len() - 1
+        self.slot_or(scene, 0, device, queue, mirrors, anim_mirrors)
+    }
+
+    /// The pool slot for `scene`: its own, a new one, an idle one rewritten; else `fallback`, its
+    /// kind's constructor scene, while the pool is full of scenes in use.
+    fn slot_or(
+        &mut self,
+        scene: TileScene,
+        fallback: usize,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        mirrors: &mut RigPaletteMirrors,
+        anim_mirrors: &mut MatAnimMirrors,
+    ) -> usize {
+        let epoch = self.epoch;
+        let pick = pick_slot(
+            self.lights.iter().map(|l| (&l.scene, l.used)),
+            &scene,
+            epoch,
+            UI_MODEL_CAM_LAYERS,
+        );
+        let slot = match pick {
+            SlotPick::Held(i) => i,
+            SlotPick::Reuse(i) => {
+                // Its twins bound the old scene's light; a tile on this slot rebuilds on the move.
+                let light = &mut self.lights[i];
+                scene.blob().write(queue, &light.buffer);
+                light.scene = scene;
+                light.variants.clear();
+                i
+            }
+            SlotPick::Grow => {
+                let key = LIGHT_MIRROR_KEYS[self.lights.len()];
+                let blob = scene.blob();
+                let buffer = blob.create(device, "wow_ui_model_light");
+                blob.write(queue, &buffer);
+                mirrors.0.insert(key, buffer.clone());
+                anim_mirrors.0.insert(key, buffer.clone());
+                self.lights.push(TileLight {
+                    scene,
+                    buffer,
+                    variants: HashMap::new(),
+                    used: epoch,
+                });
+                self.lights.len() - 1
+            }
+            SlotPick::Full => {
+                if !self.warned {
+                    self.warned = true;
+                    warn!("ui_models: the light pool is full — a pane draws in its kind's default light");
+                }
+                fallback
+            }
+        };
+        self.lights[slot].used = epoch;
+        slot
     }
 }
 
@@ -488,7 +595,14 @@ impl Plugin for UiModelsPlugin {
             )
             // The composite, in the minimap fill's lane: after packing, before the mesh rebuild.
             .add_systems(Update, compose_tiles.in_set(UiQuadAppend).after(sync_tiles))
-            .add_systems(Update, reap_tile_variants)
+            .add_systems(Update, reap_tile_variants.before(crate::portrait::PaneSync))
+            // Before every asker: the tiles and the character panes' booths.
+            .add_systems(
+                Update,
+                advance_light_epoch
+                    .before(sync_tiles)
+                    .before(crate::ui_script::UiFeed),
+            )
             .add_systems(Update, dump_atlas.after(sync_tiles));
     }
 }
@@ -505,6 +619,8 @@ fn setup_tiles(
     let mut rig = TileRig {
         layer: layer.clone(),
         lights: Vec::new(),
+        epoch: 0,
+        warned: false,
     };
     // Slot 0, the `<Model>` ctor's scene (`0x76c8e0`). A twin binds its own light buffer, whose
     // palette and mat-anim rows the tiles read, so every pool buffer joins both mirror lists.
@@ -515,6 +631,16 @@ fn setup_tiles(
         &mut mirrors,
         &mut anim_mirrors,
     );
+    // Slot 1, the character panes' ctor scene (`0x505680`), held from the start so a full pool
+    // never leaves the stock windows without their light.
+    let character = rig.slot_for(
+        TileScene::of_character(ModelLight::character(), None),
+        &device,
+        &queue,
+        &mut mirrors,
+        &mut anim_mirrors,
+    );
+    debug_assert_eq!(character, CHARACTER_SCENE_SLOT);
     let light_buf = rig.lights[0].buffer.clone();
     commands.spawn((
         Name::new("ui model tiles camera"),
@@ -1816,6 +1942,44 @@ mod tests {
     }
 
     /// A file with no lights of its own is the default scene, so the pool keeps sharing slot 0.
+    /// A scene keeps its slot while asked for; a slot no one asked for through the last whole
+    /// frame is reused, so the pool never falls back for good, and the two ctor scenes stay.
+    #[test]
+    fn an_idle_light_slot_is_reused_and_the_ctor_scenes_stay() {
+        let lit = |r: f32| {
+            scene(
+                ModelLight {
+                    enabled: true,
+                    omni: false,
+                    ambient: [r; 3],
+                    diffuse: [r; 3],
+                    vector: [0.0, 0.0, -1.0],
+                },
+                SceneRig::default(),
+            )
+        };
+        let pool: Vec<(TileScene, u64)> = (0..4).map(|i| (lit(i as f32), 9)).collect();
+        let pick = |pool: &[(TileScene, u64)], s: &TileScene, epoch, cap| {
+            pick_slot(pool.iter().map(|(s, e)| (s, *e)), s, epoch, cap)
+        };
+        assert_eq!(pick(&pool, &lit(2.0), 10, 4), SlotPick::Held(2));
+        assert_eq!(
+            pick(&pool, &lit(7.0), 10, 8),
+            SlotPick::Grow,
+            "room to grow"
+        );
+        assert_eq!(
+            pick(&pool, &lit(7.0), 10, 4),
+            SlotPick::Full,
+            "every slot asked for last frame"
+        );
+        assert_eq!(
+            pick(&pool, &lit(7.0), 11, 4),
+            SlotPick::Reuse(2),
+            "idle a whole frame: the first past the pinned two"
+        );
+    }
+
     #[test]
     fn a_file_without_lights_is_the_default_scene() {
         assert!(scene(ModelLight::default(), scene_rig(&[])) == TileScene::default_scene());
