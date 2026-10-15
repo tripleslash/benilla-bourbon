@@ -929,7 +929,11 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's chunk-visible targeting (benilla#1244, superseding #1225) moved its ceiling
     /// 4,642 -> 4,603 (-39); the fork's count follows it.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_940;
+    ///
+    /// The merge of upstream c49c2011 (2e5cc4e4) measures six more and did not move the ceiling;
+    /// the terrain horizon added none here (the dump names no horizon system or resource in
+    /// `Update`). Read pair by pair: fork-side work, with the rest.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_946;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

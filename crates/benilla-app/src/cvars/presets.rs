@@ -269,13 +269,13 @@ mod tests {
             for (k, values) in GRAPHICS_PRESETS {
                 let mut cvars = Cvars::default();
                 cvars.set(GRAPHICS_QUALITY, name);
-                // A value no column holds for this row.
-                let off = if same_value(values[col], "0.5") {
-                    "0.25"
-                } else {
-                    "0.5"
-                };
-                cvars.set(k, off);
+                // A value this column does not hold and the row's callback takes (`farclip`
+                // refuses anything under 177).
+                let off = ["0.5", "0.25", "600"]
+                    .into_iter()
+                    .filter(|v| !same_value(values[col], v))
+                    .find(|v| cvars.set(k, v) == SetOutcome::Changed)
+                    .unwrap_or_else(|| panic!("{k} takes no off value"));
                 let derived = derive_graphics_quality(&cvars);
                 assert_eq!(derived, GRAPHICS_CUSTOM, "{name} with {k} = {off}");
                 cvars.mirror_graphics_quality();

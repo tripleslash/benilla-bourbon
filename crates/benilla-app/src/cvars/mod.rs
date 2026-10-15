@@ -2353,6 +2353,8 @@ mod tests {
     #[test]
     fn a_seeded_vm_refuses_what_the_registry_refuses() {
         let mut cvars = registry(&[]);
+        // The fork boots `SmallCull` at the High stop, not the reference's 0.04.
+        let small_cull = cvars.get("SmallCull").map(str::to_string);
         let mut script = UiScript::new().unwrap();
         cvars.seed_vm(&mut script);
         script
@@ -2360,7 +2362,7 @@ mod tests {
             .unwrap();
         assert_eq!(script.cvar("shadowLevel").as_deref(), Some("1"));
         assert_eq!(script.cvar("baseMip").as_deref(), Some("1"));
-        assert_eq!(script.cvar("SmallCull").as_deref(), Some("0.04"));
+        assert_eq!(script.cvar("SmallCull"), small_cull);
         cvars.drain_vm(&mut script);
         assert_eq!(cvars.get("baseMip"), Some("1"));
         assert_eq!(
