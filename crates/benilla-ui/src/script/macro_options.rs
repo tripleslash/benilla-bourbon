@@ -142,6 +142,17 @@ local function holds(cond, unit)
     return answer and true or false
 end
 
+-- The unit of the unit frame under the cursor, read off its `unit` field (`UnitFrame_Initialize`
+-- sets it, and on its bars), climbing to the parent; nil over the world or a frame without one.
+local function frame_unit()
+    local f = GetMouseFocus and GetMouseFocus()
+    while type(f) == "table" do
+        local unit = rawget(f, "unit")
+        if type(unit) == "string" and UnitExists(unit) then return unit end
+        f = f.GetParent and f:GetParent()
+    end
+end
+
 -- One bracket group's verdict and its unit, nil without an `@`.
 local function group_holds(body)
     local unit, conds = nil, {}
@@ -154,6 +165,11 @@ local function group_holds(body)
         elseif c ~= "" then
             table.insert(conds, c)
         end
+    end
+    -- Retail's `mouseover` names a hovered unit frame's unit too; 1.12's names world units only.
+    if unit and lower(unit) == "mouseover" then
+        local ok, hovered = pcall(frame_unit)
+        if ok and hovered then unit = hovered end
     end
     for _, c in ipairs(conds) do
         if not holds(c, unit or "target") then return false end
@@ -345,6 +361,43 @@ mod tests {
         assert_eq!(eval(&lua, hop), some("Hand of Protection", None));
         lua.load(r#"UNITS.mouseover = "foe""#).exec().unwrap();
         assert_eq!(eval(&lua, hop), some("Hand of Protection", None));
+    }
+
+    /// Over a party frame the world names no mouseover, so `@mouseover` takes the hovered frame's
+    /// `unit`, from the frame or the nearest parent that carries one.
+    #[test]
+    fn mouseover_names_the_hovered_unit_frames_unit() {
+        let lua = vm();
+        let hop = "[@mouseover,help,nodead][] Hand of Protection";
+        lua.load(
+            r#"
+            UNITS.party1 = "friend"
+            PartyFrame = { unit = "party1" }
+            HealthBar = { GetParent = function() return PartyFrame end }
+            function GetMouseFocus() return FOCUS end
+            "#,
+        )
+        .exec()
+        .unwrap();
+        lua.load("FOCUS = PartyFrame").exec().unwrap();
+        assert_eq!(eval(&lua, hop), some("Hand of Protection", Some("party1")));
+        lua.load("FOCUS = HealthBar").exec().unwrap();
+        assert_eq!(eval(&lua, hop), some("Hand of Protection", Some("party1")));
+        lua.load(r#"UNITS.party1 = "deadfriend""#).exec().unwrap();
+        assert_eq!(eval(&lua, hop), some("Hand of Protection", None));
+        // A frame naming nobody, or none at all, leaves the world's mouseover.
+        lua.load(r#"UNITS.party1 = nil UNITS.mouseover = "friend""#)
+            .exec()
+            .unwrap();
+        assert_eq!(
+            eval(&lua, hop),
+            some("Hand of Protection", Some("mouseover"))
+        );
+        lua.load("FOCUS = nil").exec().unwrap();
+        assert_eq!(
+            eval(&lua, hop),
+            some("Hand of Protection", Some("mouseover"))
+        );
     }
 
     #[test]
