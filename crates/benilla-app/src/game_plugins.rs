@@ -1295,6 +1295,49 @@ pub(crate) mod schedule_tests {
         }
     }
 
+    /// The font engine is built at `Startup` before the glue VM loads: the stock glue buttons
+    /// that size to their text in `<OnLoad>` (`SetWidth(this:GetTextWidth() + 50)`) read 0 and
+    /// stand 50 wide when the VM has no measurer at load. A lost `.after`, or the engine back in
+    /// `Update` only, fails here.
+    #[test]
+    fn the_font_engine_is_built_before_the_glue_loads() {
+        let mut app = headless_client();
+        // `Update` first: its systems register the resources the census's class table names.
+        let _ = census(&mut app, Update, SyncPoints::Declared);
+        let c = census(&mut app, Startup, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Startup"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let start = one("::ui_text::engine::gpu::init");
+        let mut seen = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&one("::ui_script::lifecycle::setup_script")),
+            "the glue VM loads after the font engine is built"
+        );
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or

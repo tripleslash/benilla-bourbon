@@ -916,8 +916,9 @@ fn arm_leaving_world(world: &mut World) {
 /// load-edge half of [`super::extract::tick_script`]'s per-frame pair. A fresh VM answers 1024×768
 /// until then, and a value computed once at load keeps it: stock `WorldMapFrame_OnLoad` sizes the
 /// full-screen `BlackoutWorld` from `GetScreenWidth()` and `GetScreenHeight()` and never again
-/// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. With no
-/// atlas yet (it bakes on the first `Update`) the per-frame pass seats the measurer.
+/// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. The
+/// atlas is built at `Startup` before the glue VM ([`crate::ui_text::UiFontsBuilt`]); with none
+/// (no window, no fonts) the per-frame pass seats the measurer once one exists.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
     let (w, h) = {
         let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();

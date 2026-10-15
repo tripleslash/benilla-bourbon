@@ -330,9 +330,11 @@ impl Plugin for UiScriptPlugin {
             .add_systems(
                 Startup,
                 // After the CVars load: the glue screens read the agreements as they come up.
+                // After the font engine: the glue's `<OnLoad>`s measure text.
                 setup_script
                     .after(benilla_assets::AssetSet::Open)
-                    .after(crate::cvars::CvarLoad),
+                    .after(crate::cvars::CvarLoad)
+                    .after(crate::ui_text::UiFontsBuilt),
             )
             // The in-game UI loads on world entry, as the reference's does, once the loading cover
             // has presented, so its ~0.5 s never stalls the cover's first frame.
