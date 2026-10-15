@@ -121,6 +121,11 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("fsr::FrameGeneration", "wall"),
     ("fsr::FsrView", "wall"),
     ("fsr::PresentsHeldFrames", "wall"),
+    ("fsr::cadence::FgCadence", "wall"),
+    ("horizon::HorizonCulling", "wall"),
+    ("horizon::HorizonSet", "wall"),
+    ("horizon::LOD_DIST_FALLBACK", "wall"),
+    ("horizon::LOD_DIST_RANGE", "wall"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
     ("interact::PickMesh", "record"),
@@ -176,6 +181,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("ride_frame::RideFrame", "record"),
     ("rig_anim::AnimParked", "wall"),
     ("rig_anim::GlobalSeqDrive", "wall"),
+    ("rig_anim::PoseEveryFrame", "wall"),
     ("rig_anim::PosePost", "wall"),
     ("rig_anim::RigAnchor", "wall"),
     ("rig_anim::RigFrame", "wall"),
@@ -333,7 +339,9 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// generation (`fsr::*`, `ffx_glow::ffx_transparent_pass_2d`), the light lanes it drives
 /// (`lighting::WorldPointLight`, `SpellFxLight`, `LavaLightGain`, `flame_flicker`), the foliage
 /// wind and wet surfaces' settings, the transport's prop test, the posed pick's scratch and the
-/// effect lane's motion. They gate nothing; only the leaks do.
+/// effect lane's motion; frame generation's cadence (`fsr::cadence::FgCadence`), the terrain
+/// horizon's culling knob and set (`horizon::*`), and the portrait's every-frame pose
+/// (`rig_anim::PoseEveryFrame`). They gate nothing; only the leaks do.
 const LEAK_CEILING: usize = 107;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be
