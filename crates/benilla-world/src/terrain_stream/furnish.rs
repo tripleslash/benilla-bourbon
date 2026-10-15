@@ -101,6 +101,10 @@ pub(super) fn furnish_tile_cells(
                     // Exterior scene: from inside a WMO a cell draws only through a portal window
                     // (`0x683bf0`, fed only by the per-window walk `0x682fa0`).
                     crate::exterior_cull::ExteriorScene,
+                    super::TerrainCell {
+                        tile: key,
+                        cell: cell as u8,
+                    },
                 ));
                 if let Some(aabb) = aabb {
                     cell.insert(aabb);

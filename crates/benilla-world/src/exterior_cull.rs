@@ -16,7 +16,7 @@
 //! group's members only while the group renders, frustum-testing each: an in-room body draws when
 //! its room, or one a portal hop away (our doorway-straddle guard), is in the PVS and its box is
 //! in view. `WOW_NO_DRAW_ELECTION=1` keeps only the window leg. The horizon-occlusion term
-//! (`0x686000`) is not built.
+//! (`0x686000`) is [`crate::horizon`]'s, folded in here and by the other visibility owners.
 //!
 //! Per window the reference bilerps the camera's corner rays (`0xc7bcd8`) into 6 planes
 //! (`0x6865f0`→`0x686640`): a sub-frustum over the portal chain's screen-space AABB, tested per
@@ -201,6 +201,8 @@ type UnownedScene = (
     &'static mut Visibility,
     // Instrument only: liquid takes the terrain cell's test, and this lets the counters say so.
     Has<crate::liquid::LiquidSurface>,
+    Option<&'static crate::terrain_stream::TerrainCell>,
+    Has<crate::wdl::WdlTile>,
 );
 
 /// The objects [`apply_exterior_cull`] may write: exterior scene no one else owns. A `ModelPart`
@@ -265,9 +267,9 @@ type ElectedBody = (
     &'static mut Visibility,
 );
 
-/// Hides every [`ExteriorScene`] object no window admits, of those with no other `Visibility`
-/// owner (terrain cells, the far band, open-world liquid), and elects each net body
-/// ([`ElectedBody`]), whose root nothing else writes. A `ModelPart` or `WmoGroupVis` belongs to
+/// Hides every [`ExteriorScene`] object no window admits or the horizon hides, of those with no
+/// other `Visibility` owner (terrain cells, the far band, open-world liquid), and elects each net
+/// body ([`ElectedBody`]), whose root nothing else writes. A `ModelPart` or `WmoGroupVis` belongs to
 /// `model_render::visibility`, which folds [`ExteriorGate`] into its own verdict: a write here
 /// would overwrite it every frame.
 fn apply_exterior_cull(
@@ -280,11 +282,15 @@ fn apply_exterior_cull(
     mut verdict: ResMut<ExteriorCullVerdict>,
     trace: Option<Res<CullTrace>>,
     mut no_election: Local<Option<bool>>,
+    horizon: Option<Res<crate::horizon::Horizon>>,
+    census: Option<ResMut<crate::horizon::HorizonCensus>>,
 ) {
     // `WOW_NO_DRAW_ELECTION=1` disables the frustum and room legs; the window leg stays.
     let no_election =
         *no_election.get_or_insert_with(|| std::env::var_os("WOW_NO_DRAW_ELECTION").is_some());
     let gate = ExteriorGate::build(&windows, cam.iter().next());
+    let no_horizon = crate::horizon::Horizon::default();
+    let horizon = horizon.as_deref().unwrap_or(&no_horizon);
     // The view volume as the outside leg's `{0,0,1,1}` window (`0x6811ff`): an out-of-frustum
     // body is elected to pass 2. Built from this frame's camera transform, not the `Frustum`
     // component, which may not be refreshed yet; no camera admits.
@@ -299,10 +305,33 @@ fn apply_exterior_cull(
     };
     let (mut tested, mut hidden, mut unbounded) = (0usize, 0usize, 0usize);
     let (mut liquid, mut liquid_hidden) = (0usize, 0usize);
-    for (gt, aabb, mut vis, is_liquid) in &mut scene {
+    let (mut h_cells, mut h_liquid, mut h_far) = (0usize, 0usize, 0usize);
+    for (gt, aabb, mut vis, is_liquid, cell, is_far) in &mut scene {
         tested += 1;
         unbounded += usize::from(aabb.is_none());
-        let admitted = gate.admits(gt, aabb);
+        let mut admitted = gate.admits(gt, aabb);
+        // The horizon: chunks by the walk (`0x683bf0`), liquid by its box (`0x683ab0`), the far
+        // band after every band with flag 8 (`0x683040`).
+        if admitted && horizon.active() {
+            let behind = if let Some(cell) = cell {
+                let behind = horizon.hides_cell(cell);
+                h_cells += usize::from(behind);
+                behind
+            } else if let Some(aabb) = aabb.filter(|_| is_liquid || is_far) {
+                let (min, max) = crate::horizon::world_box(gt, aabb);
+                let behind = if is_far {
+                    horizon.hides_far_box(min, max)
+                } else {
+                    horizon.hides_box(min, max, 0)
+                };
+                h_far += usize::from(behind && is_far);
+                h_liquid += usize::from(behind && is_liquid);
+                behind
+            } else {
+                false
+            };
+            admitted = !(behind && horizon.enforced());
+        }
         hidden += usize::from(!admitted);
         liquid += usize::from(is_liquid);
         liquid_hidden += usize::from(is_liquid && !admitted);
@@ -313,7 +342,7 @@ fn apply_exterior_cull(
         });
     }
     // The body leg: one whole-object test per net body.
-    let (mut body_n, mut body_hidden) = (0usize, 0usize);
+    let (mut body_n, mut body_hidden, mut h_bodies) = (0usize, 0usize, 0usize);
     for (e, gt, body, room, mut vis) in &mut bodies {
         let Some(bound) = body.bound.as_ref() else {
             // No bound: not this cull's to decide. Traced, as no counter below sees it.
@@ -340,6 +369,15 @@ fn apply_exterior_cull(
                 ExteriorGate::Windows(_) => gate.admits(gt, Some(bound)),
             }
         };
+        // Both producers test the body's sphere against the horizon (`0x686000`).
+        let admitted = if admitted && !no_election && horizon.active() {
+            let (min, max) = crate::horizon::world_box(gt, bound);
+            let behind = horizon.hides_sphere((min + max) * 0.5, (max - min).length() * 0.5);
+            h_bodies += usize::from(behind);
+            !(behind && horizon.enforced())
+        } else {
+            admitted
+        };
         trace_body(
             &trace,
             e,
@@ -355,6 +393,12 @@ fn apply_exterior_cull(
         } else {
             Visibility::Hidden
         });
+    }
+    if let Some(mut census) = census {
+        census.cells = h_cells;
+        census.liquid = h_liquid;
+        census.far = h_far;
+        census.bodies = h_bodies;
     }
     *verdict = ExteriorCullVerdict {
         windows: match &*windows {

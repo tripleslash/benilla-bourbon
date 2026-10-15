@@ -121,6 +121,21 @@ impl TerrainStreamer {
         let spawned = self.tiles.values().filter(|t| t.furnished).count();
         (spawned, self.tiles.len())
     }
+
+    /// The spawned tiles' keys and assets, for the horizon's chunk walk.
+    pub(crate) fn spawned_tiles(&self) -> impl Iterator<Item = ((i32, i32), &Handle<AdtTile>)> {
+        self.tiles
+            .iter()
+            .filter(|(_, t)| t.entity.is_some())
+            .map(|(k, t)| (*k, &t.handle))
+    }
+}
+
+/// A furnished terrain cell: its tile and its index, row·4 + column, among the tile's 4×4 cells.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TerrainCell {
+    pub tile: (i32, i32),
+    pub cell: u8,
 }
 
 /// One loaded tile and everything it owns.

@@ -259,6 +259,8 @@ impl Plugin for RaidMarksPlugin {
                 PostUpdate,
                 place_raid_marks
                     .after(bevy::transform::TransformSystems::Propagate)
+                    // The horizon reads the world camera's transform, never a mark's.
+                    .ambiguous_with(benilla_world::horizon::HorizonSet)
                     .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
             );
     }

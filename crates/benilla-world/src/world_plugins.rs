@@ -100,6 +100,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::wmo_portal::WmoPortalPlugin)
             // From inside a building, the exterior draws only through the flood's portal windows.
             .add(crate::exterior_cull::ExteriorCullPlugin)
+            // The terrain horizon: what nearer chunks hide, read by every exterior visibility owner.
+            .add(crate::horizon::HorizonPlugin)
             // Doodad animation: placed M2s loop their first and global sequences while drawn.
             .add(crate::doodad_anim::DoodadAnimPlugin)
             // Ground clutter: the catalog and per-chunk build; the active streamer scatters.

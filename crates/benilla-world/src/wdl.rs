@@ -138,7 +138,7 @@ pub(crate) struct CoarseFloor {
 
 /// Marks a spawned WDL tile.
 #[derive(Component)]
-struct WdlTile;
+pub(crate) struct WdlTile;
 
 fn setup_wdl(
     mut commands: Commands,

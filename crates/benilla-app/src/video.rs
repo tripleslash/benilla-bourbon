@@ -404,6 +404,18 @@ pub(crate) fn spell_effect_scale(level: i32) -> f32 {
     }
 }
 
+/// `/console showCull` (`0x673250`): flips world flag 0x20, the terrain horizon, and says which way.
+fn show_cull(world: &mut World, _args: &str) -> Vec<String> {
+    let mut culling = world.get_resource_or_init::<benilla_world::horizon::HorizonCulling>();
+    culling.enabled = !culling.enabled;
+    vec![if culling.enabled {
+        "Terrain culling enabled."
+    } else {
+        "Terrain culling disabled."
+    }
+    .to_string()]
+}
+
 /// `/console detailDoodadAlpha [0..255]`, the reference's console command (`0x6739a0`, registered
 /// by `0x63f9e0` as a command, not a CVar, so it never persists): the ground-clutter cutout that
 /// `texel.a x distance_ramp` is tested against, so at the default 128 grass ends ~61 yd out of
@@ -439,6 +451,11 @@ impl Plugin for VideoPlugin {
             "detailDoodadAlpha",
             "The ground-clutter cutout reference, 0-255 (128 = the default).",
             detail_doodad_alpha,
+        );
+        app.console_command(
+            "showCull",
+            "Toggle terrain culling, the horizon.",
+            show_cull,
         );
         app.init_resource::<VideoConfig>()
             .init_resource::<GxRestarts>()

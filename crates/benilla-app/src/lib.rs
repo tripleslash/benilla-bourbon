@@ -235,7 +235,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 47] = [
+    const SEEDED: [&str; 49] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -316,6 +316,9 @@ fn seed_launch_env() {
         "WOW_RAIN_SURFACES",
         // …and the rain simulation's own CPU line (`?precip_profile=1`, `PRECIP_PROFILE`).
         "WOW_PRECIP_PROFILE",
+        // …and the terrain horizon's A/B (`?horizon=0`, `?horizon=count`) and its census line.
+        "WOW_HORIZON",
+        "WOW_HORIZON_CENSUS",
     ];
     benilla_world::launch_env::seed(
         SEEDED

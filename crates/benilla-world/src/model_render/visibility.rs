@@ -74,6 +74,8 @@ pub(super) fn apply_model_visibility(
         ),
         Without<ModelPart>,
     >,
+    horizon: Option<Res<crate::horizon::Horizon>>,
+    census: Option<ResMut<crate::horizon::HorizonCensus>>,
 ) {
     let m = &debug.models;
     let cam_view = cam.iter().next();
@@ -88,6 +90,7 @@ pub(super) fn apply_model_visibility(
         && !windows.is_changed()
         && !claim.is_changed()
         && !far_twins.is_changed()
+        && !horizon.as_ref().is_some_and(|h| h.is_changed())
         && new_portals.is_empty()
         && owner_flips.is_empty();
     let cam_pos = cam_t.map(|t| t.translation());
@@ -101,6 +104,10 @@ pub(super) fn apply_model_visibility(
     // Parallel over every resident model submesh (~100k in a city); every write is change-gated.
     let unmarked: bevy::platform::collections::HashSet<Entity> = unmarked.read().collect();
     let unmarked = &unmarked;
+    let behind_horizon = std::sync::atomic::AtomicUsize::new(0);
+    let behind_horizon = &behind_horizon;
+    let no_horizon = crate::horizon::Horizon::default();
+    let horizon = horizon.as_deref().unwrap_or(&no_horizon);
     q.par_iter_mut().for_each(
         |(
             entity,
@@ -191,6 +198,26 @@ pub(super) fn apply_model_visibility(
             // (units, GameObjects) and the camera's own building are exempt.
             let own_building = group_vis.is_some_and(|gv| Some(gv.instance) == own_instance);
             let exterior_ok = !exterior || own_building || gate.admits(&xf, aabb);
+            // Exterior doodads by their sphere (`0x683700`), map objects by their box with flags 1
+            // (`0x6856c0`); per submesh, as the window gate tests them.
+            let behind = exterior_ok
+                && exterior
+                && !own_building
+                && horizon.active()
+                && aabb.is_some_and(|a| {
+                    let (min, max) = crate::horizon::world_box(&xf, a);
+                    match part.kind {
+                        ModelKind::Doodad => {
+                            horizon.hides_sphere((min + max) * 0.5, (max - min).length() * 0.5)
+                        }
+                        ModelKind::Wmo => horizon.hides_box(min, max, 1),
+                        _ => false,
+                    }
+                });
+            if behind {
+                behind_horizon.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let exterior_ok = exterior_ok && !(behind && horizon.enforced());
 
             // A billboard card draws only while its model does, by the owner's last-frame verdict.
             // Entity-lane cards only: a placement's card is `ExteriorScene` and gated above. An
@@ -264,6 +291,9 @@ pub(super) fn apply_model_visibility(
             }
         },
     );
+    if let (false, Some(mut census)) = (scene_still, census) {
+        census.parts = behind_horizon.load(std::sync::atomic::Ordering::Relaxed);
+    }
 
     // A building's MLIQ surfaces, gated by the ever-visited latch, not this frame's PVS: a group's
     // liquid draws from its first visit for the rest of the placement's residency. An index past
