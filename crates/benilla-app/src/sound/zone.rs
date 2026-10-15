@@ -866,13 +866,13 @@ fn open_lua_music(
     if out.mixer.is_none() {
         return;
     }
-    // The chain, then the addon folder: an addon's own track has an `Interface\AddOns\…` path.
+    // The addon folder, then the chain: an addon's own track has an `Interface\AddOns\…` path.
     //
     // The chain half is the **non-blocking** read, for the reason the zone track's is
     // ([`open_music_stream`]): a track is megabytes, this runs from a system, and on the page a
     // non-resident pack makes that read a synchronous fetch on the thread that draws. The loose
     // half stays a plain read — it is a local file, and the page never has an AddOns folder.
-    let attempt = assets.chain.lock_recover().try_read(path);
+    let attempt = assets.try_read_loose_or_chain(path);
     let bytes = match attempt {
         TryRead::Ready(bytes) => bytes,
         // Not in memory yet (web only). The read has started the warm; remember the path and
@@ -884,25 +884,22 @@ fn open_lua_music(
             zone.lua_music_watch.reset();
             return;
         }
-        TryRead::Missing => match assets.read_loose_only(path) {
-            Some(bytes) => bytes,
-            None => {
-                // A file that does not resolve is the client's own silent nothing: the binding
-                // has already returned, so there is nobody left to raise at, and the name went to
-                // the file layer verbatim (no extension appended, no normalisation —
-                // `0x458720` does neither). The zone track is left exactly where it was, which is
-                // `0x4604bd`'s early return.
-                debug!("Lua music: {path} — not in the patch chain or the AddOns folder");
-                zone.lua_music_pending = None;
-                // Hand the slot back. On the first call it is already clear
-                // ([`take_lua_music_slot`] ran a line earlier); this matters on the two calls
-                // that reach here holding it — a deferred open whose pack turned out not to
-                // carry the file, and the loop's reopen of a file that has since gone — where
-                // leaving it set would gate the zone pump on a track that can never sound.
-                zone.lua_music_path = None;
-                return;
-            }
-        },
+        TryRead::Missing => {
+            // A file that does not resolve is the client's own silent nothing: the binding
+            // has already returned, so there is nobody left to raise at, and the name went to
+            // the file layer verbatim (no extension appended, no normalisation —
+            // `0x458720` does neither). The zone track is left exactly where it was, which is
+            // `0x4604bd`'s early return.
+            debug!("Lua music: {path} — not in the AddOns folder or the patch chain");
+            zone.lua_music_pending = None;
+            // Hand the slot back. On the first call it is already clear
+            // ([`take_lua_music_slot`] ran a line earlier); this matters on the two calls
+            // that reach here holding it — a deferred open whose pack turned out not to
+            // carry the file, and the loop's reopen of a file that has since gone — where
+            // leaving it set would gate the zone pump on a track that can never sound.
+            zone.lua_music_path = None;
+            return;
+        }
     };
     zone.lua_music_pending = None;
     // The decode half of the same wait: kira has no streaming module on wasm32, so

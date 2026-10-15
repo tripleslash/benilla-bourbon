@@ -899,7 +899,10 @@ impl SoundKits {
         if let Some(d) = self.cache.get(&key) {
             return Ok(Some(d.clone()));
         }
-        let attempt = assets.chain.lock_recover().try_read(path);
+        // An addon's loose file, then the chain ([`benilla_assets::read_loose_or_chain`]):
+        // `PlaySoundFile` is by path, and addon audio lives on disk, never in an MPQ. The chain
+        // half is the non-blocking read; the page has no addon folder.
+        let attempt = assets.try_read_loose_or_chain(path);
         let bytes = match attempt {
             TryRead::Ready(bytes) => bytes,
             TryRead::Pending => {
@@ -909,20 +912,11 @@ impl SoundKits {
                 self.begin_sfx(&key, path, None);
                 return Ok(None);
             }
-            // **Two stores, one rule** — the chain, then an addon's own loose file
-            // ([`benilla_assets::read_chain_or_loose`], decision 1322's resolver): a by-path
-            // sound an addon ships lives on disk, never in an MPQ, so a chain miss is not the
-            // end of the look. Only the loose half runs here, because the chain has just been
-            // asked and answered ([`WorldAssets::read_loose_only`] says why the shared helper
-            // is the wrong call from this arm). `None` on the page, which has no addon folder.
-            //
-            // The error is deliberately vaguer than the old `read_file` one it replaces:
-            // `TryRead` collapses "no such file" and "the read failed" into one arm, so claiming
-            // either specifically would be a guess. Sound misses are warned, never acted on.
-            TryRead::Missing => match assets.read_loose_only(path) {
-                Some(bytes) => bytes,
-                None => bail!("reading {path}: not in the patch chain or the AddOns folder"),
-            },
+            // `TryRead` collapses "no such file" and "the read failed" into one arm, so the error
+            // claims neither. Sound misses are warned, never acted on.
+            TryRead::Missing => {
+                bail!("reading {path}: not in the AddOns folder or the patch chain")
+            }
         };
         // The bytes are here; the **decode** is the half still on the frame. On the page it goes
         // to the browser ([`super::web_decode`]) and the shot replays when the PCM lands.

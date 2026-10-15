@@ -828,7 +828,12 @@ pub(crate) mod schedule_tests {
     /// `fishing_line::size_engine_lines` over `GizmoConfigStore` against the two engine-line
     /// painters and bevy's own eight gizmo painters: it writes one group's line width, which is
     /// read at extraction, after every painter, so the write commutes with each of them.
-    const POST_UPDATE_CEILING: usize = 478;
+    ///
+    /// **479 (merge of upstream c49c2011)** — one more, upstream's:
+    /// `glue::backdrop::fit_tiled_backgrounds`'s `ImageNode` rect against bevy's private
+    /// accessibility `image_changed`, which reads only the change tick for a label: either order
+    /// labels the same node.
+    const POST_UPDATE_CEILING: usize = 479;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may

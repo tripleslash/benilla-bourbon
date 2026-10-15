@@ -56,6 +56,7 @@ pub mod addon_gate;
 mod char_name;
 mod client;
 mod clock;
+mod cvar_checks;
 mod cvars;
 mod dressup;
 mod duel;
@@ -222,11 +223,17 @@ pub use cursor::{
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, HeldCursor, WorldPick,
     EQUIPMENT_BAG,
 };
+pub use cvar_checks::{
+    check_base_mip, check_camera_decay, check_camera_distance_max, check_camera_pitch,
+    check_camera_rate, check_camera_smooth_style, check_camera_time, check_camera_view,
+    check_camera_yaw, check_farclip, check_frill_density, check_refresh, check_shadow_level,
+    check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarVerdict,
+};
 pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
-    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, VIDEO_DEFAULT_CVARS,
-    WORLD_DETAIL_STOPS,
+    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
+    VIDEO_DEFAULT_CVARS, WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;

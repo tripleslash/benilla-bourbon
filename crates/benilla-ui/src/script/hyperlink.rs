@@ -9,9 +9,20 @@
 //! alone (`"%s"`, `0x82e280`); the click passes the link, the text and the button name. Its click
 //! mask is `LeftButtonUp` and `RightButtonUp` (`0x500`, `0x7a327d`).
 //!
-//! The text frame keeps a pool (`[+0x314]`): a span takes a button from it (`0x7a3880`), which is
-//! placed over the span and shown (`0x7a3350`), and a span gone hides its button again (`0x7a3920`),
-//! freeing nothing. The app lays the text out, so its spans arrive here as screen rects.
+//! The text frame keeps a free list (`[+0x314]`) and a live list. A rebuild (`0x788c00`, and
+//! SimpleHTML's at `0x78afdf`) compares nothing: it releases every live button (`0x7a3920`), which
+//! hides, so a hovered one gets its leave with its old link and a held press loses its capture, and
+//! goes to the free list's tail. Then each span takes the free list's head (`0x7a3880`, a new
+//! button when it is empty), which is placed on its line and shown (`0x7a3350`); nothing is ever
+//! freed. A ScrollingMessageFrame rebuilds from its update (`0x788595`) whenever its flag is up
+//! ([`crate::widget::ScrollingMessageState::links_dirty`]), and a change of its on-screen width
+//! or height relayouts it (`0x7882f0` → `0x788310` → `0x788750`), a rescale included, since the
+//! rect it compares is in screen units (`0x788342` scales the insets by `+0x7c`). The buttons hang
+//! off their line (`0x7a3441`), so a frame that only moves carries them along with no rebuild.
+//! The app lays the text out, so its spans arrive here as screen rects every frame, and a frame
+//! not rebuilt has its buttons re-seated in place.
+
+use std::collections::VecDeque;
 
 use mlua::{Lua, Value};
 
@@ -78,12 +89,26 @@ fn fire(lua: &Lua, owner: FrameHandle, script: &str, args: &[&str]) {
     }
 }
 
-/// Replace the spans on screen, `(text frame, y-up rect, link, text)`: each ScrollingMessageFrame's
-/// spans take its pooled buttons in order, a new one built when the pool runs out, and the buttons
-/// left over, or of a text frame with no span now, hide. A MessageFrame's spans stay text.
+/// One span: its y-up rect, link and text.
+type Span = (Rect, String, String);
+
+/// A text frame's hyperlink buttons: the live ones in placement order, each over the span at its
+/// index, and the free list, taken from the head and released to the tail.
+#[derive(Default)]
+pub(crate) struct LinkPool {
+    live: Vec<FrameHandle>,
+    free: VecDeque<FrameHandle>,
+    /// The text frame's on-screen size at the last pass, for the resize relayout.
+    size: Option<(f32, f32)>,
+}
+
+/// Replace the spans on screen, `(text frame, y-up rect, link, text)`, a text frame's in the
+/// order its rebuild places them. Only a ScrollingMessageFrame's take buttons; a MessageFrame's
+/// stay text. A text frame due a rebuild ([`due`]) gets one: every live button hides, in order,
+/// its leave reading the link it still carries, then each span takes a free button, is placed,
+/// and shows. Any other has its live buttons re-seated on their spans with no hide and no show,
+/// as buttons anchored to their lines follow a moved frame.
 pub(super) fn set_spans(lua: &Lua, spans: Vec<(FrameHandle, Rect, String, String)>) {
-    // One span: its rect, link and text.
-    type Span = (Rect, String, String);
     let mut by_owner: Vec<(FrameHandle, Vec<Span>)> = Vec::new();
     for (owner, rect, link, text) in spans {
         match by_owner.iter_mut().find(|(o, _)| *o == owner) {
@@ -91,58 +116,123 @@ pub(super) fn set_spans(lua: &Lua, spans: Vec<(FrameHandle, Rect, String, String
             None => by_owner.push((owner, vec![(rect, link, text)])),
         }
     }
-    let (mut show, mut hide) = (Vec::new(), Vec::new());
-    let mut moved = false;
     {
         let mut model = lua.app_data_mut::<Model>().expect("model");
         let model = &mut *model;
         model
             .link_buttons
             .retain(|owner, _| model.arena.frame(*owner).is_some());
-        for (owner, list) in &by_owner {
-            // Only the SMF (`0x788ce7`) and SimpleHTML (`0x78b052`) take one; ours draws no links.
-            if !model
+        // Text frames with live buttons and no span now come after the ones with spans, in a
+        // fixed order over the hashed map.
+        let mut emptied: Vec<FrameHandle> = model
+            .link_buttons
+            .iter()
+            .filter(|(owner, pool)| {
+                !pool.live.is_empty() && !by_owner.iter().any(|(o, _)| o == *owner)
+            })
+            .map(|(owner, _)| *owner)
+            .collect();
+        emptied.sort_by_key(|h| h.fingerprint_bits());
+        // Only the SMF (`0x788ce7`) and SimpleHTML (`0x78b052`) take one; ours draws no links.
+        by_owner.retain(|(owner, _)| {
+            model
                 .arena
                 .frame(*owner)
                 .is_some_and(|f| matches!(f.kind_state, KindState::ScrollingMessage(_)))
-            {
-                continue;
-            }
-            for (i, (rect, link, text)) in list.iter().enumerate() {
-                let pooled = model
-                    .link_buttons
-                    .get(owner)
-                    .and_then(|pool| pool.get(i))
-                    .copied();
-                let h = pooled.unwrap_or_else(|| build(model, *owner));
-                moved |= place(model, h, *rect, link, text);
-                if !model.arena.frame(h).is_some_and(|f| f.shown) {
-                    show.push(h);
-                }
-            }
-        }
-        for (owner, pool) in &model.link_buttons {
-            let used = by_owner
-                .iter()
-                .find(|(o, _)| o == owner)
-                .map_or(0, |(_, list)| list.len());
-            hide.extend(
-                pool.iter()
-                    .skip(used)
-                    .filter(|&&h| model.arena.frame(h).is_some_and(|f| f.shown)),
-            );
-        }
+        });
+        by_owner.extend(emptied.into_iter().map(|owner| (owner, Vec::new())));
     }
-    for h in hide {
-        visibility::set_shown(lua, h, false);
-    }
-    for h in show {
-        visibility::set_shown(lua, h, true);
+    let mut moved = false;
+    for (owner, list) in by_owner {
+        moved |= if due(lua, owner, &list) {
+            rebuild(lua, owner, &list)
+        } else {
+            follow(lua, owner, &list)
+        };
     }
     // The pointer hit-tests resolved rects, so a moved button is solved before the next input.
     if moved {
         UiScript::resolve_layout(&mut lua.app_data_mut::<Model>().expect("model"));
     }
+}
+
+/// Whether `owner`, a ScrollingMessageFrame, rebuilds this pass: when its flag is up, which this
+/// spends, or its on-screen size moved (`0x788394`, `0x7883b2`).
+/// Deviation: a span count that no longer matches the live set always rebuilds, so a state this
+/// model does not flag (a ring wiped by `SetMaxLines`, a hidden frame) leaves no stale button.
+fn due(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let model = &mut *model;
+    let size = model
+        .resolved
+        .get(&owner)
+        .map(|r| (r.right - r.left, r.top - r.bottom));
+    let flagged = match model.arena.frame_mut(owner).map(|f| &mut f.kind_state) {
+        Some(KindState::ScrollingMessage(smf)) => std::mem::take(&mut smf.links_dirty),
+        _ => false,
+    };
+    let pool = model.link_buttons.entry(owner).or_default();
+    let resized = std::mem::replace(&mut pool.size, size).is_some_and(|was| Some(was) != size);
+    flagged || resized || pool.live.len() != list.len()
+}
+
+/// Re-seat `owner`'s live buttons on `list`, one each, with no hide and no show. True when a
+/// button's anchors or size changed.
+fn follow(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let model = &mut *model;
+    let live = model
+        .link_buttons
+        .get(&owner)
+        .map(|p| p.live.clone())
+        .unwrap_or_default();
+    let mut moved = false;
+    for (&h, (rect, link, text)) in live.iter().zip(list) {
+        moved |= place(model, h, *rect, link, text);
+    }
+    moved
+}
+
+/// One text frame's rebuild (`0x788c00`) onto `list`. True when a button's anchors or size
+/// changed.
+fn rebuild(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
+    let released = {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let pool = model.link_buttons.entry(owner).or_default();
+        let released = std::mem::take(&mut pool.live);
+        pool.free.extend(released.iter().copied());
+        released
+    };
+    // `0x7a3920`: each hides before any is re-placed, so a hovered one leaves with its old link.
+    for &h in &released {
+        visibility::set_shown(lua, h, false);
+    }
+    let mut moved = false;
+    let mut shows = Vec::with_capacity(list.len());
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let model = &mut *model;
+        // A leave handler may have destroyed the text frame.
+        if model.arena.frame(owner).is_none() {
+            model.link_buttons.remove(&owner);
+            return false;
+        }
+        for (rect, link, text) in list {
+            let free = model
+                .link_buttons
+                .get_mut(&owner)
+                .and_then(|p| p.free.pop_front());
+            let h = free.unwrap_or_else(|| build(model, owner));
+            moved |= place(model, h, *rect, link, text);
+            shows.push(h);
+        }
+        let pool = model.link_buttons.entry(owner).or_default();
+        pool.live = shows.clone();
+    }
+    for h in shows {
+        visibility::set_shown(lua, h, true);
+    }
+    moved
 }
 
 /// `0x7a3880`'s miss: a new button, a Button child of the text frame in its stratum one level up,
@@ -163,7 +253,6 @@ fn build(model: &mut Model, owner: FrameHandle) -> FrameHandle {
     }
     model.frame_id(h);
     model.layout_inputs.entry(h).or_default();
-    model.link_buttons.entry(owner).or_default().push(h);
     h
 }
 

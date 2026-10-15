@@ -545,6 +545,102 @@ mod tests {
         assert!(!parses("local a = ... return a"));
     }
 
+    /// The client's `luaO_str2d` (`0x6f5900`) is `strtod` (`0x741e39`) and a trailing-space skip:
+    /// a decimal numeral or nothing. Every coercion goes through it, so hexadecimal, `inf` and
+    /// `nan` are not numbers to `tonumber`, to arithmetic or to a binding's argument, and a source
+    /// `0x10` does not compile.
+    #[test]
+    fn only_a_decimal_numeral_is_a_number() {
+        let s = UiScript::new().unwrap();
+        for text in [
+            "0x10", "0X1A", "0x1p4", "-0x2", " 0x10 ", "inf", "nan", "infinity",
+            // A marker with no digit after it ends the numeral before it (`0x411432`), so it
+            // trails; `f` is no marker.
+            "1e", "1d", "1f2",
+        ] {
+            assert!(
+                s.eval::<bool>(&format!("return tonumber({text:?}) == nil"))
+                    .unwrap(),
+                "tonumber({text:?})"
+            );
+        }
+        for (text, n) in [
+            (" 12 ", 12.0),
+            ("1e2", 100.0),
+            ("-.5", -0.5),
+            ("5.", 5.0),
+            ("+3", 3.0),
+            // The client's strtod also takes `d`/`D` as the exponent marker (`0x4112d1`).
+            ("1d2", 100.0),
+            ("-2.5D-1", -0.25),
+            (" 1d+1 ", 10.0),
+        ] {
+            assert_eq!(
+                s.eval::<f64>(&format!("return tonumber({text:?})"))
+                    .unwrap(),
+                n,
+                "tonumber({text:?})"
+            );
+        }
+        // A numeral too long for the conversion's stack buffer takes the same path.
+        let long = format!("1{}d-70", "0".repeat(70));
+        assert_eq!(
+            s.eval::<f64>(&format!("return tonumber({long:?})"))
+                .unwrap(),
+            1.0
+        );
+        // A base still reads hexadecimal digits: that is `strtoul`, not `luaO_str2d`.
+        assert_eq!(s.eval::<f64>(r#"return tonumber("10", 16)"#).unwrap(), 16.0);
+        assert!(!s
+            .eval::<bool>(r#"return (pcall(function() return "0x2" + 1 end))"#)
+            .unwrap());
+        assert_eq!(s.eval::<f64>(r#"return "2" + 1"#).unwrap(), 3.0);
+        // A binding's numeric argument: `GetCraftInfo`'s index raises on a non-number.
+        assert!(!s
+            .eval::<bool>(r#"return (pcall(GetCraftInfo, "0x2"))"#)
+            .unwrap());
+        assert!(s
+            .eval::<bool>(r#"return (pcall(GetCraftInfo, "2"))"#)
+            .unwrap());
+        // The numeral reader (`0x6ffd20`) stops at the `x`: `0x10` is 0 and then the name `x10`.
+        assert!(s.run("return 0x10").is_err());
+    }
+
+    /// The client's numeral reader (`0x6ffd20`, 5.0's `read_numeral`) takes digits, one `.`,
+    /// digits, then `e`/`E`, a sign and digits, and nothing more: a letter or `_` after a number
+    /// starts the next token, and `1..2` is its own error (`0x8721dc`).
+    #[test]
+    fn a_numeral_ends_where_the_clients_reader_stops() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<(i64, i64)>("a=1b=2 return a, b").unwrap(),
+            (1, 2),
+            "two statements, as the client reads them"
+        );
+        assert!(
+            s.run("a = 0x10()").is_err(),
+            "compiles as `a = 0` then a call to `x10`, which is nil"
+        );
+        assert!(s
+            .eval::<bool>("return loadstring('a = 0x10()') ~= nil")
+            .unwrap());
+        assert_eq!(s.eval::<f64>("return 1.5e+3").unwrap(), 1500.0);
+        assert_eq!(s.eval::<f64>("return .5E-1").unwrap(), 0.05);
+        assert_eq!(s.eval::<f64>("return 2.").unwrap(), 2.0);
+        let err = s.run("return 1..2").unwrap_err().to_string();
+        assert!(
+            err.contains("ambiguous syntax (decimal point x string concatenation)"),
+            "{err}"
+        );
+        // One `.` per numeral: `1.2.3` is `1.2` then `.3`.
+        let err = s.run("return 1.2.3").unwrap_err().to_string();
+        assert!(err.contains("near `.3'"), "{err}");
+        for malformed in ["return 3e", "return .5.3"] {
+            let err = s.run(malformed).unwrap_err().to_string();
+            assert!(err.contains("malformed number"), "{malformed}: {err}");
+        }
+    }
+
     #[test]
     fn sort_foreach_and_foreachi_are_bare_globals_like_the_reference() {
         let s = UiScript::new().unwrap();
@@ -579,12 +675,9 @@ mod tests {
         }
         // Two's complement, signed out: `bnot(0)` is -1, not 4294967295.
         assert_eq!(s.eval::<i64>("return bit.bnot(0)").unwrap(), -1);
-        assert_eq!(
-            s.eval::<i64>("return bit.band(0x1234, 0xFF)").unwrap(),
-            0x34
-        );
-        assert_eq!(s.eval::<i64>("return bit.bor(0xF0, 0x0F)").unwrap(), 0xFF);
-        assert_eq!(s.eval::<i64>("return bit.bxor(0xFF, 0x0F)").unwrap(), 0xF0);
+        assert_eq!(s.eval::<i64>("return bit.band(4660, 255)").unwrap(), 0x34);
+        assert_eq!(s.eval::<i64>("return bit.bor(240, 15)").unwrap(), 0xFF);
+        assert_eq!(s.eval::<i64>("return bit.bxor(255, 15)").unwrap(), 0xF0);
         assert_eq!(s.eval::<i64>("return bit.lshift(1, 4)").unwrap(), 16);
         // `rshift` is logical, `arshift` propagates the sign.
         assert_eq!(s.eval::<i64>("return bit.rshift(-1, 28)").unwrap(), 15);

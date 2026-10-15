@@ -10,7 +10,7 @@ use bevy::ui::VisualBox;
 use bevy::ui_render::ui_material::MaterialNode;
 
 use super::art::{tc_rect, ArrowArt, GlueArt, BTN_BG, BUTTON_TC, FALLBACK_ALPHA, GOLD, NAME_EDGE};
-use super::backdrop::{backdrop_border, tiled_bg_node};
+use super::backdrop::{backdrop_border, tiled_bg};
 
 // ── The shared widget vocabulary ─────────────────────────────────────────────────────────────────
 
@@ -174,9 +174,14 @@ pub(crate) fn outlined_text_centered<W: Bundle, T: Bundle>(
 /// Every `CSimpleFontString` decodes it unconditionally (`0x5c2810`), so every glue string does.
 ///
 /// An escape overrides `base` until `|r`, its alpha discarded (`0x5c2ab2`); a link keeps only its
-/// text; `||` draws one `|`. A line break (`\n`, `|n`) breaks the line in every font string,
-/// wrapped or not: only a single-line edit box skips it (`SetMultiLine`, `0x77a5e2`), so
-/// `VERSION_TEMPLATE` draws two lines. An empty string yields one empty span.
+/// text; `||` draws one `|`. A line break breaks the line whatever the string's wrap flag: `\n`
+/// and `\r` are classed before any flag is read (`0x5c286e`, `0x5c2896`), and `|n` is refused
+/// only under decoder flag `0x200` (`0x5c29e7`), which a font string's style word (`+0x120`,
+/// passed at `0x77256a`) gives from its bit `0x4000` (`0x44d4da`) and which none of its writers
+/// sets (the ctor's `0x212` at `0x770dd3`, `0x7712ed`, `0x771351`, `0x77162d`, `0x7722ee`,
+/// `0x7723a0`, `0x77350e`, and a Font object's word copied in at `0x770876`, itself `0x212` from
+/// `0x783a87`, whose justify setters write bits `0x38` and `0x7` (`0x783f8a`, `0x783fd2`)). An
+/// empty string yields one empty span.
 pub(crate) fn markup_spans(text: &str, base: Color) -> Vec<(String, Color)> {
     let mut spans: Vec<(String, Color)> = Vec::new();
     let mut cur = String::new();
@@ -668,16 +673,12 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
     }
     boxed.with_children(|b| {
         if framed {
-            b.spawn((
-                tiled_bg_node(art.tooltip_bg.clone().unwrap(), NAME_EDGE, s, fill),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(10.0),
-                    right: px(5.0),
-                    top: px(4.0),
-                    bottom: px(9.0),
-                    ..default()
-                },
+            b.spawn(tiled_bg(
+                art.tooltip_bg.clone().unwrap(),
+                NAME_EDGE,
+                (10.0, 5.0, 4.0, 9.0),
+                s,
+                fill,
             ));
             backdrop_border(b, art.name_border.as_ref().unwrap(), NAME_EDGE, border);
         }
@@ -870,7 +871,7 @@ mod tests {
         assert_eq!(
             markup_spans("|cff0055FFDeadly Boss Mod API|r", base),
             vec![("Deadly Boss Mod API".to_string(), blue)],
-            "the tooltip's title wraps, and wrapping does not exempt it from the decode"
+            "a reset after the last character leaves no empty span"
         );
         assert_eq!(
             markup_spans("A |cff00ff00B|r C", base),
@@ -910,13 +911,18 @@ mod tests {
     /// Every client's `VERSION_TEMPLATE` and Turtle WoW's `BLIZZ_DISCLAIMER` break where
     /// authored, though neither font string wraps.
     #[test]
-    fn a_line_break_breaks_whether_or_not_the_string_wraps() {
-        for text in ["one|ntwo", "one\ntwo"] {
-            assert_eq!(
-                markup_spans(text, GOLD),
-                vec![("one\ntwo".to_string(), GOLD)],
-                "{text:?}"
-            );
-        }
+    fn a_line_break_breaks_whatever_the_wrap_flag() {
+        // `VERSION_TEMPLATE` (`"%s %s (%s) (%s)\n%s"`) on the one-line version label: a hard
+        // newline is classed before any flag (`0x5c2896`).
+        assert_eq!(
+            markup_spans("1.12.1 5875\nSep 19 2006", GOLD),
+            vec![("1.12.1 5875\nSep 19 2006".to_string(), GOLD)],
+            "a hard newline breaks"
+        );
+        assert_eq!(
+            markup_spans("one|ntwo", GOLD),
+            vec![("one\ntwo".to_string(), GOLD)],
+            "so does `|n`: no font string's style word carries the bit that refuses it"
+        );
     }
 }

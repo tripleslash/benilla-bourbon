@@ -147,9 +147,10 @@ pub enum SpriteDims {
     Missing,
 }
 
-/// Decode the first of [`sprite_candidates`] that reads and decodes, from the chain and then the
-/// AddOns folder, as the reference's two loaders fail silently. A miss warns, once per key since
-/// every cache stores its misses: a missing sprite draws nothing, and nothing else says why.
+/// Decode the first of [`sprite_candidates`] that reads and decodes, each read by
+/// [`read_loose_or_chain`]'s rule, as the reference's two loaders fail silently. A miss warns, once
+/// per key since every cache stores its misses: a missing sprite draws nothing, and nothing else
+/// says why.
 fn decode_sprite(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
@@ -166,6 +167,16 @@ fn decode_sprite(
     // "no such file" and "that file is broken", which the miss warning below reports apart.
     let mut undecodable: Vec<&str> = Vec::new();
     for candidate in &candidates {
+        // A loose file answers the candidate whether or not it decodes ([`read_loose_or_chain`]).
+        if let Some(file) = loose_root.and_then(|root| loose_addon_file(root, candidate)) {
+            if let Ok(bytes) = std::fs::read(&file) {
+                match decode_sprite_bytes(&bytes) {
+                    Ok(decoded) => return SpriteLoad::Ready(decoded),
+                    Err(_) => undecodable.push(candidate),
+                }
+            }
+            continue;
+        }
         match mode.read(&chain, candidate) {
             TryRead::Ready(bytes) => {
                 if let Ok(decoded) = decode_sprite_bytes(&bytes) {
@@ -175,18 +186,6 @@ fn decode_sprite(
             }
             TryRead::Pending => waiting = true,
             TryRead::Missing => {}
-        }
-        if let Some(file) = loose_root.and_then(|root| loose_addon_file(root, candidate)) {
-            match std::fs::read(&file)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| decode_sprite_bytes(&bytes))
-            {
-                Ok(decoded) => return SpriteLoad::Ready(decoded),
-                // Only a read that SUCCEEDED and then failed to decode is the interesting fault;
-                // a missing loose file is the ordinary case for every non-addon path.
-                Err(_) if file.is_file() => undecodable.push(candidate),
-                Err(_) => {}
-            }
         }
     }
     if waiting {
@@ -275,19 +274,20 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// Read a file from the patch chain, then, for an `Interface\AddOns\` path, the loose addon folder:
-/// how art, fonts and audio an addon ships all load. The reference asks the install tree first
-/// (`0x647e60`'s attempt #4 is the MPQ); the chain holds no `AddOns\` path, so the order is moot.
-pub fn read_chain_or_loose(
+/// Read a file by path: an `Interface\AddOns\` path from the loose addon folder when the file is
+/// there, any other from the patch chain. The reference's resolver (`0x647e60`) answers from the
+/// install tree's index (`0x647f89`) before the archive chain (`0x648116`) for an open that sets
+/// the index flag, as the UI texture (`0x770281`) and sound (`0x7a8860`) opens do; a file the
+/// index answers and the open then fails is a miss, with no turn to the chain (`0x6478d5`).
+pub fn read_loose_or_chain(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,
     path: &str,
 ) -> Option<Vec<u8>> {
-    if let Ok(bytes) = chain.lock_recover().read(path) {
-        return Some(bytes);
+    match loose_root.and_then(|root| loose_addon_file(root, &normalize_path(path))) {
+        Some(file) => std::fs::read(file).ok(),
+        None => chain.lock_recover().read(path).ok(),
     }
-    let file = loose_addon_file(loose_root?, &normalize_path(path))?;
-    std::fs::read(file).ok()
 }
 
 /// Map a normalized `interface\addons\…` path onto a file under the addon root, matching each
@@ -398,32 +398,39 @@ impl WorldAssets {
         }
     }
 
-    /// [`read_chain_or_loose`] over this store, for an asset class with no decoder here (audio:
-    /// `PlayMusic`, `PlaySoundFile`).
-    pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
-        read_chain_or_loose(&self.chain, self.loose_root.as_deref(), path)
-    }
-
-    /// The loose half alone of [`read_chain_or_loose`], for a caller that has already asked the
-    /// chain and been told no: the sound kit, whose web chain read is the non-blocking
-    /// [`crate::chain::TryRead`] and must not fall back to a blocking one. The page has no loose
-    /// root, so this is `None` there.
-    pub fn read_loose_only(&self, path: &str) -> Option<Vec<u8>> {
-        let file = loose_addon_file(self.loose_root.as_deref()?, &normalize_path(path))?;
-        std::fs::read(file).ok()
+    /// [`read_loose_or_chain`]'s rule with the chain half non-blocking ([`TryRead`]), for an asset
+    /// class with no decoder here (audio: `PlayMusic`, `PlaySoundFile`), which must not fetch a
+    /// pack synchronously on the page. A loose file that will not read is `Missing`, with no turn
+    /// to the chain; the page has no loose root.
+    pub fn try_read_loose_or_chain(&self, path: &str) -> TryRead {
+        let loose = self
+            .loose_root
+            .as_deref()
+            .and_then(|root| loose_addon_file(root, &normalize_path(path)));
+        match loose {
+            Some(file) => std::fs::read(file).map_or(TryRead::Missing, TryRead::Ready),
+            None => self.chain.lock_recover().try_read(path),
+        }
     }
 
     /// Install or clear the AddOns folder. Cached misses are evicted so a path asked before it
-    /// existed gets a second look; a cached hit came from the chain and stays right.
+    /// existed gets a second look, and so is every `Interface\AddOns\` entry, since a loose file
+    /// shadows the chain's ([`read_loose_or_chain`]); any other hit came from the chain and stays.
     pub fn set_loose_addon_root(&mut self, root: Option<PathBuf>) {
         if self.loose_root == root {
             return;
         }
         self.loose_root = root;
-        self.sprites.retain(|_, v| v.is_some());
-        self.tiled_sprites.retain(|_, v| v.is_some());
-        self.portraits.retain(|_, v| v.is_some());
-        self.masks.retain(|_, v| v.is_some());
+        // `emblem_mask_texture` prefixes its `sprites` key, so the test looks past a tag.
+        let stays =
+            |key: &str, hit: bool| hit && !normalize_path(key).contains("interface\\addons\\");
+        self.sprites.retain(|k, v| stays(k, v.is_some()));
+        self.tiled_sprites.retain(|k, v| stays(&k.0, v.is_some()));
+        self.resampled_sprites
+            .retain(|k, v| stays(&k.0, v.is_some()));
+        self.resample_sources.retain(|k, v| stays(k, v.is_some()));
+        self.portraits.retain(|k, v| stays(k, v.is_some()));
+        self.masks.retain(|k, v| stays(k, v.is_some()));
     }
 
     /// Decode and upload a BLP once per path and wrap; later requests share the handle.
@@ -568,16 +575,32 @@ impl WorldAssets {
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
+        self.wrapped_sprite(path, wrap, images, ReadMode::Defer)
+    }
+
+    /// [`Self::sprite_texture_wrapped`] for a one-shot warmer ([`Self::sprite_texture_blocking`]):
+    /// the glue screens' tiled backdrops.
+    pub fn sprite_texture_wrapped_blocking(
+        &mut self,
+        path: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.wrapped_sprite(path, wrap, images, ReadMode::Block)
+    }
+
+    fn wrapped_sprite(
+        &mut self,
+        path: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+        mode: ReadMode,
+    ) -> Option<Handle<Image>> {
         let key = (sprite_key(path), wrap.0, wrap.1);
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = match decode_sprite(
-            &self.chain,
-            self.loose_root.as_deref(),
-            path,
-            ReadMode::Defer,
-        ) {
+        let loaded = match decode_sprite(&self.chain, self.loose_root.as_deref(), path, mode) {
             SpriteLoad::Ready((w, h, rgba)) => {
                 Some(images.add(sprite_image_wrapped(w, h, rgba, wrap)))
             }
@@ -991,10 +1014,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Against the real chain: a client file must still come from the archive, and the loose
-    /// folder is a fallback, not a shadow over it.
+    /// Against the real chain: a client file comes from the archive, an addon's own file from
+    /// disk, and a loose copy of a path the archive also holds shadows it, as `0x647e60` asks the
+    /// install tree (`0x647f89`) before the chain (`0x648116`), even when it will not read.
     #[test]
-    fn read_chain_or_loose_asks_the_chain_then_an_addons_own_file_on_disk() {
+    fn read_loose_or_chain_asks_an_addons_own_file_on_disk_then_the_chain() {
         let data = benilla_formats::wow_data_or_skip!();
         let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
         let root =
@@ -1004,7 +1028,7 @@ mod tests {
         std::fs::write(addons.join("Jukebox").join("Track.mp3"), b"ID3!").unwrap();
 
         // The archive leg: a client track the chain does carry.
-        let theme = read_chain_or_loose(
+        let theme = read_loose_or_chain(
             &chain,
             Some(&addons),
             "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3",
@@ -1014,7 +1038,7 @@ mod tests {
 
         // The loose leg: an addon's own track, named by the virtual path, spelt in its own case.
         assert_eq!(
-            read_chain_or_loose(
+            read_loose_or_chain(
                 &chain,
                 Some(&addons),
                 "Interface\\AddOns\\Jukebox\\Track.mp3"
@@ -1022,11 +1046,53 @@ mod tests {
             .as_deref(),
             Some(&b"ID3!"[..])
         );
+
+        // The shadow: a stock addon's file the archive carries, with a loose copy on disk.
+        let stock = "Interface\\AddOns\\Blizzard_AuctionUI\\Blizzard_AuctionUI.lua";
+        let archived = chain
+            .lock_recover()
+            .read(stock)
+            .expect("interface.MPQ carries it");
+        assert_eq!(
+            read_loose_or_chain(&chain, None, stock).as_deref(),
+            Some(&archived[..]),
+            "with no folder the archive answers"
+        );
+        std::fs::create_dir_all(addons.join("Blizzard_AuctionUI")).unwrap();
+        std::fs::write(
+            addons
+                .join("Blizzard_AuctionUI")
+                .join("Blizzard_AuctionUI.lua"),
+            b"-- loose",
+        )
+        .unwrap();
+        assert_eq!(
+            read_loose_or_chain(&chain, Some(&addons), stock).as_deref(),
+            Some(&b"-- loose"[..]),
+            "the loose copy shadows the archive's"
+        );
+        // A loose file that will not read is a miss: the index answered, so the archive is not
+        // asked (`0x6478d5`).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let loose = addons
+                .join("Blizzard_AuctionUI")
+                .join("Blizzard_AuctionUI.lua");
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = std::fs::read(&loose).is_err();
+            let got = read_loose_or_chain(&chain, Some(&addons), stock);
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+            if unreadable {
+                assert_eq!(got, None, "no fallback to the archive copy");
+            }
+        }
+
         // In neither store: a plain miss, which every caller renders as silence.
-        assert!(read_chain_or_loose(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
+        assert!(read_loose_or_chain(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
         // No folder configured (a capture run, where `local_state` is hermetic): chain only.
         assert!(
-            read_chain_or_loose(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
+            read_loose_or_chain(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
         );
         std::fs::remove_dir_all(&root).ok();
     }

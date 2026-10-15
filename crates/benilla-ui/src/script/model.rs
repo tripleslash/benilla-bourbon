@@ -231,9 +231,8 @@ pub(crate) struct Model {
     pub(crate) layout_last_scope: (usize, usize),
     /// Fixpoint rounds run across all solves.
     pub(crate) layout_rounds: u64,
-    /// Per text frame, its pool of hyperlink buttons (`[+0x314]`), the shown ones first
-    /// ([`super::hyperlink`]).
-    pub(crate) link_buttons: HashMap<FrameHandle, Vec<FrameHandle>>,
+    /// Per text frame, its hyperlink buttons, live and free ([`super::hyperlink::LinkPool`]).
+    pub(crate) link_buttons: HashMap<FrameHandle, super::hyperlink::LinkPool>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
     /// The textures the regions' slots hold, with their creation stamps ([`super::texel`]).
@@ -531,6 +530,12 @@ pub(crate) struct Model {
     pub(crate) cvar_changes: Vec<(String, String)>,
     /// `(name, default)` per addon `RegisterCVar` that created a slot.
     pub(crate) cvar_registrations: Vec<(String, String)>,
+    /// How many CVars Lua's `RegisterCVar` has created this process (`[0xb4e3c8]`), which nothing
+    /// resets; seeded by the host into each VM and read back from it.
+    pub(crate) cvar_lua_created: u32,
+    /// The lines a CVar's change callback printed ([`super::CvarVerdict::line`]), for the host's
+    /// console.
+    pub(crate) cvar_console: Vec<String>,
     pub(crate) cvars_warned: HashSet<String>,
     /// The lowercased names a Lua `SetCVar` refuses, the reference's flag bit2 (`rec+0x1c & 4`,
     /// `CVar::SetReadOnly 0x63e030`). Kept beside the rows, so a host re-seed never clears it.
@@ -844,7 +849,9 @@ pub(crate) struct Model {
     pub(crate) loot_picks: Vec<u32>,
     /// `LootSlot(slot)` rows, 1-based, apart from clicks for the reference's pending-slot gate.
     pub(crate) loot_confirms: Vec<u32>,
-    pub(crate) loot_close: bool,
+    /// The first `CloseLoot` since the last drain, with its `failed` flag; a later one in the
+    /// same frame finds the loot already released.
+    pub(crate) loot_close: Option<bool>,
     /// `GiveMasterLoot(slot, candidateIndex)`, both 1-based display positions the app translates.
     pub(crate) loot_master_gives: Vec<(u32, u32)>,
 
@@ -1399,6 +1406,8 @@ impl Model {
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
             cvar_registrations: Vec::new(),
+            cvar_lua_created: 0,
+            cvar_console: Vec::new(),
             cvars_warned: HashSet::new(),
             cvars_read_only: HashSet::new(),
             multisample_formats: Vec::new(),
@@ -1542,7 +1551,7 @@ impl Model {
             bind_on_use_confirms: 0,
             loot_picks: Vec::new(),
             loot_confirms: Vec::new(),
-            loot_close: false,
+            loot_close: None,
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
             loot_roll_votes: Vec::new(),
