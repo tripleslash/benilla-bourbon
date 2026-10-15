@@ -477,6 +477,7 @@ fn glue_ghost_arm(
                 bone: point.bone,
                 offset: point.offset,
                 emitters: dm.emitters.clone(),
+                rig: None,
             });
         }
     }
@@ -687,6 +688,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                     bone: point.bone,
                     offset: point.offset,
                     emitters: item.emitters.clone(),
+                    rig: item.emitter_rig(),
                 });
             }
             let Some(paths) = ctx.glows.as_deref().and_then(|g| g.effects(w.visual)) else {
@@ -742,6 +744,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                         bone: point.bone,
                         offset,
                         emitters: glow.emitters.clone(),
+                        rig: None,
                     });
                 }
             }

@@ -53,6 +53,7 @@ mod taxi;
 mod trade;
 mod trainer;
 mod tutorial;
+mod unserved;
 mod update_object;
 mod vendor;
 mod world_state;
@@ -149,7 +150,8 @@ pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
     split_item, swap_inv_item, swap_item, use_item, wrap_item, ItemDamage, ItemInfo,
     ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED,
-    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
+    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_PLAYERCAST, ITEM_FLAG_WRAPPER,
+    SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
     autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,
@@ -216,12 +218,12 @@ pub use roster::{
     CHAR_CREATE_SERVER_LIMIT, CHAR_CREATE_SUCCESS, CHAR_DELETE_SUCCESS, CLASS_WARRIOR, GENDER_MALE,
     RACE_HUMAN,
 };
-pub use skills::unlearn_skill;
+pub use skills::{skill_buy_step, unlearn_skill};
 pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
-    read_friend_list, read_friend_status, read_ignore_list, read_who, set_looking_for_group, who,
-    FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults,
-    WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
+    looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_who,
+    set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry,
+    WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
@@ -248,6 +250,7 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use tutorial::{tutorial_flag, TutorialFlags};
+pub use unserved::{buy_lottery_ticket, gm_survey_submit, lottery_query, SurveyAnswer};
 pub use update_object::field;
 pub use update_object::{
     power_display_scale, quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState,

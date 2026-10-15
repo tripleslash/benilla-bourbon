@@ -175,13 +175,13 @@ function Resolve-Wow {
     return $script:NativeOut
 }
 
-# A delta only under docs/ or in top-level *.md files keeps the stamped verdict.
+# A delta only under docs/, in top-level *.md files or in the issue and PR templates keeps the stamped verdict.
 function Test-DocsOnlyDelta([string]$a, [string]$b) {
     if ((Invoke-Native 'git' @('cat-file', '-e', "$a^{tree}") -Quiet) -ne 0) { return $false }
     if ((Invoke-Native 'git' @('cat-file', '-e', "$b^{tree}") -Quiet) -ne 0) { return $false }
     [void](Invoke-Native 'git' @('diff-tree', '-r', '--name-only', $a, $b) -Capture)
     foreach ($line in $script:NativeOut.Split([char]10)) {
-        if ($line -ne '' -and $line -cnotmatch '^(docs/|[^/]*\.md$)') { return $false }
+        if ($line -ne '' -and $line -cnotmatch '^(docs/|[^/]*\.md$|\.github/(ISSUE_TEMPLATE/|pull_request_template\.md$))') { return $false }
     }
     return $true
 }

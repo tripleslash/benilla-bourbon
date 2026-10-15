@@ -51,6 +51,7 @@ mod taxi;
 mod trade;
 mod trainer;
 mod tutorial;
+mod unserved;
 mod vendor;
 
 /// Write half of a split [`WorldSession`](super::WorldSession): the connection's write half and the

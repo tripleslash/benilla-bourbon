@@ -422,11 +422,14 @@ fn spawn_slot(
             slot
         }),
     };
-    // The posed prop's pose and clock, armed as the reference arms every M2 at load (animation 0
-    // through its `playableAnimationLookup`). Its palette rows stay the rider's, composed in the
-    // wearer's frame, not from its own `GlobalTransform`.
-    let mut prop_pose = (posed && rider.is_some()).then(|| {
-        let anims = dm.animations.as_ref().expect("posed ⇒ animations");
+    // An emitter's frame is its bone's posed matrix, and a resting item's bones are posed by its
+    // idle too. A pose without a skin re-seats anchors only, so the item's mesh is unchanged.
+    let poses_emitters = dm.poses_emitters();
+    // The prop's pose and clock, armed as the reference arms every M2 at load (animation 0 through
+    // its `playableAnimationLookup`). A posed prop's palette rows stay the rider's, composed in
+    // the wearer's frame, not from its own `GlobalTransform`.
+    let mut prop_pose = ((posed && rider.is_some()) || poses_emitters).then(|| {
+        let anims = dm.animations.as_ref().expect("a posed prop has animations");
         let mut player = AnimationPlayer::default();
         if let Some(idle) = anims.idle_clip() {
             let active = player.play(idle.node);
@@ -439,7 +442,7 @@ fn spawn_slot(
             AnimationGraphHandle(anims.graph.clone()),
             anims.clone(),
         ));
-        if flexes {
+        if flexes && rider.is_some() {
             commands
                 .entity(root)
                 .insert(crate::ranged_flex::RangedProp { owner: entity });
@@ -600,13 +603,14 @@ fn spawn_slot(
                 offset,
                 attach: Some(hs.attach),
                 emitters: dm.emitters.clone(),
+                rig: dm.emitter_rig(),
             });
     }
     for em in &dm.emitters {
         // A billboard bone in the chain puts the reference's emitter origin at
         // `pivot + camBasis·(position − pivot)`, so the emitter follows a mesh-less billboard frame
-        // at rest pose. A flexing prop's emitter rides its bone's anchor, rebased by `bone_pivot`:
-        // the firearm muzzle bone turns 90° in BowRelease.
+        // at rest pose. Any other emitter of a posed prop rides its bone's anchor, rebased by
+        // `bone_pivot`: the firearm muzzle bone turns 90° in BowRelease.
         let posed = prop_pose
             .as_mut()
             .filter(|_| em.billboard.is_none())
@@ -679,7 +683,7 @@ fn spawn_slot(
     // Last, so every `anchor_for` above is already registered in it.
     if let Some(pose) = prop_pose {
         debug!(
-            "ranged flex: unit {entity} display {} → prop clock ({} bones, {} anchors)",
+            "posed prop: unit {entity} display {} → prop clock ({} bones, {} anchors)",
             hs.display,
             pose.locals.len(),
             pose.anchors.len()
@@ -1151,6 +1155,27 @@ mod tests {
             hosts,
             vec![None],
             "…and its emitter stays on the pinned clock"
+        );
+        let item = app
+            .world_mut()
+            .query_filtered::<Entity, (
+                With<benilla_world::rig_anim::RigPose>,
+                With<AnimationPlayer>,
+            )>()
+            .iter(app.world())
+            .next()
+            .expect("the melee item is posed by its idle");
+        let anchors: Vec<u16> = app
+            .world_mut()
+            .query::<&benilla_world::rig_anim::RigAnchor>()
+            .iter(app.world())
+            .filter(|a| a.rig == item)
+            .map(|a| a.bone)
+            .collect();
+        assert_eq!(
+            anchors,
+            vec![1],
+            "…but its emitter still rides its bone's idle pose, which sets an XY quad's plane"
         );
     }
 

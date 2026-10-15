@@ -72,6 +72,7 @@ mod structure_queries;
 mod talent;
 mod taxi;
 mod texcoord_font;
+mod text_wrap;
 mod texture_art;
 mod tooltip;
 mod tooltip_item;

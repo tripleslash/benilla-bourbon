@@ -197,9 +197,12 @@ pub struct UnitState {
     /// (`0x516c50`, delegating to `CanAttack` `0x606980`) answers for both argument orders. Fed for
     /// `target`, `targettarget`, `npc` and the units a chain ends on; other tokens read false.
     pub can_attack: bool,
-    /// Whether the player can assist the unit, `UnitCanAssist("player", unit)` (`0x516bb0`,
-    /// delegating to `CanAssist` `0x6066f0`), fed and answered as [`Self::can_attack`] is.
+    /// Whether the player can assist the unit, `UnitCanAssist("player", unit)`: `CanAssist`
+    /// (`0x6066f0`, `this` the player, the argument the unit). Fed where [`Self::can_attack`] is.
     pub can_assist: bool,
+    /// The same with the unit as `this` and the player the argument (`0x6066f0` reads the reaction
+    /// of `this` toward the argument): `UnitCanAssist(unit, "player")`.
+    pub can_assist_player: bool,
     /// `UnitIsCorpse` (`0x5161c0`): the token names a `TYPEID_CORPSE` object, which a dead unit
     /// is not. No feed sets it.
     pub corpse_object: bool,

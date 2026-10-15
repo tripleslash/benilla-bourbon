@@ -159,8 +159,22 @@ fn drive_mouseover_tooltip(
             let entity = index.as_ref()?.0.get(&owner).copied()?;
             stores.get(entity).ok().cloned()
         };
-        s.can_assist =
-            crate::target::can_assist(Some(store), factions, &rx.reputations, self_store, owner);
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            factions,
+            &rx.reputations,
+            self_store,
+            owner,
+            crate::target::Assist::PlayerToUnit,
+        );
+        s.can_assist_player = crate::target::can_assist(
+            Some(store),
+            factions,
+            &rx.reputations,
+            self_store,
+            owner,
+            crate::target::Assist::UnitToPlayer,
+        );
         enrich_unit(
             &mut s,
             guid,

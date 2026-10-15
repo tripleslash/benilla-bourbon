@@ -23,7 +23,7 @@ import time
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T0 = time.monotonic()
 FAILED_LINE = re.compile(r"panicked at|^---- .* ----$|^test .* FAILED$|^error(\[E[0-9]+\])?:")
-DOCS_ONLY = re.compile(r"^(docs/|[^/]*\.md$)")
+DOCS_ONLY = re.compile(r"^(docs/|[^/]*\.md$|\.github/(ISSUE_TEMPLATE/|pull_request_template\.md$))")
 
 
 def seconds():
@@ -141,7 +141,7 @@ def main():
         return capture(["cargo", "run", "-q", "-p", "benilla-formats", "--example", "where"])[1]
 
     def docs_only_delta(a, b):
-        """A delta only under docs/ or in top-level *.md files keeps the stamped verdict."""
+        """A delta only under docs/, in top-level *.md files or in the issue and PR templates keeps the stamped verdict."""
         if quiet(["git", "cat-file", "-e", a + "^{tree}"]) or quiet(["git", "cat-file", "-e", b + "^{tree}"]):
             return False
         _rc, out = capture(["git", "diff-tree", "-r", "--name-only", a, b])

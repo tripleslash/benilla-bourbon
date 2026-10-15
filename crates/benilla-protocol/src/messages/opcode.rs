@@ -619,6 +619,15 @@ pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
 pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
 pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
 
+/// The GM survey's submission, built and sent by `0x496630` for `GMSurveySubmit` (`0x48cf80`).
+pub const CMSG_GMSURVEY_SUBMIT: u16 = 0x032A; // 810
+/// The lottery window's two sends: the last numbers' query (`0x4c4220`) and the ticket purchase
+/// (`0x4c4290`, `0x4c4400`). No 1.12 server handles either.
+/// `BuySkillTier`'s send (`0x4d3fbc`), the skill-point purchase of a step.
+pub const CMSG_SKILL_BUY_STEP: u16 = 0x021F; // 543
+pub const CMSG_LOTTERY_QUERY_OBSOLETE: u16 = 0x0334; // 820
+pub const CMSG_BUY_LOTTERY_TICKET_OBSOLETE: u16 = 0x0336; // 822
+
 /// A ticket-state push: `u32` 1 updated, 2 closed, 3 survey offered; vmangos never sends it. The
 /// reference re-asks for the ticket on 1 (`0x5e7932`); 2 and 3 are recorded, not acted on, and
 /// the survey window 3 offers is not built.
@@ -825,6 +834,8 @@ pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
 /// Our LFG slots and comment, sent only from `0x4e8948`; nothing answers it. The name is the
 /// emulators'.
 pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
+/// The LFG inquiry `LFGQuery` sends (`0x4e97f9`); the server's result list comes back under it.
+pub const MSG_LOOKING_FOR_GROUP: u16 = 0x01FF; // 511
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108

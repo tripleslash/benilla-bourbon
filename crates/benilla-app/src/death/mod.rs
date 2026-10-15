@@ -780,10 +780,10 @@ mod tests {
     fn the_soulstone_cancels_the_cast_in_flight_before_its_use() {
         let (mut app, rx) = soulstone_app();
         let world = app.world_mut();
-        world.resource_mut::<crate::spell::PendingCast>().arm(
+        world.resource_mut::<crate::spell::PendingCast>().push(
             FIREBALL,
+            None,
             std::time::Instant::now(),
-            true,
         );
         arm_repeat(&mut app);
         let _ = rx.try_iter().count();
@@ -915,7 +915,7 @@ mod tests {
             .set_player_control(false);
         app.world_mut()
             .resource_mut::<crate::spell::PendingCast>()
-            .arm(FIREBALL, std::time::Instant::now(), true);
+            .push(FIREBALL, None, std::time::Instant::now());
         let _ = rx.try_iter().count();
         press_soulstone(&mut app);
 
@@ -942,7 +942,7 @@ mod tests {
         app.world_mut().non_send_mut::<UiScript>().lock_item(STONE);
         app.world_mut()
             .resource_mut::<crate::spell::PendingCast>()
-            .arm(FIREBALL, std::time::Instant::now(), true);
+            .push(FIREBALL, None, std::time::Instant::now());
         let _ = rx.try_iter().count();
         press_soulstone(&mut app);
         let sent: Vec<_> = rx.try_iter().collect();

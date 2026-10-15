@@ -5,13 +5,15 @@
 
 use std::collections::BTreeSet;
 
-use benilla_formats::{SkillLineCatalog, SpellCatalog, TokenContext};
+use benilla_formats::{
+    LearnEffect, SkillLineCatalog, SpellCatalog, TokenContext, SPELL_EFFECT_SKILL_STEP,
+};
 use benilla_protocol::messages::TrainerSpell;
 use bevy::prelude::*;
 
 use benilla_ui::script::{
-    ScriptValue, TrainerAbilityReq, TrainerService, TrainerServiceCategory, TrainerSkillReq,
-    TrainerState, TrainerTooltip, UiScript,
+    TrainerAbilityReq, TrainerService, TrainerServiceCategory, TrainerSkillReq, TrainerState,
+    TrainerTooltip, UiScript,
 };
 
 use crate::entities::ItemDisplays;
@@ -23,10 +25,12 @@ use benilla_protocol::field::{
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use bevy::ecs::system::SystemParam;
 
-use crate::net::{ClientCommand, FieldChanged, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{
+    ClientCommand, FieldChanged, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer,
+};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
-use crate::ui_session::{close_npc_session_out_of_range, npc_switched, sweep_close, NpcSession};
+use crate::ui_session::{CoreCloses, LatchApp, LatchedWindow, NpcWindow};
 use crate::ui_spellbook::SkillLines;
 
 /// `SMSG_TRAINER_LIST`'s `trainer_type` for a tradeskill trainer (0 class, 1 mount, 2 tradeskill,
@@ -122,12 +126,12 @@ impl Plugin for UiTrainerPlugin {
         app.init_resource::<TrainerOpen>()
             .init_resource::<TrainerErrors>()
             .init_resource::<TrainerTooltipSubjects>()
-            .add_sweep_leg(SweepLeg::Trainer, close_trainer_on_leave_world)
+            .add_latched_window::<TrainerOpen>()
+            // `0x490ad5` → `0x4d7400` → `0x4d7440(0)`, the core.
+            .add_sweep_leg(SweepLeg::Trainer, close_core)
             .add_systems(
                 Update,
                 (
-                    // Range-close before the feed so the clear fires TRAINER_CLOSED the same frame.
-                    close_npc_session_out_of_range::<TrainerOpen>.before(feed_trainer),
                     // The unit feeds also write the pet bar the re-evaluator reads; either order
                     // reads the same pet spellbook, but the schedule check wants one declared.
                     feed_trainer
@@ -237,7 +241,43 @@ fn resolve_service(
         group_key,
         group_name,
         tooltip: service_tooltip(wire.spell, spells),
+        skill_step: display.is_some_and(|d| d.effects.contains(&SPELL_EFFECT_SKILL_STEP)),
+        step_increase: step_increase(wire.spell, spells, skill_lines, get),
+        line_name: skill_lines
+            .and_then(|c| c.line(group_key))
+            .map(|l| l.name.clone()),
     }
+}
+
+/// `GetTrainerServiceStepIncrease`'s text (`0x4da030`) for a wire spell's first skill-step effect:
+/// `INCREASE_POTENTIAL` over the effect's skill line name and five times its step (the previous
+/// step, record `+0x20`, is always 0). Nothing when there is no such effect, the step is 0 or the
+/// line has no row; the binding adds the used-row refusal.
+fn step_increase(
+    wire_spell: u32,
+    spells: &SpellCatalog,
+    skill_lines: Option<&SkillLineCatalog>,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let (skill, step) = spells
+        .learn_effects(wire_spell)
+        .iter()
+        .find_map(|e| match *e {
+            LearnEffect::SkillStep { skill, step } => Some((skill, step)),
+            _ => None,
+        })?;
+    if step == 0 {
+        return None;
+    }
+    let line = skill_lines?.line(skill)?;
+    let template = get("INCREASE_POTENTIAL")?;
+    Some(benilla_ui::strings::fill(
+        &template,
+        &[
+            benilla_ui::strings::Arg::S(&line.name),
+            benilla_ui::strings::Arg::D(5 * i64::from(step)),
+        ],
+    ))
 }
 
 /// Build the Lua snapshot from [`TrainerOpen`] and the spell and skill catalogs.
@@ -300,8 +340,8 @@ pub(crate) struct DescriptionReads<'w> {
     area_names: Option<Res<'w, crate::ui_quest_log::QuestHeaderNamesRes>>,
 }
 
-/// Push the current trainer into the VM and fire its events on a change. Another trainer while
-/// open is a close then an open: `ShowUIPanel` returns early on a visible frame.
+/// Push the current trainer into the VM and fire its events on a change; the close is the
+/// core's ([`close_core`]).
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn feed_trainer(
     script: Option<NonSendMut<UiScript>>,
@@ -320,15 +360,18 @@ pub(crate) fn feed_trainer(
     names: Res<NameCache>,
     mut tooltip_subjects: ResMut<TrainerTooltipSubjects>,
     mut last: crate::ui_script::WindowMemo<Option<TrainerState>>,
-    mut last_trainer: crate::ui_script::WindowMemo<Option<u64>>,
     mut last_name: crate::ui_script::WindowMemo<Option<String>>,
+    mut closes: CoreCloses,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
-    let last_trainer = last_trainer.get(&script);
     let last_name = last_name.get(&script);
+    if closes.since_last(&script, NpcWindow::Trainer) {
+        *last = None;
+        *last_name = None;
+    }
     // Refusals go to the log only, as the reference prints them only to its console.
     for code in errors.0.drain(..) {
         info!("ui_trainer: {} (code {code})", train_error_log_line(code));
@@ -512,67 +555,91 @@ pub(crate) fn feed_trainer(
     if *tooltip_subjects != fresh_tooltip_subjects {
         *tooltip_subjects = fresh_tooltip_subjects;
     }
-    // A name-only change re-fires `TRAINER_UPDATE`, so the title's `UnitName("npc")` repaints.
-    // The name rides as arg1, which the 1.12 trainer events do not carry.
+    // `TRAINER_SHOW` and `TRAINER_UPDATE` carry no argument (`SignalEvent` `0x4d7b73`, `0x4d83f9`)
+    // and the stock window titles with `UnitName("npc")` (`Blizzard_TrainerUI.lua:90`), so a
+    // name-only change re-fires `TRAINER_UPDATE` to repaint it.
     let trainer_name = open
         .trainer
         .and_then(|g| names.resolve(g, &commands).map(str::to_string));
     let name_changed = *last_name != trainer_name;
-    let switched = npc_switched(*last_trainer, open.trainer);
-    if fresh == *last && !name_changed && !switched && !forced {
+    if fresh == *last && !name_changed && !forced {
         return;
     }
     script.set_trainer(fresh.clone());
-    let name_arg = || vec![ScriptValue::Str(trainer_name.clone().unwrap_or_default())];
-    if switched {
-        // Drop the close intent `OnHide` queues, or the drain would clear the new trainer.
-        script.fire_event("TRAINER_CLOSED", vec![]);
-        script.fire_event("TRAINER_SHOW", name_arg());
-        let _ = script.take_trainer_close();
-    } else {
-        match (&*last, &fresh) {
-            (None, Some(_)) => script.fire_event("TRAINER_SHOW", name_arg()),
-            (Some(_), Some(_)) => script.fire_event("TRAINER_UPDATE", name_arg()),
-            (Some(_), None) => script.fire_event("TRAINER_CLOSED", vec![]),
-            (None, None) => {}
-        }
+    match (&*last, &fresh) {
+        (None, Some(_)) => script.fire_event("TRAINER_SHOW", vec![]),
+        (Some(_), Some(_)) => script.fire_event("TRAINER_UPDATE", vec![]),
+        // The core told the VM; a disconnect's clear tells it nothing.
+        (Some(_), None) | (None, None) => {}
     }
     *last = fresh;
-    *last_trainer = open.trainer;
     *last_name = trainer_name;
 }
 
-/// The leave-world sweep's trainer leg (`0x490ad5` → `0x4d7400` → `0x4d7440(0)`): an open window
-/// closes with `TRAINER_CLOSED` (`0x4d7468`) in the VM the sweep runs in.
-fn close_trainer_on_leave_world(
-    script: Option<NonSendMut<UiScript>>,
-    mut open: ResMut<TrainerOpen>,
-) {
-    if sweep_close(&mut *open).is_none() {
-        return;
-    }
-    if let Some(mut script) = script {
-        script.set_trainer(None);
-        script.fire_event("TRAINER_CLOSED", vec![]);
-    }
-}
+/// The trainer's cell `[0xb73a00]`; `CloseTrainer` (`0x4d8d50`) is the core with a zero guid.
+impl LatchedWindow for TrainerOpen {
+    const WINDOW: NpcWindow = NpcWindow::Trainer;
 
-/// The range guard closes the window, as `CloseTrainer` would, on walk-away or despawn.
-impl NpcSession for TrainerOpen {
-    fn npc(&self) -> Option<u64> {
+    fn cell(&self) -> Option<u64> {
         self.trainer
     }
 
-    fn close(&mut self) {
-        self.clear();
+    fn dispatched(world: &mut World) {
+        close_core(world);
+    }
+
+    fn take_close_verb(script: &mut UiScript) -> bool {
+        script.take_trainer_close()
     }
 }
 
-/// Each `BuyTrainerService` becomes `CMSG_TRAINER_BUY_SPELL`; a close sends nothing.
+/// The close core, `0x4d7440` with a zero guid: nothing with no trainer (`0x4d7459`, a zero guid
+/// against a zero cell), else `TRAINER_CLOSED` first (`0x4d7468`), then the latch release on the
+/// cell as it stands after the fire (`0x4d7474`) and the cell cleared (`0x4d747c`). The fire comes
+/// before the clear, so `OnHide`'s `CloseTrainer()` re-enters with the cell set.
+pub(crate) fn close_core(world: &mut World) {
+    if world.resource::<TrainerOpen>().trainer.is_none() {
+        return;
+    }
+    crate::ui_session::fire(world, |script| {
+        script.fire_event("TRAINER_CLOSED", vec![]);
+    });
+    if let Some(trainer) = world.resource::<TrainerOpen>().trainer {
+        crate::ui_session::release(world, trainer);
+    }
+    if world.resource::<TrainerOpen>().trainer.is_some() {
+        world.resource_mut::<TrainerOpen>().clear();
+        crate::ui_session::note_closed(world, NpcWindow::Trainer);
+        crate::ui_session::with_script(world, |script| script.set_trainer(None));
+    }
+}
+
+/// `SMSG_TRAINER_LIST`'s open, `0x4d7440(trainer)`: the open trainer's own list re-lists in place
+/// (`0x4d7459`); any other registers on the latch (`0x4d74ce`), then the cell (`0x4d74d5`).
+pub(crate) fn open_trainer(
+    world: &mut World,
+    trainer: u64,
+    trainer_type: u32,
+    services: Vec<TrainerSpell>,
+    greeting: String,
+) {
+    if world.resource::<TrainerOpen>().trainer != Some(trainer) {
+        crate::ui_session::register(world, trainer);
+    }
+    world
+        .resource_mut::<TrainerOpen>()
+        .open(trainer, trainer_type, services, greeting);
+}
+
+/// Each `BuyTrainerService` becomes `CMSG_TRAINER_BUY_SPELL` and `OpenTrainer` a
+/// `CMSG_TRAINER_LIST` for the player after the close core; `CloseTrainer` runs the core and
+/// sends nothing.
 fn drain_trainer(
     script: Option<NonSendMut<UiScript>>,
-    mut open: ResMut<TrainerOpen>,
+    open: Res<TrainerOpen>,
     commands: Res<NetCommands>,
+    mut world_commands: Commands,
+    me: Query<&Guid, With<SelfPlayer>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -589,9 +656,18 @@ fn drain_trainer(
             .0
             .send(ClientCommand::TrainerBuySpell { trainer, spell_id });
     }
+    // `OpenTrainer` closes the window and then asks for the player's own list (`0x5df680`), which
+    // the server answers with nothing for a player. All of it waits on the player (`0x4d8d24`).
+    if script.take_trainer_open_own() {
+        if let Ok(&Guid(trainer)) = me.single() {
+            debug!("ui_trainer: OpenTrainer closes the window and asks for the player's own list");
+            crate::ui_session::queue(&mut world_commands, close_core);
+            let _ = commands.0.send(ClientCommand::TrainerList { trainer });
+        }
+    }
     if script.take_trainer_close() {
         debug!("ui_trainer: client-side close (no packet)");
-        open.clear();
+        crate::ui_session::queue(&mut world_commands, close_core);
     }
 }
 

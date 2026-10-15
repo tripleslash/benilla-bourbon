@@ -274,7 +274,6 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
             &l.self_guid,
             &sc.stores,
             &mut l.cast_bar,
-            &mut l.pending,
             &mut l.queued_melee,
             &mut sc.text,
             *sc.damage_text,
@@ -316,7 +315,6 @@ fn on_spell_failed_other(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Sce
             &mut sc.cast_events,
             &l.self_guid,
             &mut l.cast_bar,
-            &mut l.pending,
             &mut l.queued_melee,
             l.play_seq.next(),
         );
@@ -600,7 +598,9 @@ fn cast_result(
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
     // Is this the reply to our outstanding cast (`0x6e7408 cmp ecx,[0xceca88]`)? Read before either
     // arm clears the guard: both clears are the reference's one `0x6e741a call 0x6e4940(0x1c)`.
-    let in_flight = pending.committed(Instant::now()) == Some(spell_id);
+    let now = Instant::now();
+    let in_flight =
+        pending.current(now) == Some(spell_id) || queued_melee.current() == Some(spell_id);
     if !success {
         // `HandleCastFailed 0x6e1a00` clears the GCD armed at send (`0x6e1d83 → 0x6e1630`), and the
         // bit-25 revert below drops a parked record; the spell's own recovery starts at SPELL_GO,
@@ -609,7 +609,6 @@ fn cast_result(
         // `SMSG_CANCEL_AUTO_REPEAT` routine). A deselect arrives as this failure (vmangos
         // `HandleSetSelectionOpcode` → `Spell::cancel` → `SendCastResult(INTERRUPTED)`); target
         // death arrives as [`cancel_auto_repeat`].
-        let now = Instant::now();
         // Reason 0x17 DONT_REPORT exits before the GCD clear and the display (`6e1ce1`/`6e1cf7` →
         // `0x6e224f`). The in-flight clear below still runs, as the reference's `0x6e741a` does
         // once `HandleCastFailed` returns: vmangos sends 0x17 for real aborts.
@@ -826,7 +825,6 @@ fn spell_go(
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
     cast_bar: &mut CastBarFeed,
-    pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
     // The floating-text CVars, read inside the word emitter `0x607140`: they gate miss words too.
@@ -919,7 +917,8 @@ fn spell_go(
         if completes_our_cast {
             cast_bar.0.push(CastBarEdge::Stop);
         }
-        pending.clear_if(spell_id);
+        // The in-flight slot is not popped here: only the spell's `SMSG_CAST_RESULT` pops it
+        // (`0x6e7408` → `0x6e741a`), and vmangos sends that result ahead of the GO.
         // The queued strike fired on this swing: the queue opens here, like the in-flight finish.
         queued_melee.clear_if(spell_id);
 
@@ -1115,7 +1114,6 @@ fn spell_failed_other(
     cast_events: &mut MessageWriter<CastEvent>,
     self_guid: &SelfGuid,
     cast_bar: &mut CastBarFeed,
-    pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     seq: u64,
 ) {
@@ -1133,7 +1131,6 @@ fn spell_failed_other(
         if interrupts_our_cast {
             cast_bar.0.push(CastBarEdge::Interrupted);
         }
-        pending.clear_if(spell_id);
         // The melee-slot interrupt's other half, beside the failing CAST_RESULT.
         queued_melee.clear_if(spell_id);
     }
@@ -1659,7 +1656,6 @@ mod tests {
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
                           mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -1687,7 +1683,6 @@ mod tests {
                             &self_guid,
                             &stores,
                             &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             crate::combat_text::DamageTextGates::default(),
@@ -1791,7 +1786,6 @@ mod tests {
                       mut cast_events: MessageWriter<CastEvent>,
                       self_guid: Res<SelfGuid>,
                       mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>| {
                     spell_failed_other(
                         10,
@@ -1802,7 +1796,6 @@ mod tests {
                         &mut cast_events,
                         &self_guid,
                         &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         1,
                     );
@@ -1915,7 +1908,6 @@ mod tests {
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
                           mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -1943,7 +1935,6 @@ mod tests {
                             &self_guid,
                             &stores,
                             &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             gates,
@@ -2081,7 +2072,6 @@ mod tests {
                       self_guid: Res<SelfGuid>,
                       stores: Query<&mut ObjectStore>,
                       mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>,
                       mut text: MessageWriter<CombatTextSpawn>,
                       mut go_lid: MessageWriter<GoLidOpen>,
@@ -2109,7 +2099,6 @@ mod tests {
                         &self_guid,
                         &stores,
                         &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         &mut text,
                         crate::combat_text::DamageTextGates::default(),
@@ -2289,7 +2278,6 @@ mod tests {
                       self_guid: Res<SelfGuid>,
                       stores: Query<&mut ObjectStore>,
                       mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>,
                       mut text: MessageWriter<CombatTextSpawn>,
                       mut go_lid: MessageWriter<GoLidOpen>,
@@ -2317,7 +2305,6 @@ mod tests {
                         &self_guid,
                         &stores,
                         &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         &mut text,
                         crate::combat_text::DamageTextGates::default(),
@@ -2675,7 +2662,6 @@ mod tests {
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
                           mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -2704,7 +2690,6 @@ mod tests {
                             &self_guid,
                             &stores,
                             &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             crate::combat_text::DamageTextGates::default(),
@@ -2834,8 +2819,7 @@ mod tests {
             if let Some(id) = in_flight {
                 app.world_mut()
                     .resource_mut::<PendingCast>()
-                    // `guards: false`: a ranged hunter shot is recorded but does not guard.
-                    .arm(id, Instant::now(), false);
+                    .push(id, None, Instant::now());
             }
             let (tx, _rx) = crossbeam_channel::unbounded();
             let cat = spells();

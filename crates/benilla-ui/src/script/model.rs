@@ -414,6 +414,8 @@ pub(crate) struct Model {
     pub(crate) social: social::SocialState,
     /// Social calls (`AddFriend`, `RemoveFriend`, `SendWho`, …) queued.
     pub(crate) social_requests: Vec<social::SocialRequest>,
+    /// `LFGDungeons.dbc`, pushed by the app.
+    pub(crate) lfg_dungeons: Vec<super::lfg::LfgDungeon>,
     /// The client-local LFG slot words (`[0xbc70a0]`) and comment (`[0xbc6e98]`, 0x80 bytes) that
     /// `SetLookingForGroup` writes and `GetLookingForGroup` reads; the reference's slots stay 0.
     pub(crate) lfg_slots: [u32; 3],
@@ -789,6 +791,10 @@ pub(crate) struct Model {
     pub(crate) trainer_filter: [bool; 3],
     /// Collapsed skill-line ids, kept across a re-push and cleared when the trainer closes.
     pub(crate) trainer_collapsed: HashSet<u32>,
+    /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
+    pub(crate) trainer_line_filter: u32,
+    /// `OpenTrainer` asked for the player's own trainer list; the app drains it.
+    pub(crate) trainer_open_own: bool,
 
     /// The open taxi map, the `TakeTaxiNode` calls, whether `CloseTaxiMap` ran and whether we ride.
     pub(crate) taxi: Option<taxi::TaxiUiState>,
@@ -938,6 +944,9 @@ pub(crate) struct Model {
 
     /// The open questgiver panel, its greeting-row selects and its button calls.
     pub(crate) quest: Option<quest::QuestState>,
+    /// The levels of the last greeting's two pools (`0xbde690`, `0xbdfe60`), which outlive the
+    /// panel until the next list fills them.
+    pub(crate) quest_pool_levels: quest::PoolLevels,
     pub(crate) quest_selects: Vec<quest::QuestSelect>,
     pub(crate) quest_actions: Vec<quest::QuestAction>,
 
@@ -1066,6 +1075,15 @@ pub(crate) struct Model {
     pub(crate) skills_selected: Option<u32>,
     /// `AbandonSkill` ids for `CMSG_UNLEARN_SKILL`; nothing changes until the server's update.
     pub(crate) skill_abandons: Vec<u32>,
+    /// The skill points chosen on each line and not yet accepted (row `+0x10`): `AddSkillUp` and
+    /// `RemoveSkillUp` move them, a rebuild or `CancelSkillUps` clears them.
+    pub(crate) skills_pending: HashMap<u32, u32>,
+    /// `SkillTiers.dbc`: tier id to its sixteen step costs.
+    pub(crate) skill_tiers: HashMap<u32, [u32; 16]>,
+    /// Sends the lottery and GM survey verbs queued, for the app to put on the wire.
+    pub(crate) unserved_sends: Vec<super::lottery::UnservedSend>,
+    /// The GM survey's tables and answer buffer.
+    pub(crate) gm_survey: super::gm_survey::SurveyState,
 
     /// The reputation pane's snapshot and the display tree built from it.
     pub(crate) reputation: reputation::ReputationState,
@@ -1353,6 +1371,7 @@ impl Model {
             reset_instance_asks: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
+            lfg_dungeons: Vec::new(),
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
             guild: guild::GuildState::default(),
@@ -1525,6 +1544,8 @@ impl Model {
             trainer_close: false,
             trainer_filter: [true; 3],
             trainer_collapsed: HashSet::new(),
+            trainer_line_filter: u32::MAX,
+            trainer_open_own: false,
             taxi: None,
             taxi_takes: Vec::new(),
             taxi_close: false,
@@ -1604,6 +1625,7 @@ impl Model {
             trade_clear_items: Vec::new(),
             trade_offered: Default::default(),
             quest: None,
+            quest_pool_levels: Default::default(),
             quest_selects: Vec::new(),
             quest_actions: Vec::new(),
             death: death::DeathUiState::default(),
@@ -1702,6 +1724,10 @@ impl Model {
             skills_collapsed: HashSet::new(),
             skills_selected: None,
             skill_abandons: Vec::new(),
+            skills_pending: HashMap::new(),
+            skill_tiers: HashMap::new(),
+            unserved_sends: Vec::new(),
+            gm_survey: Default::default(),
             reputation: reputation::ReputationState::default(),
             reputation_groups: Vec::new(),
             reputation_collapsed: HashSet::new(),
@@ -2430,6 +2456,22 @@ impl Model {
         for h in subtree {
             self.touch_layout_frame(h);
         }
+    }
+
+    /// The `nonspacewrap` flag `rh`'s text lays out under: its own, or on a multi-line EditBox's
+    /// text region always, as the box sets bit `0x1000` of its label (`0x77a58f`).
+    pub(crate) fn non_space_wrap_of(&self, rh: RegionHandle) -> bool {
+        let own = self.region_data.get(&rh).is_some_and(|d| d.non_space_wrap);
+        own || self
+            .arena
+            .region(rh)
+            .and_then(|r| self.arena.frame(r.owner))
+            .is_some_and(|f| {
+                matches!(
+                    &f.kind_state,
+                    crate::widget::KindState::EditBox(eb) if eb.text_region == Some(rh) && eb.multi_line
+                )
+            })
     }
 
     /// Names `rh` on the measure ledger for a write that may move its measure key.

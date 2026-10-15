@@ -1421,6 +1421,25 @@ pub(crate) enum ClientCommand {
     },
     /// `CMSG_GMTICKET_GETTICKET`: `GetGMTicket()`.
     GmTicketGet,
+    /// `CMSG_SKILL_BUY_STEP`: `BuySkillTier`, the skill line id.
+    SkillBuyStep {
+        skill_id: u32,
+    },
+    /// `CMSG_LOTTERY_QUERY_OBSOLETE`: `GetLastLotteryNumbers()`.
+    LotteryQuery,
+    /// `CMSG_BUY_LOTTERY_TICKET_OBSOLETE`: `BuyRandomPicks` is `(count, 0)`, `SubmitNumbers`
+    /// `(0, mask)`.
+    BuyLotteryTicket {
+        first: u32,
+        second: u32,
+    },
+    /// `CMSG_GMSURVEY_SUBMIT`: `GMSurveySubmit()`, the survey id, each answered question as
+    /// `(question id, rating, comment)` and the overall comment.
+    GmSurveySubmit {
+        survey: u32,
+        answers: Vec<(u32, u8, String)>,
+        comment: String,
+    },
     /// `CMSG_GMTICKET_DELETETICKET`.
     GmTicketDelete,
     /// `CMSG_GMTICKET_SYSTEMSTATUS`: `GetGMStatus()`.
@@ -2089,6 +2108,11 @@ pub(crate) enum ClientCommand {
     SetLookingForGroup {
         slots: [u32; 3],
         comment: String,
+    },
+    /// `MSG_LOOKING_FOR_GROUP`: `LFGQuery`'s inquiry.
+    LfgQuery {
+        criterion: u32,
+        class: u32,
     },
     /// `CMSG_DEL_FRIEND`.
     DelFriend {

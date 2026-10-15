@@ -52,6 +52,7 @@ const COL_SRCI_RACE_MASK: usize = 2;
 const COL_SRCI_CLASS_MASK: usize = 3;
 const COL_SRCI_FLAGS: usize = 4;
 const COL_SRCI_MIN_LEVEL: usize = 5;
+const COL_SRCI_TIER_ID: usize = 6;
 const COL_SRCI_COST_INDEX: usize = 7;
 
 /// Flag `0x80` (cmangos `SKILL_FLAG_DISPLAY_SORTED`), which the tab classifier reads as the low
@@ -104,6 +105,9 @@ pub struct SkillRaceClass {
     pub flags: u32,
     /// `reqLevel`, column 5: the level an untrained `0x4` line starts showing at.
     pub min_level: u32,
+    /// `skillTierID`, column 6: the `SkillTiers.dbc` row `BuySkillTier` prices a step by
+    /// (`0x6de1c0` reads it at `+0x18`).
+    pub tier_id: u32,
     /// `skillCostID`, column 7: `GetSkillLineInfo`'s 12th return is this plus one (`0x4d3a06`).
     pub cost_index: u32,
 }
@@ -193,6 +197,23 @@ impl SkillLineCatalog {
             race_class: HashMap::new(),
             rank_prev: HashMap::new(),
         }
+    }
+
+    /// This catalog with `SkillLine.dbc` display rows for `(id, name)` pairs, for tests and
+    /// fixtures.
+    pub fn with_line_names<'a>(mut self, lines: impl IntoIterator<Item = (u32, &'a str)>) -> Self {
+        for (id, name) in lines {
+            self.lines.insert(
+                id,
+                SkillLineInfo {
+                    name: name.to_string(),
+                    category_id: 0,
+                    icon: None,
+                    description: String::new(),
+                },
+            );
+        }
+        self
     }
 
     /// The skill line a spell belongs to, if `SkillLineAbility.dbc` names one.
@@ -451,6 +472,7 @@ fn load_race_class_info(chain: &mut Chain) -> HashMap<u32, Vec<SrciRow>> {
             row: SkillRaceClass {
                 flags: u32_at(r, COL_SRCI_FLAGS).unwrap_or(0),
                 min_level: u32_at(r, COL_SRCI_MIN_LEVEL).unwrap_or(0),
+                tier_id: u32_at(r, COL_SRCI_TIER_ID).unwrap_or(0),
                 cost_index: u32_at(r, COL_SRCI_COST_INDEX).unwrap_or(0),
             },
         });

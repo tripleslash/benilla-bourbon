@@ -38,7 +38,8 @@ use bevy::platform::time::Instant;
 use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
-    messages, AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd, SessionEvent,
+    messages::{self, SurveyAnswer},
+    AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd, SessionEvent,
     WardenRequired, WorldReader, WorldSession, WorldWriter,
 };
 use crossbeam_channel::{Receiver, Sender};
@@ -1650,6 +1651,24 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.gm_ticket_create(category, map, pos, &text),
         ClientCommand::GmTicketUpdate { category, text } => w.gm_ticket_updatetext(category, &text),
         ClientCommand::GmTicketGet => w.gm_ticket_get(),
+        ClientCommand::SkillBuyStep { skill_id } => w.skill_buy_step(skill_id),
+        ClientCommand::LotteryQuery => w.lottery_query(),
+        ClientCommand::BuyLotteryTicket { first, second } => w.buy_lottery_ticket(first, second),
+        ClientCommand::GmSurveySubmit {
+            survey,
+            answers,
+            comment,
+        } => {
+            let answers: Vec<_> = answers
+                .iter()
+                .map(|(question, rating, comment)| SurveyAnswer {
+                    question: *question,
+                    rating: *rating,
+                    comment,
+                })
+                .collect();
+            w.gm_survey_submit(survey, &answers, &comment)
+        }
         ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
         ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
         ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
@@ -1920,6 +1939,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::SetLookingForGroup { slots, comment } => {
             w.set_looking_for_group(slots, &comment)
         }
+        ClientCommand::LfgQuery { criterion, class } => w.looking_for_group_query(criterion, class),
         ClientCommand::DelFriend { guid } => w.del_friend(guid),
         ClientCommand::AddIgnore { name } => w.add_ignore(&name),
         ClientCommand::DelIgnore { guid } => w.del_ignore(guid),

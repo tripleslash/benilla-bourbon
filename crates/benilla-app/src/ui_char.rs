@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, ScriptValue, SkillEntry,
@@ -63,20 +64,41 @@ pub(crate) struct UiCharPlugin;
 
 impl Plugin for UiCharPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CharFeedState>().add_systems(
-            Update,
-            (
-                // Before `feed_containers`: a `BAG_UPDATE` handler may read the bag item's own
-                // row (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`), so the
-                // inventory push lands first.
-                feed_char
-                    .before(crate::ui_items::feed::feed_containers)
-                    .in_set(UiFeed),
-                watch_skill_ups.in_set(UiFeed),
-                feed_skills.in_set(UiFeed),
-                drain_skill_abandons.after(UiInput),
-            ),
-        );
+        app.init_resource::<CharFeedState>()
+            .add_data_loaders(load_skill_tiers)
+            .add_systems(
+                Update,
+                (
+                    // Before `feed_containers`: a `BAG_UPDATE` handler may read the bag item's own
+                    // row (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`), so the
+                    // inventory push lands first.
+                    feed_char
+                        .before(crate::ui_items::feed::feed_containers)
+                        .in_set(UiFeed),
+                    watch_skill_ups.in_set(UiFeed),
+                    feed_skills.in_set(UiFeed),
+                    drain_skill_abandons.after(UiInput),
+                ),
+            );
+    }
+}
+
+/// `SkillTiers.dbc`, which `BuySkillTier` prices a step by.
+#[derive(Resource)]
+struct SkillTiersRes(benilla_formats::SkillTiers);
+
+fn load_skill_tiers(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_skill_tiers(&mut chain)
+    };
+    match loaded {
+        Ok(tiers) => commands.insert_resource(SkillTiersRes(tiers)),
+        Err(e) => {
+            warn!("ui_char: SkillTiers.dbc failed to load — BuySkillTier prices nothing: {e:#}")
+        }
     }
 }
 
@@ -221,11 +243,21 @@ fn feed_skills(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    tiers: Option<Res<SkillTiersRes>>,
     mut last: Local<crate::ui_script::VmMemo<Option<SkillsState>>>,
+    mut tiers_pushed: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    // The cost table, once per VM.
+    let pushed = tiers_pushed.get(&script);
+    if !*pushed {
+        if let Some(tiers) = tiers.as_deref() {
+            script.set_skill_tiers(tiers.0.tiers());
+            *pushed = true;
+        }
+    }
     let last = last.get(&script);
     let lines_moved = skill_lines.as_ref().is_some_and(|l| l.is_changed());
     let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
@@ -298,6 +330,9 @@ pub(crate) fn skills_row(
         // The unlearnable bit and a nonzero skill step (`0x4d3953`).
         abandonable: slot.step != 0 && rc.unlearnable(),
         mono: rc.mono(),
+        step: u32::from(slot.step),
+        flags: rc.flags,
+        tier_id: rc.tier_id,
     })
 }
 
@@ -992,12 +1027,14 @@ pub(crate) fn feed_char(
         gate.audit("feed_char", "a bank bag slot transition");
     }
     for same_bag in repainted {
-        let args = if same_bag {
-            vec![ScriptValue::Str("player".to_string())]
+        if same_bag {
+            script.fire_event(
+                "PLAYERBANKSLOTS_CHANGED",
+                vec![ScriptValue::Str("player".to_string())],
+            );
         } else {
-            Vec::new()
-        };
-        script.fire_event("PLAYERBANKSLOTS_CHANGED", args);
+            script.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+        }
     }
 }
 

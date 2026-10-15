@@ -21,8 +21,9 @@ use super::motion::{
     trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::{
-    merge_store_fields, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp,
-    ObjectStore, RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
+    merge_store_fields, ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity,
+    NetHandlerApp, ObjectStore, RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes,
+    UnitSpeeds,
 };
 
 /// `SMSG_GAMEOBJECT_CUSTOM_ANIM`, bridged to [`crate::go_anim`], which rejects `anim_id >= 4` and
@@ -84,6 +85,7 @@ pub(crate) struct Scene<'w, 's> {
     self_guid: Res<'w, SelfGuid>,
     real: Res<'w, Time<Real>>,
     transforms: Query<'w, 's, &'static mut Transform>,
+    movers: Query<'w, 's, (), With<ActiveMover>>,
     stores: Query<'w, 's, &'static mut ObjectStore>,
     countdowns: Query<'w, 's, &'static mut crate::items::Countdowns>,
     remote: Query<'w, 's, &'static mut RemoteMotion>,
@@ -223,6 +225,7 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
             &mut sc.commands,
             &sc.index,
             &mut sc.transforms,
+            &sc.movers,
         );
     }
 }
@@ -317,8 +320,14 @@ fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene) {
 
 /// OUT_OF_RANGE takes the same deactivate as DESTROY in the reference, so a member walking out of
 /// range also gets the snapshot and `CMSG_REQUEST_PARTY_MEMBER_STATS`.
+///
+/// The active player is never released: the reference compares each listed guid with
+/// `ClntObjMgrGetActivePlayer` (`0x465f39` → `0x468550`, `0x465f3e`, `0x465f42`) and jumps past
+/// `0x464920` (`0x465f45` → `0x465f54`), the deactivate included; a player's guid is outside the
+/// second round's types (`0x465f19`, `0x465f28`), so no later pass reaches it.
 fn on_objects_removed(In(ev): In<SessionEvent>, mut sc: Scene) {
-    if let SessionEvent::ObjectsRemoved(guids) = ev {
+    if let SessionEvent::ObjectsRemoved(mut guids) = ev {
+        guids.retain(|g| sc.self_guid.0 != Some(*g));
         for guid in &guids {
             let held = |g: u64| sc.index.0.get(&g).and_then(|e| sc.stores.get(*e).ok());
             crate::ui_party::net::member_deactivated(
@@ -554,7 +563,7 @@ fn object_create(
     trace_create_spline(guid, spline.as_ref());
     let walk = spline.and_then(create_spline);
     if let Some(&e) = index.0.get(&guid) {
-        // A re-create is a fresh snapshot: refresh identity and pose, drop any extrapolation.
+        // A re-create is a fresh snapshot: refresh identity and a unit's pose, drop any extrapolation.
         commands.entity(e).insert(net).remove::<RemoteMotion>();
         // The set is replaced whole; a `SMSG_FORCE_*_SPEED_CHANGE` in the same tick lands on top,
         // since this insert applies before the next packet's handler (`apply::seam_tests`).
@@ -586,7 +595,11 @@ fn object_create(
                 commands.entity(e).remove::<Spline>();
             }
         }
-        write_pose(commands, transforms, e, position, placement);
+        // Only a unit takes the block's movement (type-mask bit 3, `0x46638c`); any other type
+        // reads the position and drops it (`0x4664c3`..`0x46656b`), so it stays where it stands.
+        if matches!(kind, EntityKind::Unit | EntityKind::Player) {
+            write_pose(commands, transforms, e, position, placement);
+        }
         // The reference refreshes a live guid in place, notifying field watchers like any delta.
         merge_fields(commands, stores, edges, e, guid, fields);
     } else {
@@ -658,7 +671,10 @@ fn item_create(
     }
 }
 
-/// An `SMSG_UPDATE_OBJECT` movement block: a new pose that supersedes any active path.
+/// An `SMSG_UPDATE_OBJECT` movement block: a new pose that supersedes any active path. The unit
+/// this client moves, our player or a possessed unit ([`ActiveMover`]), drops it: the reference
+/// compares the block's guid with the active mover before it looks the object up (`0x4670a5`,
+/// `0x4670ae`, `0x4670b5`), and returns on a match (`0x4670bb`).
 fn object_move(
     guid: u64,
     position: [f32; 3],
@@ -666,8 +682,12 @@ fn object_move(
     commands: &mut Commands,
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
+    movers: &Query<(), With<ActiveMover>>,
 ) {
     if let Some(&e) = index.0.get(&guid) {
+        if movers.contains(e) {
+            return;
+        }
         commands.entity(e).remove::<Spline>();
         // A yaw only: the GameObjects that get one are transports, which their tick then owns.
         write_pose(commands, transforms, e, position, wire_yaw(orientation));
@@ -1152,6 +1172,9 @@ fn speed_changed(
         debug!("net: {kind:?} speed change for untracked mover {guid:#x} — nothing to write");
     }
 }
+
+#[cfg(test)]
+mod update_tests;
 
 #[cfg(test)]
 mod tests {

@@ -88,11 +88,15 @@ pub use glue_realm::{
     GlueRealmType, RealmSortKey,
 };
 pub use glue_select::{GlueCharacter, GlueScenePane, GlueSelectCells};
+mod denied;
+mod gm_survey;
 mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
 mod hyperlink;
+mod lfg;
+mod lottery;
 mod screenshot;
 mod tabard;
 pub use handler_prof::HandlerRow;
@@ -207,7 +211,7 @@ pub use char_stats::{
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
-pub use chat_send::ChatSend;
+pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use client::UiFlavor;
@@ -239,6 +243,7 @@ pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
+pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
@@ -246,6 +251,8 @@ pub use guild::{
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
+pub use lfg::LfgDungeon;
+pub use lottery::UnservedSend;
 pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
@@ -284,7 +291,9 @@ pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
-pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua, install_loaded_texture};
+pub(crate) use region::{
+    apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
+};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
@@ -641,6 +650,10 @@ fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     bind_confirm::install(lua)?;
     instance::install(lua)?;
     gm_ticket::install(lua)?;
+    gm_survey::install(lua)?;
+    denied::install(lua)?;
+    lfg::install(lua)?;
+    lottery::install(lua)?;
     duel::install(lua)?;
     follow::install(lua)?;
     camera_view::install(lua)?;

@@ -68,7 +68,7 @@ pub(crate) enum Reference {
 }
 
 /// A row whose default is the reference's own registered string.
-const fn same(name: &'static str, default: &'static str) -> Registered {
+pub(super) const fn same(name: &'static str, default: &'static str) -> Registered {
     Registered {
         name,
         default,
@@ -123,16 +123,20 @@ const fn ours(name: &'static str, default: &'static str, why: &'static str) -> R
 
 /// The table as the script VM's registrar wants it: `(name, default)` pairs in table order.
 pub(crate) fn registered_pairs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    REGISTERED.iter().map(|r| (r.name, r.default))
+    all_rows().map(|r| (r.name, r.default))
+}
+
+/// Every registered row: the knobs something reads ([`REGISTERED`]), then the reference's other
+/// script-visible CVars, which nothing here reads ([`super::inert::INERT`]).
+pub(crate) fn all_rows() -> impl Iterator<Item = &'static Registered> {
+    REGISTERED.iter().chain(super::inert::INERT)
 }
 
 /// The host-backed CVars, one row per knob that has a reader: a host knob, or a Lua consumer
-/// such as the stock Video Options window's verbs.
-///
-/// Not registered for want of a reader, though pfUI's `hdgraphic` writes them: `lodDist`
-/// (`0x688524`, "100.0", read at `0x6afb1d` for the doodad LOD swap), `footstepBias` (`0x6888b4`,
-/// "0.125", read at `0x68fcb6`), `mapObjLightLOD` (`0x6886ec`, "0") and `SkyCloudLOD` (`0x6d1d33`,
-/// "0"). `DistCull` (`0x688570`) has no reader in the reference either. `maxLOD` is no 1.12 CVar.
+/// such as the stock Video Options window's verbs. The reference's other script-visible CVars,
+/// which nothing here reads, are `super::inert::INERT`: `lodDist`, `footstepBias`,
+/// `mapObjLightLOD`, `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
+/// `maxLOD` is no 1.12 CVar and stays unregistered.
 pub(crate) const REGISTERED: &[Registered] = &[
     // `realmName` (`0x83f2d0`): registered `""` (`0x882748`), help "Last realm connected to"
     // (`0x85d684`); the client builds its SavedVariables path from it (`0x5ab7d0`). Written from
@@ -461,9 +465,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // AUTO_FOLLOW_SPEED (`UIOptionsFrame.lua:88`), deg/s, registered "180.0" (`[0xbe1070]`): it
     // sets the transition's duration (`|dyaw| / rate * factor`), an average rate, not a slew. The
     // validator `0x50c000` refuses outside [0.1, 360]; the knob then clamps to `FOLLOW_SPEED_RANGE`,
-    // the slider's. The stock Save also writes `cameraPitchSmoothSpeed`
-    // at a quarter (`:353`), unregistered here: `FollowRig` has one rate.
+    // the slider's.
     same("cameraYawSmoothSpeed", "180").checked(benilla_ui::script::check_camera_rate),
+    // `UIOptionsFrame.lua:353` names `cameraPitchSmoothSpeed`, registered "45.0" (`0x50b90b`) with
+    // the same validator, and `SetCVar` raises on a name no CVar has (`0x488c53`). `FollowRig` has
+    // one rate, so nothing reads it.
+    same("cameraPitchSmoothSpeed", "45.0").checked(benilla_ui::script::check_camera_rate),
     // `cameraPivot` `[0xbe10a4]` "1" (`0x50bda3`), smart pivot: gate `0x510690`, routing
     // `0x50fee0`, release `0x5107f0`; ours is `player::camera_dynamics::SmartPivot`.
     same("cameraPivot", "1"),

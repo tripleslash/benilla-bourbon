@@ -8,6 +8,7 @@
 //! is matched by name, vmangos `FriendsResult` to `ERR_FRIEND_*`/`ERR_IGNORE_*`; the reference's
 //! own mapping is untraced.
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::{friend_result, friend_status, FriendEntry, FriendStatusUpdate};
 use bevy::prelude::*;
 
@@ -44,8 +45,6 @@ pub(crate) struct SocialState {
     pending_lines: Vec<FriendStatusUpdate>,
     /// Set when the friend list changed, so the feed fires its list event.
     friends_dirty: bool,
-    /// A `ShowFriends()` is out: the next list fires `FRIENDLIST_SHOW`, not `FRIENDLIST_UPDATE`.
-    pub(crate) friends_show_pending: bool,
     ignores_dirty: bool,
     who_dirty: bool,
 }
@@ -291,13 +290,44 @@ pub(crate) struct UiSocialPlugin;
 impl Plugin for UiSocialPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<SocialState>().add_systems(
-            Update,
-            (
-                feed::feed_social.in_set(UiFeed),
-                feed::drain_social.after(UiInput),
-            ),
-        );
+        app.init_resource::<SocialState>()
+            .add_data_loaders(load_lfg_dungeons)
+            .add_systems(
+                Update,
+                (
+                    feed::feed_social.in_set(UiFeed),
+                    feed::drain_social.after(UiInput),
+                ),
+            );
+    }
+}
+
+/// `LFGDungeons.dbc` for the VM's looking-for-group lists.
+#[derive(Resource)]
+struct LfgDungeonsRes(Vec<benilla_ui::script::LfgDungeon>);
+
+fn load_lfg_dungeons(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_lfg_dungeons(&mut chain)
+    };
+    match loaded {
+        Ok(rows) => commands.insert_resource(LfgDungeonsRes(
+            rows.into_iter()
+                .map(|r| benilla_ui::script::LfgDungeon {
+                    name: r.name,
+                    min_level: r.min_level,
+                    max_level: r.max_level,
+                    kind: r.kind,
+                    side: r.side,
+                })
+                .collect(),
+        )),
+        Err(e) => {
+            warn!("ui_social: LFGDungeons.dbc failed to load — the LFG lists stay empty: {e:#}")
+        }
     }
 }
 
