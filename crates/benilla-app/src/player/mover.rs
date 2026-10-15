@@ -294,7 +294,8 @@ pub(super) fn step(
     // (`0x636e52`, `0x636e74`), yielding to a walkable collider, the nearer floor; up is the
     // rate-limited climb below (`0x636fa1`). The one push up is ours: the body may not end the
     // frame under the surface, which the reference's swept surface never lets it reach, and only
-    // a body that is not rising is caught, so a hover launch under the waterline flies clear.
+    // a body that is not rising is caught, so a hover launch under the waterline flies clear and a
+    // jump off the water is not pulled back down by the snap on its first frames.
     // `SetPitch`'s standstill dive kick (`0x7c6f70`) is not built: it serves a walk resolver that
     // skips a body at rest, and our classify runs every frame, so dropping the layers is the dive.
     if let Some(surface) = water_floor {
@@ -306,7 +307,11 @@ pub(super) fn step(
             player.wedged = false;
             grounded = true;
             on_liquid = true;
-        } else if !on_walkable && feet > rest && feet - surface <= ground_reach {
+        } else if !on_walkable
+            && player.vel_y <= 0.0
+            && feet > rest
+            && feet - surface <= ground_reach
+        {
             center.y = rest + half_h.y;
             player.vel_y = 0.0;
             player.wedged = false;
@@ -1762,6 +1767,63 @@ mod tests {
         assert!(
             idle.distance(north) < 1.0e-3,
             "released keys must stop a water-walker dead: {north:?} -> {idle:?}"
+        );
+    }
+
+    /// A water-walker (a ghost over a lake) jumps off the surface and lands back on it: the water
+    /// snap catches only a body that is not rising, or the launch's first frames are pulled down.
+    #[test]
+    fn a_water_walker_jumps_off_the_surface() {
+        const SURFACE: f32 = 0.0;
+        const OPEN: [(f32, f32); 2] = [(-3.0, -40.0), (3.0, -40.0)];
+        let (jumped, apex, landed) = world_from_profile(&OPEN)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player {
+                    modes: super::super::state::MoveModes {
+                        water_walking: true,
+                        ..Default::default()
+                    },
+                    pos: Vec3::new(0.0, SURFACE, 0.0),
+                    ..Default::default()
+                };
+                let press = |player: &mut Player, jump: bool| {
+                    step(
+                        player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::ZERO,
+                        7.0,
+                        jump,
+                        false,
+                        None,
+                        Some(SURFACE),
+                        AIR_NUDGE_SPEED,
+                    )
+                };
+                let jumped = press(&mut player, true).jumped;
+                let mut apex = player.pos.y;
+                for _ in 0..120 {
+                    press(&mut player, false);
+                    apex = apex.max(player.pos.y);
+                }
+                (jumped, apex, player.pos.y)
+            })
+            .unwrap();
+        assert!(jumped, "the press on the water must take off");
+        let analytic = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
+        assert!(
+            apex > analytic * 0.9,
+            "the jump must reach its apex ({analytic} yd), not be snapped back: {apex}"
+        );
+        assert!(
+            (landed - SURFACE).abs() < 1.0e-3,
+            "the arc lands back on the surface: {landed}"
         );
     }
 
