@@ -78,8 +78,8 @@ pub(super) fn feed_action_state(
     mut cooldowns: ResMut<Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     auto_repeat: Res<AutoRepeatActive>,
-    // One tuple for Bevy's 16-param ceiling: cast tracking, macro bindings, spell mods and the
-    // range units.
+    // One tuple for Bevy's 16-param ceiling: cast tracking, macro bindings, spell mods, the
+    // range units and the control flag.
     cast_state: (
         Res<crate::spell::PendingCast>,
         Res<crate::spell::QueuedMeleeSpell>,
@@ -89,6 +89,8 @@ pub(super) fn feed_action_state(
         Res<crate::spell::SpellModifiers>,
         // The caster's and the target's reach and motion, which the range compare reads.
         crate::spell::RangeUnits,
+        // `[0xb4b3e4]`, which the usable walk reads.
+        Option<Res<crate::player::Player>>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -121,8 +123,10 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound, spell_mods, range_units) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound, spell_mods, range_units, player) =
+        &cast_state;
     let me = self_q.iter().next();
+    let control_lost = player.as_ref().is_some_and(|p| p.own_control_lost);
     // The bags, walked once per frame for every reagent, totem and item count below.
     let carried = me
         .map(|(s, _, _, _)| carried_counts(&s.0, &objects))
@@ -154,10 +158,9 @@ pub(super) fn feed_action_state(
         let (kind, id) = match resolve_through_macro(button.kind, button.action, bound) {
             SlotResolve::Action(kind, id) => (kind, id),
             SlotResolve::BareMacro => {
-                // `0x4e5050`'s spell-less leg: usable. It also greys every spell-less macro and
-                // item while the player-control flag `[0xb4b3e4]` is clear (taxi, fear, charm,
-                // `0x4958e0`; set at boot, `0x48f626`); that gate is not built.
-                st.usable = true;
+                // `0x4e5050`'s spell-less leg: usable while the player-control flag `[0xb4b3e4]`
+                // is set (`0x4e50f4`; `SMSG_CLIENT_CONTROL_UPDATE` clears it, `0x4958e0`).
+                st.usable = !control_lost;
                 fresh.insert(action, st);
                 continue;
             }
@@ -204,6 +207,7 @@ pub(super) fn feed_action_state(
                         cooldowns: &cooldowns,
                         carried: &carried,
                         spell_mods,
+                        control_lost,
                     };
                     let (u, oom) = usable::spell_usable(
                         button.action,
@@ -284,6 +288,7 @@ pub(super) fn feed_action_state(
                         cooldowns: &cooldowns,
                         carried: &carried,
                         spell_mods,
+                        control_lost,
                     };
                     let (u, oom) = usable::item_usable(
                         button.action,
@@ -300,7 +305,7 @@ pub(super) fn feed_action_state(
                 }
                 if let Some(u) = use_spell {
                     let d = spells.as_ref().and_then(|s| s.catalog.get(u.spell_id));
-                    let info = cooldowns.info(u.spell_id, button.action, d, now);
+                    let info = cooldowns.info_item(u.spell_id, button.action, u.category, d, now);
                     st.cooldown = info.ui_triple(anchor, ui_now);
                 }
             }
@@ -847,5 +852,222 @@ mod tests {
             !lit(true),
             "in combat the food's on-use spell fails leg 8 and the button greys"
         );
+    }
+
+    /// `SMSG_CLIENT_CONTROL_UPDATE` clears `[0xb4b3e4]` (`0x4958e0`), and `IsUsableAction` answers
+    /// nil for every spell button and spell-less macro but the spell whose immunity covers the fear
+    /// (`0x6e3dc3`-`0x6e3e4c`, `0x4e50f4`); control back, they all light.
+    #[test]
+    fn lost_control_greys_the_bar_but_the_immunity_spell() {
+        use benilla_protocol::messages::{ActionButton, ACTION_KIND_MACRO};
+        use benilla_protocol::ObjectFields;
+
+        const FIREBALL: u32 = 133;
+        const FEAR_AURA: u32 = 5782;
+        const WILL: u32 = 7744;
+        /// `UNIT_FIELD_FLAGS` bit 23, fleeing.
+        const FLEEING: u32 = 0x0080_0000;
+
+        let mut fear = SpellDisplay {
+            mechanic: 5,
+            ..Default::default()
+        };
+        fear.effects[0] = 6;
+        fear.effect_apply_aura[0] = 7;
+        let mut will = SpellDisplay {
+            attributes_ex: 0x8000,
+            ..Default::default()
+        };
+        will.effects[0] = 6;
+        will.effect_apply_aura[0] = 77;
+        will.effect_misc_value[0] = 5;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut actions = PlayerActions::default();
+        for (slot, action, kind) in [
+            (0u8, FIREBALL, ACTION_KIND_SPELL),
+            (1, WILL, ACTION_KIND_SPELL),
+            (2, 1, ACTION_KIND_MACRO),
+        ] {
+            actions
+                .buttons
+                .insert(slot, ActionButton { slot, action, kind });
+        }
+        let mut bound = crate::ui_macro::MacroBoundSpells::default();
+        bound.0.insert(1, crate::ui_macro::BoundSpell::None);
+        app.insert_resource(actions)
+            .insert_resource(bound)
+            .insert_resource(Spells {
+                catalog: benilla_formats::SpellCatalog::from_displays(
+                    [
+                        (FIREBALL, SpellDisplay::default()),
+                        (WILL, will),
+                        (FEAR_AURA, fear),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Spells::empty_for_tests()
+            })
+            .init_resource::<crate::player::Player>()
+            .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell::SpellModifiers>()
+            .init_resource::<crate::ui_script::UiClock>()
+            .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::spell::PendingCast>()
+            .init_resource::<crate::spell::QueuedMeleeSpell>()
+            .init_resource::<crate::spell::ActiveChannel>()
+            .init_resource::<crate::spell::SpellTargeting>()
+            .init_resource::<crate::spell::HeldForPick>()
+            .init_resource::<Selection>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx));
+        app.world_mut().spawn((
+            SelfPlayer,
+            Transform::default(),
+            ObjectStore(ObjectFields::from_pairs(&[
+                (22, 100),
+                (23, 500),
+                (46, (1 << 3) | FLEEING),
+                (47, FEAR_AURA),
+            ])),
+        ));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                USABLE_EVENTS = 0
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("ACTIONBAR_UPDATE_USABLE")
+                f:SetScript("OnEvent", function() USABLE_EVENTS = USABLE_EVENTS + 1 end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send(script);
+        app.add_systems(Update, feed_action_state);
+        let events = |app: &mut App| -> i64 {
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
+            s.resolve();
+            s.eval::<i64>("local n = USABLE_EVENTS; USABLE_EVENTS = 0; return n")
+                .unwrap()
+        };
+
+        let lit = |app: &App| -> Vec<bool> {
+            let script = app.world().non_send::<UiScript>();
+            (1..=3)
+                .map(|n| {
+                    script
+                        .eval::<bool>(&format!("return (IsUsableAction({n})) and true or false"))
+                        .unwrap()
+                })
+                .collect()
+        };
+
+        app.update();
+        assert_eq!(
+            lit(&app),
+            [true, true, true],
+            "in control, the whole bar is lit"
+        );
+        events(&mut app); // the first push's own signal
+
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .own_control_lost = true;
+        app.update();
+        assert_eq!(
+            lit(&app),
+            [false, true, false],
+            "only the fear immunity stays lit"
+        );
+        assert_eq!(events(&mut app), 1, "the cache change signals the bar once");
+
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .own_control_lost = false;
+        app.update();
+        assert_eq!(lit(&app), [true, true, true], "control back, all lit again");
+        assert_eq!(events(&mut app), 1);
+    }
+
+    /// A held action (Stealth) reaches the VM as the held marker, and `GetActionCooldown` answers
+    /// the poll's own now (`0x6e1517`) with no feed change between polls.
+    #[test]
+    fn a_held_action_polls_answer_their_own_now() {
+        use benilla_protocol::messages::ActionButton;
+        use benilla_protocol::ObjectFields;
+
+        const STEALTH: u32 = 1784;
+        let stealth = || SpellDisplay {
+            attributes: 0x0200_0000,
+            recovery_ms: 10_000,
+            ..Default::default()
+        };
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut actions = PlayerActions::default();
+        actions.buttons.insert(
+            0,
+            ActionButton {
+                slot: 0,
+                action: STEALTH,
+                kind: ACTION_KIND_SPELL,
+            },
+        );
+        app.insert_resource(actions)
+            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+            .insert_resource(Spells {
+                catalog: benilla_formats::SpellCatalog::from_displays(
+                    [(STEALTH, stealth())].into_iter().collect(),
+                ),
+                ..Spells::empty_for_tests()
+            })
+            .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell::SpellModifiers>()
+            .init_resource::<crate::ui_script::UiClock>()
+            .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::spell::PendingCast>()
+            .init_resource::<crate::spell::QueuedMeleeSpell>()
+            .init_resource::<crate::spell::ActiveChannel>()
+            .init_resource::<crate::spell::SpellTargeting>()
+            .init_resource::<crate::spell::HeldForPick>()
+            .init_resource::<Selection>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx));
+        app.world_mut().spawn((
+            SelfPlayer,
+            Transform::default(),
+            ObjectStore(ObjectFields::from_pairs(&[(22, 100), (23, 500)])),
+        ));
+        app.world_mut().resource_mut::<Cooldowns>().start_spell(
+            STEALTH,
+            &stealth(),
+            0,
+            Instant::now(),
+            None,
+        );
+        app.insert_non_send(UiScript::new().unwrap());
+        app.add_systems(Update, feed_action_state);
+
+        let read = |app: &App| {
+            let script = app.world().non_send::<UiScript>();
+            let (start, duration, enable) = script
+                .eval::<(f64, f64, i64)>("return GetActionCooldown(1)")
+                .unwrap();
+            (start, duration, enable, script.now())
+        };
+        app.update();
+        let first = read(&app);
+        assert_eq!((first.1, first.2), (0.001, 0), "(now, 0.001, 0)");
+        assert_eq!(first.0, first.3);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.02);
+        let second = read(&app);
+        assert_eq!(second.0, second.3, "the poll answers its own now");
+        assert!((second.0 - first.0 - 0.02).abs() < 1e-9, "20 ms apart");
     }
 }

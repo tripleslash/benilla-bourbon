@@ -22,7 +22,7 @@ use crate::net::{
 use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_script::{gate, SweepApp, UiInput};
 
-mod control_gate;
+pub(crate) mod control_gate;
 mod held;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
@@ -142,7 +142,7 @@ impl Plugin for UiUnitPlugin {
                 // After every snapshot above is pushed, so a handler reads the new reaction.
                 fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
                 held::feed_name_candidates,
-                feed_player_control,
+                feed_player_control.after(crate::player::ControlRestore),
                 // After the control edge, whose flag the exemption is asked for.
                 control_gate::feed_control_bypass,
                 feed_farsight_focus,

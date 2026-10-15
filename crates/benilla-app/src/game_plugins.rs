@@ -1234,6 +1234,67 @@ pub(crate) mod schedule_tests {
     /// reason.
     const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
 
+    /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
+    /// built client and ordered: after the self create it answers, before the controller and the
+    /// readers of the flags it clears. A lost `add_systems` line, or a lost `.after`, fails here.
+    #[test]
+    fn the_control_restore_runs_after_the_create_and_before_its_readers() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let reach = |start: SystemKey| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![start];
+            while let Some(n) = stack.pop() {
+                for m in succ.get(&n).into_iter().flatten() {
+                    if seen.insert(*m) {
+                        stack.push(*m);
+                    }
+                }
+            }
+            seen
+        };
+        let restore = one("::wire_in::regain_control_on_arrival");
+        let create = one("::net::apply::enter_world_on_self_create");
+        assert!(
+            reach(create).contains(&restore),
+            "the restore runs after the self create"
+        );
+        let after_restore = reach(restore);
+        for reader in [
+            "::player::controller::control",
+            "::ui_unit::feed_player_control",
+            "::ui_action::state::feed_action_state",
+            "::ui_shapeshift::feed_shapeshift_bar",
+            "::player::camera_saved::load_camera_pose",
+            "::tutorial::watch_self",
+            "::ui_trade::answer_trade_request",
+            "::poi_marker::expire_marker",
+            "::char_select::debug_logout_smoke",
+        ] {
+            assert!(
+                after_restore.contains(&one(reader)),
+                "`{reader}` runs after the control restore"
+            );
+        }
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
