@@ -88,6 +88,8 @@ const VERDICTS: &[(&str, Verdict)] = &[
     // The event loop's pacing, set once for a background run; neither reads the player.
     ("WinitSettings", Plumbing),
     ("UpdateMode", Plumbing),
+    // The runner's hook behind a held frame's present (`fsr::cadence`): a frame step, no input.
+    ("AfterUpdate", Plumbing),
     ("InputSystems", Plumbing),
     ("Key", Plumbing),
     ("KeyCode", Plumbing),
