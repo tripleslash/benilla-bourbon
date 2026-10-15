@@ -366,7 +366,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `iconIndex` is an index into the chooser list. An empty name raises (`0x84cbb4`, tested on
     // the first byte, so a blank one is a name), and so does a full tab (`0x84cbdc`); a made macro
     // answers exactly its new 1-based index (`0x4f16ce`). Not modelled: the script-context gate
-    // `0x494a50(7)` ahead of the body, which has no taint to read here.
+    // `0x494a50(7)` ahead of the body, which has no taint to read here. A Turtle WoW VM also takes
+    // the icon as a texture name, which its `MacroPopupOkayButton_OnClick` passes
+    // (`MACRO_ICON_FILENAMES[selectedIcon]`, e.g. `INV_MISC_QUESTIONMARK`).
     g.set(
         "CreateMacro",
         lua.create_function(|lua, args: MultiValue| {
@@ -381,14 +383,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 a.first().cloned().unwrap_or(Value::Nil),
                 "Usage: CreateMacro(name, iconIndex, body, local, perCharacter)",
             )?;
-            let icon = lua
-                .coerce_number(a.get(1).cloned().unwrap_or(Value::Nil))?
-                .ok_or_else(usage)?;
+            let icon_arg = a.get(1).cloned().unwrap_or(Value::Nil);
+            let icon = lua.coerce_number(icon_arg.clone())?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // `trunc(n) - 1` against the chooser list, unsigned (`0x4f1632`, `0x4f163c`).
-            let texture = usize::try_from(super::binding_abi::ftol(icon).wrapping_sub(1))
-                .ok()
-                .and_then(|i| model.macro_icons.get(i).cloned());
+            let texture = match icon {
+                // `trunc(n) - 1` against the chooser list, unsigned (`0x4f1632`, `0x4f163c`).
+                Some(n) => usize::try_from(super::binding_abi::ftol(n).wrapping_sub(1))
+                    .ok()
+                    .and_then(|i| model.macro_icons.get(i).cloned()),
+                None => match &icon_arg {
+                    Value::String(s) if model.flavor == super::UiFlavor::Turtle => {
+                        Some(named_icon(&s.to_string_lossy()))
+                    }
+                    _ => return Err(usage()),
+                },
+            };
             let body = a
                 .get(2)
                 .and_then(|v| super::binding_abi::optional_string(lua, v))
@@ -444,10 +453,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Resolve a chooser-list index to its texture path; a string is taken as a path already.
+/// An icon given by texture name (Turtle's `MACRO_ICON_FILENAMES`) to its path in the icons
+/// folder, as the macro file's icon token reads; a name with a path separator is taken whole.
+fn named_icon(name: &str) -> String {
+    if name.contains(['\\', '/']) {
+        name.to_string()
+    } else {
+        format!("Interface\\Icons\\{name}")
+    }
+}
+
+/// Resolve a chooser-list index to its texture path; a string is a path or an icon name.
 fn icon_path(model: &Model, v: Option<&Value>) -> Option<String> {
     match v {
-        Some(Value::String(s)) => Some(s.to_string_lossy()),
+        Some(Value::String(s)) => Some(named_icon(&s.to_string_lossy())),
         Some(v) => {
             let i = v.as_integer()?;
             let i = usize::try_from(i).ok()?.checked_sub(1)?;
@@ -562,6 +581,41 @@ mod tests {
             ),
             "a body save touches neither the name nor the icon"
         );
+    }
+
+    #[test]
+    fn a_turtle_vm_takes_the_icon_by_texture_name() {
+        let mut s = seeded();
+        s.set_flavor(crate::script::UiFlavor::Turtle);
+        // Turtle's `MacroPopupOkayButton_OnClick` call, on the character tab.
+        let index = s
+            .eval::<i64>(r#"return CreateMacro("Bop", "INV_MISC_QUESTIONMARK", nil, nil, true)"#)
+            .unwrap();
+        assert_eq!(index, 19);
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(19) return t")
+                .unwrap(),
+            "Interface\\Icons\\INV_MISC_QUESTIONMARK"
+        );
+        // Its rename popup passes the name to `EditMacro` too.
+        s.run(r#"EditMacro(19, "Bop", "SPELL_HOLY_SEALOFPROTECTION")"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(19) return t")
+                .unwrap(),
+            "Interface\\Icons\\SPELL_HOLY_SEALOFPROTECTION"
+        );
+        // The chooser index still works, and a missing icon still raises.
+        assert_eq!(
+            s.eval::<i64>(r#"return CreateMacro("Two", 2, "")"#)
+                .unwrap(),
+            1
+        );
+        assert!(s
+            .run("CreateMacro('a', nil, 'b')")
+            .expect_err("nil icon")
+            .to_string()
+            .contains("Usage: CreateMacro"));
     }
 
     #[test]
