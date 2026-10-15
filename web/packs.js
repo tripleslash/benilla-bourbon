@@ -285,10 +285,18 @@ const packs = {
   ///
   /// The lane it serves is the ~60 blocking `Chain::read` sites (`benilla_formats::web`), which are
   /// boot's and which cannot await. Rust keeps its own slower fallback for a page without this.
+  ///
+  /// `x-user-defined` gives 0x00-0x7F and U+F780-U+F7FF only. Any other unit means the body began
+  /// with a UTF-8 BOM, which the decode's BOM sniff obeys over the charset: the string is the BOM's
+  /// UTF-8 text, so the bytes are the BOM and that text re-encoded (`Credits.html`, `eula.html`).
   unpackBinary(s) {
     const n = s.length;
     const a = new Uint8Array(n);
-    for (let i = 0; i < n; i++) a[i] = s.charCodeAt(i) & 0xff;
+    for (let i = 0; i < n; i++) {
+      const c = s.charCodeAt(i);
+      if (c > 0x7f && (c < 0xf780 || c > 0xf7ff)) return new TextEncoder().encode('﻿' + s);
+      a[i] = c & 0xff;
+    }
     return a;
   },
 

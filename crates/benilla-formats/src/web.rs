@@ -568,7 +568,9 @@ mod wasm {
     /// standard workaround, used below, is `override_mime_type("text/plain; charset=x-user-defined")`:
     /// it forces the browser to decode the response body as one code unit (0x00-0xFF) per byte
     /// instead of guessing UTF-8 and mangling anything non-ASCII into U+FFFD, so the response
-    /// round-trips arbitrary binary losslessly through `& 0xFF`.
+    /// round-trips arbitrary binary losslessly through `& 0xFF`, except a body that opens with a
+    /// UTF-8 BOM: the decode's BOM sniff reads it as UTF-8 over the charset, and
+    /// [`binary_string_bytes`] re-encodes it.
     ///
     /// The unpacking of that binary string happens in JS ([`binary_string_bytes`]), not here. What
     /// still reaches this function is boot and the character-skin composite — the reads that did not
@@ -641,12 +643,12 @@ mod wasm {
                 .map(|a| a.to_vec())
         });
         unpacked.unwrap_or_else(|| {
-            value
-                .as_string()
-                .unwrap_or_default()
-                .chars()
-                .map(|c| (c as u32 & 0xff) as u8)
-                .collect()
+            let s = value.as_string().unwrap_or_default();
+            // A BOM-sniffed UTF-8 body, as `unpackBinary` reads it: the BOM and the text.
+            if s.chars().any(|c| c > '\u{7f}' && !('\u{f780}'..='\u{f7ff}').contains(&c)) {
+                return ["\u{feff}", &s].concat().into_bytes();
+            }
+            s.chars().map(|c| (c as u32 & 0xff) as u8).collect()
         })
     }
 
