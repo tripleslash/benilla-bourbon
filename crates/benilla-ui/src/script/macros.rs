@@ -313,6 +313,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let texture = match &m.texture {
                 Some(t) => Value::String(lua.create_string(t)?),
+                // Turtle's `MacroFrame_Update` runs `strupper` on it unguarded; its chooser's
+                // first icon, the question mark, stands in.
+                None if model.flavor == super::UiFlavor::Turtle => {
+                    Value::String(lua.create_string(TURTLE_NO_ICON)?)
+                }
                 None => Value::Nil,
             };
             Ok(MultiValue::from_vec(vec![
@@ -452,6 +457,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     Ok(())
 }
+
+/// The icon a Turtle WoW VM reports for a macro without one.
+const TURTLE_NO_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 
 /// An icon given by texture name (Turtle's `MACRO_ICON_FILENAMES`) to its path in the icons
 /// folder, as the macro file's icon token reads; a name with a path separator is taken whole.
@@ -616,6 +624,19 @@ mod tests {
             .expect_err("nil icon")
             .to_string()
             .contains("Usage: CreateMacro"));
+        // An index past the chooser leaves no icon: Turtle answers the question mark, which its
+        // `MacroFrame_Update` can `strupper`, where 1.12.1 answers nil.
+        s.run(r#"CreateMacro("Bare", 99, "")"#).unwrap();
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(2) return t")
+                .unwrap(),
+            TURTLE_NO_ICON
+        );
+        let vanilla = seeded();
+        vanilla.run(r#"CreateMacro("Bare", 99, "")"#).unwrap();
+        assert!(vanilla
+            .eval::<bool>("local _, t = GetMacroInfo(1) return t == nil")
+            .unwrap());
     }
 
     #[test]
