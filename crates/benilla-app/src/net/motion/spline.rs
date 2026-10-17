@@ -497,10 +497,15 @@ pub(in crate::net) fn ground_clamp_creatures(
             // [`ground_derived`]'s other Z authorities: the controller and the relay's dead-reckoning.
             Has<crate::net::Embodied>,
             Has<crate::net::RemoteMotion>,
+            // The draw election's verdict: a hidden body casts on its stride turn only
+            // (`remote::HIDDEN_STRIDE`); its Y holds the seat in between, which nothing draws.
+            Option<&Visibility>,
         ),
         Without<crate::entities::mount::MountBody>,
     >,
+    mut frame: Local<u32>,
 ) {
+    *frame = frame.wrapping_add(1);
     let cost = clamp_cost_enabled();
     let legacy = clamp_seat_disabled();
     let t0 = cost.then(bevy::platform::time::Instant::now);
@@ -515,8 +520,15 @@ pub(in crate::net) fn ground_clamp_creatures(
     // (`armed`); a nonzero steady-state `armed` means the collider set is churning.
     let (mut reseat, mut armed) = (0u32, 0u32);
 
-    for (entity, net, spline, mut t, mut clamped, swimming, modes, embodied, relayed) in &mut q {
+    for (entity, net, spline, mut t, mut clamped, swimming, modes, embodied, relayed, vis) in &mut q
+    {
         visited += 1;
+        if vis.is_some_and(|v| *v == Visibility::Hidden)
+            && !super::remote::hidden_turn(entity, *frame)
+        {
+            skipped += 1;
+            continue;
+        }
         if !ground_derived(
             net.kind,
             spline.is_some(),
