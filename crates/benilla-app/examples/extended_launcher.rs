@@ -33,8 +33,7 @@
 //! # `alsa-sys` and does not resolve.
 //! [patch.crates-io]
 //! kira = { git = "https://github.com/samwhosung/benilla" }
-//! # fork: the browser build's patches (threads, wasm32 atomics, `lua_Integer`), from this fork.
-//! mlua-sys = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! # fork: the browser build's patches (threads, wasm32 atomics), from this fork.
 //! bevy_tasks = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! bevy_ecs = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! async-executor = { git = "https://github.com/tripleslash/benilla-bourbon" }

@@ -621,6 +621,9 @@ fn drive_loading_screen(
         mut transport_legs,
     ) = edges;
     let (progress, focus) = (&stream.0, &stream.1);
+    // The focus is read by the page's backstop alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = focus;
     let now = time.elapsed_secs();
     let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal, so the body's world is live first.
@@ -723,10 +726,13 @@ fn drive_loading_screen(
         screen.dismiss();
     }
 
-    // --- Backstop: the ground under the focus is not resident and nothing raised us. In world
-    // only, since behind the glue nothing loads; only while the focus is the body, since in a
-    // cinematic or free-fly residency describes the camera's tile; and never while a same-map
-    // teleport's settle hold is up. ---
+    // --- Backstop, on the page alone: the ground under the focus is not resident and nothing
+    // raised us. Native waits for the inner window's reads in the frame and raises no screen
+    // (`0x6985d0`). Deviation: the page cannot block its one thread on a fetch, so there the
+    // stream cannot wait and the cover stands in. In world only, since behind the glue nothing
+    // loads; only while the focus is the body, since in a cinematic or free-fly residency
+    // describes the camera's tile; and never while a same-map teleport's settle hold is up. ---
+    #[cfg(target_arch = "wasm32")]
     if !screen.active
         && !progress.focus_resident
         && focus.follows_body()
@@ -1237,15 +1243,26 @@ mod tests {
         }
     }
 
+    /// A live body outrunning the stream (GM speed ×100) stands on unloaded ground with no hold:
+    /// the reference's tile pass waits for the read in the frame and calls no raise (`0x6985d0`),
+    /// so the frame hitches and no screen comes up.
     #[test]
-    fn unloaded_ground_under_a_body_no_snap_holds_is_covered() {
+    fn outrunning_the_stream_raises_no_screen() {
         let mut app = in_world(GM_ISLAND);
         land_unloaded(&mut app, SOUTH_SEAS);
         app.world_mut()
             .resource_mut::<crate::player::Player>()
             .settling = false;
-        app.update();
-        assert!(covering(&app));
+        app.insert_resource(benilla_world::terrain_stream::ViewFocus::body(
+            SOUTH_SEAS, true,
+        ));
+        for _ in 0..30 {
+            app.update();
+            assert!(
+                !covering(&app),
+                "the ground under a live body is not a load"
+            );
+        }
     }
 
     #[test]

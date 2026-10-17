@@ -564,12 +564,12 @@ pub(crate) mod schedule_tests {
                 let graph = schedule.graph();
                 let mut out = Vec::new();
                 for (key, system, conds) in graph.systems.iter() {
-                    // A write by name, not one of 0.19's whole-entity accesses (bevy's
-                    // `animate_targets` writes every component of what it animates), which
-                    // names no resource in particular.
+                    // A write by name, not one of 0.19's inverted ones (bevy's `animate_targets`
+                    // writes every component but a few, an `EntityMutExcept`), which names no
+                    // resource in particular: `try_writes` refuses an inverted set.
                     let writes = accesses.get(&key).is_some_and(|a| {
                         let c = a.combined_access();
-                        c.has_write(id) && !c.has_write_all_components() && !c.has_write_all()
+                        c.has_write(id) && c.try_writes().is_ok()
                     });
                     if !writes {
                         continue;
@@ -884,7 +884,13 @@ pub(crate) mod schedule_tests {
     ///   `PlayerActions`, so a book change seen a frame late is pushed the next;
     /// - the item gate's control-bypass feed (`ui_unit::control_gate::feed_control_bypass`)
     ///   against `player::camera_saved::load_camera_pose` over `Player`: the feed reads
-    ///   `own_control_lost` only, and the loader writes the saved camera pose.
+    ///   `own_control_lost` only, and the loader writes the saved camera pose;
+    /// - the terrain stream's spawn half (`terrain_stream::spawn_streamed_tiles`) against the
+    ///   readers of `TerrainStreamer`, `Placements` and the asset stores its request half
+    ///   (`stream_terrain`) already pairs with: the inner-window wait sits between the two, so a
+    ///   pair the one system carried now counts on both; and `attach_inner_colliders` against the
+    ///   other users of `PendingCollider`, `StreamActivity` and `TerrainStreamer`: it attaches
+    ///   only the held inner tiles' terrain builds, and the others never touch those.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -936,7 +942,11 @@ pub(crate) mod schedule_tests {
     ///
     /// The merges of upstream 560d7ff6 and f55bb79b (benilla-lua, the stock glue alone, the glue
     /// session, field-watch unit events) measure 3,644: the native glue screens' systems left.
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_644;
+    ///
+    /// Upstream's inner-window wait (8731395bd, #1824) moved its ceiling 3,346 -> 3,367 (+21):
+    /// the stream's request and spawn halves split around the wait; the merge of cff056c3
+    /// measures 3,667 (+23).
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_667;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
