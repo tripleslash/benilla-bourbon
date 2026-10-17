@@ -27,7 +27,7 @@ use benilla_formats::{
 use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
-use crate::net::Guid;
+use crate::net::{Guid, ObjectStore};
 use benilla_assets::DataLoadAppExt;
 use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::ride_frame::RideFrame;
@@ -286,7 +286,7 @@ fn arm_transports(
     net: Res<crate::net::NetCommands>,
     // A re-created lift is already armed but carries a fresh seed, so it re-enters to consume it.
     pending: Query<
-        (Entity, &Guid, Option<&ElevatorSeed>),
+        (Entity, &Guid, Option<&ElevatorSeed>, Option<&ObjectStore>),
         (
             With<TransportAnchor>,
             Or<(Without<Transport>, With<ElevatorSeed>)>,
@@ -296,7 +296,7 @@ fn arm_transports(
     if pending.is_empty() {
         return;
     }
-    for (entity, guid, seed) in &pending {
+    for (entity, guid, seed, store) in &pending {
         // The lift arm.
         if let Some(seed) = seed {
             let Timetables {
@@ -355,9 +355,12 @@ fn arm_transports(
         }
 
         // The boat arm.
-        let Some(template) = templates.get(guid.0) else {
+        let Some(store) = store else {
+            continue; // no descriptor yet: next frame
+        };
+        let Some(template) = templates.of(&store.0) else {
             // Not in yet, or evicted by a server invalidate after the spawn asked: ask (once).
-            templates.request(guid.0, &net);
+            templates.request(guid.0, &store.0, &net);
             continue;
         };
         let Some(mo) = template.mo_transport else {

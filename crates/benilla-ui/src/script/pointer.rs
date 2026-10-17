@@ -16,7 +16,7 @@ use crate::order;
 use crate::widget::{ButtonState, FrameHandle};
 
 use super::clip::{hit_clip, hit_rect};
-use super::{button, cursor, editbox, event, Model, UiScript};
+use super::{button, cursor, editbox, event, protected, Model, UiScript};
 
 /// The double-click interval, 300 ms, a constant in the Button mouse-up dispatcher `0x7792d0`
 /// (`0x77937b cmp ecx, 0x12c` on the `0x42c010` millisecond clock). It is not the OS double-click
@@ -141,19 +141,6 @@ impl UiScript {
             hit
         });
         (hit, minimap_missed.get())
-    }
-
-    /// [`Self::hit_test`] over the frames that take the wheel: the same rect and clip rules, gated
-    /// on the wheel flag alone.
-    fn hit_test_wheel(&self, x: f32, y: f32) -> Option<u32> {
-        let model = self.model_ref();
-        let sorted = order::pick_order(&model.arena);
-        let fh = order::hit_test(&sorted, |fh| {
-            // The wheel flag alone: the wheel index is separate from the mouse's, so the wheel
-            // passes a frame that only takes the mouse, as a scroll pane's chrome does.
-            model.arena.is_mouse_wheel_enabled(fh) && frame_contains(&model, fh, x, y)
-        })?;
-        model.frame_to_id.get(&fh).copied()
     }
 
     /// [`Self::hit_test_frame`] as a frame id, the id the app and the Lua bindings use.
@@ -605,7 +592,9 @@ impl UiScript {
         }
         if let Some(id) = click_id {
             // Shared with `Click()`: gated on the Button being enabled; a CheckButton toggles
-            // before `OnClick` fires.
+            // before `OnClick` fires. The mouse raises the gate's click flag around the slot
+            // (`0x779275`-`0x77928b`); `Click()` does not.
+            let _click = protected::raise(&self.lua, protected::Event::Click);
             button::click_button(&self.lua, id, button, down, false);
         }
         // The press art last (`0x7792b1` follows the Down click `0x779285`): `OnMouseDown`
@@ -665,6 +654,8 @@ impl UiScript {
         };
         let id = self.model_ref().frame_to_id.get(&h).copied();
         if let (true, Some(id)) = (click, id) {
+            // The release raises the click flag around slot `+0x98` or `+0x94` (`0x779352`-`0x7793b8`).
+            let _click = protected::raise(&self.lua, protected::Event::Click);
             if double {
                 if let Err(e) =
                     event::fire_widget_handler(&self.lua, id, "OnDoubleClick", vec![btn.clone()])
@@ -708,49 +699,12 @@ impl UiScript {
             }
         }
     }
-
-    /// A wheel spin at `(x, y)`: fires `OnMouseWheel(self, delta)` on the hit frame, or on its
-    /// nearest ancestor with the script when it has none; the reference instead lets its wheel
-    /// sweep continue past a frame with no script (`0x76c180`). `delta` passes through as given;
-    /// the reference passes only its sign, `+1` or `-1` (`0x76c1a2`).
-    pub fn mouse_wheel(&mut self, x: f32, y: f32, delta: f32) {
-        let target: Option<u32> = {
-            // The wheel flag, not the mouse bit: the reference's wheel dispatcher `0x7664f0` walks
-            // its own index and ignores hover, capture and `EnableMouse`.
-            let hit = self.hit_test_wheel(x, y);
-            let model = self.model_ref();
-            hit.and_then(|id| {
-                let mut h = *model.id_to_frame.get(&id)?;
-                loop {
-                    if model
-                        .scripts
-                        .get(&h)
-                        .is_some_and(|s| s.contains("OnMouseWheel"))
-                    {
-                        // A frame carrying a handler was registered through Lua, so it has an id.
-                        return model.frame_to_id.get(&h).copied();
-                    }
-                    h = model.arena.frame(h)?.parent?;
-                }
-            })
-        };
-        if let Some(id) = target {
-            if let Err(e) = event::fire_widget_handler(
-                &self.lua,
-                id,
-                "OnMouseWheel",
-                vec![Value::Number(f64::from(delta))],
-            ) {
-                self.push_error(e);
-            }
-        }
-    }
 }
 
 /// The probe `0x76b020` alone: whether `(x, y)` is inside the frame's hit rect and, in a scroll
 /// child's subtree, its [`hit_clip`], whatever its mouse bit. The Button click legs test it
 /// against the capture (`0x77925c`, `0x779335`).
-fn frame_contains(model: &Model, fh: FrameHandle, x: f32, y: f32) -> bool {
+pub(super) fn frame_contains(model: &Model, fh: FrameHandle, x: f32, y: f32) -> bool {
     let Some(clip) = hit_clip(model, fh) else {
         return false;
     };

@@ -766,27 +766,33 @@ fn rebuild_ui_mesh(
     // `Removed`, not `Unused`: this cache is itself a strong handle, so `Unused` never fires for a
     // cached image, and a producer retiring an image removes the asset explicitly.
     let mut retired: Vec<AssetId<Image>> = Vec::new();
-    let mut resized: Vec<AssetId<Image>> = Vec::new();
+    let mut replaced: Vec<AssetId<Image>> = Vec::new();
     for e in stores.2.read() {
         match e {
             AssetEvent::Removed { id } => retired.push(*id),
-            AssetEvent::Modified { id } => resized.push(*id),
+            AssetEvent::Modified { id } => replaced.push(*id),
             _ => {}
         }
     }
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
     }
-    // A modified image may stand on a new GPU texture (a booth's render target resized with the
-    // window), while a prepared material's bind group still holds the old one's view: the pane
-    // would show its last frame for good. Touching the material re-prepares its bind group;
-    // `into_inner`, as an `AssetMut` dropped without a mutable borrow emits no `Modified`.
-    if !resized.is_empty() {
-        for (key, handle) in &pools.materials {
-            if !resized.contains(&key.0) {
-                continue;
-            }
-            if let Some(material) = stores.1.get_mut(handle) {
+    // A modified image is re-prepared into a new GPU texture, and a prepared material's bind group
+    // keeps sampling the old one: mark each material over it modified, so it is re-prepared too.
+    // The image's event reaches this read a frame after its own re-preparation was extracted, so
+    // the new texture is in place when the material's turn comes. `into_inner`, as an `AssetMut`
+    // dropped without a mutable borrow emits no `Modified`.
+    if !replaced.is_empty() {
+        let over: Vec<AssetId<UiQuadMaterial>> = pools
+            .materials
+            .iter()
+            .filter(|(key, _)| {
+                replaced.contains(&key.0) || key.7.is_some_and(|m| replaced.contains(&m))
+            })
+            .map(|(_, handle)| handle.id())
+            .collect();
+        for id in over {
+            if let Some(material) = stores.1.get_mut(id) {
                 material.into_inner();
             }
         }
@@ -1299,61 +1305,90 @@ mod tests {
         );
     }
 
-    /// A resized booth target stands on a new GPU texture: its material must be marked modified,
-    /// or its prepared bind group keeps sampling the old one (the glue scene frozen on a resize).
+    /// A resized render target (the glue scene's, on a world round trip or a window resize) is a
+    /// new GPU texture: a material bound to the old one would show its last frame, frozen, for as
+    /// long as the cache keeps it. The material over the image is marked modified, and only it.
     #[test]
-    fn a_modified_image_re_prepares_its_material() {
+    fn a_modified_image_re_prepares_the_materials_over_it() {
         let mut app = rebuild_app();
-        let target = app
-            .world_mut()
-            .resource_mut::<Assets<Image>>()
-            .add(crate::portrait::new_target_image_sized(4, 4));
+        let new_image = |px: u8| {
+            Image::new_fill(
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                &[px; 4],
+                TextureFormat::Rgba8Unorm,
+                RenderAssetUsages::default(),
+            )
+        };
+        let (target, other) = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            (images.add(new_image(0)), images.add(new_image(255)))
+        };
         {
             let mut q = app.world_mut().resource_mut::<UiQuads>();
-            q.quads.push(UiQuad {
-                rect: Rect::new(0.0, 0.0, 32.0, 32.0),
-                texture: Some(target.clone()),
-                ..default()
-            });
+            for (texture, x) in [(&target, 0.0), (&other, 40.0)] {
+                q.quads.push(UiQuad {
+                    rect: Rect::new(x, 0.0, x + 32.0, 32.0),
+                    texture: Some(texture.clone()),
+                    ..default()
+                });
+            }
             q.dirty = true;
         }
         app.update();
+        let material_of = |app: &App, image: AssetId<Image>| {
+            app.world()
+                .resource::<Assets<UiQuadMaterial>>()
+                .iter()
+                .find(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == image))
+                .map(|(id, _)| id)
+                .expect("the quad's material")
+        };
+        let (on_target, on_other) = (
+            material_of(&app, target.id()),
+            material_of(&app, other.id()),
+        );
+        let mut cursor = bevy::ecs::message::MessageCursor::<AssetEvent<UiQuadMaterial>>::default();
+        let mut modified = |app: &App| {
+            cursor
+                .read(
+                    app.world()
+                        .resource::<Messages<AssetEvent<UiQuadMaterial>>>(),
+                )
+                .filter_map(|e| match e {
+                    AssetEvent::Modified { id } => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         app.update();
-        let material = app
-            .world()
-            .resource::<Assets<UiQuadMaterial>>()
-            .iter()
-            .find(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == target.id()))
-            .map(|(id, _)| id)
-            .expect("the textured quad must have produced a material naming the target");
-        let mut cursor = app
-            .world()
-            .resource::<bevy::ecs::message::Messages<AssetEvent<UiQuadMaterial>>>()
-            .get_cursor_current();
+        assert!(modified(&app).is_empty(), "nothing changed yet");
 
-        if let Some(mut image) = app
-            .world_mut()
+        // The resize, as `resize_target` makes it; the quads stay as they were.
+        app.world_mut()
             .resource_mut::<Assets<Image>>()
             .get_mut(&target)
-        {
-            image.resize(Extent3d {
-                width: 8,
-                height: 8,
+            .expect("the target")
+            .resize(Extent3d {
+                width: 2,
+                height: 2,
                 depth_or_array_layers: 1,
             });
+        for _ in 0..3 {
+            app.update();
         }
-        // `Modified` is written in `PostUpdate` and read by the rebuild the next `Update`, whose
-        // touch is written in that frame's `PostUpdate`.
-        app.update();
-        app.update();
-
-        let events = app
-            .world()
-            .resource::<bevy::ecs::message::Messages<AssetEvent<UiQuadMaterial>>>();
+        let got = modified(&app);
         assert!(
-            cursor.read(events).any(|e| e.is_modified(material)),
-            "the material sampling a resized image must be marked modified, so its bind group \
-             is re-prepared against the new GPU texture"
+            got.contains(&on_target),
+            "the material over the resized image must be re-prepared: {got:?}"
+        );
+        assert!(
+            !got.contains(&on_other),
+            "a material over another image is left alone"
         );
     }
 

@@ -516,6 +516,22 @@ impl Loader<'_> {
         out
     }
 
+    /// The `file=` loads of a texture region, in the order the reference runs them
+    /// (`0x76fe20`): each `inherits` level's own file with the wrap flag of that level's own
+    /// `<TexCoords>` (the flag is a local of the level's load, zeroed before its children,
+    /// `0x76fec6`), the template first. A level without a `file=` loads nothing.
+    pub(super) fn texture_file_loads(&self, raw: &Element) -> Vec<(String, bool)> {
+        let model = self.model();
+        let templates = model.framexml_templates.borrow();
+        framexml::inherit_chain(raw, &*templates)
+            .into_iter()
+            .filter_map(|level| {
+                let file = level.attr("file").filter(|f| !f.is_empty())?;
+                Some((file.to_string(), tex_coords_wrap(level)))
+            })
+            .collect()
+    }
+
     /// [`Loader::expand`] for a region, only when `inherits=` names a registered element template:
     /// a FontString's `inherits=` usually names a font object, which passes through unwarned.
     pub(super) fn expand_region(&mut self, el: &Element) -> Element {
@@ -902,6 +918,27 @@ pub(super) fn tex_coords_of(el: &Element) -> Option<(f32, f32, f32, f32)> {
     let tc = children_named(el, "TexCoords").next()?;
     let edge = |k: &str| tc.attr(k).and_then(|v| v.trim().parse::<f32>().ok());
     Some((edge("left")?, edge("right")?, edge("top")?, edge("bottom")?))
+}
+
+/// Whether an XML `<Texture>` loads its file with the wrap flag on: some `<TexCoords>` child has
+/// an edge below 0 or above 1 (`0x76fff0`-`0x77006b` set the flag at `0x770071`, which `0x77012d`
+/// passes to `0x770200`). An edge left out or empty keeps its default 0, 1, 0, 1 (`0x76fef5`),
+/// and a NaN fails both tests.
+pub(super) fn tex_coords_wrap(el: &Element) -> bool {
+    children_named(el, "TexCoords").any(|tc| {
+        [("left", 0.0), ("right", 1.0), ("top", 0.0), ("bottom", 1.0)]
+            .into_iter()
+            .any(|(k, default)| {
+                // Not `contains`: a NaN edge is in range here.
+                #[allow(clippy::manual_range_contains)]
+                let out_of_range = |edge: f32| edge < 0.0 || edge > 1.0;
+                let edge = tc
+                    .attr(k)
+                    .filter(|v| !v.is_empty())
+                    .map_or(default, crate::framexml::atof);
+                out_of_range(edge)
+            })
+    })
 }
 
 /// A `<FontHeight>`-style scalar: its `<AbsValue val=>` child, else its own `val=`.

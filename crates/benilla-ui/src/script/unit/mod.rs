@@ -144,6 +144,9 @@ pub struct UnitState {
     /// race's. `UnitCreatureType` answers it, and a creature's level line takes it as its class
     /// slot; a player's reads race and class instead. `None` for type 0 or no descriptor.
     pub creature_type_name: Option<String>,
+    /// The id that resolver returned, 0 for none. The tooltip's level line leaves the word out for
+    /// type 10, "Not specified" (`0x52a2c6`), where `UnitCreatureType` answers it.
+    pub creature_type: u32,
     /// Creature rank 0..=4 as the reference's getter (`0x605620`) answers it, so already gated:
     /// 0 without a cached creature template or with a pet number. The tooltip's rank word,
     /// `UnitLevel`'s boss -1 and `UnitClassification` all read it.
@@ -434,7 +437,7 @@ impl super::UiScript {
     /// Take the queued [`SelectionRequest`]s out of the call stream, in call order.
     pub fn take_selection_requests(&mut self) -> Vec<SelectionRequest> {
         self.take_calls_where(|c| match c {
-            ScriptCall::Select(r) => Some(r.clone()),
+            ScriptCall::Select { request, .. } => Some(request.clone()),
             _ => None,
         })
     }
@@ -444,7 +447,7 @@ impl super::UiScript {
     /// `SetSelection`.
     pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::TargetNearest { mode, reverse } => Some((*mode, *reverse)),
+            ScriptCall::TargetNearest { mode, reverse, .. } => Some((*mode, *reverse)),
             _ => None,
         })
     }
@@ -452,7 +455,7 @@ impl super::UiScript {
     /// Take the `TargetByName(name, exactMatch)` calls out of the call stream.
     pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::TargetByName { name, exact } => Some((name.clone(), *exact)),
+            ScriptCall::TargetByName { name, exact, .. } => Some((name.clone(), *exact)),
             _ => None,
         })
     }

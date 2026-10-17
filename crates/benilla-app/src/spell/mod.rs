@@ -27,7 +27,9 @@ pub(crate) mod validator;
 
 // The one cast path: every caster takes [`CastLadder`] and commits through [`CastCommit`];
 // `send_spell_cast` is private to `cast_send`, so no second send path can exist.
-pub(crate) use cast_send::{CastCommit, CastLadder, HeldCast, HeldForPick, TargetedBind};
+pub(crate) use cast_send::{
+    CastCommit, CastLadder, HeldCast, HeldForPick, ScriptCastPermit, TargetedBind,
+};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
@@ -40,7 +42,8 @@ pub(crate) use mods::{OP_COOLDOWN, OP_RANGE};
 pub(crate) use range_units::{RangeUnits, DEFAULT_REACH};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
 pub(crate) use targeting::{
-    ground_cast_radius, CorpsePick, PicksSelf, ScriptCursor, SpellTargeting, TargetingWants,
+    ground_cast_radius, CorpsePick, CursorPicks, PicksSelf, ScriptCursor, SpellTargeting,
+    TargetingWants,
 };
 
 /// A script cast's inputs, the cast tail the action bar uses, for the spellbook's and the stance
@@ -70,6 +73,8 @@ impl Plugin for SpellPlugin {
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
             .init_resource::<HeldForPick>()
+            .init_resource::<ScriptCastPermit>()
+            .init_resource::<CursorPicks>()
             .init_resource::<targeting::EnchantConfirmItem>()
             .init_resource::<targeting::PicksSelf>()
             .init_resource::<targeting::CorpsePick>()

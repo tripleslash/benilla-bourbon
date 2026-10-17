@@ -9,6 +9,7 @@ use std::time::Duration;
 // has no monotonic `Instant`), and every deadline in this file is parked on it.
 use bevy::platform::time::Instant;
 
+use benilla_assets::LockRecover;
 use bevy::prelude::*;
 
 use benilla_protocol::{ItemInfo, ObjectFields};
@@ -378,6 +379,10 @@ pub(crate) struct Items {
     /// `(guid, entry)` of our items whose entry changed to one the cache missed, each waiting on
     /// the answer with the entry watcher's callback `0x5d96b0`, in request order.
     entry_waiters: Vec<(u64, u32)>,
+    /// The entry each trade getter call that missed the cache asked for, in call order: one
+    /// callback `0x4c0340` per call, with no dedupe (`0x4c017f`, `0x4c0582`). A lookup registers
+    /// it, so it is locked like the in-flight asks and registering takes `&self`.
+    trade_waiters: std::sync::Mutex<Vec<u32>>,
 }
 
 impl Items {
@@ -404,6 +409,23 @@ impl Items {
             !hit
         });
         taken
+    }
+
+    /// A trade getter missed the cache on `entry` and asked with the callback `0x4c0340`.
+    pub(crate) fn wait_for_trade_record(&self, entry: u32) {
+        self.trade_waiters.lock_recover().push(entry);
+    }
+
+    /// The answer for `entry` landed, or refused it: how many trade getter calls were waiting on
+    /// it, whose callbacks are spent either way.
+    pub(crate) fn take_trade_waiters(&mut self, entry: u32) -> usize {
+        let waiters = self
+            .trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = waiters.len();
+        waiters.retain(|&e| e != entry);
+        before - waiters.len()
     }
 
     /// The item `guid` arrived: its queued enchant updates in arrival order, unlinked (`0x5ebde0`).
@@ -451,6 +473,19 @@ impl Items {
         })
     }
 
+    /// The display id a worn `entry` draws with, asked template-only: `None` while the answer is
+    /// pending, `Some(0)` once the server refused the entry. The reference holds the model update
+    /// while `[player+0x1d20]` counts a pending ask (`0x5ec8f0`, `0x5ed771`); the refusal runs the
+    /// callback with status 0 (the item cache's response `0x555140` -> `0x55bdb0`, refusal at
+    /// `0x55bdf5`, `push 0` at `0x55be9f`, callback at `0x55bea8`), `0x5ed880` decrements without
+    /// applying a display (`0x5ed8c0`), and the player is drawn without that slot.
+    pub(crate) fn worn_display(&self, entry: u32, commands: &NetCommands) -> Option<u32> {
+        match self.held(entry, commands) {
+            Some(t) => Some(t.display_info_id),
+            None => self.template_answered_unknown(entry).then_some(0),
+        }
+    }
+
     /// [`Self::template`] without the ask: the cached record only.
     pub(crate) fn template_cached(&self, entry: u32) -> Option<&ItemInfo> {
         self.templates.get(entry)
@@ -496,6 +531,10 @@ impl Items {
     pub(crate) fn clear_session(&mut self) {
         self.pending_enchant_times.clear();
         self.entry_waiters.clear();
+        self.trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.templates.clear_pending();
     }
 
@@ -576,6 +615,14 @@ pub(crate) fn test_spawn_item(
     let e = world
         .spawn((Guid(guid), ObjectStore(fields), ItemObject { container }))
         .id();
+    world.resource_mut::<GuidIndex>().0.insert(guid, e);
+    e
+}
+
+/// Any streamed object, straight into a test world: its guid indexed and its descriptor stored.
+#[cfg(test)]
+pub(crate) fn test_spawn_object(world: &mut World, guid: u64, fields: ObjectFields) -> Entity {
+    let e = world.spawn((Guid(guid), ObjectStore(fields))).id();
     world.resource_mut::<GuidIndex>().0.insert(guid, e);
     e
 }

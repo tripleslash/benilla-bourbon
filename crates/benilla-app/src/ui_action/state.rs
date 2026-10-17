@@ -6,7 +6,7 @@
 //! `IsSpellUsableNow 0x6e3d60` ([`crate::spell::usable`]), auto-repeat the `0xceac30` key, and
 //! range the squared distance against `GetMinMaxRange 0x6e3480`.
 
-use crate::ui_items::carried_counts;
+use crate::ui_items::stack_counts;
 use std::collections::HashMap;
 // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
@@ -127,9 +127,9 @@ pub(super) fn feed_action_state(
         &cast_state;
     let me = self_q.iter().next();
     let control_lost = player.as_ref().is_some_and(|p| p.own_control_lost);
-    // The bags, walked once per frame for every reagent, totem and item count below.
-    let carried = me
-        .map(|(s, _, _, _)| carried_counts(&s.0, &objects))
+    // The bags, walked once per frame for every reagent and totem count below.
+    let stacks = me
+        .map(|(s, _, _, _)| stack_counts(&s.0, &objects))
         .unwrap_or_default();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
@@ -205,7 +205,7 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
-                        carried: &carried,
+                        stacks: &stacks,
                         spell_mods,
                         control_lost,
                     };
@@ -264,17 +264,22 @@ pub(super) fn feed_action_state(
                 let use_spell = items
                     .template(button.action, 0, &commands)
                     .and_then(|t| t.use_spell);
-                // `IsConsumableAction` (`0x4e5250`) reads only the template, so the identity
-                // feed pushes it with the count it gates, not this one.
-                let count = carried.get(&button.action).copied().unwrap_or(0);
-                // `IsEquippedAction`, the green border: worn in any equipment slot (0..18).
+                // The count the slot holds (`0xbc6390`), which `GetActionCount` answers too: the
+                // gate reads the cache the recount wrote, never the bags (`0x4e50ab`).
+                let count = script.action_slot(action).map_or(0, |slot| slot.count);
+                // `IsEquippedAction`, the green border: `0x622270` at mask 1 (`0x4e5377`-`0x4e5380`),
+                // the walker over the worn slots, so a broken copy is not worn.
                 st.equipped = me.is_some_and(|(s, _, _, _)| {
-                    (0..19).any(|i| {
-                        s.0.player_inv_slot(i)
-                            .and_then(|g| objects.object(g))
-                            .and_then(|o| o.object_entry())
-                            == Some(button.action)
-                    })
+                    crate::ui_items::find_item(
+                        &s.0,
+                        &objects,
+                        button.action,
+                        crate::ui_items::ItemSearch {
+                            equipment_only: true,
+                            ..Default::default()
+                        },
+                    )
+                    .is_some()
                 });
                 // `0x4e5050`'s item arm runs the count, `IsItemOnCooldown` and the on-use spell
                 // through the same `0x6e3d60` walk. With no player the reference answers (0, 0)
@@ -286,14 +291,14 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
-                        carried: &carried,
+                        stacks: &stacks,
                         spell_mods,
                         control_lost,
                     };
                     let (u, oom) = usable::item_usable(
                         button.action,
                         use_spell.as_ref(),
-                        count > 0 || st.equipped,
+                        count > 0,
                         &ctx,
                         spells.as_deref(),
                         &objects,
@@ -838,7 +843,18 @@ mod tests {
                     (PACK_SLOT_1, 0xF0),
                 ])),
             ));
-            app.insert_non_send(UiScript::new().unwrap());
+            // The slot as the identity feed pushed it, with the ten muffins it counted.
+            let mut script = UiScript::new().unwrap();
+            script.set_action(
+                1,
+                Some(benilla_ui::script::ActionSlot {
+                    kind: ACTION_KIND_ITEM,
+                    action: FOOD_ITEM,
+                    count: 10,
+                    ..Default::default()
+                }),
+            );
+            app.insert_non_send(script);
             app.add_systems(Update, feed_action_state);
             app.update();
             app.world()
@@ -851,6 +867,178 @@ mod tests {
         assert!(
             !lit(true),
             "in combat the food's on-use spell fails leg 8 and the button greys"
+        );
+    }
+
+    /// `0x4e5050` reads the slot's cached count (`[0xbc6390]`, the one `GetActionCount` answers),
+    /// not the bags: a zero there greys the slot while a copy sits in the pack, and a count there
+    /// lights it with nothing in the bags, as for a worn copy the recount stored.
+    #[test]
+    fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
+        use benilla_protocol::messages::ActionButton;
+        use benilla_protocol::ObjectFields;
+
+        const ITEM: u32 = 2512;
+        // `PLAYER_FIELD_PACK_SLOT_1`, backpack slot 1.
+        const PACK_SLOT_1: u16 = 532;
+
+        let lit = |stored: u32, in_pack: bool| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            let mut actions = PlayerActions::default();
+            actions.buttons.insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: ITEM,
+                    kind: ACTION_KIND_ITEM,
+                },
+            );
+            let mut items = Items::default();
+            items.insert_template(ITEM, Some(crate::items::test_template("Rough Arrow")));
+            app.insert_resource(actions)
+                .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+                .insert_resource(Spells::empty_for_tests())
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<crate::ui_script::UiClock>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::spell::PendingCast>()
+                .init_resource::<crate::spell::QueuedMeleeSpell>()
+                .init_resource::<crate::spell::ActiveChannel>()
+                .init_resource::<crate::spell::SpellTargeting>()
+                .init_resource::<crate::spell::HeldForPick>()
+                .init_resource::<Selection>()
+                .init_resource::<crate::net::GuidIndex>()
+                .init_resource::<crate::net::Reputations>()
+                .insert_resource(items)
+                .insert_resource(NetCommands(tx));
+            crate::items::test_spawn_item(
+                app.world_mut(),
+                0xF0,
+                ObjectFields::from_pairs(&[(3, ITEM), (14, 10)]),
+                false,
+            );
+            let mut store = vec![(22, 100), (23, 500), (46, 1 << 3)];
+            if in_pack {
+                store.push((PACK_SLOT_1, 0xF0));
+            }
+            app.world_mut().spawn((
+                SelfPlayer,
+                Transform::default(),
+                ObjectStore(ObjectFields::from_pairs(&store)),
+            ));
+            let mut script = UiScript::new().unwrap();
+            script.set_action(
+                1,
+                Some(benilla_ui::script::ActionSlot {
+                    kind: ACTION_KIND_ITEM,
+                    action: ITEM,
+                    count: stored,
+                    ..Default::default()
+                }),
+            );
+            app.insert_non_send(script);
+            app.add_systems(Update, feed_action_state);
+            app.update();
+            app.world()
+                .non_send::<UiScript>()
+                .eval::<bool>("return (IsUsableAction(1)) and true or false")
+                .unwrap()
+        };
+
+        assert!(lit(3, false), "a stored count lights it, bags or none");
+        assert!(
+            !lit(0, true),
+            "a stored zero greys it with a copy in the pack"
+        );
+    }
+
+    /// `IsEquippedAction` asks `0x622270` at mask 1 (`0x4e5380`), the walker over the worn slots,
+    /// which skips a broken item (`0x6224f4`-`0x62250e`): a worn weapon at durability 0 draws no
+    /// border, a whole one does, and a copy in the pack is not worn. The slot's count comes from
+    /// the recount (`0x4e6d20`, mask 0), and the usable gate reads that count (`0x4e50ab`): a worn
+    /// whole copy lights the slot, a broken one counts 0 and greys it.
+    #[test]
+    fn a_broken_worn_weapon_draws_no_equipped_border() {
+        use benilla_protocol::messages::ActionButton;
+        use benilla_protocol::ObjectFields;
+
+        const SWORD: u32 = 2025;
+        let equipped = |seat_field: u16, durability: u32| {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            let mut actions = PlayerActions::default();
+            actions.buttons.insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: SWORD,
+                    kind: ACTION_KIND_ITEM,
+                },
+            );
+            let mut items = Items::default();
+            items.insert_template(SWORD, Some(crate::items::test_template("Sword")));
+            app.insert_resource(actions)
+                .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+                .insert_resource(Spells::empty_for_tests())
+                .add_message::<crate::item_watch::ItemNotice>()
+                .add_message::<crate::net::WorldEnterCascadeMessage>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<crate::ui_script::UiClock>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::spell::PendingCast>()
+                .init_resource::<crate::spell::QueuedMeleeSpell>()
+                .init_resource::<crate::spell::ActiveChannel>()
+                .init_resource::<crate::spell::SpellTargeting>()
+                .init_resource::<crate::spell::HeldForPick>()
+                .init_resource::<Selection>()
+                .init_resource::<crate::net::GuidIndex>()
+                .init_resource::<crate::net::Reputations>()
+                .insert_resource(items)
+                .insert_resource(NetCommands(tx));
+            // The sword: flags 0, durability, maximum 40.
+            crate::items::test_spawn_item(
+                app.world_mut(),
+                0xF0,
+                ObjectFields::from_pairs(&[(3, SWORD), (14, 1), (46, durability), (47, 40)]),
+                false,
+            );
+            app.world_mut().spawn((
+                SelfPlayer,
+                Transform::default(),
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (22, 100),
+                    (23, 500),
+                    (46, 1 << 3),
+                    (seat_field, 0xF0),
+                ])),
+            ));
+            let mut script = UiScript::new().unwrap();
+            script.set_action(
+                1,
+                Some(benilla_ui::script::ActionSlot {
+                    kind: ACTION_KIND_ITEM,
+                    action: SWORD,
+                    count: 1,
+                    ..Default::default()
+                }),
+            );
+            app.insert_non_send(script);
+            app.add_systems(Update, feed_action_state);
+            app.update();
+            app.world()
+                .non_send::<UiScript>()
+                .eval::<bool>("return (IsEquippedAction(1)) and true or false")
+                .unwrap()
+        };
+        // Player slot 15 is the main hand, 23 the first backpack seat.
+        assert!(equipped(486 + 2 * 15, 12), "a whole worn sword");
+        assert!(!equipped(486 + 2 * 15, 0), "a broken one");
+        assert!(
+            !equipped(486 + 2 * 23, 12),
+            "a copy in the pack is not worn"
         );
     }
 

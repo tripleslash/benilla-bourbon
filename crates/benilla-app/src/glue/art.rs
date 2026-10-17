@@ -341,11 +341,8 @@ impl GlueArt {
             images,
         );
         // Repeat-sampled: a [`super::backdrop::tiled_bg`] spans past one tile.
-        self.tooltip_bg = assets.sprite_texture_wrapped_blocking(
-            "Interface\\Tooltips\\UI-Tooltip-Background",
-            (true, true),
-            images,
-        );
+        self.tooltip_bg = assets
+            .sprite_texture_wrapped_blocking("Interface\\Tooltips\\UI-Tooltip-Background", images);
         fn scroll_btn(
             assets: &mut WorldAssets,
             dir: &str,
@@ -397,7 +394,6 @@ impl GlueArt {
         );
         self.dialog_bg = assets.sprite_texture_wrapped_blocking(
             "Interface\\DialogFrame\\UI-DialogBox-Background",
-            (true, true),
             images,
         );
         self.dialog_alert =
@@ -657,12 +653,13 @@ pub(crate) fn parse_race_icon_tcoords(src: &str) -> std::collections::HashMap<St
 
 impl GlueArt {
     /// A race's cell on the loaded races sheet: Turtle's own table while its flavor is in force,
-    /// keyed `<FILESTRING>_<SEX>` as its `CharacterCreateEnumerateRaces` does, else 1.12.1's.
-    pub(crate) fn race_tc(&self, race: u8, sex: u8) -> Option<[f32; 4]> {
+    /// keyed `<FILESTRING>_<SEX>` as its `CharacterCreateEnumerateRaces` does, `file` being the
+    /// race's `ChrRaces` fileString, else 1.12.1's.
+    pub(crate) fn race_tc(&self, race: u8, sex: u8, file: Option<&str>) -> Option<[f32; 4]> {
         let Some(table) = &self.race_tcoords else {
             return race_tc(race, sex);
         };
-        let (_, file) = crate::ui_unit::race_names_in(race, true)?;
+        let file = file?;
         let sex = if sex == 1 { "FEMALE" } else { "MALE" };
         table
             .get(&format!("{}_{sex}", file.to_ascii_uppercase()))
@@ -727,12 +724,23 @@ mod race_tcoords_tests {
     #[test]
     fn the_loaded_table_answers_by_file_string() {
         let mut art = GlueArt::default();
-        assert_eq!(art.race_tc(1, 0), race_tc(1, 0));
+        assert_eq!(art.race_tc(1, 0, Some("Human")), race_tc(1, 0));
         art.race_tcoords = Some(parse_race_icon_tcoords(
             "RACE_ICON_TCOORDS = {\n[\"NIGHTELF_FEMALE\"] = {0.375, 0.5, 0.5, 0.75},\n[\"BLOODELF_MALE\"] = {0.5, 0.625, 0.25, 0.5},\n}",
         ));
-        assert_eq!(art.race_tc(4, 1), Some([0.375, 0.5, 0.5, 0.75]));
-        assert_eq!(art.race_tc(10, 0), Some([0.5, 0.625, 0.25, 0.5]));
-        assert_eq!(art.race_tc(9, 0), None, "a row the table lacks is no cell");
+        assert_eq!(
+            art.race_tc(4, 1, Some("NightElf")),
+            Some([0.375, 0.5, 0.5, 0.75])
+        );
+        assert_eq!(
+            art.race_tc(10, 0, Some("BloodElf")),
+            Some([0.5, 0.625, 0.25, 0.5])
+        );
+        assert_eq!(
+            art.race_tc(9, 0, Some("Goblin")),
+            None,
+            "a row the table lacks is no cell"
+        );
+        assert_eq!(art.race_tc(10, 0, None), None, "no fileString, no key");
     }
 }

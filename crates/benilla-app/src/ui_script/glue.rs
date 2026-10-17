@@ -164,11 +164,150 @@ pub(super) fn finish_glue_load_log(script: &mut UiScript) {
 }
 
 /// Put `screen` up: `SET_GLUE_SCREEN` with its key as `arg1` (`0x46b840`, event 0).
+#[cfg(test)]
 pub(super) fn set_glue_screen(script: &mut UiScript, screen: GlueScreen) {
-    script.fire_event(
-        "SET_GLUE_SCREEN",
-        vec![ScriptValue::Str(screen.key().to_string())],
-    );
+    signal_glue_screen(script, screen.key());
+}
+
+/// `SET_GLUE_SCREEN` with `name` as `arg1` (`0x46b840`, event 0), whatever screen it names.
+pub(super) fn signal_glue_screen(script: &mut UiScript, name: &str) {
+    script.fire_event("SET_GLUE_SCREEN", vec![ScriptValue::Str(name.to_string())]);
+}
+
+/// The glue rebuild's cells: the request (`[0xb41d8c]`), which the console's `reloadUI`
+/// (`0x4035f0`) and the glue's size callback (`0x46ac76`) set and the build (`0x46a7e0`) and the
+/// per-frame glue update (`0x46b9ac`) clear; the screen size the build or the last size event left
+/// (`[0xb41e1c]`, `[0xb41e20]`); and the aspect the glue was built or last resized at (`[0xb41e24]`).
+#[derive(Resource, Default)]
+pub(crate) struct GlueRebuild {
+    requested: bool,
+    size: UVec2,
+    aspect: f32,
+}
+
+impl GlueRebuild {
+    /// Ask for a rebuild, as `reloadUI` does whatever state the client is in (`0x4035f0`).
+    pub(crate) fn request(&mut self) {
+        self.requested = true;
+    }
+}
+
+/// The glue's aspect (`0x46ab40`): 4/3 with `widescreen` off, else the applied `gxResolution`
+/// scanned as width, separator, height (`0x46ab8f`). Not the window's: benilla writes
+/// `gxResolution` only through the CVar set path (the config load, `SetCVar`, `/console set`,
+/// `SetScreenResolution`, each committed at `RestartGx` as the row is latched), never from a
+/// window drag. A size `video::parse_resolution` refuses, a zero or unparsable extent, is no value.
+fn gx_aspect(cvars: Option<&crate::cvars::Cvars>) -> Option<f32> {
+    let cvars = cvars?;
+    if cvars.flag("widescreen") == Some(false) {
+        return Some(4.0 / 3.0);
+    }
+    let size = crate::video::parse_resolution(cvars.get("gxResolution")?)?;
+    Some(size.x as f32 / size.y as f32)
+}
+
+/// The window's client size in device pixels, the size event's payload (`0x7665c0`).
+fn window_size(w: &Window) -> UVec2 {
+    UVec2::new(
+        w.resolution.physical_width(),
+        w.resolution.physical_height(),
+    )
+}
+
+/// The build's half of [`GlueRebuild`] (`0x46a7b0`): the request cleared (`0x46a7e0`), the size
+/// and the aspect stored (`0x46a7f2`-`0x46a81c`).
+pub(super) fn glue_built(world: &mut World) {
+    let size = {
+        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map_or(UVec2::ZERO, window_size)
+    };
+    let aspect = gx_aspect(world.get_resource::<crate::cvars::Cvars>());
+    if let Some(mut rebuild) = world.get_resource_mut::<GlueRebuild>() {
+        rebuild.requested = false;
+        rebuild.size = size;
+        if let Some(aspect) = aspect {
+            rebuild.aspect = aspect;
+        }
+    }
+}
+
+/// The glue's size callback, its rebuild half (`0x46abe0`). It runs on a size event: the same
+/// positive size as stored does nothing (`0x46abeb`-`0x46abfe`); any other is stored, and the
+/// `gxResolution` aspect ([`gx_aspect`]), when it moved 0.01 or more from the stored one, is stored
+/// and asks for a rebuild (`0x46ac66`-`0x46ac76`). So a window resized with `gxResolution`
+/// unchanged rebuilds nothing, and a new `gxResolution` rebuilds once, at the resize its
+/// `RestartGx` applies. The callback is the glue top's, so only a standing glue hears it.
+pub(crate) fn watch_glue_aspect(
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    cvars: Option<Res<crate::cvars::Cvars>>,
+    mut rebuild: ResMut<GlueRebuild>,
+) {
+    let Ok(w) = window.single() else {
+        return;
+    };
+    let size = window_size(w);
+    if size.x > 0 && size.y > 0 && size == rebuild.size {
+        return;
+    }
+    rebuild.size = size;
+    let Some(aspect) = gx_aspect(cvars.as_deref()) else {
+        return;
+    };
+    // `fcomp`, then `test ah,5; jnp`: only "less" skips.
+    if (rebuild.aspect - aspect).abs() < 0.01 {
+        return;
+    }
+    rebuild.aspect = aspect;
+    rebuild.requested = true;
+}
+
+/// The per-frame glue update's rebuild (`0x46b930`): in screen state 0 alone (`0x46b977`), a
+/// pending request suspends and rebuilds the glue (`0x46b993`, `0x46a7b0(1)` at `0x46b99d`) and
+/// signals the current screen again (`0x46b9a7`, `0x46b840` with the `SetCurrentScreen` buffer
+/// `[0xb41478]`), unless the glue is suspended, in the world (`0x46b98b`); either way the request
+/// is spent (`0x46b9ac`). Any other state leaves it for a later frame.
+pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
+    if !world
+        .get_resource::<GlueRebuild>()
+        .is_some_and(|r| r.requested)
+    {
+        return;
+    }
+    let idle = world
+        .get_non_send::<super::glue_mgr::SharedGlueMgr>()
+        .is_none_or(|m| m.get().state == super::glue_mgr::ScreenState::Idle);
+    if !idle {
+        return;
+    }
+    world.resource_mut::<GlueRebuild>().requested = false;
+    let in_world = world
+        .get_resource::<State<crate::char_select::ClientState>>()
+        .is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld);
+    let screen = world
+        .get_non_send::<UiScript>()
+        .filter(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
+        .map(|s| s.glue_screen());
+    let Some(screen) = screen.filter(|_| !in_world) else {
+        return;
+    };
+    info!("ui_script: glue rebuild on \"{screen}\"");
+    // The old VM goes with the replacement; the buffer is the client's, so it carries over.
+    super::lifecycle::install_glue_side_vm(world, &screen);
+}
+
+/// `ConsoleExec` lines the glue VM left for the console (`0x515f10` → `ConsoleCommandExecute`),
+/// run as the in-game drain runs its own, their output to the log: the glue has no chat to print
+/// to.
+pub(crate) fn drain_glue_console(world: &mut World) {
+    let lines = match world.get_non_send_mut::<UiScript>() {
+        Some(mut s) if s.vm_kind() == benilla_ui::script::VmKind::Glue => s.take_console_lines(),
+        _ => return,
+    };
+    for line in lines {
+        for out in crate::console::execute(world, &line) {
+            info!("console: {out}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +582,166 @@ mod tests {
             borders.iter().all(|b| bars.iter().all(|bar| b > bar)),
             "the borders draw over the black bars: {borders:?} over {bars:?}"
         );
+    }
+
+    /// The world the glue stands in at the login screens, its console holding `reloadUI`.
+    fn glue_world() -> World {
+        use crate::console::ConsoleCommandApp;
+        let mut app = App::new();
+        app.console_command("reloadUI", "", super::super::console_reload_ui);
+        let commands = app
+            .world_mut()
+            .remove_resource::<crate::console::ConsoleCommands>()
+            .expect("the registry");
+        let mut world = World::new();
+        world.insert_resource(commands);
+        world.insert_resource(GlueStock(true));
+        world.insert_resource(State::new(crate::char_select::ClientState::Login));
+        world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
+        world.init_resource::<GlueRebuild>();
+        super::super::lifecycle::setup_script(&mut world);
+        world
+    }
+
+    fn session(world: &World) -> u64 {
+        world.non_send::<UiScript>().session()
+    }
+
+    /// `ConsoleExec("reloadUI")` at the login screens reaches the console (`0x515f10`), whose
+    /// `reloadUI` asks for a glue rebuild (`0x4035f0`). The glue update spends it in state 0 alone
+    /// (`0x46b977`): it builds a new glue (`0x46a7b0(1)`) and signals the screen `SetCurrentScreen`
+    /// last named (`0x46b9a7`), the credits here; in the world the glue is suspended and the
+    /// request is spent with nothing built (`0x46b98b`).
+    #[test]
+    fn reload_ui_at_the_login_screens_rebuilds_the_glue_on_its_screen() {
+        use super::super::glue_mgr::{ScreenState, SharedGlueMgr};
+        use benilla_ui::script::VmKind;
+        let _ = benilla_formats::wow_data_or_skip!();
+        let mut world = glue_world();
+        let set_state = |world: &World, state: ScreenState| {
+            world.non_send::<SharedGlueMgr>().get_mut().state = state;
+        };
+        world
+            .non_send::<UiScript>()
+            .run("SetGlueScreen('credits') ConsoleExec('reloadUI')")
+            .unwrap();
+        drain_glue_console(&mut world);
+        let old = session(&world);
+
+        set_state(&world, ScreenState::Logon);
+        run_pending_glue_rebuild(&mut world);
+        assert_eq!(session(&world), old, "a logon in flight holds the rebuild");
+        assert!(world.resource::<GlueRebuild>().requested, "and keeps it");
+
+        set_state(&world, ScreenState::Idle);
+        run_pending_glue_rebuild(&mut world);
+        assert_ne!(session(&world), old, "state 0 rebuilds the glue");
+        let s = world.non_send::<UiScript>();
+        assert_eq!(s.vm_kind(), VmKind::Glue);
+        assert_eq!(s.glue_screen(), "credits");
+        assert_eq!(
+            s.eval::<(bool, bool)>(
+                "return CreditsFrame:IsShown() == 1, AccountLogin:IsShown() == 1"
+            )
+            .unwrap(),
+            (true, false),
+            "the rebuilt glue is on the screen it was on"
+        );
+        assert!(!world.resource::<GlueRebuild>().requested, "spent");
+        let rebuilt = session(&world);
+        run_pending_glue_rebuild(&mut world);
+        assert_eq!(session(&world), rebuilt, "once");
+
+        world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        world.resource_mut::<GlueRebuild>().request();
+        run_pending_glue_rebuild(&mut world);
+        assert_eq!(session(&world), rebuilt, "a suspended glue builds nothing");
+        assert!(
+            !world.resource::<GlueRebuild>().requested,
+            "and the request is spent"
+        );
+    }
+
+    /// The glue's size callback, alone, over a 1024×768 window with `gxResolution` "1024x768",
+    /// the glue just built.
+    struct SizeCallback {
+        app: App,
+        win: Entity,
+    }
+
+    impl SizeCallback {
+        fn new() -> Self {
+            let mut app = App::new();
+            app.init_resource::<GlueRebuild>()
+                .insert_resource(crate::cvars::Cvars::with_value("gxResolution", "1024x768"))
+                .add_systems(Update, watch_glue_aspect);
+            let mut window = Window::default();
+            window.resolution.set(1024.0, 768.0);
+            let win = app
+                .world_mut()
+                .spawn((window, bevy::window::PrimaryWindow))
+                .id();
+            glue_built(app.world_mut());
+            Self { app, win }
+        }
+
+        /// `gxResolution` written and committed, as `RestartGx` commits the latched row.
+        fn set_gx(&mut self, value: &str) {
+            let mut cvars = self.app.world_mut().resource_mut::<crate::cvars::Cvars>();
+            cvars.set("gxResolution", value);
+            cvars.commit_latched();
+        }
+
+        /// One frame with the window at `w`×`h`; whether it asked for a rebuild.
+        fn frame(&mut self, w: f32, h: f32) -> bool {
+            self.app
+                .world_mut()
+                .get_mut::<Window>(self.win)
+                .unwrap()
+                .resolution
+                .set(w, h);
+            self.app.update();
+            let mut r = self.app.world_mut().resource_mut::<GlueRebuild>();
+            std::mem::take(&mut r.requested)
+        }
+    }
+
+    /// A new `gxResolution` aspect rebuilds once, at the resize its `RestartGx` applies
+    /// (`0x46abe0` takes its aspect from `0x46ab40`); a move under a hundredth does not
+    /// (`0x46ac66`), and the next comparison is from the aspect stored (`0x46ac80`).
+    #[test]
+    fn a_gx_resolution_aspect_change_rebuilds_the_glue_once() {
+        let mut c = SizeCallback::new();
+        assert!(!c.frame(1024.0, 768.0), "the size it was built at");
+        c.set_gx("1366x768");
+        assert!(c.frame(1366.0, 768.0), "4:3 to 16:9 rebuilds");
+        assert!(!c.frame(1366.0, 768.0), "once");
+        c.set_gx("1360x768");
+        assert!(
+            !c.frame(1360.0, 768.0),
+            "16:9 to 1.7708 moves the stored aspect by under a hundredth"
+        );
+    }
+
+    /// The window is not the aspect: a drag to any size with `gxResolution` unchanged stores the
+    /// size and rebuilds nothing.
+    #[test]
+    fn a_window_resize_with_gx_resolution_unchanged_rebuilds_nothing() {
+        let mut c = SizeCallback::new();
+        for (w, h) in [(1366.0, 768.0), (800.0, 900.0), (2560.0, 1080.0)] {
+            assert!(!c.frame(w, h), "{w}x{h}");
+        }
+    }
+
+    /// A height of 0 is no aspect: neither a minimized window nor a `gxResolution` with a zero
+    /// height asks for a rebuild.
+    #[test]
+    fn a_zero_height_rebuilds_nothing() {
+        let mut c = SizeCallback::new();
+        assert!(!c.frame(1024.0, 0.0), "a minimized window");
+        assert!(!c.frame(1024.0, 768.0), "and its restore");
+        c.set_gx("1366x0");
+        assert!(!c.frame(1366.0, 768.0), "a zero-height gxResolution");
     }
 
     /// `GlueParent` fills the screen root, 768 tall and `768·a` wide (`0x41ad10`, from `0x46ab40`),

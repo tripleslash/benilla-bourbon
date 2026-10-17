@@ -180,30 +180,77 @@ fn read_loose_web(req: &str) -> Option<Vec<u8>> {
     bytes
 }
 
-/// The player's patch chain, opened once per process and shared by every VM. Process-local, not
-/// the one [`benilla_assets`] holds: tests, the addon harness and a bare `UiScript` load the
-/// interface with no Bevy world to ask.
-fn chain() -> Option<&'static Chain> {
+/// What opening the chain has to say, kept until something can log it.
+enum Notice {
+    Warn(String),
+    Error(String),
+}
+
+/// The chain `data` names, and the one thing to say if there is none.
+fn open(data: Option<std::path::PathBuf>) -> (Option<Chain>, Option<Notice>) {
+    let Some(data) = data else {
+        return (
+            None,
+            Some(Notice::Warn(
+                "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
+                 file it lists, is absent off the player's install, so its windows do not \
+                 exist and addons that call their globals will raise"
+                    .to_string(),
+            )),
+        );
+    };
+    match benilla_formats::open_chain(&data) {
+        Ok(chain) => (Some(chain), None),
+        Err(e) => (
+            None,
+            Some(Notice::Error(format!(
+                "ui_script: opening the patch chain to source the reference UI: {e:#}"
+            ))),
+        ),
+    }
+}
+
+/// The notice of the open, until [`chain`] logs it.
+static NOTICE: std::sync::Mutex<Option<Notice>> = std::sync::Mutex::new(None);
+
+/// The patch chain, opened once per process, logging nothing: the window is born before the log
+/// plugin exists ([`boot_client_locale`]), where a message would be dropped.
+fn chain_quiet() -> Option<&'static Chain> {
     static CHAIN: OnceLock<Option<Chain>> = OnceLock::new();
     CHAIN
         .get_or_init(|| {
-            let Some(data) = benilla_formats::wow_data() else {
-                warn!(
-                    "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
-                     file it lists, is absent off the player's install, so its windows do not \
-                     exist and addons that call their globals will raise"
-                );
-                return None;
-            };
-            match benilla_formats::open_chain(&data) {
-                Ok(chain) => Some(chain),
-                Err(e) => {
-                    error!("ui_script: opening the patch chain to source the reference UI: {e:#}");
-                    None
-                }
-            }
+            let (chain, notice) = open(benilla_formats::wow_data());
+            *NOTICE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = notice;
+            chain
         })
         .as_ref()
+}
+
+/// The player's patch chain, opened once per process and shared by every VM. Process-local, not
+/// the one [`benilla_assets`] holds: tests, the addon harness and a bare `UiScript` load the
+/// interface with no Bevy world to ask. The open's one message is logged here, the first time
+/// anything past start-up asks.
+fn chain() -> Option<&'static Chain> {
+    let chain = chain_quiet();
+    let notice = NOTICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match notice {
+        Some(Notice::Warn(m)) => warn!("{m}"),
+        Some(Notice::Error(m)) => error!("{m}"),
+        None => {}
+    }
+    chain
+}
+
+/// [`client_locale`] for the one caller that runs before the log plugin: the primary window's
+/// birth. It opens the same chain, but whatever the open has to say waits for [`chain`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn boot_client_locale() -> benilla_formats::Locale {
+    chain_quiet().map(Chain::locale).unwrap_or_default()
 }
 
 /// The client's locale, from the player's `Wow.ini` as start-up reads it once (`0x402350`): the
@@ -211,6 +258,12 @@ fn chain() -> Option<&'static Chain> {
 /// addon's metadata by its index, the logon carries its tag, and the name cache keys on it.
 pub(crate) fn client_locale() -> benilla_formats::Locale {
     chain().map(Chain::locale).unwrap_or_default()
+}
+
+/// `Wow.ini`'s `Region`, which start-up hands the character name check once (`0x402b7f`); 0 with
+/// no install, the file or the key. Signed, as the name check compares it (`0x6c9a78`).
+pub(crate) fn client_region() -> i32 {
+    chain().map_or(0, |c| benilla_formats::client_region(c) as i32)
 }
 
 /// Files a test lays over the chain, per test thread: an entry with bytes reads as a chain file,
@@ -264,6 +317,35 @@ fn is_word(c: char) -> bool {
 mod tests {
     use super::super::fire_scan;
     use benilla_ui::script::UiScript;
+
+    /// The open's message is returned, not logged, so a caller before the log plugin loses
+    /// nothing: no install is a warning naming the missing interface, a folder with no archives
+    /// an error carrying the cause, and a good open says nothing.
+    #[test]
+    fn the_open_returns_its_message_for_the_first_logging_caller() {
+        let (chain, notice) = super::open(None);
+        assert!(chain.is_none());
+        assert!(
+            matches!(&notice, Some(super::Notice::Warn(m)) if m.contains("no client data")),
+            "no install"
+        );
+        let empty = std::env::temp_dir().join(format!("benilla-empty-data-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let (chain, notice) = super::open(Some(empty.clone()));
+        std::fs::remove_dir_all(&empty).ok();
+        assert!(chain.is_none());
+        assert!(
+            matches!(&notice, Some(super::Notice::Error(m)) if m.contains("opening the patch chain")),
+            "no archives"
+        );
+        if let Some(data) = benilla_formats::wow_data() {
+            let (chain, notice) = super::open(Some(data));
+            assert!(
+                chain.is_some() && notice.is_none(),
+                "an install opens silently"
+            );
+        }
+    }
 
     /// An interface file loose in the install answers by its path below the install folder or
     /// `Data\`, whatever its case and separators, ahead of the chain; a bare name finds a file at
@@ -1084,7 +1166,7 @@ mod tests {
                 .collect()
         };
 
-        // Every function each chain entry and its same-name `.lua` define.
+        // Every function each chain entry and the files it loads define.
         let toc = &super::super::manifest::manifest_files();
         // Load order: each manifest entry at its line, ours included (`ours_wins` reads both
         // sides), then each reached addon's files after everything.
@@ -1106,21 +1188,13 @@ mod tests {
         let mut chain_frames: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for entry in &chain {
-            let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
-            let mut cands = vec![entry.clone()];
-            if let Some(stem) = entry.strip_suffix(".xml") {
-                cands.push(format!("{stem}.lua"));
-            }
-            for cand in cands {
-                let Some(b) = super::read(&cand.replace('\\', "/")) else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&b).into_owned();
+            // Each definition is credited to the file it is in, which for `ActionBarFrame.xml`
+            // is `ActionButton.lua`, not the entry.
+            for (path, text) in entry_files(entry) {
+                let file = path.rsplit('/').next().unwrap_or(&path).to_string();
                 for name in defined_in(&text) {
                     let at = pos[entry];
-                    chain_home.entry(name).or_insert_with(|| {
-                        (cand.rsplit('/').next().unwrap_or(leaf).to_string(), at)
-                    });
+                    chain_home.entry(name).or_insert_with(|| (file.clone(), at));
                 }
             }
         }
@@ -1154,18 +1228,16 @@ mod tests {
             if line.is_empty() || line.starts_with('#') || !line.ends_with(".xml") {
                 continue;
             }
-            for cand in [line.to_string(), format!("{}.lua", &line[..line.len() - 4])] {
-                let Some(b) = super::read(&format!("Interface/FrameXML/{cand}")) else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&b).into_owned();
-                if cand.ends_with(".xml") {
+            // A window's frames belong to its toc line; a function belongs to the file it is in.
+            for (path, text) in entry_files(&format!("Interface\\FrameXML\\{line}")) {
+                let file = path.rsplit('/').next().unwrap_or(&path).to_string();
+                if path.ends_with(".xml") {
                     for name in declares(&text) {
                         chain_frames.entry(name).or_insert_with(|| line.to_string());
                     }
                 }
                 for (name, n) in params_in(&text) {
-                    ref_arity.entry(name).or_insert((n, cand.clone()));
+                    ref_arity.entry(name).or_insert((n, file.clone()));
                 }
             }
         }
@@ -1274,9 +1346,10 @@ mod tests {
 
     /// Every global a migrated window calls exists once the shipped interface is up. Loading never
     /// runs the body that calls it, so a missing one raises on the first click that reaches it.
-    /// Bare `name(` calls in each chain file and its `.lua`, minus its own functions and locals,
-    /// count when the reference's `_G` has them (`reference/lua_globals.tsv`). Blind to names
-    /// reached through `getglobal` and to widget methods; it checks existence, not the body.
+    /// Bare `name(` calls in each chain file and every file it loads (`entry_sources`: its
+    /// `<Script file=>` and `<Include file=>`), minus their own functions and locals, count when
+    /// the reference's `_G` has them (`reference/lua_globals.tsv`). Blind to names reached
+    /// through `getglobal` and to widget methods; it checks existence, not the body.
     #[test]
     fn every_global_a_migrated_window_calls_is_answered() {
         let _data = benilla_formats::wow_data_or_skip!();
@@ -1337,17 +1410,12 @@ mod tests {
                 continue;
             }
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
-            let mut text = String::new();
-            let mut cands = vec![entry.replace('\\', "/")];
-            if let Some(stem) = entry.strip_suffix(".xml") {
-                cands.push(format!("{stem}.lua").replace('\\', "/"));
-            }
-            for cand in &cands {
-                if let Some(b) = super::read(cand) {
-                    text.push_str(&String::from_utf8_lossy(&b));
-                    text.push('\n');
-                }
-            }
+            // The entry's own text and every file it loads, as the loader does: each
+            // `<Script file=>` (`ActionBarFrame.xml` loads `ActionButton.lua`) and `<Include
+            // file=>` (`PartyFrame.xml` includes `PartyFrameTemplates.xml`), transitively.
+            let sources = entry_sources(entry);
+            assert!(!sources.is_empty(), "{entry}: the chain has no such file");
+            let text = sources.join("\n");
             let text = strip_strings(&strip_comments(&text));
             let defines: std::collections::HashSet<String> = text
                 .lines()
@@ -1371,18 +1439,15 @@ mod tests {
                     l.strip_prefix("for ")
                 };
                 if let Some(rest) = rest {
-                    for name in rest
-                        .split(['=', ' ', '\t'])
-                        .take_while(|w| *w != "in" && *w != "=" && !w.starts_with('('))
-                        .flat_map(|w| w.split(','))
-                        .map(|w| w.trim())
+                    // Only the names a statement binds: before its `=` (`local a, b = f()`
+                    // binds `a` and `b`, not `f`) and before a `for`'s `in`.
+                    let bound = rest.split('=').next().unwrap_or("");
+                    let bound = bound.split(" in ").next().unwrap_or("");
+                    for name in bound
+                        .split(['(', ')', ' ', '\t', ','])
                         .filter(|w| !w.is_empty())
                     {
-                        let name: String =
-                            name.chars().take_while(|c| super::is_word(*c)).collect();
-                        if !name.is_empty() {
-                            locals.insert(name);
-                        }
+                        locals.insert(name.to_string());
                     }
                 }
             }
@@ -1755,7 +1820,18 @@ mod tests {
         out
     }
 
+    /// The text of every file a toc entry loads, itself included.
     fn entry_sources(entry: &str) -> Vec<String> {
+        entry_files(entry)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// Every file a toc entry loads, itself first and the rest in the order the walk reaches them:
+    /// each `<Script file=>` and `<Include file=>`, transitively, as `(path, text)` with `/`
+    /// separators.
+    fn entry_files(entry: &str) -> Vec<(String, String)> {
         fn read_one(path: &str, chain: bool) -> Option<String> {
             if chain {
                 let bytes = super::read(&path.replace('\\', "/"))?;
@@ -1769,12 +1845,8 @@ mod tests {
             .ok()
         }
         let chain = super::is_chain_entry(entry);
-        let dir = {
-            let p = entry.replace('\\', "/");
-            p.rsplit_once('/').map(|(d, _)| d.to_string())
-        };
         let mut out = Vec::new();
-        let mut queue = vec![entry.to_string()];
+        let mut queue = vec![entry.replace('\\', "/")];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(path) = queue.pop() {
             if !seen.insert(path.clone()) {
@@ -1783,11 +1855,13 @@ mod tests {
             let Some(text) = read_one(&path, chain) else {
                 continue;
             };
+            // A file resolves what it loads beside itself, as the loader does.
+            let dir = path.rsplit_once('/').map(|(d, _)| d.to_string());
             for chunk in text.split('<').skip(1) {
                 let Some(end) = chunk.find('>') else { continue };
                 let tag = &chunk[..end];
                 // `<Include>` brings a sibling document and `<Script file=>` the code, where
-                // nearly every `RegisterEvent` lives; both resolve in the entry's own folder.
+                // nearly every `RegisterEvent` lives; both resolve in the including file's own folder.
                 let kind = tag.trim_start();
                 if !kind.starts_with("Include") && !kind.starts_with("Script") {
                     continue;
@@ -1800,7 +1874,7 @@ mod tests {
                     queue.push(next);
                 }
             }
-            out.push(text);
+            out.push((path, text));
         }
         out
     }
@@ -1949,7 +2023,6 @@ mod tests {
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
             ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
-            ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             (
                 "SHOW_COMPARE_TOOLTIP",
                 "PaperDollFrame.lua — the second `TRADE_REQUEST`: event 377 is \
@@ -1962,7 +2035,6 @@ mod tests {
                  event would be a divergence, not a fix",
             ),
             ("SYSMSG", "UIErrorsFrame.lua"),
-            ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
             (
                 "UNIT_MODEL_CHANGED",
                 "four files — the paperdoll model refresh",

@@ -128,7 +128,7 @@ fn drive_mouseover_tooltip(
     let last = script.world_mouseover();
     let published = memo.published.get(&script);
     let self_store = self_q.iter().next();
-    let chr = tables.classes();
+    let chr = tables.unit_names();
     let types = tables.types(&names);
 
     // A plate's pick stands for its enter's publish (`0x7cb850`), so it holds only while that plate
@@ -236,7 +236,7 @@ fn drive_mouseover_tooltip(
         let Some(owner) = store.0.corpse_owner() else {
             return;
         };
-        let Some(name) = names.resolve(owner, &commands).map(str::to_string) else {
+        let Some(name) = names.resolve_player(owner, &commands).map(str::to_string) else {
             return;
         };
         // `CORPSE_TOOLTIP`, the builder's key; no string, no plate.
@@ -255,11 +255,10 @@ fn drive_mouseover_tooltip(
         // The plate follows the cursor iff `[vtbl+0x5c]` (`0x5f8630`) finds
         // `data[0x621b00(type, 0x13)]` set, and semantic `0x13` exists only for GENERIC(5), at
         // `data[0]`. `data[1]` (`0x5f4830`) is whether it can be hovered, not where it sits.
-        let cursor_seated = stores.get(entity).map(|s| s.0.gameobject_type_id())
-            == Ok(GO_TYPE_GENERIC)
-            && go_inputs
-                .templates
-                .get(guid)
+        let go_fields = stores.get(entity).ok().map(|s| &s.0);
+        let cursor_seated = go_fields.map(|f| f.gameobject_type_id()) == Some(GO_TYPE_GENERIC)
+            && go_fields
+                .and_then(|f| go_inputs.templates.of(f))
                 .is_some_and(|t| t.floating_tooltip);
         // Window px to the VM's y-up root units, as the input seam converts.
         let cursor_ui = cursor_seated
@@ -294,12 +293,17 @@ fn drive_mouseover_tooltip(
             info!(
                 "hover probe/tooltip: guid {guid:#x} cursor_seated {cursor_seated} cursor_ui \
                  {cursor_ui:?} template {:?}",
-                go_inputs.templates.get(guid).map(|t| t.name.clone()),
+                go_fields
+                    .and_then(|f| go_inputs.templates.of(f))
+                    .map(|t| t.name.clone()),
             );
         }
-        let Some(template) = go_inputs.templates.get(guid).cloned() else {
+        let Some(fields) = go_fields else {
+            return; // not streamed: no descriptor, no entry
+        };
+        let Some(template) = go_inputs.templates.of(fields).cloned() else {
             // Template in flight: ask once, and show it when it lands.
-            go_inputs.templates.request(guid, &commands);
+            go_inputs.templates.request(guid, fields, &commands);
             return;
         };
         // The builder's lock lines (`0x52aa20`): "Locked" iff `GO_FLAG_LOCKED` (`0x52aae5`), then

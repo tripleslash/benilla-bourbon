@@ -315,16 +315,11 @@ mod tests {
     }
 
     /// Goblin and High Elf exist only under Turtle, on the sides their templates' group masks give;
-    /// 1.12.1's tables answer exactly as before.
+    /// 1.12.1's tables answer exactly as before. Their names are the mounted `ChrRaces.dbc`'s.
     #[test]
     fn turtle_races_are_turtle_only() {
         use crate::char_create::{alliance_races, horde_races};
-        use crate::ui_unit::{race_faction_group_in, race_names_in, race_pvp_team_in};
-        assert_eq!(race_names_in(9, false), None);
-        assert_eq!(race_names_in(10, false), None);
-        assert_eq!(race_names_in(9, true), Some(("Goblin", "Goblin")));
-        assert_eq!(race_names_in(10, true), Some(("High Elf", "BloodElf")));
-        assert_eq!(race_names_in(5, true), race_names_in(5, false));
+        use crate::ui_unit::{race_faction_group_in, race_pvp_team_in};
         assert_eq!(race_faction_group_in(9, false), None);
         assert_eq!(race_faction_group_in(9, true), Some("Horde"));
         assert_eq!(race_faction_group_in(10, true), Some("Alliance"));

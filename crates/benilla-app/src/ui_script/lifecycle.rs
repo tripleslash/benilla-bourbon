@@ -14,17 +14,17 @@ use super::{load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock, UiKeyboar
 use crate::ui_script::addons;
 
 pub(crate) fn setup_script(world: &mut World) {
-    install_glue_side_vm(world, super::glue::GlueScreen::Login);
+    install_glue_side_vm(world, super::glue::GlueScreen::Login.key());
 }
 
 /// Install the VM the world holds outside the world: the stock glue screens' under
-/// [`super::glue::GlueStock`], put up on `screen`, else a boot VM.
+/// [`super::glue::GlueStock`], put up on the screen named `screen`, else a boot VM.
 ///
 /// The IO thread's roster policy follows the VM that is up: the screen asks for its roster only
 /// when the stock glue VM was built and its character select screen loaded, so a run whose stock VM failed to build (logged as an error
 /// by [`new_vm`]) falls back to the park's own enumeration instead of waiting on a screen that
 /// never asks.
-fn install_glue_side_vm(world: &mut World, screen: super::glue::GlueScreen) {
+pub(super) fn install_glue_side_vm(world: &mut World, screen: &str) {
     let stock_asked = world
         .get_resource::<super::glue::GlueStock>()
         .is_some_and(|s| s.0);
@@ -68,10 +68,12 @@ pub(crate) fn strings_vm(world: &mut World) -> Option<UiScript> {
 /// builder `0x46a7b0` then `SET_GLUE_SCREEN` (`0x402b65` at startup, `0x402090` back from the
 /// world). It holds what the glue state holds and nothing of the boot VM's: no `GlobalStrings.lua`,
 /// no emote tokens.
-fn install_glue_vm(world: &mut World, screen: super::glue::GlueScreen) -> bool {
+fn install_glue_vm(world: &mut World, screen: &str) -> bool {
     let Some(mut script) = new_vm(world, UiScript::new_glue) else {
         return false;
     };
+    // The build's size and aspect, and its clear of a pending rebuild (`0x46a7e0`, `0x46a81c`).
+    super::glue::glue_built(world);
     seat_raster_seam_for_load(world, &mut script);
     // The CVar table before the load and the first screen, as the in-game build seeds its own:
     // this VM is born before `cvars::sync_cvars`'s per-VM seed, and the character screen's
@@ -86,11 +88,14 @@ fn install_glue_vm(world: &mut World, screen: super::glue::GlueScreen) -> bool {
     start_server_alert(world, &script);
     // What the glue carries across its rebuild, in place before the screen's `OnShow` reads it.
     super::glue_mgr::seat_glue_build(world, &mut script);
-    super::glue::set_glue_screen(&mut script, screen);
+    // `SetCurrentScreen`'s buffer is the client's (`[0xb41478]`) and outlives the Lua state: a
+    // rebuild signals what it holds (`0x46b9a2`), and the screen's handler writes the same name.
+    script.set_glue_screen_name(screen);
+    super::glue::signal_glue_screen(&mut script, screen);
     info!(
         "ui_script: stock glue up in {:.0} ms on \"{}\" ({} load failure(s))",
         start.elapsed().as_secs_f32() * 1000.0,
-        screen.key(),
+        screen,
         failures.len()
     );
     // Up means the screen that asks for the roster exists: the stock files loaded far enough to
@@ -159,6 +164,8 @@ fn new_vm<E: std::fmt::Display>(
     script.set_european_numbers(european_numbers);
     // `[0xc0e080]`, which start-up sets once from `Wow.ini`, so every VM answers `GetLocale` alike.
     script.set_locale(super::client_locale().index());
+    // `[0x882730]`, `Wow.ini`'s `Region`, read once alike and handed to the name check.
+    script.set_client_region(super::client_region());
     seed_vm_clock(world, &mut script);
     install_addon_asset_resolvers(world, &mut script);
     info!("ui_script: new VM, session {}", script.session());
@@ -428,7 +435,7 @@ pub(crate) fn rebuild_stale_glue_vm(
     );
     commands.queue(move |world: &mut World| {
         crate::cvars::fold_dying_vm_cvars(world);
-        install_glue_side_vm(world, screen);
+        install_glue_side_vm(world, screen.key());
     });
 }
 
@@ -534,6 +541,8 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         let stage = world.resource::<PendingEntryUiLoad>().stage;
         match stage {
             EntryStage::Armed => {
+                // Before the first file, as the one-shot path does ([`load_ingame_ui_on_world_entry`]).
+                crate::minimap::restore_default_mask(world);
                 // World entry: no player object yet, so the roster's record stands in.
                 let (identity, roster, version_check) =
                     entry_prepare(world, &mut script, LoadSeat::Roster);
@@ -781,7 +790,7 @@ fn entry_prepare(
     // streams in.
     if let Some(record) = world
         .get_resource::<crate::char_select::Roster>()
-        .and_then(record_from_roster)
+        .and_then(|roster| record_from_roster(roster, crate::ui_unit::world_unit_names(world)))
     {
         script.set_player_record(record);
     }
@@ -794,9 +803,12 @@ fn entry_prepare(
             script.set_player_xp(live.xp.0, live.xp.1);
         }
         None => {
-            if let Some(seat) = world
-                .get_resource::<crate::char_select::Roster>()
-                .and_then(seat_from_roster)
+            if let Some(seat) =
+                world
+                    .get_resource::<crate::char_select::Roster>()
+                    .and_then(|roster| {
+                        seat_from_roster(roster, crate::ui_unit::world_unit_names(world))
+                    })
             {
                 script.set_unit("player", Some(seat));
             }
@@ -925,7 +937,7 @@ fn arm_leaving_world(world: &mut World) {
 /// until then, and a value computed once at load keeps it: stock `WorldMapFrame_OnLoad` sizes the
 /// full-screen `BlackoutWorld` from `GetScreenWidth()` and `GetScreenHeight()` and never again
 /// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. The
-/// atlas is built at `Startup` before the glue VM ([`crate::ui_text::UiFontsBuilt`]); with none
+/// atlas is built at `Startup` before the glue VM ([`crate::ui_text::FontAtlasInit`]); with none
 /// (no window, no fonts) the per-frame pass seats the measurer once one exists.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
     let (w, h) = {
@@ -967,6 +979,9 @@ enum LoadSeat {
 /// ([`run_pending_entry_load`]) and a `/reload` loads under the live player.
 #[cfg(test)]
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    // Before the load, as `0x48f590` runs before `0x48fbf0`: an addon's file scope sets the mask
+    // after it, and a `/reload` never takes this step.
+    crate::minimap::restore_default_mask(world);
     load_ingame_ui_seated(world, LoadSeat::Roster);
 }
 
@@ -1025,10 +1040,11 @@ fn roster_sex(gender: u8) -> u8 {
 /// the descriptor.
 pub(crate) fn record_from_roster(
     roster: &crate::char_select::Roster,
+    names: crate::ui_unit::UnitNames<'_>,
 ) -> Option<benilla_ui::script::PlayerRecord> {
     let row = roster.pending_row()?;
-    let race = crate::ui_unit::race_names(row.race);
-    let class = crate::ui_unit::class_names(row.class);
+    let race = names.race(row.race);
+    let class = names.class(row.class);
     Some(benilla_ui::script::PlayerRecord {
         name: row.name.clone(),
         race: race.map(|(n, f)| (n.to_string(), f.to_string())),
@@ -1044,10 +1060,11 @@ pub(crate) fn record_from_roster(
 /// to say.
 pub(crate) fn seat_from_roster(
     roster: &crate::char_select::Roster,
+    names: crate::ui_unit::UnitNames<'_>,
 ) -> Option<benilla_ui::script::UnitState> {
     let row = roster.pending_row()?;
-    let race = crate::ui_unit::race_names(row.race);
-    let class = crate::ui_unit::class_names(row.class);
+    let race = names.race(row.race);
+    let class = names.class(row.class);
     let sex = roster_sex(row.gender);
     Some(benilla_ui::script::UnitState {
         // Before the player object exists the reference answers `UnitExists("player")`
@@ -1247,7 +1264,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
         Some(crate::char_select::ClientState::CharSelect) => super::glue::GlueScreen::CharSelect,
         _ => super::glue::GlueScreen::Login,
     };
-    install_glue_side_vm(world, screen);
+    install_glue_side_vm(world, screen.key());
 }
 
 /// [`end_ui_session`] up to the new VM: the shutdown tail, the folds and the host values reset.
@@ -1319,7 +1336,7 @@ pub(crate) struct ReloadUiPending(pub(crate) bool);
 /// cascade itself (`0x490168`), firing the `PLAYER_LOGIN` it armed and `PLAYER_ENTERING_WORLD`;
 /// ours fire from [`crate::ui_unit`]'s feed on the new VM's first `Update`, once it has re-seated
 /// the player. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the request
-/// is dropped.
+/// is dropped, and the glue's own rebuild is [`super::glue::run_pending_glue_rebuild`]'s.
 pub(crate) fn run_pending_reload(world: &mut World) {
     if !std::mem::take(&mut world.resource_mut::<ReloadUiPending>().0) {
         return;
@@ -1523,6 +1540,31 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The roster's stand-in `"player"` and the record `UnitRace`/`UnitClass` read carry the
+    /// table's names at the install's locale, and the tokens beside them.
+    #[test]
+    fn the_roster_seat_and_record_name_race_and_class_from_the_tables() {
+        let mut c = crate::char_select::test_character(7, "Harness");
+        c.race = 4; // Night Elf
+        c.class = 5; // Priest
+        let roster = crate::char_select::Roster::with_pending_pick(vec![c], 7);
+        let korean = crate::ui_unit::TestNames::korean();
+        let seat = seat_from_roster(&roster, korean.names()).expect("a pick seats");
+        assert_eq!(seat.race.as_deref(), Some("나이트 엘프"));
+        assert_eq!(seat.race_file.as_deref(), Some("NightElf"));
+        assert_eq!(seat.class.as_deref(), Some("사제"));
+        assert_eq!(seat.class_file.as_deref(), Some("PRIEST"));
+        let record = record_from_roster(&roster, korean.names()).expect("a pick records");
+        assert_eq!(
+            record.race,
+            Some(("나이트 엘프".to_string(), "NightElf".to_string()))
+        );
+        assert_eq!(
+            record.class,
+            Some(("사제".to_string(), "PRIEST".to_string()))
+        );
+    }
+
     /// Every VM, glue and in-game, answers `GetLocale` with the install's locale (`[0xc0e080]`).
     #[test]
     fn every_new_vm_is_seated_with_the_installs_locale() {
@@ -1534,6 +1576,7 @@ mod tests {
             assert_eq!(script.locale(), want.index());
             let answer = script.eval::<String>("return GetLocale()").unwrap();
             assert_eq!(answer, want.name());
+            assert_eq!(script.client_region(), super::super::client_region());
         }
     }
 

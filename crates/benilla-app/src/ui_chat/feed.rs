@@ -677,6 +677,7 @@ pub(super) fn feed_chat(
     langs: Res<super::language::ChatLanguages>,
     // Item names for `TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`.
     items: Res<crate::items::Items>,
+    unit_names: crate::ui_unit::NameTables,
     // The spam and profanity filters, which run in the reference's display function `0x49a870`.
     mut text_filter: crate::text_filter::ChatTextFilter,
 ) {
@@ -706,7 +707,7 @@ pub(super) fn feed_chat(
                 let name = match &msg.sender_name {
                     Some(n) => Some(n.clone()),
                     None if needs_name(msg.chat_type) && msg.sender_guid != 0 => names
-                        .resolve(msg.sender_guid, &commands)
+                        .resolve_player(msg.sender_guid, &commands)
                         .map(str::to_string),
                     _ => None,
                 };
@@ -740,6 +741,7 @@ pub(super) fn feed_chat(
                         &stores,
                         &names,
                         &commands,
+                        unit_names.get(),
                     );
                     let (text, clean) = crate::npc_text::substitute_checked(
                         &msg.text,
@@ -845,9 +847,9 @@ pub(super) fn feed_chat(
                 b_guid,
                 tries,
             } => {
-                let a = names.resolve(a_guid, &commands).map(str::to_string);
+                let a = names.resolve_player(a_guid, &commands).map(str::to_string);
                 let b = if b_guid != 0 {
-                    names.resolve(b_guid, &commands).map(str::to_string)
+                    names.resolve_player(b_guid, &commands).map(str::to_string)
                 } else {
                     Some(String::new())
                 };
@@ -883,7 +885,7 @@ pub(super) fn feed_chat(
                 guid,
                 tries,
             } => {
-                let name = names.resolve(guid, &commands).map(str::to_string);
+                let name = names.resolve_player(guid, &commands).map(str::to_string);
                 if name.is_none() && tries < NAME_MAX_TRIES {
                     still.push(Pending::Addon {
                         prefix,
@@ -909,7 +911,7 @@ pub(super) fn feed_chat(
                 guid,
                 tries,
             } => {
-                let name = names.resolve(guid, &commands).map(str::to_string);
+                let name = names.resolve_player(guid, &commands).map(str::to_string);
                 if name.is_none() && tries < NAME_MAX_TRIES {
                     still.push(Pending::Roll {
                         min,
@@ -953,7 +955,13 @@ pub(super) fn feed_chat(
                 let name = if victim == 0 {
                     None
                 } else {
-                    let resolved = names.resolve(victim, &commands).map(str::to_string);
+                    let resolved = names
+                        .resolve_unit(
+                            victim,
+                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
+                            &commands,
+                        )
+                        .map(str::to_string);
                     if resolved.is_none() && tries < NAME_MAX_TRIES {
                         still.push(Pending::XpGain {
                             victim,
@@ -984,7 +992,13 @@ pub(super) fn feed_chat(
                 let name = if victim == 0 {
                     None
                 } else {
-                    let resolved = names.resolve(victim, &commands).map(str::to_string);
+                    let resolved = names
+                        .resolve_unit(
+                            victim,
+                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
+                            &commands,
+                        )
+                        .map(str::to_string);
                     if resolved.is_none() && tries < NAME_MAX_TRIES {
                         still.push(Pending::HonorGain {
                             victim,
@@ -1030,10 +1044,12 @@ pub(super) fn feed_chat(
                 tries,
             } => {
                 // Both names ask-once: the performer's, and ours for the "is the target me?" test.
-                let performer_name = names.resolve(performer, &commands).map(str::to_string);
+                let performer_name = names
+                    .resolve_player(performer, &commands)
+                    .map(str::to_string);
                 let your_name = self_guid
                     .0
-                    .and_then(|g| names.resolve(g, &commands).map(str::to_string));
+                    .and_then(|g| names.resolve_player(g, &commands).map(str::to_string));
                 if (performer_name.is_none() || your_name.is_none()) && tries < NAME_MAX_TRIES {
                     still.push(Pending::TextEmote {
                         performer,

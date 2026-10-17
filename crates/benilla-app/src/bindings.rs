@@ -24,7 +24,7 @@
 //! character file's existence is the character-set state, as in the reference.
 
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::MouseScrollUnit;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
@@ -32,7 +32,7 @@ use benilla_ui::script::keybind::KeybindRequest;
 use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
 
 use crate::char_select::InWorldGated;
-use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
+use crate::ui_script::{PlayerUiHover, UiKeyboardCapture};
 
 pub(crate) mod chord;
 mod layout;
@@ -46,7 +46,7 @@ pub(crate) use script_input::Input;
 /// The chord-to-command map, rebuilt whenever the engine table's generation moves. Probe it
 /// through [`BindingDispatch::resolve`]: the lookup is two probes.
 #[derive(Resource, Default)]
-struct BindingDispatch {
+pub(crate) struct BindingDispatch {
     map: std::collections::HashMap<Chord, String>,
     /// The engine table's generation this map was built from, keyed per VM: a fresh VM restarts
     /// its counter at 0.
@@ -346,6 +346,60 @@ pub(crate) fn wheel_lines(unit: MouseScrollUnit, dy: f32) -> f32 {
     }
 }
 
+/// Whether the OS turns Shift plus the vertical wheel into a horizontal scroll before the window
+/// sees it: macOS does, Windows (`WM_MOUSEWHEEL` with `MK_SHIFT` in its key flags) does not.
+pub(crate) const OS_REMAPS_SHIFT_WHEEL: bool = cfg!(target_os = "macos");
+
+/// The vertical travel of a scroll: `y`, except that where the OS remapped Shift plus the wheel to
+/// a horizontal-only scroll (`remapped`), that scroll is the wheel notch it came from. It undoes
+/// the OS's remap so the reference's `WM_MOUSEWHEEL` arrives as it would on Windows (`0x42d54f`),
+/// SHIFT-MOUSEWHEELUP and DOWN stay bindable and Shift plus the wheel still counts as input.
+pub(crate) fn notch_travel_with(x: f32, y: f32, shift: bool, remapped: bool) -> f32 {
+    if remapped && shift && y == 0.0 {
+        x
+    } else {
+        y
+    }
+}
+
+/// [`notch_travel_with`] on this platform.
+pub(crate) fn notch_travel(x: f32, y: f32, shift: bool) -> f32 {
+    notch_travel_with(x, y, shift, OS_REMAPS_SHIFT_WHEEL)
+}
+
+/// The chord a wheel notch runs: the held modifiers and the direction. `None` while Super is held,
+/// where the notch runs no binding.
+fn wheel_chord(keys: &ButtonInput<KeyCode>, up: bool) -> Option<Chord> {
+    let held = |a, b| keys.pressed(a) || keys.pressed(b);
+    if held(KeyCode::SuperLeft, KeyCode::SuperRight) {
+        return None;
+    }
+    Some(Chord {
+        alt: held(KeyCode::AltLeft, KeyCode::AltRight),
+        ctrl: held(KeyCode::ControlLeft, KeyCode::ControlRight),
+        shift: held(KeyCode::ShiftLeft, KeyCode::ShiftRight),
+        key: if up {
+            BindKey::WheelUp
+        } else {
+            BindKey::WheelDown
+        },
+    })
+}
+
+/// Whether the world frame's wheel slot takes a notch: it runs the notch's chord and answers the
+/// sum of the two `ExecuteBinding` results (`0x483d87`), which is 0 for a chord with no binding.
+pub(crate) fn world_takes_wheel(
+    dispatch: Option<&BindingDispatch>,
+    keys: &ButtonInput<KeyCode>,
+    up: bool,
+) -> bool {
+    match (dispatch, wheel_chord(keys, up)) {
+        (Some(dispatch), Some(chord)) => dispatch.resolve(chord, false).is_some(),
+        (None, _) => true,
+        (Some(_), None) => false,
+    }
+}
+
 /// Whole notches out of a stream of line deltas, carrying the fraction between frames.
 ///
 /// For consumers that act per notch off the sign alone: the UI's `OnMouseWheel` (stock
@@ -372,6 +426,12 @@ impl WheelNotches {
     }
 }
 
+/// The wheel notches this frame's sweep left to the world frame, signed (`WheelWalk::World`):
+/// the UI feed writes them, the dispatch pass runs the `MOUSEWHEELUP`/`MOUSEWHEELDOWN` binding
+/// for each (`0x483d20`).
+#[derive(Default, Resource)]
+pub(crate) struct WorldWheel(pub(crate) i32);
+
 /// The dispatch pass (see the module doc). Runs after the UI key feed and before
 /// `WorldStage::Input`, so a bound key acts this frame, once.
 fn latch_and_dispatch(
@@ -381,15 +441,12 @@ fn latch_and_dispatch(
     layout: Res<LayoutNames>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    scroll: Res<AccumulatedMouseScroll>,
+    world_wheel: Res<WorldWheel>,
     capture: Res<UiKeyboardCapture>,
     hover: Res<PlayerUiHover>,
-    // The chrome flag; only the wheel branch reads it.
-    over_ui: Res<PointerOverUiPanel>,
     dispatch: Res<BindingDispatch>,
     mut state: ResMut<BindingsState>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
-    mut notches: Local<WheelNotches>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
 ) {
@@ -567,27 +624,15 @@ fn latch_and_dispatch(
     // ── Wheel ── each notch is a press and its release, back to back: the reference hands one
     // chord to `CBindings::ExecuteBinding` with `isDown=1` (`0x483d6f`) then `isDown=0`
     // (`0x483d82`) per wheel message. A `runOnUp` command runs both halves; a plain one's up leg is
-    // the `RunCommand` (`0x4b7bf1`) no-op. A trackpad's fractional lines carry to whole notches.
-    let wheel = wheel_lines(scroll.unit, scroll.delta.y);
-    // Over chrome only (`PointerOverUiPanel`): the wheel still zooms with the cursor on a
-    // nameplate, a mouse-enabled widget but not a panel.
-    if wheel != 0.0 && !sup && !over_ui.0 {
-        let steps = notches.feed(wheel);
-        let key = if steps > 0 {
-            BindKey::WheelUp
-        } else {
-            BindKey::WheelDown
-        };
-        let chord = Chord {
-            alt,
-            ctrl,
-            shift,
-            key,
-        };
-        if let Some(command) = dispatch.resolve(chord, false) {
-            for _ in 0..steps.unsigned_abs() {
-                press(&mut state, &mut script, command, Held::Wheel);
-                release(&mut state, &mut script, Held::Wheel);
+    // the `RunCommand` (`0x4b7bf1`) no-op. `WorldWheel` holds the notches no frame took.
+    let steps = world_wheel.0;
+    if steps != 0 {
+        if let Some(chord) = wheel_chord(&keys, steps > 0) {
+            if let Some(command) = dispatch.resolve(chord, false) {
+                for _ in 0..steps.unsigned_abs() {
+                    press(&mut state, &mut script, command, Held::Wheel);
+                    release(&mut state, &mut script, Held::Wheel);
+                }
             }
         }
     }
@@ -667,7 +712,7 @@ fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>,
 #[cfg(test)]
 mod tests {
     use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
+    use bevy::input::mouse::MouseButtonInput;
 
     use super::*;
 
@@ -750,14 +795,9 @@ mod tests {
             window: Entity::PLACEHOLDER,
         });
     }
-    fn wheel(app: &mut App, y: f32) {
-        app.world_mut().write_message(MouseWheel {
-            phase: bevy::input::touch::TouchPhase::Moved,
-            unit: MouseScrollUnit::Line,
-            x: 0.0,
-            y,
-            window: Entity::PLACEHOLDER,
-        });
+    /// `notches` whole notches (up positive) that the UI sweep left to the world frame.
+    fn wheel(app: &mut App, notches: i32) {
+        app.world_mut().resource_mut::<WorldWheel>().0 = notches;
     }
 
     /// What a keyboard frame ate this frame. Set, not pushed: `feed_ui_input` rewrites the list
@@ -789,7 +829,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiHover>()
-            .init_resource::<PointerOverUiPanel>()
+            .init_resource::<WorldWheel>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingDispatch>()
             .init_resource::<LayoutNames>()
@@ -1149,13 +1189,119 @@ mod tests {
         let mut app = vm_harness(s);
 
         // The bound chord now dispatches: the next notch jumps rather than binding.
-        wheel(&mut app, 1.0);
+        wheel(&mut app, 1);
         app.update();
         assert!(state(&app).fired(Input::Jump));
         assert!(
             !state(&app).fired(Input::CameraZoomIn),
             "JUMP stole the wheel from the camera, the 1.12 steal law"
         );
+    }
+
+    /// The whole path of a notch over the stock chrome: the UI's sweep first, then the bindings
+    /// pass with what it left. Over a button with no `OnMouseWheel` the camera zooms (`0x76c1cb`,
+    /// `0x483d20`); over a frame that has one, the frame scrolls and the camera does not.
+    #[test]
+    fn a_notch_zooms_the_camera_over_a_button_and_not_over_a_scroll_pane() {
+        use bevy::input::mouse::MouseScrollUnit;
+        let notch = (MouseScrollUnit::Line, 1.0);
+        let mut s = core_script();
+        s.set_screen_size(1024.0, 768.0);
+        s.run(
+            r#"
+            local w = CreateFrame("WorldFrame", "WorldFrame")
+            w:SetPoint("BOTTOMLEFT", 0, 0) w:SetWidth(1024) w:SetHeight(768)
+            local b = CreateFrame("Button", "ActionButton")
+            b:SetPoint("BOTTOMLEFT", 100, 100) b:SetWidth(40) b:SetHeight(40)
+            local p = CreateFrame("Frame", "Pane")
+            p:SetPoint("BOTTOMLEFT", 600, 100) p:SetWidth(100) p:SetHeight(100)
+            p:EnableMouseWheel(true)
+            p:SetScript("OnMouseWheel", function() SCROLLED = (SCROLLED or 0) + 1 end)
+            "#,
+        )
+        .expect("frames");
+        s.resolve();
+        let mut notches = WheelNotches::default();
+        let over_button = crate::ui_script::feed_wheel(
+            &mut s,
+            &mut notches,
+            Vec2::new(120.0, 120.0),
+            notch,
+            |_| true,
+        );
+        let over_pane = crate::ui_script::feed_wheel(
+            &mut s,
+            &mut notches,
+            Vec2::new(650.0, 150.0),
+            notch,
+            |_| true,
+        );
+        let mut app = vm_harness(s);
+
+        wheel(&mut app, over_pane);
+        app.update();
+        assert!(
+            !state(&app).fired(Input::CameraZoomIn),
+            "the pane took the notch"
+        );
+        assert_eq!(lua_count(&app, "SCROLLED"), 1);
+
+        wheel(&mut app, over_button);
+        app.update();
+        assert!(
+            state(&app).fired(Input::CameraZoomIn),
+            "a button has no OnMouseWheel: the notch is the camera's"
+        );
+        assert_eq!(lua_count(&app, "SCROLLED"), 1);
+    }
+
+    /// Where the OS turned Shift plus the wheel sideways, a horizontal-only scroll with Shift held
+    /// is the vertical notch it came from; nowhere else is a sideways scroll a notch.
+    #[test]
+    fn a_remapped_shift_wheel_is_the_vertical_notch() {
+        assert_eq!(notch_travel_with(-1.0, 0.0, true, true), -1.0);
+        assert_eq!(notch_travel_with(2.0, 0.0, true, true), 2.0);
+        assert_eq!(
+            notch_travel_with(2.0, 0.0, false, true),
+            0.0,
+            "no Shift: sideways"
+        );
+        assert_eq!(
+            notch_travel_with(2.0, 0.0, true, false),
+            0.0,
+            "no remap: sideways"
+        );
+        assert_eq!(
+            notch_travel_with(2.0, 3.0, true, true),
+            3.0,
+            "a vertical part wins"
+        );
+        assert_eq!(notch_travel_with(0.0, -1.0, true, true), -1.0);
+    }
+
+    /// The world slot takes a notch only when its chord has a binding (`0x483d87`); Super holds
+    /// the notch back.
+    #[test]
+    fn the_world_takes_a_notch_only_for_a_bound_chord() {
+        let mut app = harness();
+        app.update();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        let dispatch = app.world().resource::<BindingDispatch>();
+        assert!(world_takes_wheel(Some(dispatch), &keys, true));
+        assert!(world_takes_wheel(Some(dispatch), &keys, false));
+        // SHIFT-MOUSEWHEELUP has no binding; the unmodified chord's retry is the leftmost
+        // modifier dropped, so it falls back to the bound plain chord.
+        keys.press(KeyCode::ShiftLeft);
+        assert!(world_takes_wheel(Some(dispatch), &keys, true));
+        keys.press(KeyCode::SuperLeft);
+        assert!(!world_takes_wheel(Some(dispatch), &keys, true));
+        assert!(world_takes_wheel(None, &keys, true), "no table, no say");
+        let empty = BindingDispatch::default();
+        assert!(!world_takes_wheel(
+            Some(&empty),
+            &ButtonInput::default(),
+            true
+        ));
     }
 
     /// A notch is a press and its release (`0x483d6f`, `0x483d82`), so a `runOnUp` binding on the
@@ -1170,7 +1316,7 @@ mod tests {
         script.load_binding_set(1);
         let mut app = vm_harness(script);
 
-        wheel(&mut app, 1.0);
+        wheel(&mut app, 1);
         app.update();
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1, "the notch's press half");
         assert_eq!(
@@ -1826,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_buttons_bind_only_over_the_world_and_the_wheel_respects_ui() {
+    fn mouse_buttons_bind_only_over_the_world() {
         let mut app = harness();
         // BUTTON4 (winit Forward) is TOGGLEAUTORUN's second default.
         mouse(&mut app, MouseButton::Forward, ButtonState::Pressed);
@@ -1850,40 +1996,42 @@ mod tests {
         mouse(&mut app, MouseButton::Middle, ButtonState::Released);
         app.update();
         assert!(!state(&app).steering());
-        // The wheel: each notch runs CAMERAZOOMIN's `CameraZoomIn(1.0)`; over UI it belongs to
-        // the frame.
+    }
+
+    /// The notches the sweep left to the world each run CAMERAZOOMIN's `CameraZoomIn(1.0)`, and
+    /// none left run nothing.
+    #[test]
+    fn each_notch_left_to_the_world_zooms() {
         let mut app = harness();
-        wheel(&mut app, 2.0);
+        wheel(&mut app, 2);
         app.update();
         assert!(state(&app).fired(Input::CameraZoomIn));
         assert_eq!(state(&app).amount(Input::CameraZoomIn), 2.0, "two notches");
-        app.world_mut().resource_mut::<PointerOverUiPanel>().0 = true;
-        wheel(&mut app, 2.0);
+        wheel(&mut app, -1);
         app.update();
-        assert!(
-            !state(&app).fired(Input::CameraZoomIn),
-            "a UI wheel is the frame's"
-        );
+        assert_eq!(state(&app).amount(Input::CameraZoomOut), 1.0);
+        wheel(&mut app, 0);
+        app.update();
+        assert!(!state(&app).fired(Input::CameraZoomIn), "no notch, no zoom");
+        assert!(!state(&app).fired(Input::CameraZoomOut));
     }
 
     /// A trackpad's fractional lines carry to whole notches, each one `CameraZoomIn(1.0)`, and a
     /// reversal drops the carried fraction.
     #[test]
-    fn fractional_wheel_lines_dispatch_per_whole_notch() {
-        let mut app = harness();
-        for want in [0.0, 0.0, 1.0] {
-            wheel(&mut app, 0.4);
-            app.update();
-            assert_eq!(
-                state(&app).amount(Input::CameraZoomIn),
-                want,
-                "0.4 lines a frame: the third completes the notch"
-            );
-        }
-        wheel(&mut app, -1.0);
-        app.update();
-        assert_eq!(state(&app).amount(Input::CameraZoomOut), 1.0);
-        assert_eq!(state(&app).amount(Input::CameraZoomIn), 0.0);
+    fn fractional_wheel_lines_carry_to_whole_notches() {
+        let mut notches = WheelNotches::default();
+        let got: Vec<i32> = [0.4, 0.4, 0.4].map(|l| notches.feed(l)).to_vec();
+        assert_eq!(
+            got,
+            [0, 0, 1],
+            "0.4 lines a frame: the third completes the notch"
+        );
+        assert_eq!(
+            notches.feed(-1.0),
+            -1,
+            "a reversal drops the carried fraction"
+        );
     }
 
     /// The window deactivate (`0x514490`) clears the direction bits a Lua Start set and keeps the

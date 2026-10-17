@@ -65,10 +65,11 @@ fn resolve_board(
     log: &PvpLogData,
     names: &NameCache,
     commands: &NetCommands,
+    unit_names: crate::ui_unit::UnitNames<'_>,
 ) -> Option<Vec<BattlefieldScoreRow>> {
     let mut rows = Vec::with_capacity(log.rows.len());
     for r in &log.rows {
-        let name = names.resolve(r.guid, commands)?.to_string();
+        let name = names.resolve_player(r.guid, commands)?.to_string();
         let (race, class) = names
             .player_traits(r.guid)
             .map_or((0, 0), |(race, class, _)| (race, class));
@@ -87,8 +88,8 @@ fn resolve_board(
             honor_gained: r.honor_gained,
             faction,
             rank: i32::try_from(r.rank).unwrap_or(i32::MAX),
-            race: crate::ui_unit::race_names(race).map(|(n, _)| n.to_string()),
-            class: crate::ui_unit::class_names(class).map(|(n, _)| n.to_string()),
+            race: unit_names.race(race).map(|(n, _)| n.to_string()),
+            class: unit_names.class(class).map(|(n, _)| n.to_string()),
             stats,
         });
     }
@@ -102,6 +103,7 @@ pub(crate) fn feed_battlefield_score(
     catalog: Option<Res<WorldStateUiRes>>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
+    unit_names: crate::ui_unit::NameTables,
     mut last: Local<crate::ui_script::VmMemo<Option<BattlefieldScores>>>,
 ) {
     let Some(mut script) = script else {
@@ -111,7 +113,7 @@ pub(crate) fn feed_battlefield_score(
     script.set_battlefield_run_time_ms(queue.run_time_ms(now));
 
     let fresh = board.log.as_ref().and_then(|log| {
-        let rows = resolve_board(log, &names, &commands)?;
+        let rows = resolve_board(log, &names, &commands, unit_names.get())?;
         let columns = queue
             .active_map()
             .zip(catalog.as_deref())

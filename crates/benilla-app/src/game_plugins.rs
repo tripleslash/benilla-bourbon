@@ -1298,12 +1298,12 @@ pub(crate) mod schedule_tests {
         }
     }
 
-    /// The font engine is built at `Startup` before the glue VM loads: the stock glue buttons
-    /// that size to their text in `<OnLoad>` (`SetWidth(this:GetTextWidth() + 50)`) read 0 and
-    /// stand 50 wide when the VM has no measurer at load. A lost `.after`, or the engine back in
-    /// `Update` only, fails here.
+    /// The `Startup` VM, the stock glue's under `WOW_GLUE_STOCK=1`, is built after the glyph cache:
+    /// its first screen sizes frames by measured text in the show (`TOSFrameHeader` off
+    /// `TOSFrameTitle:GetWidth()`, `AccountLogin.lua`), which with no cache measures 0; so do the
+    /// glue buttons that size to their text in `<OnLoad>` (`SetWidth(this:GetTextWidth() + 50)`).
     #[test]
-    fn the_font_engine_is_built_before_the_glue_loads() {
+    fn the_startup_vm_is_built_after_the_glyph_cache() {
         let mut app = headless_client();
         // `Update` first: its systems register the resources the census's class table names.
         let _ = census(&mut app, Update, SyncPoints::Declared);
@@ -1325,9 +1325,12 @@ pub(crate) mod schedule_tests {
         for (a, b) in &c.dependencies {
             succ.entry(*a).or_default().push(*b);
         }
-        let start = one("::ui_text::engine::gpu::init");
+        let (atlas, vm) = (
+            one("::ui_text::engine::gpu::init"),
+            one("::ui_script::lifecycle::setup_script"),
+        );
         let mut seen = HashSet::new();
-        let mut stack = vec![start];
+        let mut stack = vec![atlas];
         while let Some(n) = stack.pop() {
             for m in succ.get(&n).into_iter().flatten() {
                 if seen.insert(*m) {
@@ -1335,10 +1338,7 @@ pub(crate) mod schedule_tests {
                 }
             }
         }
-        assert!(
-            seen.contains(&one("::ui_script::lifecycle::setup_script")),
-            "the glue VM loads after the font engine is built"
-        );
+        assert!(seen.contains(&vm), "the VM is built after the glyph cache");
     }
 
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
@@ -1515,7 +1515,7 @@ pub(crate) mod schedule_tests {
         ("ui_gm_ticket.rs", "feed_gm_ticket", Because::MemoLatched,
          "`feed.vm: VmMemo<FedTicket>` counters restart per VM while `state.answers` keeps counting, so the latest answer is re-fired"),
         ("ui_honor.rs", "feed_honor", Because::MemoLatched,
-         "`state.vm: VmMemo<HonorFeedMemo>`; `events_for(None, ..)` re-fires both events on a fresh VM"),
+         "`state.vm: VmMemo<HonorFeedMemo>`; a fresh VM is pushed the block again and re-fires `INSPECT_HONOR_UPDATE` for a held reply"),
         ("ui_inspect.rs", "feed_inspect", Because::MemoLatched,
          "the token is latched only by Lua's `NotifyInspect`, and the diffs ride a `VmMemo`"),
         ("ui_item_text.rs", "feed_item_text", Because::MemoLatched,

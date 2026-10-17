@@ -25,7 +25,7 @@ use benilla_world::map_proj::{world_uv, WorldProj};
 use super::LoadingScreen;
 use crate::glue::art::tc_rect;
 use crate::go_templates::GameObjectTemplates;
-use crate::net::Guid;
+use crate::net::ObjectStore;
 
 /// Dots per unit of route length, `1/0.015` (`0x7ffd80`); the count truncates, with a floor of 1.
 const DOTS_PER_UNIT: f32 = 66.666_67;
@@ -322,7 +322,8 @@ impl LoadingScreen {
 pub(super) struct ShipLookup<'w, 's> {
     routes: Option<Res<'w, ShipRoutes>>,
     templates: Res<'w, GameObjectTemplates>,
-    guids: Query<'w, 's, &'static Guid>,
+    /// The transport's descriptor, whose `OBJECT_FIELD_ENTRY` keys its template.
+    stores: Query<'w, 's, &'static ObjectStore>,
 }
 
 impl ShipLookup<'_, '_> {
@@ -335,11 +336,11 @@ impl ShipLookup<'_, '_> {
         transport: Option<(u32, u32)>,
     ) -> Option<Option<&ShipRoute>> {
         let (entry, from_map) = transport?;
-        let guid = self.guids.get(deck?).ok()?;
-        if self.templates.entry_of(guid.0) != Some(entry) {
+        let store = self.stores.get(deck?).ok()?;
+        if store.0.object_entry() != Some(entry) {
             return None;
         }
-        let path_id = self.templates.get(guid.0).and_then(|t| t.mo_transport);
+        let path_id = self.templates.of(&store.0).and_then(|t| t.mo_transport);
         Some(
             path_id
                 .zip(self.routes.as_ref())
@@ -351,8 +352,8 @@ impl ShipLookup<'_, '_> {
     /// the leg it left. `None` when the transport is gone; else that leg's route, or `Some(None)`
     /// when it draws none.
     fn leg_route(&self, deck: Entity, left: usize) -> Option<Option<&ShipRoute>> {
-        let guid = self.guids.get(deck).ok()?;
-        let path_id = self.templates.get(guid.0).and_then(|t| t.mo_transport);
+        let store = self.stores.get(deck).ok()?;
+        let path_id = self.templates.of(&store.0).and_then(|t| t.mo_transport);
         Some(
             path_id
                 .zip(self.routes.as_ref())
@@ -621,7 +622,6 @@ mod tests {
     /// names, and only when the packet names the transport we ride.
     #[test]
     fn a_transfer_draws_the_route_of_the_transport_we_ride() {
-        use benilla_protocol::guid::HIGH_MO_TRANSPORT;
         const BOAT: u32 = 176231;
         const PATH: u32 = 292;
 
@@ -645,7 +645,7 @@ mod tests {
             by_path: HashMap::from([(PATH, legs)]),
         });
         let deck = world
-            .spawn(Guid((u64::from(HIGH_MO_TRANSPORT) << 48) | u64::from(BOAT)))
+            .spawn(ObjectStore(crate::go_templates::test_fields(BOAT)))
             .id();
         let mut state = bevy::ecs::system::SystemState::<ShipLookup>::new(&mut world);
         let lookup = state.get(&world).expect("the lookup's resources are in");

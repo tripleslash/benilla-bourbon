@@ -8,6 +8,7 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{bool_or_default, flag};
+use super::protected::{self, Tag};
 use super::Model;
 use crate::script::binding_abi::Idx32;
 
@@ -81,6 +82,9 @@ pub struct ActionUse {
     /// the call (`0x4e607b` → `0x5d8d32`), so the app, which finds the copy, tests it against
     /// these and not the locks a later call in the frame took or released.
     pub item_locks: Vec<u64>,
+    /// What the protected-action gate's tag 2 allowed the call (`0x6e4bc1`): a spell or an item's
+    /// on-use spell casts through `TryCastSpell`, behind it. The equip arm and a macro are not.
+    pub may_cast: bool,
 }
 
 impl ActionUse {
@@ -160,6 +164,16 @@ impl super::UiScript {
     /// Drain the GlobalStrings keys of engine-side refusals; the app fires `UI_ERROR_MESSAGE` for
     /// each, where the reference calls `CGGameUI::DisplayError` inline.
     pub fn take_ui_errors(&mut self) -> Vec<&'static str> {
+        self.take_ui_errors_with_input()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    /// [`Self::take_ui_errors`] with the input events each was raised under: the reference signals
+    /// `UI_ERROR_MESSAGE` inside the failing press, and the app signals it a frame later, under
+    /// these raised again.
+    pub fn take_ui_errors_with_input(&mut self) -> Vec<(&'static str, super::InputEvents)> {
         std::mem::take(&mut self.model_mut().ui_errors)
     }
 }
@@ -285,19 +299,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // Both flags go through `GetBoolOrDefault` (`0x4e717e`, `0x4e716f`), default 0.
             let check_cursor = bool_or_default(rest.front(), false);
             let on_self = bool_or_default(rest.get(1), false);
+            let may_cast = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if check_cursor && model.cursor.is_some() {
                 drop(model);
                 super::cursor::place_action(lua, action);
             } else {
                 let item_locks = model.item_locks.iter().copied().collect();
-                model
-                    .script_calls
-                    .push(super::ScriptCall::UseAction(ActionUse {
-                        action,
-                        on_self,
-                        item_locks,
-                    }));
+                model.queue_call(super::ScriptCall::UseAction(ActionUse {
+                    action,
+                    on_self,
+                    item_locks,
+                    may_cast,
+                }));
             }
             Ok(())
         })?,

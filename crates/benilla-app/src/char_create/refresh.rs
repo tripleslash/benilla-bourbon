@@ -27,6 +27,7 @@ pub(super) fn refresh_dynamic(
     catalog: Option<Res<CharCreate>>,
     art: Res<GlueArt>,
     strings: Option<Res<GlueStrings>>,
+    unit_names: crate::ui_unit::NameTables,
     root: Query<Ref<CharCreateUi>>,
     mut icons: Query<(&DynIcon, &mut ImageNode)>,
     mut texts: Query<(&DynText, &mut Text)>,
@@ -65,10 +66,15 @@ pub(super) fn refresh_dynamic(
 
     for (icon, mut node) in &mut icons {
         let tc = match icon {
-            DynIcon::Race(r) => art
-                .races
-                .as_ref()
-                .and_then(|(h, size)| Some((h.clone(), tc_rect(*size, art.race_tc(*r, sel.sex)?)))),
+            DynIcon::Race(r) => art.races.as_ref().and_then(|(h, size)| {
+                Some((
+                    h.clone(),
+                    tc_rect(
+                        *size,
+                        art.race_tc(*r, sel.sex, cat.and_then(|c| c.0.race_file(*r)))?,
+                    ),
+                ))
+            }),
             DynIcon::ClassSlot(i) => {
                 let class = classes.get(*i as usize).copied();
                 art.classes
@@ -84,7 +90,13 @@ pub(super) fn refresh_dynamic(
                 (h.clone(), tc_rect(*size, half))
             }),
             DynIcon::Info(InfoKind::Race) => art.races.as_ref().and_then(|(h, size)| {
-                Some((h.clone(), tc_rect(*size, art.race_tc(sel.race, sel.sex)?)))
+                Some((
+                    h.clone(),
+                    tc_rect(
+                        *size,
+                        art.race_tc(sel.race, sel.sex, cat.and_then(|c| c.0.race_file(sel.race)))?,
+                    ),
+                ))
             }),
             DynIcon::Info(InfoKind::Class) => art
                 .classes
@@ -123,8 +135,10 @@ pub(super) fn refresh_dynamic(
                     if alliance { "Alliance" } else { "Horde" },
                 )
                 .to_string(),
-            DynText::InfoTitle(InfoKind::Race) => race_name(sel.race).to_string(),
-            DynText::InfoTitle(InfoKind::Class) => class_name(sel.class).to_string(),
+            DynText::InfoTitle(InfoKind::Race) => race_name(unit_names.get(), sel.race).to_string(),
+            DynText::InfoTitle(InfoKind::Class) => {
+                class_name(unit_names.get(), sel.class).to_string()
+            }
             // Never trimmed: each `FACTION_INFO_*`, `RACE_INFO_*` and `CLASS_*` string opens with
             // eight spaces, which is the reference's first-line clearance past the header icon.
             DynText::InfoBody(InfoKind::Faction) => strings
@@ -155,7 +169,7 @@ pub(super) fn refresh_dynamic(
                 .to_string(),
             DynText::ClassSlotLabel(i) => classes
                 .get(*i as usize)
-                .map(|&c| class_name(c).to_string())
+                .map(|&c| class_name(unit_names.get(), c).to_string())
                 .unwrap_or_default(),
         };
         if t.0 != new {

@@ -28,6 +28,11 @@ pub(crate) struct ScriptSelect<'w, 's> {
 }
 
 impl ScriptSelect<'_, '_> {
+    /// The guid selected now.
+    pub(crate) fn selected(&self) -> Option<u64> {
+        self.commit.selection.guid
+    }
+
     /// `TargetUnit` (`0x4899d0`), `AssistUnit` (`0x489b80`) and `TargetLastEnemy` share the
     /// reference's helper `0x489a40`: a resolved unit or a roster member is committed, anything
     /// else is a no-op, never a deselect. Here a token must name a streamed unit, so an
@@ -86,6 +91,7 @@ impl ScriptSelect<'_, '_> {
             &mut self.history,
             &mut self.commit.selection,
             &mut self.commit.seam,
+            &mut self.commit.front,
             engaged,
         );
     }
@@ -132,6 +138,8 @@ mod tests {
         world.init_resource::<crate::net::Reputations>();
         world.init_resource::<super::super::AssistAttack>();
         world.init_resource::<super::super::Selection>();
+        world.init_resource::<crate::spell::SpellTargeting>();
+        world.init_resource::<crate::spell::CursorPicks>();
         world.init_resource::<scan::LastEnemy>();
         world.init_resource::<crate::names::NameCache>();
         world.init_resource::<scan::TabHistory>();

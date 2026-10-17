@@ -62,7 +62,7 @@ pub(crate) fn attack_nearest_probe(
     mut press: AttackPress,
 ) {
     if probe.read().last().is_some() && press.selection.guid.is_none() {
-        press.attack_target();
+        press.attack_target(true);
     }
 }
 
@@ -82,10 +82,21 @@ impl AttackPress<'_, '_> {
     /// attacking (`0x60ecb0`) stops (`0x5ecac0`), else it starts at the validator's target
     /// (`0x5ecb70`). Only the start cancels auto-repeat (`0x5ecd8c`), so stopping melee leaves
     /// Auto Shot running.
-    pub(crate) fn attack_target(&mut self) {
-        let Some(guid) = self.validate(None) else {
-            return;
-        };
+    pub(crate) fn attack_target(&mut self, may_pick: bool) {
+        if let Some(guid) = self.validate_attack(may_pick) {
+            self.start_attack(guid);
+        }
+    }
+
+    /// [`Self::attack_target`]'s first half, the validator `0x612df0`. Its `SelectTarget` calls
+    /// (`0x613100`, `0x4941e6`) may hand a unit to the targeting cursor, which binds it before the
+    /// swing below goes out, so a caller that owns the cursor binds between the two halves.
+    pub(crate) fn validate_attack(&mut self, may_pick: bool) -> Option<u64> {
+        self.validate(None, may_pick)
+    }
+
+    /// [`Self::attack_target`]'s second half, the toggle at the validated target.
+    pub(crate) fn start_attack(&mut self, guid: u64) {
         let Self { pick, seam, .. } = self;
         let Ok(e) = seam.me.single() else {
             return;
@@ -112,11 +123,11 @@ impl AttackPress<'_, '_> {
     /// cast goes on, at the unit the pick left selected.
     pub(crate) fn pick_for_cast(&mut self, held: crate::spell::HeldCast) -> bool {
         let caster = self.pick.player().1.filter(|_| held.on_self);
-        self.validate(caster).is_some()
+        self.validate(caster, true).is_some()
     }
 
     /// The attack validator `0x612df0`: its actor checks, then its target pick.
-    fn validate(&mut self, passed: Option<u64>) -> Option<u64> {
+    fn validate(&mut self, passed: Option<u64>, may_pick: bool) -> Option<u64> {
         let Self {
             pick,
             selection,
@@ -127,7 +138,7 @@ impl AttackPress<'_, '_> {
         if attack_actor_refusal(me, my_guid, ui_errors) {
             return None;
         }
-        pick.target(passed, selection, seam, ui_errors)
+        pick.target(passed, may_pick, selection, seam, ui_errors)
     }
 }
 
@@ -173,6 +184,22 @@ pub(super) fn drain_go_openers(
                     &mut ui_errors,
                 );
             }
+        }
+    }
+}
+
+impl ActionPress<'_, '_> {
+    /// How many by-key refusals are queued.
+    pub(crate) fn error_count(&self) -> usize {
+        self.ui_errors.0.len()
+    }
+
+    /// Stamp the refusals queued since `from` with the input events the call that raised them ran
+    /// under, so the feed signals `UI_ERROR_MESSAGE` for them as the reference does, inside the
+    /// press.
+    pub(crate) fn stamp_errors(&mut self, from: usize, input: benilla_ui::script::InputEvents) {
+        for e in self.ui_errors.0.iter_mut().skip(from) {
+            e.input = input;
         }
     }
 }
@@ -226,16 +253,20 @@ pub(crate) fn use_action(
         Some(b) if b.kind == ACTION_KIND_SPELL && b.action == SPELL_ATTACK => {
             // `UseAction` casts Attack through TryCast, so its dead rung comes first: "You are
             // dead", where the binding, which skips TryCast, reads "Can't attack while dead."
-            // Then TryCast's effect-0x4e short-circuit runs the Attack toggle (`0x6e4c90`).
+            // Then TryCast's effect-0x4e short-circuit runs the Attack toggle (`0x6e4c90`). The
+            // gate (`0x6e4bc1`) is TryCast's first rung, ahead of both.
+            if !ladder.permitted() {
+                return UseOutcome::Done;
+            }
             if ladder.dead_refusal(SPELL_ATTACK, targeting.self_store.iter().next()) {
                 return UseOutcome::Done;
             }
             return UseOutcome::Attack;
         }
         Some(b) if b.kind == ACTION_KIND_SPELL => {
-            // In `UseAction 0x4e5ee0` only: re-pressing the spell whose targeting cursor is
-            // up cancels it before `TryCast` (`GetTargetingSpellId 0x6e48e0`,
-            // `StopTargeting 0x6e4900`). A spellbook re-press aborts and re-enters.
+            // Re-pressing the spell whose targeting cursor is up cancels it before `TryCast`
+            // (`GetTargetingSpellId 0x6e48e0`, `StopTargeting 0x6e4900`), as `CastBookSpell`
+            // does for the spellbook (`0x4b3474`, [`crate::ui_spellbook::cast_spell`]).
             if ladder.ground.spell() == Some(b.action) {
                 debug!(
                     "ui_action: cast {} re-pressed — targeting toggles off",
@@ -383,6 +414,8 @@ pub(crate) fn use_action(
         // The macro arm (`0x4e5ee0` calls `0x4f1460`): each body line goes through the chat
         // input, as if typed.
         Some(b) if b.kind == ACTION_KIND_MACRO => {
+            // The press's input events are up around the whole call
+            // ([`crate::script_calls::in_call_order`]), so the lines run inside them.
             if !crate::ui_macro::run_macro(script, b.action) {
                 debug!(
                     "ui_action: macro action {action} (macro {}) is empty",

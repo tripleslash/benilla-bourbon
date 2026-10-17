@@ -103,7 +103,7 @@ pub use factions::{
     FactionInfo, FactionTemplate, Reaction,
 };
 mod creature_types;
-pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
+pub use creature_types::{load_creature_type_table, CreatureTypeTable};
 /// The chat language scramble, the reference's `0x49b560`.
 mod garble;
 pub use garble::{garble, garble_chat, Garble, FLUENT_SKILL};
@@ -144,6 +144,8 @@ pub use lock::{
 };
 mod lock_type;
 pub use lock_type::{load_lock_type_catalog, LockTypeCatalog};
+mod chr_races;
+pub use chr_races::{load_chr_races, ChrRaces};
 mod chr_classes;
 pub use chr_classes::{load_chr_classes, ChrClasses, PET_NAME_TOKEN_FALLBACK};
 mod pet_stats;

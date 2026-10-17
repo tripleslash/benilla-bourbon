@@ -101,34 +101,43 @@ fn content_kind(c: &QuadContent) -> &'static str {
     }
 }
 
-/// Which axes run past the texture, the reference's tiling idiom (`SetTexCoord(0, n, 0, 1)`
-/// repeats the art n times), and so sample `Repeat`; a bounded axis on `Repeat` would filter its
-/// edge against the opposite one. Its tolerance must match [`uv_clamp_window`]'s.
-///
-/// Only an axis-aligned mapping tiles. A rotated quad, `SetTexCoord`'s eight-number form as stock
-/// `TaxiFrame.lua`'s `DrawRouteLine` draws a route, runs past the texture in its bounding box's
-/// slack corners, which must clamp onto `UI-Taxi-Line.blp`'s transparent border
-/// (`TAXIROUTE_LINEFACTOR` = 32/30 scales the box for that border): repeated, each corner draws a
-/// neighbouring copy of the line beside it.
-pub(crate) fn tiling_axes(uv: &UvRect) -> (bool, bool) {
-    let [tl, tr, _, bl] = uv.corners;
-    let one_axis =
-        |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1.0e-4 || (a[1] - b[1]).abs() < 1.0e-4;
-    if !(one_axis(tl, tr) && one_axis(tl, bl)) {
-        return (false, false);
+/// Where a UI sprite comes from: the store's clamped and repeating images of one file.
+trait SpriteSource {
+    fn clamped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>>;
+    fn wrapped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>>;
+}
+
+impl SpriteSource for WorldAssets {
+    fn clamped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        self.sprite_texture(path, images)
     }
-    let past = |axis: usize| {
-        uv.corners
-            .iter()
-            .any(|c| !(-0.001..=1.001).contains(&c[axis]))
-    };
-    (past(0), past(1))
+
+    fn wrapped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        self.sprite_texture_wrapped(path, images)
+    }
+}
+
+/// The image a texture quad samples: the repeating one when its file loaded with the wrap flag,
+/// else the clamped one (`0x770200`'s second argument, bits 3 and 4 of the flags word), whatever
+/// its coordinates say.
+fn sprite_for_wrap(
+    source: &mut impl SpriteSource,
+    path: &str,
+    wrap: bool,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
+    if wrap {
+        source.wrapped(path, images)
+    } else {
+        source.clamped(path, images)
+    }
 }
 
 /// The [`UiQuad::uv_clamp`] window of an atlas crop, inset half a texel so a magnified cell does
 /// not filter in its neighbour (in `ChatBubble-Backdrop`, a white alpha-0 column: a pale line
-/// through the speech bubble). A tiling axis is left alone, or each period would land short and
-/// walk the art; a whole-texture axis needs no window.
+/// through the speech bubble). An axis past the texture is left alone (repeating, each period
+/// would land short and walk the art; clamping, the sampler's edge is the window); a
+/// whole-texture axis needs no window.
 fn uv_clamp_window(uv: &UvRect, size: (u32, u32)) -> Option<[f32; 4]> {
     let mut out = [1.0, 1.0, 0.0, 0.0]; // both axes off: `min > max`
     let mut any = false;
@@ -1344,6 +1353,7 @@ fn convert_entry(
             gradient,
             additive,
             tex_coords,
+            wrap,
             circular,
             portrait_unit,
             rotation,
@@ -1405,14 +1415,12 @@ fn convert_entry(
             // (a data-less run) the quad draws untextured.
             //
             // `SetTexCoord`'s edges map to raw UV corners, so a mirrored slice (`left > right`)
-            // keeps its flip; resolved before the handle because the wrap mode follows it.
+            // keeps its flip. The coordinates never decide the wrap: the file's load did.
             let uv = match tex_coords {
                 Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
                 Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
                 None => UvRect::FULL,
             };
-            // A slice past the texture tiles (`BonusActionBarFrame.lua:173`), on that axis alone.
-            let wrap = tiling_axes(&uv);
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
                     let resolved = if p == benilla_ui::script::nameplate::BORDER_TEXTURE {
@@ -1443,10 +1451,8 @@ fn convert_entry(
                     } else if circular {
                         // The circle-masked variant (`SetPortraitToTexture`).
                         a.portrait_texture(p, images)
-                    } else if wrap != (false, false) {
-                        a.sprite_texture_wrapped(p, wrap, images)
                     } else {
-                        a.sprite_texture(p, images)
+                        sprite_for_wrap(&mut **a, p, wrap, images)
                     };
                     if resolved.is_none() {
                         return;
@@ -1624,10 +1630,10 @@ fn cursor_icon_quad(pos: Vec2, texture: Handle<Image>) -> UiQuad {
     }
 }
 
-/// [`uv_clamp_window`] and [`tiling_axes`] on shapes the stock UI draws.
+/// [`uv_clamp_window`] on shapes the stock UI draws.
 #[cfg(test)]
 mod uv_clamp_tests {
-    use super::{tiling_axes, uv_clamp_window, UvRect};
+    use super::{uv_clamp_window, UvRect};
 
     /// `POIIcons` is 128², and a world-map POI samples its cell (7, 1).
     #[test]
@@ -1644,71 +1650,6 @@ mod uv_clamp_tests {
     #[test]
     fn the_whole_texture_asks_for_no_window() {
         assert!(uv_clamp_window(&UvRect::FULL, (128, 128)).is_none());
-    }
-
-    /// The stance bar's middle strip, `SetTexCoord(0, n-2, 0, 1)` (`BonusActionBarFrame.lua:173`).
-    #[test]
-    fn a_one_axis_strip_wraps_that_axis_only() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 2.0, 0.0, 1.0])),
-            (true, false)
-        );
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 3.0])),
-            (false, true)
-        );
-    }
-
-    #[test]
-    fn a_bounded_mapping_tiles_nothing() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 1.0])),
-            (false, false)
-        );
-        assert_eq!(tiling_axes(&UvRect::FULL), (false, false));
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.453125, 0.875, 0.0, 1.0])),
-            (false, false)
-        );
-    }
-
-    /// A taxi route line: stock `DrawRouteLine`'s `dy >= 0` arm for a hop 100 right and 60 up at
-    /// width 32, its `SetTexCoord(TLx, TLy, BLx, BLy, TRx, TRy, BRx, BRy)` stored as `paint.rs`
-    /// stores it. The quad runs past the texture on both axes, and still tiles neither.
-    #[test]
-    fn a_rotated_route_line_tiles_nothing() {
-        let (dx, dy, w) = (100.0f32, 60.0f32, 32.0f32);
-        let l = (dx * dx + dy * dy).sqrt();
-        let (s, c) = (-dy / l, dx / l);
-        let sc = s * c;
-        let (blx, bly, bry) = ((w / l) * sc, s * s, (l / w) * sc);
-        let (brx, tlx, tly, trx) = (1.0 - bly, bly, 1.0 - bry, 1.0 - blx);
-        let try_ = brx;
-        let uv = UvRect::from_corners([[tlx, tly], [trx, try_], [brx, bry], [blx, bly]]);
-        assert!(
-            uv.corners
-                .iter()
-                .any(|c| !(0.0..=1.0).contains(&c[0]) || !(0.0..=1.0).contains(&c[1])),
-            "the route quad reaches past the texture: {:?}",
-            uv.corners
-        );
-        assert_eq!(tiling_axes(&uv), (false, false));
-    }
-
-    /// A quarter turn is still axis-aligned (a backdrop edge maps atlas u to screen y): it tiles by
-    /// its ranges as a plain strip does.
-    #[test]
-    fn a_quarter_turned_strip_still_tiles() {
-        let uv = UvRect::from_corners([[0.0, 0.0], [0.0, 3.0], [1.0, 3.0], [1.0, 0.0]]);
-        assert_eq!(tiling_axes(&uv), (false, true));
-    }
-
-    #[test]
-    fn a_two_axis_tile_wraps_both() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 4.0, 0.0, 2.5])),
-            (true, true)
-        );
     }
 
     #[test]
@@ -2594,5 +2535,35 @@ mod extract_gate_tests {
             0,
             "a moved raster environment forbids splicing"
         );
+    }
+}
+
+/// [`sprite_for_wrap`]: the load-time flag alone picks the sampler.
+#[cfg(test)]
+mod sprite_wrap_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Calls(Vec<&'static str>);
+
+    impl SpriteSource for Calls {
+        fn clamped(&mut self, _: &str, _: &mut Assets<Image>) -> Option<Handle<Image>> {
+            self.0.push("clamped");
+            None
+        }
+
+        fn wrapped(&mut self, _: &str, _: &mut Assets<Image>) -> Option<Handle<Image>> {
+            self.0.push("wrapped");
+            None
+        }
+    }
+
+    #[test]
+    fn a_wrapped_file_repeats_and_any_other_clamps() {
+        let mut images = Assets::<Image>::default();
+        let mut calls = Calls::default();
+        sprite_for_wrap(&mut calls, "Interface\\A", true, &mut images);
+        sprite_for_wrap(&mut calls, "Interface\\B", false, &mut images);
+        assert_eq!(calls.0, ["wrapped", "clamped"]);
     }
 }

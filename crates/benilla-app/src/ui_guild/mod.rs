@@ -684,7 +684,11 @@ impl Plugin for UiGuildPlugin {
             .add_systems(
                 Update,
                 (
-                    feed::feed_guild.in_set(UiFeed).in_set(GuildFeed),
+                    // Its push is what `PLAYER_GUILD_UPDATE`'s handlers read.
+                    feed::feed_guild
+                        .in_set(UiFeed)
+                        .in_set(GuildFeed)
+                        .in_set(crate::ui_unit::field_events::FieldEventPushes),
                     feed::drain_guild.after(UiInput),
                 )
                     // Never against the boot VM: the feed's edge memo survives the entry load, so
@@ -791,7 +795,7 @@ mod tests {
             ..Default::default()
         });
 
-        let rows = feed::display_rows(&guild, None, None);
+        let rows = feed::display_rows(&guild, None, None, Default::default());
         assert_eq!(rows.len(), 3, "every member, always");
         assert_eq!(guild.num_members(), 2, "but the count is the online tally");
         assert!(
@@ -801,7 +805,7 @@ mod tests {
         assert!(!rows[2].info.online);
 
         guild.set_show_offline(true);
-        let rows = feed::display_rows(&guild, None, None);
+        let rows = feed::display_rows(&guild, None, None, Default::default());
         assert_eq!(rows.len(), 3);
         assert_eq!(guild.num_members(), 3, "now the count is everybody");
     }
@@ -1174,6 +1178,57 @@ mod tests {
     }
 
     /// A command channel whose receiver stays alive, so a send neither blocks nor is dropped.
+    /// `PLAYER_GUILD_UPDATE` is the descriptor watchers' (`crate::field_watch`, `0x5e2770`,
+    /// `0x5e27b0`): the feed that mirrors our guild id and rank fires it on neither edge.
+    #[test]
+    fn the_guild_feed_fires_no_guild_update() {
+        use crate::net::ObjectStore;
+        use benilla_ui::script::UiScript;
+        use bevy::ecs::system::RunSystemOnce;
+        const PLAYER_GUILDID: u16 = 191;
+        const PLAYER_GUILDRANK: u16 = 192;
+        let mut app = App::new();
+        app.init_resource::<GuildState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(net_commands().0);
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = 0
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_GUILD_UPDATE")
+                f:SetScript("OnEvent", function() SEEN = SEEN + 1 end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                crate::net::SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::default()),
+            ))
+            .id();
+        for (id, rank) in [(7, 0), (7, 3), (9, 3), (0, 0)] {
+            app.world_mut()
+                .entity_mut(me)
+                .get_mut::<ObjectStore>()
+                .unwrap()
+                .0
+                .merge(benilla_protocol::ObjectFields::from_pairs(&[
+                    (PLAYER_GUILDID, id),
+                    (PLAYER_GUILDRANK, rank),
+                ]));
+            app.world_mut().run_system_once(feed::feed_guild).unwrap();
+            assert_eq!(app.world().resource::<GuildState>().guild_id, id);
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
+            s.resolve();
+            assert_eq!(s.eval::<i64>("return SEEN").unwrap(), 0, "{id}/{rank}");
+        }
+    }
+
     fn net_commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         (NetCommands(tx), rx)

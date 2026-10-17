@@ -120,6 +120,7 @@ pub(super) fn enter_create(
     mut images: ResMut<Assets<Image>>,
     mut add_mats: ResMut<Assets<crate::glue::add_material::AddUiMaterial>>,
     strings: Option<Res<GlueStrings>>,
+    unit_names: crate::ui_unit::NameTables,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
     sel.reset(catalog.as_deref());
@@ -134,6 +135,7 @@ pub(super) fn enter_create(
         &portraits,
         &art,
         strings.as_deref(),
+        unit_names.get(),
         &window,
     );
 }
@@ -147,6 +149,7 @@ pub(super) fn rescale_screen(
     portraits: Res<PortraitImages>,
     art: Res<GlueArt>,
     strings: Option<Res<GlueStrings>>,
+    unit_names: crate::ui_unit::NameTables,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
     let s = crate::glue::screen_scale(window.single().ok());
@@ -159,6 +162,7 @@ pub(super) fn rescale_screen(
                 &portraits,
                 &art,
                 strings.as_deref(),
+                unit_names.get(),
                 &window,
             );
         }
@@ -171,6 +175,7 @@ fn spawn_screen(
     portraits: &PortraitImages,
     art: &GlueArt,
     strings: Option<&GlueStrings>,
+    unit_names: crate::ui_unit::UnitNames<'_>,
     window: &Query<&Window, With<PrimaryWindow>>,
 ) {
     let font = wow_font(assets);
@@ -223,7 +228,7 @@ fn spawn_screen(
     // The chrome hangs off the canvas, the boxed scene's rect, never the window.
     let mut canvas = commands.spawn((crate::glue::glue_canvas(), ChildOf(root)));
     canvas.with_children(|ui| {
-        left_tower(ui, art, &font, s, strings);
+        left_tower(ui, art, &font, s, strings, unit_names);
 
         // `CharacterCreateWoWLogo` (256×128 at (3,-7)), after the tower, as the reference's
         // frame order draws it over the border art. Turtle WoW 1.18.1 anchors the frame at (3,7)
@@ -286,6 +291,7 @@ fn left_tower(
     font: &Handle<Font>,
     s: f32,
     strings: &GlueStrings,
+    unit_names: crate::ui_unit::UnitNames<'_>,
 ) {
     let px = |v: f32| Val::Px(v * s);
     let turtle = crate::flavor::turtle();
@@ -380,7 +386,7 @@ fn left_tower(
                                 Some(DynIcon::Race(race)),
                                 None,
                                 None::<DynText>,
-                                race_name(race),
+                                race_name(unit_names, race),
                                 art,
                                 s,
                                 l.race,

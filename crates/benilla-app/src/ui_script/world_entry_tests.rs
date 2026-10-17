@@ -1868,6 +1868,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _capture, _home) = hermetic_probe("nameseed");
     let mut world = booted_world();
+    crate::ui_unit::TestNames::english().insert_world(&mut world);
     log_in_as(&mut world, "Nelprifour", 0x2A);
 
     assert_eq!(
@@ -2211,5 +2212,131 @@ fn the_sliced_entry_load_arms_player_login_for_the_feed() {
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ───────────────────── The minimap mask is the process's, not the VM's ─────────────────────
+
+/// The default mask and an addon's, as [`crate::minimap::seat_mask_for_test`] takes them.
+const DEFAULT_MASK: Handle<Image> =
+    bevy::asset::uuid_handle!("d0000000-0000-4000-8000-0000000000a1");
+const ADDON_MASK: Handle<Image> = bevy::asset::uuid_handle!("d0000000-0000-4000-8000-0000000000a2");
+
+/// The mask is one process-wide texture (`0xbc7968`), which `0x4ed810` loads with the default at
+/// `0x48f590`, inside `InitializeGame` (`0x48f480`) at every world entry (`0x401570`); an addon's
+/// lasts to the next entry. A relog enters again, and the circle is back whatever the new VM's
+/// Minimap says.
+#[test]
+fn a_relog_restores_the_default_minimap_mask() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("mask-relog");
+    let mut world = booted_world();
+    crate::minimap::seat_mask_for_test(&mut world, DEFAULT_MASK, DEFAULT_MASK);
+
+    log_in_as(&mut world, "Onehunter", 1);
+    // What the mask feed does for an addon's `Minimap:SetMaskTexture`.
+    crate::minimap::seat_mask_for_test(&mut world, DEFAULT_MASK, ADDON_MASK);
+    super::end_ui_session(&mut world);
+    assert_eq!(
+        crate::minimap::mask_for_test(&world),
+        Some(ADDON_MASK),
+        "logging out leaves the texture where it was until the next entry"
+    );
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        crate::minimap::mask_for_test(&world),
+        Some(DEFAULT_MASK),
+        "the next world entry loads the default over the addon's mask"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `ReloadUI` runs the shutdown `0x490bd0` and the initializer `0x48fbf0` (`0x495664`,
+/// `0x495669`), neither of which reaches `0x4ed810`, so the mask an addon set stays.
+#[test]
+fn a_reload_keeps_the_minimap_mask_an_addon_set() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("mask-reload");
+    let mut world = booted_world();
+    crate::minimap::seat_mask_for_test(&mut world, DEFAULT_MASK, DEFAULT_MASK);
+
+    log_in_as(&mut world, "Onehunter", 1);
+    crate::minimap::seat_mask_for_test(&mut world, DEFAULT_MASK, ADDON_MASK);
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+
+    assert_eq!(
+        crate::minimap::mask_for_test(&world),
+        Some(ADDON_MASK),
+        "a /reload does not load the default mask again"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ───────────────────── Addons load against the XML's buff anchors ─────────────────────
+
+/// Records, at file scope and in `ADDON_LOADED`, what `BuffButton8` is anchored to.
+const BUFF_PROBE_LUA: &str = "\
+local function anchor()
+    local _, rel = BuffButton8:GetPoint()
+    return rel and rel:GetName() or \"nil\"
+end
+BuffProbe = { file = anchor() }
+local f = CreateFrame(\"Frame\")
+f:RegisterEvent(\"ADDON_LOADED\")
+f:SetScript(\"OnEvent\", function()
+    if arg1 == \"BuffProbe\" then BuffProbe.loaded = anchor() end
+end)
+";
+
+/// `BuffFrame_OnLoad` does not pitch the buff rows. The stock `UIOptionsFrame.lua` does, in its
+/// `VARIABLES_LOADED` arm (l.206), which `CGGameUI::Initialize` fires after every addon has
+/// loaded (`0x4900a3`, then `0x4900b2`). So an addon's file scope and its `ADDON_LOADED` see
+/// `BuffFrame.xml`'s anchor, `BuffButton8` under `BuffButton0`, and the pass moves it under
+/// `TempEnchant1` once the saved variables are in.
+#[test]
+fn addons_load_against_the_buff_anchors_the_xml_gives() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "buff-anchor",
+        "BuffProbe",
+        "## Interface: 11200\nBuffProbe.lua\n",
+        BUFF_PROBE_LUA,
+    );
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    let s = world
+        .get_non_send::<benilla_ui::script::UiScript>()
+        .expect("in-world VM");
+    let probe = |field: &str| {
+        s.eval::<String>(&format!("return tostring(BuffProbe.{field})"))
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        (probe("file"), probe("loaded")),
+        ("BuffButton0".to_string(), "BuffButton0".to_string()),
+        "BuffFrame.xml's anchor (BuffFrame.xml:231-239) holds through the addon walk"
+    );
+    assert_eq!(
+        s.eval::<String>("local _, rel = BuffButton8:GetPoint() return rel:GetName()")
+            .as_deref()
+            .ok(),
+        Some("TempEnchant1"),
+        "VARIABLES_LOADED then runs the stock pass (BuffFrame.lua:152-160)"
+    );
+
+    drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }

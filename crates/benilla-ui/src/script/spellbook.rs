@@ -13,6 +13,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{bool_or_default, flag};
 use super::cursor::{clear_cursor, set_cursor, CursorPayload, CursorSpell};
+use super::protected::{self, Tag};
 use super::tick::verb;
 use super::{Model, ScriptCall};
 
@@ -526,17 +527,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             |lua, (id, book_type, on_self): (Value, Value, Option<Value>)| {
                 let (id, book_type) = spell_slot_args(id, book_type, "CastSpell")?;
                 let on_self = bool_or_default(on_self.as_ref(), false);
+                // The player book's cast is `TryCastSpell`, behind the gate's tag 2 (`0x6e4bc1`),
+                // after the cancels of an active aura or form (`0x4b3466`, `0x4b35da`), so the call
+                // is queued whatever the gate said and carries the answer to the cast alone; the
+                // pet book's `CMSG_PET_ACTION` fork (`0x4b34c8`) is not gated.
+                let pet = is_pet_book(&book_type);
+                let may_cast = pet || protected::gate(lua, Tag::CAST);
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 if let Some(slot) = book_slot(&model, id, &book_type) {
                     if !slot.passive {
                         let spell_id = slot.spell_id;
-                        model.script_calls.push(if is_pet_book(&book_type) {
+                        model.queue_call(if pet {
                             ScriptCall::CastPetSpell { spell_id, on_self }
                         } else {
                             ScriptCall::CastSpell {
                                 spell_id,
                                 on_self,
                                 unit: None,
+                                may_cast,
                             }
                         });
                     }
@@ -589,7 +597,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ToggleSpellAutocast",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "ToggleSpellAutocast")?;
-            if !is_pet_book(&book_type) {
+            // `SendSpellAutocast 0x4bccb0` opens on the gate's tag 2 (`0x4bccc1`).
+            if !is_pet_book(&book_type) || !protected::gate(lua, Tag::CAST) {
                 return Ok(());
             }
             super::tick::verb(lua, |model| {
@@ -647,6 +656,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 (name, None)
             };
             let name = name.as_str();
+            // `TryCastSpell`'s gate, tag 2 (`0x6e4bc1`), behind the cancels as for `CastSpell`. The
+            // name resolves in the player book alone, whose leg is the gated one.
+            let may_cast = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let unit = match unit {
                 Some(token) if token.eq_ignore_ascii_case("player") => {
@@ -658,10 +670,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             if let Some(slot) = resolve_spell_by_name(&model.spellbook, name) {
                 let spell_id = slot.spell_id;
-                model.script_calls.push(ScriptCall::CastSpell {
+                model.queue_call(ScriptCall::CastSpell {
                     spell_id,
                     on_self,
                     unit,
+                    may_cast,
                 });
             }
             Ok(())
@@ -685,9 +698,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SpellStopCasting",
         lua.create_function(|lua, ()| {
+            // The gate's tag 2 opens the function (`0x6e6e88`); a refusal answers nil, as nothing
+            // to stop does (`0x6e6edd`).
+            let may_stop = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.casting {
-                model.script_calls.push(ScriptCall::SpellStopCasting);
+            if may_stop && model.casting {
+                model.queue_call(ScriptCall::SpellStopCasting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)
@@ -731,9 +747,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SpellStopTargeting",
         lua.create_function(|lua, ()| {
+            // The gate's tag 2 opens the function (`0x6e6e38`); a refusal answers nil (`0x6e6e69`).
+            let may_stop = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.spell_targeting {
-                model.script_calls.push(ScriptCall::SpellStopTargeting);
+            if may_stop && model.spell_targeting {
+                model.queue_call(ScriptCall::SpellStopTargeting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)

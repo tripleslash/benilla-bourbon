@@ -584,9 +584,7 @@ pub(crate) fn split_container_item(lua: &Lua, bag: i64, slot: u32, count: i64) -
         clear_cursor(model);
         // `StopTargeting` ends an armed spell's targeting, as `SpellStopTargeting` does.
         if model.spell_targeting {
-            model
-                .script_calls
-                .push(super::ScriptCall::SpellStopTargeting);
+            model.queue_call(super::ScriptCall::SpellStopTargeting);
         }
     });
     pick_up_item(lua, item);
@@ -668,8 +666,8 @@ impl super::UiScript {
     }
 
     /// The stackable arrival's unlock (`0x5d8590` into `0x6221e0`): every one of `guids`, the
-    /// player's items of one entry, unlocks unless it sits in our trade offer (`0x4bfd20`), the
-    /// mail attach slot (`0xb6ef90`) or the auction sell slot (`0xb72608`), each of which keeps
+    /// player's items of one entry, unlocks unless it sits in our trade offer while the window is
+    /// open (`0x4bfd20`), the mail attach slot (`0xb6ef90`) or the auction sell slot (`0xb72608`), each of which keeps
     /// its lock until it leaves; then one `ITEM_LOCK_CHANGED` (`0x5d859a`).
     pub fn unlock_entry_items(&mut self, guids: &[u64]) {
         {
@@ -678,7 +676,7 @@ impl super::UiScript {
             let attached = |guid: u64| {
                 let held =
                     |item: &Option<CursorItem>| item.as_ref().is_some_and(|i| i.guid == guid);
-                model.trade_offered.iter().any(held)
+                model.trade_holds(guid)
                     || held(&model.mail_send_item)
                     || held(&model.auction_sell_item)
             };
@@ -825,16 +823,34 @@ impl super::UiScript {
         self.model_mut().spell_targetable_units = guids.into_iter().collect();
     }
 
-    /// Drain the `(bag, slot)` picks since the last call; a paper-doll pick reports as
-    /// [`EQUIPMENT_BAG`] and its 1-based inventory slot.
-    pub fn take_item_picks(&mut self) -> Vec<(i64, u32)> {
+    /// Drain the picks since the last call; a paper-doll pick reports as [`EQUIPMENT_BAG`] and
+    /// its 1-based inventory slot.
+    pub fn take_item_picks(&mut self) -> Vec<ItemPick> {
         std::mem::take(&mut self.model_mut().item_picks)
     }
 
     /// Drain the enchant-confirm answers since the last call; both answer the pick the app parked.
-    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantConfirm> {
+    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantAnswer> {
         std::mem::take(&mut self.model_mut().enchant_confirms)
     }
+}
+
+/// A bag or paper-doll click made while targeting wants an item (`0x4f9c54`, `0x4c76df`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemPick {
+    pub bag: i64,
+    pub slot: u32,
+    /// What the protected-action gate's tag 2 allowed the click: the bind that ends
+    /// `ValidateSpellItemTarget 0x495d60` is `BindSpellTargetObject`, which asks it (`0x6e5b9e`).
+    pub may_cast: bool,
+}
+
+/// One `BindEnchant()` or `ReplaceEnchant()` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnchantAnswer {
+    pub confirm: EnchantConfirm,
+    /// What the protected-action gate's tag 2 allowed the call, as [`ItemPick::may_cast`].
+    pub may_cast: bool,
 }
 
 /// A Yes on an enchant-apply confirm (`StaticPopup.lua:1245`, `:1257`); the app holds the item
@@ -864,8 +880,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, ()| {
+                let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.enchant_confirms.push(answer);
+                model.enchant_confirms.push(EnchantAnswer {
+                    confirm: answer,
+                    may_cast,
+                });
                 Ok(())
             })?,
         )?;
@@ -1380,6 +1400,28 @@ mod tests {
         assert_eq!(heard::take(&s), ["ITEM_LOCK_CHANGED"]);
         assert!(s.item_locked(117), "the attachment keeps its lock");
         assert!(!s.item_locked(118));
+    }
+
+    /// The same unlock keeps an item in our trade offer, but only while the window is open
+    /// (`0x4bfd20` tests the partner cell first, `0x4bfd23`).
+    #[test]
+    fn the_entry_unlock_skips_a_trade_offer_only_while_the_window_is_open() {
+        let mut s = UiScript::new().unwrap();
+        s.open_trade_window();
+        s.set_trade(Some(Default::default()));
+        s.set_container(0, Some(super::two_item_bag()));
+        s.run("PickupContainerItem(0, 1) ClickTradeButton(1)")
+            .unwrap();
+        s.lock_item(118);
+        s.unlock_entry_items(&[117, 118]);
+        assert!(s.item_locked(117), "the offered item keeps its lock");
+        assert!(!s.item_locked(118));
+        s.close_trade_window();
+        s.unlock_entry_items(&[117]);
+        assert!(
+            !s.item_locked(117),
+            "past the close the table holds nothing"
+        );
     }
 
     #[test]
